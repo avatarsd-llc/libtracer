@@ -3374,6 +3374,33 @@ class vertex_t {
         return true;
     }
 
+    /**
+     * @brief Draw, ahead of a `graph_t::set_policy`, every block its members can be refused
+     *        (#1883): the extension block, a default ring state when @p ring, and an empty
+     *        app-field group when @p app.
+     *
+     * None of them is observable: a default ring state reads back as no ring and is the state
+     * the first admission draws anyway, and an empty group reads back as no table. So a
+     * refusal here, or at any later step of the policy, leaves every member as it was.
+     * @return The extension block, or null when the source refused one of the blocks.
+     */
+    [[nodiscard]] vertex_ext_t* stage_policy(bool ring, bool app, tr::mem::block_source_t& tables) {
+        vertex_ext_t* const e = ensure_ext(tables);
+        if (e == nullptr) return nullptr;
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        if (ring && e->ring == nullptr) e->ring = tr::mem::make_in<ring_state_t>(*e->src);
+        if (app && e->app == nullptr)
+            e->app = tr::mem::make_in<app_field_group_t>(*e->src, *e->src);
+        return (ring && e->ring == nullptr) || (app && e->app == nullptr) ? nullptr : e;
+    }
+
+    /** @brief Install a pre-built field table — the step of a staged policy that can no longer
+     *         be refused, because the staging step drew the group it lands in (#1883). */
+    void install_app_fields(vertex_ext_t& e, app_field_table_t built) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        (void)install_app_table(e, std::move(built));
+    }
+
     /** @brief Pack an owning @p table into one @ref app_field_table_t (ADR-0058): the slot
      *         array and the name+descriptor bytes share a single `owned` block (one
      *         allocation for the whole table), the slots viewing the bytes after them; any
@@ -3386,7 +3413,9 @@ class vertex_t {
         std::size_t off = table.size() * sizeof(app_field_slot_t);
         std::size_t total = off;
         for (const app_field_t& f : table) total += f.name.size() + f.descriptor.size();
-        if (!table.empty() && !t.own(total)) return false;
+        // No table leaves @p t's slots as they are: a borrowed declaration set them already.
+        if (table.empty()) return true;
+        if (!t.own(total)) return false;
         auto* const slots = reinterpret_cast<app_field_slot_t*>(t.owned);
         for (std::size_t i = 0; i < table.size(); ++i) {
             const app_field_t& f = table[i];

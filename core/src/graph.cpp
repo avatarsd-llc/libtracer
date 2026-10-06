@@ -785,7 +785,7 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // refusal anywhere in this chain leaves a placeholder, which `find` does not answer for.
     // The refusal clears every declaration back off it, so the next registration here, through
     // a door that brings no policy (`ensure_vertex`), inherits nothing of the refused one.
-    if (!apply_policy(node, role, std::move(policy)) ||
+    if (!apply_policy(node, role, std::move(policy), nullptr) ||
         !declare_payload_rights(node, rights, schema_catalog) ||
         !declare_admission(node, handlers) || !node->fill(role, handlers, *tables_)) {
         node->clear_declarations();
@@ -1569,56 +1569,70 @@ retention_t graph_t::retention(vertex_handle_t v) const noexcept { return v.get(
 result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
     vertex_t* const vx = v.get();
     if (!policy_legal(vx->role(), policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    const delivery_mode_t mode = policy.delivery_mode;
-    if (!apply_policy(vx, vx->role(), std::move(policy)))
-        return std::unexpected(status_t::BACKPRESSURE);
-    if (vx->delivery_mode() == mode) return {};
+    // The key is rendered only for a mode that moves; it is scratch, so a refusal here leaves
+    // nothing either.
     mem::bytes_t key(*tables_);
-    if (!try_build_key(vx, key) || !apply_delivery_mode(vx, mode, mem::as_span(key)))
+    const bool mode_moves = vx->delivery_mode() != policy.delivery_mode;
+    if ((mode_moves && !try_build_key(vx, key)) ||
+        !apply_policy(vx, vx->role(), std::move(policy), mode_moves ? &key : nullptr))
         return std::unexpected(status_t::BACKPRESSURE);
     return {};
 }
 
 /**
- * @brief Apply a (legal) policy member by member, skipping every member that already holds —
- *        so a default policy on a fresh vertex touches nothing and allocates nothing.
+ * @brief Apply a (legal) policy all-or-nothing (#1883), skipping every member that already
+ *        holds — so a default policy on a fresh vertex touches nothing and allocates nothing.
+ *
+ * Every block a member can be refused is drawn first (`vertex_t::stage_policy`, and the owned
+ * field table built aside), then the delivery mode lands with its sweep-set entry when
+ * @p mode_key names the vertex (`set_policy`; a registration lands the mode itself, after the
+ * map lock drops). Only then are the members applied, and none of them can be refused any
+ * more: a refusal before that point leaves blocks with no observable effect.
  *
  * Order matters in one place: the ring source is bound BEFORE the retention, because binding
  * drains the ring and a depth set first would be applied to a ring about to be emptied anyway;
  * either order is correct, this one does the drain once.
  */
-bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy) {
-    mem::block_source_t& tables = *tables_;
-    // Each member that moves may need the vertex's extension block (#1778); the first refusal
-    // stops the rest, so a refused policy is never applied out of order.
-    if ((vx->ring_source() != policy.ring_source || vx->ring_reliable() != policy.ring_reliable) &&
-        !vx->set_ring_source(policy.ring_source, policy.ring_reliable, tables))
-        return false;
-    // A HANDLER is NONE by role and carries no bit for it. Re-applying the retention a vertex
-    // already holds is a no-op: only `N` touches the extension block, which a STREAM always
-    // has, and a `NONE` vertex keeps neither slot nor ring to clear.
-    if (role != role_t::HANDLER &&
-        !vx->set_retention(policy.retention.value_or(default_retention(role)), policy.depth,
-                           tables))
-        return false;
+bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
+                           const mem::bytes_t* mode_key) {
+    const bool ring_moves = std::pair(vx->ring_source(), vx->ring_reliable()) !=
+                            std::pair(policy.ring_source, policy.ring_reliable);
+    // A HANDLER is NONE by role and carries no bit for it. Only `N` touches the extension
+    // block, which a STREAM always has, and a `NONE` vertex keeps neither slot nor ring.
+    const retention_t retention = policy.retention.value_or(default_retention(role));
     // Compared as stored, so a threshold that saturates the same way moves nothing.
-    if (saturate_threshold(vx->share_threshold_bytes()) !=
-            saturate_threshold(policy.share_threshold_bytes) &&
-        !vx->set_share_threshold_bytes(policy.share_threshold_bytes, tables))
-        return false;
-    // Owner-facing declaration (RFC-0010 §A.2) — a local host API, so no ACL gate. A borrowed
-    // table already installed is the same declaration and keeps its stored values.
+    const bool threshold_moves = saturate_threshold(vx->share_threshold_bytes()) !=
+                                 saturate_threshold(policy.share_threshold_bytes);
+    // Owner-facing declaration (RFC-0010 §A.2) — a local host API, so no ACL gate. An owning
+    // table is always (re)declared, so its values reset; a borrowed one already installed is
+    // the same declaration and keeps its stored values; none declared over a table installed
+    // uninstalls it. An empty span is the null one on both sides, so two empties compare equal.
     const app_fields_decl_t& fields = policy.app_fields;
-    if (fields.is_borrowed()) {
-        const std::span<const app_field_slot_t> want = fields.borrowed().slots();
-        const std::span<const app_field_slot_t> have = vx->app_field_slots();
-        return (have.data() == want.data() && have.size() == want.size()) ||
-               vx->set_app_fields_static(fields.borrowed(), tables);
+    const std::span<const app_field_slot_t> have = vx->app_field_slots();
+    const std::span<const app_field_slot_t> want =
+        fields.is_borrowed() ? fields.borrowed().slots() : std::span<const app_field_slot_t>{};
+    const bool fields_move = !fields.owned().empty() || std::pair(have.data(), have.size()) !=
+                                                            std::pair(want.data(), want.size());
+    // Stage: a member that moves draws its blocks now. A ring or a field group already there
+    // is kept, so staging one for a member that moves back to its default draws nothing.
+    vertex_ext_t* e = nullptr;
+    if (ring_moves || threshold_moves || fields_move || retention == retention_t::N) {
+        e = vx->stage_policy(ring_moves, fields_move, *tables_);
+        if (e == nullptr) return false;
     }
-    if (!fields.owned().empty())  // moved, never copied
-        return vx->set_app_fields(std::move(policy.app_fields).owned(), tables);
-    // Uninstall: back to the closed ENOTTY surface.
-    return vx->app_field_slots().empty() || vx->set_app_fields({}, tables);
+    app_field_table_t built(*tables_);
+    built.slots = want;  // a borrowed table is viewed in place and allocates nothing
+    if (!vertex_t::build_owning_table(fields.owned(), built) ||
+        (mode_key != nullptr &&
+         !apply_delivery_mode(vx, policy.delivery_mode, mem::as_span(*mode_key))))
+        return false;
+    // Nothing below can be refused: every block is drawn and the mode has landed.
+    if (ring_moves) (void)vx->set_ring_source(policy.ring_source, policy.ring_reliable, *tables_);
+    if (role != role_t::HANDLER) (void)vx->set_retention(retention, policy.depth, *tables_);
+    if (threshold_moves)
+        (void)vx->set_share_threshold_bytes(policy.share_threshold_bytes, *tables_);
+    if (fields_move) vx->install_app_fields(*e, std::move(built));
+    return true;
 }
 
 /** @brief Bytes the receiver ring currently holds reserved — the byte bound's observable. */
