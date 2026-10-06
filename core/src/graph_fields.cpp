@@ -384,29 +384,32 @@ void parse_subscriber_tlv(const tlv_node_t& sub, subscriber_t& s) {
 
 /**
  * @brief The wire→`subscriber_t` admission parse, hand-rolled at three doors before #869:
- *        type-check the decoded record, then parse it ONCE (ADR-0049).
+ *        decode the record, type-check it, parse it ONCE (ADR-0049), and retain it.
  *
  * The three doors are `graph_t::subscribe_wire` and the `:subscribers[]` append and
  * `:subscribers[N]` replace of the field surface (graph_fields.cpp). What is deliberately NOT
  * in here is everything the doors disagree about: the `[N]` arm's `acl_allows(WRITE)` gate and
- * its empty-STATUS eviction sentinel (both of which must run before this), the field-write
+ * its empty-STATUS eviction sentinel (both of which run before this), the field-write
  * door's `require a PATH child` rule, and `subscribe_wire`'s inverse — it CLEARS `target_key`,
  * because a PATH child there names the consumer at ITS origin and delivery rides the return route.
  *
- * The zero-copy `source_view` retain stays at each door on purpose. Taking the record by
- * value here so the retain could be shared too measured **+1980 bytes** of graph.cpp `.text`
- * at -O3 — a `view_t` move plus its destructor and landing pad, duplicated at each of the
- * two field-write inline sites of the time — for one assignment saved.
+ * The record is taken by reference and retained by a refcount clone. Taking it BY VALUE so
+ * the wire door could move it in measured **+1980 bytes** of graph.cpp `.text` at -O3 — a
+ * `view_t` move plus its destructor and landing pad at each inline site — for one refcount
+ * saved on a control-plane path.
  *
- * @param tlv The validated record, read in place. Not re-validated here: the `[N]` arm must
- *            inspect it before this, to discriminate the eviction sentinel.
- * @param s   Filled on success; untouched on the type refusal.
- * @return False iff @p tlv is not a SUBSCRIBER — the doors' one shared TYPE_MISMATCH. A
- *         `bool` rather than a `result_t<void>` because there is exactly one failure.
+ * @param record The record as written: one TLV, validated here.
+ * @param s      Filled on success, its `source_view` the zero-copy retain a later
+ *               `:subscribers[]` read ropes into the REPLY (ADR-0035); untouched on refusal.
+ * @return False iff @p record is not one valid SUBSCRIBER TLV — the doors' one shared
+ *         TYPE_MISMATCH. A `bool` rather than a `result_t<void>` because there is exactly one
+ *         failure.
  */
-[[nodiscard]] bool parse_wire_subscriber(const tlv_node_t& tlv, subscriber_t& s) {
-    if (tlv.type() != type_t::SUBSCRIBER) return false;
-    parse_subscriber_tlv(tlv, s);
+[[nodiscard]] bool parse_wire_subscriber(const view::view_t& record, subscriber_t& s) {
+    const auto tlv = wire::tlv_node_t::over(record);
+    if (!tlv || tlv->type() != type_t::SUBSCRIBER) return false;
+    parse_subscriber_tlv(*tlv, s);
+    s.source_view = record;
     return true;
 }
 
@@ -510,6 +513,20 @@ struct graph_t::field_surface_t {
             if (!g.acl_allows(v, ctx.subject, acl_right_t::WRITE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
             slot = field.steps[0].index;
+            // §D.1 is payload-DISCRIMINATING. Before it, every indexed write cleared the slot
+            // payload-blind, so a peer writing a SUBSCRIBER to slot N — plainly meaning to
+            // replace that edge — silently destroyed it and was told RESULT. The eviction
+            // sentinel is an empty STATUS — no payload bytes and no children (`09 00 00 00`,
+            // the smallest valid TLV); on an append it is no SUBSCRIBER, so the parse below
+            // refuses it, as it refuses a record that does not decode at all.
+            if (const auto tlv = wire::tlv_node_t::over(value);
+                tlv && tlv->type() == type_t::STATUS && tlv->body().empty()) {
+                // Clear-and-report through the ONE slot-clear door `unsubscribe` also runs: the
+                // observer's view is taken before the clear, the RFC-0005 counters unwind, and
+                // only a slot that WAS active is reported as a removal.
+                (void)g.clear_subscriber_slot(v, *slot, ctx.subject);
+                return {};
+            }
         } else if (sel != field_sel_t::APPEND) {
             // A tail and the bare name name nothing: SCHEMA_NOT_FOUND, ungated.
             //
@@ -533,30 +550,13 @@ struct graph_t::field_surface_t {
             return std::unexpected(sel == field_sel_t::WILDCARD ? status_t::INVALID_PATH
                                                                 : status_t::SCHEMA_NOT_FOUND);
         }
-        // §D.1 is payload-DISCRIMINATING. Before it, every indexed write cleared the slot
-        // payload-blind, so a peer writing a SUBSCRIBER to slot N — plainly meaning to replace
-        // that edge — silently destroyed it and was told RESULT.
-        const auto tlv = wire::tlv_node_t::over(value);
-        if (!tlv) return std::unexpected(status_t::TYPE_MISMATCH);
-        // The eviction sentinel, `[N]` only: an empty STATUS — no payload bytes and no children
-        // (`09 00 00 00`, the smallest valid TLV). On an append it is no SUBSCRIBER, so the
-        // parse below refuses it.
-        if (slot && tlv->type() == type_t::STATUS && tlv->body().empty()) {
-            // Clear-and-report through the ONE slot-clear door `unsubscribe` also runs: the
-            // observer's view is taken before the clear, the RFC-0005 counters unwind, and only
-            // a slot that WAS active is reported as a removal.
-            (void)g.clear_subscriber_slot(v, *slot, ctx.subject);
-            return {};
-        }
         subscriber_t s;
-        // The shared door parse (ADR-0049, #869): type check + parse — the same two steps
-        // `subscribe_wire` runs. On `[N]` it sits AFTER the WRITE gate and AFTER the sentinel
-        // discrimination above, which are that arm's alone. Then retain the SUBSCRIBER TLV
-        // zero-copy (a refcount clone of `value`) so a later `:subscribers[]` read ropes it
-        // into the REPLY (ADR-0035).
-        if (!parse_wire_subscriber(*tlv, s)) return std::unexpected(status_t::TYPE_MISMATCH);
-        s.source_view = value;
-        if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
+        // The shared door parse (ADR-0049, #869): decode, type check, parse and retain — the
+        // same steps `subscribe_wire` runs. On `[N]` it sits AFTER the WRITE gate and AFTER the
+        // sentinel discrimination above, which are that arm's alone. A record with no PATH
+        // child names no local target, and this door has nowhere else to deliver.
+        if (!parse_wire_subscriber(value, s) || !s.target_key)
+            return std::unexpected(status_t::TYPE_MISMATCH);
         // The fan-in gate context for this edge's deliveries (#81); the empty (local)
         // context needs no cold half. It is ALSO what makes the edge reclaimable: this
         // door leaves `subscriber_remote_t::link` empty (there is no return route to
@@ -834,7 +834,7 @@ struct graph_t::field_surface_t {
         // cannot disagree about who wrote, and it sees the arrival link the value plane's
         // `on_admit` sees.
         view::view_t admitted = value;
-        const admission_node_t* adm = v->has_admission() ? g.admission_for(v) : nullptr;
+        const admission_node_t* adm = g.admission_for(v);
         if (adm != nullptr && adm->on_app_field_admit) {
             result_t<view::view_t> decided = adm->on_app_field_admit(key, value, ctx);
             if (!decided) return std::unexpected(decided.error());
@@ -1228,7 +1228,7 @@ result_t<view::view_t> graph_t::read_settings_app(vertex_t* v) const {
 }
 
 app_field_read_hook_t graph_t::app_field_reader(const vertex_t* v) const noexcept {
-    const admission_node_t* adm = v->has_admission() ? admission_for(v) : nullptr;
+    const admission_node_t* adm = admission_for(v);
     return adm != nullptr ? adm->on_app_field_read : app_field_read_hook_t{};
 }
 

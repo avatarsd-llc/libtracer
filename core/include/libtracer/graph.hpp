@@ -3582,8 +3582,8 @@ class graph_t {
      *         @retval false The table source refused the node. */
     [[nodiscard]] bool declare_admission(vertex_t* v, const handlers_t& h);
 
-    /** @brief @p v's admission node, or null when it has none. Lock-free; the caller has
-     *         already tested the flag. */
+    /** @brief @p v's admission node, or null when it has none. Lock-free; one flag test for
+     *         the vertices without one. */
     [[nodiscard]] const admission_node_t* admission_for(const vertex_t* v) const noexcept;
 
     /** @brief @p v's app-field read seam (`handlers_t::on_app_field_read`, #1878), or an empty

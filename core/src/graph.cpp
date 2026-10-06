@@ -830,10 +830,12 @@ bool graph_t::declare_admission(vertex_t* v, const handlers_t& h) {
 }
 
 const graph_t::admission_node_t* graph_t::admission_for(const vertex_t* v) const noexcept {
-    // Walks only for a vertex whose flag says it installed one: the list holds one node per
-    // declaring registration, and a node is immortal, so no lock is needed to read one. The
-    // FIRST match is the vertex's own newest declaration — an older node left by a previous
-    // occupant of this address sits behind it and must never answer for it.
+    // Walks only for a vertex whose flag says it installed one — tested HERE, so no caller
+    // repeats it: the list holds one node per declaring registration, and a node is immortal,
+    // so no lock is needed to read one. The FIRST match is the vertex's own newest declaration
+    // — an older node left by a previous occupant of this address sits behind it and must
+    // never answer for it.
+    if (!v->has_admission()) return nullptr;
     for (const admission_node_t* n = admissions_.head.load(std::memory_order_acquire); n != nullptr;
          n = n->next)
         if (n->v == v) return n;
@@ -3369,17 +3371,12 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // an empty PATH TLV is, and what `fwd_router_t::subscribe_toward` already answers for the
     // empty residual it refuses to build a route from.
     if (return_route.empty()) return std::unexpected(status_t::INVALID_PATH);
-    // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) — delivery_compact comes from this
-    // parse (the resolver's parallel subscriber_compact() is retired); the node borrows
-    // source_view's bytes, which the slot then retains zero-copy.
-    const auto sub = wire::tlv_node_t::over(source_view);
-    if (!sub) return std::unexpected(status_t::TYPE_MISMATCH);
+    // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) through the door parse every subscriber
+    // door shares (#869): decode, type check, parse, and the zero-copy retain the slot keeps.
+    // delivery_compact comes from this parse (the resolver's parallel subscriber_compact() is
+    // retired).
     subscriber_t s;
-    // The shared door parse (ADR-0049, #869) — type check + parse. The retain stays here;
-    // `sub`'s spans survive the move (a `view_t` move transfers the segment, not the bytes)
-    // and are not read again after it.
-    if (!parse_wire_subscriber(*sub, s)) return std::unexpected(status_t::TYPE_MISMATCH);
-    s.source_view = std::move(source_view);
+    if (!parse_wire_subscriber(source_view, s)) return std::unexpected(status_t::TYPE_MISMATCH);
     // RFC-0021 §4.A/§4.B.1: the `PATH` child, when it routes through a MOUNT, is the delivery
     // target spelled in THIS (the producer's) frame — the same frame a `FWD`'s `dst` is
     // resolved in, because a delivery IS a write (RFC-0004 §D). Binding it here is what makes

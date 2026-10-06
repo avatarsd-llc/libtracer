@@ -3,7 +3,7 @@
   "functions": {
     "tr::graph::apply_op": {
       "ccn": [
-        38
+        35
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },

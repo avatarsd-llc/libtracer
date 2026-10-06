@@ -244,6 +244,32 @@ inline void emit_value_le(std::vector<std::byte>& out, T value, std::size_t widt
     return emit_path_ref_into(std::span<std::byte>(out).subspan(base), elements, type);
 }
 
+/**
+ * @brief Write the head of a bound list that grows by ONE element at its front: the 4-byte
+ *        header and @p first, with the length covering @p rest_body_len more bytes.
+ *
+ * The terminus's two RFC-0024 §7.1 prepends: its one-element mint answer (@p rest_body_len
+ * 0), and the reverse route it completes and stores, whose hop elements the caller copies in
+ * straight after the 12 bytes. The forwarding hop's own prepends (the reply mint and the
+ * request's reverse mint in `fwd_frame_view.hpp`) still write the same bytes through their
+ * stack writer: moving them here re-partitions the router's translation unit and grows its
+ * rope forward hop by 333 B on the symbol-size ratchet.
+ *
+ * It cannot fail, so it reports nothing: the span is exactly one element's wire size, and
+ * every caller holds a list under @ref kMaxPathRefElements, whose body never needs `LL`.
+ *
+ * @param out           The 12 bytes the head occupies.
+ * @param type          `type_t::PATH_REF` or `type_t::PATH_REF_REVERSE`.
+ * @param first         The element that leads the list.
+ * @param rest_body_len Body bytes of the elements that follow it.
+ */
+inline void emit_path_ref_head(std::span<std::byte, path_ref_wire_bytes(1)> out, type_t type,
+                               const path_ref_element_t& first,
+                               std::size_t rest_body_len) noexcept {
+    store_header(out, type, opt_t{}, kPathRefElementBytes + rest_body_len);
+    path_ref_store_element(out.subspan<4>(), first);
+}
+
 /** @brief Append a NAME TLV over a text segment (no temporary buffer). */
 inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
     emit_name(out, std::span<const std::byte>(reinterpret_cast<const std::byte*>(name.data()),
