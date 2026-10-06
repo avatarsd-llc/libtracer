@@ -1500,8 +1500,8 @@ namespace {
  * index with another's generation — the field-tearing shape #882 fixed one seam out.
  */
 [[nodiscard]] constexpr peer_handle_t peer_handle_from_bits(std::uint64_t bits) noexcept {
-    return peer_handle_t{.index = static_cast<std::uint32_t>(bits),
-                         .generation = static_cast<std::uint32_t>(bits >> 32)};
+    return peer_handle_t{wire::pair_t{.index = static_cast<std::uint32_t>(bits),
+                                      .generation = static_cast<std::uint32_t>(bits >> 32)}};
 }
 }  // namespace
 

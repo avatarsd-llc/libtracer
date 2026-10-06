@@ -54,6 +54,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `(index, generation)` pair), `kPathPairRecordBytes` (11), `path_pair_record_valid`,
   `path_pair_store` / `emit_path_pair` (writer), `path_pair_load` / `path_pair_at` (reader).
   Constexpr and allocation-free; the emitter appends to a caller's vector.
+- **`libtracer/pair.hpp` — one shared PAIR type
+  ([#1700](https://github.com/avatarsd-llc/libtracer/issues/1700)).** `tr::wire::pair_t` (the
+  owner-issued `(u32 index, u32 generation)`), `kPairBytes` (8) and its little-endian
+  `pair_load_le` / `pair_store_le`. `graph::vertex_slot_t`, `wire::path_ref_element_t` and
+  `wire::path_pair_t` are now aliases of it, so a value moves between them without a
+  conversion. `net::peer_handle_t` and `net::kPeerNameChars` are defined here too, the handle as
+  a distinct type derived from the PAIR, so `op_resolve.hpp` no longer includes the net plane's
+  `peer_handle.hpp` (which keeps `kSolePeerHandle` and includes this header).
 - **`wire::emit_path_ref_head`: the head of a bound list that grows by one element at its
   front ([#1798](https://github.com/avatarsd-llc/libtracer/issues/1798)).** It writes the 4-byte
   `PATH_REF` / `PATH_REF_REVERSE` header and the leading element into exactly 12 bytes, with the
@@ -225,6 +233,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     vertex refuses such a PAIR, as it refuses the NAME spelling.
   - `path_element_kind_t` gains `PAIR` (kind `0x16` at length 8; length 4 stays the RFC-0027
     `LABEL`, any other length is `MALFORMED`), and `path_element_census_t` gains `pairs`.
+  - `net::peer_handle_t` derives from the shared `wire::pair_t` (above) instead of declaring
+    its own two fields. Positional and copy initialisation are unchanged; a designated
+    initialiser must now name the base: `peer_handle_t{wire::pair_t{.index = i, .generation = g}}`.
 
 - **One FWD header parse per hop: `rebuild_fwd_forward` takes the peek's `fwd_pre_t`
   ([#1794](https://github.com/avatarsd-llc/libtracer/issues/1794)).** `fwd_frame_view.hpp`:

@@ -43,7 +43,8 @@ PAGES = {
     "frame-codec.md": [
         "tlv.hpp", "frame.hpp", "tlv_emit.hpp", "tlv_arena.hpp", "tlv_view.hpp", "grammar.hpp",
         "rope_decode.hpp", "byteorder.hpp", "crc.hpp", "batch.hpp", "playout.hpp",
-        "packed_path.hpp", "path_element.hpp", "path_ref.hpp", "key_view.hpp",
+        "packed_path.hpp", "path_element.hpp", "path_ref.hpp", "path_pair.hpp", "pair.hpp",
+        "key_view.hpp",
         "length_prefix_framer.hpp",
     ],
     "path.md": ["path.hpp"],

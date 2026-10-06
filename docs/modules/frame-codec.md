@@ -400,14 +400,31 @@ Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `batch.hpp`,
 :project: libtracer
 ```
 
+The PAIR (`pair.hpp`) — the owner-issued `(index, generation)` and its little-endian wire form.
+It is one type: the graph's `vertex_slot_t`, the RFC-0024 path-ref element and the RFC-0029 PAIR
+element (`path_pair.hpp`) are aliases of it. The per-peer link handle,
+`tr::net::peer_handle_t`, is a distinct type over it ([transport.md](transport.md)).
+
+```{doxygenstruct} tr::wire::pair_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::wire::pair_load_le
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::pair_store_le
+:project: libtracer
+```
+
 The bound-path element codec (RFC-0024 §4) — the element's layout and the purely STRUCTURAL
 rules the grammar enforces. What an element *means* — the bounds check into a host's vertex
 map, the generation compare, the ACL re-check at the dereferenced vertex — is L4 routing and
 lives in [fwd-router.md](fwd-router.md) §the bound hop.
 
-```{doxygenstruct} tr::wire::path_ref_element_t
+```{doxygentypedef} tr::wire::path_ref_element_t
 :project: libtracer
-:members:
 ```
 
 ```{doxygenfunction} tr::wire::path_ref_element_count

@@ -233,6 +233,13 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(path_label_terminus_test)
     add_test(NAME path_label_terminus COMMAND path_label_terminus_test)
 
+    # The shared PAIR header (#1700): sentinels that the vertex slot, the path-ref element and
+    # the PAIR element are one type, and that the peer handle stays a distinct one over it.
+    add_executable(pair_test pair_test.cpp)
+    target_link_libraries(pair_test PRIVATE libtracer)
+    libtracer_test_warnings(pair_test)
+    add_test(NAME pair COMMAND pair_test)
+
     # RFC-0029 slice S1 — the PAIR element and the per-hop arm that consumes it, bound against
     # the production `fwd_router_t` + `op_resolver_t` wiring (the harness routes nothing).
     add_executable(path_pair_test path_pair_test.cpp)

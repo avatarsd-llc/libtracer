@@ -39,8 +39,8 @@
 
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/pair.hpp"
 #include "libtracer/path_ref.hpp"
-#include "libtracer/peer_handle.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/tlv_arena.hpp"

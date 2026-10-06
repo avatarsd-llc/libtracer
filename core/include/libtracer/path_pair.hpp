@@ -8,9 +8,9 @@
  *
  * The two fields are RFC-0024 §4.4's, unchanged: the index is a slot in the owner's dense,
  * append-only vertex index, the generation is that vertex's retirement stamp (saturating,
- * never wrapping). The VALUE type is therefore `path_ref_element_t` — the pair RFC-0024
- * already carried — and only its spelling is new: one element among others in a `PATH`, read
- * by its kind and length, so NAMEs and PAIRs mix freely (RFC-0029 §4.2).
+ * never wrapping). The VALUE type is therefore the shared `pair_t` (`pair.hpp`) — the pair
+ * RFC-0024 already carried — and only its spelling is new: one element among others in a `PATH`,
+ * read by its kind and length, so NAMEs and PAIRs mix freely (RFC-0029 §4.2).
  *
  * `kind = 0x16` is shared with RFC-0027's 4-byte label until RFC-0029 slice S3 deletes that
  * form (§16 Q4 rules the reuse). The two are told apart by the declared `len`, which is the
@@ -31,7 +31,7 @@
 #include <vector>
 
 #include "libtracer/packed_path.hpp"
-#include "libtracer/path_ref.hpp"
+#include "libtracer/pair.hpp"
 
 /**
  * @file
@@ -43,17 +43,17 @@ namespace tr::wire {
 /**
  * @brief The value a PAIR element carries — the owner-issued `(index, generation)`.
  *
- * An alias, not a new type: RFC-0029 §4.1 keeps RFC-0024's element verbatim and changes only
- * where it is spelled, so the deref (`graph_t::deref_vertex_slot`) and every consumer of the
- * bound form read the same struct.
+ * An alias of the shared @ref pair_t, not a new type: RFC-0029 §4.1 keeps RFC-0024's element
+ * verbatim and changes only where it is spelled, so the deref (`graph_t::deref_vertex_slot`),
+ * the vertex slot a mint reads and every consumer of the bound form share one struct.
  */
-using path_pair_t = path_ref_element_t;
+using path_pair_t = pair_t;
 
 /** @brief The escape `kind` a PAIR element is spelled at (RFC-0029 §5.1, §16 Q4 — reused). */
 inline constexpr std::uint8_t kPathPairKind = kPackedEscapeKindLabel;
 
 /** @brief Payload bytes of a PAIR element — a `u32` index and a `u32` generation. */
-inline constexpr std::size_t kPathPairBodyBytes = kPathRefElementBytes;
+inline constexpr std::size_t kPathPairBodyBytes = kPairBytes;
 
 /** @brief Bytes one PAIR element occupies in a packed body — 11 (`00 <kind> <len>` + 8). */
 inline constexpr std::size_t kPathPairRecordBytes = kPackedEscapeOverhead + kPathPairBodyBytes;
@@ -80,7 +80,7 @@ constexpr void path_pair_store(std::span<std::byte, kPathPairRecordBytes> out,
     out[0] = static_cast<std::byte>(kPackedEscapeLen);
     out[1] = static_cast<std::byte>(kPathPairKind);
     out[2] = static_cast<std::byte>(kPathPairBodyBytes);
-    path_ref_store_element(out.subspan(kPackedEscapeOverhead), pair);
+    pair_store_le(out.subspan(kPackedEscapeOverhead), pair);
 }
 
 /**
@@ -102,7 +102,7 @@ inline void emit_path_pair(std::vector<std::byte>& out, const path_pair_t& pair)
  * @note Precondition: `payload.size() == 8`, which @ref path_pair_record_valid establishes.
  */
 [[nodiscard]] constexpr path_pair_t path_pair_load(std::span<const std::byte> payload) noexcept {
-    return path_ref_element_at(payload, 0);
+    return pair_load_le(payload);
 }
 
 /**
