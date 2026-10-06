@@ -618,6 +618,20 @@ constexpr int kCreates = 200000;
 constexpr int kCatalogNames = 64;
 
 /**
+ * @brief How many distinct catalog keys the flipper grows the table to before cycling.
+ *
+ * The catalog is a sorted table (#1778), so an insert moves every entry after it, and
+ * N distinct inserts cost O(N^2) entry moves, all under the exclusive lock the creator's
+ * lookups wait on. At 200000 (the bound this had while the catalog was a `std::map`), the TSan
+ * leg ran this scenario for about 14 minutes locally and past the 35-minute job limit in
+ * hosted CI, with the creator starved behind the flipper. A real catalog holds a handful of
+ * types. 1024 still grows the table through ten doublings while the lookups run, and keeps
+ * each insert's move bounded. The ctest TIMEOUT on `graph_config_race` is the regression
+ * check: a storm that scales again fails there, naming the test, instead of wedging the job.
+ */
+constexpr int kCatalogFillers = 1024;
+
+/**
  * @brief The creatable-child-type catalog: a public insert against a tree a PEER's bytes walk.
  *
  * The map is the member the `{fn, ctx}` publication cannot reach, so this scenario's verdict
@@ -656,8 +670,9 @@ void child_catalog_flip_race() {
     graph_t g;
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
 
-    // Every catalog key the flipper will insert, formatted before the storm starts.
-    constexpr int kFillers = 200000;
+    // Every catalog key the flipper will insert, formatted before the storm starts. See
+    // kCatalogFillers for the bound.
+    constexpr int kFillers = kCatalogFillers;
     std::vector<std::string> fillers;
     fillers.reserve(kFillers);
     for (int i = 0; i < kFillers; ++i) fillers.push_back("filler" + std::to_string(i));
@@ -674,13 +689,11 @@ void child_catalog_flip_race() {
     std::thread flipper([&] {
         while (!go.load(std::memory_order_acquire)) {
         }
-        // Distinct keys, so the tree genuinely GROWS and rebalances rather than
-        // insert_or_assign-ing one node in place. BOUNDED at kFillers, then cycled: the
-        // catalog has no erase, and under a sanitizer the reader storm runs slowly enough
-        // that an unbounded flipper would allocate a fresh `std::function` and map node per
-        // iteration for minutes. kFillers is sized so the GROWTH phase outlasts the whole
-        // creation storm on a release build while still being bounded; cycling afterwards
-        // still mutates the map the reader walks.
+        // Distinct keys, so the table genuinely GROWS and its entries move rather than one
+        // entry being replaced in place. BOUNDED at kFillers, then cycled: the catalog has no
+        // erase, and every growth insert moves the entries after it (a sorted table, #1778),
+        // so the bound is what keeps the storm linear. Cycling afterwards still writes the
+        // entries the reader looks up, under the same exclusive lock.
         //
         // The names are built UP FRONT, outside the timed loop. This flipper's whole job is
         // insert density — how many rebalances it can drive through the tree while the
