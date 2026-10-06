@@ -28,9 +28,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   seg)` (`packed_path.hpp`) ([#1779](https://github.com/avatarsd-llc/libtracer/issues/1779)).**
   These are fixed-buffer forms of `emit_path_label` and `emit_path_segment`, with the same
   bytes and no vector. `store_path_segment` measures when `out` is empty.
-- **`mem::block_array_t::append(p, n)` ([#1779](https://github.com/avatarsd-llc/libtracer/issues/1779)).**
-  It appends `n` trivially copyable elements and grows to fit them exactly. It returns `false`,
-  leaving the array unchanged, when the source refuses.
 
 - **`graph_t::trim_tables()`
   ([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778)).** Releases the free slabs
