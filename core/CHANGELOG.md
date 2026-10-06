@@ -210,9 +210,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the injected root otherwise), not in `std` containers on the global heap.
   Every growth site is failable: a refusal answers `BACKPRESSURE` and leaves nothing
   half-made. A refused `try_register_vertex` leaves an unregistered placeholder. A refused
-  `retire` changes nothing. A refused `set_policy` may have applied the members before the
-  refusal, but never the delivery mode without its sweep-set entry
-  ([#1883](https://github.com/avatarsd-llc/libtracer/issues/1883) makes it all-or-nothing). At setup,
+  `retire` changes nothing. A refused `set_policy` changes no member: it draws every block
+  first, then lands the delivery mode with its sweep-set entry, and only then applies the
+  members ([#1883](https://github.com/avatarsd-llc/libtracer/issues/1883)). At setup,
   `register_vertex`, `register_child_type` and the constructor abort when the source runs
   dry, and print the call, the source name and the bytes it was refused to `stderr` first
   (ADR-0056 amendment). Migration:

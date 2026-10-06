@@ -1811,7 +1811,8 @@ class graph_t {
      * @return `SCHEMA_NOT_FOUND` when the policy's retention is illegal for @p v's role (a
      *         `HANDLER` asked to retain, a `STORED_VALUE` asked for a ring, a `STREAM` asked
      *         for `LAST`) — checked before anything is applied, so a refused policy changes
-     *         nothing.
+     *         nothing. `BACKPRESSURE` when the table source refused a block the policy needs;
+     *         the policy is all-or-nothing (#1883), so this too changes no member.
      */
     [[nodiscard]] result_t<void> set_policy(vertex_handle_t v, vertex_policy_t policy);
     /** @brief Bytes @p v's receiver ring currently holds RESERVED against its source — the
@@ -2576,13 +2577,13 @@ class graph_t {
         vertex_policy_t&& policy, std::span<const payload_right_t> rights,
         std::span<const std::byte> schema_catalog = {});
 
-    /** @brief Apply a legal @ref vertex_policy_t's vertex-local members — every member but
-     *         the delivery mode — to @p vx, skipping every member that holds; an owning field
-     *         table is MOVED into the vertex, never copied. @p role is the role @p vx has, or
-     *         is about to be filled with.
-     *  @retval false The table source refused a member's block (#1778); the members before
-     *          it are applied, the rest are not. */
-    [[nodiscard]] bool apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy);
+    /** @brief Apply a legal @ref vertex_policy_t to @p vx all-or-nothing, skipping every
+     *         member that holds. @p role is the role @p vx has, or is about to be filled with.
+     *         The delivery mode is applied only when @p mode_key (@p vx's canonical key) is
+     *         given; a registration lands it itself, after the map lock drops.
+     *  @retval false The table source refused a block (#1778, #1883); no member changed. */
+    [[nodiscard]] bool apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
+                                    const mem::bytes_t* mode_key);
 
     /** @brief Set @p v's propagation policy and maintain the sweep's UNCONDITIONAL membership
      *         under the sweep lock (RFC-0008 §C) — the policy member applied apart from

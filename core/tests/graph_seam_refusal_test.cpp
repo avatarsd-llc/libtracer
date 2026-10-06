@@ -18,6 +18,7 @@
  * the message names the call, the source and the bytes it was asked for.
  */
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -337,22 +338,74 @@ void test_retire() {
     report(drive<vertex_handle_t>(setup, op, untouched), "retire");
 }
 
-/** @brief A policy change on a live vertex: extension, field table, UNCONDITIONAL entry. */
+/** @brief Every policy member a vertex reports — what a refused `set_policy` must leave. */
+struct policy_state_t {
+    tr::mem::block_source_t* ring_source = nullptr;   /**< @brief The bound ring source. */
+    bool ring_reliable = false;                       /**< @brief The §4.4 arm. */
+    retention_t retention = retention_t::NONE;        /**< @brief What the vertex retains. */
+    std::uint32_t depth = 0;                          /**< @brief The ring depth. */
+    std::size_t threshold = 0;                        /**< @brief The share threshold. */
+    std::size_t fields = 0;                           /**< @brief Installed app-field slots. */
+    delivery_mode_t mode = delivery_mode_t::IF_NEWER; /**< @brief The delivery mode. */
+
+    /** @brief Read every member off @p v. */
+    static policy_state_t of(vertex_handle_t v) {
+        const tr::graph::vertex_t* const x = std::bit_cast<tr::graph::vertex_t*>(v);
+        return {x->ring_source(),     x->ring_reliable(),         x->retention(),
+                x->retention_depth(), x->share_threshold_bytes(), x->app_field_slots().size(),
+                x->delivery_mode()};
+    }
+    /** @brief Member-wise equality. */
+    bool operator==(const policy_state_t&) const = default;
+};
+
+/** @brief A vertex and the policy state it had before the operation. */
+struct policy_ctx_t {
+    vertex_handle_t v;     /**< @brief The vertex the policy lands on. */
+    policy_state_t before; /**< @brief Its members before the operation. */
+};
+
+/**
+ * @brief A policy change on a live vertex is all-or-nothing (#1883): a refusal at any of its
+ *        allocations (the extension block, the ring state, the owned field table and its
+ *        group, the UNCONDITIONAL sweep-set entry) leaves every member as it was.
+ */
 void test_set_policy() {
-    std::printf("set_policy — extension block, field table, sweep-set entry:\n");
-    const auto setup = [](graph_t& g) {
-        return g.register_vertex(*path_t::parse("/p"), role_t::STORED_VALUE);
+    std::printf("set_policy — every member, all-or-nothing:\n");
+    // A STORED_VALUE has no extension block yet, so the first member that moves draws one.
+    const auto leaf = [](graph_t& g) {
+        const vertex_handle_t v = g.register_vertex(*path_t::parse("/p"), role_t::STORED_VALUE);
+        return policy_ctx_t{v, policy_state_t::of(v)};
     };
-    const auto op = [](graph_t& g, vertex_handle_t& v) {
+    const auto leaf_op = [](graph_t& g, policy_ctx_t& c) {
         vertex_policy_t p;
+        p.share_threshold_bytes = 7;
         p.app_fields = {app_field_t{.name = "k", .access = app_access_t::RW}};
         p.delivery_mode = delivery_mode_t::UNCONDITIONAL;
-        return verdict(g.set_policy(v, std::move(p)));
+        return verdict(g.set_policy(c.v, std::move(p)));
     };
-    // A refused policy may have applied the members before the refusal (documented); the
-    // retry below is what pins that it then completes.
-    const auto untouched = [](graph_t& g, vertex_handle_t&) { return found(g, "/p"); };
-    report(drive<vertex_handle_t>(setup, op, untouched), "set_policy");
+    const auto untouched = [](graph_t&, policy_ctx_t& c) {
+        return policy_state_t::of(c.v) == c.before;
+    };
+    report(drive<policy_ctx_t>(leaf, leaf_op, untouched), "set_policy on a leaf");
+    // A STREAM has its extension block but no ring state yet; the policy moves every member.
+    const auto stream = [](graph_t& g) {
+        const vertex_handle_t v = g.register_vertex(*path_t::parse("/s"), role_t::STREAM);
+        return policy_ctx_t{v, policy_state_t::of(v)};
+    };
+    const auto stream_op = [](graph_t& g, policy_ctx_t& c) {
+        vertex_policy_t p;
+        p.ring_source = &tr::mem::heap_source();
+        p.ring_reliable = true;
+        p.retention = retention_t::N;
+        p.depth = 4;
+        p.share_threshold_bytes = 7;
+        p.app_fields = {
+            app_field_t{.name = "k", .access = app_access_t::RW, .value = {std::byte{1}}}};
+        p.delivery_mode = delivery_mode_t::UNCONDITIONAL;
+        return verdict(g.set_policy(c.v, std::move(p)));
+    };
+    report(drive<policy_ctx_t>(stream, stream_op, untouched), "set_policy on a stream");
 }
 
 /** @brief An app-field write: the table's value slots and the stored bytes. */
