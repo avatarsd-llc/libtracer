@@ -2569,35 +2569,21 @@ class graph_t {
      *        class outside `graph_t` can claim its access.
      */
     struct field_surface_t;
-    /**
-     * @brief The one registration door that takes a policy: refuse an illegal one before the
-     *        descent, register, then apply it outside the map lock.
-     */
-    [[nodiscard]] result_t<vertex_handle_t> register_with_policy(
-        std::span<const std::byte> key, role_t role, const handlers_t& handlers,
-        vertex_policy_t&& policy, std::span<const payload_right_t> rights,
-        std::span<const std::byte> schema_catalog = {});
-
     /** @brief Apply a legal @ref vertex_policy_t to @p vx all-or-nothing, skipping every
      *         member that holds. @p role is the role @p vx has, or is about to be filled with.
      *         The delivery mode is applied only when @p mode_key (@p vx's canonical key) is
-     *         given; a registration lands it itself, after the map lock drops.
+     *         not empty, which the caller passes when the mode moves.
      *  @retval false The table source refused a block (#1778, #1883); no member changed. */
     [[nodiscard]] bool apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
-                                    const mem::bytes_t* mode_key);
+                                    std::span<const std::byte> mode_key);
 
     /** @brief Set @p v's propagation policy and maintain the sweep's UNCONDITIONAL membership
-     *         under the sweep lock (RFC-0008 §C) — the policy member applied apart from
-     *         `apply_policy`, because the sweep lock never nests with the map lock. @p key is
-     *         @p v's canonical key.
+     *         under the sweep lock (RFC-0008 §C) — `apply_policy`'s commit point. A
+     *         registration calls it under the map lock; the sweep lock never takes the map
+     *         lock under it (ADR-0057). @p key is @p v's canonical key.
      *  @retval false The table source refused the set entry (#1778); nothing changed. */
     [[nodiscard]] bool apply_delivery_mode(vertex_t* v, delivery_mode_t mode,
                                            std::span<const std::byte> key);
-
-    /** @brief Add @p key to the UNCONDITIONAL sweep set, under the sweep lock.
-     *  @return true when this call added it, false when it was there already, BACKPRESSURE
-     *          when the table source refused (#1778). */
-    [[nodiscard]] result_t<bool> enroll_unconditional(std::span<const std::byte> key);
 
     // Internal (raw `vertex_t*`) forms of the public handle-returning resolvers: the graph's
     // own machinery threads raw pointers (ADR-0056 — internal methods keep `vertex_t*`), and
@@ -2609,8 +2595,9 @@ class graph_t {
     // retains the key, so the public owning-vector overload is a convenience wrapper and the
     // graph's own callers (write-creates, path registration) pass a span rather than paying a
     // heap copy just to spell the call (#1139/#873).
-    // @p policy has its vertex-local members applied to the node before it is filled, so a
-    // refused one leaves it a placeholder (#1778). The default policy touches nothing on a
+    // @p policy is refused before the descent when it is illegal for @p role, and otherwise
+    // applied to the node before it is filled, its delivery mode included, so a refused one
+    // leaves it a placeholder (#1778, #1920). The default policy touches nothing on a
     // placeholder, which carries none.
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key_span(
         std::span<const std::byte> key, role_t role, const handlers_t& handlers,

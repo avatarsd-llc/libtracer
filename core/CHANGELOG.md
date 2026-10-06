@@ -227,7 +227,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   table sub-pool of the graph's own, so independent graphs share no pool lock and no slab;
   the injected root otherwise), not in `std` containers on the global heap.
   Every growth site is failable: a refusal answers `BACKPRESSURE` and leaves nothing
-  half-made. A refused `try_register_vertex` leaves an unregistered placeholder. A refused
+  half-made. A refused `try_register_vertex` leaves an unregistered placeholder, and that
+  includes a refusal at the UNCONDITIONAL sweep-set entry, which a registration used to drop
+  and answer success with the vertex left IF_NEWER
+  ([#1920](https://github.com/avatarsd-llc/libtracer/issues/1920)). A refused
   `retire` changes nothing. A refused `set_policy` changes no member: it draws every block
   first, then lands the delivery mode with its sweep-set entry, and only then applies the
   members ([#1883](https://github.com/avatarsd-llc/libtracer/issues/1883)). At setup,

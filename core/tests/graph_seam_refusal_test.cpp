@@ -248,17 +248,50 @@ void test_register_policy_reset() {
     report(drive<none_t>([](graph_t&) { return none_t{}; }, op, untouched), "register policy");
 }
 
-/** @brief Registration that enrolls the vertex in the UNCONDITIONAL sweep set. */
+/**
+ * @brief Registration that lands the vertex in the UNCONDITIONAL sweep set (#1920): the mode
+ *        and its set entry land inside the registration, so a refusal at the entry, or at the
+ *        value seam drawn after it, registers nothing. A policy-less registration at the same
+ *        address afterwards is IF_NEWER, and a covering sweep does not deliver it.
+ */
 void test_register_unconditional() {
-    std::printf("register_vertex — UNCONDITIONAL enrollment:\n");
+    std::printf("register_vertex — UNCONDITIONAL mode and its sweep-set entry:\n");
+    static auto on_write = [](const tr::graph::value_t&,
+                              const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+        return {};
+    };
     const auto op = [](graph_t& g, none_t&) {
+        handlers_t h;
+        h.on_write = tr::graph::thunk(on_write);  // a value seam, drawn after the set entry
         vertex_policy_t p;
         p.delivery_mode = delivery_mode_t::UNCONDITIONAL;
         return verdict(
-            g.try_register_vertex(*path_t::parse("/u/v"), role_t::STORED_VALUE, {}, std::move(p)));
+            g.try_register_vertex(*path_t::parse("/u/v"), role_t::STORED_VALUE, h, std::move(p)));
     };
-    const auto untouched = [](graph_t& g, none_t&) { return !found(g, "/u/v"); };
-    report(drive<none_t>([](graph_t&) { return none_t{}; }, op, untouched),
+    const auto untouched = [](graph_t& g, none_t&) {
+        if (found(g, "/u/v")) return false;
+        const auto h = g.ensure_vertex(key_of("/u/v"));  // the write-create door: no policy
+        if (!h) return false;
+        std::size_t delivered = 0;
+        const auto count = [](void* ctx, const tr::graph::value_t&) {
+            ++*static_cast<std::size_t*>(ctx);
+        };
+        const bool if_newer =
+            std::bit_cast<tr::graph::vertex_t*>(*h)->delivery_mode() == delivery_mode_t::IF_NEWER;
+        const auto sub = g.subscribe(*path_t::parse("/u"), +count, &delivered);
+        const bool stored = g.write(*h, make_value({0x01})).has_value();
+        delivered = 0;  // the write's own bubbled delivery
+        const bool swept = g.propagate(*g.find(path_t::parse("/u")->key())).has_value();
+        const bool clean = if_newer && sub && stored && swept && delivered == 0;
+        if (sub) (void)g.unsubscribe(*sub);
+        return g.retire(*h).has_value() && clean;
+    };
+    report(drive<none_t>(
+               [](graph_t& g) {
+                   (void)g.register_vertex(*path_t::parse("/u"), role_t::STORED_VALUE);
+                   return none_t{};
+               },
+               op, untouched),
            "register UNCONDITIONAL");
 }
 
