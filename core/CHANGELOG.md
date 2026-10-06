@@ -203,6 +203,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **The TCP and WS servers clear their delivering session after each frame
+  ([#1915](https://github.com/avatarsd-llc/libtracer/issues/1915)).** `inbound_peer()` on a
+  `slot_server_t` names a session only while that session's frame is being delivered; outside a
+  delivery it answers the default (invalid) handle. The WS server also clears it on the paths
+  that record a session and then do not deliver (a shed message, a fragment mid-message, an
+  over-cap reassembly). No signature, frame handling or wire byte changes.
+
 - **`hazard_slot_t` nodes come from their own node class, not the global heap
   ([#1782](https://github.com/avatarsd-llc/libtracer/issues/1782), ADR-0083 Decision 8).** A
   publish that finds its participant's free list empty draws a 16-byte node from one fixed-size

@@ -1013,6 +1013,75 @@ void test_flat_server_down_only_on_last_session() {
 }
 
 /**
+ * @brief What a flat server's `inbound_peer()` answered, read on its own poll thread: once
+ *        inside each delivery and once from the link-down notifier, which runs outside one.
+ */
+struct inbound_probe_t {
+    const tr::net::transport_t* link = nullptr;  /**< @brief The server under test. */
+    std::mutex m;                                /**< @brief Guards the fields below. */
+    std::condition_variable cv;                  /**< @brief Signalled on every record. */
+    std::vector<tr::net::peer_handle_t> during;  /**< @brief One answer per delivery. */
+    std::optional<tr::net::peer_handle_t> after; /**< @brief The answer at link-down. */
+
+    /** @brief The flat receiver: record the answer while the frame is being delivered. */
+    void operator()(std::span<const std::byte>) {
+        {
+            const std::lock_guard lock(m);
+            during.push_back(link->inbound_peer());
+        }
+        cv.notify_all();
+    }
+    /** @brief The `{fn, ctx}` link-down notifier: record the answer outside a delivery. */
+    static void on_down(void* ctx) {
+        auto* self = static_cast<inbound_probe_t*>(ctx);
+        {
+            const std::lock_guard lock(self->m);
+            self->after = self->link->inbound_peer();
+        }
+        self->cv.notify_all();
+    }
+    /** @brief True once @p n deliveries and the link-down landed before @p timeout. */
+    bool wait_done(std::size_t n, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(m);
+        return cv.wait_for(lock, timeout, [&] { return during.size() >= n && after.has_value(); });
+    }
+};
+
+/**
+ * @brief #1915 — a flat TCP server names the delivering session only inside a delivery.
+ *
+ * Both reads run on the server's poll thread: the receiver's inside the delivery, the
+ * link-down notifier's after the last session's frames have all been handed up.
+ */
+void test_flat_server_inbound_peer_only_inside_a_delivery() {
+    std::printf(
+        "TCP transport — flat server: inbound_peer() outside a delivery is empty (#1915):\n");
+
+    inbound_probe_t probe;
+    tr::net::transport_tcp_server server(0);
+    check(server.ok(), "flat server bound");
+    probe.link = &server;
+    server.set_receiver(probe);
+    server.set_down_notifier(&inbound_probe_t::on_down, &probe);
+
+    {
+        raw_client_t client(server.local_port());
+        check(client.fd >= 0, "raw client connected");
+        client.write(record(test_frame(3, 0x10)));
+        client.write(record(test_frame(5, 0x20)));
+    }  // the client hangs up: its session is the last, so the link reports down
+
+    check(probe.wait_done(2, 2s), "both frames delivered, then the link-down fired");
+    const std::lock_guard lock(probe.m);
+    check(probe.during.size() == 2 && probe.during[0].valid() && probe.during[1].valid(),
+          "inside each delivery the link names the delivering session");
+    check(probe.during.size() == 2 && probe.during[0] == probe.during[1],
+          "both frames came from the same session");
+    check(probe.after.has_value() && !probe.after->valid(),
+          "outside a delivery the link reports no inbound session");
+}
+
+/**
  * @brief Take the out-of-contract path #889 exists to refuse: reach `set_peer_receiver`
  *        by an explicit upcast to the PUBLIC `bus_link_t` base, past the null `bus()`.
  *
@@ -1458,6 +1527,7 @@ int main() {
     test_server_multi_peer_bus();
     test_server_max_peers_cap();
     test_flat_server_down_only_on_last_session();
+    test_flat_server_inbound_peer_only_inside_a_delivery();
     test_flat_server_rejects_peer_receiver();
     test_peer_named_server_does_not_downgrade_to_flat();
     test_accept_publish_is_atomic_to_senders();
