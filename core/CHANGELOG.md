@@ -16,6 +16,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`handlers_t::on_app_field_read`: an on-demand read seam for app fields
+  ([#1878](https://github.com/avatarsd-llc/libtracer/issues/1878)).** A field read could answer
+  only the bytes a field write stored, so an owner that keeps a field's state in its own struct
+  (restored at startup, changed by another subsystem) had reads return the last client write.
+  The seam takes the field's key and returns `std::optional<value_ref_t>`: a value (the field's
+  TLV, minted with `value_ref_t::copy`) answers the read, and `std::nullopt` declines, so the read
+  falls through to the stored bytes or `NOT_FOUND`. It serves the named
+  `:settings.app.<name>` read, locally and over a link, and every field the `:settings` and
+  `:settings.app` container reads list. It runs on the reader's thread with no vertex lock held,
+  after the READ gate, never for a `wo` field, and nothing it returns is stored. New alias
+  `app_field_read_hook_t`. The seam rides the graph's admission declaration node, so a vertex
+  that installs none pays nothing; `sizeof(handlers_t)`, the registration input, grows 96 → 112 B.
+  A client write the admission filter refuses was already never stored; a write the apply seam
+  receives but does not adopt is stored, and with this seam installed a read answers the owner's
+  value instead of it. The read semantics are RFC-0010 Amendment 4. A registration whose
+  declaration node the table source refuses answers `BACKPRESSURE`, as for the admission filters.
+
 - **`slab_class_stats_t::rounding`: the bytes a size class's live blocks lose to rounding up
   ([#1646](https://github.com/avatarsd-llc/libtracer/issues/1646)).** The class size less what
   each request asked, summed over the blocks `slab_pool_t::try_alloc` handed out; compiled only

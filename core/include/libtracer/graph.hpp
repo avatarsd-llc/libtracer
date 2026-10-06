@@ -3547,6 +3547,10 @@ class graph_t {
         admit_hook_t on_admit;
         /** @brief The app-field plane's pre-store filter, or empty. */
         app_field_admit_hook_t on_app_field_admit;
+        /** @brief The app-field plane's on-demand read seam (#1878), or empty. Not a filter,
+         *         but owner control-plane data on the few vertices that install it, so it
+         *         rides this node for the reason `%admissions_` states. */
+        app_field_read_hook_t on_app_field_read;
         admission_node_t* next = nullptr; /**< @brief The previously declared node. */
     };
 
@@ -3572,15 +3576,19 @@ class graph_t {
      */
     immortal_list_t<admission_node_t> admissions_;
 
-    /** @brief Publish @p on_admit / @p on_app_field_admit as @p v's filters and set its flag.
-     *         Call with `map_mutex_` held UNIQUE (the registration hold). A declaration with
-     *         neither filter set is ignored. @retval false The table source refused the node. */
-    [[nodiscard]] bool declare_admission(vertex_t* v, admit_hook_t on_admit,
-                                         app_field_admit_hook_t on_app_field_admit);
+    /** @brief Publish @p h's two admission filters and its app-field read seam as @p v's node
+     *         and set its flag. Call with `map_mutex_` held UNIQUE (the registration hold). A
+     *         declaration with none of the three set is ignored.
+     *         @retval false The table source refused the node. */
+    [[nodiscard]] bool declare_admission(vertex_t* v, const handlers_t& h);
 
     /** @brief @p v's admission node, or null when it has none. Lock-free; the caller has
      *         already tested the flag. */
     [[nodiscard]] const admission_node_t* admission_for(const vertex_t* v) const noexcept;
+
+    /** @brief @p v's app-field read seam (`handlers_t::on_app_field_read`, #1878), or an empty
+     *         hook when it installed none — one flag test for the vertices without one. */
+    [[nodiscard]] app_field_read_hook_t app_field_reader(const vertex_t* v) const noexcept;
 };
 
 }  // namespace tr::graph

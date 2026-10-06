@@ -316,9 +316,14 @@ using admit_hook_t = hook_t<admission_t(const value_t& value, const write_ctx_t&
 /** @brief The @ref hook_t shape of `handlers_t::on_app_field_admit` (RFC-0028 D10). */
 using app_field_admit_hook_t = hook_t<result_t<view::view_t>(
     std::string_view name, const view::view_t& value, const write_ctx_t& ctx)>;
+/**
+ * @brief The @ref hook_t shape of `handlers_t::on_app_field_read` (#1878): the field's key in,
+ *        the owner's live value out — or `std::nullopt` to decline.
+ */
+using app_field_read_hook_t = hook_t<std::optional<value_ref_t>(std::string_view name)>;
 
 /**
- * @brief User behavior for a Handler-role vertex — six @ref hook_t seams, 96 B on the host
+ * @brief User behavior for a Handler-role vertex — seven @ref hook_t seams, 112 B on the host
  *        (RFC-0028 D10: one callback idiom).
  *
  * `on_children` additionally applies to ANY role: when set, a read of the vertex's
@@ -431,6 +436,32 @@ struct handlers_t {
      *        metadata field).
      */
     app_field_write_hook_t on_app_field_write;
+    /**
+     * @brief The app-field plane's ON-DEMAND read seam (#1878): answers a declared
+     *        `:settings.app.<name>` read with the owner's LIVE value instead of the bytes a
+     *        field write stored.
+     *
+     * For an owner that keeps a field's state in its own struct and changes it by paths other
+     * than field writes (a restore at startup, another subsystem): without this seam a read
+     * can only answer the last stored write. Called with the field's key (below
+     * `settings.app.`) after the READ gate and the RFC-0010 §A.3 checks — an undeclared or
+     * `wo` field is answered SCHEMA_NOT_FOUND without asking it — and on every read that
+     * serves the field: the named read, and each field the `:settings` and `:settings.app`
+     * container reads list.
+     *
+     * Return a value holding the field's TLV, the same shape a field write stores (mint it
+     * with `value_ref_t::copy`), to answer it; `std::nullopt` to DECLINE, in which case the
+     * read falls through to the stored bytes, or NOT_FOUND when nothing is stored. An engaged
+     * but empty reference is a refused allocation and answers BACKPRESSURE, as for `on_read`.
+     * Nothing the seam returns is stored.
+     *
+     * CONTEXT. It runs on the READER's thread — the local caller of `graph_t::read`, or the
+     * receive context of the link a `FWD{READ}` arrived on — with no vertex lock held, so it
+     * may re-enter the graph, the same context `on_read` documents. It lives with the
+     * admission filters on the graph's declaration list (`graph_t::admissions_`), so a vertex
+     * that installs none pays nothing for it. Unset ⇒ reads serve the stored bytes, as before.
+     */
+    app_field_read_hook_t on_app_field_read;
 };
 
 /**
@@ -1125,7 +1156,8 @@ class vertex_t {
 
     /**
      * @brief Record that this vertex installed an ADMISSION filter (@ref handlers_t::on_admit /
-     *        @ref handlers_t::on_app_field_admit).
+     *        @ref handlers_t::on_app_field_admit) or the app-field read seam
+     *        (@ref handlers_t::on_app_field_read), which rides the same declaration node.
      *
      * The filters themselves are the graph's — see `graph_t::admissions_` for why they are not
      * here — and this bit is the whole of the per-vertex cost. Set by the graph under the map

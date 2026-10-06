@@ -1411,6 +1411,13 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(admission_link_kind_test PRIVATE libtracer)
     libtracer_test_warnings(admission_link_kind_test)
     add_test(NAME admission_link_kind COMMAND admission_link_kind_test)
+
+    # #1878: the app-field on-demand read seam — a declared field's read answers the owner's
+    # live value, locally and over a link, and a refused client write never reads back.
+    add_executable(app_field_read_hook_test app_field_read_hook_test.cpp)
+    target_link_libraries(app_field_read_hook_test PRIVATE libtracer)
+    libtracer_test_warnings(app_field_read_hook_test)
+    add_test(NAME app_field_read_hook COMMAND app_field_read_hook_test)
 endif()
 
 # M1 — conformance harness (links the built library).

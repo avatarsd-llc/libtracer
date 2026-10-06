@@ -787,8 +787,7 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // a door that brings no policy (`ensure_vertex`), inherits nothing of the refused one.
     if (!apply_policy(node, role, std::move(policy)) ||
         !declare_payload_rights(node, rights, schema_catalog) ||
-        !declare_admission(node, handlers.on_admit, handlers.on_app_field_admit) ||
-        !node->fill(role, handlers, *tables_)) {
+        !declare_admission(node, handlers) || !node->fill(role, handlers, *tables_)) {
         node->clear_declarations();
         return std::unexpected(status_t::BACKPRESSURE);
     }
@@ -815,15 +814,15 @@ bool graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_
     return true;
 }
 
-bool graph_t::declare_admission(vertex_t* v, admit_hook_t on_admit,
-                                app_field_admit_hook_t on_app_field_admit) {
+bool graph_t::declare_admission(vertex_t* v, const handlers_t& h) {
     // The overwhelming majority: no node, no flag, no cost.
-    if (!on_admit && !on_app_field_admit) return true;
+    if (!h.on_admit && !h.on_app_field_admit && !h.on_app_field_read) return true;
     // PREPEND, so a re-registration at the same address publishes a filter the walk finds
     // before any the previous occupant left behind (the list is never unlinked — see the
     // member's doc for why that is what makes the read lock-free).
     admission_node_t* const node = mem::make_in<admission_node_t>(
-        *tables_, admission_node_t{v, on_admit, on_app_field_admit, nullptr});
+        *tables_,
+        admission_node_t{v, h.on_admit, h.on_app_field_admit, h.on_app_field_read, nullptr});
     if (node == nullptr) return false;
     admissions_.prepend(node);
     v->mark_admission();

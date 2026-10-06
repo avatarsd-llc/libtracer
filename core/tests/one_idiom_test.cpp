@@ -8,7 +8,7 @@
  *
  * The gates, each asserted here:
  *
- *   - `sizeof(handlers_t) <= 96` and `sizeof(value_handlers_t) <= 48` on a 64-bit host: six and
+ *   - `sizeof(handlers_t) <= 112` and `sizeof(value_handlers_t) <= 48` on a 64-bit host: seven and
  *     three `{fn, ctx}` hooks, where they were `std::function`s of 32 B each (216 B / 96 B);
  *   - `graph_t::history` fills caller storage and allocates NOTHING;
  *   - a HANDLER target's `on_write` is handed the very block the source published — its
@@ -126,7 +126,8 @@ void test_sizes() {
     static_assert(std::is_trivially_destructible_v<tr::graph::value_handlers_t>,
                   "freeing a parked seam block runs no user code");
     if constexpr (sizeof(void*) == 8) {
-        static_assert(sizeof(handlers_t) <= 96, "RFC-0028 §5.7: handlers_t 216 -> 96 B");
+        static_assert(sizeof(handlers_t) <= 112,
+                      "RFC-0028 §5.7: handlers_t 216 -> 96 B; +16 B on_app_field_read (#1878)");
         static_assert(sizeof(tr::graph::value_handlers_t) <= 48,
                       "RFC-0028 §5.7: value_handlers_t 96 -> 48 B");
     }

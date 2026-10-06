@@ -16,6 +16,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Created** | 2026-07-09 |
 | **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |
 | **Tracking issue** | [#411](https://github.com/avatarsd-llc/libtracer/issues/411) |
+| **Amendments** | [1](#amendment-1-2026-08-22--the-node-scoped-seam-census-a-reserved-stats-field-namespace-1503-step-5) (2026-08-22, `:stats` census); [2](#amendment-2-2026-08-23--the-net-plane-seam-sampler-router-labels-and-link-join-the-census-1503-residual) (2026-08-23, net-plane seams); [3](#amendment-3-2026-10-03--three-statsmem-seam-names-for-the-graphs-sub-pools) (2026-10-03, `:stats.mem` sub-pools); [4](#amendment-4-2026-10-06--a-named-app-field-read-serves-the-owners-current-value-when-the-owner-answers-it-1878) (2026-10-06, owner-answered app-field reads) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 | **Roadmap item** | this RFC is the specification of the **"field descriptor table"** item of the 2026-07-08 architecture-review backlog (the vertex-verbs / lazy-validation / field-descriptor-table cluster; item 2 of that backlog — the `vertex_t` verb seam — shipped as [#338](https://github.com/avatarsd-llc/libtracer/pull/338), and is the seam §D slots behind) |
 
@@ -255,6 +256,11 @@ acceptable at cutover time, before any name freezes).
 - A declared field that has never been written and carries no initial value
   reads as `NOT_FOUND` (declared but empty — distinct from `SCHEMA_NOT_FOUND`,
   undeclared), and is omitted from container reads.
+
+  > **Amendment 4 (2026-10-06), [#1878](https://github.com/avatarsd-llc/libtracer/issues/1878) —
+  > see §Amendment 4 at the end of this document.** A named read serves the stored bytes
+  > **or**, when the owner answers the read itself, the owner's current value; the
+  > container reads agree with the named read. No frame shape or status code changes.
 
 ### B. Owner-defined `:schema`
 
@@ -1073,3 +1079,46 @@ can poll.
 not derive a given sub-pool answers that name with `SCHEMA_NOT_FOUND`, and a monitor reads
 that as "this node does not publish that seam", exactly as Amendment 1 §Compatibility already
 requires. Per-size-class detail is not in this surface.
+
+## Amendment 4 (2026-10-06) — a named app-field read serves the owner's current value when the owner answers it ([#1878](https://github.com/avatarsd-llc/libtracer/issues/1878))
+
+**Status:** accepted (maintainer ruling 2026-10-06; the 14-day window is waived per
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md), the solo-maintainer default, as on
+Amendments 1–3).
+
+**Scope.** This amendment changes **§A.4's first and second bullets only**. §A.1–§A.3, the
+§Erratum's gate order, §B and §C are untouched. **No frame shape, type code, grammar rule or
+error identity changes**: a read answers the same TLV shape with the same status codes, and a
+node whose owner never answers a read behaves byte-for-byte as before.
+
+**Why.** §A.4 said a named read "serves the stored TLV bytes verbatim". An owner that keeps a
+field's state itself — restored at startup, changed by another subsystem, or a client write it
+received and did not adopt — then had reads report the last stored write rather than the
+state the field actually holds. The owner is the authority for its own fields (§A.3); the read
+surface should be able to say what the owner says.
+
+### A.4 (amended) — read semantics
+
+- `read <v>:settings.app.<name>` of a declared, non-`wo` field serves **either** the stored
+  TLV bytes verbatim **or**, when the owner has installed a local read hook and that hook
+  answers, the owner's **current value** as one TLV of the same shape a field write stores.
+  The owner's answer is not stored. A hook that declines leaves the read to the stored bytes,
+  and to `NOT_FOUND` when none are stored. Installing the hook is a local host-API act, like
+  declaring the table (§A.2); no wire operation installs, removes or reveals it.
+- The gates and their order are unchanged. The READ gate and the §Erratum's order run first;
+  an undeclared or `wo` field answers `SCHEMA_NOT_FOUND` **without** the owner's hook being
+  consulted, so a `wo` secret is still never mirrored back and the hook is never an existence
+  oracle.
+- `read <v>:settings.app` and `read <v>:settings` list, for each declared non-`wo` field, the
+  **same** TLV the named read would serve at that moment: a field the owner answers is listed
+  with the owner's value, and a field neither stored nor answered is omitted, as before. The
+  containers and the named read never disagree.
+- An owner that cannot produce an answer for want of resources answers the read
+  `BACKPRESSURE`, the same transient status any read that cannot allocate gives.
+
+**Compatibility.** Additive on the wire: no new type, field name, opt bit or status. A reader
+cannot tell an owner-answered value from a stored one, and need not — both are the field's
+value as the owner holds it. Conformance vector §1 (`app-field-declare-read-write`) is
+unchanged for a node whose owner installs no read hook; a node that installs one serves the
+owner's value on both the local and the remote read, which §1's "identical bytes" property
+still holds for.
