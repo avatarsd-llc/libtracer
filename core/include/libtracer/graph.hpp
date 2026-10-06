@@ -41,6 +41,7 @@
 #include "libtracer/key_view.hpp"
 #include "libtracer/link_id.hpp"
 #include "libtracer/link_index.hpp"
+#include "libtracer/mem_chunked_map.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
@@ -2833,7 +2834,7 @@ class graph_t {
     /** @brief A byte-ordered set of vertex keys (the sweep sets). The value is the key's vertex
      *         — null only for an UNCONDITIONAL enrollment whose registration has not created
      *         it yet — so `retire` can tell a retiree's entry from a newcomer's (#1884). */
-    using key_set_t = mem::sorted_map_t<mem::bytes_t, vertex_t*, mem::bytes_less_t>;
+    using key_set_t = mem::chunked_map_t<mem::bytes_t, vertex_t*, mem::bytes_less_t>;
     // The propagate(v) sweep body: delivers v then its qualifying descendants
     // (RFC-0008 §B/§C). Loop-free by construction (each delivery terminates at its
     // target — ADR-0051), so no recursion depth to thread.
@@ -3359,8 +3360,10 @@ class graph_t {
     // lock-free. Snapshots are taken under it and delivered outside it (callbacks /
     // re-dispatch re-enter the graph), mirroring fan_out's discipline.
     //
-    // Sorted tables of table-source keys since #1778: an insert or a drained range moves the
-    // tail once, and the subtree range is found by binary search, as it was in the tree.
+    // Sorted tables of table-source keys since #1778, in leaves of at most 64 entries since
+    // #1886: an insert or a single erase moves at most one leaf (a whole-array table moved the
+    // tail, O(N) under this graph-wide lock on every marking assign), and the subtree range is
+    // still one run in key order, found by binary search.
     key_set_t pending_;
     key_set_t unconditional_;
     std::mutex sweep_mutex_;

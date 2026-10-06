@@ -195,6 +195,16 @@ any argument passed by rvalue) unchanged when they do. Nothing has migrated onto
 :members:
 ```
 
+`sorted_map_t` moves its tail on every insert and erase, which suits a map built at registration
+time. For a map written on the value path, `chunked_map_t` keeps the same sorted order in leaves
+of a fixed size, so an insert or erase moves at most one leaf, and walks a key range leaf by leaf
+([#1886](https://github.com/avatarsd-llc/libtracer/issues/1886)). The graph's two
+propagate-sweep sets use it.
+
+```{doxygenclass} tr::mem::chunked_map_t
+:members:
+```
+
 The bounded reference backend:
 
 ```{doxygenclass} tr::mem::pool_t

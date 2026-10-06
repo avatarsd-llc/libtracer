@@ -2,7 +2,8 @@
  * @file
  * @brief Unit tests for the core container set (#1776, ADR-0083 Decision 2 and 9): the vector
  *        (`block_array_t`), the name/string store (`string_t`), the sorted map
- *        (`sorted_map_t`) and the non-owning `function_ref_t`.
+ *        (`sorted_map_t`, and the leaf-chunked `chunked_map_t`) and the non-owning
+ *        `function_ref_t`.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -17,10 +18,12 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <map>
 #include <string_view>
 #include <type_traits>
 
 #include "libtracer/function_ref.hpp"
+#include "libtracer/mem_chunked_map.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_string.hpp"
@@ -258,6 +261,88 @@ void test_sorted_map() {
     }
 }
 
+/** @brief A map with 8-entry leaves, so a few dozen keys split, drain and empty leaves. */
+using chunked_t = tr::mem::chunked_map_t<int, tracked_t, std::less<>, 8>;
+
+/** @brief Whether @p m holds exactly @p want's keys and values, in key order. */
+bool same_as(const chunked_t& m, const std::map<int, int>& want) {
+    if (m.size() != want.size()) return false;
+    chunked_t::pos_t p{0, 0};
+    for (const auto& [k, v] : want) {
+        if (p == m.end_pos() || m.at(p).key != k || m.at(p).value.value != v) return false;
+        p = m.next(p);
+    }
+    return p == m.end_pos();
+}
+
+/**
+ * @brief The chunked map (#1886) against a `std::map` oracle: inserts in a scrambled order split
+ *        leaves, a refused insert at every request number changes nothing, range erases cross
+ *        leaves and give emptied ones back, and every byte returns.
+ */
+void test_chunked_map() {
+    constexpr int kKeys = 96;
+    const auto scrambled = [](int i) { return (i * 37) % kKeys; };  // 37 is coprime to 96
+    int inserts_requests = 0;
+    for (int nth = 0; nth <= 24; ++nth) {
+        refuse_nth_source_t src(nth);
+        {
+            chunked_t m(src);
+            std::map<int, int> want;
+            int refusals = 0;
+            for (int i = 0; i < kKeys; ++i) {
+                const int k = scrambled(i);
+                auto r = m.try_emplace(k, k * 10);
+                if (r.value == nullptr) {
+                    ++refusals;
+                    check(!r.inserted && same_as(m, want),
+                          "chunked: a refused insert changes nothing");
+                    r = m.try_emplace(k, k * 10);
+                }
+                check(r.inserted && r.value != nullptr && r.value->value == k * 10,
+                      "chunked: insert adds the entry");
+                want.emplace(k, k * 10);
+            }
+            // The refusal-free pass (nth == 0, first) counts the requests the inserts make.
+            if (nth == 0) inserts_requests = src.calls_;
+            check(refusals == (nth != 0 && nth <= inserts_requests ? 1 : 0),
+                  "chunked: exactly the Nth request was refused");
+            check(same_as(m, want) && g_live == kKeys, "chunked: every key, in key order");
+            const auto again = m.try_emplace(5, -1);
+            check(!again.inserted && again.value != nullptr && again.value->value == 50,
+                  "chunked: a present key is not replaced");
+            check(m.find(95) != nullptr && m.find(kKeys) == nullptr && m.find(-1) == nullptr,
+                  "chunked: find at both ends and past them");
+            // Erase every third key one at a time, then the odd keys of [20, 70) as one range.
+            for (int k = 0; k < kKeys; k += 3) {
+                check(m.erase(k), "chunked: erase a present key");
+                want.erase(k);
+            }
+            check(!m.erase(0), "chunked: erasing an absent key answers false");
+            const std::size_t gone =
+                m.erase_if(m.lower_bound(20), m.lower_bound(70),
+                           [](const chunked_t::entry_t& e) { return e.key % 2 != 0; });
+            std::size_t odd = 0;
+            for (auto it = want.lower_bound(20); it != want.lower_bound(70);)
+                it = it->first % 2 != 0 ? (++odd, want.erase(it)) : std::next(it);
+            check(gone == odd && same_as(m, want) && g_live == static_cast<int>(want.size()),
+                  "chunked: a range erase across leaves keeps the rest in order");
+            // Drain the whole map as one run: every leaf but the first is given back.
+            check(m.erase_if(m.lower_bound(0), m.end_pos(),
+                             [](const chunked_t::entry_t&) { return true; }) == want.size() &&
+                      m.empty() && m.lower_bound(0) == m.end_pos(),
+                  "chunked: draining every entry empties the map");
+            check(src.blocks_out_ == 2, "chunked: a drained map keeps its index and one leaf");
+            const int kept = src.calls_;
+            check(m.try_emplace(1, 10).inserted && src.calls_ == kept && m.erase(1),
+                  "chunked: the next insert into a drained map allocates nothing");
+            check(m.try_emplace(7, 70).inserted && m.size() == 1, "chunked: reusable once empty");
+        }
+        check(g_live == 0, "chunked: every value destroyed");
+        check(src.bytes_out_ == 0 && src.blocks_out_ == 0, "chunked: every byte returned");
+    }
+}
+
 /** @brief A free function for the function-pointer form of `function_ref_t`. */
 int twice(int x) { return 2 * x; }
 
@@ -298,6 +383,7 @@ int main() {
     test_array_nontrivial();
     test_string();
     test_sorted_map();
+    test_chunked_map();
     test_function_ref();
     return tr::testing::summary("core_containers");
 }

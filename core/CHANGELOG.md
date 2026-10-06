@@ -16,6 +16,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`mem::chunked_map_t`: a failable sorted map in fixed-size leaves
+  ([#1886](https://github.com/avatarsd-llc/libtracer/issues/1886)).** `mem_chunked_map.hpp`. The
+  entries of `sorted_map_t`, kept in key order across leaves of at most `LeafEntries` (default 64)
+  entries, indexed by a sorted array of leaves; every block comes from the injected source. A
+  lookup is two binary searches, and an insert or erase moves at most one leaf plus, on a leaf
+  split, one index slot. A key range is walked by `pos_t` (`lower_bound`, `next`, `at`,
+  `end_pos`) and erased by `erase_if`, which gives emptied leaves back except the last one a
+  drained map keeps. An insert the source refuses changes nothing. The graph's propagate-sweep
+  sets (`pending_`, `unconditional_`) move onto it, so a marking `assign` no longer moves the
+  whole set under the sweep lock.
+
 - **`wire::emit_path_ref_head`: the head of a bound list that grows by one element at its
   front ([#1798](https://github.com/avatarsd-llc/libtracer/issues/1798)).** It writes the 4-byte
   `PATH_REF` / `PATH_REF_REVERSE` header and the leading element into exactly 12 bytes, with the
