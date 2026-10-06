@@ -52,6 +52,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **One FWD header parse per hop: `rebuild_fwd_forward` takes the peek's `fwd_pre_t`
+  ([#1794](https://github.com/avatarsd-llc/libtracer/issues/1794)).** `fwd_frame_view.hpp`:
+  `rebuild_fwd_forward(cur, pre, mount_tlv, extra_seg, mint_fn, reverse_mint_fn,
+  reply_label)` reads the leading headers from `pre` and applies `pre.strip_at` as given,
+  refusing a strip past the `dst`. The `strip_k` parameter, the `pre == nullptr` self-parsing
+  arm and the single-NAME `rebuild_fwd_forward(cur, inbound_name)` overload are removed; call
+  `peek_fwd_dst_any` (or `peek_fwd_dst`) first and set `strip_at` from the descent, as the
+  router does. `fwd_pre_t::dst_ref` and `dst_to_path` are replaced by `dst_type`, the type the
+  shrunk `dst` is headed with. `fwd_dst_kind_t::EMPTY` is new: a canonical `PATH` with no
+  records, which the peek now fills `pre` for. On a `NONE` answer the peek still fills the op
+  fields when the frame has an op VALUE. `stack_writer_t::header_bare` and `header_path` are
+  merged into `header_route(type, body_len)`, and `stack_writer_t::header_bytes(body_len)`
+  reports a header's width. `rebuild_reply_mint` and `rebuild_request_reverse_mint` return
+  `void`; the caller sizes the body from `fwd_rebuild_t::mint` and `ref_body_len`. The bytes
+  on the wire are unchanged.
 - **`handlers_t::on_app_field_admit` receives the writer's `write_ctx_t`
   ([#1832](https://github.com/avatarsd-llc/libtracer/issues/1832)).** The app-field admission
   filter was handed the field key and the written TLV only, so it could not see who wrote or

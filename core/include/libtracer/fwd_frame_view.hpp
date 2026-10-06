@@ -17,6 +17,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -148,12 +149,22 @@ template <class Cursor>
  * that duplicate. Carrying the offsets forward is what removes it.
  *
  * Offsets, not spans, for the same reason the peeks are: the source may be a rope, so a caller
- * re-slices from its own cursor. Filled by @ref peek_fwd_dst;
- * @ref strip_at is filled by the CALLER once the mount descent has decided how many segments
- * this hop consumes, since the peek runs before that is known.
+ * re-slices from its own cursor. Filled by @ref peek_fwd_dst_any, which is the ONLY parse of
+ * the frame's leading headers a hop makes (#1794): the descent, the head rebuild, the bound
+ * arms, the terminus split and both refusal arms read these offsets and never re-read the
+ * headers behind them.
+ *
+ * Two validities, kept apart on purpose. @ref valid says the HEADERS were read — through the
+ * `dst`, in a routable form or the empty one. @ref strip_at says how much of that `dst` this
+ * hop consumes, which the peek knows only for a bound `dst` and the mount descent decides for
+ * a canonical one. The descent used to clear @ref valid when it had no strip to hand over,
+ * which threw the parsed headers away with it and made the rebuild parse them again.
  */
 struct fwd_pre_t {
-    bool valid = false;       /**< @brief False ⇒ nothing was learned; rebuild parses itself. */
+    /** @brief The leading headers were read: a structured FWD, an op VALUE and a `dst` in one
+     *         of the forms @ref fwd_dst_kind_t names other than `NONE`. False ⇒ only the op
+     *         fields below may be filled (see @ref op_body_len). */
+    bool valid = false;
     std::size_t body_end = 0; /**< @brief End of the FWD body. */
     std::size_t op_pos = 0;   /**< @brief Offset of the op VALUE TLV. */
     std::size_t op_total = 0; /**< @brief Its total size. */
@@ -162,7 +173,11 @@ struct fwd_pre_t {
     /** @brief Its body length. Carried rather than re-checked so the rebuild keeps its own
      *         `body_len == 0` rejection: the peek does NOT reject an empty op (such a frame
      *         falls through to the terminus decode today), and making the peek stricter would
-     *         silently turn a dropped frame into a terminus one. */
+     *         silently turn a dropped frame into a terminus one.
+     *
+     *         The op fields are filled as soon as the op is read, before the `dst` is judged,
+     *         so the terminus split reads the opcode off them even for a `dst` the peek
+     *         refuses. Non-zero here is exactly the frame `peek_fwd_op` answers for. */
     std::size_t op_body_len = 0;
     std::size_t dst_body_off = 0; /**< @brief First byte of the dst PATH body. */
     std::size_t dst_end = 0;      /**< @brief End of the dst PATH body. */
@@ -176,47 +191,42 @@ struct fwd_pre_t {
      * `parse_header` on EVERY forward hop, which is a per-frame cost the pre-lift peek did
      * not pay (its one walk both gated and collected). Carrying the two integers forward
      * removes the duplicate without moving the gate: the same header, read once, decides the
-     * same thing. Meaningless when @ref valid is false.
+     * same thing. Meaningless unless the peek answered `PATH`.
      */
     std::size_t seg0_off = 0;
     std::size_t seg0_len = 0; /**< @brief Length of the first `dst` segment's body. */
-    /** @brief Where the surviving `dst` starts after this hop consumes its leading segments —
-     *         i.e. the end of segment `strip_k - 1`, or @ref dst_body_off when nothing is
-     *         stripped. Filled by the caller after the mount descent; leaving it 0 with
-     *         `valid` set would silently forward an unshrunk dst, so the rebuild treats a
-     *         `strip_at` below @ref dst_body_off as "not supplied" and walks the segments. */
+    /** @brief Where the surviving `dst` starts after this hop consumes its leading records.
+     *
+     *         The peek sets it past element 0 for a bound `dst` (each hop consumes exactly one
+     *         element, RFC-0024 §4.1) and to @ref dst_body_off — nothing consumed — for a
+     *         canonical one, whose strip the mount descent decides and writes here. The
+     *         rebuild consumes `[dst_body_off, strip_at)` as given and refuses a value past
+     *         @ref dst_end, so a strip the caller could not establish is a drop, never a
+     *         re-walk. */
     std::size_t strip_at = 0;
     /**
-     * @brief The `dst` is a `PATH_REF` (`0x14`) — a BOUND address (RFC-0024 §4).
+     * @brief The `dst` header's type — and the type the rebuilt frame's shrunk `dst` is
+     *        headed with: `PATH`, or `PATH_REF` for a BOUND address (RFC-0024 §4).
      *
-     * Filled by @ref peek_fwd_dst_ref and never by @ref peek_fwd_dst, which gates on a
-     * canonical `PATH` of NAMEs. It changes exactly two things in the rebuild: the shrunk
-     * `dst` header is emitted as a `PATH_REF` (`opt.PL = 0` — the body is a fixed-stride
-     * record array, not child TLVs), and the shrink is an element rather than a run of
-     * segments. Everything else about a forward hop — the grown `src`, the selector, the
-     * payload, the egress gather — is identical, because a bound path changes how the
-     * address is SPELLED and nothing about what a hop does with the rest of the frame.
-     */
-    bool dst_ref = false;
-    /**
-     * @brief Re-head the shrunk BOUND `dst` as a canonical empty `PATH` instead of a
-     *        `PATH_REF` — the reverse-list delivery's LAST hop (RFC-0024 §7.1 amendment 1).
+     * The peek records the inbound type, so the outgoing one is the same by default: a bound
+     * `dst` stays bound across a forwarder hop (`opt = 0` — the body is a fixed-stride record
+     * array, not child TLVs), and a canonical one stays canonical. The ONE caller that changes
+     * it is the router's session-delivery arm, the reverse-list delivery's LAST hop (RFC-0024
+     * §7.1 amendment 1): the consumed element was the final one and the egress is the accepted
+     * session, whose peer is an ORIGIN that never speaks the bound form, so it re-heads the
+     * emptied `dst` as a canonical `PATH` — byte-for-byte the canonical delivery shape.
      *
-     * Set only by the router's session-delivery arm, where the consumed element was the
-     * final one and the egress is the accepted session itself: the peer behind it is an
-     * ORIGIN, which never speaks the bound form, so the frame it receives must be the
-     * canonical delivery shape byte-for-byte (`dst` = an empty `PATH`, exactly what the
-     * canonical mount descent leaves after stripping mount + peer). Meaningless unless
-     * @ref dst_ref is also set.
+     * Value-initialised to `type_t{}` (no type), so a default `fwd_pre_t` stays all-zero and
+     * resetting one per frame is a plain clear; the peek writes it whenever it reads a `dst`.
      */
-    bool dst_to_path = false;
+    wire::type_t dst_type{};
     /**
      * @brief The outer FWD header's decoded `opt` bits — the peek's own read, kept (#1109).
      *
      * The rebuild needs them for exactly one thing: preserving the frame's trailer-timestamp
      * across the hop (`opt.TS`/`opt.TF` name the trailer window at `body_end` that the fresh
      * head must re-claim and the gather must re-emit — without them the origin's stamp is
-     * silently dropped at the first forwarder). Meaningless when @ref valid is false.
+     * silently dropped at the first forwarder). Filled with the op fields.
      */
     wire::opt_t fwd_opt{};
 };
@@ -250,6 +260,17 @@ enum class fwd_dst_kind_t : std::uint8_t {
      * record.
      */
     PATH_LABEL,
+    /**
+     * @brief A canonical `PATH` with NO records — a fully consumed address.
+     *
+     * The shape a terminating REPLY carries (its `dst` is the request's accumulated `src`, and
+     * every hop on the way back consumed its own part of it), and the shape of a request
+     * addressed to this node's own root. There is nothing to descend, so it takes neither the
+     * mount descent nor a bound arm; it terminates here. It is an answer of its own, with the
+     * headers kept in the filled `fwd_pre_t`, so the terminus split and the refusal
+     * correlation read their offsets instead of parsing the same headers again (#1794).
+     */
+    EMPTY,
 };
 
 /**
@@ -260,7 +281,8 @@ enum class fwd_dst_kind_t : std::uint8_t {
  * reads NO segments and materializes nothing, so its cost and its stack are the same whatever
  * the `dst`'s depth or element count.
  *
- * The two arms diverge only at the `dst` header's type code:
+ * The arms diverge only at the `dst` header's type code (plus the `EMPTY` answer, a canonical
+ * `PATH` with no records):
  *   - `PATH` — the canonical address, a packed record run with `opt.PL = 0` (RFC-0018). The
  *     leading record must be a LITERAL segment (a `dst` whose first record is the label
  *     escape is not an address this node can descend), and @ref fwd_pre_t::strip_at starts at
@@ -272,8 +294,9 @@ enum class fwd_dst_kind_t : std::uint8_t {
  *
  * @tparam Cursor A grammar byte-source cursor (span or rope).
  * @param  cur    The cursor positioned at the frame's first byte.
- * @param  pre    Filled on every non-`NONE` answer; reset with `valid = false` otherwise, so a
- *                caller cannot pass stale offsets to the rebuild.
+ * @param  pre    Filled on every non-`NONE` answer, with `valid` set. On `NONE` it is reset
+ *                with `valid = false`, and only its op fields may be filled (when the frame is
+ *                a structured FWD with an op VALUE), which is what the terminus split reads.
  * @param  ref_count Written with the `PATH_REF` element count on the `PATH_REF` answer, 0
  *                otherwise. **1 is the terminus** (the residual is this node's own reference
  *                to the target vertex); **> 1 is a forwarder hop**; **0 is a route with no
@@ -294,74 +317,75 @@ template <class Cursor>
     const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
     const auto op_h = read_fwd_header(cur, fwd_h->body_off);
     if (!op_h || op_h->type != wire::type_t::VALUE) return fwd_dst_kind_t::NONE;
+    // The op is known from here, whatever the `dst` turns out to be, so every answer below
+    // fills it — `NONE` included: the terminus split reads the opcode off these offsets for
+    // every FWD that reaches it, including one whose `dst` this peek refuses (`op_body_len`).
+    //
+    // Stored only once the last header is read, never between reads, and the order is
+    // measured: a `std::size_t` store through @p pre is one the compiler must assume aliases
+    // the cursor's own length word, so each header read after it reloads the cursor (+1.5 ns
+    // on the resolve leg). Filling a local and copying it out instead cost +5 ns.
+    const auto fill_op = [&] {
+        pre.fwd_opt = fwd_h->opt;
+        pre.body_end = body_end;
+        pre.op_pos = fwd_h->body_off;
+        pre.op_total = op_h->total;
+        pre.op_body_off = op_h->body_off;
+        pre.op_body_len = op_h->body_len;
+    };
+    const auto refuse = [&] {
+        fill_op();
+        return fwd_dst_kind_t::NONE;
+    };
     const std::size_t dst_pos = fwd_h->body_off + op_h->total;
-    if (dst_pos >= body_end) return fwd_dst_kind_t::NONE;
+    if (dst_pos >= body_end) return refuse();
     const auto dst_h = read_fwd_header(cur, dst_pos);
-    if (!dst_h) return fwd_dst_kind_t::NONE;
-    const bool is_ref = dst_h->type == wire::type_t::PATH_REF;
-    // The gate's own read of segment 0, handed over below rather than discarded — see the
-    // `seg0_off` member doc. Nothing is filled until BOTH arms have accepted, so a rejected
-    // frame leaves `pre` cleared exactly as it did when these were two functions.
-    std::size_t seg0_off = 0;
-    std::size_t seg0_len = 0;
-    if (is_ref) {
+    if (!dst_h) return refuse();
+    const std::size_t dst_end = dst_h->body_off + dst_h->body_len;
+    // Every accepted form: the headers are read (`valid`), and the `dst` window is open with
+    // nothing consumed yet — a canonical `dst`'s descent overwrites `strip_at`.
+    const auto accept = [&] {
+        fill_op();
+        pre.valid = true;
+        pre.dst_type = dst_h->type;
+        pre.dst_body_off = dst_h->body_off;
+        pre.dst_end = dst_end;
+        pre.after_dst = dst_pos + dst_h->total;
+        pre.strip_at = dst_h->body_off;
+    };
+    if (dst_h->type == wire::type_t::PATH_REF) {
         if (!wire::path_ref_body_valid(dst_h->opt.pl, dst_h->opt.ll, dst_h->body_len))
-            return fwd_dst_kind_t::NONE;
-    } else {
-        if (dst_h->type != wire::type_t::PATH || dst_h->opt.pl || dst_h->body_len == 0)
-            return fwd_dst_kind_t::NONE;
-        // Segment 0 is a packed record, and WHICH kind it is decides which arm routes the
-        // frame. A literal record is the canonical address the mount descent walks; an ESCAPE
-        // is RFC-0027's labelled address, which has no name to descend and is answered by the
-        // label branch instead (or, on a node that does not mint, by the terminus arm — the
-        // same fall-through a non-NAME leading child has always taken).
-        const auto seg0 = read_packed_seg(cur, dst_h->body_off, dst_h->body_off + dst_h->body_len);
-        if (!seg0) return fwd_dst_kind_t::NONE;
-        if (seg0->escape) {
-            pre.valid = true;
-            pre.fwd_opt = fwd_h->opt;
-            pre.body_end = body_end;
-            pre.op_pos = fwd_h->body_off;
-            pre.op_total = op_h->total;
-            pre.op_body_off = op_h->body_off;
-            pre.op_body_len = op_h->body_len;
-            pre.dst_body_off = dst_h->body_off;
-            pre.dst_end = dst_h->body_off + dst_h->body_len;
-            pre.after_dst = dst_pos + dst_h->total;
-            // `seg0_off`/`seg0_len` stay zero: there is no literal segment 0, and a descent
-            // that read them would be reading the escape's payload as a name. `strip_at` is
-            // left at the body start for the label branch to set once it knows the record's
-            // width — the same contract the canonical arm has with the descent.
-            pre.strip_at = dst_h->body_off;
-            return fwd_dst_kind_t::PATH_LABEL;
-        }
-        seg0_off = seg0->body_off;
-        seg0_len = seg0->body_len;
+            return refuse();
+        accept();
+        // Element 0 is this hop's own, and consuming it is not conditional on anything the
+        // descent decides — there is no descent. So the shrink is known here, unlike the
+        // canonical arm's, which has to wait for `strip_k`. Clamped for the H = 0 body.
+        pre.strip_at = std::min(dst_h->body_off + wire::kPathRefElementBytes, dst_end);
+        ref_count = wire::path_ref_element_count(dst_h->body_len);
+        return fwd_dst_kind_t::PATH_REF;
     }
-    pre.valid = true;
-    pre.fwd_opt = fwd_h->opt;
-    pre.body_end = body_end;
-    pre.op_pos = fwd_h->body_off;
-    pre.op_total = op_h->total;
-    pre.op_body_off = op_h->body_off;
-    pre.op_body_len = op_h->body_len;
-    pre.dst_body_off = dst_h->body_off;
-    pre.dst_end = dst_h->body_off + dst_h->body_len;
-    pre.after_dst = dst_pos + dst_h->total;
-    if (!is_ref) {
-        pre.seg0_off = seg0_off;
-        pre.seg0_len = seg0_len;
-        pre.strip_at = dst_h->body_off;  // caller overwrites once strip_k is known
-        return fwd_dst_kind_t::PATH;
+    if (dst_h->type != wire::type_t::PATH || dst_h->opt.pl) return refuse();
+    if (dst_h->body_len == 0) {
+        accept();
+        return fwd_dst_kind_t::EMPTY;
     }
-    pre.dst_ref = true;
-    // Element 0 is this hop's own, and consuming it is not conditional on anything the
-    // descent decides — there is no descent. So the shrink is known here, unlike the
-    // canonical arm's, which has to wait for `strip_k`.
-    pre.strip_at = dst_h->body_off + wire::kPathRefElementBytes;
-    if (pre.strip_at > pre.dst_end) pre.strip_at = pre.dst_end;  // the H = 0 body
-    ref_count = wire::path_ref_element_count(dst_h->body_len);
-    return fwd_dst_kind_t::PATH_REF;
+    // Segment 0 is a packed record, and WHICH kind it is decides which arm routes the frame.
+    // A literal record is the canonical address the mount descent walks; an ESCAPE is
+    // RFC-0027's labelled address, which has no name to descend and is answered by the label
+    // branch instead (or, on a node that does not mint, by the terminus arm — the same
+    // fall-through a non-NAME leading child has always taken). Its `seg0_off`/`seg0_len` stay
+    // zero for an escape: a descent that read them would read the escape's payload as a name.
+    const auto seg0 = read_packed_seg(cur, dst_h->body_off, dst_end);
+    if (!seg0) return refuse();
+    accept();
+    if (seg0->escape) return fwd_dst_kind_t::PATH_LABEL;
+    pre.seg0_off = seg0->body_off;
+    // `total - 1`, not `body_len` (the same value for a literal record: one length byte, then
+    // the name). Copying the two adjacent fields made GCC 13 reload them from the stack as one
+    // 16-byte load over two 8-byte stores, a store-forwarding stall measured at +1.5 % on the
+    // whole fwd-demux hop.
+    pre.seg0_len = seg0->total - 1;
+    return fwd_dst_kind_t::PATH;
 }
 
 /**
@@ -405,8 +429,7 @@ template <class Cursor>
  * ask (the conformance and unit tests). The router asks BOTH questions at once, because a
  * frame is one form or the other and finding out twice is a second header walk for nothing.
  *
- * Fills @p pre as @ref peek_fwd_dst_any does on its `PATH_REF` answer, plus
- * @ref fwd_pre_t::dst_ref, and sets
+ * Fills @p pre as @ref peek_fwd_dst_any does on its `PATH_REF` answer, and sets
  * @ref fwd_pre_t::strip_at past element 0 — the ONE element this hop consumes (§4.1: each hop
  * consumes element 0 and forwards the remainder, the same monotone shrink the canonical `dst`
  * performs, which is why a bound path is loop-free by construction and needs no visited set).
@@ -899,60 +922,46 @@ class stack_writer_t {
      * bit would mint a frame its own receiver rejects as `crc_fail`.
      */
     void header(wire::type_t type, std::size_t body_len, wire::opt_t trailer = {}) {
-        wire::opt_t opt{.pl = true, .ts = trailer.ts, .tf = trailer.ts && trailer.tf};
-        if (body_len > 0xFFFFu) opt.ll = true;
-        const std::size_t width = opt.ll ? 4u : 2u;
-        if (len_ + 2 + width > N) {
-            overflow_ = true;
-            return;
-        }
-        buf_[len_++] = static_cast<std::byte>(std::to_underlying(type));
-        buf_[len_++] = static_cast<std::byte>(opt.encode());
-        for (std::size_t i = 0; i < width; ++i)
-            buf_[len_++] = static_cast<std::byte>((body_len >> (8 * i)) & 0xFF);
+        put_header(type,
+                   wire::opt_t{.pl = true,
+                               .ts = trailer.ts,
+                               .ll = body_len > 0xFFFFu,
+                               .tf = trailer.ts && trailer.tf},
+                   body_len);
     }
     /**
-     * @brief Append a BARE TLV header (`opt = 0`) for @p body_len — a `PATH_REF`'s own shape.
+     * @brief Append a ROUTE header — a `PATH`, `PATH_REF` or `PATH_REF_REVERSE` — for
+     *        @p body_len, with `opt.PL = 0`.
      *
-     * Separate from @ref header, which sets `opt.PL` because every header it writes frames
-     * child TLVs. A `PATH_REF` body is a fixed-stride record array, so `PL = 1` would make a
-     * generic walker read the first four body bytes as a TLV header and mis-frame the whole
-     * body — the rule is a MUST (RFC-0024 §4.2), not a preference. `LL` is never set either:
-     * the element bound caps the body at 2040 bytes, so a body needing a u32 length cannot be
-     * reached, and a @p body_len that claims otherwise overflows rather than widening.
+     * Its own method rather than @ref header, because a route body is NOT a child run: a packed
+     * `PATH` body is a record run (RFC-0018 §5) and a `PATH_REF` body a fixed-stride element
+     * array (RFC-0024 §4.2), and `opt.PL = 1` on either would make a generic walker read the
+     * first body bytes as a TLV header and mis-frame the whole address — a MUST, not a
+     * preference.
+     *
+     * `LL` widens for a `PATH`, whose body may legally pass 0xFFFF. It never widens for the
+     * bound types: their element bound caps the body at 2040 bytes, so a @p body_len that
+     * claims otherwise overflows rather than widening. One method for every route type is what
+     * lets the forward hop head its shrunk `dst` with the type the peek carried
+     * (@ref fwd_pre_t::dst_type) instead of choosing between two writers.
      */
-    void header_bare(wire::type_t type, std::size_t body_len) {
-        if (len_ + 4 > N || body_len > 0xFFFFu) {
+    void header_route(wire::type_t type, std::size_t body_len) {
+        const bool wide = body_len > 0xFFFFu;
+        if (wide && type != wire::type_t::PATH) {
             overflow_ = true;
             return;
         }
-        buf_[len_++] = static_cast<std::byte>(std::to_underlying(type));
-        buf_[len_++] = std::byte{0};
-        buf_[len_++] = static_cast<std::byte>(body_len & 0xFF);
-        buf_[len_++] = static_cast<std::byte>((body_len >> 8) & 0xFF);
+        put_header(type, wire::opt_t{.ll = wide}, body_len);
     }
     /**
-     * @brief Append a `PATH` header for @p body_len — `opt.PL = 0`, `LL` auto-widened.
+     * @brief The wire bytes a header this writer emits for @p body_len occupies — 4, or 6 once
+     *        the length needs a u32.
      *
-     * Its own method rather than @ref header, because a packed `PATH` body is NOT a child
-     * run: `opt.PL = 1` would make a generic walker read the first body bytes as a TLV
-     * header and mis-frame the whole address (RFC-0018 §5 — the same MUST that
-     * @ref header_bare states for `PATH_REF`). And not @ref header_bare either, because
-     * that one refuses to widen: a `PATH` body may legally pass 0xFFFF, where a `PATH_REF`
-     * body cannot.
+     * The writer reports its own width, so a caller sizing a parent body counts a child header
+     * by the rule that will write it rather than by a copy of that rule.
      */
-    void header_path(std::size_t body_len) {
-        wire::opt_t opt{};
-        if (body_len > 0xFFFFu) opt.ll = true;
-        const std::size_t width = opt.ll ? 4u : 2u;
-        if (len_ + 2 + width > N) {
-            overflow_ = true;
-            return;
-        }
-        buf_[len_++] = static_cast<std::byte>(std::to_underlying(wire::type_t::PATH));
-        buf_[len_++] = static_cast<std::byte>(opt.encode());
-        for (std::size_t i = 0; i < width; ++i)
-            buf_[len_++] = static_cast<std::byte>((body_len >> (8 * i)) & 0xFF);
+    [[nodiscard]] static constexpr std::size_t header_bytes(std::size_t body_len) noexcept {
+        return wire::header_bytes(wire::opt_t{.ll = body_len > 0xFFFFu});
     }
 
     /** @brief Append one packed PATH segment record over @p s (`[u8 len][bytes]`, RFC-0018).
@@ -985,6 +994,20 @@ class stack_writer_t {
     [[nodiscard]] bool ok() const noexcept { return !overflow_; }
 
    private:
+    /** @brief The one header layout: type, `opt`, then the u16 or u32 LE length `opt.LL`
+     *         selects. A write past @p N overflows rather than truncates. */
+    void put_header(wire::type_t type, wire::opt_t opt, std::size_t body_len) {
+        const std::size_t width = wire::header_bytes(opt) - 2;
+        if (len_ + 2 + width > N) {
+            overflow_ = true;
+            return;
+        }
+        buf_[len_++] = static_cast<std::byte>(std::to_underlying(type));
+        buf_[len_++] = static_cast<std::byte>(opt.encode());
+        for (std::size_t i = 0; i < width; ++i)
+            buf_[len_++] = static_cast<std::byte>((body_len >> (8 * i)) & 0xFF);
+    }
+
     std::array<std::byte, N> buf_{}; /**< @brief The fixed stack buffer. */
     std::size_t len_ = 0;            /**< @brief Bytes written so far. */
     bool overflow_ = false;          /**< @brief A write exceeded @p N. */
@@ -1228,17 +1251,18 @@ static_assert(sizeof(fwd_rebuild_t) <= 256,
  * shape paying for a form its frames cannot be. Out of line, the request hop sees one
  * not-taken branch and the rope arm measures at or below `main` at every fan.
  *
- * Writes @p r's tail and mint fields; @return the bytes this hop's element adds to the body,
- * or 0 when it contributes nothing — which INCLUDES the strip cases (no element to give, or a
- * list already at the cap). A reply with no mint answer at all leaves @p r untouched.
+ * Writes @p r's tail and mint fields. A contribution leaves @ref fwd_rebuild_t::mint written
+ * (the re-headed child and this hop's element); contributing nothing — which INCLUDES the strip
+ * cases (no element to give, or a list already at the cap) — leaves it empty, and the caller
+ * sizes the body from those two fields alone. A reply with no mint answer at all leaves @p r
+ * untouched.
  */
 template <class Cursor, class MintFn>
-[[gnu::noinline]] std::size_t rebuild_reply_mint(const Cursor& cur, std::size_t pos,
-                                                 std::size_t body_end, MintFn& mint_fn,
-                                                 fwd_rebuild_t& r) {
+[[gnu::noinline]] void rebuild_reply_mint(const Cursor& cur, std::size_t pos, std::size_t body_end,
+                                          MintFn& mint_fn, fwd_rebuild_t& r) {
     const std::optional<trailing_mint_t> found =
         peek_trailing_mint(cur, pos, body_end, wire::type_t::PATH_REF);
-    if (!found) return 0;
+    if (!found) return;
     // The tail stops short of the mint answer either way: this hop re-heads it one element
     // longer, or removes it. It is never relayed untouched.
     r.tail_len = found->pos > pos ? found->pos - pos : 0;
@@ -1257,14 +1281,13 @@ template <class Cursor, class MintFn>
     // map — where the same index and generation are an ordinary live vertex. That is a
     // mis-route, which the design refuses outright. The origin sees an ordinary reply, stays
     // canonical, and loses nothing but the optimisation.
-    if (!mint) return 0;
+    if (!mint) return;
     r.ref_body_off = found->pos + 4;  // LL = 0 is a MUST, so the header is 4 bytes
     r.ref_body_len = found->body_len;
-    r.mint.header_bare(wire::type_t::PATH_REF, r.ref_body_len + wire::kPathRefElementBytes);
+    r.mint.header_route(wire::type_t::PATH_REF, r.ref_body_len + wire::kPathRefElementBytes);
     std::array<std::byte, wire::kPathRefElementBytes> e{};
     wire::path_ref_store_element(e, *mint);
     r.mint.raw(e);
-    return wire::kPathRefElementBytes;
 }
 
 /**
@@ -1293,14 +1316,14 @@ template <class Cursor, class MintFn>
  * The unflagged request never reaches here (the caller gates on op bit 7), so the ordinary
  * forward hop pays one not-taken branch, exactly as it does for the reply mint.
  *
- * Writes @p r's tail and mint fields; @return the bytes this hop's element adds to the body
- * (an extension adds the element; a creation is billed through the same @ref
- * fwd_rebuild_t::ref_body_len = 0 accounting), or 0 for strip/no-op.
+ * Writes @p r's tail and mint fields, as @ref rebuild_reply_mint does: an extension or a
+ * creation leaves @ref fwd_rebuild_t::mint written (a creation with
+ * @ref fwd_rebuild_t::ref_body_len = 0), and strip or no-op leaves it empty.
  */
 template <class Cursor, class MintFn>
-[[gnu::noinline]] std::size_t rebuild_request_reverse_mint(const Cursor& cur, std::size_t pos,
-                                                           std::size_t body_end, MintFn& mint_fn,
-                                                           fwd_rebuild_t& r) {
+[[gnu::noinline]] void rebuild_request_reverse_mint(const Cursor& cur, std::size_t pos,
+                                                    std::size_t body_end, MintFn& mint_fn,
+                                                    fwd_rebuild_t& r) {
     const std::optional<trailing_mint_t> found =
         peek_trailing_mint(cur, pos, body_end, wire::type_t::PATH_REF_REVERSE);
     // The ONE call — after the frame is known mint-flagged, at most once per hop.
@@ -1309,35 +1332,42 @@ template <class Cursor, class MintFn>
     if (!found) {
         // CREATE: no reverse child yet. Nothing to strip; a hop that cannot mint forwards
         // the flagged request untouched (the strip rule binds only when a list exists).
-        if (!mint) return 0;
-        r.mint.header_bare(wire::type_t::PATH_REF_REVERSE, wire::kPathRefElementBytes);
+        if (!mint) return;
+        r.mint.header_route(wire::type_t::PATH_REF_REVERSE, wire::kPathRefElementBytes);
         std::array<std::byte, wire::kPathRefElementBytes> e{};
         wire::path_ref_store_element(e, *mint);
         r.mint.raw(e);
-        return wire::kPathRefElementBytes;
+        return;
     }
     // A list exists: the tail stops short of it either way — extended one element longer, or
     // STRIPPED whole (RFC-0024 §7.1 amendment 1; erratum 1's rule direction-reversed).
     r.tail_len = found->pos > pos ? found->pos - pos : 0;
-    if (!mint) return 0;
+    if (!mint) return;
     r.ref_body_off = found->pos + 4;  // LL = 0 is a MUST, so the header is 4 bytes
     r.ref_body_len = found->body_len;
-    r.mint.header_bare(wire::type_t::PATH_REF_REVERSE, r.ref_body_len + wire::kPathRefElementBytes);
+    r.mint.header_route(wire::type_t::PATH_REF_REVERSE,
+                        r.ref_body_len + wire::kPathRefElementBytes);
     std::array<std::byte, wire::kPathRefElementBytes> e{};
     wire::path_ref_store_element(e, *mint);
     r.mint.raw(e);
-    return wire::kPathRefElementBytes;
 }
 
 /**
  * @brief The forward hop's head rebuild, read entirely by OFFSET — no decoded
  *        tree (ADR-0038 inv. #1).
  *
- * Layout: `FWD{ op VALUE, dst PATH, FIELD? sel, src PATH, tail }` — strips @p strip_k
- * leading dst segments (shrink), grows src by @p inbound_mount (unless the op is
- * REPLY: a reply accumulates no return route, RFC-0004 §B), and synthesizes the
- * two fresh stack heads. The caller scatter-gathers the result via
+ * Layout: `FWD{ op VALUE, dst PATH, FIELD? sel, src PATH, tail }` — consumes the leading
+ * `dst` records the routing decision named (@ref fwd_pre_t::strip_at), grows src by
+ * @p mount_tlv (unless the op is REPLY: a reply accumulates no return route, RFC-0004 §B),
+ * and synthesizes the two fresh stack heads. The caller scatter-gathers the result via
  * @ref fwd_rebuild_t::gather — no payload copy, zero heap.
+ *
+ * **One parse per hop (#1794).** Every header in front of the selector was read by
+ * @ref peek_fwd_dst_any, and this function reads none of them again: it starts at
+ * @ref fwd_pre_t::after_dst and parses only the selector and `src` headers the peek never
+ * reached. It used to carry a second, self-parsing arm for a caller with no peek in hand, and
+ * a segment walk for a caller that had not recorded where its strip ended; both are gone, so
+ * the header logic of a forward hop lives in one function and a fix to it lands everywhere.
  *
  * **strip-K and the symmetric return route (ADR-0061 + its erratum).** A mount is
  * addressed by its full path `/net/<module>/<name>[/<peer>]`, so a hop consumes K
@@ -1350,14 +1380,25 @@ template <class Cursor, class MintFn>
  *
  * @tparam Cursor A grammar byte-source cursor (span or rope).
  * @param  cur           The cursor positioned at the inbound FWD frame's first byte.
+ * @param  pre           What @ref peek_fwd_dst_any read off this frame, with
+ *                       @ref fwd_pre_t::strip_at set to the end of the records this hop
+ *                       consumes (the mount descent's answer, or element 0 for a bound `dst`)
+ *                       and @ref fwd_pre_t::dst_type to the type the shrunk `dst` is headed
+ *                       with.
  * @param  mount_tlv     This node's mount path for the link the frame arrived on, ALREADY
- *                       ENCODED as a run of NAME TLVs (precomputed per child, #508).
+ *                       ENCODED as a run of packed records (precomputed per child, #508).
  * @param  extra_seg     One further mount segment whose name is only known now — a bus PEER.
  *                       Empty when the mount is fully precomputed.
- * @param  strip_k       How many leading dst segments this hop consumes.
- * @param  pre           The offsets the routing peek already read, or nullptr to re-parse.
+ * @param  mint_fn       This hop's mint contribution, supplied LAZILY: invoked at most once,
+ *                       and only on a forwarded REPLY that actually carries an extendable
+ *                       mint answer. Laziness is the whole point — deciding eagerly meant
+ *                       reading the op byte a second time on EVERY forwarded frame,
+ *                       including the request hops that can never mint, and that duplicate
+ *                       read is a rope-cursor byte walk on a fragmented frame. Defaults to
+ *                       @ref no_mint_t, the hop that contributes nothing.
+ * @param  reverse_mint_fn The REVERSE-direction twin, invoked at most once and only on a
+ *                       mint-flagged request (RFC-0024 §7.1 amendment 1).
  * @param  reply_label   RFC-0027 6.1's minted spelling of THIS hop's own local part, as the
- *                       already-encoded 7-byte label element, or empty to mint nothing.
  *                       already-encoded 7-byte label element, or empty to mint nothing.
  *
  *                       This is the one region a REPLY's `src` may grow by, and it exists
@@ -1375,16 +1416,9 @@ template <class Cursor, class MintFn>
  *                       decided at acceptance and which is recorded as an erratum in that
  *                       RFC's log rather than assumed here. Empty is the default and the
  *                       conformant behaviour, so a node that never mints is byte-unchanged.
- * @param  mint_fn       This hop's mint contribution, supplied LAZILY: invoked at most once,
- *                       and only on a forwarded REPLY that actually carries an extendable
- *                       mint answer. Laziness is the whole point — deciding eagerly meant
- *                       reading the op byte a second time on EVERY forwarded frame,
- *                       including the request hops that can never mint, and that duplicate
- *                       read is a rope-cursor byte walk on a fragmented frame. Defaults to
- *                       @ref no_mint_t, the hop that contributes nothing.
- * @retval std::nullopt The frame is not a well-formed forwardable FWD (wrong
- *         type/shape, or fewer than @p strip_k dst segments) — the caller falls to its
- *         terminus path.
+ * @retval std::nullopt The frame is not a well-formed forwardable FWD (no peeked headers, an
+ *         empty op, a strip past the `dst`, an unspellable peer segment, or a `src` that
+ *         cannot be relayed) — the caller drops it.
  * @note   A returned rebuild may still have `!ok()` (an oversized op TLV
  *         overflowed a head) — the caller must check and drop, never overrun.
  *
@@ -1403,65 +1437,29 @@ template <class Cursor, class MintFn>
  */
 template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_t>
 [[gnu::flatten]] [[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(
-    const Cursor& cur, std::span<const std::byte> mount_tlv, std::string_view extra_seg,
-    std::size_t strip_k, const fwd_pre_t* pre = nullptr, MintFn mint_fn = MintFn{},
+    const Cursor& cur, const fwd_pre_t& pre, std::span<const std::byte> mount_tlv,
+    std::string_view extra_seg, MintFn mint_fn = MintFn{},
     ReverseMintFn reverse_mint_fn = ReverseMintFn{}, std::span<const std::byte> reply_label = {}) {
-    // The frame's leading headers were already parsed by the `dst` peek that routed this hop.
-    // When the caller hands them over, re-reading them is pure duplicated work — profiling put
-    // ~88% of a 1-link forward hop in header parsing, most of it exactly this. There is still
-    // ONE rebuild: the branch below only chooses where the four offsets come from, and every
-    // rejection the self-parsing path applies is applied to the carried values too (see the
-    // `op_body_len` note on fwd_pre_t — the peek deliberately does not reject an empty op, so
-    // that check has to live here or a malformed frame would change fate).
-    std::size_t body_end = 0;
-    std::size_t op_pos = 0;
-    std::size_t op_total = 0;
-    std::size_t op_body_off = 0;
-    std::size_t dst_body_off = 0;
-    std::size_t dst_end = 0;
-    std::size_t pos = 0;
-    wire::opt_t outer_opt{};
-
-    if (pre != nullptr && pre->valid) {
-        if (pre->op_body_len == 0) return std::nullopt;
-        body_end = pre->body_end;
-        op_pos = pre->op_pos;
-        op_total = pre->op_total;
-        op_body_off = pre->op_body_off;
-        dst_body_off = pre->dst_body_off;
-        dst_end = pre->dst_end;
-        pos = pre->after_dst;
-        outer_opt = pre->fwd_opt;
-    } else {
-        const auto fwd_h = read_fwd_header(cur, 0);
-        if (!fwd_h || fwd_h->type != wire::type_t::FWD) return std::nullopt;
-        body_end = fwd_h->body_off + fwd_h->body_len;
-        outer_opt = fwd_h->opt;
-
-        pos = fwd_h->body_off;
-        const auto op_h = read_fwd_header(cur, pos);
-        if (!op_h || op_h->type != wire::type_t::VALUE || op_h->body_len == 0) return std::nullopt;
-        op_pos = pos;
-        op_total = op_h->total;
-        op_body_off = op_h->body_off;
-        pos += op_h->total;
-
-        const auto dst_h = read_fwd_header(cur, pos);
-        if (!dst_h || dst_h->type != wire::type_t::PATH) return std::nullopt;
-        dst_body_off = dst_h->body_off;
-        dst_end = dst_h->body_off + dst_h->body_len;
-        pos += dst_h->total;
-    }
+    // The peek's rejections are the peek's; these are the ones only a rebuild can make. An
+    // EMPTY op is one of them on purpose (see `fwd_pre_t::op_body_len`: the peek accepts it,
+    // so the check lives here or a malformed frame would change fate). A strip past the `dst`
+    // is a `dst` shorter than the mount the descent matched. The packed record's length field
+    // is a `u8` (RFC-0018 §5) — the wire's own bound on a segment and now the only one on a
+    // peer name: past it the name has no spelling at all.
+    if (!pre.valid || pre.op_body_len == 0 || pre.strip_at > pre.dst_end ||
+        extra_seg.size() > wire::kPackedSegMaxBytes)
+        return std::nullopt;
     // Masked (RFC-0024 §9.3) — the flag bits say nothing about which op this is. The raw
     // byte is read ONCE and split: opcode for the reply test, bit 7 for the reverse mint's
     // gate (§7.1 amendment 1 — the reverse child rides only a mint-flagged request).
-    const std::uint8_t op_byte = cur.byte_at(op_body_off);
+    const std::uint8_t op_byte = cur.byte_at(pre.op_body_off);
     const bool is_reply =
         static_cast<graph::fwd_op_t>(op_byte & graph::kFwdOpcodeMask) == graph::fwd_op_t::REPLY;
     const bool mint_flagged = (op_byte & graph::kFwdOpFlagMintRequest) != 0;
 
+    std::size_t pos = pre.after_dst;
     fwd_rebuild_t r;
-    if (pos < body_end) {
+    if (pos < pre.body_end) {
         const auto peek = read_fwd_header(cur, pos);
         if (peek && peek->type == wire::type_t::FIELD) {
             r.sel_pos = pos;
@@ -1481,12 +1479,12 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
     // `src` by its inbound mount, and a mount NAME prepended into a fixed-stride record array
     // is not a longer route, it is a corrupt one. A request whose `src` cannot accumulate has
     // no return route, so it is dropped here rather than forwarded unanswerable.
-    const bool src_ref = src_h->type == wire::type_t::PATH_REF;
-    if (src_h->type != wire::type_t::PATH && !(src_ref && is_reply)) return std::nullopt;
+    if (src_h->type != wire::type_t::PATH && !(src_h->type == wire::type_t::PATH_REF && is_reply))
+        return std::nullopt;
     pos += src_h->total;
 
     r.tail_off = pos;
-    r.tail_len = body_end > pos ? body_end - pos : 0;
+    r.tail_len = pre.body_end > pos ? pre.body_end - pos : 0;
     r.src_body_off = src_h->body_off;
     r.src_body_len = src_h->body_len;
 
@@ -1497,60 +1495,41 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
     // child. An UNFLAGGED request is never touched — the mint request still costs zero added
     // origin bytes, which is the whole point of putting the flag in the op byte (§7.5).
     // Both mint halves are CALLS, never inlined here (see `rebuild_reply_mint`).
-    const std::size_t mint_growth =
-        is_reply       ? rebuild_reply_mint(cur, pos, body_end, mint_fn, r)
-        : mint_flagged ? rebuild_request_reverse_mint(cur, pos, body_end, reverse_mint_fn, r)
-                       : 0u;
-
-    // The K leading dst segment RECORDS this hop consumes. The peek already walked exactly
-    // these, so a caller that recorded where they end hands the answer over; `strip_at` below
-    // `dst_body_off` means it did not, and the walk runs as before.
-    //
-    // Under RFC-0018 the walk is `strip_at += 1 + len` — one byte load and an add where it was
-    // a `parse_header` option decode, and the strip stays the same zero-copy shrink: the
-    // residual `dst` is still emitted as ONE untouched span with a fresh 4-byte `PATH` header,
-    // and no length table is rewritten (§5.1).
-    std::size_t strip_at = dst_body_off;
-    if (pre != nullptr && pre->valid && pre->strip_at >= dst_body_off) {
-        strip_at = pre->strip_at;
-        if (strip_at > dst_end) return std::nullopt;  // dst shorter than the mount
-    } else {
-        for (std::size_t i = 0; i < strip_k;) {
-            if (strip_at >= dst_end) return std::nullopt;  // dst shorter than the mount
-            const auto rec = read_packed_seg(cur, strip_at, dst_end);
-            if (!rec) return std::nullopt;
-            strip_at += rec->total;
-            // An escape record inside the consumed run is stepped over and does NOT count
-            // against `strip_k` — the descent counted literal segments, so the strip must too.
-            if (!rec->escape) ++i;
-        }
+    if (is_reply) {
+        rebuild_reply_mint(cur, pos, pre.body_end, mint_fn, r);
+    } else if (mint_flagged) {
+        rebuild_request_reverse_mint(cur, pos, pre.body_end, reverse_mint_fn, r);
     }
-    r.rem_dst_off = strip_at;
-    r.rem_dst_len = dst_end - strip_at;
 
-    // The inbound mount path appended to src (grow) — empty for a REPLY (no accumulation).
-    // The precomputed run is already-encoded bytes, so it contributes its own length; a
-    // dynamic peer segment adds ONE length byte plus its bytes. The only bound left is the
-    // packed record's `u8` length field — beyond that a mount path is limited solely by the
-    // frame fitting the link's `max_frame`/MTU, never by a buffer budget.
-    // The packed record's length field is a `u8` (RFC-0018 §5), which is the wire's own bound
-    // on a segment and now the only one: a peer name longer than this has no spelling at all.
-    if (extra_seg.size() > wire::kPackedSegMaxBytes) return std::nullopt;
-    const std::size_t inbound_name_len =
-        is_reply ? reply_label.size()
-                 : mount_tlv.size() + (extra_seg.empty() ? 0u : 1u + extra_seg.size());
+    // The leading `dst` records this hop consumes, as the routing decision recorded them. The
+    // strip stays the zero-copy shrink of §5.1: the residual `dst` is emitted as ONE untouched
+    // span under a fresh header, and no length table is rewritten.
+    r.rem_dst_off = pre.strip_at;
+    r.rem_dst_len = pre.dst_end - pre.strip_at;
+
+    // What `src` grows by. A REQUEST grows by the inbound mount path — the precomputed run is
+    // already-encoded bytes, and a dynamic bus-peer segment adds ONE length byte plus its
+    // bytes. A REPLY grows by RFC-0027 §6.1's minted spelling alone, which is empty for every
+    // hop that does not mint — which is every hop today — so a REPLY's `src` is byte-identical
+    // to what it has always been and no shipped vector moves. The two ride the SAME fields
+    // because they are the same region of the frame: the bytes prepended to `src`. The only
+    // bound on a mount path is the packed record's `u8` length field; beyond that it is limited
+    // solely by the frame fitting the link's `max_frame`/MTU, never by a buffer budget.
+    r.mount_tlv = is_reply ? reply_label : mount_tlv;
+    r.extra_seg = is_reply ? std::string_view{} : extra_seg;
+    r.extra_hdr[0] = static_cast<std::byte>(r.extra_seg.size());
+    const std::size_t grown =
+        r.mount_tlv.size() + (r.extra_seg.empty() ? 0u : 1u + r.extra_seg.size());
 
     const std::size_t new_dst_body = r.rem_dst_len;
-    const std::size_t new_src_body = src_h->body_len + inbound_name_len;
-    const std::size_t new_dst_total = (new_dst_body > 0xFFFFu ? 6u : 4u) + new_dst_body;
-    const std::size_t new_src_total = (new_src_body > 0xFFFFu ? 6u : 4u) + new_src_body;
-    // `tail_len` no longer covers the trailing `PATH_REF` when this hop minted into it, so the
-    // body accounts for that child explicitly: its own 4-byte head, the elements already
-    // there, and the 8 this hop adds.
-    const std::size_t ref_total =
-        mint_growth == 0 ? 0u : 4u + r.ref_body_len + wire::kPathRefElementBytes;
+    const std::size_t new_src_body = src_h->body_len + grown;
+    // `tail_len` no longer covers the trailing mint child when this hop minted into it, so the
+    // body accounts for that child explicitly: its fresh head and element (`mint`, empty when
+    // this hop contributed nothing) and the elements already there.
     const std::size_t new_fwd_body =
-        op_total + new_dst_total + r.sel_total + new_src_total + r.tail_len + ref_total;
+        pre.op_total + stack_writer_t<kFwdHead1Cap>::header_bytes(new_dst_body) + new_dst_body +
+        r.sel_total + stack_writer_t<kFwdSrcHdrCap>::header_bytes(new_src_body) + new_src_body +
+        r.tail_len + r.mint.span().size() + r.ref_body_len;
 
     // The inbound frame's trailer timestamp, preserved VERBATIM across the hop (#1109):
     // the fresh head keeps the TS/TF bits and the gather re-emits the stamp's source
@@ -1565,59 +1544,29 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
     // `kTsNarrow` cannot express its offset there, so the stamp and its header bits are
     // dropped TOGETHER: a head that declares a trailer the gather cannot emit would be a
     // frame its own receiver rejects, which is strictly worse than relaying it unstamped.
-    const bool keep_ts = outer_opt.ts && body_end < fwd_rebuild_t::kTsNarrow;
+    const bool keep_ts = pre.fwd_opt.ts && pre.body_end < fwd_rebuild_t::kTsNarrow;
     if (keep_ts) {
-        r.ts_window =
-            static_cast<std::uint32_t>(body_end) | (outer_opt.tf ? fwd_rebuild_t::kTsNarrow : 0u);
+        r.ts_window = static_cast<std::uint32_t>(pre.body_end) |
+                      (pre.fwd_opt.tf ? fwd_rebuild_t::kTsNarrow : 0u);
     }
 
     // head1: FWD header + op (copied) + new (shrunk) dst header. head2: new (grown)
-    // src header + the prepended inbound NAME. Both fixed stack buffers — ZERO heap
-    // on the forward hop (ADR-0038 inv. #2). An overflow (a malformed op TLV larger
-    // than the buffer) yields an empty span ⇒ the caller drops, never a buffer overrun.
+    // src header. Both fixed stack buffers — ZERO heap on the forward hop (ADR-0038 inv. #2).
+    // An overflow (a malformed op TLV larger than the buffer) yields an empty span ⇒ the
+    // caller drops, never a buffer overrun.
     r.head1.header(wire::type_t::FWD, new_fwd_body,
-                   keep_ts ? outer_opt : outer_opt.without_trailer());
-    cur.for_each_span(op_pos, op_total, [&](std::span<const std::byte> s) { r.head1.raw(s); });
-    // A bound `dst` re-heads as a `PATH_REF` with `opt = 0`: the shrink is an element, and the
-    // body it now describes is still a fixed-stride record array, so `PL` stays clear
-    // (RFC-0024 §4.2 — a set `PL` here would mis-frame the whole body at the next hop).
-    if (pre != nullptr && pre->valid && pre->dst_ref && !pre->dst_to_path) {
-        r.head1.header_bare(wire::type_t::PATH_REF, new_dst_body);
-    } else {
-        // Canonical PATH — the ordinary shrunk dst, AND the reverse-list delivery's last
-        // hop (`dst_to_path`): the consumed element was the final one and the peer behind
-        // the egress is an origin, so it receives the canonical delivery shape (§7.1
-        // amendment 1 — the origin never speaks the bound form).
-        r.head1.header_path(new_dst_body);
-    }
-
-    if (src_ref) {
-        r.head2.header_bare(wire::type_t::PATH_REF, new_src_body);
-    } else {
-        r.head2.header_path(new_src_body);
-    }
-    // RFC-0027 §6.1's reply-leg contribution rides the SAME field the request leg's mount run
-    // rides, because it is the same region of the frame: the bytes prepended to `src`. Empty
-    // for every hop that does not mint — which is every hop today — so a REPLY's `src` is
-    // byte-identical to what it has always been and no shipped vector moves.
-    r.mount_tlv = is_reply ? reply_label : mount_tlv;
-    if (!is_reply && !extra_seg.empty()) {
-        r.extra_hdr[0] = static_cast<std::byte>(extra_seg.size());
-        r.extra_seg = extra_seg;
-    }
-
+                   keep_ts ? pre.fwd_opt : pre.fwd_opt.without_trailer());
+    cur.for_each_span(pre.op_pos, pre.op_total,
+                      [&](std::span<const std::byte> s) { r.head1.raw(s); });
+    // The shrunk `dst` is headed with the type the peek carried: a bound `dst` stays a
+    // `PATH_REF` with `opt = 0` (the shrink is an element and the body is still a fixed-stride
+    // record array, so a set `PL` would mis-frame it at the next hop, RFC-0024 §4.2), a
+    // canonical one stays a `PATH`, and the reverse-list delivery's last hop arrives here
+    // already re-typed to `PATH` (see `fwd_pre_t::dst_type`).
+    r.head1.header_route(pre.dst_type, new_dst_body);
+    // `src` keeps its own type: a `PATH`, or the `PATH_REF` a reply to a bound request echoes.
+    r.head2.header_route(src_h->type, new_src_body);
     return r;
-}
-
-/**
- * @brief Single-NAME convenience overload — a flat, one-segment mount (strip-1).
- *
- * The pre-ADR-0061 shape, kept for callers whose link identity is a bare NAME.
- */
-template <class Cursor>
-[[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(const Cursor& cur,
-                                                               std::string_view inbound_name) {
-    return rebuild_fwd_forward(cur, std::span<const std::byte>{}, inbound_name, 1);
 }
 
 }  // namespace tr::net

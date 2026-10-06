@@ -109,10 +109,20 @@ tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const st
     return r;
 }
 
-/** @brief The rebuilt forward-hop frame gathered into one contiguous byte vector. */
+/**
+ * @brief The rebuilt forward-hop frame gathered into one contiguous byte vector — a flat,
+ *        one-segment mount (strip-1) named @p inbound_name.
+ *
+ * The router's own sequence, which is the only one the rebuild has (#1794): the peek reads the
+ * frame's headers once, the routing decision records where the consumed segment ends, and the
+ * rebuild reuses both. A frame the peek refuses leaves `pre` invalid, which the rebuild refuses.
+ */
 template <class Cursor>
 std::optional<bytes_t> forward_bytes(const Cursor& cur, std::string_view inbound_name) {
-    const auto r = tr::net::rebuild_fwd_forward(cur, inbound_name);
+    tr::net::fwd_pre_t pre;
+    (void)tr::net::peek_fwd_dst(cur, pre);
+    pre.strip_at = pre.seg0_off + pre.seg0_len;  // consume the one leading segment
+    const auto r = tr::net::rebuild_fwd_forward(cur, pre, {}, inbound_name);
     if (!r || !r->ok()) return std::nullopt;
     bytes_t out;
     r->gather(cur,
@@ -316,8 +326,8 @@ int main() {
         tr::net::fwd_pre_t pre;
         check(tr::net::peek_fwd_dst(span_cursor{frame}, pre), "stamped frame: dst peek accepts");
         pre.strip_at = pre.seg0_off + pre.seg0_len;  // consume the one leading segment
-        const auto pre_r = tr::net::rebuild_fwd_forward(
-            span_cursor{frame}, std::span<const std::byte>{}, "in", 1, &pre);
+        const auto pre_r = tr::net::rebuild_fwd_forward(span_cursor{frame}, pre,
+                                                        std::span<const std::byte>{}, "in");
         check(pre_r.has_value() && pre_r->ok(), "stamped frame: the pre-carried rebuild succeeds");
         if (pre_r) {
             bytes_t pre_out;
@@ -360,22 +370,21 @@ int main() {
     {
         const bytes_t good = b_fwd(fwd_op_t::WRITE, b_path({"a", "b"}), b_path({}), {}, payload);
         const bytes_t truncated(good.begin(), good.begin() + 3);
-        check(!tr::net::rebuild_fwd_forward(span_cursor{truncated}, "in").has_value(),
+        check(!forward_bytes(span_cursor{truncated}, "in").has_value(),
               "reject: a truncated frame");
-        check(!tr::net::rebuild_fwd_forward(span_cursor{b_path({"a"})}, "in").has_value(),
+        check(!forward_bytes(span_cursor{b_path({"a"})}, "in").has_value(),
               "reject: a non-FWD frame");
         bytes_t no_dst_body = b_op(fwd_op_t::WRITE);  // FWD{ op, VALUE } — dst is not a PATH
         append(no_dst_body, payload);
         bytes_t no_dst;
         tr::wire::emit_tlv(no_dst, type_t::FWD, opt_t{.pl = true}, no_dst_body);
-        check(!tr::net::rebuild_fwd_forward(span_cursor{no_dst}, "in").has_value(),
+        check(!forward_bytes(span_cursor{no_dst}, "in").has_value(),
               "reject: child[1] is not a dst PATH");
         bytes_t no_src_body = b_op(fwd_op_t::WRITE);  // FWD{ op, dst } — src PATH missing
         append(no_src_body, b_path({"a"}));
         bytes_t no_src;
         tr::wire::emit_tlv(no_src, type_t::FWD, opt_t{.pl = true}, no_src_body);
-        check(!tr::net::rebuild_fwd_forward(span_cursor{no_src}, "in").has_value(),
-              "reject: a missing src PATH");
+        check(!forward_bytes(span_cursor{no_src}, "in").has_value(), "reject: a missing src PATH");
         // dst record[0] is the RFC-0018 §5.4 ESCAPE, not a literal segment — the packed
         // successor of "the first child is a VALUE, not a NAME". Nothing mints an escape,
         // and an address that LEADS with one names no transport child here, so the gate
