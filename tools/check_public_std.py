@@ -19,8 +19,10 @@ history, or for the host-side spelling a caller may keep) is never counted.
   header or a type the baseline does not list. A drop also fails until ``--repin``
   lowers the pin, so the baseline never sits above the truth. ``--repin`` only lowers
   or removes pins; it never adds one.
-* ZERO is the acceptance of #1781: once the baseline is empty, the scan finds no owning
-  std type in any installed header.
+* ZERO is the acceptance of #1781, with ONE exception: the ``path.hpp`` pins (the storage
+  of ``path_t`` / ``field_path_t`` and their path adjuncts) are owned by RFC-0029 S2 and stay
+  until that step reshapes them. Every other pin reaches zero; then the scan finds no owning
+  std type in any installed header outside that excepted set.
 
 Usage::
 

@@ -96,7 +96,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **A public-std ratchet in CI ([#1781](https://github.com/avatarsd-llc/libtracer/issues/1781)).**
   `tools/check_public_std.py` counts every owning `std` type in the installed headers
   (comments and strings excluded) against `tools/public_std_baseline.json`, which names the
-  step that removes each. A count may only go down, and #1781 closes at zero.
+  step that removes each. A count may only go down, and #1781 closes at zero except for the
+  `path.hpp` storage of `path_t` / `field_path_t`, which RFC-0029 S2 owns and which stays.
 
 - **`slab_class_stats_t::rounding`: the bytes a size class's live blocks lose to rounding up
   ([#1646](https://github.com/avatarsd-llc/libtracer/issues/1646)).** The class size less what

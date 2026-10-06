@@ -75,7 +75,7 @@
     }
   },
   "core/include/libtracer/path.hpp": {
-    "owner": "#1781 step 2: path_t / field_path_t storage moves onto core containers (maintainer ruling on the value shape)",
+    "owner": "RFC-0029 S2 (excepted from #1781): path_t / field_path_t / path_binding_t / path_label_cache_t storage is RFC-0029 S2's to reshape; these hits stay after #1781 closes",
     "counts": {
       "string": 1,
       "vector": 4
