@@ -5,7 +5,7 @@
 
 /**
  * @file
- * @brief The hazard domain's node class (#1782, ADR-0083 Decision 5): one fixed-size class of
+ * @brief The hazard domain's node class (#1782, ADR-0083 Decision 8): one fixed-size class of
  *        `detail_hp::node_t` blocks, cut from slabs, behind each participant's own free list,
  *        which refills and spills `kNodeBatch` nodes per hold of the class lock.
  *
@@ -38,24 +38,33 @@ constexpr std::size_t kNodeSlabBytes = 4096;
 /** @brief The node class: one row, its lock the build's guard. */
 using node_pool_t = mem::slab_pool_t<guard_t, 1>;
 
-/**
- * @brief The node class and the platform heap its slabs come from: constant-initialized and
- *        never destroyed.
- *
- * The exit sweep (`final_sweep_t`) and every `thread_local` participant that unwinds after
- * static destruction return nodes here, so the class must outlive them all, as the platform
- * heap it replaces did.
- */
-struct node_storage_t {
+/** @brief The node class and the platform heap its slabs come from, as one object. */
+struct node_class_t {
     mem::heap_source_t heap; /**< @brief Serves whole slabs, never a node. */
-    union {
-        node_pool_t pool; /**< @brief The node class. */
-    };
+    node_pool_t pool;        /**< @brief The node class, drawing its slabs from @ref heap. */
     /** @brief Constant-initializes the class over @ref heap. */
-    constexpr node_storage_t() noexcept
+    constexpr node_class_t() noexcept
         : heap(),
           pool("lkv_nodes", std::span<const std::size_t, 1>(kNodeClass), heap, kNodeSlabBytes) {}
-    /** @brief Deliberately does not destroy the class. */
+};
+
+/**
+ * @brief Storage for the one @ref node_class_t: constant-initialized and never destroyed.
+ *
+ * The exit sweep (`final_sweep_t`) and every `thread_local` participant that unwinds after
+ * static destruction return nodes here, and a return can release a slab to the heap source
+ * (once the class keeps `kSlabClassCap` free slabs), so the pool AND the source it releases
+ * through must outlive them all, as the platform heap they replace did. Both sit inside the
+ * union: a source kept beside it would be destroyed at static destruction while the pool still
+ * pointed at it.
+ */
+struct node_storage_t {
+    union {
+        node_class_t cls; /**< @brief The class and its slab source. */
+    };
+    /** @brief Constant-initializes the class. */
+    constexpr node_storage_t() noexcept : cls() {}
+    /** @brief Deliberately destroys nothing. */
     ~node_storage_t() {}
     node_storage_t(const node_storage_t&) = delete;
     node_storage_t& operator=(const node_storage_t&) = delete;
@@ -69,7 +78,7 @@ constinit node_storage_t g_nodes{};
 std::size_t refill_nodes(lists_t& l) noexcept {
     std::array<void*, kNodeBatch> b;
     if (!tr::detail::probe_hook_ok(sizeof(node_t))) return 0;  // test-only OOM injection
-    const std::size_t got = g_nodes.pool.take(0, b.data(), kNodeBatch, sizeof(node_t));
+    const std::size_t got = g_nodes.cls.pool.take(0, b.data(), kNodeBatch, sizeof(node_t));
     for (std::size_t i = 0; i < got; ++i) {
         node_t* const n = new (b[i]) node_t;
         n->next = l.freelist;
@@ -87,7 +96,7 @@ void spill_nodes(lists_t& l, std::size_t n) noexcept {
             b[i] = l.freelist;
             l.freelist = l.freelist->next;
         }
-        g_nodes.pool.give(0, b.data(), k);
+        g_nodes.cls.pool.give(0, b.data(), k);
         l.freelist_n -= k;
         n -= k;
     }
@@ -95,7 +104,7 @@ void spill_nodes(lists_t& l, std::size_t n) noexcept {
 
 void free_node(node_t* n) noexcept {
     void* b = n;
-    g_nodes.pool.give(0, &b, 1);
+    g_nodes.cls.pool.give(0, &b, 1);
 }
 
 }  // namespace tr::graph::detail_hp
