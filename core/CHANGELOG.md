@@ -14,6 +14,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Security
+
+- **The ACL gate reads a settled hook slot during a republish
+  ([GHSA-j8p5-qwx8-fm7c](https://github.com/avatarsd-llc/libtracer/security/advisories/GHSA-j8p5-qwx8-fm7c)).**
+  A gated operation that overlaps a `graph_t::set_hooks` republish now waits the publish out
+  (`sink_slot_t::get_settled`: a bounded re-read of the slot's generation, yielding every 64
+  reads, with no clock and no sleep) and resolves with the settled hooks. A slot that does not
+  settle within the bound refuses the caller.
+
 ### Added
 
 - **`mem::chunked_map_t`: a failable sorted map in fixed-size leaves

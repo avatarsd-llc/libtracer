@@ -45,6 +45,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
+#include <thread>
 #include <type_traits>
 
 namespace tr {
@@ -152,6 +154,34 @@ class sink_slot_t {
         // that has nothing to order. The acquire that matters is in @ref read_installed.
         if (fn_.load(std::memory_order_relaxed) == nullptr) return {nullptr, nullptr};
         return read_installed();
+    }
+
+    /**
+     * @brief Read the pair coherently, re-reading while a @ref set is in flight.
+     *
+     * Where @ref get reports "no sink" to a reader that overlaps a publish, this one waits the
+     * publish out: it re-reads the generation until it is even and unchanged across the pair,
+     * at most @p reads times. A publish is a handful of stores, so it settles within a few
+     * reads unless the publisher is preempted inside it. For that case every 64th unsettled
+     * read yields the processor, so a preempted publisher (on one core, or on an oversubscribed
+     * host) can finish; the bound keeps the wait finite. A retry loop: no clock, no sleep, no
+     * lock.
+     *
+     * @return The settled pair (`fn` is null only when no sink is installed), or `nullopt`
+     *         when the generation did not settle within @p reads attempts.
+     */
+    [[gnu::noinline]] [[nodiscard]] std::optional<snapshot_t> get_settled(
+        std::uint32_t reads) const noexcept {
+        for (std::uint32_t i = 0; i < reads; ++i) {
+            const std::uint32_t before = gen_.load(std::memory_order_acquire);
+            if ((i & 63U) == 63U) std::this_thread::yield();  // let a preempted publisher run
+            if ((before & 1U) != 0U) continue;                // a publish is in flight
+            const Fn fn = fn_.load(std::memory_order_relaxed);
+            void* const ctx = ctx_.load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (gen_.load(std::memory_order_relaxed) == before) return snapshot_t{fn, ctx};
+        }
+        return std::nullopt;
     }
 
    private:
