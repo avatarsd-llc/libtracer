@@ -75,6 +75,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import re
 import resource
 import subprocess
 import sys
@@ -572,6 +573,57 @@ def _cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+# The runner's own processes, by executable name: a shell whose command line merely MENTIONS
+# them (the workflow's own `pgrep` step) is not one.
+RUNNER_PROCESS = re.compile(r"(^|/)Runner\.(Listener|Worker)$")
+
+
+def runners_on(procs: dict[int, tuple[str, set[int]]], bench: Iterable[int]) -> list[int]:
+    """@brief The runner processes (@p procs: pid -> (executable, CPUs any of its threads
+    may run on)) still allowed on a @p bench CPU, sorted (#1890)."""
+    b = set(bench)
+    return sorted(pid for pid, (cmd, cpus) in procs.items()
+                  if RUNNER_PROCESS.search(cmd) and cpus & b)
+
+
+def _job_procs() -> dict[int, tuple[str, set[int]]]:
+    """@brief This job's processes (its cgroup and the cgroups below it): pid -> (argv[0],
+    the union of its threads' affinities). A process that exits mid-read is skipped."""
+    cg = cgroup_pressure_path(_read(PROC_SELF_CGROUP))
+    root = cg.rsplit("/", 1)[0] if cg else ""
+    pids: set[int] = set()
+    for d, _, files in os.walk(root) if root else ():
+        if "cgroup.procs" in files:
+            pids.update(int(x) for x in (_read(f"{d}/cgroup.procs") or "").split())
+    out = {}
+    for pid in pids:
+        try:
+            cmd = (_read(f"/proc/{pid}/cmdline") or "").split("\0")[0]
+            cpus = set()
+            for tid in os.listdir(f"/proc/{pid}/task"):
+                cpus |= os.sched_getaffinity(int(tid))
+        except OSError:
+            continue
+        out[pid] = (cmd, cpus)
+    return out
+
+
+def _cmd_runner_check(args: argparse.Namespace) -> int:
+    """@brief Fail when a runner process of this job may still run on the bench CPU, and
+    the job had another CPU to put it on (#1890)."""
+    bench = parse_cpu_list(args.cpu)
+    if not set(off_cpus(job_cpus(), bench)) - set(bench):
+        print(f"bench_conditions: this job has no CPU besides {cpu_list(bench)}; nothing to check")
+        return 0
+    bad = runners_on(_job_procs(), bench)
+    if bad:
+        print(f"::error::runner process(es) {bad} may still run on bench CPU "
+              f"{cpu_list(bench)}; the measurement would queue them behind the bench")
+        return 1
+    print(f"bench_conditions: no runner process of this job may run on {cpu_list(bench)}")
+    return 0
+
+
 def _cmd_off_cpus(args: argparse.Namespace) -> int:
     print(cpu_list(off_cpus(job_cpus(), parse_cpu_list(args.cpu))))
     return 0
@@ -597,6 +649,9 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--cpu", required=True, help="the bench CPU(s) to keep the job's own "
                    "processes off (#1890)")
     o.set_defaults(fn=_cmd_off_cpus)
+    c = sub.add_parser("runner-check", help="fail if a runner process may run on the bench CPU")
+    c.add_argument("--cpu", required=True, help="the bench CPU(s) (#1890)")
+    c.set_defaults(fn=_cmd_runner_check)
     args = ap.parse_args(argv)
     if args.cmd == "run":
         if args.argv[:1] == ["--"]:

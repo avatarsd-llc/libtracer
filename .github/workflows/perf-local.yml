@@ -233,6 +233,12 @@ jobs:
             if grep -qx "$pid" <<<"$own"; then taskset -a -p -c "$rest" "$pid" || true; fi
           done
 
+      # The proof the move took: no runner process of this job may still run on the bench
+      # CPU. Red rather than a silent contended point: this is a workflow defect, not a busy
+      # host, and every point it costs would be flagged anyway.
+      - name: Check the bench CPU is free of the runner's processes
+        run: python3 bench/bench_conditions.py runner-check --cpu "$BENCH_CPU"
+
       - name: Capture host characteristics (stamped onto every recorded point)
         id: host
         run: |

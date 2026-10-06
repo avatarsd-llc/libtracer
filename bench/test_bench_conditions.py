@@ -22,6 +22,7 @@ import contextlib
 import io
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -424,6 +425,29 @@ class TheJobStaysOffTheBenchCpu(unittest.TestCase):
                  f"{bc.CGROUP_FS}/bench.slice/cpuset.cpus.effective": "2-6\n"}
         self.assertEqual(bc.job_cpus(files.get), (2, 3, 4, 5, 6))
 
+    def test_runner_check_names_a_runner_left_on_the_bench_cpu(self):
+        procs = {10: ("/home/r/bin/Runner.Listener", {2}),
+                 11: ("/home/r/bin/Runner.Worker", {3, 4, 5, 6}),
+                 12: ("./bench/build/bench_forward_demux", {2}),  # the bench itself: fine
+                 13: ("bash", {2})}  # a step shell, whatever its script mentions
+        self.assertEqual(bc.runners_on(procs, (2,)), [10])
+        procs[10] = ("/home/r/bin/Runner.Listener", {3, 4, 5, 6})
+        self.assertEqual(bc.runners_on(procs, (2,)), [])
+
+    def test_runner_check_passes_here(self):
+        """Live: no runner process belongs to a developer's shell, so the check is green.
+
+        Skipped inside a CI job: there the job's own runner processes are in its cgroup and
+        may legitimately sit on any CPU (gate-pr pins them to CPU 2 on purpose). The real
+        check runs in perf-local, as a workflow step, after the move.
+        """
+        if os.environ.get("GITHUB_ACTIONS"):
+            self.skipTest("inside a CI job the runner's own processes are this job's")
+        cpu = max(os.sched_getaffinity(0))
+        r = subprocess.run([sys.executable, str(pathlib.Path(bc.__file__)), "runner-check",
+                            "--cpu", str(cpu)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_cpu_list_round_trips(self):
         for spec in ("2", "3-6", "0-1,7-30"):
             self.assertEqual(bc.cpu_list(bc.parse_cpu_list(spec)), spec)
@@ -435,8 +459,23 @@ class TheJobStaysOffTheBenchCpu(unittest.TestCase):
         move = text.find("bench_conditions.py off-cpus --cpu \"$BENCH_CPU\"")
         self.assertGreater(move, 0, "perf-local must move the runner's processes off BENCH_CPU")
         self.assertIn("Runner\\.(Listener|Worker)", text[move - 400:move + 400])
-        for timed in ("bench_conditions.py run", "host_guard.py wait"):
-            self.assertLess(move, text.find(timed), f"the move must come before `{timed}`")
+        check = text.find("bench_conditions.py runner-check --cpu \"$BENCH_CPU\"")
+        self.assertGreater(check, move, "the runner-check must follow the move")
+        for timed in (r"bench_conditions\.py run\b(?!-)", r"host_guard\.py wait"):
+            first = re.search(timed, text)
+            self.assertIsNotNone(first, timed)
+            self.assertLess(check, first.start(), f"the check must come before `{timed}`")
+
+    def test_gate_pr_puts_the_runner_back(self):
+        """perf.yml's move onto CPU 2 must be undone, even on failure, or it leaks into
+        every later job's Runner.Worker."""
+        text = (self.WORKFLOW.parent / "perf.yml").read_text()
+        i = text.find("- name: Restore the runner's own processes' CPU affinity")
+        self.assertGreater(i, text.find("- name: Performance gate (INTERLEAVED"))
+        self.assertIn("if: always() && runner.environment == 'self-hosted'", text[i:i + 200])
+        # The original affinity is recorded before the move, and restored from that record.
+        self.assertLess(text.find('runner-affinity.txt'), text.find("taskset -a -p -c 2"))
+        self.assertIn('done <"$RUNNER_TEMP/runner-affinity.txt"', text[i:])
 
 
 class CLI(unittest.TestCase):
