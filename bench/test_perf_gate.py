@@ -1075,6 +1075,48 @@ class MissingGatedKeysFail(unittest.TestCase):
         self.assertIn("inproc/64/1/1 not measured", out.getvalue())
 
 
+class GatedRowsTimeWhatTheyClaim(unittest.TestCase):
+    """@brief #1904: the timing rules every gated binary's source must keep.
+
+    Static checks over the sources, because each rule is about how a row is MEASURED, which
+    no transcript shows: a plateau-calibrated batch and a window-calibrated one print the
+    same columns, and so do a measured p50 and a bulk rate inverted into one."""
+
+    HERE = pathlib.Path(__file__).resolve().parent
+    # `calibrate_batch(`, not `calibrate_batch_for_window(`: the plateau calibrator's batch is
+    # a per-execution lottery (bench_common.hpp), so no gated row may be sized by it.
+    PLATEAU = re.compile(r"\bcalibrate_batch\s*\(")
+    # `Summary{x, x, x...}`: one bulk figure published as a p50, a p99 and a mean.
+    TRIPLED = re.compile(r"Summary\s*\w*\s*\{\s*(\w+)\s*,\s*\1\s*,\s*\1\b")
+
+    def gated_sources(self) -> dict[str, str]:
+        return {name: (self.HERE / f"{name}.cpp").read_text()
+                for name in pg.BENCH_BY_KEY.values()}
+
+    def test_no_gated_binary_uses_the_plateau_calibrator(self):
+        for name, src in self.gated_sources().items():
+            with self.subTest(binary=name):
+                self.assertIsNone(self.PLATEAU.search(src))
+
+    def test_every_gated_binary_records_its_clock_floor(self):
+        for name, src in self.gated_sources().items():
+            with self.subTest(binary=name):
+                self.assertIn("emit_clock_floor()", src)
+
+    def test_no_bench_publishes_one_bulk_figure_three_times(self):
+        """Bulk-only rows report ONE metric (the rate); their latency columns are 0."""
+        for path in sorted(self.HERE.glob("*.cpp")):
+            with self.subTest(source=path.name):
+                self.assertIsNone(self.TRIPLED.search(path.read_text()))
+
+    def test_the_rules_catch_what_they_forbid(self):
+        self.assertIsNotNone(self.PLATEAU.search("const auto b = calibrate_batch(op);"))
+        self.assertIsNone(self.PLATEAU.search("calibrate_batch_for_window(op)"))
+        self.assertIsNotNone(self.TRIPLED.search("Latency::Summary lat{ns, ns, ns};"))
+        self.assertIsNotNone(self.TRIPLED.search("Summary{q, q, q, q, q, n, ok}"))
+        self.assertIsNone(self.TRIPLED.search("Summary{p50, p99, mean}"))
+
+
 class StoreLatencyRowsAreGated(unittest.TestCase):
     """@brief #1869: bench_store_sweep's `RESULT_STORE_LAT` rows reach the gate as POINTS.
 

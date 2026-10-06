@@ -62,15 +62,14 @@
  * `bench/collate.py` read them without a special case. The three axis columns carry the
  * bench's own knobs: `size` = live slots, `fan` = 1, `ep` = 1.
  *
- * @warning **Every figure here is BATCH-DERIVED**, so `p50`, `p99` and `mean` are the same
- *          number and the distribution columns carry no distribution. That is deliberate and
- *          it is the only way this leg can see what it was built to see: a node acquisition
- *          costs a few tens of nanoseconds and two `%now_ns` reads cost ~22 ns of it, so
- *          per-operation timestamping would spend most of the measurement on the stopwatch
- *          and compress exactly the difference the gate is asking about (measured: with
- *          per-op reads the cold and the free-list arms both read a p50 of 30 ns — the clock,
- *          not the code). The window charges the two reads once per batch instead. Read the
- *          `pub/s` column; the latency columns are `1e9 / pub_s` restated.
+ * @warning **Every figure here is BATCH-DERIVED**, so the rate is the only metric and the
+ *          latency columns are 0 (#1904): there is no distribution to report. That is deliberate
+ * and it is the only way this leg can see what it was built to see: a node acquisition costs a few
+ * tens of nanoseconds and two `%now_ns` reads cost ~22 ns of it, so per-operation timestamping
+ * would spend most of the measurement on the stopwatch and compress exactly the difference the gate
+ * is asking about (measured: with per-op reads the cold and the free-list arms both read a p50 of
+ * 30 ns — the clock, not the code). The window charges the two reads once per batch instead. Read
+ * the `pub/s` column.
  */
 
 #include <cstddef>
@@ -126,14 +125,16 @@ constexpr std::size_t kSteadyOps = 20'000'000;
     return p;
 }
 
-/** @brief Emit one arm's batch-derived per-operation figure in the standard RESULT shape. */
+/**
+ * @brief Emit one arm's rate in the standard RESULT shape: ONE metric (#1904).
+ *
+ * Each arm is timed as one block, so its rate is the only measurement. The latency columns are
+ * 0 ("not measured") and no `RESULT_TAIL` follows: the per-op mean inverted into a p50, a p99,
+ * a p999 and a max, with a `tail_ok` vouching for it, was one number wearing five names.
+ */
 void emit_arm(const char* mode, std::size_t size_axis, std::size_t ops, std::uint64_t ns) {
-    const double per = ops == 0 ? 0.0 : static_cast<double>(ns) / static_cast<double>(ops);
     const double rate = ns == 0 ? 0.0 : static_cast<double>(ops) * 1e9 / static_cast<double>(ns);
-    const auto q = static_cast<std::uint64_t>(per + 0.5);
-    const bench::Latency::Summary s{q, q, q, q, q, ops, ops >= bench::kTailSampleFloor};
-    bench::emit("libtracer", mode, size_axis, 1, 1, rate, rate, 0.0, s);
-    bench::emit_tail("libtracer", mode, size_axis, 1, 1, s);
+    bench::emit("libtracer", mode, size_axis, 1, 1, rate, rate, 0.0, bench::Latency::Summary{});
 }
 
 /**

@@ -119,10 +119,10 @@ int main() {
         const double secs = static_cast<double>(t1 - t0) / 1e9;
         const double writes_s = secs > 0 ? static_cast<double>(writes.load()) / secs : 0.0;
         const double wakeups_s = secs > 0 ? static_cast<double>(wakeups.load()) / secs : 0.0;
-        const std::uint64_t ns_per_write =
-            writes_s > 0 ? static_cast<std::uint64_t>(1e9 / writes_s) : 0;
-
-        const bench::Latency::Summary lat{ns_per_write, ns_per_write, ns_per_write};
+        // ONE metric (#1904): the whole window is timed as one block, so the rate is the only
+        // measurement. Its latency columns are 0, read everywhere as "not measured", instead of
+        // the same figure inverted and printed three times as a p50, a p99 and a mean.
+        const bench::Latency::Summary lat{};
         bench::emit("libtracer", "wake_storm", /*size_bytes=*/buf.size(), /*fanout=*/W,
                     /*endpoints=*/1, writes_s, wakeups_s, /*mb_per_s=*/0.0, lat);
     }

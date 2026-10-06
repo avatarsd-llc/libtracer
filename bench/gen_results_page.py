@@ -456,7 +456,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "T receive threads forward rope frames with the RX block source shared across all "
         "children, one pool shared, or one pool per child. One seam; the whole-node instrument "
         "is `bench_store_sweep.cpp`.",
-        "frames/s · ns p50, per thread count"),
+        "frames/s per thread count"),
     instrument_t(
         "bench_store_sweep.cpp", "scaling", (),
         "Composes a whole node under four allocation-store configurations — the shipped all-heap "
@@ -517,7 +517,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "stream/lock-free ratio is same-run. The committed instrument for §4.6.2's four-writer "
         "leg; it prices today's receiving-vertex retention, not the producer-side ring that "
         "figure priced and PR #1490 deleted.",
-        "aggregate and per-thread ops/s · ps per system-wide op · the same-run ratio",
+        "aggregate and per-thread ops/s · the same-run ratio",
         "never gated — a many-thread aggregate rate is a property of the host"),
     instrument_t(
         "bench_lkv_slot.cpp", "scaling", (),
@@ -530,9 +530,9 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "Isolates hazard-slot NODE ACQUISITION, which every other LKV bench amortizes away: it "
         "holds thousands of never-written slots live so that each publish takes the allocating "
         "arm rather than the free list, and reports that arm, the retire-scan-free path and a "
-        "free-list-hit control separately. Batch-derived per-operation figures, so the "
-        "distribution columns carry no distribution.",
-        "ns per acquisition · ns per release"),
+        "free-list-hit control separately. Each arm is timed as one block, so its rate is the "
+        "only figure it reports.",
+        "acquisitions/s · releases/s"),
     instrument_t(
         "bench_contention.cpp", "scaling", (),
         "Measures the machine rather than libtracer: nine arms isolating a thread-private "

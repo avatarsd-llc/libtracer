@@ -177,10 +177,12 @@ enum class arm_t { LOCKFREE, STREAM };
 
     const double ops = static_cast<double>(kOpsPerThread) * static_cast<double>(threads);
     const double agg = elapsed == 0 ? 0.0 : ops * 1e9 / static_cast<double>(elapsed);
-    const std::uint64_t ps_per_op = agg == 0.0 ? 0 : static_cast<std::uint64_t>(1e12 / agg);
+    // ONE metric (#1904): the whole window is timed as one block, so the rate is the only
+    // measurement (it also printed picoseconds into the
+    // nanosecond columns). Its latency columns are 0, read everywhere as "not measured", instead of
+    // the same figure inverted and printed three times as a p50, a p99 and a mean.
     emit("libtracer", arm_name(a), kSize, threads, 1, agg / static_cast<double>(threads),
-         /*deliv_per_s=*/0.0, /*mb_per_s=*/0.0,
-         Latency::Summary{ps_per_op, ps_per_op, ps_per_op, ps_per_op, ps_per_op, 0, false});
+         /*deliv_per_s=*/0.0, /*mb_per_s=*/0.0, Latency::Summary{});
 
     const std::uint64_t published = ok.load(std::memory_order_relaxed);
     std::printf("NOTE %s threads=%zu published=%llu of %.0f\n", arm_name(a), threads,

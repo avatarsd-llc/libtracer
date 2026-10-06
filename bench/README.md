@@ -1838,8 +1838,9 @@ different now.
 
 #### Batch rows: picosecond figures, a 20 µs window floor, and the clock floor (#1804)
 
-Every batch row — `fold-b*`, the `-batch` twins, `path-parse`, `compact-*` and `fwd-demux-*` —
-times through one loop, `bench::time_batches` in `bench_common.hpp`:
+Every batch row — `fold-b*`, the `-batch` twins, `path-parse`, `compact-*`, `fwd-demux-*` and
+`bench_store_sweep`'s `store-lat-*` rows (#1904) — times through one loop, `bench::time_batches`
+in `bench_common.hpp`:
 
 - the batch is sized by **window** (`calibrate_batch_for_window`, aimed at 40 µs), never by
   the plateau rule, and **every** kept window is at least 20 µs. A shorter one means a stall
@@ -1854,7 +1855,13 @@ times through one loop, `bench::time_batches` in `bench_common.hpp`:
 
 The `lkv-*` rows time their whole loop as one block, so they have exactly one measurement:
 **throughput** (also charted as ns/delivery). Their p50 and mean columns read 0; they used to
-repeat `1e9 / ops` truncated to whole ns, which the gate counted as three legs agreeing.
+repeat `1e9 / ops` truncated to whole ns, which the gate counted as three legs agreeing. The
+ungated bulk-window benches follow the same rule (#1904): `bench_fanout_clone_storm`,
+`bench_await_wakeup_storm`, `bench_route_handle_contention`, `bench_rx_source_topology`,
+`bench_writer_fanin` and `bench_hazard_node` print their rate and 0 in every latency column,
+and `bench_hazard_node` no longer follows its rows with a `RESULT_TAIL`. `test_perf_gate.py`
+fails any bench source that builds a `Summary` from one figure repeated, any gated binary that
+calls the plateau calibrator, and any gated binary that does not print its clock floor.
 
 Each run also prints its **clock floor** ahead of its rows: `CLOCK <res_ns> <sample_ns>`, the
 clock's `clock_getres` resolution and the measured cost of the pair of clock reads one timed
