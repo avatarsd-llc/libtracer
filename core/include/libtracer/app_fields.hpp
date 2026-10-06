@@ -123,7 +123,7 @@ struct app_field_t {
  * @brief One app-field DECLARATION (ADR-0058, class ②): view-shaped, owning nothing.
  *
  * Unlike @ref app_field_t this owns NOTHING: `name` and `descriptor` are VIEWS. For an
- * OWNING install they point into @ref app_field_table_t::backing; for a BORROWED install
+ * OWNING install they point into @ref app_field_table_t::owned; for a BORROWED install
  * (@ref vertex_policy_t::app_fields) they point at the caller's own storage, and the
  * caller guarantees the pointed-to bytes — **and the array holding these entries** —
  * outlive the vertex. Pass static storage (flash / `.rodata`), never a stack array or a
@@ -319,7 +319,8 @@ struct app_field_table_t {
      *         descriptor bytes, which the slots view. Null for a borrowed install. Sized
      *         exactly at install and never resized: a re-install builds a whole new table and
      *         move-assigns it under the stripe lock. Raw rather than two core arrays so the
-     *         table stays the 56 B its `std::vector` predecessor was (`vertex_app5` gate). */
+     *         table is 48 B, under the 56 B its `std::vector` predecessor took
+     *         (`vertex_app5` gate). */
     std::byte* owned = nullptr;
     /** @brief The size @ref owned was drawn at — what its sized release hands back. */
     std::size_t owned_bytes = 0;
