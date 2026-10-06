@@ -147,7 +147,7 @@
     },
     "tr::net::ws::detail::decode_one": {
       "ccn": [
-        20
+        19
       ],
       "file": "core/include/libtracer/ws.hpp"
     },

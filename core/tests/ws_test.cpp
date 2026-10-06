@@ -11,7 +11,9 @@
  *   - the masked client "Hello" data frame from RFC 6455 §5.7,
  *   - a tiny server BINARY frame (FIN=1, unmasked) round-trip,
  *   - the need-more (nullopt) signal on a truncated buffer, and
- *   - the 16-bit extended-length (126 marker) path.
+ *   - the 16-bit extended-length (126 marker) path, and
+ *   - the word-wide unmask (#1922) against a byte-wise reference at every length mod 8 and
+ *     every starting mask offset.
  */
 
 #include "libtracer/ws.hpp"
@@ -244,6 +246,60 @@ int main() {
         check(
             decode_frame_checked(nonfinal, kNoPayloadCap).status == decode_status_t::PROTOCOL_ERROR,
             "§5.5 still rejects a non-final control frame");
+    }
+
+    // #1922: the word-wide unmask equals the byte-wise RFC 6455 §5.3 reference. The buffer
+    // starts at each of the eight offsets from an 8-byte boundary, so the head runs 0..7 bytes
+    // and the word loop starts at every one of the four key rotations; the lengths 0..40 cover
+    // every length mod 8 with zero, one and several whole words behind each head.
+    {
+        const std::array<std::uint8_t, 4> key{0x37, 0xFA, 0x21, 0x3D};
+        alignas(8) std::array<std::byte, 64> buf{};
+        bool all_equal = true;
+        bool all_restored = true;
+        for (std::size_t offset = 0; offset < 8; ++offset) {
+            for (std::size_t len = 0; len <= 40; ++len) {
+                const std::span<std::byte> data(buf.data() + offset, len);
+                for (std::size_t i = 0; i < len; ++i)
+                    data[i] = static_cast<std::byte>((i * 29 + offset * 7 + len) & 0xFFu);
+                std::vector<std::byte> want(data.begin(), data.end());
+                const std::vector<std::byte> original = want;
+                for (std::size_t i = 0; i < len; ++i) want[i] ^= static_cast<std::byte>(key[i % 4]);
+                const std::byte before = offset > 0 ? buf[offset - 1] : std::byte{0};
+                const std::byte after = buf[offset + len];
+                detail::xor_mask(data, key);
+                all_equal = all_equal && std::ranges::equal(data, want) &&
+                            (offset == 0 || buf[offset - 1] == before) &&
+                            buf[offset + len] == after;
+                detail::xor_mask(data, key);
+                all_restored = all_restored && std::ranges::equal(data, original);
+            }
+        }
+        check(all_equal,
+              "word-wide unmask == byte-wise reference, every length mod 8 x every mask offset, "
+              "no byte outside the payload touched");
+        check(all_restored, "  unmasking twice restores the input");
+    }
+
+    // ...and through the decoder: a masked frame whose payload starts at every offset from an
+    // 8-byte boundary still decodes to its plaintext.
+    {
+        std::vector<std::byte> plain(1000);
+        for (std::size_t i = 0; i < plain.size(); ++i)
+            plain[i] = static_cast<std::byte>((i * 13) & 0xFFu);
+        const std::vector<std::byte> frame = client_frame_ref(opcode_t::BINARY, plain, 0xA1B2C3D4u);
+        bool all_ok = true;
+        for (std::size_t offset = 0; offset < 8; ++offset) {
+            std::vector<std::byte> store(frame.size() + 16);
+            const std::size_t lead =
+                (8u - reinterpret_cast<std::uintptr_t>(store.data()) % 8u) % 8u + offset;
+            const std::span<std::byte> buf(store.data() + lead, frame.size());
+            std::ranges::copy(frame, buf.begin());
+            const decode_result_t r = decode_frame_checked(buf, kNoPayloadCap);
+            all_ok = all_ok && r.status == decode_status_t::OK &&
+                     std::ranges::equal(r.frame.payload, plain);
+        }
+        check(all_ok, "masked 1000-byte frame decodes at every buffer offset mod 8");
     }
 
     return tr::testing::summary("ws");
