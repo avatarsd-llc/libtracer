@@ -651,6 +651,10 @@ void run_grid() {
         for (std::size_t E : kGridEndpoints)
             run_inproc(S, 1, E, alloc_t::HEAP, true, "inproc-path", kGridBudget, kGridLatBudget,
                        nullptr, rows_t::QUANTIZED);
+    // The dense payload sweep (#1890), at fan-out 1 only: the payload charts' slice.
+    for (std::size_t S : bench::sweep_extra(kGridSizes))
+        run_inproc(S, 1, 1, alloc_t::HEAP, false, "inproc", bench::ladder_budget(S, kGridBudget),
+                   bench::ladder_budget(S, kGridLatBudget), nullptr, rows_t::QUANTIZED);
 }
 
 /** @brief Mixed workload: 128 topics with varied fan-out (1..16) and payloads (1..8192). */
@@ -1930,6 +1934,11 @@ void family_inproc_size() {
         run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc");
     // The payload ladder's rows above and around 1 KiB (#1806), after every existing row.
     for (std::size_t S : bench::ladder_extra())
+        run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc",
+                   bench::ladder_budget(S, kDeliveryBudget),
+                   bench::ladder_budget(S, kLatencyDeliveryBudget));
+    // The dense comparison sweep (#1890), after those: Zenoh's `inproc-size` runs the same.
+    for (std::size_t S : bench::sweep_extra(kSizes, bench::kPayloadLadder))
         run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc",
                    bench::ladder_budget(S, kDeliveryBudget),
                    bench::ladder_budget(S, kLatencyDeliveryBudget));

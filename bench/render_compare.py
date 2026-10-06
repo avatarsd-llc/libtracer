@@ -188,6 +188,8 @@ HIST_SPECS: dict[str, list[tuple]] = {
                     ("zenoh", f"zenoh inproc {_PAY}", "throughput", False)],
     "ltz-mb-size": [("libtracer", f"inproc {_PAY}", "throughput", True),
                     ("zenoh", f"zenoh inproc {_PAY}", "throughput", True)],
+    "ltz-lat-size": [("libtracer", f"inproc {_PAY}", "p50 latency", False),
+                     ("zenoh", f"zenoh inproc {_PAY}", "p50 latency", False)],
     "ltz-tp-ep": [("libtracer", r"inproc-path 64B/fan1/(\d+)ep", "throughput", False)],
     "ltz-lat-ep": [("libtracer", r"inproc-path 64B/fan1/(\d+)ep", "p50 latency", False)],
 }
@@ -376,6 +378,9 @@ def build(rows: list[dict], hist: dict | None = None) -> dict:
     s = two(**{**pay, "col": "mbps"})
     add("ltz-mb-size", "Bandwidth vs payload", "1 subscriber · 1 topic · in-process",
         s, X_SIZE, "mb", "application bandwidth", True, reading(s, f_mb, label_x=f_bytes))
+    s = two(**{**pay, "col": "p50"})
+    add("ltz-lat-size", "p50 latency vs payload", "1 subscriber · 1 topic · in-process",
+        s, X_SIZE, "ns", "p50 latency", True, reading(s, f_ns, label_x=f_bytes))
     # --- topic count: libtracer only, by ruling ------------------------------------
     # The Zenoh series is NOT drawn on the topic-count pair, and dropping it is a
     # correctness fix rather than a scope cut. The two rows are not the same operation:
@@ -401,7 +406,12 @@ def build(rows: list[dict], hist: dict | None = None) -> dict:
         return {"libtracer": series.get("libtracer", [])}
 
     TOP_LABEL = {"libtracer": "libtracer — write by path (address re-resolved per publish)"}
-    TOP_COND = f"{REF} · 1 subscriber · write-by-path · resolve per publish"
+    TOP_COND = (f"{REF} · 1 subscriber · write-by-path · resolve per publish · "
+                "<b>libtracer only:</b> Zenoh is not drawn because its arm publishes through "
+                "a declared handle and resolves nothing per put, so the two are not the "
+                "same operation; both spellings on both engines are compared in the "
+                '<a href="https://github.com/avatarsd-llc/libtracer/issues/1485">#1485 '
+                "decomposition</a>")
     s = lt_only(two(**{**top, "col": "pub"}))
     add("ltz-tp-ep", "Throughput vs topic count", TOP_COND,
         s, X_EP, "rate", "publishes / second", False, reading(s, f_rate), labels=TOP_LABEL)

@@ -611,9 +611,14 @@
       s += '<line class="ph-gl" x1="' + m.l + '" y1="' + y.toFixed(1) + '" x2="' + (W - m.r) + '" y2="' + y.toFixed(1) + '"/>';
       s += '<text class="ph-tick" x="' + (m.l - 8) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end">' + yf(v) + "</text>";
     });
+    // Every point gets a grid line; a label only where it clears the last one drawn, so a
+    // dense sweep (#1890: 32 payload sizes) stays readable instead of overprinting.
+    var lastX = -Infinity;
     xs.forEach(function (v) {
       var x = X(v);
       s += '<line class="ph-gl" x1="' + x.toFixed(1) + '" y1="' + m.t + '" x2="' + x.toFixed(1) + '" y2="' + (m.t + ph) + '"/>';
+      if (x - lastX < 44) return;
+      lastX = x;
       s += '<text class="ph-tick" x="' + x.toFixed(1) + '" y="' + (m.t + ph + 16) + '" text-anchor="middle">' + xf(v) + "</text>";
     });
     s += '<rect class="ph-frame" x="' + m.l + '" y="' + m.t + '" width="' + pw + '" height="' + ph + '"/>';
