@@ -684,10 +684,10 @@ template <class N, class ReplyError>
     if (req.mint_request) {
         path_label_fn = nullptr;
         if (const std::optional<vertex_slot_t> slot = graph.vertex_slot(v)) {
-            const wire::path_ref_element_t e{.index = slot->index, .generation = slot->generation};
-            if (wire::emit_path_ref_into(mint_buf,
-                                         std::span<const wire::path_ref_element_t>(&e, 1)))
-                mint = std::span<const std::byte>(mint_buf);
+            wire::emit_path_ref_head(
+                mint_buf, wire::type_t::PATH_REF,
+                wire::path_ref_element_t{.index = slot->index, .generation = slot->generation}, 0);
+            mint = std::span<const std::byte>(mint_buf);
         }
     }
 
@@ -852,18 +852,11 @@ template <class N, class ReplyError>
                             flat, 4u + wire::kPathRefElementBytes + rbody.size());
                         if (seg) {
                             const std::span<std::byte> out = seg->bytes;
-                            if (wire::emit_path_ref_into(
-                                    out, std::span<const wire::path_ref_element_t>(&*own, 1))) {
-                                // emit_path_ref_into wrote a 1-element header; widen the
-                                // length to cover the appended hop elements too.
-                                const std::size_t body_len =
-                                    wire::kPathRefElementBytes + rbody.size();
-                                out[2] = static_cast<std::byte>(body_len & 0xFFu);
-                                out[3] = static_cast<std::byte>((body_len >> 8) & 0xFFu);
-                                std::memcpy(out.data() + 4 + wire::kPathRefElementBytes,
-                                            rbody.data(), rbody.size());
-                                reverse_route = view::view_t::over(std::move(seg));
-                            }
+                            wire::emit_path_ref_head(out.first<wire::path_ref_wire_bytes(1)>(),
+                                                     wire::type_t::PATH_REF, *own, rbody.size());
+                            std::memcpy(out.data() + wire::path_ref_wire_bytes(1), rbody.data(),
+                                        rbody.size());
+                            reverse_route = view::view_t::over(std::move(seg));
                         }
                     }
                 }
@@ -875,7 +868,10 @@ template <class N, class ReplyError>
             // (ADR-0082). They are the same string for every caller that supplied no
             // peer handle, and differ exactly when the terminus derived a per-writer
             // subject — which is what makes a FLAT listener's peers distinguishable
-            // without making any of them individually routable.
+            // without making any of them individually routable. The subject is passed
+            // as it is: `subscribe_wire` already falls back to the link for an empty
+            // one, so blanking a subject equal to the link here only made it rebuild
+            // the same string.
             // The carried link token (#1417), asked for HERE and only here — lazily, at
             // the one branch that can use it. `subject_for` is resolved once per resolve
             // because every op needs a subject; a token is needed by remote SUBSCRIBE
@@ -883,7 +879,7 @@ template <class N, class ReplyError>
             // mistake #1290's prototype was killed for.
             result_t<void> w = graph.subscribe_wire(
                 v, sub_value, return_route, std::string(inbound_link), std::move(reverse_route),
-                subject == inbound_link ? std::string{} : std::string(subject), link_token.ask());
+                std::string(subject), link_token.ask());
             if (!w) return assemble_error_reply(route, w.error(), egress);
             const reply_route_t ok = labelled_route();
             return or_backpressure(

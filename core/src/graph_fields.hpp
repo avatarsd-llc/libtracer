@@ -22,10 +22,12 @@ namespace tr::graph {
 
 /**
  * @brief The wire→`subscriber_t` admission parse every subscriber door shares (ADR-0049):
- *        type-check the decoded record, then parse it once. Defined in `graph_fields.cpp`.
+ *        decode and type-check the record, parse it once, and retain it zero-copy. Defined in
+ *        `graph_fields.cpp`.
  *
- * @return False iff @p tlv is not a SUBSCRIBER — the doors' one shared TYPE_MISMATCH.
+ * @return False iff @p record is not one valid SUBSCRIBER TLV — the doors' one shared
+ *         TYPE_MISMATCH.
  */
-[[nodiscard]] bool parse_wire_subscriber(const wire::tlv_node_t& tlv, subscriber_t& s);
+[[nodiscard]] bool parse_wire_subscriber(const view::view_t& record, subscriber_t& s);
 
 }  // namespace tr::graph

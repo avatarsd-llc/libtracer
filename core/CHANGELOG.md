@@ -16,6 +16,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`wire::emit_path_ref_head`: the head of a bound list that grows by one element at its
+  front ([#1798](https://github.com/avatarsd-llc/libtracer/issues/1798)).** It writes the 4-byte
+  `PATH_REF` / `PATH_REF_REVERSE` header and the leading element into exactly 12 bytes, with the
+  length covering the elements the caller places after them, and returns nothing because it
+  cannot fail. The terminus's mint answer and the reverse route it stores are both written
+  through it, so the two `emit_path_ref_into` result checks there, which could never fail, are
+  gone. No wire byte changes.
+
 - **`handlers_t::on_app_field_read`: an on-demand read seam for app fields
   ([#1878](https://github.com/avatarsd-llc/libtracer/issues/1878)).** A field read could answer
   only the bytes a field write stored, so an owner that keeps a field's state in its own struct
