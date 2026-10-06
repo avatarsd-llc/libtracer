@@ -152,12 +152,15 @@ instrument #1713's own test uses).
 its tables from the host slab pool
 ([#1777](https://github.com/avatarsd-llc/libtracer/issues/1777), ADR-0083), a counting window
 over a default graph sees whole slabs (64 KiB and up, one per size class a growing table
-first reaches), not the object it is pricing. So the gated `vertex`, `edge_callback`,
-`edge_wire` and `vertex_value_1k` probes run on a graph injected with
+first reaches), not the object it is pricing. So the gated `vertex`, `vertex_app5`,
+`vertex_app5_static`, `edge_callback`, `edge_wire` and `vertex_value_1k` probes run on a graph
+injected with
 `tr::mem::heap_source()` (and `vertex_value_1k` mints its segments through a backend over
 that same source): every block is then its own counted `operator new`, which is what a build
-without the slab pool (an MCU) pays per object. The same windows on a default graph are still printed, ungated, as
-`RESULT slabfoot <what> live_x1000= blocks_x1000= n=`, so the slab cost stays visible. The
+without the slab pool (an MCU) pays per object. The same windows on a default graph are still
+printed, ungated, as `RESULT slabfoot <what> live_x1000= blocks_x1000= n=` (the two app-table
+rows have no such twin; `slabfoot vertex` already prices a leaf's slabs), so the slab cost
+stays visible. The
 two methods differ only where the old one missed a block: on `main` before #1778, a wire
 edge's per-link candidate list came from the graph's pmr pool, which the old window did not
 see (7.035 blocks per wire edge counted per object, 6.035 the old way); and the old
@@ -583,8 +586,8 @@ Details that make these trustworthy:
 - The same gate additionally checks **five memory probes** (`perf_gate.py`'s
   `MEM_POINTS`, named here in full because this page is hand-written and a bare count
   rots): `vertex` — a leaf at rest, its tables drawn per object (see *Per object, not per slab*); `vertex_value` — the increment one LKV write
-  adds; `vertex_app5` — a leaf carrying a *copied* five-field app-field table;
-  `vertex_app5_static` — the *borrowed* twin of that table (ADR-0058); and `reg_escape` —
+  adds; `vertex_app5` — a leaf carrying a *copied* five-field app-field table, drawn per
+  object; `vertex_app5_static` — the *borrowed* twin of that table (ADR-0058), likewise; and `reg_escape` —
   the global-heap blocks a runtime registration takes that the graph's injected
   `memory_resource` never sees (ADR-0039 / RFC-0014), whose target is zero. Each ratchets
   on two quantities: **live bytes** per vertex, tolerant at **+2%** because it is

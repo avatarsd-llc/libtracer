@@ -236,9 +236,12 @@ bool link_index_t::index_vertex(std::string_view link, link_id_t token, vertex_t
     // insert a reject (+19% on this path, #1071, from the N/2-pointer shift the Nth
     // subscription paid). A genuinely new vertex still lands with a bare `push_back`.
     if (candidates_contain(e.vs, e.compacted, v)) return true;
-    // A link's FIRST candidate takes a one-pointer block, not the container's opening eight:
-    // most links carry a single subscribed vertex, and the list is per link (#1778).
-    if ((e.vs.capacity() == 0 && !e.vs.reserve(1)) || !e.vs.push_back(v)) return false;
+    // Grown to `2n + 1`, so a link's FIRST candidate takes a one-pointer block, not the
+    // container's opening eight: most links carry a single subscribed vertex, and the list is
+    // per link (#1778). Doubling past that keeps the appends amortized; the reserve is a
+    // no-op while capacity remains, so the push below cannot be refused.
+    if (!e.vs.reserve(e.vs.size() * 2 + 1)) return false;
+    (void)e.vs.push_back(v);
     // With the membership test above the list IS the distinct set, so compaction no longer
     // bounds unbounded growth — nothing can grow it past the vertices this link subscribed
     // on. What it bounds now is the TAIL, i.e. how long the linear half of that test can get:

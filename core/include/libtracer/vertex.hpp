@@ -669,13 +669,6 @@ struct ring_state_t {
     return bytes >= UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(bytes);
 }
 
-/** @brief One app-field store outcome (`vertex_t::app_field_store`, #1778). */
-enum class app_store_t {
-    STORED,     /**< @brief Stored (or, for a field that retains nothing, admitted). */
-    UNDECLARED, /**< @brief No such field in the table (or no table) — `ENOTTY`. */
-    REFUSED,    /**< @brief The table source refused the bytes — `BACKPRESSURE`. */
-};
-
 /**
  * @brief The lazily-allocated COLD half of a vertex (issue #361 §1): every member a plain
  *        STORED_VALUE leaf with default storage policy, no handlers, and no `:acl` never touches.
@@ -1549,7 +1542,7 @@ class vertex_t {
      *         a caller can map it straight to `BACKPRESSURE` without re-deriving the arm.
      */
     bool ring_admit(const value_ref_t& sp, std::size_t bytes, tr::mem::block_source_t& src,
-                    store_drops_t* drops, ring_take_t* take = nullptr) {
+                    store_drops_t& drops, ring_take_t* take = nullptr) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (take != nullptr) take->engaged_ = true;
@@ -1565,13 +1558,13 @@ class vertex_t {
      * @return As %ring_admit.
      */
     bool admit_locked(vertex_ext_t* e, const value_ref_t& sp, std::size_t bytes,
-                      tr::mem::block_source_t& src, store_drops_t* drops) {
+                      tr::mem::block_source_t& src, store_drops_t& drops) {
         if (e->ring == nullptr) {  // first append (#388 lazy)
             e->ring = tr::mem::make_in<ring_state_t>(*e->src);
             if (e->ring == nullptr) {
                 // No ring state, so no bound arm either: the best-effort default holds, and
                 // the loss is accounted like any refused admission (#1778).
-                if (drops != nullptr) drops->ring_append = true;
+                drops.ring_append = true;
                 return true;
             }
         }
@@ -1630,13 +1623,13 @@ class vertex_t {
         }
         // The shed is accounted on BOTH outcomes, so once, here. Under the reliable arm `shed`
         // is always zero (only best-effort sheds), so this is a no-op there.
-        if (drops != nullptr) drops->ring_shed += shed;
+        drops.ring_shed += shed;
         r.gaps += shed;
         if (token == nullptr) {
             // Nothing admitted. Under the reliable arm nothing was shed either, and the caller
             // turns our `false` into BACKPRESSURE. Under best-effort the ring was already
             // emptied above, so the loss is real and is accounted rather than silent.
-            if (drops != nullptr && !arm_reliable) drops->ring_append = true;
+            if (!arm_reliable) drops.ring_append = true;
             return !arm_reliable;
         }
         // Placed at the front of its own reservation: the queue's bookkeeping is charged to the
@@ -2368,17 +2361,24 @@ class vertex_t {
     // -- ACL state (#81, ADR-0018/0020) -------------------------------------------------
 
     /**
-     * @brief Return every member a `vertex_policy_t` sets to an unregistered placeholder's
-     *        default: retention by role (no `RETAIN_NONE`), depth 1, no ring (so no ring
-     *        source and best-effort), the default share threshold, no app-field group.
+     * @brief Take back everything a registration DECLARES, to an unregistered placeholder's
+     *        default: the policy members (retention by role with no `RETAIN_NONE`, depth 1, no
+     *        ring so no ring source and best-effort, the default share threshold, no
+     *        app-field group) and the payload-right and admission flags.
      *
-     * Retirement calls it, and so does a registration refused after its policy landed on the
-     * placeholder (#1778), so a later registration through a door that applies no policy (the
-     * write-create `ensure_vertex`) inherits none of it. The caller MUST hold the graph map
-     * lock; the stripe lock is taken here. Allocates nothing.
+     * The flags belong to the occupant, not to the address (RFC-0014 Amendment 2): the
+     * graph's rows and filter nodes for this vertex stay parked and unreachable while the bits
+     * are clear, and a re-registration that declares again prepends its own, newer node.
+     *
+     * Retirement calls it, and so does a registration refused after its declarations landed on
+     * the placeholder (#1778), so a later registration through a door that brings no policy
+     * (the write-create `ensure_vertex`) inherits none of it. The caller MUST hold the graph
+     * map lock; the stripe lock is taken here. Allocates nothing.
      */
-    void clear_policy() noexcept {
+    void clear_declarations() noexcept {
         set_flag(flag_t::RETAIN_NONE, false);
+        set_flag(flag_t::PAYLOAD_RIGHTS, false);
+        set_flag(flag_t::ADMISSION, false);
         vertex_ext_t* const e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) return;
         const std::lock_guard lock(vertex_stripe_of(this).m);
@@ -2451,19 +2451,10 @@ class vertex_t {
         // next registration at this key is a different vertex kind and must be listed unless
         // it asks not to be (RFC-0014 §3 / S4).
         set_flag(flag_t::ENUM_HIDDEN, false);
-        // Same argument for the payload-right declaration (RFC-0014 Amendment 2): it belongs
-        // to the retiring occupant, not to the address. The graph's rows for this vertex stay
-        // parked and unreachable — nothing consults them while this bit is clear — and a
-        // re-registration that declares again publishes its own, newer rows.
-        set_flag(flag_t::PAYLOAD_RIGHTS, false);
-        // And for the admission filters, for the third time the same reason: they belong to the
-        // retiring occupant, not to the address. The graph's node for this vertex stays parked
-        // and unreachable — nothing consults it while this bit is clear — and a re-registration
-        // that installs a filter again prepends its own, newer node.
-        set_flag(flag_t::ADMISSION, false);
-        // And the policy (RFC-0028 §5.4 retention, the ring, the threshold, the app fields): the
-        // next occupant starts from its own role's defaults until it declares otherwise.
-        clear_policy();
+        // The same argument for everything the occupant declared: its payload rights, its
+        // admission filters and its policy (RFC-0028 §5.4 retention, the ring, the threshold,
+        // the app fields). The next occupant starts from its own role's defaults.
+        clear_declarations();
         // And the pending-mark hint (#1712): the retire erases the occupant's key from the
         // sweep set right after the map lock drops, so the next occupant starts unmarked.
         set_flag(flag_t::PENDING_MARK, false);
@@ -2750,28 +2741,28 @@ class vertex_t {
      *        self-description) — or store nothing, if the field retains nothing (`wo`, or
      *        declared @ref retention_t::NONE; RFC-0028 §5.4). The caller's apply seam fires
      *        either way.
-     * @return `%app_store_t::UNDECLARED` iff @p name is not declared (e.g. a concurrent
-     *         table replacement removed it between the caller's gate and this store), and
-     *         `%app_store_t::REFUSED` when the table source could not hold the bytes
-     *         (#1778) — the field keeps its previous bytes.
+     * @return `SCHEMA_NOT_FOUND` iff @p name is not declared (e.g. a concurrent table
+     *         replacement removed it between the caller's gate and this store), and
+     *         `BACKPRESSURE` when the table source could not hold the bytes (#1778) — the
+     *         field keeps its previous bytes.
      */
-    [[nodiscard]] app_store_t app_field_store(std::string_view name,
-                                              std::span<const std::byte> bytes) {
+    [[nodiscard]] result_t<void> app_field_store(std::string_view name,
+                                                 std::span<const std::byte> bytes) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         const std::ptrdiff_t i = find_app_slot(e, name);
-        if (i < 0) return app_store_t::UNDECLARED;
+        if (i < 0) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         app_field_table_t& t = e->app->table;
         // A field that retains nothing (`wo`, or declared `NONE` — RFC-0028 §5.4) stores
         // nothing: the caller still fires `on_app_field_write` with the bytes, and `values`
         // is never allocated on its account. Declared and admitted, so this is a success.
-        if (t.slots[static_cast<std::size_t>(i)].retains_nothing()) return app_store_t::STORED;
+        if (t.slots[static_cast<std::size_t>(i)].retains_nothing()) return {};
         // Class-③ value store: allocated on the FIRST write to a retaining field on this
         // vertex (#389 lazy pattern) — a declared-but-never-written table never pays for it.
-        if (t.values.empty() && !t.ensure_values()) return app_store_t::REFUSED;
-        return tr::mem::assign_bytes(t.values[static_cast<std::size_t>(i)], bytes)
-                   ? app_store_t::STORED
-                   : app_store_t::REFUSED;
+        if (!t.ensure_values() ||
+            !tr::mem::assign_bytes(t.values[static_cast<std::size_t>(i)], bytes))
+            return std::unexpected(status_t::BACKPRESSURE);
+        return {};
     }
 
     /** @brief One app-field read outcome — the graph maps these onto the RFC-0002
@@ -2793,7 +2784,7 @@ class vertex_t {
         const app_field_table_t& t = e->app->table;
         const std::size_t idx = static_cast<std::size_t>(i);
         if (t.slots[idx].access == app_access_t::WO) return app_read_t::WRITE_ONLY;
-        if (t.values.empty() || t.values[idx].empty()) return app_read_t::UNSET;
+        if (t.values == nullptr || t.values[idx].empty()) return app_read_t::UNSET;
         out.assign(t.values[idx].begin(), t.values[idx].end());
         return app_read_t::OK;
     }
@@ -2817,7 +2808,7 @@ class vertex_t {
             f.name.assign(t.slots[i].name);
             f.access = t.slots[i].access;
             f.descriptor.assign(t.slots[i].descriptor.begin(), t.slots[i].descriptor.end());
-            if (i < t.values.size()) f.value.assign(t.values[i].begin(), t.values[i].end());
+            if (t.values != nullptr) f.value.assign(t.values[i].begin(), t.values[i].end());
             out.push_back(std::move(f));
         }
         return out;
@@ -3351,51 +3342,39 @@ class vertex_t {
         return true;
     }
 
-    /** @brief Pack an owning @p table into one @ref app_field_table_t (ADR-0058): the
-     *         name+descriptor bytes are concatenated into a single `backing` buffer (one
-     *         allocation for the whole table) with the slots viewing into it; any initial
-     *         values are copied into the lazy value store. `backing`'s address is stable
-     *         across the table's moves, so the slot views stay valid. Every block comes from
-     *         @p t's source (#1778); false when it refused one, and @p t is then discarded. */
+    /** @brief Pack an owning @p table into one @ref app_field_table_t (ADR-0058): the slot
+     *         array and the name+descriptor bytes share a single `owned` block (one
+     *         allocation for the whole table), the slots viewing the bytes after them; any
+     *         initial values are copied into the lazy value store. The block's address is
+     *         stable across the table's moves, so the slot views stay valid. Every block comes
+     *         from @p t's source (#1778); false when it refused one, and @p t is then
+     *         discarded. */
     [[nodiscard]] static bool build_owning_table(const std::vector<app_field_t>& table,
                                                  app_field_table_t& t) {
-        if (table.empty()) return true;
-        std::size_t total = 0;
-        bool any_value = false;
-        for (const app_field_t& f : table) {
-            total += f.name.size() + f.descriptor.size();
-            any_value = any_value || (!f.value.empty() && f.access != app_access_t::WO &&
-                                      f.retention != retention_t::NONE);
+        std::size_t off = table.size() * sizeof(app_field_slot_t);
+        std::size_t total = off;
+        for (const app_field_t& f : table) total += f.name.size() + f.descriptor.size();
+        if (!table.empty() && !t.own(total)) return false;
+        auto* const slots = reinterpret_cast<app_field_slot_t*>(t.owned);
+        for (std::size_t i = 0; i < table.size(); ++i) {
+            const app_field_t& f = table[i];
+            char* const name = reinterpret_cast<char*>(t.owned + off);
+            std::copy(f.name.begin(), f.name.end(), name);
+            std::byte* const desc = t.owned + off + f.name.size();
+            std::copy(f.descriptor.begin(), f.descriptor.end(), desc);
+            off += f.name.size() + f.descriptor.size();
+            ::new (slots + i)
+                app_field_slot_t{std::string_view(name, f.name.size()), f.access, f.retention,
+                                 std::span<const std::byte>(desc, f.descriptor.size())};
         }
-        if (!t.backing.reserve(total) || !t.owned_slots.reserve(table.size())) return false;
-        for (std::size_t k = 0; k < total; ++k) (void)t.backing.push_slot();  // reserved
-        std::size_t si = 0;
-        std::size_t off = 0;
-        for (const app_field_t& f : table) {
-            const std::size_t noff = off;
-            std::copy(f.name.begin(), f.name.end(),
-                      reinterpret_cast<char*>(t.backing.data()) + noff);
-            off += f.name.size();
-            const std::size_t doff = off;
-            std::copy(f.descriptor.begin(), f.descriptor.end(), t.backing.data() + doff);
-            off += f.descriptor.size();
-            (void)t.owned_slots.push_back(app_field_slot_t{
-                std::string_view(reinterpret_cast<const char*>(t.backing.data()) + noff,
-                                 f.name.size()),
-                f.access, f.retention,
-                std::span<const std::byte>(t.backing.data() + doff, f.descriptor.size())});
-            ++si;
-        }
-        t.slots = std::span<const app_field_slot_t>(t.owned_slots.data(), table.size());
+        t.slots = std::span<const app_field_slot_t>(slots, table.size());
         // An initial value on a field that retains nothing is dropped, like any write to it:
-        // a `wo` field has no read surface to serve it through (RFC-0028 §5.4).
-        if (any_value) {
-            if (!t.ensure_values()) return false;
-            for (std::size_t i = 0; i < table.size(); ++i)
-                if (!t.owned_slots[i].retains_nothing() &&
-                    !tr::mem::assign_bytes(t.values[i], table[i].value))
-                    return false;
-        }
+        // a `wo` field has no read surface to serve it through (RFC-0028 §5.4). The value
+        // store is drawn on the first value that needs it, so a table of none draws nothing.
+        for (std::size_t i = 0; i < table.size(); ++i)
+            if (!slots[i].retains_nothing() && !table[i].value.empty() &&
+                (!t.ensure_values() || !tr::mem::assign_bytes(t.values[i], table[i].value)))
+                return false;
         return true;
     }
 
@@ -3436,9 +3415,8 @@ class vertex_t {
     [[nodiscard]] bool adopt_identity(role_t role, const handlers_t& handlers,
                                       tr::mem::block_source_t& src) noexcept {
         const bool has_seam = handlers.on_read || handlers.on_write || handlers.on_children;
-        if (role != role_t::STREAM && !has_seam && !handlers.on_app_field_write &&
-            ext_.load(std::memory_order_acquire) == nullptr)
-            return true;
+        // Nothing to install, so nothing to draw (an existing extension block needs nothing).
+        if (role != role_t::STREAM && !has_seam && !handlers.on_app_field_write) return true;
         // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
         // seam only when one of its three is set; the app-field group's apply seam only
         // when given. Registration is single-threaded for this vertex, so no lock here.
@@ -3456,22 +3434,23 @@ class vertex_t {
         const bool need_app = handlers.on_app_field_write && (e == nullptr || e->app == nullptr);
         app_field_group_t* const app =
             need_app ? tr::mem::make_in<app_field_group_t>(from, from) : nullptr;
-        if (e == nullptr) e = ensure_ext(src);
-        if (e == nullptr || (has_seam && seam == nullptr) || (need_app && app == nullptr)) {
+        // One check for every block: as many drawn as were wanted, and the extension block
+        // (an existing one comes straight back).
+        e = ensure_ext(src);
+        if (e == nullptr ||
+            int{seam != nullptr} + int{app != nullptr} != int{has_seam} + int{need_app}) {
             tr::mem::drop_in(from, seam);
             tr::mem::drop_in(from, app);
             return false;
         }
         if (need_app) e->app = app;
-        if (seam != nullptr) {
-            // Publish the seam atomically. `fill` only ever runs on an UNREGISTERED node
-            // (register_vertex_key returns PATH_IN_USE otherwise), and such a node's seam
-            // is null — a fresh placeholder never had one, and retirement already swapped a
-            // retired node's out. So the prior is provably null and a plain release store
-            // suffices; the store races only the lock-free reader, which the release
-            // ordering covers.
-            e->handlers.store(seam, std::memory_order_release);
-        }
+        // Publish the seam atomically, null included. `fill` only ever runs on an UNREGISTERED
+        // node (register_vertex_key returns PATH_IN_USE otherwise), and such a node's seam is
+        // null — a fresh placeholder never had one, and retirement already swapped a retired
+        // node's out. So the prior is provably null, storing null over it changes nothing, and
+        // a plain release store suffices; the store races only the lock-free reader, which the
+        // release ordering covers.
+        e->handlers.store(seam, std::memory_order_release);
         if (handlers.on_app_field_write) e->app->on_app_field_write = handlers.on_app_field_write;
         return true;
     }

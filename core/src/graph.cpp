@@ -373,21 +373,29 @@ struct branch_node_t {
     // key are core containers over @p src (#873 phase 1, #1778): a refusal soft-fails the
     // whole branch write as BACKPRESSURE (the store-leg status), never an abort — and with no
     // probe-then-commit window left (#850, #981), on an MCU node too.
+    //
+    // The node's key starts as a copy of @p base — the whole target key for the root, the
+    // parent's key for a sub-branch — with room reserved for one more packed record (RFC-0018:
+    // a length byte plus the name), and the NAME's body is answered so a sub-branch can append
+    // that record within capacity. @p base may view a key on the stack: the push relocates the
+    // `open_t`, never the key's block.
     mem::block_array_t<open_t> stack(src);
-    const auto open = [&a, &stack](std::uint32_t node, mem::bytes_t&& k) -> result_t<void> {
+    const auto open = [&a, &stack, &src](
+                          std::uint32_t node,
+                          std::span<const std::byte> base) -> result_t<std::span<const std::byte>> {
         if (!a[node].opt.pl || !trailer_less(a[node]))
             return std::unexpected(status_t::TYPE_MISMATCH);
         const std::uint32_t cn = wire::tlv_arena_t::first_child(node);
         if (cn >= a[node].end || a[cn].type != type_t::NAME)
             return std::unexpected(status_t::TYPE_MISMATCH);
-        if (!stack.push_back(open_t{.node = node, .next = a.next_sibling(cn), .key = std::move(k)}))
+        if (!stack.push_back(
+                open_t{.node = node, .next = a.next_sibling(cn), .key = mem::bytes_t(src)}) ||
+            !stack.back().key.reserve(base.size() + 1 + a[cn].body.size()) ||
+            !stack.back().key.append(base.data(), base.size()))
             return std::unexpected(status_t::BACKPRESSURE);
-        return {};
+        return a[cn].body;
     };
-    mem::bytes_t root_key(src);
-    if (!mem::assign_bytes(root_key, key)) return std::unexpected(status_t::BACKPRESSURE);
-    if (const result_t<void> o = open(root, std::move(root_key)); !o)
-        return std::unexpected(o.error());
+    if (const auto o = open(root, key); !o) return std::unexpected(o.error());
 
     for (;;) {
         open_t& top = stack.back();
@@ -416,22 +424,13 @@ struct branch_node_t {
             top.store = slice_of(frame_view, c.wire);
         } else if (c.type == type_t::POINT) {
             top.has_point_child = true;
-            const std::uint32_t cn = wire::tlv_arena_t::first_child(ci);
-            if (cn >= c.end || a[cn].type != type_t::NAME)
-                return std::unexpected(status_t::TYPE_MISMATCH);
-            // The child key = parent key + one NAME record, composed failably (#477): reserve
-            // the exact final size, then the copy + emit cannot be refused, so the emit's
-            // false means only an illegal segment.
-            mem::bytes_t child_key(src);
-            if (!child_key.reserve(top.key.size() + 1 + a[cn].body.size()) ||
-                !child_key.append(top.key.data(), top.key.size()))
-                return std::unexpected(status_t::BACKPRESSURE);
-            // One packed record (RFC-0018) — a length byte plus the name, within capacity.
-            if (!wire::emit_path_segment(child_key, a[cn].body))
+            // The child key = parent key + one NAME record, composed failably (#477): open()
+            // reserved the exact final size, so the emit's false means only an illegal
+            // segment. `top` is invalidated by the push inside open().
+            const auto name = open(ci, mem::as_span(top.key));
+            if (!name) return std::unexpected(name.error());
+            if (!wire::emit_path_segment(stack.back().key, *name))
                 return std::unexpected(status_t::INVALID_PATH);
-            // `top` is invalidated by the push inside open().
-            if (const result_t<void> o = open(ci, std::move(child_key)); !o)
-                return std::unexpected(o.error());
         } else {
             return std::unexpected(status_t::TYPE_MISMATCH);
         }
@@ -667,7 +666,7 @@ result_t<vertex_handle_t> graph_t::register_with_policy(std::span<const std::byt
         mode == delivery_mode_t::UNCONDITIONAL ? enroll_unconditional(key) : false;
     if (!enrolled) return std::unexpected(enrolled.error());
     result_t<vertex_handle_t> h =
-        register_vertex_key_span(key, role, handlers, rights, schema_catalog, &policy);
+        register_vertex_key_span(key, role, handlers, rights, schema_catalog, std::move(policy));
     if (!h && *enrolled) {
         const std::lock_guard lock(sweep_mutex_);
         (void)unconditional_.erase(key);
@@ -681,7 +680,7 @@ result_t<vertex_handle_t> graph_t::register_with_policy(std::span<const std::byt
 result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     std::span<const std::byte> key, role_t role, const handlers_t& handlers,
     std::span<const payload_right_t> rights, std::span<const std::byte> schema_catalog,
-    vertex_policy_t* policy) {
+    vertex_policy_t policy) {
     const std::unique_lock lock(map_mutex_);
     // Descend the Composite tree (ADR-0057), creating unregistered PLACEHOLDER nodes for
     // missing intermediate levels — invisible to find/read_children until a registration
@@ -754,22 +753,20 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // Same treatment, same hold, and for the same reason (see `graph_t::admissions_`): the two
     // ADMISSION filters are taken here, before `fill` adopts the rest, so the seam block
     // `adopt_identity` may allocate is byte-for-byte the one it allocated before this feature.
-    // The flags are raised only once all three have succeeded (#1778): a node published for
-    // a refused registration is never walked, because nothing flags its vertex, and a later
+    // Each declaration raises its vertex flag as it lands (#1778). A node published for a
+    // refused registration is never walked once the refusal lowers the flags again, and a later
     // declaration at this address is found first anyway.
     // The policy's vertex-local members land on the still-unregistered node first (#1778): a
     // refusal anywhere in this chain leaves a placeholder, which `find` does not answer for.
-    // The refusal also clears the policy back off it, so the next registration here, through a
-    // door that applies none (`ensure_vertex`), inherits nothing of the refused one.
-    if ((policy != nullptr && !apply_policy(node, role, std::move(*policy))) ||
+    // The refusal clears every declaration back off it, so the next registration here, through
+    // a door that brings no policy (`ensure_vertex`), inherits nothing of the refused one.
+    if (!apply_policy(node, role, std::move(policy)) ||
         !declare_payload_rights(node, rights, schema_catalog) ||
         !declare_admission(node, handlers.on_admit, handlers.on_app_field_admit) ||
         !node->fill(role, handlers, *tables_)) {
-        node->clear_policy();
+        node->clear_declarations();
         return std::unexpected(status_t::BACKPRESSURE);
     }
-    if (!rights.empty() || !schema_catalog.empty()) node->mark_payload_rights();
-    if (handlers.on_admit || handlers.on_app_field_admit) node->mark_admission();
     return vertex_handle_t{node};
 }
 
@@ -789,6 +786,7 @@ bool graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_
     }
     node->v = v;
     payload_rights_.prepend(node);
+    v->mark_payload_rights();
     return true;
 }
 
@@ -803,6 +801,7 @@ bool graph_t::declare_admission(vertex_t* v, admit_hook_t on_admit,
         *tables_, admission_node_t{v, on_admit, on_app_field_admit, nullptr});
     if (node == nullptr) return false;
     admissions_.prepend(node);
+    v->mark_admission();
     return true;
 }
 
@@ -1569,16 +1568,16 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy) 
     if ((vx->ring_source() != policy.ring_source || vx->ring_reliable() != policy.ring_reliable) &&
         !vx->set_ring_source(policy.ring_source, policy.ring_reliable, tables))
         return false;
-    // A HANDLER is NONE by role and carries no bit for it.
-    if (role != role_t::HANDLER) {
-        const retention_t r = policy.retention.value_or(default_retention(role));
-        const bool depth_moves = r == retention_t::N && vx->retention_depth() != policy.depth;
-        if ((r != vx->retention() || depth_moves) && !vx->set_retention(r, policy.depth, tables))
-            return false;
-    }
-    const std::size_t threshold =
-        policy.share_threshold_bytes >= UINT32_MAX ? SIZE_MAX : policy.share_threshold_bytes;
-    if (vx->share_threshold_bytes() != threshold &&
+    // A HANDLER is NONE by role and carries no bit for it. Re-applying the retention a vertex
+    // already holds is a no-op: only `N` touches the extension block, which a STREAM always
+    // has, and a `NONE` vertex keeps neither slot nor ring to clear.
+    if (role != role_t::HANDLER &&
+        !vx->set_retention(policy.retention.value_or(default_retention(role)), policy.depth,
+                           tables))
+        return false;
+    // Compared as stored, so a threshold that saturates the same way moves nothing.
+    if (saturate_threshold(vx->share_threshold_bytes()) !=
+            saturate_threshold(policy.share_threshold_bytes) &&
         !vx->set_share_threshold_bytes(policy.share_threshold_bytes, tables))
         return false;
     // Owner-facing declaration (RFC-0010 §A.2) — a local host API, so no ACL gate. A borrowed
@@ -2209,7 +2208,7 @@ result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
     // `vertex_t::ring_admit` charges the bound source first — "per-injection-point, never a
     // shared pool" (RFC-0025 §4.6.1 clause 3), spelled once, under the lock. Reading the bound
     // source here, unlocked, raced the first admission that creates the ring state.
-    if (receives && !v->ring_admit(sp, retained, *values_, &drops, take))
+    if (receives && !v->ring_admit(sp, retained, *values_, drops, take))
         return std::unexpected(status_t::BACKPRESSURE);  // the RELIABLE arm of §4.4
     return sp;
 }
@@ -3041,11 +3040,10 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // the deref that replaces it is flat. Failure here is not an error: an unbound edge
     // simply keeps the canonical spelling, which is what a target that does not exist yet,
     // one that is a placeholder, and one whose generation has saturated all get.
+    // `vertex_slot` answers nothing for an absent (null) target, so that case needs no test.
     if (s.target_key) {
-        if (vertex_t* const target = find_ptr(*s.target_key); target != nullptr) {
-            if (const auto slot = vertex_slot(vertex_handle_t{target}))
-                s.binding = target_binding_t{.index = slot->index, .generation = slot->generation};
-        }
+        if (const auto slot = vertex_slot(vertex_handle_t{find_ptr(*s.target_key)}))
+            s.binding = target_binding_t{.index = slot->index, .generation = slot->generation};
     }
 
     // Latch the current value to the new subscriber iff THIS SUBSCRIBER asked for it
@@ -3894,21 +3892,19 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
     // the whole reason this is an ordered map and not a hash — the two passes below need
     // exactly those two orders and nothing else. A sorted table from the table source
     // (#1778): entries MOVE on insert, so a node is addressed by index or re-found, never
-    // held across an insert.
-    mem::sorted_map_t<mem::bytes_t, fold_node_t, mem::bytes_less_t> tree(frame);
+    // held across an insert. Its keys are VIEWS, never copies: every key is `lo`, a selected
+    // key, or a parent of one, and a parent is a prefix of its child's bytes, so all of them
+    // point into `lo_key` and `keys`, which outlive the table.
+    mem::sorted_map_t<std::span<const std::byte>, fold_node_t, mem::bytes_less_t> tree(frame);
     // Admit one node, resolving the vertex and validating what it may contribute. `selected`
     // false admits a skeleton: the vertex is named so the tree stays connected, and no value
     // rides it. Returns the error a §B decomposer would raise on the frame this would build.
-    const auto admit = [this, v, lo, &tree, &frame](std::span<const std::byte> key,
-                                                    bool selected) -> result_t<fold_node_t*> {
-        fold_node_t* found = tree.find(key);
-        if (found == nullptr) {
-            mem::bytes_t k(frame);
-            found = mem::assign_bytes(k, key) ? tree.try_emplace(std::move(k)).value : nullptr;
-            if (found == nullptr) return std::unexpected(status_t::BACKPRESSURE);
-            found->vx = std::ranges::equal(key, lo) ? v : find_ptr(key);
-        }
+    const auto admit = [this, v, lo, &tree](std::span<const std::byte> key,
+                                            bool selected) -> result_t<fold_node_t*> {
+        const auto [found, fresh] = tree.try_emplace(key);
+        if (found == nullptr) return std::unexpected(status_t::BACKPRESSURE);
         fold_node_t& n = *found;
+        if (fresh) n.vx = std::ranges::equal(key, lo) ? v : find_ptr(key);
         if (n.vx == nullptr) return &n;  // vanished mid-sweep — propagate_impl skips it too
         if (!selected || n.selected) return &n;
         n.selected = true;
@@ -3971,7 +3967,7 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
     mem::mem_backend_t& hdr_backend = *value_backend_;
     for (std::size_t ti = tree.size(); ti-- > 0;) {
         fold_node_t& n = tree.at(ti).value;
-        const std::span<const std::byte> nk = mem::as_span(tree.at(ti).key);
+        const std::span<const std::byte> nk = tree.at(ti).key;
         if (n.vx == nullptr) continue;
         const std::span<const std::byte> seg = child_segment(*n.vx);
         n.body_len =
@@ -4007,7 +4003,7 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
     // frame to every ancestor subscriber, exactly as the eager branch write's notify half does.
     for (std::size_t ti = tree.size(); ti-- > 0;) {
         const fold_node_t& n = tree.at(ti).value;
-        if (n.vx == nullptr || std::ranges::equal(mem::as_span(tree.at(ti).key), lo)) continue;
+        if (n.vx == nullptr || std::ranges::equal(tree.at(ti).key, lo)) continue;
         if (n.kids_len == 0) {
             if (n.lkv) fan_out(n.vx, *n.lkv);  // leaf landing site: its VALUE slice
         } else {  // interior node: its whole POINT subtree — a frame no vertex stored

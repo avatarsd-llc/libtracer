@@ -919,9 +919,11 @@ int main() {
     // descriptor table adds per vertex (the extension block + the table's own
     // storage) — the number that decides whether per-endpoint app-field schemas
     // beat the /meta child-vertex workaround on the MCU (#388's ask for a gate
-    // row alongside the per-leaf number).
+    // row alongside the per-leaf number). Counted per object, on a graph injected with
+    // `tr::mem::heap_source()`, for the reason the `vertex` row is (#1778): a default graph's
+    // window sees the table slabs its pool carves, not the vertex.
     {
-        graph_t app_graph;
+        graph_t app_graph(tr::mem::heap_source());
         const auto mk_table = [] {
             std::vector<tr::graph::app_field_t> table;
             table.reserve(5);
@@ -976,9 +978,9 @@ int main() {
     // whether per-endpoint schemas beat the `/meta` workaround on the target, and until now nothing
     // measured it: the economics were claimed, never gated. This row is the borrowed twin of
     // `vertex_app5`, same five fields and same descriptor width, so the pair reads as the
-    // copy-vs-view delta rather than two unrelated numbers.
+    // copy-vs-view delta rather than two unrelated numbers. Counted per object, like it.
     {
-        graph_t app_graph;
+        graph_t app_graph(tr::mem::heap_source());
         static constexpr std::array<std::byte, 16> kDescriptor{};
         static constexpr std::string_view kNames[5] = {"kp", "ki", "kd", "mode", "label"};
         // Static storage, as the borrowed contract requires: these must outlive every

@@ -819,17 +819,11 @@ struct graph_t::field_surface_t {
             if (!decided) return std::unexpected(decided.error());
             admitted = std::move(*decided);
         }
-        // Store (§D — bytes in, bytes out). UNDECLARED means a concurrent table replacement
-        // un-declared the name between gate and store; REFUSED means the value's bytes did
-        // not fit the table source (#1778).
-        switch (v->app_field_store(key, admitted.bytes())) {
-            case app_store_t::STORED:
-                break;
-            case app_store_t::UNDECLARED:
-                return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-            case app_store_t::REFUSED:
-                return std::unexpected(status_t::BACKPRESSURE);
-        }
+        // Store (§D — bytes in, bytes out). SCHEMA_NOT_FOUND means a concurrent table
+        // replacement un-declared the name between gate and store; BACKPRESSURE means the
+        // value's bytes did not fit the table source (#1778).
+        if (const result_t<void> stored = v->app_field_store(key, admitted.bytes()); !stored)
+            return std::unexpected(stored.error());
         // The owner apply seam (§A.3), OUTSIDE the vertex lock — it may re-enter the
         // graph (apply the config, restructure children, then ANNOUNCE per §C). The
         // field write itself deliberately neither wakes `await` nor propagates:

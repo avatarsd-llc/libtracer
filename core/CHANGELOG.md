@@ -147,15 +147,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     adopts a raw block from `src`, not a `std::unique_ptr`) return a refusal by value
     (`false`, `nullptr`). The `vertex_t` constructor takes an optional trailing
     `block_source_t&` (default `tr::mem::table_source()`).
-  - `vertex_t::app_field_store` returns `tr::graph::app_store_t` (`STORED`, `UNDECLARED`,
-    `REFUSED`), not `bool`.
+  - `vertex_t::app_field_store` returns `result_t<void>` (`SCHEMA_NOT_FOUND` when the field
+    is undeclared, `BACKPRESSURE` when the table source refused the bytes), not `bool`.
+  - `vertex_t::ring_admit` takes its drop report by reference (`store_drops_t&`), not a
+    nullable pointer.
   - `vertex_t::add_edge(s, latch, tables)`, `vertex_t::ring_take_t(src)`, and
     `alloc_edge_pub(src, n)` / `destroy_edge_pub(src, p)` name the source their blocks come
     from.
   - `link_index_t` is built over a source (`link_index_t(block_source_t&)`). The
     `set_entry_resource` pmr door is gone, and `index_vertex` returns `[[nodiscard]] bool`.
-  - `app_field_table_t` and `app_field_group_t` are built over a source. Their `owned_slots`,
-    `backing` and `values` members are core arrays (`mem::block_array_t`, `mem::bytes_t`).
+  - `app_field_table_t` and `app_field_group_t` are built over a source, and the table is
+    move-only. `owned_slots` and `backing` merge into one `owned` block (the slot array, then
+    the name and descriptor bytes), and `values` is a lazily drawn `mem::bytes_t` array, one
+    per slot (null until the first retained write).
   - New in `tr::mem`:
     - `block_array_t::append`, `block_array_t::resize_for_overwrite` and a ranged
       `block_array_t::erase_at(i, n)`.

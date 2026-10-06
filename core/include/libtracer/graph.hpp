@@ -2607,12 +2607,13 @@ class graph_t {
     // retains the key, so the public owning-vector overload is a convenience wrapper and the
     // graph's own callers (write-creates, path registration) pass a span rather than paying a
     // heap copy just to spell the call (#1139/#873).
-    // @p policy, when given, has its vertex-local members applied (moved from) to the node
-    // before it is filled, so a refused one leaves it a placeholder (#1778).
+    // @p policy has its vertex-local members applied to the node before it is filled, so a
+    // refused one leaves it a placeholder (#1778). The default policy touches nothing on a
+    // placeholder, which carries none.
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key_span(
         std::span<const std::byte> key, role_t role, const handlers_t& handlers,
         std::span<const payload_right_t> rights = {},
-        std::span<const std::byte> schema_catalog = {}, vertex_policy_t* policy = nullptr);
+        std::span<const std::byte> schema_catalog = {}, vertex_policy_t policy = {});
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
     // for a direct write; a delivered subscription's stored context terminates at

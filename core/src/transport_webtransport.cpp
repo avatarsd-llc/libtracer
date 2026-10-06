@@ -355,7 +355,11 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         // is tight is exactly the over-broad refusal #919 removed. So an OOM aborts just
         // this stream and returns true: the connection, and any live session on it, stay up.
         // (#981: hosted-only TU — no probe window here; see the file header.)
-        if (!c.acc.append(p, n)) refuse_stream(c);
+        //
+        // Grown EXACTLY to what this chunk needs, never by `append`'s doubling: the buffer is
+        // capped and short-lived, so slack buys nothing, and an exact reserve means every
+        // chunk that adds bytes is a growth the seam can refuse.
+        if (!c.acc.reserve(c.acc.size() + n) || !c.acc.append(p, n)) refuse_stream(c);
         return true;
     }
 
