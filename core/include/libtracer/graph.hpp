@@ -2830,8 +2830,10 @@ class graph_t {
         mem::bytes_t bytes_;                   /**< @brief Every key's bytes, back to back. */
         mem::block_array_t<std::size_t> ends_; /**< @brief Where each key ends. */
     };
-    /** @brief A byte-ordered set of vertex keys (the sweep sets; the value is unused). */
-    using key_set_t = mem::sorted_map_t<mem::bytes_t, std::uint8_t, mem::bytes_less_t>;
+    /** @brief A byte-ordered set of vertex keys (the sweep sets). The value is the key's vertex
+     *         — null only for an UNCONDITIONAL enrollment whose registration has not created
+     *         it yet — so `retire` can tell a retiree's entry from a newcomer's (#1884). */
+    using key_set_t = mem::sorted_map_t<mem::bytes_t, vertex_t*, mem::bytes_less_t>;
     // The propagate(v) sweep body: delivers v then its qualifying descendants
     // (RFC-0008 §B/§C). Loop-free by construction (each delivery terminates at its
     // target — ADR-0051), so no recursion depth to thread.
