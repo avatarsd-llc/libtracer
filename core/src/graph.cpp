@@ -294,15 +294,16 @@ inline void retire_pair(const retired_callback_t& pair) {
 // rebuild) and the subtree-precise invalidation below.
 
 /**
- * @brief True iff the node's opt byte carries no trailer bits.
+ * @brief True iff the opt byte @p o carries no trailer bits.
  *
  * A branch write (RFC-0005)
  * stores refcount subviews of the written frame, so a trailer inside the tree
  * cannot be sliced off without a copy — trailer-carrying nodes are rejected
- * (TYPE_MISMATCH), keeping stored values trailer-less at rest (ADR-0041 §4).
+ * (TYPE_MISMATCH), keeping stored values trailer-less at rest (ADR-0041 §4). The FOLD
+ * emission holds a stored value to the same rule before framing it as a §B node, so the
+ * parse and the emit read one predicate.
  */
-[[nodiscard]] bool trailer_less(const wire::arena_tlv_t& node) noexcept {
-    const opt_t& o = node.opt;
+[[nodiscard]] bool trailer_less(const opt_t& o) noexcept {
     return !o.ts && !o.cr && !o.cw && !o.tf;
 }
 
@@ -320,17 +321,37 @@ inline void retire_pair(const retired_callback_t& pair) {
 }
 
 /**
- * @brief One landing site of a branch write (RFC-0005): the vertex key, the VALUE slice that lands
- *        there (empty when the node carries no value of its own), and the slice this vertex's
- *        subscribers are notified with (the VALUE for a leaf node, the node's whole POINT subtree
- *        for an interior node — the smallest subview covering every write at-or-below the
- *        subscription point).
+ * @brief One node of a branch write's plan (RFC-0005), and the landing site it becomes: the vertex
+ *        key, the VALUE slice that lands there (empty when the node carries no value of its own),
+ *        the slice this vertex's subscribers are notified with, and what the apply half did there.
+ *
+ * `notify` is RFC-0005 §B's leaf/interior choice, made ONCE by the parse: the VALUE for a leaf
+ * node, the node's whole POINT subtree for an interior node (the smallest subview covering every
+ * write at-or-below the subscription point), and empty when no value lands at-or-below it. The
+ * root is tagged once after the parse — `vx` is the written vertex and `notify` the whole written
+ * TLV — so no later pass re-detects it by key or address.
  */
 struct branch_node_t {
-    mem::bytes_t key; /**< @brief The landing vertex's canonical key (table source, #1778). */
-    view::view_t store{};
-    view::view_t notify{};
-    bool subtree_has_value = false;
+    mem::bytes_t key;       /**< @brief The landing vertex's canonical key (table source, #1778). */
+    view::view_t store{};   /**< @brief The node's own VALUE slice; empty on a value-free node. */
+    view::view_t notify{};  /**< @brief The §B notify slice; empty when nothing lands below. */
+    vertex_t* vx = nullptr; /**< @brief The resolved landing vertex: the root, or a site with a
+                                 VALUE once admitted; null on a value-free interior node. */
+    /**
+     * @brief What this site's own store published here — null until the apply loop, and on a
+     *        site whose store soft-failed. clear_pending compares it against the vertex's
+     *        current LKV so a racing assign's mark keeps its delivery (#1185); a null on a vertex
+     *        that holds an LKV simply fails that compare, which is the safe direction (a
+     *        duplicate delivery, never a lost one).
+     */
+    value_ref_t stored;
+    /**
+     * @brief Did this site's own admission filter REFUSE its slice? Distinct from a null
+     *        `stored`, which a soft-failed store also produces: the notify half must not fan a
+     *        refused slice out, and it must keep fanning out a soft-failed one (that value did
+     *        reach the seam; only its retention failed).
+     */
+    bool refused = false;
 };
 
 /**
@@ -363,9 +384,8 @@ struct branch_node_t {
         std::uint32_t next = 0;       /**< @brief Next unvisited child (arena pre-order index). */
         mem::bytes_t key;             /**< @brief This node's canonical vertex key. */
         view::view_t store{};         /**< @brief The node's own VALUE slice, if any. */
-        bool has_value = false;       /**< @brief A VALUE child was seen. */
         bool has_point_child = false; /**< @brief A POINT sub-branch was seen. */
-        bool subtree_value = false;   /**< @brief A VALUE landed below this node. */
+        bool subtree_value = false;   /**< @brief A VALUE landed at or below this node. */
     };
 
     // Validate a POINT node's shape (structured, trailer-less, leading NAME) and
@@ -383,7 +403,7 @@ struct branch_node_t {
     const auto open = [&a, &stack, &src](
                           std::uint32_t node,
                           std::span<const std::byte> base) -> result_t<std::span<const std::byte>> {
-        if (!a[node].opt.pl || !trailer_less(a[node]))
+        if (!a[node].opt.pl || !trailer_less(a[node].opt))
             return std::unexpected(status_t::TYPE_MISMATCH);
         const std::uint32_t cn = wire::tlv_arena_t::first_child(node);
         if (cn >= a[node].end || a[cn].type != type_t::NAME)
@@ -401,26 +421,31 @@ struct branch_node_t {
         open_t& top = stack.back();
         if (top.next >= a[top.node].end) {
             // Node complete — emit its landing site (post-order) and fold its
-            // subtree-has-value into the parent.
-            const bool subtree_value = top.subtree_value || top.has_value;
-            view::view_t notify =
-                top.has_point_child ? slice_of(frame_view, a[top.node].wire) : top.store;
+            // subtree-has-value into the parent. The notify slice is the §B leaf/interior
+            // choice; a value-free leaf's empty `store` doubles as its empty notify.
+            const bool subtree_value = top.subtree_value;
+            view::view_t notify = top.has_point_child && subtree_value
+                                      ? slice_of(frame_view, a[top.node].wire)
+                                      : top.store;
             if (!out.push_back(branch_node_t{.key = std::move(top.key),
                                              .store = std::move(top.store),
                                              .notify = std::move(notify),
-                                             .subtree_has_value = subtree_value}))
+                                             .vx = nullptr,
+                                             .stored = value_ref_t{},
+                                             .refused = false}))
                 return std::unexpected(status_t::BACKPRESSURE);
             stack.pop_back();
             if (stack.empty()) return subtree_value;
-            stack.back().subtree_value = stack.back().subtree_value || subtree_value;
+            stack.back().subtree_value |= subtree_value;
             continue;
         }
         const std::uint32_t ci = top.next;
         const wire::arena_tlv_t& c = a[ci];
         top.next = a.next_sibling(ci);
         if (c.type == type_t::VALUE) {
-            if (top.has_value || !trailer_less(c)) return std::unexpected(status_t::TYPE_MISMATCH);
-            top.has_value = true;
+            if (!top.store.empty() || !trailer_less(c.opt))
+                return std::unexpected(status_t::TYPE_MISMATCH);
+            top.subtree_value = true;
             top.store = slice_of(frame_view, c.wire);
         } else if (c.type == type_t::POINT) {
             top.has_point_child = true;
@@ -2482,14 +2507,6 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     if (!arena) return std::unexpected(status_t::TYPE_MISMATCH);
     const wire::tlv_arena_t& a = *arena;
 
-    // The root POINT's leading NAME must name this vertex (the written tree is
-    // rooted AT `v`); a mismatch is an addressing error, not a shape error.
-    const std::uint32_t n0 = wire::tlv_arena_t::first_child(0);
-    if (n0 >= a.root().end || a[n0].type != type_t::NAME)
-        return std::unexpected(status_t::TYPE_MISMATCH);
-    if (!std::ranges::equal(a[n0].body, key_view_t{v->name().bytes()}.last_segment()))
-        return std::unexpected(status_t::INVALID_PATH);
-
     // The written tree is rooted AT `v`: render its full key once (ADR-0057
     // render-on-demand) — the node-key prefix of the whole decomposition plan. The key
     // render and its parse copy are NOTHROW (#477): OOM soft-fails the branch write as
@@ -2503,74 +2520,67 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     mem::block_array_t<branch_node_t> plan(src);
     const result_t<bool> parsed = parse_branch_node(a, 0, *head, root_key, plan, src);
     if (!parsed) return std::unexpected(parsed.error());
+    // The root POINT's leading NAME — which the parse has just shape-checked — must name this
+    // vertex (the written tree is rooted AT `v`); a mismatch is an addressing error, not a
+    // shape error, and it outranks the value-free no-op below.
+    if (!std::ranges::equal(a[wire::tlv_arena_t::first_child(0)].body,
+                            key_view_t{v->name().bytes()}.last_segment()))
+        return std::unexpected(status_t::INVALID_PATH);
     if (!*parsed) return {};  // a value-free branch is a no-op write
+    // Tag the root ONCE: it lands at `v` itself (already WRITE-gated by write_impl), and its
+    // subscription point is notified with the whole written TLV as-is.
+    plan.back().vx = v;
+    plan.back().notify = *head;
 
     // Admission: resolve-or-create every landing vertex (write-creates, CREATE-
     // gated) and gate WRITE on each BEFORE any store, so a denial rejects the
     // whole branch with nothing landed. (Created-but-empty intermediates may
-    // persist past a later denial — the `mkdir -p` analogy; RFC-0005 §ACL.)
-    struct site_t {
-        vertex_t* vx;
-        const branch_node_t* node;
-        // What this branch's own store published here — null until the apply loop below,
-        // and on a site whose store soft-failed. clear_pending compares it against the
-        // vertex's current LKV so a racing assign's mark keeps its delivery (#1185); a
-        // null on a vertex that holds an LKV simply fails that compare, which is the safe
-        // direction (a duplicate delivery, never a lost one).
-        value_ref_t stored;
-        // Did this site's own admission filter REFUSE its slice? Distinct from a null `stored`,
-        // which a soft-failed store also produces: the notify half below must not fan a refused
-        // slice out, and it must keep fanning out a soft-failed one exactly as it always has
-        // (that value did reach the seam; only its retention failed).
-        bool refused = false;
-    };
-    // Failable, from the table source (#477, #1778): a refusal => BACKPRESSURE.
-    mem::block_array_t<site_t> sites(src);
+    // persist past a later denial — the `mkdir -p` analogy; RFC-0005 §ACL.) A landing site
+    // is a plan node with a VALUE of its own; `sites` lists them so the passes below walk
+    // only those, and each site's outcome lives on its node. Failable, from the table source
+    // (#477, #1778): a refusal => BACKPRESSURE.
+    mem::block_array_t<branch_node_t*> sites(src);
     if (!sites.reserve(plan.size())) return std::unexpected(status_t::BACKPRESSURE);
-    for (const branch_node_t& node : plan) {
+    for (branch_node_t& node : plan) {
         if (node.store.empty()) continue;
-        vertex_t* vx = nullptr;
-        if (std::ranges::equal(mem::as_span(node.key), root_key)) {
-            vx = v;  // the root value — `v` itself, already WRITE-gated by write_impl
-        } else {
+        if (node.vx == nullptr) {  // every site but the root, tagged above
             const result_t<vertex_t*> ensured = ensure_vertex_ptr(mem::as_span(node.key), caller);
             if (!ensured) return std::unexpected(ensured.error());
-            vx = *ensured;
-            if (!acl_allows(vx, caller, acl_right_t::WRITE))
+            node.vx = *ensured;
+            if (!acl_allows(node.vx, caller, acl_right_t::WRITE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
         }
-        (void)sites.push_back(site_t{vx, &node, value_ref_t{}, false});  // reserved
+        (void)sites.push_back(&node);  // reserved
     }
 
     // Apply: land every slice. Admission was atomic; application is per-vertex and
     // best-effort (a handler-role landing site may refuse its slice without
     // un-landing the others) — the branch is NOT a transaction (RFC-0005
     // §atomicity non-promise; each leaf is its own consistent refcounted snapshot).
-    for (site_t& site : sites) {
+    for (branch_node_t* const site : sites) {
         vertex_t::store_drops_t store_drops;
-        if (result_t<value_ref_t> r =
-                store_value(site.vx, site.node->store, store_drops, caller, link)) {
-            site.stored = std::move(*r);
-        } else {
-            // A landing site's own admission filter may refuse its slice, and per the
-            // non-transaction rule above that un-lands nothing else. Record it so the notify
-            // half skips THIS site: the branch's per-site refusal is worth exactly as much as
-            // the plain path's if a subscriber can still see the slice that was refused.
-            // BACKPRESSURE keeps its old behaviour (delivered, unretained) — that is a
-            // resource event, not a verdict on the value.
-            site.refused = r.error() != status_t::BACKPRESSURE;
-        }
+        result_t<value_ref_t> r = store_value(site->vx, site->store, store_drops, caller, link);
+        // A landing site's own admission filter may refuse its slice, and per the
+        // non-transaction rule above that un-lands nothing else. Record it so the notify
+        // half skips THIS site: the branch's per-site refusal is worth exactly as much as
+        // the plain path's if a subscriber can still see the slice that was refused.
+        // BACKPRESSURE keeps its old behaviour (delivered, unretained) — that is a
+        // resource event, not a verdict on the value — so it reads as "not refused".
+        site->refused = r.error_or(status_t::BACKPRESSURE) != status_t::BACKPRESSURE;
+        site->stored = std::move(r).value_or(value_ref_t{});
         // Counted ONLY on the assign half. The notify half below delivers each covered site's
         // slice through fan_out and then mark_flushed()es the cursor, so on that path the ring
         // was never the delivery vehicle: a shed append costs a HISTORY entry, not a delivery,
         // and counting it would be the overcount that makes delivery_drops() lie the other way.
-        if (!notify) count_store_drops(site.vx, store_drops);
+        if (!notify) count_store_drops(site->vx, store_drops);
     }
 
     if (!notify) {
         // The assign half (RFC-0008 §B branch-assign): mark each landed vertex for the
-        // next covering propagate sweep; deliver nothing, bubble nothing.
-        for (const site_t& site : sites) mark_pending(site.vx);
+        // next covering propagate sweep; deliver nothing, bubble nothing. A pass of its own,
+        // after every store, rather than folded into the store loop: interleaving the two
+        // measured ~6% slower on a wide branch assign.
+        for (const branch_node_t* site : sites) mark_pending(site->vx);
         return {};
     }
 
@@ -2587,24 +2597,21 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     // REFUSAL at the site's own subscription point is what is enforced here, and it is the half
     // that matters: the vertex whose invariant the filter defends never delivers the value it
     // rejected.
+    //
+    // The refusal is the node's own flag, so a wide branch pays one test per node here, not a
+    // scan of every site per node.
     for (const branch_node_t& node : plan) {
-        const bool is_root = &node == &plan.back();
-        if (!node.subtree_has_value) continue;
-        const view::view_t& slice = is_root ? *head : node.notify;
-        if (slice.empty()) continue;
-        const bool refused = std::ranges::any_of(
-            sites, [&node](const site_t& s) { return s.node == &node && s.refused; });
-        if (refused) continue;
-        vertex_t* vx = is_root ? v : find_ptr(node.key);
-        if (vx != nullptr) fan_out_slice(vx, slice);
+        if (node.refused || node.notify.empty()) continue;
+        vertex_t* vx = node.vx != nullptr ? node.vx : find_ptr(node.key);
+        if (vx != nullptr) fan_out_slice(vx, node.notify);
     }
     if (v->listeners_above() > 0)
         deliver_unstored(v, value, &graph_t::bubble_up, v->listeners_above());
     // Eager branch delivered these landing sites — clear any pending mark (a prior assign)
     // and advance stream drain cursors so a later sweep does not re-deliver (RFC-0008 §E).
-    for (const site_t& site : sites) {
-        clear_pending(site.vx, site.stored.get());
-        if (site.vx->role() == role_t::STREAM) site.vx->mark_flushed();
+    for (const branch_node_t* site : sites) {
+        clear_pending(site->vx, site->stored.get());
+        if (site->vx->role() == role_t::STREAM) site->vx->mark_flushed();
     }
     return {};
 }
@@ -3512,73 +3519,99 @@ namespace {
 }
 
 /**
- * @brief A POINT header for a @p body_len body IMMEDIATELY FOLLOWED by the `NAME` header of
- *        the node's own @p seg_len-byte segment text — one exactly-sized OWNED segment.
+ * @brief What one folded node contributes ON ITS OWN, before its sub-branches: its POINT body
+ *        bytes and its link count.
  *
- * Two headers in one segment, deliberately. Before RFC-0018 the folds emitted a POINT header
- * and then BORROWED the node's key record, because that record already WAS a `NAME` TLV. A
- * packed key record is `[u8 len][bytes]`, so the `NAME` framing has to be written — and
- * writing it into the same segment as the POINT header keeps both folds at exactly the link
- * count they had before, which is what their link-table reservations are sized against and
- * what keeps a wide `:children` listing off the transports' iovec spill. The segment TEXT is
- * still borrowed in place.
- *
- * For `:children` the body is `NAME header + text`; for the composed read it is that plus the
- * node's stored TLV and its whole folded subtree — hence @p body_len as a parameter rather
- * than derived. Byte-identical to `read_children`'s materialized emit, which is what
- * `folded_children_test` differentials.
+ * The node's `NAME` header and segment text when it is @p named (null at a composed-read root
+ * or a `:children` listing's outer POINT, whose identity is the addressed vertex — RFC-0016
+ * §A), plus @p lkv's TLV verbatim when it carries one. The links are the owned header segment,
+ * the borrowed name text and the stored TLV's links, which is exactly what
+ * @ref append_folded_node appends — so a caller that reserves from this sum never reallocates.
  */
-[[nodiscard]] view::segment_ptr_t folded_member_header(mem::mem_backend_t& backend,
-                                                       std::size_t body_len, std::size_t seg_len) {
-    const bool ll = body_len > 0xFFFFu;  // mirror emit_tlv's auto-widen exactly
-    view::segment_ptr_t out =
-        view::segment_alloc(backend, folded_hdr_len(body_len) + kNameHeaderBytes);
-    if (!out) return out;  // the seam refused — a null segment_ptr_t IS the refusal
-    std::byte* p = out->bytes.data();
-    *p++ = static_cast<std::byte>(std::to_underlying(type_t::POINT));
-    *p++ = static_cast<std::byte>(opt_t{.pl = true, .ll = ll}.encode());
-    detail::store_le(std::span<std::byte>(p, ll ? 4u : 2u), static_cast<std::uint32_t>(body_len),
-                     ll ? 4u : 2u);
-    p += ll ? 4u : 2u;
-    *p++ = static_cast<std::byte>(std::to_underlying(type_t::NAME));
-    *p++ = std::byte{0};
-    detail::store_le(std::span<std::byte>(p, 2), static_cast<std::uint32_t>(seg_len), 2);
-    return out;
+struct folded_own_t {
+    std::size_t len = 0;   /**< @brief The node's own POINT body bytes. */
+    std::size_t links = 1; /**< @brief Its own links; the owned header segment is always one. */
+};
+
+/** @brief The @ref folded_own_t of a node named by @p named carrying @p lkv (either may be null).
+ */
+[[nodiscard]] folded_own_t folded_own(const vertex_t* named, const value_t* lkv) noexcept {
+    folded_own_t o;
+    if (named != nullptr) {
+        o.len += kNameHeaderBytes + child_segment(*named).size();
+        o.links += 1;
+    }
+    if (lkv != nullptr) {
+        o.len += lkv->total_length();
+        o.links += lkv->link_count();
+    }
+    return o;
 }
 
 /**
- * @brief One structured POINT header as a single exactly-sized OWNED segment drawn from @p
- *        backend and emitted by cursor. Null ⇒ the seam refused (the caller answers
+ * @brief Append one folded node's own links to @p out: its POINT header for a @p body_len body
+ *        — IMMEDIATELY FOLLOWED, when it is @p named, by the `NAME` header of its segment text,
+ *        in ONE exactly-sized OWNED segment — then that segment text BORROWED in place, then
+ *        @p lkv's links refcount-cloned. False ⇒ a seam refused (the caller answers
  *        `BACKPRESSURE` by value; nothing here throws).
  *
- * Byte-identical to `wire::emit_header(out, type_t::POINT, {.pl = true, .ll}, body_len)` into a
- * `std::vector<std::byte>` — the ONE home of the folded reads' header framing, so the `ll`
- * auto-widen boundary cannot drift between the composed-root fold and the ":children" fold.
- * No throwing `std::vector` transient sits on the reply path (the op_resolve_walk assemble
- * pattern).
+ * The ONE member emitter of the three folds — `:children` (@ref
+ * graph_t::read_children_folded), the composed read (@ref graph_t::read_subtree_folded) and the
+ * FOLD sweep (`propagate_folded_impl`) — so the `emit_tlv` auto-widen boundary of the header
+ * framing cannot drift between them (#831): byte-identical to `wire::emit_header(out,
+ * type_t::POINT, {.pl = true, .ll}, body_len)` plus `wire::emit_name` into a
+ * `std::vector<std::byte>`, emitted by cursor with no throwing vector transient on the reply
+ * path (the op_resolve_walk assemble pattern). The node's sub-branches are the caller's.
  *
- * @p backend is the graph's ADR-0060 `value_backend_` at both call sites (#831). These are
+ * Two headers in one segment, deliberately. Before RFC-0018 the folds emitted a POINT header
+ * and then BORROWED the node's key record, because that record already WAS a `NAME` TLV. A
+ * packed key record is `[u8 len][bytes]`, so the `NAME` framing has to be written — and writing
+ * it into the same segment as the POINT header keeps every fold at exactly the link count it
+ * had before, which is what their link-table reservations are sized against and what keeps a
+ * wide `:children` listing off the transports' iovec spill. The named vertex is pinned and
+ * insert-only and its `name_` is immutable once linked, so the borrowed text outlives the rope.
+ *
+ * @p backend is the graph's ADR-0060 `value_backend_` at every call site (#831). These are
  * PAYLOAD framing bytes — the length field wraps the stored TLV and the name records below it —
  * so they are that seam's byte class, NOT the ADR-0074 `egress` seam, which is documented and
- * sized against ROUTE bytes. Both counts are PEER-influenced (a peer picks the composed root,
- * and thus how many subtree nodes fold; or whose ":children" to list, and thus how many members
+ * sized against ROUTE bytes. Every count is PEER-influenced (a peer picks the composed root, and
+ * thus how many subtree nodes fold; or whose ":children" to list, and thus how many members
  * frame), so an ADR-0067-class node with every backend at one slab would otherwise still leak
  * this framing to `malloc`. The segments escape inside the returned reply rope and are freed on
  * whichever thread drops the last reference — exactly the cross-thread self-routed reclaim
  * ADR-0060 §2 already requires of this backend. The default is `&mem::heap_backend()`, so a
  * shipped shape allocates byte-identically.
  */
-[[nodiscard]] view::segment_ptr_t folded_point_header(mem::mem_backend_t& backend,
-                                                      std::size_t body_len) {
+[[nodiscard]] bool append_folded_node(view::rope_t& out, mem::mem_backend_t& backend,
+                                      std::size_t body_len, const vertex_t* named,
+                                      const value_t* lkv) {
     const bool ll = body_len > 0xFFFFu;  // mirror emit_tlv's auto-widen exactly
-    view::segment_ptr_t seg = view::segment_alloc(backend, folded_hdr_len(body_len));
-    if (!seg) return seg;  // the seam refused — a null segment_ptr_t IS the refusal
-    std::byte* p = seg->bytes.data();
+    const std::size_t len_bytes = ll ? 4u : 2u;
+    const std::span<const std::byte> seg =
+        named != nullptr ? child_segment(*named) : std::span<const std::byte>{};
+    view::segment_ptr_t hseg = view::segment_alloc(
+        backend, folded_hdr_len(body_len) + (named != nullptr ? kNameHeaderBytes : 0u));
+    if (!hseg) return false;  // the seam refused — a null segment_ptr_t IS the refusal
+    std::byte* p = hseg->bytes.data();
     *p++ = static_cast<std::byte>(std::to_underlying(type_t::POINT));
     *p++ = static_cast<std::byte>(opt_t{.pl = true, .ll = ll}.encode());
-    detail::store_le(std::span<std::byte>(p, ll ? 4u : 2u), static_cast<std::uint32_t>(body_len),
-                     ll ? 4u : 2u);
-    return seg;
+    detail::store_le(std::span<std::byte>(p, len_bytes), static_cast<std::uint32_t>(body_len),
+                     len_bytes);
+    p += len_bytes;
+    view::segment_ptr_t nseg;  // the borrowed segment text — named nodes only
+    if (named != nullptr) {
+        *p++ = static_cast<std::byte>(std::to_underlying(type_t::NAME));
+        *p++ = std::byte{0};
+        detail::store_le(std::span<std::byte>(p, 2), static_cast<std::uint32_t>(seg.size()), 2);
+        nseg = view::borrow_const(seg);
+        if (!nseg) return false;
+    }
+    out.append(view::view_t::over(std::move(hseg)));            // owned POINT (+ NAME) headers
+    if (nseg) out.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
+    if (lkv != nullptr) {  // the stored TLV verbatim — links cloned, refcount bump
+        for (const view::view_t& l : lkv->links()) out.append(l);
+    }
+    return true;
 }
 
 }  // namespace
@@ -3605,10 +3638,10 @@ result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     // followed by the same name bytes, in the same child order.
     //
     // Every header here — one per registered child, plus the outer one — is framed by
-    // folded_point_header from the ADR-0060 value_backend_, NOT from view::over_bytes' global
+    // append_folded_node from the ADR-0060 value_backend_, NOT from view::over_bytes' global
     // heap (#831). The count is PEER-influenced (a peer picks which vertex's ":children" to
     // READ, and thus how many members frame), and this is the site the wire ":children" field
-    // READ routes to — see folded_point_header for the full seam argument, which the
+    // READ routes to — see append_folded_node for the full seam argument, which the
     // composed-root fold below shares verbatim.
     mem::mem_backend_t& hdr_backend = *value_backend_;
     view::rope_t members;
@@ -3621,23 +3654,14 @@ result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
             // and enumeration-hidden children (the RFC-0014 §3 creator endpoint) are not
             // members on either door.
             if (oom || !c.enumerable_member()) return;
-            const std::span<const std::byte> seg = child_segment(c);
-            const std::size_t body = kNameHeaderBytes + seg.size();
-            view::segment_ptr_t mseg = folded_member_header(hdr_backend, body, seg.size());
-            view::segment_ptr_t nseg = view::borrow_const(seg);
-            if (!mseg || !nseg) {
-                oom = true;
-                return;
-            }
-            members.append(view::view_t::over(std::move(mseg)));  // owned POINT+NAME headers
-            members.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
+            const std::size_t body = folded_own(&c, nullptr).len;
+            oom = !append_folded_node(members, hdr_backend, body, &c, nullptr);
             members_len += folded_hdr_len(body) + body;
         });
     }
-    if (oom) return std::unexpected(status_t::BACKPRESSURE);
-    view::segment_ptr_t oseg = folded_point_header(hdr_backend, members_len);
-    if (!oseg) return std::unexpected(status_t::BACKPRESSURE);
-    view::rope_t out{view::view_t::over(std::move(oseg))};
+    view::rope_t out;
+    if (oom || !append_folded_node(out, hdr_backend, members_len, nullptr, nullptr))
+        return std::unexpected(status_t::BACKPRESSURE);
     // The member count is already in hand, so take the join as ONE sized growth instead of
     // the geometric push_back ladder (a wide listing is 2 links per child). Best effort:
     // on soft-fail the concat below still produces the right chain, it just pays the
@@ -3664,16 +3688,17 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
      *        wire order: a node's POINT header precedes its NAME/value/children bytes).
      */
     struct snap_node_t {
-        const vertex_t* v = nullptr; /**< @brief The pinned vertex (name bytes immutable). */
-        value_ref_t lkv;             /**< @brief Its landed LKV — loaded ONCE, atomically. */
-        std::size_t parent = 0;      /**< @brief Parent's index in the array (kNoParent at
-                                                 the root). */
-        std::size_t body_len = 0;    /**< @brief POINT body length, completed bottom-up. */
+        const vertex_t* named = nullptr; /**< @brief The pinned vertex whose NAME leads the node
+                                              (name bytes immutable); null at the root. */
+        value_ref_t lkv;                 /**< @brief Its landed LKV — loaded ONCE, atomically. */
+        std::size_t parent = 0;          /**< @brief Parent's index in the array (unused at the
+                                              root, index 0). */
+        std::size_t body_len = 0;        /**< @brief POINT body length, completed bottom-up. */
     };
-    constexpr std::size_t kNoParent = static_cast<std::size_t>(-1);
-    // The POINT header width and the header framing itself both come from the file-local
-    // folded_hdr_len / folded_point_header, shared with read_children_folded — one home, so
-    // the emit_tlv auto-widen boundary cannot drift between the two folded reads (#831).
+    // The POINT header width and the member emission itself both come from the file-local
+    // folded_hdr_len / folded_own / append_folded_node, shared with read_children_folded and
+    // the FOLD sweep — one home, so the emit_tlv auto-widen boundary cannot drift between the
+    // three folds (#831).
     mem::mem_backend_t& hdr_backend = *value_backend_;
 
     // Pass 1 — collect, under ONE shared map lock: an ITERATIVE pre-order stack machine
@@ -3691,6 +3716,11 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
     // relocates `snap_node_t`'s reference by move. The node COUNT is peer-chosen, like the
     // collect stack below it.
     mem::block_array_t<snap_node_t> nodes(*tables_);
+    // The reply's exact final link count, summed as each node is collected, so the reply rope
+    // reserves its heap chain ONCE (nothrow) and every append below is guaranteed
+    // non-reallocating. A composed-root reply is thousands of links on a fragmented heap — the
+    // un-reserved spill is exactly what aborted the node.
+    std::size_t total_links = 0;
     {
         /** @brief One unvisited subtree root: the vertex and its parent's array index. */
         struct work_t {
@@ -3712,19 +3742,21 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
         // `nodes` draws from the same store. A lambda cannot return the error, so the child
         // push latches `oom` and the loop propagates it after each visit.
         bool oom = false;
-        if (!stack.push_back(work_t{.v = root, .parent = kNoParent}))
+        if (!stack.push_back(work_t{.v = root, .parent = 0}))
             return std::unexpected(status_t::BACKPRESSURE);
         while (!stack.empty()) {
             const work_t w = stack.back();
             stack.pop_back();
             const std::size_t idx = nodes.size();
             snap_node_t n;
-            n.v = w.v;
+            // The root is tagged once, as the first node collected: its identity is the
+            // addressed vertex, so its node carries no NAME (RFC-0016 §A).
+            n.named = idx == 0 ? nullptr : w.v;
             n.lkv = w.v->read_stored();  // ONE atomic load per node
             n.parent = w.parent;
-            n.body_len =
-                (w.parent == kNoParent ? 0 : kNameHeaderBytes + child_segment(*w.v).size()) +
-                (n.lkv ? n.lkv->total_length() : 0);
+            const folded_own_t own = folded_own(n.named, n.lkv.get());
+            n.body_len = own.len;
+            total_links += own.links;
             // One refusable growth, no probe window (#850, #981 closed here by #1778).
             if (!nodes.push_back(std::move(n))) return std::unexpected(status_t::BACKPRESSURE);
             // Push the children, then reverse the just-pushed run: the LIFO pop then
@@ -3755,14 +3787,6 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
     for (std::size_t i = nodes.size(); i-- > 1;)
         nodes[nodes[i].parent].body_len += folded_hdr_len(nodes[i].body_len) + nodes[i].body_len;
 
-    // Pass 3 preamble — the exact final link count, so the reply rope reserves its heap
-    // chain ONCE (nothrow) and every append/concat below is guaranteed non-reallocating:
-    // per node an owned header segment (1) + the borrowed name text below the root (0/1) +
-    // the stored TLV's links (0..). A composed-root reply is thousands of links on a
-    // fragmented heap — the un-reserved spill is exactly what aborted the node.
-    std::size_t total_links = 0;
-    for (const snap_node_t& n : nodes)
-        total_links += 1u + (n.parent != kNoParent ? 1u : 0u) + (n.lkv ? n.lkv->link_count() : 0u);
     // #981 residual: the reservation itself is the `std::vector<view_t>` growth this
     // paragraph exists to make ONE growth — but under `-fno-exceptions` that one growth is
     // still probe-then-commit and abort()s the node if a racer takes the freed probe block
@@ -3771,39 +3795,16 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
     view::rope_t out;
     if (!out.try_reserve(total_links)) return std::unexpected(status_t::BACKPRESSURE);
 
-    // Pass 3 — emit, in array (= pre-order = wire) order. Per node: an OWNED header link
-    // (the POINT header, plus the NAME header below the root — the root's identity is the
-    // addressed vertex; its own stored TLV leads the root body), the BORROWED name text
-    // below the root, then the stored TLV's links refcount-CLONED (no byte copy). Zero flatten
-    // anywhere; a view allocation failure is the audited BACKPRESSURE pattern.
+    // Pass 3 — emit, in array (= pre-order = wire) order, through the one member emitter the
+    // three folds share (append_folded_node, which carries the seam and lifetime arguments).
+    // Per node: an OWNED header link (the POINT header, plus the NAME header below the root —
+    // the root's identity is the addressed vertex, RFC-0016 §A; its own stored TLV leads the
+    // root body), the BORROWED name text below the root, then the stored TLV's links
+    // refcount-CLONED (no byte copy). Zero flatten anywhere; a view allocation failure is the
+    // audited BACKPRESSURE pattern.
     for (const snap_node_t& n : nodes) {
-        // The POINT header as one exactly-sized OWNED segment, emitted by cursor straight
-        // into the segment's bytes (the op_resolve_walk assemble pattern) — no throwing
-        // std::vector<std::byte> transient sits on the reply path. Byte-identical to the
-        // retired wire::emit_header(type, {.pl, .ll}, body_len). The bytes come from the
-        // ADR-0060 value_backend_ rather than view::heap_alloc's global heap (#831) — the
-        // seam argument, shared with read_children_folded, is on folded_point_header.
-        if (n.parent == kNoParent) {
-            view::segment_ptr_t hseg = folded_point_header(hdr_backend, n.body_len);
-            if (!hseg) return std::unexpected(status_t::BACKPRESSURE);
-            out.append(view::view_t::over(std::move(hseg)));  // owned POINT header
-        } else {
-            // The POINT header AND the leading NAME TLV's header in ONE owned segment, then
-            // the node's segment TEXT borrowed in place over the pinned, immutable name bytes
-            // — the read_children_folded lifetime argument. Under RFC-0018 the key record is
-            // packed, so the NAME framing is emitted rather than borrowed; the per-node link
-            // count is UNCHANGED because that framing shares the segment the POINT header
-            // would otherwise have had to itself.
-            const std::span<const std::byte> seg = child_segment(*n.v);
-            view::segment_ptr_t hseg = folded_member_header(hdr_backend, n.body_len, seg.size());
-            view::segment_ptr_t nseg = view::borrow_const(seg);
-            if (!hseg || !nseg) return std::unexpected(status_t::BACKPRESSURE);
-            out.append(view::view_t::over(std::move(hseg)));  // owned POINT + NAME headers
-            out.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
-        }
-        if (n.lkv) {  // stored TLV verbatim — links cloned, refcount bump
-            for (const view::view_t& l : n.lkv->links()) out.append(l);
-        }
+        if (!append_folded_node(out, hdr_backend, n.body_len, n.named, n.lkv.get()))
+            return std::unexpected(status_t::BACKPRESSURE);
     }
     return composed_or_backpressure(std::move(out));
 }
@@ -3899,12 +3900,18 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
     // Admit one node, resolving the vertex and validating what it may contribute. `selected`
     // false admits a skeleton: the vertex is named so the tree stays connected, and no value
     // rides it. Returns the error a §B decomposer would raise on the frame this would build.
-    const auto admit = [this, v, lo, &tree](std::span<const std::byte> key,
-                                            bool selected) -> result_t<fold_node_t*> {
+    //
+    // The root is `lo`, a strict prefix of every other key, so it is index 0 for the life of the
+    // table. It is tagged once, here, as `v` itself; every other node resolves by key.
+    const auto [root, root_fresh] = tree.try_emplace(lo);
+    if (root == nullptr) return std::unexpected(status_t::BACKPRESSURE);
+    root->vx = v;
+    const auto admit = [this, &tree](std::span<const std::byte> key,
+                                     bool selected) -> result_t<fold_node_t*> {
         const auto [found, fresh] = tree.try_emplace(key);
         if (found == nullptr) return std::unexpected(status_t::BACKPRESSURE);
         fold_node_t& n = *found;
-        if (fresh) n.vx = std::ranges::equal(key, lo) ? v : find_ptr(key);
+        if (fresh) n.vx = find_ptr(key);
         if (n.vx == nullptr) return &n;  // vanished mid-sweep — propagate_impl skips it too
         if (!selected || n.selected) return &n;
         n.selected = true;
@@ -3937,57 +3944,49 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
         // moved out of the trailer into payload `TIME` (`0x0C`) children INSIDE the value,
         // where §B never looks.
         const auto& [t, o] = *head;
-        if (t != type_t::VALUE || o.ts || o.cr || o.cw || o.tf)
-            return std::unexpected(status_t::TYPE_MISMATCH);
+        if (t != type_t::VALUE || !trailer_less(o)) return std::unexpected(status_t::TYPE_MISMATCH);
         return &n;
     };
 
     if (const result_t<fold_node_t*> r = admit(lo, true); !r) return std::unexpected(r.error());
-    if (tree.begin()->value.vx == nullptr) return {};  // the root itself vanished
     for (std::size_t ki = 0; ki < keys.size(); ++ki) {
-        const std::span<const std::byte> k = keys[ki];
-        if (const result_t<fold_node_t*> r = admit(k, true); !r) return std::unexpected(r.error());
-        // Every level between this key and the root must exist as a node or the tree is not a
-        // tree. Walking parents off the key itself costs O(depth) per selected vertex; walking
-        // the whole subtree structurally (the composed read's shape) would cost the SUBTREE,
-        // which is the wrong order for a sweep whose selection is usually sparse.
-        for (key_view_t p = key_view_t{k}.parent(); p.bytes().size() > lo.size(); p = p.parent()) {
-            if (const result_t<fold_node_t*> r = admit(p.bytes(), false); !r)
+        // The selected key itself, then every level between it and the root as a skeleton:
+        // each must exist as a node or the tree is not a tree. Walking parents off the key
+        // itself costs O(depth) per selected vertex; walking the whole subtree structurally
+        // (the composed read's shape) would cost the SUBTREE, which is the wrong order for a
+        // sweep whose selection is usually sparse. A selected key is a STRICT descendant, so
+        // the walk always admits it.
+        bool selected = true;
+        for (key_view_t p{keys[ki]}; p.bytes().size() > lo.size(); p = p.parent()) {
+            if (const result_t<fold_node_t*> r = admit(p.bytes(), selected); !r)
                 return std::unexpected(r.error());
+            selected = false;
         }
     }
 
     // Frame it, deepest first. Every node — the root INCLUDED — emits `POINT{ NAME, [VALUE],
     // POINT… }`: a branch-write root carries its leading NAME echoing the target's leaf
     // segment (RFC-0005 §B), which is the one root asymmetry RFC-0016 §A names against a
-    // composed-READ root, and the asymmetry Amendment 3 clause 5 resolves in §B's favour. The
-    // header framing is `folded_member_header`'s, shared verbatim with both folded reads, so
-    // the emit_tlv auto-widen boundary cannot drift between the three (#831); its bytes come
-    // from the ADR-0060 value_backend_ for the reason stated on `folded_point_header`.
+    // composed-READ root, and the asymmetry Amendment 3 clause 5 resolves in §B's favour — so
+    // every node here is `named`, where the composed read's root is not. The member emission
+    // is `append_folded_node`'s, shared verbatim with both folded reads, so the emit_tlv
+    // auto-widen boundary cannot drift between the three (#831); its bytes come from the
+    // ADR-0060 value_backend_ for the reason stated there.
     mem::mem_backend_t& hdr_backend = *value_backend_;
     for (std::size_t ti = tree.size(); ti-- > 0;) {
         fold_node_t& n = tree.at(ti).value;
-        const std::span<const std::byte> nk = tree.at(ti).key;
         if (n.vx == nullptr) continue;
-        const std::span<const std::byte> seg = child_segment(*n.vx);
-        n.body_len =
-            kNameHeaderBytes + seg.size() + (n.lkv ? n.lkv->total_length() : 0) + n.kids_len;
-        view::segment_ptr_t hseg = folded_member_header(hdr_backend, n.body_len, seg.size());
-        view::segment_ptr_t nseg = view::borrow_const(seg);
-        if (!hseg || !nseg) return std::unexpected(status_t::BACKPRESSURE);
-        if (!n.frame.try_reserve(2 + (n.lkv ? n.lkv->link_count() : 0) + n.kids.link_count()))
+        const folded_own_t own = folded_own(n.vx, n.lkv.get());
+        n.body_len = own.len + n.kids_len;
+        if (!n.frame.try_reserve(own.links + n.kids.link_count()) ||
+            !append_folded_node(n.frame, hdr_backend, n.body_len, n.vx, n.lkv.get()))
             return std::unexpected(status_t::BACKPRESSURE);
-        n.frame.append(view::view_t::over(std::move(hseg)));  // owned POINT + NAME headers
-        n.frame.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
-        if (n.lkv) {                                          // the stored VALUE, verbatim
-            for (const view::view_t& l : n.lkv->links()) n.frame.append(l);
-        }
-        n.frame.concat(n.kids);                    // the sub-branches, in key order
-        if (std::ranges::equal(nk, lo)) continue;  // the root folds into nobody
-        fold_node_t* const parent = tree.find(key_view_t{nk}.parent().bytes());
-        if (parent == nullptr) continue;  // unreachable: admit() inserted every level
-        parent->kids.concat(n.frame);
-        parent->kids_len += folded_hdr_len(n.body_len) + n.body_len;
+        n.frame.concat(n.kids);  // the sub-branches, in key order
+        if (ti == 0) break;      // the root folds into nobody
+        // admit() inserted every level, so the parent is always there.
+        fold_node_t& parent = *tree.find(key_view_t{tree.at(ti).key}.parent().bytes());
+        parent.kids.concat(n.frame);
+        parent.kids_len += folded_hdr_len(n.body_len) + n.body_len;
     }
 
     // Deliver, and NOT one delivery per selected vertex — this is where the fold pays. Each
@@ -4001,27 +4000,28 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
     //
     // Descendant fan-outs are NOT bubbled: the root's own bubble already carries the whole
     // frame to every ancestor subscriber, exactly as the eager branch write's notify half does.
-    for (std::size_t ti = tree.size(); ti-- > 0;) {
+    for (std::size_t ti = tree.size(); ti-- > 1;) {  // index 0 is the root, delivered below
         const fold_node_t& n = tree.at(ti).value;
-        if (n.vx == nullptr || std::ranges::equal(tree.at(ti).key, lo)) continue;
+        if (n.vx == nullptr) continue;
         if (n.kids_len == 0) {
             if (n.lkv) fan_out(n.vx, *n.lkv);  // leaf landing site: its VALUE slice
         } else {  // interior node: its whole POINT subtree — a frame no vertex stored
             deliver_unstored(n.vx, n.frame, &graph_t::fan_out, n.vx->own_subs());
         }
     }
-    const fold_node_t& root = tree.begin()->value;
-    deliver_unstored(v, root.frame, &graph_t::fan_out, v->own_subs());
+    const fold_node_t& root_node = tree.begin()->value;
+    deliver_unstored(v, root_node.frame, &graph_t::fan_out, v->own_subs());
     if (v->listeners_above() > 0)
-        deliver_unstored(v, root.frame, &graph_t::bubble_up, v->listeners_above());
+        deliver_unstored(v, root_node.frame, &graph_t::bubble_up, v->listeners_above());
 
     // Retire the marks this sweep just discharged — the SAME door the eager branch write uses
     // for its landing sites, and for the same reason: it erases only while the value this call
     // delivered is still the vertex's CURRENT LKV (#1185), so an assign that raced the
     // validation above keeps its mark and its delivery instead of losing both to the peek/drain
     // window an unconditional erase here would have opened.
+    // `selected` is only ever set on a node whose vertex resolved.
     for (const auto& e : tree) {
-        if (e.value.vx != nullptr && e.value.selected) clear_pending(e.value.vx, e.value.lkv.get());
+        if (e.value.selected) clear_pending(e.value.vx, e.value.lkv.get());
     }
     return {};
 }
