@@ -1383,6 +1383,10 @@ add_executable(graph_config_race_test graph_config_race_test.cpp)
 target_link_libraries(graph_config_race_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(graph_config_race_test)
 add_test(NAME graph_config_race COMMAND graph_config_race_test)
+# A bound, not a budget: the scenario takes about 25 s under TSan on a workstation. A storm
+# whose work scales with the table again (the 200000-filler catalog on a sorted table ran past
+# the TSan job's 35-minute limit) fails here, naming the test, instead of wedging the job.
+set_tests_properties(graph_config_race PROPERTIES TIMEOUT 300)
 
 if(LIBTRACER_NET_PLANE)
     # #419 — the two-mount route: one dst crossing TWO net/<module>/<name> mounts, driven
