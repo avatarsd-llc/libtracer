@@ -50,6 +50,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   sets (`pending_`, `unconditional_`) move onto it, so a marking `assign` no longer moves the
   whole set under the sweep lock.
 
+- **`libtracer/path_pair.hpp` — the RFC-0029 PAIR element codec.** `path_pair_t` (the
+  `(index, generation)` pair), `kPathPairRecordBytes` (11), `path_pair_record_valid`,
+  `path_pair_store` / `emit_path_pair` (writer), `path_pair_load` / `path_pair_at` (reader).
+  Constexpr and allocation-free; the emitter appends to a caller's vector.
 - **`wire::emit_path_ref_head`: the head of a bound list that grows by one element at its
   front ([#1798](https://github.com/avatarsd-llc/libtracer/issues/1798)).** It writes the 4-byte
   `PATH_REF` / `PATH_REF_REVERSE` header and the leading element into exactly 12 bytes, with the
@@ -194,6 +198,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - `:children`, `:schema`, `:settings`, `:settings.app`, `:stats` reads, `set_identity` and the
     local target `subscribe` stage their TLVs on the table source or a stack frame over it, and
     answer `BACKPRESSURE` when it refuses.
+
+- **The bound spelling of a `dst` is a `PATH` of PAIR elements; a `PATH_REF` (`0x14`) is no
+  longer an address ([RFC-0029](../docs/spec/rfcs/0029-one-path-primitive.md) slice S1).**
+  An owner-issued `(u32 index, u32 generation)` pair now rides INSIDE a canonical `PATH` as the
+  escape record `00 16 08 <idx LE><gen LE>` (11 bytes), and every node runs RFC-0029 §6 on a
+  PAIR head: dereference it (bounds, generation, registered), then a connection vertex with a
+  tail is a HOP (the head is consumed, the tail forwarded, `src` grown canonically), a last
+  element is the TERMINUS (the same `apply_op` the NAME spelling reaches; a connection vertex
+  named last reads its own facets), and any other vertex with a tail is refused. Observable:
+  - A `dst` spelled as a `PATH_REF` is refused `tr::path::invalid` at the router and at the
+    terminus, and never applied. The RFC-0024 vectors `fwd/fwd-bound-forward`,
+    `fwd/fwd-bound-forwarded` and `acl/bound-vs-canonical-{allow,deny}` remain codec vectors
+    only (retired by S2).
+  - A refused PAIR is **answered** `tr::path::not_found` (stale or saturated generation, index
+    out of range, retired vertex, a hop with no egress or denied by its `:acl`); RFC-0024's
+    bound hop dropped these silently. A tail below an ordinary vertex answers
+    `tr::path::invalid`, below a bus mount `tr::path::not_found`.
+  - `fwd_router_t::bound_dispatch` returns its `dst` spelled as PAIRs (`4 + 11 × (H − 1)`
+    bytes), and the reverse-list delivery leg and `vertex_t::evict_route_edges` store and match
+    the PAIR spelling.
+  - A PAIR is authorized where the NAME spelling of the same hop is: a hop at the connection
+    vertex it names, and a last element naming a bus session's anchor at that session's
+    mount connection vertex as well as at the anchor (`fwd_router_t::name_hop_allows`, the
+    gate the NAME hop runs). On a graph that enforces an ACL, a mount with no connection
+    vertex refuses such a PAIR, as it refuses the NAME spelling.
+  - `path_element_kind_t` gains `PAIR` (kind `0x16` at length 8; length 4 stays the RFC-0027
+    `LABEL`, any other length is `MALFORMED`), and `path_element_census_t` gains `pairs`.
 
 - **One FWD header parse per hop: `rebuild_fwd_forward` takes the peek's `fwd_pre_t`
   ([#1794](https://github.com/avatarsd-llc/libtracer/issues/1794)).** `fwd_frame_view.hpp`:

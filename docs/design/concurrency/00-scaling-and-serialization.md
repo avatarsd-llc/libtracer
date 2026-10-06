@@ -64,7 +64,7 @@ hold and recurses under it. A doc comment states the same contract for the
 
 **The RFC-0024 bound-path slot API is on this list, and it is not control plane.** Minting an
 element takes the lock (`op_resolve_walk.hpp:returns the index and the generation TOGETHER` → `vertex_slot`) and honouring one takes it
-again (`op_resolve_walk.hpp:graph.deref_vertex_slot(elem->index` and `fwd_router.cpp:fwd_router_t::bound_egress` → `deref_vertex_slot`), so a bound-path hop pays
+again (`op_resolve_walk.hpp:graph.deref_vertex_slot(dst_label_target->index` and `fwd_router.cpp:fwd_router_t::bound_egress` → `deref_vertex_slot`), so a bound-path hop pays
 `map_mutex_` on both ends of the round trip that bound paths exist to make cheap. The two are not
 the same cost: `vertex_slot` **scans `vertex_slots_` linearly** inside the hold, while
 `deref_vertex_slot` and `vertex_slot_at` are a bounds check and one compare — the asymmetry

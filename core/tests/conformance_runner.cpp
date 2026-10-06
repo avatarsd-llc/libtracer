@@ -35,6 +35,7 @@
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/path_label.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -196,9 +197,9 @@ bool malformed_input_declared(const fs::path& case_dir) {
  *
  * Frame-path context (RFC-0018 §5.4 Amendment 1), the permissive one: escape records are
  * admissible and a foreign `kind` is stepped over by its declared length. What is NOT
- * admissible anywhere is a body that does not tile into records, and a `kind = 0x16` label
- * element outside RFC-0027 §5.3.2's two structural clauses or carrying the reserved
- * generation `0` (§4.1).
+ * admissible anywhere is a body that does not tile into records, and a `kind = 0x16` element
+ * that is neither an RFC-0029 PAIR (`len = 8`) nor a label inside RFC-0027 §5.3.2's two
+ * structural clauses with a non-reserved generation (§4.1).
  */
 std::optional<std::string> packed_path_illegal(std::span<const std::byte> body) {
     std::size_t at = 0;
@@ -206,8 +207,10 @@ std::optional<std::string> packed_path_illegal(std::span<const std::byte> body) 
         const std::size_t span = tr::wire::packed_record_span(body, at);
         if (span == 0) return "PATH body does not tile into packed records (RFC-0018)";
         const auto kind = tr::wire::packed_escape_kind(body, at);
-        if (kind == tr::wire::kPackedEscapeKindLabel && !tr::wire::path_label_at(body, at))
-            return "PATH carries a malformed label element (RFC-0027 §5.3.2 / §4.1)";
+        if (kind == tr::wire::kPackedEscapeKindLabel && !tr::wire::path_label_at(body, at) &&
+            !tr::wire::path_pair_at(body, at))
+            return "PATH carries a malformed `0x16` element: neither a label (RFC-0027 §5.3.2 / "
+                   "§4.1) nor a PAIR (RFC-0029 §5.1)";
         at += span;
     }
     return std::nullopt;

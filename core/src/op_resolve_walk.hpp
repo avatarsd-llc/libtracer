@@ -40,6 +40,7 @@
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/path_label.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/pin_instrument.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -249,9 +250,7 @@ struct parsed_fwd_t {
      * there on it means "a mint this terminus will answer" (RFC-0027 §11.2's second clause).
      */
     bool mint_request = false;
-    /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
-    bool dst_bound = false;
-    N dst{};                     /**< forward route (a PATH or PATH_REF node) */
+    N dst{};                     /**< forward route (a PATH node — NAMEs and PAIRs, RFC-0029) */
     std::optional<N> selector{}; /**< optional :field (a FIELD node) */
     N src{};                     /**< accumulated return route (a PATH node) */
     std::optional<N> payload{};  /**< WRITE only (the value node) */
@@ -316,17 +315,11 @@ template <class N>
     p.mint_request = (op_byte & kFwdOpFlagMintRequest) != 0;
 
     std::optional<N> dst = ch.next();
-    // Two address forms, and the second changes nothing about the first (RFC-0024 §1): a
-    // canonical PATH of packed segment records (RFC-0018), or a PATH_REF whose body shape the
-    // grammar has already settled (path_ref.hpp — PL=0, LL=0, a whole number of 8-byte
-    // elements, at or under the count bound). What an element MEANS is settled at the deref, in
-    // resolve_node.
-    if (!dst) return std::unexpected(status_t::INVALID_PATH);
-    if (dst->type() == type_t::PATH_REF) {
-        p.dst_bound = true;
-    } else if (dst->type() != type_t::PATH) {
-        return std::unexpected(status_t::INVALID_PATH);
-    }
+    // ONE address form (RFC-0029 §4.2): a `PATH` whose packed body mixes NAME and PAIR
+    // elements. The bare `PATH_REF` (`0x14`) array is retired as an address (§5.3) and refused
+    // here like any other non-`PATH` `dst` — the router refuses it first, addressed, so this is
+    // the terminus tier's own guard for a caller that is not the router.
+    if (!dst || dst->type() != type_t::PATH) return std::unexpected(status_t::INVALID_PATH);
     p.dst = *dst;
 
     std::optional<N> next = ch.next();
@@ -673,8 +666,8 @@ template <class N, class ReplyError>
     // element naming the vertex's SUCCESSOR — the origin believing it bound the vertex its
     // operation actually reached.
     //
-    // A labelled `dst` arrives here with `mint_request` already cleared: `resolve_node` decided
-    // that once, at the edge (RFC-0027 §11.2's second clause).
+    // An element-spelled `dst` (a PAIR or a label) arrives here with `mint_request` already
+    // cleared: `resolve_node` decided that once, at the edge (RFC-0027 §11.2's second clause).
     //
     // The ask also switches the label mint off, here and without a branch of its own: §11.2's
     // mutual exclusion. A mint-flagged request is asking for one compression of this address,
@@ -710,9 +703,9 @@ template <class N, class ReplyError>
     std::array<std::byte, kPathHeadBytes + wire::kPathLabelRecordBytes> label_buf{};
     const auto labelled_route = [&]() -> reply_route_t {
         // A null @p path_label_fn is the whole off switch, and every reason for it was settled
-        // before this lambda can run: no injected table, a `dst` already compressed (a
-        // `PATH_REF`, or a label `resolve_node` dereferenced), or a mint-flagged request (the
-        // mint block above). There is no runtime flag here that could be forgotten.
+        // before this lambda can run: no injected table, a `dst` already compressed (an
+        // element — a PAIR or a label — that `resolve_node` dereferenced), or a mint-flagged
+        // request (the mint block above). There is no runtime flag here that could be forgotten.
         if (path_label_fn == nullptr) return route;
         // What the label ALIASES: this node's own reference to the vertex the residual
         // resolved to, read as ONE pair under one lock hold (`vertex_slot`'s whole contract —
@@ -838,29 +831,41 @@ template <class N, class ReplyError>
                 // The grammar settled the body's shape on both tiers (a whole number of
                 // elements, at or under the count bound), and a refused flatten reads as an
                 // empty body, so the count alone decides: at least one hop element, and room
-                // for this node's own in front of them.
-                if (n >= 1 && n + 1 <= wire::kMaxPathRefElements) {
+                // for this node's own in front of them — `1 <= n <= max - 1`, as one unsigned
+                // compare (`n == 0` wraps above the bound).
+                if (n - 1 < wire::kMaxPathRefElements - 1) {
                     const std::optional<wire::path_ref_element_t> own =
                         reverse_ref_fn(reverse_ref_ctx, inbound_link);
                     if (own) {
                         // One owned segment for the subscription's life (the ADR-0041
-                        // §2 shape `return_route` uses one field over): a fresh 4-byte
-                        // header, this node's element, then the hops' elements verbatim.
+                        // §2 shape `return_route` uses one field over): a 4-byte `PATH`
+                        // header, then this node's element and the hops' elements, each
+                        // spelled as an RFC-0029 PAIR.
                         //
-                        // Headed `PATH_REF` (`0x14`), not `PATH_REF_REVERSE`: the stored
-                        // form is an ADDRESS at rest — every delivery consumes element 0
-                        // locally and puts elements 1.. on the wire as the delivery's
-                        // bound `dst`, which is a `PATH_REF` by definition. `0x15` names
-                        // the accumulating list on a request in flight, and this blob
-                        // never travels in that role.
-                        view::segment_ptr_t seg = view::segment_alloc(
-                            flat, 4u + wire::kPathRefElementBytes + rbody.size());
+                        // Re-spelled ONCE here, at subscribe, so no delivery pays for it:
+                        // every delivery consumes element 0 locally and puts elements 1..
+                        // on the wire VERBATIM as its `dst`, and a `dst` is a `PATH` of
+                        // path elements (RFC-0029 §4.2 — the bare `PATH_REF` array is no
+                        // longer an address, §5.3). The request-leg `0x15` list keeps its
+                        // array spelling until RFC-0029 S5 re-spells it on the wire.
+                        constexpr std::size_t kHead = 4;  // type, opt, u16 LE length
+                        const std::size_t body_len = (n + 1) * wire::kPathPairRecordBytes;
+                        view::segment_ptr_t seg = view::segment_alloc(flat, kHead + body_len);
                         if (seg) {
                             const std::span<std::byte> out = seg->bytes;
-                            wire::emit_path_ref_head(out.first<wire::path_ref_wire_bytes(1)>(),
-                                                     wire::type_t::PATH_REF, *own, rbody.size());
-                            std::memcpy(out.data() + wire::path_ref_wire_bytes(1), rbody.data(),
-                                        rbody.size());
+                            out[0] = static_cast<std::byte>(std::to_underlying(type_t::PATH));
+                            out[1] = std::byte{0};
+                            out[2] = static_cast<std::byte>(body_len & 0xFFu);
+                            out[3] = static_cast<std::byte>((body_len >> 8) & 0xFFu);
+                            std::size_t at = kHead;
+                            const auto put = [&](const wire::path_ref_element_t& e) {
+                                wire::path_pair_store(
+                                    out.subspan(at).first<wire::kPathPairRecordBytes>(), e);
+                                at += wire::kPathPairRecordBytes;
+                            };
+                            put(*own);
+                            for (std::size_t i = 0; i < n; ++i)
+                                put(wire::path_ref_element_at(rbody, i));
                             reverse_route = view::view_t::over(std::move(seg));
                         }
                     }
@@ -1126,57 +1131,36 @@ template <class N>
     if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);
     if (!field) return reply_error(field.error());
 
-    // The two COMPRESSED spellings of `dst`, merged into one element and one dereference: a
-    // labelled `dst` (RFC-0027 §7.2) arrives with the element its label aliases already
-    // resolved by the caller (@p dst_label_target), and a bound `dst` (RFC-0024 §5) carries
-    // it as its only body element. Neither is a key and neither is looked up — the element is
-    // DEREFERENCED, and then the op's own per-operation ACL runs at the dereferenced vertex
-    // inside `graph_t::read` / `write` / `await`, exactly as the string form's does (§8.2,
-    // RFC-0024 §5.1). One implementation of that sentence cannot drift from itself.
+    // The ELEMENT-spelled terminus: an RFC-0029 PAIR (or, until S3, an RFC-0027 label) that
+    // the router already dereferenced as the `dst`'s last element and hands in as
+    // @p dst_label_target. An element is not a key and is not looked up — it is DEREFERENCED,
+    // and the op's own per-operation ACL then runs at the dereferenced vertex inside
+    // `graph_t::read` / `write` / `await`, on the identical `apply_op` the NAME spelling
+    // reaches (RFC-0029 §6.4: the gate at the vertex is one implementation, not two). What is
+    // NOT here is the router's half — a table lookup, a link, a hop: this walk is instantiated
+    // for a graph with no transports at all, so `fwd_router_t::route_pair_forward` decides HOP
+    // or TERMINUS and this arm applies.
     //
-    // The label goes first because a labelled `dst` is a canonical `PATH` by type (`dst_bound`
-    // is false for it) whose body `path_lookup_key` would refuse as an escape record in key
-    // context. The two compressions are mutually exclusive on the wire (§11.2), so the order
-    // only states which one wins if a caller ever supplies both.
+    // Placed AHEAD of `path_lookup_key`, because an element-headed `dst` is a `PATH` whose body
+    // would be refused as a lookup key — an escape record in key context, which RFC-0018
+    // rejects and RFC-0029 §5.1 keeps ("a chain is a frame path and never a key").
     //
-    // Exactly one element reaches a terminus: each hop consumes element 0 and forwards the
-    // remainder (§4.1). A longer residual is a hop, and a hop needs a LINK, which this tier
-    // does not have and must not grow (it is instantiated for a graph with no transports at
-    // all); `fwd_router_t::route_bound_forward` consumes it before the frame gets here. A long
-    // residual arriving HERE came from a caller that is not the router — a direct resolve, a
-    // test, an embedder's own sink — and this node drops it rather than guess which element is
-    // its own. An empty residual is a route with no hops, which the codec admits and the router
-    // refuses (§9.4 `ref-empty`).
+    // **Failure is a DROP, never a mis-route.** The router answered its own refusals already
+    // (`NOT_FOUND`, addressed); a vertex that retired between that deref and this one is
+    // refused by value — no re-resolution, no nearest match, no fall-through to the canonical
+    // walk, because the element REPLACED the name. No creation either: a creation hook decides
+    // a missing child by NAME (RFC-0030 §7.2), and an element is not one.
     //
-    // Every failure of the compressed arm is a by-value DROP, never a mis-route (§5.3, §7.2):
-    // no re-resolution, no nearest match, no fall-through to the canonical walk. The origin
-    // still holds the canonical path, and re-resolving it is the origin's recovery, not this
-    // node's. (§5.3's NACK carrying the failing hop index is still deferred: §9.2's spelling
-    // question is open, and a drop is already conformant.) No creation either: a creation
-    // hook decides a missing child by NAME (RFC-0030 §7.2), and an element is not one.
-    //
-    // The compressions the REPLY may carry are decided here, once. A compressed `dst` is never
-    // handed a label mint: §11.2 for the bound form, and for the labelled form §6.1's own
-    // arithmetic at its fixed point — the reply's `src` IS the request's `dst`, so that region
-    // is already the label, and re-minting would spend a second slot on bytes the echo already
-    // carries. A labelled `dst` is not handed a `PATH_REF` mint either, which is §11.2's
-    // second clause: *"a host SHOULD NOT bind a `PATH_REF` over a path whose elements are
-    // already labelled"*. Its label is live by construction (it just resolved), and its
-    // recovery from a stale one is the canonical path it still holds.
+    // The compressions the REPLY may carry are decided here, once. An element-spelled `dst`
+    // is handed neither a label mint (§6.1's own arithmetic at its fixed point — the reply's
+    // `src` IS the request's `dst`, so that region is already compressed, and re-minting would
+    // spend a second slot on bytes the echo already carries) nor a `PATH_REF` mint (RFC-0027
+    // §11.2's second clause). Its element is live by construction (it just resolved), and its
+    // recovery from a stale one is the canonical path the origin still holds.
     std::optional<vertex_handle_t> v;
-    wire::path_ref_element_t bound_elem{};
-    const wire::path_ref_element_t* elem = dst_label_target;
-    if (elem != nullptr) {
+    if (dst_label_target != nullptr) {
         req.mint_request = false;
-    } else if (req.dst_bound) {
-        const std::span<const std::byte> elems = req.dst.body();
-        if (wire::path_ref_element_count(elems.size()) != 1)
-            return std::unexpected(status_t::INVALID_PATH);
-        bound_elem = wire::path_ref_element_at(elems, 0);
-        elem = &bound_elem;
-    }
-    if (elem != nullptr) {
-        v = graph.deref_vertex_slot(elem->index, elem->generation);
+        v = graph.deref_vertex_slot(dst_label_target->index, dst_label_target->generation);
         if (!v) return std::unexpected(status_t::NOT_FOUND);  // stale: retired since the mint
         path_label_fn = nullptr;
     } else {

@@ -39,7 +39,7 @@
     },
     "tr::graph::parse_fwd": {
       "ccn": [
-        21
+        20
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },
@@ -51,7 +51,7 @@
     },
     "tr::graph::resolve_node": {
       "ccn": [
-        21
+        18
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },
@@ -94,12 +94,6 @@
     "tr::net::fwd_router_t::route_fwd_forward": {
       "ccn": [
         18
-      ],
-      "file": "core/src/fwd_router.cpp"
-    },
-    "tr::net::fwd_router_t::route_label_forward": {
-      "ccn": [
-        16
       ],
       "file": "core/src/fwd_router.cpp"
     },

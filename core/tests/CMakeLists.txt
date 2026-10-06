@@ -233,6 +233,15 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(path_label_terminus_test)
     add_test(NAME path_label_terminus COMMAND path_label_terminus_test)
 
+    # RFC-0029 slice S1 — the PAIR element and the per-hop arm that consumes it, bound against
+    # the production `fwd_router_t` + `op_resolver_t` wiring (the harness routes nothing).
+    add_executable(path_pair_test path_pair_test.cpp)
+    target_link_libraries(path_pair_test PRIVATE libtracer)
+    target_compile_definitions(path_pair_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    libtracer_test_warnings(path_pair_test)
+    add_test(NAME path_pair COMMAND path_pair_test)
+
     # RFC-0027 origin car — the ORIGIN: adopt the minted `src`, spend it as `dst`, fall back on
     # `NOT_FOUND`. The two above pin the hop's EMISSION; this one closes the round trip, and it
     # is where `fwd/fwd-label-stale`'s "the bytes an origin sends" stops being hand-built.

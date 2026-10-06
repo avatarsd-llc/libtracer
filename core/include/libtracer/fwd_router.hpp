@@ -53,6 +53,7 @@
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/path_element.hpp"
 #include "libtracer/path_label_table.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/sink_slot.hpp"
@@ -734,8 +735,8 @@ class fwd_router_t {
     /** @brief What the origin sends a bound operation as: the link, and the `dst` on the wire. */
     struct bound_dispatch_t {
         transport_t* link = nullptr; /**< @brief The egress link element 0 named. */
-        /** @brief The `PATH_REF` TLV carrying the RESIDUAL, drawn from the label plane's
-         *         source (#1779). */
+        /** @brief The `PATH` TLV carrying the RESIDUAL as PAIR elements (RFC-0029 §4.2),
+         *         drawn from the label plane's source (#1779). */
         mem::block_array_t<std::byte> dst;
     };
 
@@ -744,9 +745,10 @@ class fwd_router_t {
      *
      * The origin consumes element 0 exactly as every forwarder consumes its own: it is this
      * node's reference to its first-hop connection vertex, so it selects the link and does
-     * NOT go on the wire. What goes out is the residual, `4 + 8×(H−1)` bytes, and the host
-     * that receives it consumes ITS element in turn — the monotone shrink that makes a bound
-     * path loop-free for the same reason a canonical `dst` is.
+     * NOT go on the wire. What goes out is the residual, a `PATH` of `H−1` PAIR elements
+     * (`4 + 11×(H−1)` bytes, RFC-0029 §5.2 — the retired `PATH_REF` array is no longer an
+     * address), and the host that receives it consumes ITS element in turn — the monotone
+     * shrink that makes a bound path loop-free for the same reason a canonical `dst` is.
      *
      * @param right The right the operation carries, evaluated at the dereferenced connection
      *              vertex like any other hop's (§6.2).
@@ -1782,11 +1784,12 @@ class fwd_router_t {
      * (non-null on the owning-delivery path) is threaded into the resolver for
      * the ADR-0042 §3 referenced WRITE store.
      *
-     * @p dst_label_target is RFC-0027 §7.2's terminus deref: the vertex reference a LABELLED
-     * `dst` resolved to through this node's own label table, handed to the resolver because
-     * the label REPLACED the name it stands for and there is nothing left to look up.
-     * Non-null only on the `TERMINUS` arm of `route_label_forward` (see `label_dst_t`); nullptr for
-     * every other frame this node terminates, which is every frame today.
+     * @p dst_label_target is the terminus deref of an escape-headed `dst`: the vertex
+     * reference its last element named — an RFC-0029 PAIR carried verbatim, or an RFC-0027
+     * label resolved through this node's own table — handed to the resolver because the
+     * element REPLACED the name it stands for and there is nothing left to look up. Non-null
+     * only on the `TERMINUS` arm of `route_pair_forward` / `route_label_forward` (see
+     * `head_dst_t`); nullptr for every NAME-spelled frame this node terminates.
      */
     void resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
                           const view::view_t* frame_view,
@@ -1834,7 +1837,7 @@ class fwd_router_t {
      * type gate, the `dst` peek, the mount descent, and the five dispositions that come out
      * of it — forward / rejected / bound-forward / terminus / reply. Templated over the
      * grammar `Cursor` (ADR-0053 ④b) exactly as `route_fwd_forward` and
-     * `route_bound_forward` below already are, so the contiguous and the scatter-gather tier
+     * `route_pair_forward` below already are, so the contiguous and the scatter-gather tier
      * run the SAME classification instead of two hand-written copies of it. The copies had
      * already drifted: a FWD-classified frame whose op VALUE is empty resolved at the
      * terminus contiguously and was dropped as a non-control frame when the identical bytes
@@ -1892,24 +1895,64 @@ class fwd_router_t {
                            bool from_peer, const Cursor& cur, transport_t& child,
                            const fwd_pre_t& pre, std::span<const std::byte> reply_label = {});
     /**
-     * @brief What the RFC-0027 §7.2 label branch decided about one inbound `dst`.
+     * @brief What an escape-headed `dst`'s head arm — RFC-0029's PAIR (`route_pair_forward`)
+     *        or RFC-0027's label (`route_label_forward`) — decided about one inbound frame.
      *
-     * Three answers and not two, because a label resolves to a `path_ref_element_t` and this
-     * node may be either of the things such an element can name: one of its own EGRESS
-     * connection vertices (a hop — car 4) or an ORDINARY vertex (a terminus — this car). The
-     * two are told apart by the element alone, never by the op or the frame, which is what
-     * keeps the labelled spelling agreeing with the string one: a name that descends to a
-     * mount is a hop and a name that resolves to a vertex is a terminus, and the label stands
-     * for exactly that already-made resolution.
+     * Three answers and not two, because the head element resolves to a `path_ref_element_t`
+     * and this node may be either of the things such an element can name: one of its own
+     * EGRESS connection vertices (a hop) or an ORDINARY vertex (a terminus). The two are told
+     * apart by the element alone, never by the op or the frame, which is what keeps the
+     * element spelling agreeing with the string one: a name that descends to a mount is a hop
+     * and a name that resolves to a vertex is a terminus, and the element stands for exactly
+     * that already-made resolution.
      */
-    enum class label_dst_t : std::uint8_t {
-        /** @brief Not a label at all — run the canonical mount descent, unchanged. */
-        NOT_LABELLED,
-        /** @brief Fully handled here: forwarded over the link the label named, or refused. */
+    enum class head_dst_t : std::uint8_t {
+        /** @brief Not this arm's element — try the next arm, then the canonical path. */
+        PASS,
+        /** @brief Fully handled here: forwarded over the link the element named, or refused. */
         HANDLED,
         /** @brief A local vertex: resolve HERE, against the element the out-param carries. */
         TERMINUS,
     };
+    /**
+     * @brief The PAIR hop (RFC-0029 §6) — route @p cur by the owner-issued `(index,
+     *        generation)` standing as the HEAD element of its `PATH` `dst`.
+     *
+     * The whole per-hop algorithm for a PAIR head, and the reason it needs no table: the pair
+     * IS this node's own index entry. `deref_vertex_slot` (bounds, generation, registered) is
+     * the entire validation, and what the vertex IS decides the rest:
+     *
+     * - a point-to-point child's **connection vertex with a tail** — a hop: §6.4's gate and the
+     *   egress through @ref bound_egress, the element consumed, `src` grown canonically;
+     * - the **last** element — the terminus (`head_dst_t::TERMINUS`), including a
+     *   connection vertex named last, which addresses its own `:`-facets; a WRITE whose last
+     *   element names an accepted session's anchor is the reverse-list delivery's last hop;
+     * - a **tail below any other vertex** — `INVALID_PATH`, or `NOT_FOUND` for a bus mount
+     *   (§10).
+     *
+     * Every refusal of a well-formed pair answers `NOT_FOUND` from the request's own `src`
+     * (§6.3) and nothing is repaired: no re-resolution, no fall-through to the canonical walk,
+     * because the pair replaced the name bytes. Zero heap, nothing held across frames.
+     *
+     * @param out_target Written only on `head_dst_t::TERMINUS`: the pair, for the resolver.
+     */
+    template <class Cursor, class Reject>
+    [[nodiscard]] head_dst_t route_pair_forward(std::string_view inbound_name,
+                                                const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                                const Cursor& cur, const fwd_pre_t& pre,
+                                                Reject&& reject, wire::path_pair_t& out_target);
+    /**
+     * @brief The right a `FWD` op byte carries at a hop's gate — READ for READ/AWAIT, WRITE
+     *        for WRITE, `nullopt` for a REPLY or an opcode this build cannot name (masked,
+     *        RFC-0024 §9.3).
+     */
+    [[nodiscard]] static std::optional<graph::acl_right_t> fwd_op_right(
+        std::uint8_t op_byte) noexcept;
+    /**
+     * @brief True iff @p v is the connection vertex of a live BUS (shared) mount — the COLD
+     *        test that picks RFC-0029 §10's `NOT_FOUND` for a PAIR that tries to hop through one.
+     */
+    [[nodiscard]] bool is_bus_mount_vertex(graph::vertex_handle_t v) const;
     /**
      * @brief The LABELLED forward hop (RFC-0027 §7.2) — try to route @p cur by a path label
      *        standing in the first element of its canonical `dst`.
@@ -1948,16 +1991,16 @@ class fwd_router_t {
      * `await` at that vertex — the string spelling's own gate, reused rather than restated,
      * exactly as the hop arm reuses `bound_egress`.
      *
-     * @param terminus_target Written only when `label_dst_t`'s `TERMINUS` is returned: this
+     * @param terminus_target Written only when `head_dst_t`'s `TERMINUS` is returned: this
      *                        node's reference to the vertex the label aliased, for
      *                        `resolve_terminus`. Untouched on every other answer.
      */
     template <class Cursor, class Reject>
-    [[nodiscard]] label_dst_t route_label_forward(std::string_view inbound_name,
-                                                  const child_rx_ctx_t* inbound_ctx, bool from_peer,
-                                                  const Cursor& cur, const fwd_pre_t& pre,
-                                                  Reject&& reject,
-                                                  wire::path_ref_element_t& terminus_target);
+    [[nodiscard]] head_dst_t route_label_forward(std::string_view inbound_name,
+                                                 const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                                 const Cursor& cur, const fwd_pre_t& pre,
+                                                 Reject&& reject,
+                                                 wire::path_ref_element_t& terminus_target);
     /**
      * @brief May @p caller carry this frame's op through the connection vertex of the
      *        point-to-point child @p entry the NAME descent matched?
@@ -2045,56 +2088,6 @@ class fwd_router_t {
     void release_child_label(child_rx_ctx_t& ctx) noexcept;
     /** @brief The next per-child `label_peer` identity — control plane only, under `ctl_m_`. */
     [[nodiscard]] std::uint64_t next_label_peer_bits() noexcept;
-    /**
-     * @brief The BOUND forward hop (RFC-0024 §3.4/§5) — try to route @p cur by its `PATH_REF`.
-     *
-     * The whole of a bound hop: read element 0, bounds-check the index, compare the
-     * generation, evaluate the ACL at the dereferenced vertex, and egress the residual over
-     * the link that vertex names. No digest fold, no segment compare, no variable-length
-     * walk — the `resolve_mount_*` family is not entered at all, which is the structural
-     * claim §3.4 makes and §8.4 makes measuring a condition of acceptance.
-     *
-     * @retval true  The frame was consumed — forwarded, or DROPPED because validation failed
-     *               (§5.3: a host that cannot validate element 0 MUST NOT forward, MUST NOT
-     *               apply and MUST NOT repair; either way the caller must not fall through
-     *               to its terminus arm, or a bound frame this node could not route would be
-     *               applied LOCALLY, which is the mis-route the whole design exists to
-     *               refuse).
-     * @retval false This frame is not a bound FORWARD — the residual is one element and this
-     *               node is its terminus, or the op is one no bound hop carries. The caller
-     *               continues exactly as it did before bound paths existed.
-     *
-     * @param pre           The offsets @ref peek_fwd_dst_any already filled for this frame,
-     *                      for a `PATH_REF` `dst`. Passed in rather than re-peeked: the caller has
-     *                      to classify the `dst` anyway, and reading the same three headers a
-     *                      second time is what made a bound terminus measurably slower than
-     *                      the canonical one it is supposed to beat.
-     * @param element_count The `PATH_REF` element count that peek reported.
-     * @param reject        The caller's addressed-refusal arm (the RFC-0020-shaped echo) —
-     *                      §5.3's NACK for a one-element delivery whose validation failed,
-     *                      which is what the producer's step-5 reclaim correlates.
-     */
-    template <class Cursor, class Reject>
-    [[nodiscard]] bool route_bound_forward(std::string_view inbound_name,
-                                           const child_rx_ctx_t* inbound_ctx, bool from_peer,
-                                           const Cursor& cur, const fwd_pre_t& pre,
-                                           std::size_t element_count, Reject&& reject);
-    /**
-     * @brief The reverse-list delivery's LAST hop (RFC-0024 §7.1 amendment 1, #1223 step 4):
-     *        a one-element bound WRITE whose element dereferences to a SESSION ANCHOR is
-     *        egressed to that session as the canonical delivery frame.
-     *
-     * The disclosure fix lives in this function's deref: a dead session's element carries
-     * the retired generation, the recycled slot's revived anchor reads one higher, and the
-     * frame refuses (§5.1) with §5.3's NACK — the addressed echo the producer's step-5
-     * reclaim retires the stale edge on. A one-element WRITE whose element names an
-     * ORDINARY vertex answers false and keeps its bound-terminus meaning byte-for-byte.
-     */
-    template <class Cursor, class Reject>
-    [[nodiscard]] bool route_bound_session_delivery(std::string_view inbound_name,
-                                                    const child_rx_ctx_t* inbound_ctx,
-                                                    bool from_peer, const Cursor& cur,
-                                                    const fwd_pre_t& pre, Reject&& reject);
     /**
      * @brief This hop's REVERSE-direction mint element (RFC-0024 §7.1 amendment 1): a
      *        reference for the identity a mint-flagged request ARRIVED on.
