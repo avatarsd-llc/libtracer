@@ -15,7 +15,7 @@
     },
     "tr::graph::graph_t::propagate_folded_impl": {
       "ccn": [
-        42
+        29
       ],
       "file": "core/src/graph.cpp"
     },
@@ -25,21 +25,15 @@
       ],
       "file": "core/src/graph.cpp"
     },
-    "tr::graph::graph_t::read_subtree_folded": {
-      "ccn": [
-        24
-      ],
-      "file": "core/src/graph.cpp"
-    },
     "tr::graph::graph_t::write_branch": {
       "ccn": [
-        32
+        27
       ],
       "file": "core/src/graph.cpp"
     },
     "tr::graph::parse_branch_node": {
       "ccn": [
-        22
+        21
       ],
       "file": "core/src/graph.cpp"
     },
