@@ -519,13 +519,40 @@ inline void release_claim(registry_t& r, std::size_t i) {
                                                     std::memory_order_acq_rel);
 }
 
-/** @brief The one domain. Emitted only in a build that actually binds @ref hazard_slot_t. */
+/**
+ * @brief How many nodes a participant moves between its free list and the node class at once:
+ *        half a batch, so a list that refills or spills lands mid-way and does not turn round.
+ */
+inline constexpr std::size_t kNodeBatch = kRetireBatch / 2 > 0 ? kRetireBatch / 2 : 1;
+
+/**
+ * @brief Refill @p l's empty free list with up to `%kNodeBatch` nodes from the domain's node
+ *        class (#1782, ADR-0083 Decision 8), under one hold of the class's lock.
+ * @return The nodes added: 0 when the platform heap refused the class a slab.
+ *
+ * The class is one fixed-size row of nodes cut from 4 KiB slabs (`core/src/lkv_node_pool.cpp`),
+ * so the platform heap sees slab draws only, never a node. The participant's free list is the
+ * per-thread cache in front of it: one lock per `%kNodeBatch` nodes, not one per node, which
+ * is what keeps the cold arm at the cost of the lock-free `operator new` fast path it replaced.
+ * Out of line and a direct call; nothing about it is virtual, the cost #873 phase 2 measured.
+ */
+[[nodiscard]] std::size_t refill_nodes(lists_t& l) noexcept;
+
+/** @brief Hand the first @p n nodes of @p l's free list back to the node class, under one hold
+ *         of its lock. Each must hold no value. */
+void spill_nodes(lists_t& l, std::size_t n) noexcept;
+
+/** @brief Return one node to the node class. */
+void free_node(node_t* n) noexcept;
+
 /** @brief Free a node that no reader can reach, releasing the value reference it still holds
  *         (a retired node's; a free-list node's is already null). */
 inline void destroy_node(node_t* n) noexcept {
     value_t::release(n->v);
-    delete n;
+    free_node(n);
 }
+
+/** @brief The one domain. Emitted only in a build that actually binds @ref hazard_slot_t. */
 
 [[nodiscard]] inline registry_t& registry() {
     static constinit registry_t reg{};
@@ -629,17 +656,14 @@ class ticket_t {
     bool overflow_ = false;
 };
 
-/** @brief Park a scanned-clean node for reuse, or free it once the free list is at its bound. */
+/** @brief Park a scanned-clean node for reuse; past the free list's bound, spill half of it back
+ *         to the node class. */
 inline void recycle(lists_t& l, node_t* n) {
     value_t::release(n->v);  // drop the value's reference NOW, not when the node is next used
     n->v = nullptr;
-    if (l.freelist_n >= kRetireBatch) {
-        destroy_node(n);
-        return;
-    }
     n->next = l.freelist;
     l.freelist = n;
-    ++l.freelist_n;
+    if (++l.freelist_n > kRetireBatch) spill_nodes(l, l.freelist_n - kNodeBatch);
 }
 
 /**
@@ -794,38 +818,28 @@ inline void retire_and_flush(node_t* n) {
 }
 
 /**
- * @brief A node for the next publish — recycled if this participant has one, else allocated.
- * @return A node with an empty `sp`, or `nullptr` when the allocation failed.
+ * @brief A node for the next publish — recycled if this participant has one, else drawn from
+ *        the node class.
+ * @return A node with an empty `v`, or `nullptr` when the node class could not get a slab.
  *
  * Every publish displaces exactly one node, so after the first the free list keeps up and a
  * publish allocates nothing at all. That is what keeps ADR-0069 §5's "one allocation per
- * publish" off the steady-state write path; only a participant's first publish can allocate.
+ * publish" off the steady-state write path; only a participant's first publish can draw.
  *
- * @note **This is the global heap ON PURPOSE, and it is the one channel #873 does not close.**
- *       Phase 2 of that issue moved this allocation (and the matching `delete`s in `%recycle`,
- *       `%~participant_t` and `%~final_sweep_t`) onto the graph's injected
- *       @ref tr::mem::block_source_t, with a process default of @ref tr::mem::heap_source().
- *       It was implemented, measured against the gate the ruling staged it behind, and
- *       REVERTED: `bench/bench_hazard_node.cpp`, both arms pinned to one logical CPU over 12
- *       interleaved rounds, read **+22.7 %** on the allocating publish and — the disqualifying
- *       half — **+3.5 % on the FREE-LIST arm, which never touches the substrate at all**,
- *       against a two-binary A/A null of +0.45 % / −1.1 % and with disjoint ranges. End to end
- *       at this binding `bench_libtracer fan` lost 3.6-6.9 % of its deliveries/s.
- *       The cost is the indirect `try_alloc` against the direct `operator new` this line calls,
- *       plus the compiler budget that call re-partitions around `%scan`; moving the body out of
- *       line did not recover it. Do not re-migrate this site without re-running that bench under
- *       `docs/methodology.md` §"The A/B protocol" — the rationale, the full table and the shape
- *       a future attempt should start from instead are in
- *       `docs/reference/09-memory-substrate.md` §"The carve-out".
+ * The per-thread free list is the participant's own (`lists_t::freelist`, at most
+ * `kRetireBatch` nodes); `%refill_nodes` fills it from the shared node class `%kNodeBatch`
+ * at a time, and no global-heap call is made per node (#1782, closing the #873 carve-out). The
+ * free-list arm is unchanged, and
+ * `bench/bench_hazard_node.cpp` is the instrument that says the cold arm costs what
+ * `operator new` did — see `docs/reference/09-memory-substrate.md` §"LKV hazard-slot nodes".
  */
 [[nodiscard]] inline node_t* acquire_node(lists_t& l) {
-    if (node_t* n = l.freelist) {
-        l.freelist = n->next;
-        --l.freelist_n;
-        n->next = nullptr;
-        return n;
-    }
-    return new (std::nothrow) node_t;
+    if (l.freelist == nullptr && refill_nodes(l) == 0) return nullptr;
+    node_t* n = l.freelist;
+    l.freelist = n->next;
+    --l.freelist_n;
+    n->next = nullptr;
+    return n;
 }
 
 /**
@@ -873,11 +887,7 @@ inline participant_t::~participant_t() {
     // Free-list nodes are provably unreachable — a scan cleared them and nothing republished
     // them — so they can go now. Retired ones may still be announced, so the domain adopts
     // them and the next scan on any thread (or the final sweep) finishes the job.
-    while (node_t* n = l.freelist) {
-        l.freelist = n->next;
-        destroy_node(n);
-    }
-    l.freelist_n = 0;
+    spill_nodes(l, l.freelist_n);
     if (node_t* head = l.retired) {
         node_t* tail = head;
         while (tail->next != nullptr) tail = tail->next;
@@ -998,15 +1008,16 @@ inline final_sweep_t::~final_sweep_t() {
  * that can fail. Such a node binds @ref single_writer_slot_t.
  *
  * **Publish can fail under memory exhaustion**, which @ref single_writer_slot_t cannot: an empty
- * free list makes the first publish per participant allocate a 16-byte node. It is *reported*,
+ * free list makes the first publish per participant draw a 16-byte node. It is *reported*,
  * not silent — `store` returns `false` and `vertex_t::store` turns that into the same
  * `nullptr` → `BACKPRESSURE` soft-fail an LKV allocation failure already produces (#477), so
  * no write is ever reported as taken when it was not. Every later publish reuses the node its
  * own displacement recycled, so the window is a warm-up one — but it is still a real
  * difference in the policy's failure surface, and a third reason the MCU does not bind this
- * slot. Note also that the node comes from the **global heap**, not from a graph's injected
- * `block_source_t`: the slot policy is never handed one, and a bounded target that
- * needs every byte accounted for is another target that should bind @ref single_writer_slot_t.
+ * slot. Note also that the node comes from the domain's own **node class** (#1782): one
+ * fixed-size row of 4 KiB slabs the platform heap serves whole, process-wide like the domain,
+ * not a graph's injected `block_source_t` — the slot policy is never handed one, and a bounded
+ * target that needs every byte drawn from its own source should bind @ref single_writer_slot_t.
  *
  * **It does not spin-wait.** The one loop in the domain that waits on another thread is the
  * overflow index's lock in `detail_hp::ticket_t`, and it waits with `atomic_flag::wait`, which

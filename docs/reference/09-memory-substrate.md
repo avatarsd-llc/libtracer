@@ -292,7 +292,7 @@ The other cold-path channel phase 1 closes is `tr::net::child_registry_t`'s chun
 
 #### The channel ledger, at #873's close
 
-All three phases are terminal: phase 1 landed, phase 2 was measured and **reverted** to a carve-out, phase 3 landed. This is the whole account of where a `graph_t`'s bytes come from — read it as the answer to "if I inject one bounded source, what is *not* bounded?"
+All three phases are terminal: phase 1 landed, phase 2 was measured and **reverted** to a carve-out, phase 3 landed. The carve-out phase 2 left was closed by a different shape in [#1782](https://github.com/avatarsd-llc/libtracer/issues/1782) ([ADR-0083](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0083-one-allocation-seam.md) Decision 8). This is the whole account of where a `graph_t`'s bytes come from — read it as the answer to "if I inject one bounded source, what is *not* bounded?"
 
 | Channel | Where it draws from | Instrument |
 | --- | --- | --- |
@@ -305,17 +305,14 @@ All three phases are terminal: phase 1 landed, phase 2 was measured and **revert
 | The router's NAME→link demux chunks | `fwd_router_t`'s `label_src` (its own injection, by design — see below) | `plane_isolation_test`, `conn_add_oom_test` |
 | The router's peer-reachable ownership copies — the COLD COMPACT delivery payload and the host-local subscribe door's route + `SUBSCRIBER` TLVs | `fwd_router_t`'s `flat` (its own injection, by design — see below; these were on the global heap via the one-argument `view::over_bytes` until [#1582](https://github.com/avatarsd-llc/libtracer/issues/1582)) | `router_flat_seam_test` |
 | The WARM COMPACT delivery's stored value (one inline block the store adopts, as the full-route terminus's copy arm) | the injected source directly (`control_source()`), since [#1714](https://github.com/avatarsd-llc/libtracer/issues/1714); it was a `flat` segment plus a second `value_t` block | `router_flat_seam_test` |
-| **LKV hazard-slot nodes** | **the global heap — carve-out 1**, measured | `bench_hazard_node` |
-| **Plain `std::vector<std::byte>` sites** — the KEY containers and the read-back encoders' staging buffers | **the global heap — carve-out 2**, a container-type constraint | — |
+| LKV hazard-slot nodes | the hazard domain's own **node class**: one fixed-size row of 4 KiB slabs the platform heap serves whole, behind each participant's free list ([#1782](https://github.com/avatarsd-llc/libtracer/issues/1782); a global-heap carve-out until then) | `lkv_slot_test` (`node_draws_skip_the_heap`), `bench_hazard_node` |
+| **Plain `std::vector<std::byte>` sites** — the KEY containers and the read-back encoders' staging buffers | **the global heap — the carve-out**, a container-type constraint | — |
 
-So: **one injected source bounds every byte channel `graph_t` owns except two**, and both are documented rather than pending.
+So: **one injected source bounds every byte channel `graph_t` owns except one**, and it is documented rather than pending. The LKV hazard-slot nodes are not drawn from the graph's source either, but they no longer reach the global heap per node: the domain is process-wide, so its node class is too (see [LKV hazard-slot nodes](#lkv-hazard-slot-nodes-have-their-own-class)).
 
-- **Carve-out 1 — LKV hazard-slot nodes.** Phase 2 built the migration and measured it off the cliff: +22.7 % on hazard-node acquisition, +3.5 % on the free-list-hit *steady* arm that never touches the substrate, with disjoint ranges against a −0.12 % A/A null. The next section carries the full table and the three findings.
-- **Carve-out 2 — the plain `std::vector<std::byte>` sites.** These look like an allocator swap and are not, because their container type is fixed by the signatures they cross. The KEY containers (`try_build_key`'s out-parameter, `select_sweep`'s output, the branch-write child-key composition, the sweep snapshot's element type) are pinned by member-function signatures and by the `pending_` / `unconditional_` key sets, so moving them is a key-*type* change across the graph. The read-back encoders' staging buffers are pinned by `tr::wire::emit_tlv`'s `std::vector<std::byte>&` sink; phase 3 moved the resulting *segment* onto the injection, but the transient buffer it is copied from is still the global heap's.
+- **The carve-out — the plain `std::vector<std::byte>` sites.** These look like an allocator swap and are not, because their container type is fixed by the signatures they cross. The KEY containers (`try_build_key`'s out-parameter, `select_sweep`'s output, the branch-write child-key composition, the sweep snapshot's element type) are pinned by member-function signatures and by the `pending_` / `unconditional_` key sets, so moving them is a key-*type* change across the graph. The read-back encoders' staging buffers are pinned by `tr::wire::emit_tlv`'s `std::vector<std::byte>&` sink; phase 3 moved the resulting *segment* onto the injection, but the transient buffer it is copied from is still the global heap's.
 
 **What is deliberately outside this ledger, and is not a carve-out.** `fwd_router_t` and the transports keep their own `block_source_t` / `mem_backend_t` seams (`rx`, `label_src`, `egress_src`, `retained`, a transport's `rx_backend`) rather than sharing the graph's. That is receiver-pays, not an omission: a peer-driven receive path that exhausts must not be able to starve the graph's write path, and [ADR-0060](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-value-copy-draws-from-an-injected-backend.md) erratum 1 measured a *shared* free-list pool collapsing to ~1/15 of its single-thread rate on a 12-core host. A node that genuinely wants one store passes the same object to each.
-
-### The carve-out: LKV hazard-slot nodes stay on the global heap
 
 ### The router's seams are split by LIFETIME, not by tidiness
 
@@ -354,7 +351,32 @@ rejected a shared cross-backend hint vocabulary as a bloat vector, and that reje
 `alloc_hint_t` remains opaque and backend-private. A distinct seam says the same thing without
 a registry — the caller names the backend, and no backend has to interpret anyone else's flag.
 
-`hazard_slot_t`'s indirection nodes (`core/include/libtracer/lkv_slot.hpp`, `detail_hp::acquire_node`) allocate with `new (std::nothrow) node_t` and free with `delete`, and that is now a **decision**, not an omission. [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 2 was staged as "move them onto the injected `block_source_t`, gated on a dedicated before/after acquisition A/B; a regression outside the null band reverts the phase and documents the carve-out." It was implemented, measured, and reverted on that gate.
+### LKV hazard-slot nodes have their own class
+
+`hazard_slot_t`'s indirection nodes (`core/include/libtracer/lkv_slot.hpp`, `detail_hp::acquire_node`) come from the hazard domain's **node class** (`core/src/lkv_node_pool.cpp`, [#1782](https://github.com/avatarsd-llc/libtracer/issues/1782)): a one-row `slab_pool_t` of 16-byte blocks cut from 4 KiB slabs, which the platform heap serves whole. Each participant's own free list (`lists_t::freelist`, at most `kRetireBatch` nodes) is the per-thread cache in front of it, so a steady publish never reaches the class at all: the node its own displacement recycled is the next one it uses. The class is reached only when the free list runs dry (a participant's first publishes, a publish to a slot nobody has written) or overflows (a scan that recycles more than it holds), and then `kNodeBatch` (half a batch) nodes at a time under one hold of the class lock: `refill_nodes` and `spill_nodes`.
+
+Three properties of the shape are what the #873 phase-2 attempt below lacked:
+
+- **A direct call, not a virtual draw.** `refill_nodes` and `spill_nodes` are out-of-line functions on a concrete `final` pool, the same call shape as the `operator new` they replace. Phase 2's cost was the indirect `block_source_t::try_alloc`.
+- **One lock per batch, not per node.** The first cut took the class lock per node and measured −16 % on `hazard-acquire` (14 → 17 ns) and −15 % on `hazard-release` against glibc's lock-free tcache. Moving `kNodeBatch` nodes per hold is what turned both into gains.
+- **Process-wide, like the domain.** The registry, the announcement cells and the free lists are all process-wide, and a node routinely moves between threads (a node is recycled onto the list of whichever thread displaced it). So the class is too: constant-initialized and never destroyed, because the exit sweep and every `thread_local` participant that unwinds after static destruction still return nodes to it. It is not a graph's source and not one of the host root's sub-pools; a target that needs every byte drawn from its own injected source binds `single_writer_slot_t`, which allocates nothing to publish.
+- **A 4 KiB slab, not a 64 KiB one.** A node is 16 bytes, so one slab holds 252 nodes and a process with one hazard slot holds 4 KiB for it.
+
+The class's slab draws, and its lock (`config_t::guard_t`), are the only things the platform heap and the scheduler see. `lkv_slot_test`'s `node_draws_skip_the_heap` publishes into 1,000 never-written slots on a fresh thread and asserts that no nothrow heap request was node-sized and at most four were made.
+
+Measured with `bench_hazard_node` and `bench_libtracer` built with `hazard_slot_t` bound, base `origin/main` against the node class, 12 ABBA-interleaved rounds, best-of-rounds, single-threaded rows pinned to one logical CPU (shared host, CPUs 7-30 only):
+
+| arm | global heap | node class | delta |
+| --- | ---: | ---: | ---: |
+| `hazard-acquire` (every publish draws) | 69.6 M/s (14 ns) | 79.2 M/s (13 ns) | **+13.9 %** |
+| `hazard-release` (retire → scan → free) | 24.4 M/s (41 ns) | 25.8 M/s (39 ns) | **+5.6 %** |
+| `hazard-steady` (free-list hit, the control) | 56.3 M/s (18 ns) | 55.9 M/s (18 ns) | −0.7 % |
+
+Every `lkv-*` row (fresh and aged, 64 B to 64 KiB) is within ±2 % of base, inside ADR-0083's ±3 % bar. A build that binds `single_writer_slot_t` (the default) references none of the node class and links none of it.
+
+#### History: the #873 phase-2 carve-out
+
+Until #1782 the nodes were allocated with `new (std::nothrow) node_t` and freed with `delete`, and that was a **decision**, not an omission. [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 2 was staged as "move them onto the injected `block_source_t`, gated on a dedicated before/after acquisition A/B; a regression outside the null band reverts the phase and documents the carve-out." It was implemented, measured, and reverted on that gate.
 
 The instrument is `bench/bench_hazard_node.cpp`, written for this question because no existing bench could answer it: acquisition is amortized to a free-list hit after a participant's first publish, so a bench that publishes in a loop reads a flat line whatever the substrate does. It holds thousands of never-written slots live so every publish takes the allocating arm, and reports that arm (`hazard-acquire`), the free path (`hazard-release`) and a free-list-hit control (`hazard-steady`) separately.
 

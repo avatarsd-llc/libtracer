@@ -14,11 +14,12 @@
  *
  * It **failed the gate** (+22.7 % on the allocating publish, +3.5 % on the free-list arm that
  * the substrate never touches, ranges disjoint, against a two-binary A/A null under ±1.2 %),
- * so the migration reverted and the hazard nodes stay on the global heap as a documented
- * carve-out — `docs/reference/09-memory-substrate.md` §"The carve-out" has the whole table.
- * This bench is checked in because that carve-out is a MEASURED decision with a shelf life:
- * anyone reopening the question re-runs this, under the same protocol, before believing a
- * replacement.
+ * so that migration reverted and the hazard nodes stayed on the global heap as a carve-out.
+ * #1782 closed it with a different shape — the domain's own node class, a direct call behind
+ * each participant's free list — and this bench is the gate it was held to.
+ * `docs/reference/09-memory-substrate.md` §"LKV hazard-slot nodes have their own class" has
+ * both tables. Anyone changing where the nodes come from re-runs this, under the same
+ * protocol, before believing the change.
  *
  * ## Why a general LKV bench is not sufficient
  *

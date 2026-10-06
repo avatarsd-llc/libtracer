@@ -184,6 +184,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`hazard_slot_t` nodes come from their own node class, not the global heap
+  ([#1782](https://github.com/avatarsd-llc/libtracer/issues/1782), ADR-0083 Decision 8).** A
+  publish that finds its participant's free list empty draws a 16-byte node from one fixed-size
+  class of 4 KiB slabs, process-wide like the hazard domain, instead of calling
+  `new (std::nothrow)`; a node freed past the free list's bound goes back to it. The platform heap
+  sees whole slabs only. No API changes, and a build that binds `single_writer_slot_t` (the
+  default) links none of it. A test that starved the node draw by replacing the nothrow
+  `operator new` now does it through the fault-injection probe (`tr::detail::probe_fail_hook`,
+  refusing `sizeof(detail_hp::node_t)`).
 - **The graph core draws its own state from the graph's table source
   ([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778), ADR-0083).** The vertex
   tree, the vertex index, the link index, subscriber edge tables, the seam park, the creation

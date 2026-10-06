@@ -38,6 +38,7 @@ set(LIBTRACER_SOURCES_REQUIRED
     "${_libtracer_src}/mem_source.cpp"
     "${_libtracer_src}/mem_source_backend.cpp"
     "${_libtracer_src}/mem_pool.cpp"
+    "${_libtracer_src}/lkv_node_pool.cpp"
     "${_libtracer_src}/rope.cpp"
     "${_libtracer_src}/rope_decode.cpp"
     "${_libtracer_src}/tlv_view.cpp"
