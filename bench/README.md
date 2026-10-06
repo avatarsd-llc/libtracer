@@ -1700,6 +1700,10 @@ process — the driver, each family, an isolated mode such as the `lkv` ratio re
 `bench_compact_delivery` / `bench_forward_demux` — first re-executes itself under one fixed
 `GLIBC_TUNABLES` string (`bench_process.hpp`: mmap threshold 128 KiB, trim threshold 32 MiB,
 8 arenas), because glibc otherwise slides those thresholds while a run is in progress.
+`bench_store_sweep latency` (the gated `store-lat-*` rows) does the same. Each of those
+processes records what it ran under as a stdout line ahead of its rows, `ALLOC <pinned|unpinned>
+<GLIBC_TUNABLES>` (#1903): `perf_gate.py` prints it under the verdict, and `host_guard.py stamp`
+writes it onto every history point beside the clock floor.
 
 Why: every row used to share one process heap, aged by every row ahead of it in a fixed order,
 so a row's value partly reflected its POSITION in the sweep. The 1 KiB regression appeared in

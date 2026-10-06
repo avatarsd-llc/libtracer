@@ -118,6 +118,10 @@ LEDGER = bc.Ledger()
 # Every `CLOCK res_ns sample_ns` line the timed transcripts carried (#1804): the clock's
 # resolution and the measured cost of one timed sample, printed under the verdict.
 CLOCK_FLOORS: list[tuple[float, float]] = []
+# Every `ALLOC state tunables` line the timed transcripts carried (#1903): the allocator
+# settings each bench process ran under (`pinned` = exactly bench_process.hpp's fixed set),
+# printed under the verdict. A binary that predates the line contributes nothing.
+ALLOC_STATES: list[tuple[str, str]] = []
 CPUS = bc.cpus_from_env()
 # The ONE logical CPU a single-threaded step is pinned to (#1807): `BENCH_CPU_SINGLE`, or the
 # first CPU of `BENCH_CPU`; None when unpinned. See "HOW THE GATE TIMES THE FAMILIES".
@@ -756,7 +760,8 @@ def gate_plan(*arms: dict[str, pathlib.Path] | None,
 
 
 def parse_rows(out: str) -> list[tuple]:
-    """@brief The 12-column RESULT rows of one transcript; records its CLOCK line (#1804)."""
+    """@brief The 12-column RESULT rows of one transcript; records its CLOCK (#1804) and
+    ALLOC (#1903) lines."""
     rows = []
     for line in out.splitlines():
         f = line.split("\t")
@@ -772,6 +777,8 @@ def parse_rows(out: str) -> list[tuple]:
                          0.0, int(f[5]) / 1000.0, 0.0))
         elif f[0] == "CLOCK" and len(f) == 3:
             CLOCK_FLOORS.append((float(f[1]), float(f[2])))
+        elif f[0] == "ALLOC" and len(f) == 3:
+            ALLOC_STATES.append((f[1], f[2]))
     return rows
 
 
@@ -1864,6 +1871,24 @@ def print_conditions() -> None:
         print(f"  clock floor: resolution {'/'.join(f'{r:g}' for r in res)} ns, "
               f"{min(cost):.1f}..{max(cost):.1f} ns per timed sample "
               f"({len(cost)} transcript(s))")
+    print(alloc_line(ALLOC_STATES))
+
+
+def alloc_line(states: list[tuple[str, str]]) -> str:
+    """@brief The allocator settings the timed processes ran under, as one line (#1903).
+
+    Every bench process prints `ALLOC <pinned|unpinned> <GLIBC_TUNABLES>`; a run whose
+    processes were all pinned to one set reads `allocator: pinned <tunables> (N process(es))`.
+    Any unpinned process is named with its count, since its rows ran under glibc's sliding
+    thresholds and are not comparable to a pinned arm's."""
+    if not states:
+        return "  allocator: not recorded (the binaries predate the ALLOC line)"
+    tun = sorted({s for _, s in states})
+    unpinned = sum(1 for st, _ in states if st != "pinned")
+    if unpinned == 0 and len(tun) == 1:
+        return f"  allocator: pinned {tun[0]} ({len(states)} process(es))"
+    return (f"  allocator: WARNING {unpinned} of {len(states)} process(es) unpinned; "
+            f"tunables seen: {' | '.join(tun)}")
 
 
 if __name__ == "__main__":

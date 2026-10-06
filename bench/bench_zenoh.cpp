@@ -340,6 +340,7 @@ int main(int argc, char** argv) {
         for (const zenoh_family_t& f : kFamilies) {
             if (f.name != argv[2]) continue;
             std::fprintf(stderr, "FAMILY %.*s\n", static_cast<int>(f.name.size()), f.name.data());
+            emit_alloc_state();  // the settings this family's rows run under (#1903)
             const std::size_t start_kb = rss_kb();
             {
                 auto session = open_session();
@@ -381,6 +382,7 @@ int main(int argc, char** argv) {
     }
     // The default sweep: one fresh process per family, the clock floor once, ahead of them.
     emit_clock_floor();
+    emit_alloc_state();
     for (const zenoh_family_t& f : kFamilies) {
         if constexpr (!kFamilyProcesses) {
             auto session = open_session();
