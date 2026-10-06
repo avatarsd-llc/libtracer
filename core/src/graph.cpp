@@ -533,31 +533,13 @@ struct branch_node_t {
 /** @brief The `[first, last)` run of @p set's keys in the subtree whose root key is @p lo —
  *         contiguous in byte order, starting at the lower bound of @p lo. */
 template <class Set>
-[[nodiscard]] std::pair<std::size_t, std::size_t> subtree_run(const Set& set,
-                                                              std::span<const std::byte> lo) {
-    const std::size_t first = set.lower_bound(lo);
-    std::size_t last = first;
-    while (last < set.size() && in_subtree(lo, mem::as_span(set.at(last).key))) ++last;
+[[nodiscard]] std::pair<typename Set::pos_t, typename Set::pos_t> subtree_run(
+    const Set& set, std::span<const std::byte> lo) {
+    const typename Set::pos_t first = set.lower_bound(lo);
+    typename Set::pos_t last = first;
+    while (last != set.end_pos() && in_subtree(lo, mem::as_span(set.at(last).key)))
+        last = set.next(last);
     return {first, last};
-}
-
-/** @brief Erase the entries of @p set's subtree run under @p lo whose vertex @p drop selects,
- *         keeping the survivors in key order, and answer how many went. The run is compacted
- *         in place and its tail erased once, so the cost is one pass over the run. Kept out of
- *         line: only `retire` calls it, and inlined there it moved GCC's inlining budget for
- *         this file enough to grow the hot `dispatch_edge_remote` (the symbol ratchet). */
-template <class Set, class Drop>
-[[gnu::noinline]] std::size_t drop_from_run(Set& set, std::span<const std::byte> lo,
-                                            Drop drop) noexcept {
-    const auto [first, end] = subtree_run(set, lo);
-    std::size_t kept = first;
-    for (std::size_t i = first; i < end; ++i) {
-        if (drop(set.at(i).value)) continue;
-        if (kept != i) std::swap(set.at(kept), set.at(i));
-        ++kept;
-    }
-    set.erase_at(kept, end - kept);
-    return end - kept;
 }
 
 }  // namespace
@@ -1201,12 +1183,14 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     // that registration fills it or erases it itself. The window is closed.
     {
         const std::lock_guard slock(sweep_mutex_);
-        (void)drop_from_run(unconditional_, mem::as_span(lo), [](const vertex_t* u) {
-            return u != nullptr && u->delivery_mode() != delivery_mode_t::UNCONDITIONAL;
+        const auto [ui, uj] = subtree_run(unconditional_, mem::as_span(lo));
+        (void)unconditional_.erase_if(ui, uj, [](const key_set_t::entry_t& e) {
+            return e.value != nullptr && e.value->delivery_mode() != delivery_mode_t::UNCONDITIONAL;
         });
+        const auto [pi, pj] = subtree_run(pending_, mem::as_span(lo));
         pending_count_.fetch_sub(
-            drop_from_run(pending_, mem::as_span(lo),
-                          [](const vertex_t* u) { return !u->has_pending_mark(); }),
+            pending_.erase_if(
+                pi, pj, [](const key_set_t::entry_t& e) { return !e.value->has_pending_mark(); }),
             std::memory_order_relaxed);
     }
     return {};
@@ -2739,21 +2723,21 @@ void graph_t::propagate_impl(vertex_t* v) {
         // Collect BEFORE the drain: a refusal leaves this and later marks for the next
         // covering sweep instead of silently losing them. The drained run goes in one erase.
         const auto [first, end] = subtree_run(pending_, lo);
-        std::size_t last = first;
-        for (; last < end; ++last) {
+        key_set_t::pos_t last = first;
+        for (; last != end; last = pending_.next(last)) {
             const std::span<const std::byte> k = mem::as_span(pending_.at(last).key);
             if (k.size() != lo.size() && !to_deliver.push(k)) break;  // strict descendant
             own_drained = own_drained || k.size() == lo.size();
         }
         // v itself, if present, was delivered above. An empty run takes no atomic RMW: the
         // plain propagate of an unmarked vertex is this path's common case.
-        if (last != first) {
-            pending_.erase_at(first, last - first);
-            pending_count_.fetch_sub(last - first, std::memory_order_relaxed);
-        }
+        if (last != first)
+            pending_count_.fetch_sub(
+                pending_.erase_if(first, last, [](const key_set_t::entry_t&) { return true; }),
+                std::memory_order_relaxed);
         // Iterate, do not drain; a refusal defers the rest to the next sweep.
         const auto [ufirst, uend] = subtree_run(unconditional_, lo);
-        for (std::size_t i = ufirst; i < uend; ++i) {
+        for (key_set_t::pos_t i = ufirst; i != uend; i = unconditional_.next(i)) {
             const std::span<const std::byte> k = mem::as_span(unconditional_.at(i).key);
             if (k.size() != lo.size() && !to_deliver.push(k)) break;
         }
@@ -3912,7 +3896,7 @@ bool graph_t::select_sweep(vertex_t* v, mem::bytes_t& lo, key_list_t& out) {
     const std::lock_guard lock(sweep_mutex_);
     for (const key_set_t* set : {&pending_, &unconditional_}) {
         const auto [first, last] = subtree_run(*set, los);
-        for (std::size_t i = first; i < last; ++i) {
+        for (key_set_t::pos_t i = first; i != last; i = set->next(i)) {
             const std::span<const std::byte> k = mem::as_span(set->at(i).key);
             if (k.size() != los.size() && !out.push(k)) return false;
         }

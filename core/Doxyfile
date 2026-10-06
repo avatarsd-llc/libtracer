@@ -37,6 +37,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/mem_slab_pool.hpp \
                          core/include/libtracer/mem_string.hpp \
                          core/include/libtracer/mem_sorted_map.hpp \
+                         core/include/libtracer/mem_chunked_map.hpp \
                          core/include/libtracer/mem_poly_ptr.hpp \
                          core/include/libtracer/mem_pool.hpp \
                          core/include/libtracer/mem_borrowed.hpp \
