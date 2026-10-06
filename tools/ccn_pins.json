@@ -99,7 +99,7 @@
     },
     "tr::net::fwd_router_t::route_fwd_forward": {
       "ccn": [
-        19
+        18
       ],
       "file": "core/src/fwd_router.cpp"
     },
@@ -109,29 +109,17 @@
       ],
       "file": "core/src/fwd_router.cpp"
     },
-    "tr::net::peek_fwd_dst_any": {
-      "ccn": [
-        17
-      ],
-      "file": "core/include/libtracer/fwd_frame_view.hpp"
-    },
     "tr::net::peek_refused_route": {
       "ccn": [
-        32
+        20
       ],
       "file": "core/src/fwd_router.cpp"
     },
     "tr::net::rebuild_fwd_forward": {
       "ccn": [
-        47
-      ],
-      "file": "core/include/libtracer/fwd_frame_view.hpp"
-    },
-    "tr::net::reject_bus_name_hop": {
-      "ccn": [
         22
       ],
-      "file": "core/src/fwd_router.cpp"
+      "file": "core/include/libtracer/fwd_frame_view.hpp"
     },
     "tr::net::self_heal_link_t::worker_main": {
       "ccn": [

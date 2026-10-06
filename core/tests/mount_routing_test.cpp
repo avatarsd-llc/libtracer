@@ -271,7 +271,13 @@ void test_strip_k_and_symmetric_src() {
     const std::string_view mount[3] = {"net", "ws-server", "up"};
     const auto enc = tr::net::encode_mount_tlv(std::span<const std::string_view>(mount));
     check(enc.has_value(), "the mount prefix encodes");
-    const auto rb = tr::net::rebuild_fwd_forward(cur, std::span<const std::byte>(*enc), {}, 3);
+    // The router's sequence (#1794): the peek reads the headers once, the descent records
+    // where the K = 3 consumed segments end, and the rebuild applies exactly that strip.
+    tr::net::fwd_pre_t pre;
+    check(tr::net::peek_fwd_dst(cur, pre), "the dst window opens");
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> walk(cur, pre);
+    pre.strip_at = walk.end_of(2).value_or(pre.dst_end + 1);
+    const auto rb = tr::net::rebuild_fwd_forward(cur, pre, std::span<const std::byte>(*enc), {});
     check(rb.has_value() && rb->ok(), "the hop rebuilds");
     if (!rb || !rb->ok()) return;
 
@@ -296,7 +302,14 @@ void test_short_dst_is_not_forwardable() {
     const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(frame)};
     const std::string_view mount[3] = {"net", "ws-server", "up"};
     const auto enc = tr::net::encode_mount_tlv(std::span<const std::string_view>(mount));
-    check(!tr::net::rebuild_fwd_forward(cur, std::span<const std::byte>(*enc), {}, 3),
+    tr::net::fwd_pre_t pre;
+    check(tr::net::peek_fwd_dst(cur, pre), "the short dst still opens");
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> walk(cur, pre);
+    const std::optional<std::size_t> end = walk.end_of(2);
+    check(!end.has_value(), "the walk has no third segment to end a K = 3 strip at");
+    // The router records that as a strip past the `dst`, and the rebuild refuses it.
+    pre.strip_at = end.value_or(pre.dst_end + 1);
+    check(!tr::net::rebuild_fwd_forward(cur, pre, std::span<const std::byte>(*enc), {}),
           "stripping more segments than dst holds is refused, not truncated");
 }
 

@@ -701,11 +701,7 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::span<const std::byte>, std::string_view, std::size_t, const fwd_pre_t*, MintFn, ReverseMintFn, std::span<const std::byte>)
-:project: libtracer
-```
-
-```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::string_view)
+```{doxygenfunction} tr::net::rebuild_fwd_forward
 :project: libtracer
 ```
 

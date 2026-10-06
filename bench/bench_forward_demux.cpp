@@ -248,7 +248,7 @@ template <class Cursor>
         pre.strip_at = dst_h->body_off;  // caller overwrites once strip_k is known
         return tr::net::fwd_dst_kind_t::PATH;
     }
-    pre.dst_ref = true;
+    pre.dst_type = type_t::PATH_REF;  // `pre.dst_ref = true` at 5e7659e3 (renamed by #1794)
     pre.strip_at = dst_h->body_off + tr::wire::kPathRefElementBytes;
     if (pre.strip_at > pre.dst_end) pre.strip_at = pre.dst_end;  // the H = 0 body
     ref_count = tr::wire::path_ref_element_count(dst_h->body_len);
@@ -284,8 +284,18 @@ class legacy_dst_seg_walk_t {
     legacy_dst_seg_walk_t(const Cursor& cur, const tr::net::fwd_pre_t& pre) noexcept
         : cur_(&cur), body_off_(pre.dst_body_off), end_(pre.dst_end), pos_(pre.dst_body_off) {}
 
-    /** @brief Fill the inline cache NOW, in ONE tight loop. */
-    void prefill() {
+    /**
+     * @brief Fill the inline cache NOW, in ONE tight loop.
+     *
+     * `flatten` is the one thing here that is NOT in the retired source, and it pins the
+     * retired BUILD instead: there GCC inlined these header reads, and whether it still does
+     * depends on the whole TU's inline budget, which moves when the shipped headers shrink.
+     * #1794's smaller rebuild flipped it and the out-of-line `parse_header` calls cost this
+     * control arm +8 ns — a falsifier control drifting slower by an accident of budgeting.
+     * Flattened, every read is inlined whatever the budget, which reads ~3.5 ns BELOW the
+     * pre-#1794 figure: the control is now the faster, stricter one, and stays there.
+     */
+    [[gnu::flatten]] void prefill() {
         while (cached_ < tr::net::kDstSegCacheSlots && pos_ < end_) {
             const auto h = tr::net::read_fwd_header(*cur_, pos_);
             if (!h || h->type != type_t::NAME) return;
@@ -451,6 +461,32 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
  * points production takes, so this is a decomposition of the shipped path — not a model of a
  * hypothetical one.
  */
+/**
+ * @brief Record where the first @p strip_k `dst` segments end, as the descent does before the
+ *        rebuild runs (#1794). Setup, not timed; out of line so its walker does not grow
+ *        @ref run_leg (see @ref rebuild_once for why that matters).
+ */
+[[gnu::noinline]] void record_strip(const tr::wire::grammar::span_cursor& cur,
+                                    tr::net::fwd_pre_t& pre, std::size_t strip_k) {
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> w(cur, pre);
+    pre.strip_at = w.end_of(strip_k - 1).value_or(pre.dst_end + 1);
+}
+
+/**
+ * @brief The rebuild leg's one call, kept OUT OF LINE — the shape production takes.
+ *
+ * The router calls `rebuild_fwd_forward` out of line (it is `[[gnu::flatten]]` and large),
+ * and so did this bench until #1794 shrank the rebuild enough for GCC to inline it into
+ * @ref run_leg. `noinline` keeps the leg timing the call production makes, and keeps the
+ * rebuild out of the function that also holds the resolve legs.
+ */
+[[gnu::noinline]] std::size_t rebuild_once(const tr::wire::grammar::span_cursor& cur,
+                                           const tr::net::fwd_pre_t& pre,
+                                           std::span<const std::byte> mount_tlv) {
+    const auto rb = tr::net::rebuild_fwd_forward(cur, pre, mount_tlv, "in");
+    return rb ? rb->head1.span().size() : 0;
+}
+
 [[nodiscard]] double run_leg(const char* mode, bool rebuild_leg,
                              path_form_t form = path_form_t::PACKED) {
     const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
@@ -472,6 +508,10 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
     // is timed the same way — otherwise it would re-parse and double-count the very work
     // this axis is trying to attribute to the peek.
     (void)tr::net::peek_fwd_dst(cur, pre);
+    // ... and the descent records where the consumed mount run ends, which is the strip the
+    // rebuild applies (it walks nothing itself since #1794). Recorded once, outside the timed
+    // leg, exactly as the hop records it once per frame before the rebuild runs.
+    record_strip(cur, pre, 2);
 
     const auto leg = [&] {
         if (form == path_form_t::LITERAL) {
@@ -489,8 +529,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
         if (rebuild_leg) {
             // Strip the two-segment local mount run (`net` / `ws-client`) — the same K the hop
             // strips, so the emitted head matches the one the hop builds.
-            const auto rb = tr::net::rebuild_fwd_forward(cur, mount_tlv, "in", 2, &pre);
-            sink += rb ? rb->head1.span().size() : 0;
+            sink += rebuild_once(cur, pre, mount_tlv);
         } else {
             tr::net::fwd_pre_t local{};
             if (!tr::net::peek_fwd_dst(cur, local)) return;

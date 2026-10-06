@@ -1221,21 +1221,22 @@ class fwd_router_t {
     /**
      * @brief Reclaim the subscriber edge a refused delivery route names (#1223 step 5).
      *
-     * Called on every inbound `FWD{REPLY}` that terminates here, BEFORE the reply sink and
-     * whether or not one is installed. A reply that is not an addressed `tr::path::invalid`
-     * refusal (RFC-0020's bus-residual reject — op REPLY, kind ERROR, `STATUS{ERROR{0x0021}}`)
-     * returns after at most five header reads, allocation-free, so the warm read-reply path
-     * pays a peek and nothing else. On a refusal, the reply's `src` — the refused route the
-     * rejecting hop echoed back verbatim ("so it can correlate", `reject_bus_name_hop`) — is
-     * handed with @p inbound_name to `graph_t::evict_route_edges`, which reclaims exactly the
-     * edge(s) that stored that route over that link. This is the producer-side half of the
-     * RFC-0020 exchange: the reject already ships; this makes the producer act on it instead
-     * of dropping it into a sink that never matched it.
+     * Called on every inbound `FWD{REPLY}` that terminates here and IS an addressed
+     * `tr::path::invalid` refusal (RFC-0020's bus-residual reject — op REPLY, kind ERROR,
+     * `STATUS{ERROR{0x0021}}`), BEFORE the reply sink and whether or not one is installed. The
+     * shape is recognised by the ingress driver off the routing peek's own offsets, so a reply
+     * that is not a refusal costs the warm read-reply path a few header reads past its `dst`
+     * and nothing else. On a refusal, the reply's `src` — the refused route the rejecting hop
+     * echoed back verbatim ("so it can correlate", `reject_bus_name_hop`) — is handed with
+     * @p inbound_name to `graph_t::evict_route_edges`, which reclaims exactly the edge(s) that
+     * stored that route over that link. This is the producer-side half of the RFC-0020
+     * exchange: the reject already ships; this makes the producer act on it instead of
+     * dropping it into a sink that never matched it.
      *
      * @param inbound_name This node's NAME for the link the reply arrived on.
-     * @param frame        The reply frame's contiguous bytes.
+     * @param route        The echoed route TLV's contiguous bytes (header and body).
      */
-    void reclaim_refused_route(std::string_view inbound_name, std::span<const std::byte> frame);
+    void reclaim_refused_route(std::string_view inbound_name, std::span<const std::byte> route);
 
     /**
      * @brief A link's stable per-child receiver state — its identity AND its mount run.
@@ -1846,15 +1847,18 @@ class fwd_router_t {
      * @param  observe  The read-only inbound observer (tests/ACL seam), which wants a decoded
      *                  tree and so exists only on the contiguous tier; a no-op on the rope
      *                  tier, where nothing contiguous is in hand to give it.
-     * @param  reject   Reply to a bus NAME + residual hop (ADR-0073 §3 / RFC-0020). Needs
-     *                  contiguous bytes, which the rope tier buys with its one COLD flatten.
+     * @param  reject   Reply to a bus NAME + residual hop (ADR-0073 §3 / RFC-0020), called
+     *                  with the refusal status and the frame's `fwd_pre_t`, whose offsets
+     *                  locate the routes the refusal swaps. Needs contiguous bytes, which the
+     *                  rope tier buys with its one COLD flatten.
      * @param  terminus Resolve here: the arena decode on the contiguous tier, the lazy
      *                  view-tier resolve straight off the rope on the other. Takes the
      *                  RFC-0027 §7.2 labelled-`dst` resolution (`const
      *                  wire::path_ref_element_t*`, null for every string- and
      *                  `PATH_REF`-spelled frame), because a label leaves no name to look up
      *                  and the deref is made where the label table lives.
-     * @param  reply    Hand a FWD{REPLY} that reached its originator to the reply sink.
+     * @param  reply    Hand a FWD{REPLY} that reached its originator to the reply sink,
+     *                  called with the frame's `fwd_pre_t` for the refusal correlation.
      *
      * @pre `cur.size() >= 4` — the callers' own runt-frame gate has already run.
      * @retval true  The frame was FWD-classified and is fully handled; the caller returns.
@@ -1867,24 +1871,26 @@ class fwd_router_t {
     /**
      * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
      *
-     * Strips the leading `dst` segment, prepends the inbound-link NAME to `src` (unless a
-     * REPLY), and scatter-gather-sends onward via @p child. @p child is the transport the
-     * first `dst` segment already resolved to. Templated over the grammar `Cursor` (ADR-0053
-     * ④b): a @ref wire::grammar::span_cursor reads a contiguous frame (byte-identical to the
-     * pre-rope path, zero heap — a stack `iov` array), a @ref wire::grammar::rope_cursor reads
-     * a scatter-gather frame (the egress gathers each region's per-link sub-spans into a
+     * Consumes the `dst` records @p pre names (`strip_at`), prepends the inbound link's mount
+     * path to `src` (unless a REPLY), and scatter-gather-sends onward via @p child. @p child
+     * is the transport the routing decision already resolved to. Templated over the grammar
+     * `Cursor` (ADR-0053 ④b): a @ref wire::grammar::span_cursor reads a contiguous frame
+     * (byte-identical to the pre-rope path, zero heap — a stack `iov` array), a @ref
+     * wire::grammar::rope_cursor reads a scatter-gather frame (the egress gathers each region's
+     * per-link sub-spans into a
      * @ref mem::block_array_t drawn from the injected `rx_` — still no payload copy, and
      * exhaustion DROPS the frame rather than throwing, matching the reply path's own
      * failable-seam gather (#596, #1570)).
      *
      * @tparam Cursor A grammar byte-source cursor (span or rope).
      * @param cur     The cursor positioned at the inbound FWD frame's first byte.
+     * @param pre     The routing peek's offsets, with the strip and the outgoing `dst` type
+     *                set by the arm that routed the frame.
      */
     template <class Cursor>
     void route_fwd_forward(std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx,
-                           bool from_peer, std::size_t strip_k, const Cursor& cur,
-                           transport_t& child, const fwd_pre_t* pre = nullptr,
-                           std::span<const std::byte> reply_label = {});
+                           bool from_peer, const Cursor& cur, transport_t& child,
+                           const fwd_pre_t& pre, std::span<const std::byte> reply_label = {});
     /**
      * @brief What the RFC-0027 §7.2 label branch decided about one inbound `dst`.
      *
@@ -1975,7 +1981,7 @@ class fwd_router_t {
     [[gnu::noinline]] std::span<const std::byte> label_src_prefix(std::string_view inbound_name,
                                                                   const child_rx_ctx_t* inbound_ctx,
                                                                   const Cursor& cur,
-                                                                  const fwd_pre_t* pre,
+                                                                  const fwd_pre_t& pre,
                                                                   std::string_view outbound_name);
     /**
      * @brief RFC-0027 §6.1 point 3 — the TERMINUS's label for the residual it just resolved,
@@ -2042,7 +2048,7 @@ class fwd_router_t {
      *               continues exactly as it did before bound paths existed.
      *
      * @param pre           The offsets @ref peek_fwd_dst_any already filled for this frame,
-     *                      with `dst_ref` set. Passed in rather than re-peeked: the caller has
+     *                      for a `PATH_REF` `dst`. Passed in rather than re-peeked: the caller has
      *                      to classify the `dst` anyway, and reading the same three headers a
      *                      second time is what made a bound terminus measurably slower than
      *                      the canonical one it is supposed to beat.
