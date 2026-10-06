@@ -680,7 +680,8 @@ def lkv_ratio_report_paired(bench: pathlib.Path, base_bench: pathlib.Path,
 #     the two arms of a pair are seconds apart and share whatever the machine was doing.
 #   - A SINGLE family runs pinned to ONE logical CPU (`CPU_SINGLE`: `BENCH_CPU_SINGLE`, or
 #     the first CPU of `BENCH_CPU`), judged on that CPU's foreign time and on own-cgroup
-#     pressure. The methodology's own rule is one CPU per single-threaded measurement; the
+#     pressure. Unpinned (no `BENCH_CPU`), the family still narrows itself to one CPU, the
+#     lowest of its mask (`bench::pin_to_one_cpu`, #1906), and is judged over the whole set. The methodology's own rule is one CPU per single-threaded measurement; the
 #     old whole-sweep invocation needed several CPUs only because MULTI rows rode along.
 #   - A MULTI family runs on every bench CPU (`BENCH_CPU`), judged on foreign time only: its
 #     own threads raise its own cgroup's pressure (#1803). It sizes T from its affinity mask

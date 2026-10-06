@@ -1723,6 +1723,13 @@ with 0% foreign load. A real intruder still shows as foreign CPU time on either 
 gated MULTI points are `inproc-mt4/64/1/4`, `acl-inherit-d4-mt4/64/1/4` and
 `poolalloc-mt4/64/1/1`.
 
+The set also places the process (#1906). A SINGLE family narrows itself to one logical CPU,
+the lowest of the mask it was started with (`bench::pin_to_one_cpu`), however it was started.
+A MULTI family keeps the whole mask and sizes T from it (`bench::usable_cpus`), so it needs
+its own invocation on the CPUs its threads should have: `perf-local` runs `--family-set
+single` on CPU 2 and `--family-set multi` on CPUs 2-5, and `gate-pr` gives MULTI families
+3-6. A whole sweep pinned to one CPU emits the MULTI rows at T=1 only.
+
 `LIBTRACER_BENCH_FAMILY_SEED=<n>` runs the families in a seeded shuffled order (printed on
 stderr as `FAMILY-ORDER`). It exists to check the isolation: a shuffled run must leave every row
 inside its A/A spread. Each family also prints its own RSS delta on stdout, `RSS family=<name>

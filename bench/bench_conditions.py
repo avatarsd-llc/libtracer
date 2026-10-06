@@ -533,10 +533,9 @@ def _gh(name: str, text: str) -> None:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    cpus = (tuple(int(c) for c in args.cpu.split(",")) if args.cpu
-            else cpus_from_env())
+    cpus = parse_cpu_list(args.cpu) if args.cpu else cpus_from_env()
     m = measure(args.argv, cpus=cpus, attempts=args.attempts,
-                log=lambda s: print(s, file=sys.stderr))
+                log=lambda s: print(s, file=sys.stderr), score_pressure=not args.multi)
     if args.out:
         pathlib.Path(args.out).write_text(m.stdout)
     if not args.out or args.tee:
@@ -633,7 +632,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="run one timed bench invocation under the classifier")
-    r.add_argument("--cpu", default="", help="pin to these CPUs (default: $BENCH_CPU)")
+    r.add_argument("--cpu", default="", help="pin to these CPUs, e.g. 2 or 2-5 "
+                   "(default: $BENCH_CPU)")
+    r.add_argument("--multi", action="store_true",
+                   help="a multi-threaded invocation: judge it on foreign time only, since "
+                   "its own threads raise its own cgroup's pressure (#1803, #1906)")
     r.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS)
     r.add_argument("--out", default="", help="write the kept attempt's stdout here")
     r.add_argument("--tee", action="store_true", help="with --out, also echo it")

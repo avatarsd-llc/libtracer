@@ -18,8 +18,9 @@
  *     process under the pinned allocator tunables (bench_process.hpp), exactly as
  *     bench_libtracer's families run, and each family opens its own `Session`. No row inherits
  *     a heap or a session another family aged.
- *   - **The same pin, runtime threads accounted for.** Both binaries inherit one CPU set from
- *     `bench_conditions.py`, and Zenoh's runtime threads share it with the publishing thread.
+ *   - **The same pin, runtime threads accounted for.** Every compared family, on both sides,
+ *     narrows itself to one logical CPU, the lowest of the set `bench_conditions.py` gives it
+ *     (#1906), and Zenoh's runtime threads share it with the publishing thread.
  *     A `NOTE zenoh-runtime` line after each row gives those threads' CPU time over the
  *     throughput window: 0 ns on the in-process rows, so delivery there runs on the putting
  *     thread, as libtracer's does. Any share of the pin the runtime takes is on the record
@@ -339,6 +340,9 @@ int main(int argc, char** argv) {
     if (argc > 2 && arg == "--family") {
         for (const zenoh_family_t& f : kFamilies) {
             if (f.name != argv[2]) continue;
+            // One logical CPU, as bench_libtracer's single-threaded families (#1906): the
+            // compared rows keep the same pin, and Zenoh's runtime threads share it.
+            pin_to_one_cpu();
             std::fprintf(stderr, "FAMILY %.*s\n", static_cast<int>(f.name.size()), f.name.data());
             emit_alloc_state();  // the settings this family's rows run under (#1903)
             const std::size_t start_kb = rss_kb();
