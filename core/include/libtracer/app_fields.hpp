@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "libtracer/hook.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/view.hpp"
 
 /**
@@ -122,7 +123,7 @@ struct app_field_t {
  * @brief One app-field DECLARATION (ADR-0058, class ②): view-shaped, owning nothing.
  *
  * Unlike @ref app_field_t this owns NOTHING: `name` and `descriptor` are VIEWS. For an
- * OWNING install they point into @ref app_field_table_t::backing; for a BORROWED install
+ * OWNING install they point into @ref app_field_table_t::owned; for a BORROWED install
  * (@ref vertex_policy_t::app_fields) they point at the caller's own storage, and the
  * caller guarantees the pointed-to bytes — **and the array holding these entries** —
  * outlive the vertex. Pass static storage (flash / `.rodata`), never a stack array or a
@@ -290,15 +291,16 @@ class app_fields_decl_t {
  * @brief A vertex's RFC-0010 field descriptor table (ADR-0058): the immutable declaration
  *        (class ②) split from the per-vertex mutable values (class ③).
  *
- * Both install overloads converge here. A borrowed declaration leaves `backing` empty and
+ * Both install overloads converge here. A borrowed declaration leaves @ref owned null and
  * points @ref slots straight at the caller's array — the declaration costs zero RAM, neither
  * bytes nor slots (measured host-side: 392 B / 10 allocs per leaf versus 695 B / 17 for the
  * owning install, against a 136 B bare leaf — the `vertex_app5_static` and `vertex_app5` gate
  * rows). Erratum 1 is what removed the slot copy; an earlier revision of this comment still
  * described it (592 B / 11) after the code had stopped doing it. The owning declaration
- * packs the runtime table's name+descriptor bytes into `backing` — ONE allocation for the
- * whole table — and points the slots into it. `backing` is never mutated or reallocated
- * while `slots` reference it (a re-install replaces the whole table under the vertex mutex).
+ * packs the slot array and the runtime table's name+descriptor bytes into @ref owned — ONE
+ * allocation for the whole table — and points the slots into it. @ref owned is never mutated
+ * or reallocated while `slots` reference it (a re-install replaces the whole table under the
+ * vertex mutex).
  */
 struct app_field_table_t {
     /** @brief Per-field declaration views, in owner install order. Empty ⇒ no table
@@ -307,26 +309,72 @@ struct app_field_table_t {
      *         A SPAN, not a container: a borrowed install points it straight at the caller's
      *         array and allocates nothing for the declaration, which is what ADR-0058 §Step 1.2
      *         promised and did not deliver (it copied into a `std::vector` — see erratum 1). An
-     *         owning install points it at @ref owned_slots. Stable across the table's moves for
-     *         the same reason `backing` is: a moved `unique_ptr` keeps its heap address, and a
-     *         borrowed span points outside the table entirely. */
+     *         owning install points it at the head of @ref owned. Stable across the table's
+     *         moves: a move hands over the block, never copies it, and a borrowed span points
+     *         outside the table entirely. */
     std::span<const app_field_slot_t> slots{};
-    /** @brief The owning install's slot array; null for a borrowed install. A
-     *         `unique_ptr<T[]>` rather than a `vector` so the table stays the same size as
-     *         when `slots` was the vector (pointer + span == vector on both host and rv32)
-     *         and drops the vector's capacity word. Never resized: a re-install builds a
-     *         whole new table and move-assigns it under the stripe lock. */
-    std::unique_ptr<app_field_slot_t[]> owned_slots{};
-    /** @brief Owned copy of the declaration bytes for the owning install (name then
-     *         descriptor, concatenated per field); empty for a borrowed install whose
-     *         slots view caller storage. */
-    std::vector<std::byte> backing{};
-    /** @brief Class-③ per-field values, index-aligned with @ref slots — LAZILY allocated,
-     *         null until the first write to a RETAINING field on this vertex (#389 pattern).
-     *         A declared-but-never-written table, and one whose only writes went to `wo` /
-     *         @ref retention_t::NONE fields, costs zero value RAM (RFC-0028 §5.4).
-     *         `(*values)[i]` empty ⇒ field i unset. */
-    std::unique_ptr<std::vector<std::vector<std::byte>>> values{};
+    /** @brief The source every owned block below came from (#1778). */
+    mem::block_source_t* src;
+    /** @brief The owning install's ONE block: the slot array, then each field's name and
+     *         descriptor bytes, which the slots view. Null for a borrowed install. Sized
+     *         exactly at install and never resized: a re-install builds a whole new table and
+     *         move-assigns it under the stripe lock. Raw rather than two core arrays so the
+     *         table is 48 B, under the 56 B its `std::vector` predecessor took
+     *         (`vertex_app5` gate). */
+    std::byte* owned = nullptr;
+    /** @brief The size @ref owned was drawn at — what its sized release hands back. */
+    std::size_t owned_bytes = 0;
+    /** @brief Class-③ per-field values, `slots.size()` of them, index-aligned with
+     *         @ref slots — LAZILY allocated, null until the first write to a RETAINING field on
+     *         this vertex (#389 pattern). A declared-but-never-written table, and one whose only
+     *         writes went to `wo` / @ref retention_t::NONE fields, costs zero value RAM
+     *         (RFC-0028 §5.4). `values[i]` empty ⇒ field i unset. */
+    mem::bytes_t* values = nullptr;
+
+    /** @brief An empty table whose owned storage draws from @p s (the vertex's extension
+     *         block's source, #1778). */
+    explicit app_field_table_t(mem::block_source_t& s) noexcept : src(&s) {}
+    app_field_table_t(const app_field_table_t&) = delete;
+    app_field_table_t& operator=(const app_field_table_t&) = delete;
+    /** @brief Take @p o's blocks; @p o is left an empty table over the same source. */
+    app_field_table_t(app_field_table_t&& o) noexcept
+        : slots(std::exchange(o.slots, {})),
+          src(o.src),
+          owned(std::exchange(o.owned, nullptr)),
+          owned_bytes(std::exchange(o.owned_bytes, 0)),
+          values(std::exchange(o.values, nullptr)) {}
+    /** @brief Release this table's blocks, then take @p o's. */
+    app_field_table_t& operator=(app_field_table_t&& o) noexcept {
+        if (this == &o) return *this;
+        this->~app_field_table_t();
+        return *::new (this) app_field_table_t(std::move(o));
+    }
+    ~app_field_table_t() {
+        if (values != nullptr) {
+            std::destroy_n(values, slots.size());
+            src->release(values, slots.size() * sizeof(mem::bytes_t), alignof(mem::bytes_t));
+        }
+        if (owned != nullptr) src->release(owned, owned_bytes, alignof(app_field_slot_t));
+    }
+
+    /** @brief Draw @ref owned at @p bytes. @retval false The source refused. */
+    [[nodiscard]] bool own(std::size_t bytes) noexcept {
+        owned = static_cast<std::byte*>(src->try_alloc(bytes, alignof(app_field_slot_t)));
+        owned_bytes = owned != nullptr ? bytes : 0;
+        return owned != nullptr;
+    }
+
+    /** @brief Allocate @ref values — one empty byte string per slot — on the first write;
+     *         a no-op once allocated.
+     *  @retval false The source refused; @ref values is still null. */
+    [[nodiscard]] bool ensure_values() noexcept {
+        if (values != nullptr) return true;
+        void* const p = src->try_alloc(slots.size() * sizeof(mem::bytes_t), alignof(mem::bytes_t));
+        if (p == nullptr) return false;
+        values = static_cast<mem::bytes_t*>(p);
+        for (std::size_t i = 0; i < slots.size(); ++i) ::new (values + i) mem::bytes_t(*src);
+        return true;
+    }
 };
 
 /** @brief The owner apply seam's @ref hook_t shape (RFC-0010 §A.3): the field's key below
@@ -345,6 +393,9 @@ using app_field_write_hook_t = hook_t<void(std::string_view name, const view::vi
  * guarded by the vertex mutex, insert-only (never freed before the vertex).
  */
 struct app_field_group_t {
+    /** @brief An empty group whose table draws from @p src (#1778). */
+    explicit app_field_group_t(mem::block_source_t& src) noexcept : table(src) {}
+
     app_field_table_t table; /**< @brief The view-slot descriptor table + lazy value store. */
     /** @brief The owner apply seam (RFC-0010 §A.3): fires after a declared field write
      *         stored its bytes, OUTSIDE the vertex lock. Unset ⇒ bytes just store. Never fires

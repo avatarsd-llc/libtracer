@@ -708,7 +708,7 @@ struct vertex_ext_t {
      *         source, the pressure arm and the gap census — so RFC-0025 §4.6.1's byte bound
      *         moves `sizeof(vertex_ext_t)` by NOTHING and a non-receiving ext-bearing vertex
      *         pays nothing for it. */
-    std::unique_ptr<ring_state_t> ring;
+    ring_state_t* ring = nullptr;
     /** @brief The `:acl` parsed into core-subset ACEs at write time (#81) — the ONLY stored
      *         ACL state (#907); guarded by the vertex mutex. `graph_t::acl_allows` evaluates
      *         this list and `graph_t::read_acl` RE-ENCODES it, so read-back is canonical by
@@ -776,18 +776,28 @@ struct vertex_ext_t {
      *         its `on_app_field_write` apply seam, LAZILY allocated: a vertex with no app
      *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
      *         insert-only. Null ⇒ the closed `ENOTTY` default (pre-RFC `:schema` shape). */
-    std::unique_ptr<app_field_group_t> app;
+    app_field_group_t* app = nullptr;
     /** @brief STREAM drain cursor (RFC-0008 §E): ring APPENDS not yet flushed, so a
      *         propagate drains only what was appended; guarded by the vertex mutex. NOT a
      *         `write_seq_` delta (#925) — that bumps on a SHED append, fabricating a tail. */
     std::uint64_t appended_since_flush = 0;
 
-    /** @brief Free the live handler block. `handlers` is a raw atomic pointer (for lock-free
-     *         reads) so it no longer self-frees; this closes that. Blocks parked by retirement
-     *         live on the graph, not here. The ring's reservations go back through
-     *         `~ring_state_t`, which owns that pairing. Runs from `~vertex_t`'s `delete ext_`. */
-    ~vertex_ext_t() { delete handlers.load(std::memory_order_acquire); }
-    vertex_ext_t() = default;
+    /** @brief The source this block was drawn from, and the one every block hung off it (the
+     *         value seam, @ref ring, @ref app and the app table) is drawn from and returned to
+     *         (#1778): the graph's table source. */
+    tr::mem::block_source_t* src;
+
+    /** @brief A block whose lazy members will draw from @p s, which also served it. */
+    explicit vertex_ext_t(tr::mem::block_source_t& s) noexcept : src(&s) {}
+    /** @brief Free the live handler block, the ring state and the app group to @ref src.
+     *         `handlers` is a raw atomic pointer (for lock-free reads) so it does not
+     *         self-free. Blocks parked by retirement live on the graph, not here. The ring's
+     *         reservations go back through `~ring_state_t`, which owns that pairing. */
+    ~vertex_ext_t() {
+        tr::mem::drop_in(*src, handlers.load(std::memory_order_acquire));
+        tr::mem::drop_in(*src, ring);
+        tr::mem::drop_in(*src, app);
+    }
     vertex_ext_t(const vertex_ext_t&) = delete;
     vertex_ext_t& operator=(const vertex_ext_t&) = delete;
 };
@@ -895,10 +905,16 @@ class vertex_t {
 
     /** @brief Construct a vertex with its role, own canonical NAME record (ADR-0057 — one
      *         segment, not the full key), and handlers. The cold extension block is
-     *         allocated only if this identity needs one (#361 §1). */
-    vertex_t(role_t role, path_key_t name, handlers_t handlers)
+     *         allocated, from @p src, only if this identity needs one (#361 §1).
+     *
+     *  The graph builds every vertex as a handler-less placeholder (no allocation) and
+     *  installs an identity through `%fill`, whose refusal is a value. A standalone
+     * vertex built WITH handlers whose @p src refuses the extension block stops the node
+     *  (`%mem::exhausted_at_init`): a constructor has no other way to answer. */
+    vertex_t(role_t role, path_key_t name, handlers_t handlers,
+             tr::mem::block_source_t& src = tr::mem::table_source())
         : name_(std::move(name)), role_(role) {
-        adopt_identity(role, std::move(handlers));
+        if (!adopt_identity(role, handlers, src)) tr::mem::exhausted_at_init(src, "vertex_t");
     }
 
     vertex_t(const vertex_t&) = delete;
@@ -908,8 +924,10 @@ class vertex_t {
      *         flush the edge block's published + parked arrays (`edge_block_t`'s destructor
      *         states the outlive-the-publishers contract that makes this safe). */
     ~vertex_t() {
-        delete ext_.load(std::memory_order_acquire);
-        delete edges_.load(std::memory_order_acquire);
+        if (children_ != nullptr) tr::mem::drop_in(children_->sorted.source(), children_);
+        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire)) tr::mem::drop_in(*e->src, e);
+        if (edge_block_t* b = edges_.load(std::memory_order_acquire))
+            tr::mem::drop_in(b->slots.source(), b);
     }
 
     /**
@@ -925,7 +943,7 @@ class vertex_t {
     [[nodiscard]] role_t role() const noexcept { return role_.load(std::memory_order_relaxed); }
     /** @brief This vertex's own canonical NAME record (its single path segment, ADR-0057);
      *         empty at the root. The full key is a parent-walk concatenation
-     *         (`graph_t`'s `build_key`). */
+     *         (`graph_t`'s `try_build_key`). */
     [[nodiscard]] const path_key_t& name() const noexcept { return name_; }
     /**
      * @brief Whether the lazily-allocated cold extension block EXISTS on this vertex (#361 §1).
@@ -1045,14 +1063,20 @@ class vertex_t {
      *
      * Called under the graph's UNIQUE map lock — either on a freshly constructed node or on
      * a placeholder being registered in place (the allocation never moves, ADR-0057).
+     *
+     * @param src The graph's table source, which the extension block is drawn from when this
+     *            identity needs one.
+     * @retval false @p src refused the identity's blocks (#1778): nothing was installed and
+     *         the node is still an unregistered placeholder.
      */
-    void fill(role_t role, handlers_t handlers) {
+    [[nodiscard]] bool fill(role_t role, const handlers_t& handlers, tr::mem::block_source_t& src) {
+        if (!adopt_identity(role, handlers, src)) return false;
         role_.store(role, std::memory_order_relaxed);  // atomic since #1477 — see @ref role
-        adopt_identity(role, std::move(handlers));
         registered_ = true;
         // Maintain the parent's lock-free fork bit (#652). Setting is unconditional and
         // idempotent; the root has no parent, and nothing asks about the root's parent.
         if (parent_ != nullptr) parent_->set_flag(flag_t::REGISTERED_CHILD, true);
+        return true;
     }
 
     /** @brief Flip this vertex back to a placeholder (invisible to `find`) — retirement's
@@ -1169,21 +1193,28 @@ class vertex_t {
      * common MCU vertex — keeps `children_` null and pays exactly one pointer. The
      * list stays sorted by name record, so a wide composite resolves a child in
      * O(log children). The `vertex_t` itself never moves (only owning pointers do).
+     * The list and @p child must both come from @p src (`graph_t::table_source`, #1778):
+     * on success the list OWNS @p child and returns its block to that source when this
+     * vertex is destroyed.
      * @note Called under the graph's UNIQUE map lock.
-     * @return The adopted child (its stable address).
+     * @return The adopted child (its stable address), or null when @p src refused the list's
+     *         growth — then nothing changed and @p child is still the caller's.
      */
-    vertex_t* add_child(std::unique_ptr<vertex_t> child) {
-        child->parent_ = this;
-        vertex_t* raw = child.get();
-        if (!children_) children_ = std::make_unique<children_t>();
-        std::vector<std::unique_ptr<vertex_t>>& sorted = children_->sorted;
-        const auto pos =
+    [[nodiscard]] vertex_t* add_child(vertex_t* child, tr::mem::block_source_t& src) noexcept {
+        if (children_ == nullptr) {
+            children_ = tr::mem::make_in<children_t>(src, src);
+            if (children_ == nullptr) return nullptr;
+        }
+        tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
+        vertex_t* const* const pos =
             std::lower_bound(sorted.begin(), sorted.end(), child->name().bytes(),
-                             [](const std::unique_ptr<vertex_t>& c, std::span<const std::byte> n) {
+                             [](const vertex_t* c, std::span<const std::byte> n) {
                                  return std::ranges::lexicographical_compare(c->name().bytes(), n);
                              });
-        sorted.insert(pos, std::move(child));
-        return raw;
+        if (sorted.emplace_at(static_cast<std::size_t>(pos - sorted.begin()), child) == nullptr)
+            return nullptr;
+        child->parent_ = this;
+        return child;
     }
 
    public:
@@ -1193,16 +1224,16 @@ class vertex_t {
      * @note Called under the graph's map lock (shared suffices).
      */
     [[nodiscard]] vertex_t* child_by_record(std::span<const std::byte> record) const noexcept {
-        if (!children_) return nullptr;
-        const std::vector<std::unique_ptr<vertex_t>>& sorted = children_->sorted;
+        if (children_ == nullptr) return nullptr;
+        const tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
         const auto it =
             std::lower_bound(sorted.begin(), sorted.end(), record,
-                             [](const std::unique_ptr<vertex_t>& c, std::span<const std::byte> r) {
+                             [](const vertex_t* c, std::span<const std::byte> r) {
                                  return std::ranges::lexicographical_compare(c->name().bytes(), r);
                              });
         if (it == sorted.end()) return nullptr;
         const bool matches = std::ranges::equal((*it)->name().bytes(), record);
-        return matches ? it->get() : nullptr;
+        return matches ? *it : nullptr;
     }
 
     /**
@@ -1213,8 +1244,8 @@ class vertex_t {
      */
     template <typename F>
     void for_each_child(F&& f) const {
-        if (!children_) return;
-        for (const std::unique_ptr<vertex_t>& c : children_->sorted) f(*c);
+        if (children_ == nullptr) return;
+        for (vertex_t* c : children_->sorted) f(*c);
     }
 
     /**
@@ -1330,8 +1361,9 @@ class vertex_t {
          */
         static constexpr std::size_t kInline = 4;
 
-        /** @brief An empty take; nothing allocated. */
-        ring_take_t() noexcept = default;
+        /** @brief An empty take whose spill, if one is ever needed, draws from @p src (the
+         *         graph's value source, #1778); nothing allocated. */
+        explicit ring_take_t(tr::mem::block_source_t& src) noexcept : spill_(src) {}
         /** @brief Non-copyable — transient delivery storage, never a value. */
         ring_take_t(const ring_take_t&) = delete;
         /** @brief Non-assignable — transient delivery storage, never a value. */
@@ -1340,7 +1372,7 @@ class vertex_t {
         /** @brief The taken entries, oldest first. */
         [[nodiscard]] std::span<const value_ref_t> entries() const noexcept {
             return spill_.empty() ? std::span<const value_ref_t>(inline_.data(), n_)
-                                  : std::span<const value_ref_t>(spill_);
+                                  : std::span<const value_ref_t>(spill_.data(), spill_.size());
         }
         /** @brief Did a ring admission run the take at all? False only when the store never
          *         reached a STREAM ring (a role that changed under a racing retire), which
@@ -1354,18 +1386,18 @@ class vertex_t {
          * @return false iff the spill could not be allocated (nothing taken; retry later).
          */
         [[nodiscard]] bool reserve(std::size_t n) noexcept {
-            return n <= kInline || tr::detail::try_reserve(spill_, n);
+            return n <= kInline || spill_.reserve(n);
         }
         /** @brief Append one refcount share; %reserve has made room. */
         void push_back(const value_ref_t& v) {
             if (spill_.capacity() != 0)
-                spill_.push_back(v);  // within capacity — no allocation
+                (void)spill_.push_back(v);  // within capacity — no allocation, cannot fail
             else
                 inline_[n_++] = v;
         }
 
         std::array<value_ref_t, kInline> inline_{}; /**< @brief The in-frame slots. */
-        std::vector<value_ref_t> spill_;            /**< @brief The overflow; empty ⇒ unused. */
+        tr::mem::block_array_t<value_ref_t> spill_; /**< @brief The overflow; empty ⇒ unused. */
         std::size_t n_ = 0;                         /**< @brief In-frame entries taken. */
         bool engaged_ = false;                      /**< @brief See @ref engaged. */
     };
@@ -1510,7 +1542,7 @@ class vertex_t {
      *         a caller can map it straight to `BACKPRESSURE` without re-deriving the arm.
      */
     bool ring_admit(const value_ref_t& sp, std::size_t bytes, tr::mem::block_source_t& src,
-                    store_drops_t* drops, ring_take_t* take = nullptr) {
+                    store_drops_t& drops, ring_take_t* take = nullptr) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (take != nullptr) take->engaged_ = true;
@@ -1526,8 +1558,16 @@ class vertex_t {
      * @return As %ring_admit.
      */
     bool admit_locked(vertex_ext_t* e, const value_ref_t& sp, std::size_t bytes,
-                      tr::mem::block_source_t& src, store_drops_t* drops) {
-        if (!e->ring) e->ring = std::make_unique<ring_state_t>();  // first append (#388 lazy)
+                      tr::mem::block_source_t& src, store_drops_t& drops) {
+        if (e->ring == nullptr) {  // first append (#388 lazy)
+            e->ring = tr::mem::make_in<ring_state_t>(*e->src);
+            if (e->ring == nullptr) {
+                // No ring state, so no bound arm either: the best-effort default holds, and
+                // the loss is accounted like any refused admission (#1778).
+                drops.ring_append = true;
+                return true;
+            }
+        }
         ring_state_t& r = *e->ring;
         // Bind the source ONCE. A release must reach the source that served the block (sized
         // reclaim), so a vertex that has already charged keeps charging the same seam even if
@@ -1583,13 +1623,13 @@ class vertex_t {
         }
         // The shed is accounted on BOTH outcomes, so once, here. Under the reliable arm `shed`
         // is always zero (only best-effort sheds), so this is a no-op there.
-        if (drops != nullptr) drops->ring_shed += shed;
+        drops.ring_shed += shed;
         r.gaps += shed;
         if (token == nullptr) {
             // Nothing admitted. Under the reliable arm nothing was shed either, and the caller
             // turns our `false` into BACKPRESSURE. Under best-effort the ring was already
             // emptied above, so the loss is real and is accounted rather than silent.
-            if (drops != nullptr && !arm_reliable) drops->ring_append = true;
+            if (!arm_reliable) drops.ring_append = true;
             return !arm_reliable;
         }
         // Placed at the front of its own reservation: the queue's bookkeeping is charged to the
@@ -1888,14 +1928,15 @@ class vertex_t {
      *         when the edge array could not be allocated — nothing was admitted and the
      *         previously published array is untouched, so the vertex is unchanged.
      */
-    std::size_t add_edge(subscriber_t s, edge_latch_t* latch = nullptr) {
+    std::size_t add_edge(subscriber_t s, edge_latch_t* latch = nullptr,
+                         tr::mem::block_source_t& tables = tr::mem::table_source()) {
         edge_block_t* b = nullptr;
         std::size_t idx = kNoSlot;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
-            b = ensure_edges();
+            b = ensure_edges(tables);
             if (b == nullptr) return kNoSlot;  // OOM on the block itself: admit nothing
-            std::vector<subscriber_t>& subs = b->slots;
+            tr::mem::block_array_t<subscriber_t>& subs = b->slots;
             idx = subs.size();
             for (std::size_t i = 0; i < subs.size(); ++i) {
                 if (!subs[i].active) {
@@ -1903,9 +1944,9 @@ class vertex_t {
                     break;
                 }
             }
-            if (idx == subs.size())
-                subs.push_back(std::move(s));
-            else
+            if (idx == subs.size()) {
+                if (!subs.push_back(std::move(s))) return kNoSlot;  // the table did not grow
+            } else
                 subs[idx] = std::move(s);  // reuse frees the cleared slot's leftovers
             if (!try_publish_edges(*b)) {
                 // The new edge could not be published. ROLL THE SLOT BACK rather than leave a
@@ -1948,7 +1989,7 @@ class vertex_t {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b == nullptr) return false;
-            std::vector<subscriber_t>& subs = b->slots;
+            tr::mem::block_array_t<subscriber_t>& subs = b->slots;
             if (idx >= subs.size() || !subs[idx].active) return false;
             if (retired_ctx != nullptr) *retired_ctx = subs[idx].callback_ctx;
             if (retired_remote != nullptr) *retired_remote = std::move(subs[idx].remote);
@@ -2023,7 +2064,7 @@ class vertex_t {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b == nullptr) return edge_replace_t::OUT_OF_RANGE;
-            std::vector<subscriber_t>& subs = b->slots;
+            tr::mem::block_array_t<subscriber_t>& subs = b->slots;
             if (idx >= subs.size()) return edge_replace_t::OUT_OF_RANGE;
             const bool was_active = subs[idx].active;
             if (displaced_remote != nullptr) *displaced_remote = std::move(subs[idx].remote);
@@ -2097,7 +2138,7 @@ class vertex_t {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b == nullptr) return 0;
-            std::vector<subscriber_t>& subs = b->slots;
+            tr::mem::block_array_t<subscriber_t>& subs = b->slots;
             for (std::size_t i = 0; i < subs.size(); ++i) {
                 subscriber_t& s = subs[i];
                 if (!s.active || s.remote == nullptr) continue;
@@ -2158,7 +2199,7 @@ class vertex_t {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b == nullptr) return 0;
-            std::vector<subscriber_t>& subs = b->slots;
+            tr::mem::block_array_t<subscriber_t>& subs = b->slots;
             for (std::size_t i = 0; i < subs.size(); ++i) {
                 subscriber_t& s = subs[i];
                 if (!s.active || s.remote == nullptr) continue;
@@ -2298,7 +2339,7 @@ class vertex_t {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const edge_block_t* b = edges_locked();
         if (b == nullptr) return std::nullopt;
-        const std::vector<subscriber_t>& subs = b->slots;
+        const tr::mem::block_array_t<subscriber_t>& subs = b->slots;
         if (idx < subs.size() && subs[idx].active && subs[idx].source_view.owner)
             return subs[idx].source_view;  // clone (refcount bump)
         return std::nullopt;
@@ -2318,6 +2359,39 @@ class vertex_t {
     }
 
     // -- ACL state (#81, ADR-0018/0020) -------------------------------------------------
+
+    /**
+     * @brief Take back everything a registration DECLARES, to an unregistered placeholder's
+     *        default: the policy members (retention by role with no `RETAIN_NONE`, depth 1, no
+     *        ring so no ring source and best-effort, the default share threshold, no
+     *        app-field group) and the payload-right and admission flags.
+     *
+     * The flags belong to the occupant, not to the address (RFC-0014 Amendment 2): the
+     * graph's rows and filter nodes for this vertex stay parked and unreachable while the bits
+     * are clear, and a re-registration that declares again prepends its own, newer node.
+     *
+     * Retirement calls it, and so does a registration refused after its declarations landed on
+     * the placeholder (#1778), so a later registration through a door that brings no policy
+     * (the write-create `ensure_vertex`) inherits none of it. The caller MUST hold the graph
+     * map lock; the stripe lock is taken here. Allocates nothing.
+     */
+    void clear_declarations() noexcept {
+        set_flag(flag_t::RETAIN_NONE, false);
+        set_flag(flag_t::PAYLOAD_RIGHTS, false);
+        set_flag(flag_t::ADMISSION, false);
+        vertex_ext_t* const e = ext_.load(std::memory_order_acquire);
+        if (e == nullptr) return;
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        // `~ring_state_t` hands every held reservation back to the source that served it, so
+        // dropping the block here cannot leak the ring's byte budget.
+        tr::mem::drop_in(*e->src, e->ring);
+        e->ring = nullptr;
+        e->appended_since_flush = 0;  // cleared WITH `ring` — the drain's invariant
+        e->retention_depth = 1;
+        e->share_threshold_bytes = saturate_threshold(config_t::kShareThresholdBytes);
+        tr::mem::drop_in(*e->src, e->app);
+        e->app = nullptr;
+    }
 
     /**
      * @brief Restore this vertex to the state an unregistered PLACEHOLDER carries — the
@@ -2341,12 +2415,14 @@ class vertex_t {
      *       the old pointer, so the graph parks it and the embedder frees the park through
      *       `graph_t::collect()` (#576). The per-vertex stripe lock is taken internally.
      *
-     * @param routed Receives the cold half of every active edge ROUTED through a link (a
-     *        non-empty delivery link) that the clear drops, so the graph can give each one's
-     *        link hold back once its locks are released (#1816).
+     * @param gone Receives this vertex's whole subscriber slot table (MOVED out, never
+     *        copied, so it cannot fail): the graph gives each ROUTED edge's link hold back
+     *        and drops the table once its locks are released (#1816, #1778). Left as it was
+     *        when this vertex has no edge block.
      * @return the detached seam block to park, or nullptr if this vertex had none.
      */
-    [[nodiscard]] value_handlers_t* revert_to_placeholder(std::vector<remote_ptr_t>& routed) {
+    [[nodiscard]] value_handlers_t* revert_to_placeholder(
+        tr::mem::block_array_t<subscriber_t>& gone) {
         // Atomics first — no lock needed, and clearing own ACEs before anything else is
         // fail-closed: the graph's bearing-ancestor walk (the OWN_ACES bit) skips this vertex
         // immediately, so a concurrent gated op on a descendant stops seeing the retired
@@ -2375,19 +2451,10 @@ class vertex_t {
         // next registration at this key is a different vertex kind and must be listed unless
         // it asks not to be (RFC-0014 §3 / S4).
         set_flag(flag_t::ENUM_HIDDEN, false);
-        // Same argument for the payload-right declaration (RFC-0014 Amendment 2): it belongs
-        // to the retiring occupant, not to the address. The graph's rows for this vertex stay
-        // parked and unreachable — nothing consults them while this bit is clear — and a
-        // re-registration that declares again publishes its own, newer rows.
-        set_flag(flag_t::PAYLOAD_RIGHTS, false);
-        // And for the admission filters, for the third time the same reason: they belong to the
-        // retiring occupant, not to the address. The graph's node for this vertex stays parked
-        // and unreachable — nothing consults it while this bit is clear — and a re-registration
-        // that installs a filter again prepends its own, newer node.
-        set_flag(flag_t::ADMISSION, false);
-        // And the retention declaration (RFC-0028 §5.4): the next occupant retains by its own
-        // role's default until it declares otherwise.
-        set_flag(flag_t::RETAIN_NONE, false);
+        // The same argument for everything the occupant declared: its payload rights, its
+        // admission filters and its policy (RFC-0028 §5.4 retention, the ring, the threshold,
+        // the app fields). The next occupant starts from its own role's defaults.
+        clear_declarations();
         // And the pending-mark hint (#1712): the retire erases the occupant's key from the
         // sweep set right after the map lock drops, so the next occupant starts unmarked.
         set_flag(flag_t::PENDING_MARK, false);
@@ -2408,17 +2475,10 @@ class vertex_t {
             // reader). The remaining ext fields are mutated under the stripe lock.
             detached = e->handlers.exchange(nullptr, std::memory_order_acq_rel);
             const std::lock_guard lock(vertex_stripe_of(this).m);
-            // `~ring_state_t` hands every held reservation back to the source that served it,
-            // so dropping the block here cannot leak the ring's byte budget.
-            e->ring.reset();
             e->acl_present = false;
             e->aces.clear();
             e->eff_aces.clear();
             invalidate_acl_cache(*e);  // ADR-0078: nothing here a rebuilder can clobber
-            e->retention_depth = 1;
-            e->share_threshold_bytes = saturate_threshold(config_t::kShareThresholdBytes);
-            e->app.reset();
-            e->appended_since_flush = 0;  // cleared WITH `ring` — the drain's invariant
         }
         // The edge block is stripe-guarded; clear it in its own critical section (both it and
         // the ext block may be absent). The graph has already adjusted descendant
@@ -2427,19 +2487,17 @@ class vertex_t {
         // The slots are SWAPPED out rather than cleared in place, so the routed ones can be
         // sorted from the rest after the stripe lock is down — nothing allocates under it.
         edge_block_t* b = nullptr;
-        std::vector<subscriber_t> gone;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b != nullptr) {
-                gone.swap(b->slots);
+                tr::mem::block_source_t& src = b->slots.source();
+                gone = std::move(b->slots);
+                b->slots = tr::mem::block_array_t<subscriber_t>(src);
                 (void)try_publish_edges(*b);  // slots are empty ⇒ publishes null, cannot fail
             }
         }
         if (b != nullptr) scan_retired_edges(*b);
-        for (subscriber_t& e : gone)
-            if (e.active && e.remote != nullptr && !e.remote->link.empty())
-                routed.push_back(std::move(e.remote));
         return detached;
     }
 
@@ -2452,8 +2510,10 @@ class vertex_t {
      * there is no second copy to fall out of step with the list evaluation walks — an
      * `:acl` read re-encodes from here.
      */
-    void set_acl(std::vector<ace_t> aces) {
-        vertex_ext_t& e = ensure_ext();
+    [[nodiscard]] bool set_acl(std::vector<ace_t> aces, tr::mem::block_source_t& tables) {
+        vertex_ext_t* const ext = ensure_ext(tables);
+        if (ext == nullptr) return false;
+        vertex_ext_t& e = *ext;
         const std::lock_guard lock(vertex_stripe_of(this).m);
         e.aces = std::move(aces);
         e.acl_present = true;
@@ -2468,6 +2528,7 @@ class vertex_t {
         // defeats the publish CAS of any rebuild already in flight over the OLD list, which
         // is what stops a stale merge being stamped current.
         invalidate_acl_cache(e);
+        return true;
     }
 
     /**
@@ -2587,7 +2648,16 @@ class vertex_t {
     template <typename Rebuild, typename Eval>
     auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
         -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
-        vertex_ext_t& e = ensure_ext();  // gated eval caches its merge here (fresh ⇒ stale)
+        // The merge is cached in the extension block. A BEARER — the only vertex the graph
+        // evaluates here — always has one (its own ACEs live there), so this never allocates
+        // (#1778); a vertex without one evaluates a fresh merge over no own ACEs, uncached.
+        vertex_ext_t* const ext = ext_.load(std::memory_order_acquire);
+        if (ext == nullptr) {
+            static const std::vector<ace_t> kNoAces{};
+            const std::vector<ace_t> merged = rebuild(kNoAces);
+            return eval(merged);
+        }
+        vertex_ext_t& e = *ext;
         std::unique_lock lock(vertex_stripe_of(this).m);
         while (true) {
             // The fast path is ONE acquire load and a parity test — what the retired dirty
@@ -2624,12 +2694,15 @@ class vertex_t {
      * vertex that never had an extension block, allocates nothing (#361 §1: a leaf with
      * no app fields pays nothing).
      */
-    void set_app_fields(std::vector<app_field_t> table) {
-        if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return;
-        app_field_table_t built = build_owning_table(std::move(table));
-        vertex_ext_t& e = ensure_ext();
+    [[nodiscard]] bool set_app_fields(std::vector<app_field_t> table,
+                                      tr::mem::block_source_t& tables) {
+        if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return true;
+        vertex_ext_t* const e = ensure_ext(tables);
+        if (e == nullptr) return false;
+        app_field_table_t built(*e->src);
+        if (!build_owning_table(table, built)) return false;
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        install_app_table(e, std::move(built));
+        return install_app_table(*e, std::move(built));
     }
 
     /**
@@ -2641,13 +2714,15 @@ class vertex_t {
      *        uninstall-on-empty and allocate-nothing-on-empty-leaf semantics as
      *        @ref vertex_policy_t::app_fields.
      */
-    void set_app_fields_static(borrowed_fields_t table) {
-        if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return;
-        app_field_table_t built;
+    [[nodiscard]] bool set_app_fields_static(borrowed_fields_t table,
+                                             tr::mem::block_source_t& tables) {
+        if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return true;
+        vertex_ext_t* const e = ensure_ext(tables);
+        if (e == nullptr) return false;
+        app_field_table_t built(*e->src);
         built.slots = table.slots();  // viewed in place — this install allocates NOTHING here
-        vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        install_app_table(e, std::move(built));
+        return install_app_table(*e, std::move(built));
     }
 
     /** @brief The declared access of the app field @p name (`nullopt` ⇒ undeclared —
@@ -2666,25 +2741,28 @@ class vertex_t {
      *        self-description) — or store nothing, if the field retains nothing (`wo`, or
      *        declared @ref retention_t::NONE; RFC-0028 §5.4). The caller's apply seam fires
      *        either way.
-     * @return false iff @p name is not declared (e.g. a concurrent table replacement
-     *         removed it between the caller's gate and this store).
+     * @return `SCHEMA_NOT_FOUND` iff @p name is not declared (e.g. a concurrent table
+     *         replacement removed it between the caller's gate and this store), and
+     *         `BACKPRESSURE` when the table source could not hold the bytes (#1778) — the
+     *         field keeps its previous bytes.
      */
-    bool app_field_store(std::string_view name, std::span<const std::byte> bytes) {
+    [[nodiscard]] result_t<void> app_field_store(std::string_view name,
+                                                 std::span<const std::byte> bytes) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         const std::ptrdiff_t i = find_app_slot(e, name);
-        if (i < 0) return false;
+        if (i < 0) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         app_field_table_t& t = e->app->table;
         // A field that retains nothing (`wo`, or declared `NONE` — RFC-0028 §5.4) stores
         // nothing: the caller still fires `on_app_field_write` with the bytes, and `values`
         // is never allocated on its account. Declared and admitted, so this is a success.
-        if (t.slots[static_cast<std::size_t>(i)].retains_nothing()) return true;
+        if (t.slots[static_cast<std::size_t>(i)].retains_nothing()) return {};
         // Class-③ value store: allocated on the FIRST write to a retaining field on this
         // vertex (#389 lazy pattern) — a declared-but-never-written table never pays for it.
-        if (t.values == nullptr)
-            t.values = std::make_unique<std::vector<std::vector<std::byte>>>(t.slots.size());
-        (*t.values)[static_cast<std::size_t>(i)].assign(bytes.begin(), bytes.end());
-        return true;
+        if (!t.ensure_values() ||
+            !tr::mem::assign_bytes(t.values[static_cast<std::size_t>(i)], bytes))
+            return std::unexpected(status_t::BACKPRESSURE);
+        return {};
     }
 
     /** @brief One app-field read outcome — the graph maps these onto the RFC-0002
@@ -2706,8 +2784,8 @@ class vertex_t {
         const app_field_table_t& t = e->app->table;
         const std::size_t idx = static_cast<std::size_t>(i);
         if (t.slots[idx].access == app_access_t::WO) return app_read_t::WRITE_ONLY;
-        if (t.values == nullptr || (*t.values)[idx].empty()) return app_read_t::UNSET;
-        out = (*t.values)[idx];
+        if (t.values == nullptr || t.values[idx].empty()) return app_read_t::UNSET;
+        out.assign(t.values[idx].begin(), t.values[idx].end());
         return app_read_t::OK;
     }
 
@@ -2730,7 +2808,7 @@ class vertex_t {
             f.name.assign(t.slots[i].name);
             f.access = t.slots[i].access;
             f.descriptor.assign(t.slots[i].descriptor.begin(), t.slots[i].descriptor.end());
-            if (t.values != nullptr && i < t.values->size()) f.value = (*t.values)[i];
+            if (t.values != nullptr) f.value.assign(t.values[i].begin(), t.values[i].end());
             out.push_back(std::move(f));
         }
         return out;
@@ -2758,20 +2836,23 @@ class vertex_t {
      * @param depth Entries to retain under @ref retention_t::N; 0 is normalised to 1 by the
      *              ring trim. Ignored otherwise.
      */
-    void set_retention(retention_t r, std::uint32_t depth) {
+    [[nodiscard]] bool set_retention(retention_t r, std::uint32_t depth,
+                                     tr::mem::block_source_t& tables) {
         if (r == retention_t::N) {
-            vertex_ext_t& e = ensure_ext();
+            vertex_ext_t* const e = ensure_ext(tables);
+            if (e == nullptr) return false;
             const std::lock_guard lock(vertex_stripe_of(this).m);
-            e.retention_depth = depth;
+            e->retention_depth = depth;
         }
         set_flag(flag_t::RETAIN_NONE, r == retention_t::NONE);
-        if (r != retention_t::NONE) return;
+        if (r != retention_t::NONE) return true;
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own reference
         if (vertex_ext_t* e = ext_.load(std::memory_order_acquire); e != nullptr) {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             if (e->ring) e->ring->release_all();
             e->appended_since_flush = 0;  // cleared WITH the ring — the drain's invariant
         }
+        return true;
     }
 
     /** @brief True iff this value vertex was declared @ref retention_t::NONE — the write
@@ -2818,20 +2899,25 @@ class vertex_t {
      *                 loss, raise a gap; true reliable — refuse the admission and answer the
      *                 local producer `BACKPRESSURE`, shedding nothing.
      */
-    void set_ring_source(tr::mem::block_source_t* src, bool reliable) {
-        vertex_ext_t& e = ensure_ext();
+    [[nodiscard]] bool set_ring_source(tr::mem::block_source_t* src, bool reliable,
+                                       tr::mem::block_source_t& tables) {
+        vertex_ext_t* const ext = ensure_ext(tables);
+        if (ext == nullptr) return false;
+        vertex_ext_t& e = *ext;
         const std::lock_guard lock(vertex_stripe_of(this).m);
         // Nothing declared and no ring yet ⇒ nothing to record: do not allocate the ring block
         // for a call that restores the default. The whole point of hanging this state off the
         // lazy pointer is that a vertex which never receives never pays for it.
         if (e.ring == nullptr) {
-            if (src == nullptr && !reliable) return;
-            e.ring = std::make_unique<ring_state_t>();
+            if (src == nullptr && !reliable) return true;
+            e.ring = tr::mem::make_in<ring_state_t>(*e.src);
+            if (e.ring == nullptr) return false;
         }
         e.ring->release_all();  // reservations go back to the source that served them
         e.appended_since_flush = 0;
         e.ring->source = src;
         e.ring->reliable = reliable;
+        return true;
     }
 
     /** @brief This receiver's §4.4 arm: `true` once declared RELIABLE (see
@@ -2866,10 +2952,13 @@ class vertex_t {
      * takes no lock, because a threshold changing under a concurrent write only decides
      * WHICH correct store shape that write takes.
      */
-    void set_share_threshold_bytes(std::size_t bytes) {
-        vertex_ext_t& e = ensure_ext();
+    [[nodiscard]] bool set_share_threshold_bytes(std::size_t bytes,
+                                                 tr::mem::block_source_t& tables) {
+        vertex_ext_t* const e = ensure_ext(tables);
+        if (e == nullptr) return false;
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e.share_threshold_bytes = saturate_threshold(bytes);
+        e->share_threshold_bytes = saturate_threshold(bytes);
+        return true;
     }
 
     /**
@@ -3069,10 +3158,10 @@ class vertex_t {
     /** @brief This vertex's edge block, allocating it on first subscribe. Call with the
      *         stripe lock held.
      *  @return Null on OOM (#477 — the caller soft-fails; the vertex is unchanged). */
-    [[nodiscard]] edge_block_t* ensure_edges() noexcept {
+    [[nodiscard]] edge_block_t* ensure_edges(tr::mem::block_source_t& src) noexcept {
         edge_block_t* b = edges_.load(std::memory_order_relaxed);
         if (b != nullptr) return b;
-        b = new (std::nothrow) edge_block_t{};
+        b = tr::mem::make_in<edge_block_t>(src, src);
         if (b == nullptr) return nullptr;
         edges_.store(b, std::memory_order_release);  // pairs with snapshot_edges' acquire
         return b;
@@ -3120,7 +3209,7 @@ class vertex_t {
     [[nodiscard]] bool try_publish_edges(edge_block_t& b) noexcept {
         edge_pub_t* np = nullptr;
         if (!b.slots.empty()) {
-            np = alloc_edge_pub(b.slots.size());
+            np = alloc_edge_pub(b.slots.source(), b.slots.size());
             if (np == nullptr) return false;
             pub_edge_t* dst = np->entries();
             for (const subscriber_t& s : b.slots) {
@@ -3243,54 +3332,50 @@ class vertex_t {
      *         an empty table on a vertex with no group is a no-op (nothing to uninstall),
      *         so a group is never created just to hold an empty table; an existing group's
      *         `on_app_field_write` apply seam is preserved across a table replacement. */
-    void install_app_table(vertex_ext_t& e, app_field_table_t built) {
-        if (built.slots.empty() && e.app == nullptr) return;
-        if (e.app == nullptr) e.app = std::make_unique<app_field_group_t>();
+    [[nodiscard]] static bool install_app_table(vertex_ext_t& e, app_field_table_t built) {
+        if (built.slots.empty() && e.app == nullptr) return true;
+        if (e.app == nullptr) {
+            e.app = tr::mem::make_in<app_field_group_t>(*e.src, *e.src);
+            if (e.app == nullptr) return false;
+        }
         e.app->table = std::move(built);
+        return true;
     }
 
-    /** @brief Pack an owning @p table into one @ref app_field_table_t (ADR-0058): the
-     *         name+descriptor bytes are concatenated into a single `backing` buffer (one
-     *         allocation for the whole table) with the slots viewing into it; any initial
-     *         values are moved into the lazy value store. `backing`'s address is stable
-     *         across the table's moves, so the slot views stay valid. */
-    [[nodiscard]] static app_field_table_t build_owning_table(std::vector<app_field_t> table) {
-        app_field_table_t t;
-        if (table.empty()) return t;
-        std::size_t total = 0;
-        bool any_value = false;
-        for (const app_field_t& f : table) {
-            total += f.name.size() + f.descriptor.size();
-            any_value = any_value || (!f.value.empty() && f.access != app_access_t::WO &&
-                                      f.retention != retention_t::NONE);
+    /** @brief Pack an owning @p table into one @ref app_field_table_t (ADR-0058): the slot
+     *         array and the name+descriptor bytes share a single `owned` block (one
+     *         allocation for the whole table), the slots viewing the bytes after them; any
+     *         initial values are copied into the lazy value store. The block's address is
+     *         stable across the table's moves, so the slot views stay valid. Every block comes
+     *         from @p t's source (#1778); false when it refused one, and @p t is then
+     *         discarded. */
+    [[nodiscard]] static bool build_owning_table(const std::vector<app_field_t>& table,
+                                                 app_field_table_t& t) {
+        std::size_t off = table.size() * sizeof(app_field_slot_t);
+        std::size_t total = off;
+        for (const app_field_t& f : table) total += f.name.size() + f.descriptor.size();
+        if (!table.empty() && !t.own(total)) return false;
+        auto* const slots = reinterpret_cast<app_field_slot_t*>(t.owned);
+        for (std::size_t i = 0; i < table.size(); ++i) {
+            const app_field_t& f = table[i];
+            char* const name = reinterpret_cast<char*>(t.owned + off);
+            std::copy(f.name.begin(), f.name.end(), name);
+            std::byte* const desc = t.owned + off + f.name.size();
+            std::copy(f.descriptor.begin(), f.descriptor.end(), desc);
+            off += f.name.size() + f.descriptor.size();
+            ::new (slots + i)
+                app_field_slot_t{std::string_view(name, f.name.size()), f.access, f.retention,
+                                 std::span<const std::byte>(desc, f.descriptor.size())};
         }
-        t.backing.resize(total);
-        t.owned_slots = std::make_unique<app_field_slot_t[]>(table.size());
-        std::size_t si = 0;
-        std::size_t off = 0;
-        for (const app_field_t& f : table) {
-            const std::size_t noff = off;
-            std::copy(f.name.begin(), f.name.end(),
-                      reinterpret_cast<char*>(t.backing.data()) + noff);
-            off += f.name.size();
-            const std::size_t doff = off;
-            std::copy(f.descriptor.begin(), f.descriptor.end(), t.backing.data() + doff);
-            off += f.descriptor.size();
-            t.owned_slots[si++] = app_field_slot_t{
-                std::string_view(reinterpret_cast<const char*>(t.backing.data()) + noff,
-                                 f.name.size()),
-                f.access, f.retention,
-                std::span<const std::byte>(t.backing.data() + doff, f.descriptor.size())};
-        }
-        t.slots = std::span<const app_field_slot_t>(t.owned_slots.get(), table.size());
+        t.slots = std::span<const app_field_slot_t>(slots, table.size());
         // An initial value on a field that retains nothing is dropped, like any write to it:
-        // a `wo` field has no read surface to serve it through (RFC-0028 §5.4).
-        if (any_value) {
-            t.values = std::make_unique<std::vector<std::vector<std::byte>>>(table.size());
-            for (std::size_t i = 0; i < table.size(); ++i)
-                if (!t.owned_slots[i].retains_nothing()) (*t.values)[i] = std::move(table[i].value);
-        }
-        return t;
+        // a `wo` field has no read surface to serve it through (RFC-0028 §5.4). The value
+        // store is drawn on the first value that needs it, so a table of none draws nothing.
+        for (std::size_t i = 0; i < table.size(); ++i)
+            if (!slots[i].retains_nothing() && !table[i].value.empty() &&
+                (!t.ensure_values() || !tr::mem::assign_bytes(t.values[i], table[i].value)))
+                return false;
+        return true;
     }
 
     /**
@@ -3301,16 +3386,19 @@ class vertex_t {
      * compare-exchange — the loser frees its candidate and adopts the winner's block.
      * The pointer is never cleared once published (ADR-0057 insert-only lifetime), so
      * lock-free readers (@ref share_threshold_bytes / @ref handlers) stay valid forever.
+     * @return The block, or null when @p src refused it (#1778) — nothing changed.
      */
-    vertex_ext_t& ensure_ext() {
+    [[nodiscard]] vertex_ext_t* ensure_ext(tr::mem::block_source_t& src) noexcept {
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e != nullptr) return *e;
-        auto fresh = std::make_unique<vertex_ext_t>();
+        if (e != nullptr) return e;
+        vertex_ext_t* const fresh = tr::mem::make_in<vertex_ext_t>(src, src);
+        if (fresh == nullptr) return nullptr;
         vertex_ext_t* expected = nullptr;
-        if (ext_.compare_exchange_strong(expected, fresh.get(), std::memory_order_acq_rel,
+        if (ext_.compare_exchange_strong(expected, fresh, std::memory_order_acq_rel,
                                          std::memory_order_acquire))
-            return *fresh.release();
-        return *expected;  // another thread won the publish; fresh is freed here
+            return fresh;
+        tr::mem::drop_in(src, fresh);  // another thread won the publish
+        return expected;
     }
 
     /**
@@ -3324,31 +3412,47 @@ class vertex_t {
      * before: registration can no longer force the cold block onto a vertex, and the two
      * owner-side magnitudes materialise it only if an owner actually declares one.
      */
-    void adopt_identity(role_t role, const handlers_t& handlers) {
-        const bool has_handlers = handlers.on_read || handlers.on_write || handlers.on_children ||
-                                  handlers.on_app_field_write;
-        if (role != role_t::STREAM && !has_handlers &&
-            ext_.load(std::memory_order_acquire) == nullptr)
-            return;
-        vertex_ext_t& e = ensure_ext();
+    [[nodiscard]] bool adopt_identity(role_t role, const handlers_t& handlers,
+                                      tr::mem::block_source_t& src) noexcept {
+        const bool has_seam = handlers.on_read || handlers.on_write || handlers.on_children;
+        // Nothing to install, so nothing to draw (an existing extension block needs nothing).
+        if (role != role_t::STREAM && !has_seam && !handlers.on_app_field_write) return true;
         // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
         // seam only when one of its three is set; the app-field group's apply seam only
         // when given. Registration is single-threaded for this vertex, so no lock here.
-        if (handlers.on_read || handlers.on_write || handlers.on_children) {
-            // Publish the seam atomically. `fill` only ever runs on an UNREGISTERED node
-            // (register_vertex_key returns PATH_IN_USE otherwise), and such a node's seam
-            // is null — a fresh placeholder never had one, and retirement already swapped a
-            // retired node's out. So the prior is provably null and a plain release store
-            // suffices; the store races only the lock-free reader, which the release
-            // ordering covers.
-            e.handlers.store(
-                new value_handlers_t{handlers.on_read, handlers.on_write, handlers.on_children},
-                std::memory_order_release);
+        // Every block, the extension block last, is drawn BEFORE anything is published
+        // (#1778), so a refusal installs nothing and the node stays the placeholder it was.
+        // The groups come from the source the extension block draws from: an existing
+        // block's own, else @p src, which the block about to be made records.
+        vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        tr::mem::block_source_t& from = e != nullptr ? *e->src : src;
+        value_handlers_t* const seam =
+            has_seam ? tr::mem::make_in<value_handlers_t>(
+                           from, value_handlers_t{handlers.on_read, handlers.on_write,
+                                                  handlers.on_children})
+                     : nullptr;
+        const bool need_app = handlers.on_app_field_write && (e == nullptr || e->app == nullptr);
+        app_field_group_t* const app =
+            need_app ? tr::mem::make_in<app_field_group_t>(from, from) : nullptr;
+        // One check for every block: as many drawn as were wanted, and the extension block
+        // (an existing one comes straight back).
+        e = ensure_ext(src);
+        if (e == nullptr ||
+            int{seam != nullptr} + int{app != nullptr} != int{has_seam} + int{need_app}) {
+            tr::mem::drop_in(from, seam);
+            tr::mem::drop_in(from, app);
+            return false;
         }
-        if (handlers.on_app_field_write) {
-            if (e.app == nullptr) e.app = std::make_unique<app_field_group_t>();
-            e.app->on_app_field_write = handlers.on_app_field_write;
-        }
+        if (need_app) e->app = app;
+        // Publish the seam atomically, null included. `fill` only ever runs on an UNREGISTERED
+        // node (register_vertex_key returns PATH_IN_USE otherwise), and such a node's seam is
+        // null — a fresh placeholder never had one, and retirement already swapped a retired
+        // node's out. So the prior is provably null, storing null over it changes nothing, and
+        // a plain release store suffices; the store races only the lock-free reader, which the
+        // release ordering covers.
+        e->handlers.store(seam, std::memory_order_release);
+        if (handlers.on_app_field_write) e->app->on_app_field_write = handlers.on_app_field_write;
+        return true;
     }
 
     // Members are laid out in descending-alignment groups (#361 diet: zero interior
@@ -3532,15 +3636,25 @@ class vertex_t {
     /** @brief The lazily-allocated child list (null for every leaf): the owned children,
      *         sorted by their canonical NAME record bytes. */
     struct children_t {
-        std::vector<std::unique_ptr<vertex_t>> sorted; /**< @brief Sorted owned children. */
+        /** @brief An empty list drawing from @p src, which also served every child in it. */
+        explicit children_t(tr::mem::block_source_t& src) noexcept : sorted(src) {}
+        /** @brief Destroy every child and return its block to the list's source. */
+        ~children_t() {
+            for (vertex_t* c : sorted) tr::mem::drop_in(sorted.source(), c);
+        }
+        children_t(const children_t&) = delete;            /**< @brief Owns its children. */
+        children_t& operator=(const children_t&) = delete; /**< @brief Owns its children. */
+        tr::mem::block_array_t<vertex_t*> sorted; /**< @brief Sorted owned children (#1778). */
     };
-    std::unique_ptr<children_t> children_;
+    /** @brief The child list, or null for a leaf; drawn from, and freed to, the source its
+     *         own `sorted` array names (`graph_t::table_source`). */
+    children_t* children_ = nullptr;
 
     /** @brief First child in sorted name-record order, or null for a leaf (@ref
      * for_each_descendant). */
     [[nodiscard]] vertex_t* first_child() const noexcept {
-        if (!children_ || children_->sorted.empty()) return nullptr;
-        return children_->sorted.front().get();
+        if (children_ == nullptr || children_->sorted.empty()) return nullptr;
+        return children_->sorted.front();
     }
 
     /**
@@ -3557,17 +3671,17 @@ class vertex_t {
      * shared a record, where a name compare would silently return the wrong sibling.
      */
     [[nodiscard]] vertex_t* next_sibling_of(const vertex_t& c) const noexcept {
-        if (!children_) return nullptr;
-        const std::vector<std::unique_ptr<vertex_t>>& sorted = children_->sorted;
+        if (children_ == nullptr) return nullptr;
+        const tr::mem::block_array_t<vertex_t*>& sorted = children_->sorted;
         auto it =
             std::lower_bound(sorted.begin(), sorted.end(), c.name().bytes(),
-                             [](const std::unique_ptr<vertex_t>& e, std::span<const std::byte> n) {
+                             [](const vertex_t* e, std::span<const std::byte> n) {
                                  return std::ranges::lexicographical_compare(e->name().bytes(), n);
                              });
-        while (it != sorted.end() && it->get() != &c) ++it;
+        while (it != sorted.end() && *it != &c) ++it;
         if (it == sorted.end()) return nullptr;  // not our child — caller error, walk stops
         ++it;
-        return it == sorted.end() ? nullptr : it->get();
+        return it == sorted.end() ? nullptr : *it;
     }
 };
 

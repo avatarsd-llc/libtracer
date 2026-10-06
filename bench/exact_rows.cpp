@@ -32,6 +32,7 @@
 #include "heap_probe.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
 
@@ -99,8 +100,12 @@ class counting_seam_t final : public tr::mem::block_source_t {
     counting_seam_t() noexcept : block_source_t("exact-rows") {}
     std::atomic<std::size_t> blocks{0}; /**< @brief Blocks served. */
     std::atomic<std::size_t> bytes{0};  /**< @brief Bytes requested by those blocks. */
+    /** @brief The one request size refused while nonzero (the `defer` fixture's spill). */
+    std::atomic<std::size_t> refuse_bytes{0};
     /** @brief Serve from `aligned_alloc`, counting. */
     [[nodiscard]] void* try_alloc(std::size_t n, std::size_t align) noexcept override {
+        const std::size_t refused = refuse_bytes.load(std::memory_order_relaxed);
+        if (refused != 0 && n == refused) return nullptr;
         blocks.fetch_add(1, std::memory_order_relaxed);
         bytes.fetch_add(n, std::memory_order_relaxed);
         const std::size_t a = align < alignof(std::max_align_t) ? alignof(std::max_align_t) : align;
@@ -117,10 +122,18 @@ struct null_link_t : tr::net::transport_t {
     void send(std::span<const std::span<const std::byte>>) override {}
 };
 
-/** @brief Print one `ramprobe` row from a window's counts over @p n units. */
-void print_ram(const char* what, const probe::counts_t& c, std::size_t n) {
-    std::printf("RESULT ramprobe %s blocks_x1000=%zu bytes_x1000=%zu n=%zu\n", what,
-                x1000(static_cast<long long>(c.allocs), n), x1000(c.live_bytes, n), n);
+/**
+ * @brief Print one row from a window's counts over @p n units: the gated `ramprobe` row when
+ *        the graph drew its tables per object (@p per_object), else the ungated `slabfoot`
+ *        row of a default graph, whose window counts the host slab pool's whole slabs (#1778).
+ */
+void print_ram(const char* what, const probe::counts_t& c, std::size_t n, bool per_object) {
+    if (per_object)
+        std::printf("RESULT ramprobe %s blocks_x1000=%zu bytes_x1000=%zu n=%zu\n", what,
+                    x1000(static_cast<long long>(c.allocs), n), x1000(c.live_bytes, n), n);
+    else
+        std::printf("RESULT slabfoot %s live_x1000=%zu blocks_x1000=%zu n=%zu (ungated)\n", what,
+                    x1000(c.live_bytes, n), x1000(static_cast<long long>(c.allocs), n), n);
 }
 
 /** @brief Units each RAM probe spreads its window over. */
@@ -133,10 +146,17 @@ constexpr std::size_t kRamN = 256;
  * usable-size bytes and heap blocks per edge. The wire edge names its link
  * `192.168.x.y:9000`, past the small-string buffer like a real `host:port` link, and that
  * name is built inside the window because the edge keeps it.
+ *
+ * Each probe runs twice (#1778). The gated `ramprobe` row is taken on a graph injected with
+ * `tr::mem::heap_source()`, so every table block is its own counted `operator new`: the
+ * per-object cost, what a build without the slab pool pays and what main measured before
+ * the graph's tables moved onto the seam. The ungated `slabfoot` row is the same window on a
+ * default graph, whose tables come from the host slab pool and are counted a slab at a time.
  */
-bool ram_edges() {
+bool ram_edges_on(bool per_object) {
+    tr::mem::block_source_t& src = per_object ? tr::mem::heap_source() : tr::mem::default_root();
     {
-        graph_t g;
+        graph_t g(src);
         const path_t p = *path_t::parse("/edge/cb");
         (void)g.register_vertex(p, role_t::STORED_VALUE);
         if (!g.subscribe(p, noop_cb, nullptr).has_value()) return false;
@@ -146,10 +166,10 @@ bool ram_edges() {
             ok = g.subscribe(p, noop_cb, nullptr).has_value() && ok;
         const probe::counts_t c = win.result();
         if (!ok) return false;
-        print_ram("edge_callback", c, kRamN);
+        print_ram("edge_callback", c, kRamN, per_object);
     }
     {
-        graph_t g;
+        graph_t g(src);
         const vertex_handle_t v =
             g.register_vertex(*path_t::parse("/edge/wire"), role_t::STORED_VALUE);
         // The remote SUBSCRIBER form (no PATH child) and the smallest well-formed route.
@@ -169,10 +189,13 @@ bool ram_edges() {
             ok = g.subscribe_wire(v, sub_v, route_v, link(i)).has_value() && ok;
         const probe::counts_t c = win.result();
         if (!ok) return false;
-        print_ram("edge_wire", c, kRamN);
+        print_ram("edge_wire", c, kRamN, per_object);
     }
     return true;
 }
+
+/** @brief Both arms of @ref ram_edges_on: the gated per-object rows, then the slab rows. */
+bool ram_edges() { return ram_edges_on(true) && ram_edges_on(false); }
 
 /**
  * @brief RAM per LINK (`link`): what one `fwd_router_t::add_child` costs the router.
@@ -194,7 +217,7 @@ bool ram_links() {
     }
     const probe::counts_t c = win.result();
     if (!ok) return false;
-    print_ram("link", c, kRamN);
+    print_ram("link", c, kRamN, true);
     return true;
 }
 
@@ -205,9 +228,17 @@ bool ram_links() {
  * The vertices are registered outside the window. Inside it, each value is minted (one owned
  * 1 KiB segment, as a producer hands one over) and written, so the live balance holds the
  * segment the vertex keeps and the record around it: the RAM a 1 KiB value really costs.
+ *
+ * Two arms, as for the edges (#1778). The gated `ramprobe` row injects
+ * `tr::mem::heap_source()` into the graph and mints each segment through a backend over that
+ * same source, so the record and the segment are each one counted `operator new`. The
+ * ungated `slabfoot` row is the old window: a default graph, segments from the host slab
+ * pool's value sub-pool, counted a slab at a time (one kept free slab over 256 units moved
+ * the old row by 384 B, #1879).
  */
-bool ram_value_1k() {
-    graph_t g;
+bool ram_value_1k_on(bool per_object) {
+    static tr::mem::source_backend_t heap_segments{tr::mem::heap_source()};
+    graph_t g(per_object ? tr::mem::heap_source() : tr::mem::default_root());
     std::vector<vertex_handle_t> vs;
     vs.reserve(kRamN);
     for (std::size_t i = 0; i < kRamN; ++i) {
@@ -215,15 +246,24 @@ bool ram_value_1k() {
         std::snprintf(pb, sizeof pb, "/kv/v%04zu", i);
         vs.push_back(g.register_vertex(*path_t::parse(pb), role_t::STORED_VALUE));
     }
+    const auto mint = [per_object](std::uint8_t fill) {
+        tr::view::segment_ptr_t seg =
+            per_object ? tr::view::segment_alloc(heap_segments, 1024) : tr::view::heap_alloc(1024);
+        if (seg) std::memset(seg->bytes.data(), fill, 1024);
+        return tr::view::view_t::over(std::move(seg));
+    };
     bool ok = true;
     probe::window_t win;
     for (std::size_t i = 0; i < kRamN; ++i)
-        ok = g.write(vs[i], heap_view(1024, static_cast<std::uint8_t>(i))).has_value() && ok;
+        ok = g.write(vs[i], mint(static_cast<std::uint8_t>(i))).has_value() && ok;
     const probe::counts_t c = win.result();
     if (!ok) return false;
-    print_ram("vertex_value_1k", c, kRamN);
+    print_ram("vertex_value_1k", c, kRamN, per_object);
     return true;
 }
+
+/** @brief Both arms of @ref ram_value_1k_on: the gated per-object row, then the slab row. */
+bool ram_value_1k() { return ram_value_1k_on(true) && ram_value_1k_on(false); }
 
 /**
  * @brief Blocks per write at each payload-ladder size, for both ways a value arrives: from
@@ -316,9 +356,10 @@ void print_lock(const char* what, std::size_t sections, std::size_t heap, std::s
  *  - `w1`: the steady-state write, past two hazard retire batches of warm-up (the #873
  *    carve-out). #1713's claim is ONE section and ZERO heap, and the gate holds it to that.
  *  - `spill`: a write over `ring_take_t::kInline + 2` queued entries; still one section, plus
- *    the one spill vector.
- *  - `defer`: the same write with every global allocation refused, so the spill cannot be
- *    allocated and the window is deferred: delivered is 0, and the next write delivers it all.
+ *    the one spill, drawn from the values source since #1778 (so its heap column is 0).
+ *  - `defer`: the same write with the spill refused — every global allocation, and the
+ *    values source's spill-sized request, since the spill draws from the graph's values source
+ *    (#1778) — so the window is deferred: delivered is 0, and the next write delivers it all.
  *  - `w4`: four writers on one vertex at once; sections per write (heap is not printed: each
  *    new thread stocks its own reclamation list once, which is not the write's cost).
  *
@@ -383,7 +424,9 @@ bool stream_locks() {
         const std::size_t before = seen.load();
         g_locks = 0;
         probe::g_refuse.store(true);
+        values.refuse_bytes.store((kBacklog + 1) * sizeof(tr::graph::value_ref_t));
         (void)g.write(v, std::move(vals[kBacklog]));
+        values.refuse_bytes.store(0);
         probe::g_refuse.store(false);
         sections += g_locks;
         deferred_delivered += seen.load() - before;

@@ -154,11 +154,10 @@ struct work_shape_t {
  * @brief The composed read's NODE-TABLE element, mirrored for the same reason
  *        @ref work_shape_t is: to compute the block shape its first growth asks for.
  *
- * `snap_node_t` holds a `value_ref_t` — a one-word intrusive handle with a destructor — so it
- * can never take `block_array_t`'s memcpy relocation, which is why #873 phase 1 put it on a
- * source ALLOCATOR instead: the element type and its destructors are untouched and only the
- * block moves onto the injected store. The mirror carries one pointer where the handle sits
- * (RFC-0028 slice 3 shrank it from a `shared_ptr`), or the size is wrong.
+ * `snap_node_t` holds a `value_ref_t` — a one-word intrusive handle with a destructor — which
+ * `block_array_t` relocates by move. #873 phase 1 put it on a source ALLOCATOR; #1778 made it a
+ * `block_array_t` over the graph's table source. The mirror carries one pointer where the
+ * handle sits (RFC-0028 slice 3 shrank it from a `shared_ptr`), or the size is wrong.
  */
 struct snap_shape_t {
     const void* v = nullptr;
@@ -168,10 +167,10 @@ struct snap_shape_t {
 };
 
 /**
- * @brief The node table's FIRST growth. `tr::detail::try_push_back` grows an empty vector to
- *        `grow_capacity(0) == 1`, so the first request is exactly one element.
+ * @brief The node table's FIRST growth: a `block_array_t`'s first growth is 8 elements (#1778),
+ *        exactly as for the collect stack below.
  */
-constexpr std::size_t kNodeTableBytes = sizeof(snap_shape_t);
+constexpr std::size_t kNodeTableBytes = 8 * sizeof(snap_shape_t);
 constexpr std::size_t kNodeTableAlign = alignof(snap_shape_t);
 
 /**
@@ -477,21 +476,19 @@ void test_reply_iov_on_the_seam() {
           "counted on reply_iov_dropped at composed-root size too");
 }
 
-// --- (d) the composed-read NODE TABLE, on a source ALLOCATOR (#873 phase 1) ---
+// --- (d) the composed-read NODE TABLE, on the injected source (#873 phase 1, #1778) ---
 
 /**
  * @brief `read_subtree_folded`'s node table draws from the graph's injected source too, and
  *        its exhaustion is BACKPRESSURE.
  *
- * Section (a) pins the collect STACK, which took `block_array_t` because its element is two
- * words. The node table beside it could not: `snap_node_t` owns a `std::shared_ptr`, so a
- * memcpy relocation would tear it, and the site carried a `#981 residual` note saying it was
- * stranded on the global heap. #873 phase 1 closed it with a source ALLOCATOR — the container
- * and element type are unchanged, only the block moves. This is the ablation for that: revert
- * the allocator and `served()` reads 0, because the growth goes back to `operator new`.
+ * Section (a) pins the collect STACK. The node table beside it was stranded on the global heap
+ * until #873 phase 1 moved its block with a source ALLOCATOR, and #1778 made it a core
+ * `block_array_t` over the same source. This is the ablation for that: put it back on
+ * `operator new` and `served()` reads 0.
  */
 void test_node_table_on_the_seam() {
-    std::printf("read_subtree_folded's node table (std::vector over a source allocator):\n");
+    std::printf("read_subtree_folded's node table (a core array over the injected source):\n");
     gated_source_t src;
     graph_t g(src);
 

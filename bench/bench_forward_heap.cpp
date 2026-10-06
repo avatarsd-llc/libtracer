@@ -773,6 +773,44 @@ int main() {
     // regrowth), so it IS the number an MCU's heap watermark moves by per
     // endpoint. `bytes=` in these two lines therefore reports the live balance
     // per vertex, not gross alloc bytes; the gross figure rides in the tail.
+    //
+    // THE METHOD (#1778). Since the default graph draws its tables from the host slab pool
+    // (#1777, ADR-0083), a window over a DEFAULT graph sees whole slabs — 64 KiB and up, one
+    // per size class a growing table first reaches — not the vertex. So the gated `vertex`
+    // row registers on a graph injected with `tr::mem::heap_source()`: every table block is
+    // then its own counted `operator new`, which is exactly what a build without the slab
+    // pool (an MCU) pays per vertex and what main measured before its tables moved. The
+    // default graph's window is still printed, ungated, as `slabfoot vertex`, so the slab
+    // cost stays visible. `vertex_value` is unchanged: writes on the default graph.
+    {
+        constexpr std::size_t kObjN = 512;
+        graph_t obj_graph(tr::mem::heap_source());
+        if (const auto warm = tr::graph::path_t::parse("/ep/warm"))
+            (void)obj_graph.register_vertex(*warm, tr::graph::role_t::STORED_VALUE);
+        bool obj_ok = true;
+        probe::reset();
+        probe::arm();
+        for (std::size_t i = 0; i < kObjN; ++i) {
+            char pb[24];
+            std::snprintf(pb, sizeof pb, "/ep/v%04zu", i);
+            const auto p = tr::graph::path_t::parse(pb);
+            obj_ok = obj_ok && p.has_value();
+            if (p) (void)obj_graph.register_vertex(*p, tr::graph::role_t::STORED_VALUE);
+        }
+        const probe::counts_t obj = probe::snapshot();
+        probe::disarm();
+        std::printf(
+            "RESULT zeroheap vertex allocs=%zu frees=%zu bytes=%zu n=%zu gross_bytes=%zu "
+            "ok=%d (report-only — live usable-size bytes per leaf, its tables drawn per object "
+            "from the counted heap, #361 §8, #1778)\n",
+            obj.allocs / kObjN, obj.frees / kObjN,
+            obj.live_bytes > 0 ? static_cast<std::size_t>(obj.live_bytes) / kObjN : 0, kObjN,
+            obj.bytes / kObjN, obj_ok ? 1 : 0);
+        if (!obj_ok) {
+            std::printf("FAIL: per-object vertex fixture did not register — not a heap result\n");
+            return 2;
+        }
+    }
     {
         graph_t diet_graph;
         if (const auto warm = tr::graph::path_t::parse("/ep/warm"))
@@ -810,11 +848,12 @@ int main() {
         const auto per = [](long long total) {
             return total > 0 ? static_cast<std::size_t>(total) / kDietN : std::size_t{0};
         };
+        // Ungated (#1778): the default graph's registration window, slabs and all.
         std::printf(
-            "RESULT zeroheap vertex allocs=%zu frees=%zu bytes=%zu n=%zu gross_bytes=%zu "
-            "ok=%d (report-only — live usable-size bytes per default leaf, #361 §8)\n",
-            reg.allocs / kDietN, reg.frees / kDietN, per(reg.live_bytes), kDietN,
-            reg.bytes / kDietN, diet_ok ? 1 : 0);
+            "RESULT slabfoot vertex live_x1000=%zu blocks_x1000=%zu n=%zu (ungated — live bytes "
+            "per default leaf counted at slab granularity, the host slab pool's footprint)\n",
+            reg.live_bytes > 0 ? static_cast<std::size_t>(reg.live_bytes) * 1000 / kDietN : 0,
+            reg.allocs * 1000 / kDietN, kDietN);
         std::printf(
             "RESULT zeroheap vertex_value allocs=%zu frees=%zu bytes=%zu n=%zu gross_bytes=%zu "
             "ok=%d (report-only — live bytes one 4B LKV write adds per vertex)\n",
@@ -880,9 +919,11 @@ int main() {
     // descriptor table adds per vertex (the extension block + the table's own
     // storage) — the number that decides whether per-endpoint app-field schemas
     // beat the /meta child-vertex workaround on the MCU (#388's ask for a gate
-    // row alongside the per-leaf number).
+    // row alongside the per-leaf number). Counted per object, on a graph injected with
+    // `tr::mem::heap_source()`, for the reason the `vertex` row is (#1778): a default graph's
+    // window sees the table slabs its pool carves, not the vertex.
     {
-        graph_t app_graph;
+        graph_t app_graph(tr::mem::heap_source());
         const auto mk_table = [] {
             std::vector<tr::graph::app_field_t> table;
             table.reserve(5);
@@ -937,9 +978,9 @@ int main() {
     // whether per-endpoint schemas beat the `/meta` workaround on the target, and until now nothing
     // measured it: the economics were claimed, never gated. This row is the borrowed twin of
     // `vertex_app5`, same five fields and same descriptor width, so the pair reads as the
-    // copy-vs-view delta rather than two unrelated numbers.
+    // copy-vs-view delta rather than two unrelated numbers. Counted per object, like it.
     {
-        graph_t app_graph;
+        graph_t app_graph(tr::mem::heap_source());
         static constexpr std::array<std::byte, 16> kDescriptor{};
         static constexpr std::string_view kNames[5] = {"kp", "ki", "kd", "mode", "label"};
         // Static storage, as the borrowed contract requires: these must outlive every

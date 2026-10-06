@@ -190,9 +190,15 @@ int main() {
         check(&g_default.default_ring_source() == &tr::mem::value_source(),
               "graph_t{} draws its default rings from the value sub-pool (#1822 folded in #1777)");
         check(&g_default.value_source() == &tr::mem::value_source() &&
-                  &g_default.table_source() == &tr::mem::table_source() &&
                   &g_default.net_source() == &tr::mem::net_source(),
-              "and its values, tables and net default from the default sub-pools");
+              "and its values and net default from the default sub-pools");
+        {
+            tr::graph::graph_t g_other;
+            const bool own = &g_default.table_source() != &tr::mem::table_source() &&
+                             &g_default.table_source() != &g_other.table_source();
+            check(own == tr::mem::kSlabPool,
+                  "and each default graph draws its tables from its own sub-pool (#1778)");
+        }
         check(g_default.derives_sub_pools() == tr::mem::kSlabPool,
               "it derives sub-pools exactly where the build has the host slab pool");
 
@@ -208,10 +214,21 @@ int main() {
         check(std::strcmp(g_ptr.control_source().name(), "budget") == 0,
               "the injected source reports its own name");
 
-        // Constructing a graph draws nothing from the seam — the first consumer is the
-        // branch-write decode (graph.cpp), which only reaches the seam past its 4 KiB
-        // stack buffer. Registration is still to migrate.
-        check(injected.served_ == 0, "constructing a graph draws no control blocks");
+        // Since #1778 a graph's own tables draw from the injected root too: constructing one
+        // takes its structural blocks (the two roots, the first vertex-index chunk and its
+        // directory, the built-in `stored_value` catalog entry) from it, and destroying the
+        // graph gives every one of them back.
+        check(injected.served_ > 0, "constructing a graph draws its tables from the root");
+    }
+    {
+        budget_source_t root(64);
+        {
+            tr::graph::graph_t g{root};
+            (void)g.try_register_vertex(*tr::graph::path_t::parse("/a/b"),
+                                        tr::graph::role_t::STORED_VALUE);
+        }
+        check(root.served_ > 0 && root.released_ == root.served_,
+              "a graph returns every table block it drew when it is destroyed (#1778)");
     }
 
     return tr::testing::summary("mem_source");

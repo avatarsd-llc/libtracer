@@ -836,6 +836,20 @@ class block_array_t {
     }
 
     /**
+     * @brief Set the size to @p n, growing to exactly @p n when needed; elements past the old
+     *        size are left UNINITIALIZED for the caller to overwrite (a key rendered back to
+     *        front). Offered only for a trivially copyable `T`.
+     * @retval false The source is exhausted — the array is unchanged.
+     */
+    [[nodiscard]] bool resize_for_overwrite(std::size_t n) noexcept
+        requires kTrivial
+    {
+        if (!reserve(n)) return false;
+        end_ = data_ + n;
+        return true;
+    }
+
+    /**
      * @brief Append a copy of @p v.
      *
      * @warning For a trivially copyable `T`, @p v must not refer to an element of this
@@ -937,17 +951,21 @@ class block_array_t {
     }
 
     /**
-     * @brief Append @p n elements copied from @p p, growing to fit them exactly when needed.
+     * @brief Append @p n elements copied from @p p, growing geometrically (or to fit them,
+     *        if more) when needed — so repeated appends stay amortized O(1) per element.
      *
      * Offered only for a trivially copyable `T` (a byte string, a pointer table). @p p must
-     * not point into this array.
+     * not point into this array. Call @ref reserve first to size the block exactly.
      *
      * @retval false The source is exhausted — the array is unchanged (BACKPRESSURE).
      */
     [[nodiscard]] bool append(const T* p, std::size_t n) noexcept
         requires kTrivial
     {
-        if (n > static_cast<std::size_t>(cap_ - end_) && !regrow(size() + n)) return false;
+        const std::size_t want = size() + n;
+        if (n > static_cast<std::size_t>(cap_ - end_) &&
+            !regrow(want > next_capacity() ? want : next_capacity()))
+            return false;
         if (n != 0) std::memcpy(static_cast<void*>(end_), p, n * sizeof(T));
         end_ += n;
         return true;
@@ -958,15 +976,16 @@ class block_array_t {
         --end_;
         if constexpr (!kTrivial) end_->~T();
     }
-    /** @brief Remove element @p i, shifting the tail down by one. Precondition: `i < size()`. */
-    void erase_at(std::size_t i) noexcept {
+    /** @brief Remove the @p n elements from @p i, shifting the tail down — one move of the
+     *         tail however many go. Precondition: `i + n <= size()`. */
+    void erase_at(std::size_t i, std::size_t n = 1) noexcept {
         if constexpr (kTrivial) {
-            std::memmove(data_ + i, data_ + i + 1,
-                         static_cast<std::size_t>(end_ - (data_ + i + 1)) * sizeof(T));
-            --end_;
+            std::memmove(data_ + i, data_ + i + n,
+                         static_cast<std::size_t>(end_ - (data_ + i + n)) * sizeof(T));
+            end_ -= n;
         } else {
-            for (T* p = data_ + i; p + 1 != end_; ++p) *p = std::move(p[1]);
-            pop_back();
+            for (T* p = data_ + i; n != 0 && p + n != end_; ++p) *p = std::move(p[n]);
+            for (; n != 0; --n) pop_back();
         }
     }
     /**

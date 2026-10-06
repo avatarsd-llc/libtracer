@@ -623,7 +623,9 @@ struct graph_t::field_surface_t {
             return std::unexpected(status_t::TYPE_MISMATCH);
         result_t<std::vector<ace_t>> aces = parse_acl(*acl);
         if (!aces) return std::unexpected(aces.error());
-        v->set_acl(std::move(*aces));  // storing replaces; empty => no restrictions
+        // Storing replaces; empty => no restrictions. A refused extension block stores nothing.
+        if (!v->set_acl(std::move(*aces), g.table_source()))
+            return std::unexpected(status_t::BACKPRESSURE);
         {
             // Subtree-precise cache invalidation (ADR-0050 via the ADR-0057 child
             // links): every descendant's effective merge embeds this vertex's
@@ -817,10 +819,11 @@ struct graph_t::field_surface_t {
             if (!decided) return std::unexpected(decided.error());
             admitted = std::move(*decided);
         }
-        // Store (§D — bytes in, bytes out). A false return means a
-        // concurrent table replacement un-declared the name between gate and store.
-        if (!v->app_field_store(key, admitted.bytes()))
-            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        // Store (§D — bytes in, bytes out). SCHEMA_NOT_FOUND means a concurrent table
+        // replacement un-declared the name between gate and store; BACKPRESSURE means the
+        // value's bytes did not fit the table source (#1778).
+        if (const result_t<void> stored = v->app_field_store(key, admitted.bytes()); !stored)
+            return std::unexpected(stored.error());
         // The owner apply seam (§A.3), OUTSIDE the vertex lock — it may re-enter the
         // graph (apply the config, restructure children, then ANNOUNCE per §C). The
         // field write itself deliberately neither wakes `await` nor propagates:
@@ -982,15 +985,19 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view::view_t& spec_
     child_factory_t factory;
     {
         const std::shared_lock lock(child_types_mutex_);
-        const auto it = child_types_.find(type_sel);
-        if (it == child_types_.end()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        factory = it->second;
+        const child_factory_t* const found = child_types_.find(type_sel);
+        if (found == nullptr) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        factory = *found;
     }
 
     // Compose the child key = parent's canonical PATH-payload + one packed record for
     // `child_name` (RFC-0018). The graph owns this addressing; the factory only sees the
     // finished key.
-    std::vector<std::byte> child_key = build_key(parent);
+    // The factory's key is an owning `std::vector` by its public signature (the public-API
+    // half of the seam migration); the render itself draws from the table source (#1778).
+    mem::bytes_t parent_key(*tables_);
+    if (!try_build_key(parent, parent_key)) return std::unexpected(status_t::BACKPRESSURE);
+    std::vector<std::byte> child_key(parent_key.begin(), parent_key.end());
     if (!wire::emit_path_segment(child_key, child_name))
         return std::unexpected(status_t::INVALID_PATH);
 
@@ -1101,18 +1108,24 @@ result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byt
     // LOUDLY at the one install site rather than overflowing that buffer.
     if (record.size() > kMaxIdentityRecordBytes) return std::unexpected(status_t::TYPE_MISMATCH);
 
-    // Publish under the lock (#1049). The record is BUILT above, outside it, so the only
-    // thing serialized is the swap that frees the previous buffer — the buffer a concurrent
-    // `read_identity` may be memcpying from, on behalf of a peer that has authenticated
-    // nothing (RFC-0011 §C: the facet resolves above the READ gate on purpose).
-    const std::unique_lock lock(identity_mutex_);
-    identity_record_ = std::move(record);
+    // Publish under the lock (#1049). The record is BUILT and copied into the table source
+    // above, outside it, so the only thing serialized is the swap — the previous buffer, the
+    // one a concurrent `read_identity` may be memcpying from on behalf of a peer that has
+    // authenticated nothing (RFC-0011 §C: the facet resolves above the READ gate on purpose),
+    // is freed after the unlock, so no allocator call runs inside this leaf (#1778).
+    mem::bytes_t fresh(*tables_);
+    if (!mem::assign_bytes(fresh, record)) return std::unexpected(status_t::BACKPRESSURE);
+    {
+        const std::unique_lock lock(identity_mutex_);
+        std::swap(identity_record_, fresh);
+    }
     return {};
 }
 
 void graph_t::clear_identity() {
+    mem::bytes_t old(*tables_);
     const std::unique_lock lock(identity_mutex_);
-    identity_record_.clear();
+    std::swap(identity_record_, old);
 }
 
 result_t<view::view_t> graph_t::read_identity() const {

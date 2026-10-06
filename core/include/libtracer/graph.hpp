@@ -22,10 +22,8 @@
 #include <chrono>
 #include <concepts>
 #include <cstdint>
-#include <deque>
 #include <expected>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -44,9 +42,10 @@
 #include "libtracer/link_id.hpp"
 #include "libtracer/link_index.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
-#include "libtracer/mem_source_pmr.hpp"
+#include "libtracer/mem_string.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/reclaim.hpp"
 #include "libtracer/sink_slot.hpp"
@@ -692,8 +691,10 @@ class graph_t {
      *
      * @par Which bytes flow through @p src after phase 1
      * ALL of the following, where before they came from four separately-injected places:
-     * - the per-write LKV control block and `rope_t` wrapper (ADR-0039 §1, #361 §5) —
-     *   through an internally-built `std::pmr` adapter (@ref mem::source_resource_t);
+     * - the graph's own tables (#1778): the vertex tree, the vertex index, the link index,
+     *   subscriber edge tables, the seam park, the creation catalog, the identity record, the
+     *   declaration lists and the propagate-sweep sets — through the table sub-pool
+     *   (@ref table_source), in core containers;
      * - the write-path copy-store's owned value @ref view::segment_t and both folded READs'
      *   exactly-sized POINT headers (ADR-0060, #831) — through an internally-built
      *   @ref mem::source_backend_t;
@@ -716,28 +717,19 @@ class graph_t {
      *   +22.7 % on hazard-node acquisition and +3.5 % on the free-list-hit steady arm, with
      *   disjoint ranges against an A/A null band of −0.12 %. The seam's own `@note` carries
      *   the figures.
-     * - the plain **`std::vector<std::byte>`** sites are an allocator swap only in
-     *   appearance, because their container type is fixed by the signatures they cross.
-     *   Two groups: the KEY containers (`try_build_key`'s out-parameter, `select_sweep`'s
-     *   output, the branch-write child-key composition, the sweep snapshot's element type),
-     *   pinned by member-function signatures and by the `pending_` / `unconditional_` key
-     *   sets, so moving them is a key-TYPE change across the graph; and the read-back
-     *   encoders' STAGING buffers, pinned by `tr::wire::emit_tlv`'s `std::vector<std::byte>&`
-     *   sink. Phase 3 moved the resulting SEGMENT onto the injection; the transient buffer it
-     *   is copied from is still the global heap's, and that is stated rather than glossed.
-     *
-     * The `std::vector` growth behind `tr::detail::try_reserve`/`try_push_back` is otherwise
-     * migrated where the container's element type permits it; the residual sites carry their
-     * own `#981 residual` notes.
+     * - the read-back encoders' STAGING buffers, pinned by `tr::wire::emit_tlv`'s
+     *   `std::vector<std::byte>&` sink. Phase 3 moved the resulting SEGMENT onto the
+     *   injection; the transient buffer it is copied from is still the global heap's. The
+     *   public signatures that still take or return owning `std` types are the same kind of
+     *   residual, and move with the public-API batch of the seam migration.
      *
      * @par Failure convention
      * The substrate speaks raw `nullptr`-on-exhaustion and the graph does not wrap it.
-     * Adapters translate at their own boundaries and nowhere else: the pmr adapter turns a
-     * refusal into `std::bad_alloc` because `std::pmr`'s contract requires a throw, and the
-     * backend adapter turns it into a null @ref view::segment_t, which is the BACKPRESSURE
-     * signal the write path already answered. So an injected @p src bounds the node, and a
-     * peer's CREATE frame can no longer reboot a `-fno-exceptions` node through the failable
-     * channels.
+     * The one adapter translates at its own boundary and nowhere else: the backend adapter
+     * turns a refusal into a null @ref view::segment_t, which is the BACKPRESSURE signal the
+     * write path already answered. The graph's own tables answer BACKPRESSURE directly. So an
+     * injected @p src bounds the node, and a peer's CREATE frame can no longer reboot a
+     * `-fno-exceptions` node through the failable channels.
      *
      * @par NARROW vs WIDE is WHICH source, never a config knob
      * A host that passes nothing gets @ref mem::default_root (ADR-0083 Decision 4, #1777).
@@ -820,10 +812,20 @@ class graph_t {
     /**
      * @brief Where this graph's TABLE blocks are drawn from: vertex registration, the
      *        control-plane containers and the failable scratch of a composed read or a branch
-     *        write (`:stats.mem.tables`). The table sub-pool or the injected root, as
-     *        @ref value_source.
+     *        write (`:stats.mem.tables`). On a default graph of a `kSlabPool` build, a table
+     *        sub-pool of the graph's OWN, derived from the host root's platform heap (#1778):
+     *        independent graphs share no class lock and no cache line. The injected root
+     *        otherwise, as @ref value_source.
      */
     [[nodiscard]] mem::block_source_t& table_source() const noexcept { return *tables_; }
+
+    /**
+     * @brief Return every fully free slab of this graph's own table sub-pool to the platform
+     *        heap, on the caller's schedule (the graph keeps no timer to do it). A no-op on a
+     *        graph without one (an injected root, or a build without the slab pool); the
+     *        process-wide sub-pools are trimmed by `tr::mem::host_root().trim()`.
+     */
+    void trim_tables() noexcept;
 
     /**
      * @brief The NET sub-pool a router or link on this graph defaults to when the application
@@ -1122,7 +1124,7 @@ class graph_t {
      * asks for the SAME anchor.
      *
      * **An anchor is not part of the addressable tree, deliberately.** It hangs off a private
-     * structural root that `root_` cannot reach, so:
+     * structural root that `roots_` cannot reach, so:
      *   - `find`, `read`, every path descent and every `:children[]` listing are byte-for-byte
      *     unchanged — an anchor is invisible to all of them. That is what keeps
      *     `bus_link_t::enumerate_peers` the ONE source of truth for a bus vertex's synthesized
@@ -1332,7 +1334,7 @@ class graph_t {
      *
      * @note Whatever is still parked when the graph is destroyed is freed by the graph's
      *       own teardown — a backstop against unbounded growth, NOT a substitute for this
-     *       call. `retired_seams_` is declared before `map_mutex_` and `root_`, so it
+     *       call. `retired_seams_` is declared before `map_mutex_` and `roots_`, so it
      *       destructs **last**, after the vertex tree and the map lock are already gone: a
      *       seam callback whose destructor re-enters the graph re-enters a half-destroyed
      *       object and crashes. Such an owner is safe HERE and only here — it must be
@@ -1582,7 +1584,7 @@ class graph_t {
      * would have done anyway. Offering both would buy nothing and invite the wrong one.
      *
      * The order is the SAME one the RFC-0008 sweep sets are kept in (`pending_` /
-     * `unconditional_`, byte-keyed `std::set`s), and it earns its keep the same way: the
+     * `unconditional_`, byte-keyed sorted tables), and it earns its keep the same way: the
      * length-prefixed NAME framing makes a parent's key a byte-prefix of every descendant's,
      * so a parent always precedes its subtree and that subtree is a CONTIGUOUS run. The
      * result therefore reads as a stable pre-order tree listing.
@@ -1594,8 +1596,11 @@ class graph_t {
      *       is stability and subtree contiguity.
      *
      * @warning **CONTROL-PLANE ONLY** and priced as such: it allocates one owned key per
-     *          registered vertex plus the snapshot vector, then sorts. Do not put this on a
-     *          delivery or write path.
+     *          registered vertex plus the snapshot array, all from the graph's table source,
+     *          then sorts. Do not put this on a delivery or write path.
+     *
+     * @return false when the table source refused the snapshot (#1778): @p fn was called for
+     *         nothing. A walk either visits every vertex or none.
      *
      * Concurrency: the {key, vertex} snapshot is taken under ONE shared `map_mutex_` hold and
      * `fn` runs OUTSIDE it — the same two-phase discipline @ref evict_link_edges and the
@@ -1607,20 +1612,31 @@ class graph_t {
      * Vertices registered BEFORE the hold are all visited.
      */
     template <typename Fn>
-    void for_each_vertex(Fn&& fn) const {
-        std::vector<std::pair<std::vector<std::byte>, vertex_t*>> snap;
+    bool for_each_vertex(Fn&& fn) const {
+        struct entry_t {
+            mem::bytes_t key; /**< @brief The vertex's canonical key. */
+            vertex_t* v;      /**< @brief The vertex. */
+        };
+        mem::block_array_t<entry_t> snap(*tables_);
+        bool ok = true;
         {
             const std::shared_lock lock(map_mutex_);
-            vertex_t* const r = root_.get();
-            const auto take = [&snap](vertex_t& c) {
-                if (c.registered()) snap.emplace_back(build_key(&c), &c);
+            vertex_t* const r = root();
+            const auto take = [this, &snap, &ok](vertex_t& c) {
+                if (!ok || !c.registered()) return;
+                mem::bytes_t k(*tables_);
+                ok = try_build_key(&c, k) && snap.push_back(entry_t{std::move(k), &c});
             };
             take(*r);
             r->for_each_descendant(take);
         }
-        std::sort(snap.begin(), snap.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
-        for (const auto& e : snap) fn(wire::key_view_t{e.first}, vertex_handle_t{e.second});
+        if (!ok) return false;
+        std::sort(snap.begin(), snap.end(), [](const entry_t& a, const entry_t& b) {
+            return mem::bytes_less_t{}(a.key, b.key);
+        });
+        for (const entry_t& e : snap)
+            fn(wire::key_view_t{mem::as_span(e.key)}, vertex_handle_t{e.v});
+        return true;
     }
 
     /**
@@ -1645,14 +1661,18 @@ class graph_t {
      * registered by the constructor.
      *
      * CONFIGURATION, like the `graph_hooks_t` seams: populate the catalog at setup,
-     * before frames flow. Unlike them the catalog is a `std::map`, so #1049's `{fn, ctx}`
-     * publication does not reach it — a concurrent insert rebalances a tree the in-band
-     * creation path may be walking. Registration and lookup therefore take a lock, which
-     * costs nothing: both are control-plane cold (one map lookup per created vertex) and
+     * before frames flow. Unlike them the catalog is a sorted table, so #1049's `{fn, ctx}`
+     * publication does not reach it — a concurrent insert moves entries the in-band
+     * creation path may be reading. Registration and lookup therefore take a lock, which
+     * costs nothing: both are control-plane cold (one lookup per created vertex) and
      * neither is on a read, write or dispatch path. Violating the setup-only contract is
      * consequently slow rather than corrupting.
+     *
+     * The entry draws from the graph's table source (#1778). Setup is where the catalog is
+     * sized, so a refusal here is a sizing bug: it aborts with a message naming the source
+     * and the bytes it was asked for (ADR-0056, ADR-0083).
      */
-    void register_child_type(std::string type, child_factory_t factory);
+    void register_child_type(std::string_view type, child_factory_t factory);
 
     /**
      * @brief Read a resolved vertex's stored value (the hot path — lock-free in the LKV slot).
@@ -2556,13 +2576,26 @@ class graph_t {
         vertex_policy_t&& policy, std::span<const payload_right_t> rights,
         std::span<const std::byte> schema_catalog = {});
 
-    /** @brief Apply a legal @ref vertex_policy_t to @p vx, skipping every member that holds;
-     *         an owning field table is MOVED into the vertex, never copied. */
-    void apply_policy(vertex_t* vx, vertex_policy_t&& policy);
+    /** @brief Apply a legal @ref vertex_policy_t's vertex-local members — every member but
+     *         the delivery mode — to @p vx, skipping every member that holds; an owning field
+     *         table is MOVED into the vertex, never copied. @p role is the role @p vx has, or
+     *         is about to be filled with.
+     *  @retval false The table source refused a member's block (#1778); the members before
+     *          it are applied, the rest are not. */
+    [[nodiscard]] bool apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy);
 
     /** @brief Set @p v's propagation policy and maintain the sweep's UNCONDITIONAL membership
-     *         under the sweep lock (RFC-0008 §C) — the delivery-mode arm of `apply_policy`. */
-    void apply_delivery_mode(vertex_t* v, delivery_mode_t mode);
+     *         under the sweep lock (RFC-0008 §C) — the policy member applied apart from
+     *         `apply_policy`, because the sweep lock never nests with the map lock. @p key is
+     *         @p v's canonical key.
+     *  @retval false The table source refused the set entry (#1778); nothing changed. */
+    [[nodiscard]] bool apply_delivery_mode(vertex_t* v, delivery_mode_t mode,
+                                           std::span<const std::byte> key);
+
+    /** @brief Add @p key to the UNCONDITIONAL sweep set, under the sweep lock.
+     *  @return true when this call added it, false when it was there already, BACKPRESSURE
+     *          when the table source refused (#1778). */
+    [[nodiscard]] result_t<bool> enroll_unconditional(std::span<const std::byte> key);
 
     // Internal (raw `vertex_t*`) forms of the public handle-returning resolvers: the graph's
     // own machinery threads raw pointers (ADR-0056 — internal methods keep `vertex_t*`), and
@@ -2574,10 +2607,13 @@ class graph_t {
     // retains the key, so the public owning-vector overload is a convenience wrapper and the
     // graph's own callers (write-creates, path registration) pass a span rather than paying a
     // heap copy just to spell the call (#1139/#873).
+    // @p policy has its vertex-local members applied to the node before it is filled, so a
+    // refused one leaves it a placeholder (#1778). The default policy touches nothing on a
+    // placeholder, which carries none.
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key_span(
         std::span<const std::byte> key, role_t role, const handlers_t& handlers,
         std::span<const payload_right_t> rights = {},
-        std::span<const std::byte> schema_catalog = {});
+        std::span<const std::byte> schema_catalog = {}, vertex_policy_t policy = {});
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
     // for a direct write; a delivered subscription's stored context terminates at
@@ -2761,6 +2797,40 @@ class graph_t {
     // since the last flush, in order (RFC-0008 §E — a queue, not a coalesce); HANDLER /
     // never-assigned (null LKV): nothing.
     void deliver_current(vertex_t* v);
+    /**
+     * @brief A flat list of vertex keys drawn from one source (#1778): every key's bytes in
+     *        one array plus where each ends, so collecting N keys is two growing arrays, not
+     *        N owned buffers.
+     */
+    class key_list_t {
+       public:
+        /** @brief An empty list drawing from @p src. */
+        explicit key_list_t(mem::block_source_t& src) noexcept : bytes_(src), ends_(src) {}
+        /** @brief Append @p k. @retval false The source refused; the list is unchanged. */
+        [[nodiscard]] bool push(std::span<const std::byte> k) noexcept {
+            // Both arrays grow by doubling, so N pushes copy O(N) bytes (an exact
+            // `reserve(size() + 1)` regrew on every push). A refused end entry takes the
+            // appended bytes back off, which shrinks and so cannot fail.
+            const std::size_t was = bytes_.size();
+            if (!bytes_.append(k.data(), k.size())) return false;
+            if (ends_.push_back(bytes_.size())) return true;
+            (void)bytes_.resize_for_overwrite(was);
+            return false;
+        }
+        /** @brief Keys held. */
+        [[nodiscard]] std::size_t size() const noexcept { return ends_.size(); }
+        /** @brief Key @p i (`i < size()`). */
+        [[nodiscard]] std::span<const std::byte> operator[](std::size_t i) const noexcept {
+            const std::size_t b = i == 0 ? 0 : ends_[i - 1];
+            return {bytes_.data() + b, ends_[i] - b};
+        }
+
+       private:
+        mem::bytes_t bytes_;                   /**< @brief Every key's bytes, back to back. */
+        mem::block_array_t<std::size_t> ends_; /**< @brief Where each key ends. */
+    };
+    /** @brief A byte-ordered set of vertex keys (the sweep sets; the value is unused). */
+    using key_set_t = mem::sorted_map_t<mem::bytes_t, std::uint8_t, mem::bytes_less_t>;
     // The propagate(v) sweep body: delivers v then its qualifying descendants
     // (RFC-0008 §B/§C). Loop-free by construction (each delivery terminates at its
     // target — ADR-0051), so no recursion depth to thread.
@@ -2777,8 +2847,7 @@ class graph_t {
     // able to refuse an unencodable selection without having consumed it. The marks are
     // retired afterwards by `clear_pending`, exactly as the eager branch write retires its
     // landing sites. False on an OOM key render — the sweep defers, as it does today.
-    [[nodiscard]] bool select_sweep(vertex_t* v, std::vector<std::byte>& lo,
-                                    std::vector<std::vector<std::byte>>& out);
+    [[nodiscard]] bool select_sweep(vertex_t* v, mem::bytes_t& lo, key_list_t& out);
     // Record v as assigned-since-last-sweep so a covering propagate flushes it (RFC-0008
     // §B). No-op for EXPLICIT (never ancestor-swept), for UNCONDITIONAL (already a
     // permanent sweep member), and — the idle-write fast path — when nothing observes at
@@ -2910,16 +2979,13 @@ class graph_t {
     [[nodiscard]] result_t<view::view_t> read_settings_app(vertex_t* v) const;
 
     // The full canonical key of `v` — its ancestors' NAME records concatenated root-down
-    // (ADR-0057 render-on-demand: vertices store one segment, not the full key). Walks
-    // immutable parent links, so no lock. Used only at sweep/observed-write/wiring
-    // frequency (the RFC-0008 byte-keyed sweep sets, `create_child` key composition).
-    [[nodiscard]] static std::vector<std::byte> build_key(const vertex_t* v);
-    // The NOTHROW twin of build_key for the writer-thread store/delivery legs (#477):
-    // renders into `out` via the mem_heap.hpp nothrow growth primitives; false on OOM
-    // (out is cleared), so a sweep-set mark/drain leg drops or defers instead of a
-    // bad_alloc abort() under the MCU profile's -fno-exceptions.
-    [[nodiscard]] static bool try_build_key(const vertex_t* v,
-                                            std::vector<std::byte>& out) noexcept;
+    // (ADR-0057 render-on-demand: vertices store one segment, not the full key) — rendered
+    // into `out`, whose source the bytes come from. Walks immutable parent links, so no lock.
+    // Used only at sweep/observed-write/wiring frequency (the RFC-0008 byte-keyed sweep sets,
+    // `create_child` key composition). The ONE renderer since #1778 (its throwing twin
+    // `build_key` is gone): false when the source refused (out is then empty), so every
+    // caller drops, defers or answers BACKPRESSURE instead of aborting.
+    [[nodiscard]] static bool try_build_key(const vertex_t* v, mem::bytes_t& out) noexcept;
     // Bump every strict descendant's listeners_above_ by `delta` (RFC-0005 bookkeeping) —
     // a child-link subtree walk (placeholders included, so a later fill inherits a
     // correct count). Call with map_mutex_ held (shared suffices; counters are atomics).
@@ -2927,12 +2993,15 @@ class graph_t {
 
     // RFC-0009 §B.6: pre-order re-virginize of @p v's subtree — unwind each vertex's
     // subscriber contribution to its descendants' listeners_above_, revert it to a
-    // placeholder, and flip it unregistered. Collects each retired vertex's key into
-    // @p keys for the caller's sweep-set cleanup, and parks each detached value-seam block
-    // into @ref retired_seams_. Call with map_mutex_ held UNIQUE (it flips registered_ and
-    // appends to retired_seams_, both map-lock-guarded).
-    void retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys,
-                        std::vector<remote_ptr_t>& routed);
+    // placeholder, and flip it unregistered. Parks each detached value-seam block
+    // into @ref retired_seams_. Each vertex's subscriber slot table is MOVED into @p gone,
+    // which the caller reserved one entry per visited vertex, so the walk cannot fail; the
+    // caller gives each routed edge's link hold back and drops the tables once the locks are
+    // released (#1816, #1778). Call with map_mutex_ held UNIQUE (it flips registered_ and
+    // parks into retired_seams_, both map-lock-guarded).
+    /** @brief The slot tables a retirement moved out of its vertices. */
+    using gone_edges_t = mem::block_array_t<mem::block_array_t<subscriber_t>>;
+    void retire_subtree(vertex_t* v, gone_edges_t& gone);
 
     // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,
     // so a swapped-out block cannot be freed while a reader might still hold the old
@@ -2941,17 +3010,56 @@ class graph_t {
     // only under map_mutex_ (unique). #576: the park's other end is the public collect(),
     // which the EMBEDDER calls at a moment it knows no reader holds a seam. The graph's own
     // destructor is a growth backstop only, not a substitute: this member is declared BEFORE
-    // map_mutex_ and root_, so it destructs LAST — a seam whose destructor re-enters the
+    // map_mutex_ and roots_, so it destructs LAST — a seam whose destructor re-enters the
     // graph finds a half-destroyed object. Until collect() runs the size is peer-driven (one
     // per BUS-link connection teardown; a point-to-point teardown parks nothing, because the
     // identity vertex only gets an on_children when link->bus() != nullptr) — hence the
     // public parked_seam_count().
-    std::vector<std::unique_ptr<value_handlers_t>> retired_seams_;
+    //
+    // A table-source array of the parked blocks (#1778), which also served the seams: `retire`
+    // reserves room for its whole subtree BEFORE it changes anything, so parking itself cannot
+    // fail. A link inside the seam would have avoided the reservation but cost 8 B on every
+    // seam-bearing vertex, and a reader may still be reading every other byte of it.
+    struct seam_park_t {
+        mem::block_array_t<value_handlers_t*> seams; /**< @brief The parked blocks. */
+        /** @brief An empty park drawing from @p src. */
+        explicit seam_park_t(mem::block_source_t& src) noexcept : seams(src) {}
+        seam_park_t(const seam_park_t&) = delete;
+        seam_park_t& operator=(const seam_park_t&) = delete;
+        /** @brief Frees every seam still parked. */
+        ~seam_park_t() { free_all(seams); }
+        /** @brief Free every block in @p a into the source @p a draws from. */
+        static void free_all(mem::block_array_t<value_handlers_t*>& a) noexcept {
+            for (value_handlers_t* s : a) mem::drop_in(a.source(), s);
+            a.clear();
+        }
+    };
+    // The graph's OWN table sub-pool (#1778). A default graph on a `kSlabPool` build derives
+    // one from the platform heap instead of sharing the host root's: with one pool for every
+    // graph, independent graphs written from different threads paid for each other's blocks
+    // (inproc-mt4 -28%, #1882). Declared FIRST, so it is built before and destroyed after
+    // every member that draws from it. Empty on an injected root, which serves every purpose.
+    // Defined in graph.cpp, so this header carries no pool definition into every unit that
+    // includes it (with it, the forward router's inlining moved: +319 B, symbol ratchet).
+    struct own_pool_t {
+        mem::block_source_t* pool = nullptr; /**< @brief The pool, or null. */
+        /** @brief Derive one when @p src is the default root of a slab-pool build. */
+        explicit own_pool_t(mem::block_source_t& src) noexcept;
+        ~own_pool_t();
+        own_pool_t(const own_pool_t&) = delete;
+        own_pool_t& operator=(const own_pool_t&) = delete;
+        /** @brief The pool, or @p src when there is none. */
+        [[nodiscard]] mem::block_source_t& or_root(mem::block_source_t& src) const noexcept {
+            return pool != nullptr ? *pool : src;
+        }
+    };
+    own_pool_t own_tables_;
+    seam_park_t retired_seams_;
 
     // The node-scoped vertex index (RFC-0024 §6.4) — the ONE new structure a bound path
     // needs, named honestly. The "vertex map" is a Composite tree of non-moving unique_ptr
     // allocations with no dense index, so an element's u32 index has no meaning until one
-    // exists. This is it: one slot appended per vertex_t ALLOCATION (slot 0 = root_,
+    // exists. This is it: one slot appended per vertex_t ALLOCATION (slot 0 = roots_,
     // placeholders included), under the same unique map_mutex_ hold that links the node into
     // the tree, so slot order is allocation order and the mapping is a bijection forever.
     //
@@ -2964,19 +3072,63 @@ class graph_t {
     // Session identity anchors (@ref register_session_anchor, #1223) append here on the same
     // terms and for the same reason — an anchor is allocated once and revived in place, so a
     // slot handed out for one names that allocation forever. The one structural exception is
-    // `anchor_root_` itself, which takes NO slot: it is a private parent, never registered,
+    // `anchor_root()` itself, which takes NO slot: it is a private parent, never registered,
     // never filled and never mintable, so the property this container actually owes RFC-0024
     // — "every vertex a mint may be asked for has exactly one immovable slot" — is untouched.
     //
-    // CHUNKED, not a `std::vector`, and the difference is the whole charged cost. A vector
+    // CHUNKED, not a flat array, and the difference is the whole charged cost. A flat array
     // grows geometrically, so between two doublings it holds up to TWICE the pointers it
     // needs: measured on the 512-vertex heap probe (bench_forward_heap `zeroheap vertex`) a
     // vector cost 15 B/vertex live where the RFC charges 8 — the slack, not the slot, was
-    // most of it. A deque appends into fixed-size blocks, so live bytes track the vertex
-    // count instead of the last doubling: the same probe reads 8 B/vertex, exactly the
-    // pointer §6.4 prices and not a byte of unpriced headroom. Indexing stays O(1) and
+    // most of it. Fixed-size chunks make live bytes track the vertex count instead of the
+    // last doubling: 8 B/vertex, exactly the pointer §6.4 prices. Indexing stays O(1) and
     // elements never move, which is all the deref needs.
-    std::deque<vertex_t*> vertex_slots_;
+    //
+    // Its chunks and directory draw from the table source (#1778), and growth is split from
+    // the append: `reserve_next` is the one failable step, taken BEFORE the vertex is
+    // allocated, so `push_back` cannot fail and a refused creation leaves nothing behind.
+    class vertex_index_t {
+       public:
+        /** @brief Slots per chunk — 512 B of pointers on a 64-bit host. */
+        static constexpr std::size_t kChunk = 64;
+        /** @brief An empty index drawing from @p src. */
+        explicit vertex_index_t(mem::block_source_t& src) noexcept : dir_(src) {}
+        vertex_index_t(const vertex_index_t&) = delete;
+        vertex_index_t& operator=(const vertex_index_t&) = delete;
+        /** @brief Returns every chunk. */
+        ~vertex_index_t() {
+            for (vertex_t** c : dir_)
+                dir_.source().release(c, kChunk * sizeof(vertex_t*), alignof(vertex_t*));
+        }
+        /** @brief Slots appended so far. */
+        [[nodiscard]] std::size_t size() const noexcept { return n_; }
+        /** @brief Slot @p i (`i < size()`). */
+        [[nodiscard]] vertex_t* operator[](std::size_t i) const noexcept {
+            return dir_[i / kChunk][i % kChunk];
+        }
+        /** @brief Make room for one more slot. @retval false The source refused. */
+        [[nodiscard]] bool reserve_next() noexcept {
+            if (n_ < dir_.size() * kChunk) return true;
+            // The chunk first, then the directory entry, which grows by doubling (an exact
+            // `reserve(size() + 1)` regrew the directory on every chunk); a refused entry gives
+            // the chunk back.
+            void* const c = dir_.source().try_alloc(kChunk * sizeof(vertex_t*), alignof(vertex_t*));
+            if (c == nullptr) return false;
+            if (dir_.push_back(static_cast<vertex_t**>(c))) return true;
+            dir_.source().release(c, kChunk * sizeof(vertex_t*), alignof(vertex_t*));
+            return false;
+        }
+        /** @brief Append @p v into the room `reserve_next` made. */
+        void push_back(vertex_t* v) noexcept {
+            dir_[n_ / kChunk][n_ % kChunk] = v;
+            ++n_;
+        }
+
+       private:
+        mem::block_array_t<vertex_t**> dir_; /**< @brief The chunk directory. */
+        std::size_t n_ = 0;                  /**< @brief Slots appended. */
+    };
+    vertex_index_t vertex_slots_;
 
     /**
      * @brief Stamp @p v with the index of the `vertex_slots_` entry that was just appended
@@ -2997,24 +3149,16 @@ class graph_t {
      */
     void note_owner_slot(vertex_t& v) noexcept;
 
-    // ---- DECLARED FIRST so they are DESTROYED LAST (#873 phase 1) ---------------------
+    // ---- DECLARED FIRST so it is DESTROYED LAST (#873 phase 1) -----------------------
     //
-    // These two are the graph's internal faces of the one injected source, and their
-    // position in the object is a LIFETIME requirement, not a preference. The value path no
-    // longer draws through them (a stored LKV is a `value_t` block drawn straight from `ctl_`
-    // since RFC-0028 slice 3, and `ctl_` is the caller's object), but the control-plane pmr
-    // containers below still allocate through `mr_` → `src_mr_`, and a payload segment a
-    // vertex retains still reclaims through `src_backend_` — both from inside `~graph_t`, when
-    // `root_`'s vertex tree is torn down. Members are destroyed in REVERSE declaration order,
-    // so an adapter declared after `root_` is already dead by then: a virtual call on a
-    // destroyed object, caught by UBSan's `vptr` check as "member call on address ... which
-    // does not point to an object of type 'memory_resource'" across six tests. Declaring them
-    // first inverts that and is robust by construction — it does not depend on anyone
-    // enumerating which member might hold such an allocation, which an explicit teardown
-    // order would.
-    //
-    // The cost is that every member below sits 40 B further into the object than it did.
-    // That was measured rather than assumed: the symbol ratchet's seven pins are unmoved.
+    // The graph's internal face of the one injected source for VALUE segments, and its
+    // position in the object is a LIFETIME requirement, not a preference: a payload segment a
+    // vertex retains still reclaims through `src_backend_` from inside `~graph_t`, when
+    // `roots_`'s vertex tree is torn down. Members are destroyed in REVERSE declaration order,
+    // so an adapter declared after `roots_` is already dead by then: a virtual call on a
+    // destroyed object, caught by UBSan's `vptr` check across six tests. Declaring it first
+    // inverts that and is robust by construction. Its pmr sibling `src_mr_` is gone (#1778):
+    // no graph table draws through `std::pmr` any more.
 
     /** @brief The graph's OWN `mem_backend_t` over the injected source (#873 phase 1).
      *
@@ -3024,17 +3168,6 @@ class graph_t {
      *         to the ADR-0047 §2 devirtualized `HEAP` reclaim arm. Held BY VALUE: it is
      *         three words, and making it optional would cost the same space plus a branch. */
     mem::source_backend_t src_backend_;
-
-    /** @brief The graph's OWN `std::pmr::memory_resource` over the injected source (#873
-     *         phase 1).
-     *
-     *         Same story as `src_backend_`: pointed at by `mr_` only when a
-     *         non-default source was injected, so a process-default graph's control-plane
-     *         containers still come from `new_delete_resource()` through exactly one
-     *         virtual call, as they always did. This adapter is where the substrate's
-     *         `nullptr` becomes a `std::bad_alloc` — the ONE boundary in the graph that
-     *         translates the failure convention, and only because `std::pmr` requires it. */
-    mem::source_resource_t src_mr_;
 
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose
@@ -3048,18 +3181,6 @@ class graph_t {
     // route_handle clear_link dangling-ref class, fixed in #220); it needs a vertex
     // lifetime scheme (refcount / epoch reclamation, or a tombstone) first. Registering
     // the empty key fills this node in place (the "root vertex" the flat map allowed).
-    /** @brief The ADR-0039 pmr resource the CONTROL-PLANE containers draw from (the link
-     *         index, its free list and long names). NOT the value path: since RFC-0028 slice 3
-     *         a publish draws its one `value_t` block straight from `ctl_`, and this channel's
-     *         throwing seam (ADR-0079 Decision 3) is off the hot path for good.
-     *
-     *         Since #873 phase 1 this is no longer injected — it POINTS at whichever
-     *         resource the constructor's single source resolved to: `new_delete_resource()`
-     *         for a process-default graph (so the default composition is byte-for-byte what
-     *         it always was), or the graph's own `src_mr_` adapter over the injected
-     *         source. A pointer rather than the object because those are two different
-     *         types and the hot path reads one indirection either way. */
-    std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();
 
     /** @brief The ADR-0060 byte-buffer seam the write-path copy-store draws its owned
      *         value @ref view::segment_t from (the flatten of a branch/field write,
@@ -3076,11 +3197,26 @@ class graph_t {
      *         fallback; thread-safety is the injected source's contract (§2), because a
      *         segment's reclaim self-routes on the last-ref thread. */
     mem::mem_backend_t* value_backend_ = &mem::heap_backend();
-    std::unique_ptr<vertex_t> root_;
+    /** @brief The two structural roots in ONE table-source block (#1778): the tree root and the
+     *         session anchors' private root below. One owner keeps the pair at the two words the
+     *         two `unique_ptr`s took, so no member after it moves. */
+    struct roots_t {
+        vertex_t root;   /**< @brief The Composite tree's root. */
+        vertex_t anchor; /**< @brief The session anchors' private root (#1223). */
+        /** @brief Both roots, their children drawing from @p src. */
+        explicit roots_t(mem::block_source_t& src) noexcept
+            : root(role_t::STORED_VALUE, path_key_t{}, handlers_t{}, src),
+              anchor(role_t::STORED_VALUE, path_key_t{}, handlers_t{}, src) {}
+    };
+    mem::block_ptr_t<roots_t> roots_;
+    /** @brief The tree root. */
+    [[nodiscard]] vertex_t* root() const noexcept { return &roots_->root; }
+    /** @brief The anchors' private root. */
+    [[nodiscard]] vertex_t* anchor_root() const noexcept { return &roots_->anchor; }
     // The session identity anchors' private structural root (#1223, ADR-0044 §Amendment
-    // 2026-08-13). NOT reachable from root_ — that is the whole design: an anchor gets a
+    // 2026-08-13). NOT reachable from roots_ — that is the whole design: an anchor gets a
     // vertex-map slot and a saturating generation without becoming an ADDRESS. `find` and
-    // every `:children[]` listing walk from root_, so they never see one; a bus mount's
+    // every `:children[]` listing walk from roots_, so they never see one; a bus mount's
     // members stay exactly what `enumerate_peers` synthesizes, and RFC-0020 §3's "MUST NOT
     // resolve the residual against its local graph" keeps its premise, because there is no
     // local graph node below the mount for a residual to land on.
@@ -3091,25 +3227,25 @@ class graph_t {
     // leaving them free-floating) is what lets `retire` — which refuses a parentless vertex
     // — work on them unchanged.
     //
-    // Anchor keys cannot collide with an addressable vertex's key: build_key stops at the
+    // Anchor keys cannot collide with an addressable vertex's key: try_build_key stops at the
     // node whose parent is null, so an anchor's key is its own single NAME record, and the
     // router composes that record's content to contain `:` and `/` — two of the SEVEN
     // characters `path::valid_segment` rejects, so no registered address anywhere in this
     // graph can render the same bytes. That is what keeps retirement's sweep-set cleanup
     // (which is keyed by rendered key bytes) from ever touching a real vertex's entry.
-    std::unique_ptr<vertex_t> anchor_root_;
+    // (`anchor_root()`, the second half of `roots_` above.)
     // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
     // setup (register_child_type) — configuration, per #1049's ruling, exactly like the
-    // three sinks below. `std::less<>` enables heterogeneous string_view lookup.
+    // three sinks below. Looked up by string_view; drawn from the table source (#1778).
     //
-    // It is a std::map, so #1049's {fn, ctx} + slot mechanism does not reach it: there is no
-    // pointer-sized word to publish, and the read walks a red-black tree an insert would be
-    // rebalancing. The lookup runs from a PEER's bytes (create_child) and is control-plane
+    // It is a sorted table, so #1049's {fn, ctx} + slot mechanism does not reach it: there is
+    // no pointer-sized word to publish, and the read walks entries an insert would be
+    // moving. The lookup runs from a PEER's bytes (create_child) and is control-plane
     // cold — one vertex creation — so the arm that costs nothing where it lands is a lock,
     // and it is taken here rather than on any hot path. It buys a defined outcome for a
     // caller that violates the setup-only contract instead of a corrupted tree walk.
     mutable std::shared_mutex child_types_mutex_;
-    std::map<std::string, child_factory_t, std::less<>> child_types_;
+    mem::sorted_map_t<mem::string_t, child_factory_t> child_types_;
     // The five CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
     // through a sink_slot_t — the mechanism #914 established for fwd_router_t's five, hoisted
     // to the layer-neutral `tr` namespace so L4 can hold one without naming the net plane.
@@ -3142,8 +3278,10 @@ class graph_t {
     // The read tests emptiness and then MEMCPYs the buffer; install and clear both free the
     // old one. Straddling that with a reassignment is a remotely-reachable use-after-free,
     // and the read is cold (one identity read per peer per pin), so the lock costs nothing
-    // anywhere that matters. Same reasoning as child_types_ above: a std::vector has no
-    // pointer-sized word for the slot mechanism to publish.
+    // anywhere that matters. Same reasoning as child_types_ above: a byte array has no
+    // pointer-sized word for the slot mechanism to publish. Drawn from the table source
+    // (#1778); install and clear SWAP under the lock and free after it, so no allocator call
+    // runs inside this leaf.
     //
     // The reader copies these bytes out through a stack buffer and allocates only after
     // unlocking, so this mutex is a strict LEAF — acquired at three sites, holding nothing
@@ -3151,7 +3289,7 @@ class graph_t {
     // once #873 injects a `block_source_t` (whose `Sync` policy may take its own lock) at
     // the allocation site.
     mutable std::shared_mutex identity_mutex_;
-    std::vector<std::byte> identity_record_;
+    mem::bytes_t identity_record_;
     /**
      * @brief The two test/bench instrumentation counters, present only when
      *        @ref default_config_t::kInstrumentCounters is bound `true` (#1664).
@@ -3217,8 +3355,11 @@ class graph_t {
     // when a subscriber exists at/above a written vertex, so the idle write stays
     // lock-free. Snapshots are taken under it and delivered outside it (callbacks /
     // re-dispatch re-enter the graph), mirroring fan_out's discipline.
-    std::set<std::vector<std::byte>> pending_;
-    std::set<std::vector<std::byte>> unconditional_;
+    //
+    // Sorted tables of table-source keys since #1778: an insert or a drained range moves the
+    // tail once, and the subtree range is found by binary search, as it was in the tree.
+    key_set_t pending_;
+    key_set_t unconditional_;
     std::mutex sweep_mutex_;
     // pending_.size() mirrored as a relaxed atomic: the observed-write fast path
     // (clear_pending on every eager delivery) skips the key render + sweep lock while no
@@ -3237,20 +3378,18 @@ class graph_t {
      *
      *         Defaults to the platform heap, so behaviour is byte-identical until a host
      *         injects a bounded source — except that exhaustion is a `nullptr` return
-     *         rather than the `-fno-exceptions` abort stub. Kept a DIFFERENT type from
-     *         `mr_` on purpose (see @ref tr::mem::block_source_t): the pmr channel may be
-     *         null-checked away and throws, this one cannot and does not.
+     *         rather than the `-fno-exceptions` abort stub.
      *
      *         LAST on purpose: no hot path reads it, so declaring it here keeps
      *         every other member at the byte offset it had before this seam
-     *         existed. A cold pointer inserted mid-object would shift `root_` and
+     *         existed. A cold pointer inserted mid-object would shift `roots_` and
      *         everything after it, which is a layout change the forward-hop bench
      *         can see and nothing gains from.
      *
-     *         The two adapters built over this source — `src_backend_` and `src_mr_` — do
-     *         NOT sit here for that reason: they are declared FIRST in the class (see the
+     *         The adapter built over this source — `src_backend_` — does NOT sit here for
+     *         that reason: they are declared FIRST in the class (see the
      *         "DECLARED FIRST so they are DESTROYED LAST" block), because a retained payload
-     *         segment reclaims through `src_backend_` while `root_`'s vertex tree is torn
+     *         segment reclaims through `src_backend_` while `roots_`'s vertex tree is torn
      *         down, and members die in reverse declaration order. Moving them down here to
      *         match this member's layout argument reintroduces the UBSan `vptr` lifetime
      *         bug that placement fixed.
@@ -3271,7 +3410,7 @@ class graph_t {
      *         brings its own source, and per-vertex isolation stays a tested property.
      *
      *         Declared beside `ctl_` for the reason that member documents — a cold pointer
-     *         inserted mid-object shifts `root_` and every hot member after it. */
+     *         inserted mid-object shifts `roots_` and every hot member after it. */
     mem::block_source_t* values_ = &mem::heap_source();
 
     /** @brief The TABLE sub-pool (#1777): registration, the control-plane containers and the
@@ -3285,7 +3424,7 @@ class graph_t {
      * Atomic rather than map-lock state: the charge is read on the creation path, which already
      * holds the unique map lock, but the deployer sizes and observes it from anywhere. Declared
      * beside `ctl_` for the reason that member documents — a cold word inserted mid-object shifts
-     * `root_` and every hot member after it. */
+     * `roots_` and every hot member after it. */
     std::atomic<std::size_t> vertex_ceiling_{kNoVertexCeiling};
     /** @brief Creations the ceiling refused — the evidence the bound bit (#838's count-then-act).
      *         Word-wide for the reason the delivery-drop counters are (#1697). */
@@ -3293,7 +3432,7 @@ class graph_t {
 
     // ---- #1071: the per-link departure index. LAST, beside `ctl_`, and for the same
     // reason that member documents: no hot path reads it, so declaring it here keeps
-    // `root_`, `vertex_slots_` and every other member at the byte offset it had before this
+    // `roots_`, `vertex_slots_` and every other member at the byte offset it had before this
     // index existed. Declared mid-object instead, it shifted those offsets and
     // `graph_t::fan_out` grew 48 B of wider displacement encodings — a codegen change on the
     // DELIVERY path, which the symbol ratchet caught and which nothing here gains from.
@@ -3302,23 +3441,25 @@ class graph_t {
      *        behind the link doors above and the two evictions. Its design, its carry and its
      *        locking are documented on the type (`link_index.hpp`, #1710).
      *
-     * Built against `mr_` as it stands at member initialization; the constructor body points
-     * its per-link allocations at the resolved resource (`link_index_t::set_entry_resource`).
+     * Every table it keeps draws from the graph's table source (#1778).
      */
-    link_index_t link_index_{mr_};
+    link_index_t link_index_{*tables_};
 
     /**
      * @brief One vertex's declared payload-type → required-ACL-right rows (RFC-0014 Am. 2),
      *        as a node of the graph's insert-only, immortal declaration list.
      */
     struct payload_right_node_t {
-        const vertex_t* v = nullptr;       /**< @brief The declaring vertex. */
-        std::vector<payload_right_t> rows; /**< @brief Its table, in declaration order. */
+        /** @brief An empty node drawing from @p src. */
+        explicit payload_right_node_t(mem::block_source_t& src) noexcept
+            : rows(src), catalog(src) {}
+        const vertex_t* v = nullptr;              /**< @brief The declaring vertex. */
+        mem::block_array_t<payload_right_t> rows; /**< @brief Its table, in declaration order. */
         /** @brief Its declared `:schema` catalog (RFC-0014 Amendment 3) — the encoded content
          *         of the schema's `SETTINGS`, served verbatim; empty when it declared none. It
          *         rides this node because it is the same kind of declaration (what a CONTROL
          *         vertex's writes accept), made at the same moment by the same caller. */
-        std::vector<std::byte> catalog;
+        mem::bytes_t catalog;
         payload_right_node_t* next = nullptr; /**< @brief The previously declared node. */
     };
 
@@ -3348,21 +3489,44 @@ class graph_t {
      * **What it costs the rest of the graph:** two members here, and one relaxed flag-bit test
      * on the write path. A node that declares nothing allocates nothing and never walks.
      */
-    std::atomic<payload_right_node_t*> payload_rights_{nullptr};
-
-    /** @brief OWNERSHIP of the `%payload_rights_` chain — deliberately separate from the
-     *         atomic head that readers walk, so the nodes are freed by an ordinary member
-     *         destructor and `graph_t` needs no user-provided one. (It measured: an
-     *         out-of-line `~graph_t` re-partitioned GCC's inline budget in this TU and grew
-     *         `dispatch_edge_remote` by 32 B — the #1223/#1250 hazard, caught by the symbol
-     *         ratchet.) Appended under the unique map lock, never erased. */
-    std::vector<std::unique_ptr<payload_right_node_t>> payload_right_store_;
+    /**
+     * @brief An insert-only, immortal declaration list that OWNS its nodes (#1778): the atomic
+     *        head readers walk, plus the source every node came from.
+     *
+     * Owning through its own destructor is what keeps `graph_t` without a user-provided one.
+     * (It measured: an out-of-line `~graph_t` re-partitioned GCC's inline budget in this TU and
+     * grew `dispatch_edge_remote` by 32 B — the #1223/#1250 hazard, caught by the symbol
+     * ratchet.) Nodes are prepended under the unique map lock and freed only here.
+     */
+    template <class N>
+    struct immortal_list_t {
+        std::atomic<N*> head{nullptr};      /**< @brief Newest node first. */
+        mem::block_source_t* src = nullptr; /**< @brief Where every node came from. */
+        /** @brief An empty list. */
+        immortal_list_t() noexcept = default;
+        immortal_list_t(const immortal_list_t&) = delete;
+        immortal_list_t& operator=(const immortal_list_t&) = delete;
+        /** @brief Frees every node. */
+        ~immortal_list_t() {
+            for (N* n = head.load(std::memory_order_relaxed); n != nullptr;) {
+                N* const next = n->next;
+                mem::drop_in(*src, n);
+                n = next;
+            }
+        }
+        /** @brief Publish @p n as the newest node. Under the unique map lock. */
+        void prepend(N* n) noexcept {
+            n->next = head.load(std::memory_order_relaxed);
+            head.store(n, std::memory_order_release);
+        }
+    };
+    immortal_list_t<payload_right_node_t> payload_rights_;
 
     /** @brief Publish @p rows and @p catalog as @p v's declaration and set its flag. Call with
-     *         `map_mutex_` held UNIQUE (the registration hold). Silently ignores a declaration
-     *         with neither. */
-    void declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
-                                std::span<const std::byte> catalog);
+     *         `map_mutex_` held UNIQUE (the registration hold). A declaration with neither is
+     *         ignored. @retval false The table source refused the node; nothing published. */
+    [[nodiscard]] bool declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
+                                              std::span<const std::byte> catalog);
 
     /** @brief @p v's declared `:schema` catalog bytes — empty unless it declared one.
      *         Lock-free; the caller has already tested the flag. */
@@ -3406,18 +3570,13 @@ class graph_t {
      * unique map lock, never unlinked, and retirement clears the vertex's `ADMISSION` flag
      * rather than removing anything, so a newer declaration is simply found first.
      */
-    std::atomic<admission_node_t*> admissions_{nullptr};
-
-    /** @brief OWNERSHIP of the `%admissions_` chain, separate from the atomic head readers
-     *         walk — for the reason `%payload_right_store_` states, including why `graph_t`
-     *         must not grow a user-provided destructor. */
-    std::vector<std::unique_ptr<admission_node_t>> admission_store_;
+    immortal_list_t<admission_node_t> admissions_;
 
     /** @brief Publish @p on_admit / @p on_app_field_admit as @p v's filters and set its flag.
-     *         Call with `map_mutex_` held UNIQUE (the registration hold). Silently ignores a
-     *         declaration with neither filter set. */
-    void declare_admission(vertex_t* v, admit_hook_t on_admit,
-                           app_field_admit_hook_t on_app_field_admit);
+     *         Call with `map_mutex_` held UNIQUE (the registration hold). A declaration with
+     *         neither filter set is ignored. @retval false The table source refused the node. */
+    [[nodiscard]] bool declare_admission(vertex_t* v, admit_hook_t on_admit,
+                                         app_field_admit_hook_t on_app_field_admit);
 
     /** @brief @p v's admission node, or null when it has none. Lock-free; the caller has
      *         already tested the flag. */

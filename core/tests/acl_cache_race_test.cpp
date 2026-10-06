@@ -331,7 +331,7 @@ void test_mark_inside_rebuild_defeats_the_publish() {
     vertex_t v{role_t::STORED_VALUE, path_key_t{as_bytes("bearer")}, {}};
     // Allocates the extension block and leaves the counter ODD, so the next gated evaluation
     // rebuilds — the state a first-ever `acl_allows` on a freshly written vertex is in.
-    v.set_acl({grant(kKeeper, acl_right_t::WRITE, false)});
+    (void)v.set_acl({grant(kKeeper, acl_right_t::WRITE, false)}, tr::mem::table_source());
 
     const std::vector<ace_t> pre_mark = {grant(kOther, acl_right_t::READ, true)};
     const std::vector<ace_t> post_mark = {grant(kProbe, acl_right_t::READ, true)};

@@ -40,7 +40,8 @@
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::find_ptr",
-      "bytes": 546
+      "bytes": 540,
+      "note": "RE-PINNED 546 -> 540 (-6 B) by #1778 (graph core onto the table source). The walk's start is now the tree root inside the one `roots_` block (`&roots_->root`, a load of the owner's pointer word) where it was `root_.get()` on a `unique_ptr`; the descent and `child_by_record` are unchanged, and every other pin is +0. A SHRINK, re-pinned as the new floor."
     },
     {
       "binary": "bench_compact_delivery",

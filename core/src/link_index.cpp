@@ -29,9 +29,10 @@ namespace {
  * twice costs a second `vertex_t::evict_link_edges` that finds the link's edges already gone
  * and reports 0.
  */
-void compact_candidates(std::pmr::vector<vertex_t*>& vs) {
+void compact_candidates(mem::block_array_t<vertex_t*>& vs) {
     std::sort(vs.begin(), vs.end());
-    vs.erase(std::unique(vs.begin(), vs.end()), vs.end());
+    vertex_t** const last = std::unique(vs.begin(), vs.end());
+    while (vs.end() != last) vs.pop_back();
 }
 
 /**
@@ -47,7 +48,7 @@ void compact_candidates(std::pmr::vector<vertex_t*>& vs) {
  * +48 B, for a control-plane change that touches neither. This unit no longer shares that
  * budget (#1710); the hand-written form is kept so the move itself changes no code.
  */
-bool candidates_contain(const std::pmr::vector<vertex_t*>& vs, std::size_t sorted,
+bool candidates_contain(const mem::block_array_t<vertex_t*>& vs, std::size_t sorted,
                         const vertex_t* v) {
     std::size_t lo = 0;
     std::size_t hi = sorted;
@@ -71,7 +72,7 @@ std::string_view link_index_t::slot_name(std::uint32_t i) const {
     const link_slot_t& s = slots_[i];
     if (s.len != kOverflowNameLen) return std::string_view(s.name, s.len);
     for (const link_long_name_t& l : long_names_)
-        if (l.slot == i) return l.text;
+        if (l.slot == i) return l.text.view();
     return {};
 }
 
@@ -84,16 +85,20 @@ std::uint32_t link_index_t::find_slot(std::string_view name) const {
     return kNoSlot;
 }
 
-/** @brief Give slot @p i the spelling @p name, inline when it fits. */
-void link_index_t::name_slot(std::uint32_t i, std::string_view name) {
+/** @brief Give slot @p i the spelling @p name, inline when it fits; false when the overflow
+ *         name could not be stored (the slot is left unnamed, i.e. dead). */
+bool link_index_t::name_slot(std::uint32_t i, std::string_view name) {
     link_slot_t& s = slots_[i];
     if (name.size() <= kInlineNameChars) {
         std::memcpy(s.name, name.data(), name.size());
         s.len = static_cast<std::uint8_t>(name.size());
-        return;
+        return true;
     }
-    long_names_.push_back(link_long_name_t{i, std::pmr::string(name, entry_mr_)});
+    mem::string_t text(slots_.source());
+    if (!text.assign(name)) return false;
+    if (long_names_.emplace_back(link_long_name_t{i, std::move(text)}) == nullptr) return false;
     s.len = kOverflowNameLen;
+    return true;
 }
 
 /** @brief Mint-or-find @p name with the lock held. */
@@ -104,24 +109,29 @@ link_id_t link_index_t::intern_locked(std::string_view name) {
     // slot `p3` already has rather than stranding it behind a second one.
     if (const std::uint32_t i = find_slot(name); i != kNoSlot)
         return link_id_t{i, slots_[i].generation};
-    std::uint32_t i = 0;
-    if (!free_.empty()) {
-        i = free_.back();
-        free_.pop_back();
+    std::uint32_t i = free_head_;
+    if (i != kNoSlot) {
+        free_head_ = static_cast<std::uint32_t>(slots_[i].e.compacted);
+        slots_[i].e.compacted = 0;
     } else {
         // Grown to EXACTLY what is needed rather than doubled. This runs once per link-up
         // and the figure #1266 is judged on is bytes at rest in the user-pinned arena
         // (#1160's budget on the C6), where a doubling vector of 64-byte slots would hand
         // back up to a fifth of the saving as capacity slack. The copy is a move of a
         // handful of trivially-relocatable records on a control-plane-cold path.
-        if (slots_.size() == slots_.capacity()) slots_.reserve(slots_.size() + 1);
-        slots_.push_back(
-            link_slot_t{.e = link_entry_t{.vs = std::pmr::vector<vertex_t*>(entry_mr_)}});
+        // A refusal of either step is a failed intern (#1778): an invalid token, nothing kept.
+        if (slots_.size() == slots_.capacity() && !slots_.reserve(slots_.size() + 1)) return {};
+        (void)slots_.emplace_back(
+            link_slot_t{.e = link_entry_t{.vs = mem::block_array_t<vertex_t*>(slots_.source())}});
         i = static_cast<std::uint32_t>(slots_.size() - 1);
     }
     link_slot_t& s = slots_[i];
     if (s.generation == 0) s.generation = 1;  // fresh; a released slot was bumped on release
-    name_slot(i, name);
+    if (!name_slot(i, name)) {
+        s.e.compacted = free_head_;  // the slot stays dead (len == 0), first to be reused
+        free_head_ = i;
+        return {};
+    }
     return link_id_t{i, s.generation};
 }
 
@@ -171,7 +181,7 @@ void link_index_t::release_slot(std::uint32_t i) {
     if (s.len == kOverflowNameLen)
         for (std::size_t k = 0; k < long_names_.size(); ++k)
             if (long_names_[k].slot == i) {
-                long_names_.erase(long_names_.begin() + static_cast<std::ptrdiff_t>(k));
+                long_names_.erase_at(k);
                 break;
             }
     s.len = 0;  // DEAD — a name scan skips it, and no live link can spell itself empty
@@ -181,13 +191,13 @@ void link_index_t::release_slot(std::uint32_t i) {
     ++s.generation;
     if (s.generation == 0) s.generation = 1;  // wrapped: 0 is reserved for "no token"
     s.e.vs.clear();
-    s.e.compacted = 0;
-    free_.push_back(i);
+    s.e.compacted = free_head_;  // a dead slot's prefix mark is the free list's link
+    free_head_ = i;
 }
 
 /** @brief Record @p v under @p link, by the carried token when it validates. */
-void link_index_t::index_vertex(std::string_view link, link_id_t token, vertex_t* v) {
-    if (link.empty()) return;  // the LOCAL spelling — no link teardown can ever name it
+bool link_index_t::index_vertex(std::string_view link, link_id_t token, vertex_t* v) {
+    if (link.empty()) return true;  // the LOCAL spelling — no link teardown can ever name it
     const std::lock_guard lock(mutex_);
     // THE CARRY (#1417). A valid token whose slot is live AND spells `link` is the entry,
     // reached by subscript: no hash, no find, no key copy. Everything else falls back to
@@ -205,7 +215,7 @@ void link_index_t::index_vertex(std::string_view link, link_id_t token, vertex_t
     } else {
         ++name_lookups_;  // the carry did not reach here — see name_lookups
         const link_id_t fresh = intern_locked(link);
-        if (!fresh.valid()) return;
+        if (!fresh.valid()) return false;
         i = fresh.slot;
     }
     link_entry_t& e = slots_[i].e;
@@ -225,8 +235,13 @@ void link_index_t::index_vertex(std::string_view link, link_id_t token, vertex_t
     // plus a bounded scan of the tail, with NO memmove — which is what made a fully sorted
     // insert a reject (+19% on this path, #1071, from the N/2-pointer shift the Nth
     // subscription paid). A genuinely new vertex still lands with a bare `push_back`.
-    if (candidates_contain(e.vs, e.compacted, v)) return;
-    e.vs.push_back(v);
+    if (candidates_contain(e.vs, e.compacted, v)) return true;
+    // Regrown only when full, to `2n + 1`: a link's FIRST candidate takes a one-pointer block,
+    // not the container's opening eight, because most links carry a single subscribed vertex
+    // and the list is per link (#1778). Doubling past that keeps the appends amortized, and
+    // with room ensured the push below cannot be refused.
+    if (e.vs.size() == e.vs.capacity() && !e.vs.reserve(e.vs.size() * 2 + 1)) return false;
+    (void)e.vs.push_back(v);
     // With the membership test above the list IS the distinct set, so compaction no longer
     // bounds unbounded growth — nothing can grow it past the vertices this link subscribed
     // on. What it bounds now is the TAIL, i.e. how long the linear half of that test can get:
@@ -236,6 +251,7 @@ void link_index_t::index_vertex(std::string_view link, link_id_t token, vertex_t
         compact_candidates(e.vs);
         e.compacted = e.vs.size();
     }
+    return true;
 }
 
 /** @brief The distinct candidate count for @p link, compacting first. */
@@ -258,18 +274,24 @@ std::size_t link_index_t::candidate_count(std::string_view link) const {
 }
 
 /** @brief The candidate vertices for @p link — copied, or taken with the slot released. */
-std::pmr::vector<vertex_t*> link_index_t::candidates(std::string_view link, bool take) {
+mem::block_array_t<vertex_t*> link_index_t::candidates(std::string_view link, bool take) {
     const std::lock_guard lock(mutex_);
     const std::uint32_t i = find_slot(link);
-    if (i == kNoSlot) return std::pmr::vector<vertex_t*>(entry_mr_);
+    if (i == kNoSlot) return mem::block_array_t<vertex_t*>(slots_.source());
     // Compact first: a duplicate would cost a second eviction pass over the same vertex.
     link_entry_t& e = slots_[i].e;
     if (e.vs.size() != e.compacted) {
         compact_candidates(e.vs);
         e.compacted = e.vs.size();
     }
-    if (!take) return e.vs;  // a copy: the entry outlives this eviction
-    std::pmr::vector<vertex_t*> out = std::move(e.vs);
+    if (!take) {
+        // A copy: the entry outlives this eviction. Refused ⇒ empty (see the declaration).
+        mem::block_array_t<vertex_t*> copy(slots_.source());
+        if (!copy.append(e.vs.data(), e.vs.size())) copy.clear();
+        return copy;
+    }
+    mem::block_array_t<vertex_t*> out = std::move(e.vs);
+    e.vs = mem::block_array_t<vertex_t*>(slots_.source());
     // RELEASED, not merely emptied — the exact footprint behaviour the erased map entry had,
     // so a node that churns links keeps one slot per link it CURRENTLY holds rather than one
     // per name it has ever seen. The stamp bump inside is what stops a token cached for the

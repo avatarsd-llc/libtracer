@@ -25,6 +25,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `slab_pool_t` in front of the `pool_source_t` (its root), which rounds into the one
   size-class table and keeps the bound; `pool_source_t` gets no rounding mode of its own.
 
+- **`graph_t::trim_tables()`
+  ([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778)).** Releases the free slabs
+  of a default graph's own table sub-pool; a no-op on a graph with an injected root.
+
 ### Breaking
 
 - **`handlers_t::on_app_field_admit` receives the writer's `write_ctx_t`
@@ -109,6 +113,60 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     pointer to the state instead.
   - The ESP-IDF links (`httpd_ws_link_t`, `esp_ws_client_link_t`, `twai_link_t`) are not
     migrated yet. A follow-up issue tracks them.
+
+### Changed
+
+- **The graph core draws its own state from the graph's table source
+  ([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778), ADR-0083).** The vertex
+  tree, the vertex index, the link index, subscriber edge tables, the seam park, the creation
+  catalog, the identity record, the payload-right and admission lists and the propagate-sweep
+  sets now live in core containers over `graph_t::table_source()` (on a default graph, a
+  table sub-pool of the graph's own, so independent graphs share no pool lock and no slab;
+  the injected root otherwise), not in `std` containers on the global heap.
+  Every growth site is failable: a refusal answers `BACKPRESSURE` and leaves nothing
+  half-made. A refused `try_register_vertex` leaves an unregistered placeholder. A refused
+  `retire` changes nothing. A refused `set_policy` may have applied the members before the
+  refusal, but never the delivery mode without its sweep-set entry
+  ([#1883](https://github.com/avatarsd-llc/libtracer/issues/1883) makes it all-or-nothing). At setup,
+  `register_vertex`, `register_child_type` and the constructor abort when the source runs
+  dry, and print the call, the source name and the bytes it was refused to `stderr` first
+  (ADR-0056 amendment). Migration:
+  - `graph_t::register_child_type(std::string, child_factory_t)` →
+    `register_child_type(std::string_view, child_factory_t)`. Source-compatible for every
+    string argument.
+  - `graph_t::for_each_vertex` returns `bool`: `false` when the table source refused the
+    snapshot, in which case the callback ran for nothing. Callers that ignore the result are
+    unchanged.
+  - `vertex_t` setters take the source their blocks come from and return `[[nodiscard]] bool`
+    (`false` = refused, nothing installed): `set_acl(aces, tables)`,
+    `set_app_fields(table, tables)`, `set_app_fields_static(table, tables)`,
+    `set_retention(r, depth, tables)`, `set_ring_source(src, reliable, tables)`,
+    `set_share_threshold_bytes(bytes, tables)`. Pass `graph.table_source()`, or
+    `tr::mem::table_source()` for a free-standing vertex.
+  - `vertex_t::fill(role, handlers, src)` and `vertex_t::add_child(vertex_t*, src)` (which now
+    adopts a raw block from `src`, not a `std::unique_ptr`) return a refusal by value
+    (`false`, `nullptr`). The `vertex_t` constructor takes an optional trailing
+    `block_source_t&` (default `tr::mem::table_source()`).
+  - `vertex_t::app_field_store` returns `result_t<void>` (`SCHEMA_NOT_FOUND` when the field
+    is undeclared, `BACKPRESSURE` when the table source refused the bytes), not `bool`.
+  - `vertex_t::ring_admit` takes its drop report by reference (`store_drops_t&`), not a
+    nullable pointer.
+  - `vertex_t::add_edge(s, latch, tables)`, `vertex_t::ring_take_t(src)`, and
+    `alloc_edge_pub(src, n)` / `destroy_edge_pub(src, p)` name the source their blocks come
+    from.
+  - `link_index_t` is built over a source (`link_index_t(block_source_t&)`). The
+    `set_entry_resource` pmr door is gone, and `index_vertex` returns `[[nodiscard]] bool`.
+  - `app_field_table_t` and `app_field_group_t` are built over a source, and the table is
+    move-only. `owned_slots` and `backing` merge into one `owned` block (the slot array, then
+    the name and descriptor bytes), and `values` is a lazily drawn `mem::bytes_t` array, one
+    per slot (null until the first retained write).
+  - New in `tr::mem`:
+    - `block_array_t::append`, `block_array_t::resize_for_overwrite` and a ranged
+      `block_array_t::erase_at(i, n)`.
+    - `sorted_map_t::at`, `sorted_map_t::erase_at`, and a public `sorted_map_t::lower_bound`.
+    - `bytes_t`, `assign_bytes`, `as_span`, `bytes_less_t`, `make_in` / `drop_in`,
+      `block_ptr_t` / `make_block`, and `exhausted_at_init`.
+  - `wire::emit_path_segment` gains `mem::bytes_t&` overloads.
 
 ## [0.18.0] — 2026-10-05
 

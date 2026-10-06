@@ -277,7 +277,7 @@ void test_acl_verbs() {
 
     ace_t ace;
     ace.access_mask = 0x3;
-    v.set_acl({ace});
+    check(v.set_acl({ace}, tr::mem::table_source()), "the ACE list fits the table source");
     check(acl_present(v) && acl_ace_count(v) == 1,
           "with_acl serves the presence bit and the stored ACE list together");
     check(v.with_aces([](const std::vector<ace_t>& aces) {
@@ -287,7 +287,7 @@ void test_acl_verbs() {
 
     // #907: an empty store replaces the list, but the ACL stays PRESENT — the empty
     // container is a written policy that grants nothing, not the absence of one.
-    v.set_acl({});
+    check(v.set_acl({}, tr::mem::table_source()), "an empty store fits too");
     check(acl_ace_count(v) == 0, "storing replaces — an empty store clears the ACE list");
     check(acl_present(v), "an empty store leaves the :acl PRESENT (an ACL granting nothing)");
 }

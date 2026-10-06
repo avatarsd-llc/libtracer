@@ -21,7 +21,7 @@
     },
     "tr::graph::graph_t::propagate_impl": {
       "ccn": [
-        30
+        27
       ],
       "file": "core/src/graph.cpp"
     },
@@ -33,13 +33,13 @@
     },
     "tr::graph::graph_t::write_branch": {
       "ccn": [
-        33
+        32
       ],
       "file": "core/src/graph.cpp"
     },
     "tr::graph::parse_branch_node": {
       "ccn": [
-        23
+        22
       ],
       "file": "core/src/graph.cpp"
     },
