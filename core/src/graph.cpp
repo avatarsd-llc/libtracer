@@ -541,6 +541,25 @@ template <class Set>
     return {first, last};
 }
 
+/** @brief Erase the entries of @p set's subtree run under @p lo whose vertex @p drop selects,
+ *         keeping the survivors in key order, and answer how many went. The run is compacted
+ *         in place and its tail erased once, so the cost is one pass over the run. Kept out of
+ *         line: only `retire` calls it, and inlined there it moved GCC's inlining budget for
+ *         this file enough to grow the hot `dispatch_edge_remote` (the symbol ratchet). */
+template <class Set, class Drop>
+[[gnu::noinline]] std::size_t drop_from_run(Set& set, std::span<const std::byte> lo,
+                                            Drop drop) noexcept {
+    const auto [first, end] = subtree_run(set, lo);
+    std::size_t kept = first;
+    for (std::size_t i = first; i < end; ++i) {
+        if (drop(set.at(i).value)) continue;
+        if (kept != i) std::swap(set.at(kept), set.at(i));
+        ++kept;
+    }
+    set.erase_at(kept, end - kept);
+    return end - kept;
+}
+
 }  // namespace
 
 graph_t::own_pool_t::own_pool_t(mem::block_source_t& src) noexcept {
@@ -1169,17 +1188,26 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     // (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the
     // leaked key, overriding the IF_NEWER reset revert_to_placeholder just applied. A
     // concurrent sweep tolerates a not-yet-erased key: find_ptr skips the unregistered
-    // vertex, so delivery never lands on a retired one either way. The subtree's entries are
-    // one contiguous run per set, so each goes in one erase. A vertex registered under the
-    // subtree between the unlock and this erase loses a mark taken in that window — the window
-    // the per-key erase already had for a vertex revived at a retired address.
+    // vertex, so delivery never lands on a retired one either way.
+    //
+    // Between the unlock and this lock another thread may register under the subtree and
+    // enroll or mark the newcomer (#1884), so the run is filtered, not erased whole: each
+    // entry names its vertex, and the entry goes only when that vertex no longer belongs in
+    // the set. The retire walk above reset every retired vertex to IF_NEWER and dropped its
+    // pending-mark hint; only a newcomer's own mode store or mark puts either back, and both
+    // happen under the sweep lock held here. So an UNCONDITIONAL entry whose vertex is not
+    // UNCONDITIONAL is the retiree's, and a pending entry whose hint is down is too. A null
+    // UNCONDITIONAL entry is a registration's enrollment that has not reached its vertex yet;
+    // that registration fills it or erases it itself. The window is closed.
     {
         const std::lock_guard slock(sweep_mutex_);
-        const auto [ui, uj] = subtree_run(unconditional_, mem::as_span(lo));
-        unconditional_.erase_at(ui, uj - ui);
-        const auto [pi, pj] = subtree_run(pending_, mem::as_span(lo));
-        pending_.erase_at(pi, pj - pi);
-        pending_count_.fetch_sub(pj - pi, std::memory_order_relaxed);
+        (void)drop_from_run(unconditional_, mem::as_span(lo), [](const vertex_t* u) {
+            return u != nullptr && u->delivery_mode() != delivery_mode_t::UNCONDITIONAL;
+        });
+        pending_count_.fetch_sub(
+            drop_from_run(pending_, mem::as_span(lo),
+                          [](const vertex_t* u) { return !u->has_pending_mark(); }),
+            std::memory_order_relaxed);
     }
     return {};
 }
@@ -2837,9 +2865,8 @@ void graph_t::mark_pending(vertex_t* v) {
     // a key in the set — a fresh insert or one already present. Every drop is also taken
     // under this lock and only over an absent key, so a set member's hint is always up.
     const bool if_newer = v->delivery_mode() == delivery_mode_t::IF_NEWER;
-    const key_set_t::emplace_result_t ins =
-        if_newer ? pending_.try_emplace(std::move(key), std::uint8_t{0})
-                 : key_set_t::emplace_result_t{nullptr, false};
+    const key_set_t::emplace_result_t ins = if_newer ? pending_.try_emplace(std::move(key), v)
+                                                     : key_set_t::emplace_result_t{nullptr, false};
     if (ins.value != nullptr) v->set_pending_mark(true);
     if (ins.inserted)
         pending_count_.fetch_add(1, std::memory_order_relaxed);
@@ -2893,7 +2920,7 @@ result_t<bool> graph_t::enroll_unconditional(std::span<const std::byte> key) {
     if (unconditional_.contains(key)) return false;
     mem::bytes_t k(*tables_);
     if (!mem::assign_bytes(k, key) ||
-        unconditional_.try_emplace(std::move(k), std::uint8_t{0}).value == nullptr)
+        unconditional_.try_emplace(std::move(k), nullptr).value == nullptr)
         return std::unexpected(status_t::BACKPRESSURE);
     return true;
 }
@@ -2903,13 +2930,17 @@ bool graph_t::apply_delivery_mode(vertex_t* v, delivery_mode_t mode,
     // The one failable step, taken before anything changes (#1778): the set entry, drawn only
     // when the key is not enrolled yet, so a registration that enrolled it first cannot be
     // refused here. It goes in UNDER the same lock as the mode store and the pending erase,
-    // so no sweep ever sees the key in both sets (#895).
+    // so no sweep ever sees the key in both sets (#895). An entry the registration enrolled
+    // before @p v existed is null until here, where it learns its vertex (#1884); naming it on
+    // the way out of the set as well costs nothing, since the erase below drops it.
     const std::lock_guard lock(sweep_mutex_);
     mem::bytes_t k(*tables_);
-    if (mode == delivery_mode_t::UNCONDITIONAL && !unconditional_.contains(key) &&
+    vertex_t** entry = unconditional_.find(key);
+    if (mode == delivery_mode_t::UNCONDITIONAL && entry == nullptr &&
         (!mem::assign_bytes(k, key) ||
-         unconditional_.try_emplace(std::move(k), std::uint8_t{0}).value == nullptr))
+         (entry = unconditional_.try_emplace(std::move(k), v).value) == nullptr))
         return false;
+    if (entry != nullptr) *entry = v;
     v->set_delivery_mode(mode);
     // Leaving IF_NEWER retires any mark below, and the pending-mark hint (#1712) with it:
     // UNCONDITIONAL is swept via unconditional_ now (no double membership) and EXPLICIT is

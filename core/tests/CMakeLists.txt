@@ -1104,6 +1104,13 @@ target_link_libraries(delivery_mode_race_test PRIVATE libtracer Threads::Threads
 libtracer_test_warnings(delivery_mode_race_test)
 add_test(NAME delivery_mode_race COMMAND delivery_mode_race_test)
 
+# #1884 — `retire` against a registration under the retired prefix: the newcomer's sweep-set
+# entries must survive the retire's cleanup. Also a TSan target.
+add_executable(retire_sweep_race_test retire_sweep_race_test.cpp)
+target_link_libraries(retire_sweep_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(retire_sweep_race_test)
+add_test(NAME retire_sweep_race COMMAND retire_sweep_race_test)
+
 # #1712: the per-vertex pending-mark hint — an unmarked observed write skips the key render and
 # the sweep lock (global-new counter difference), plus the mark/clear race the tsan lane runs.
 add_executable(pending_mark_test pending_mark_test.cpp)

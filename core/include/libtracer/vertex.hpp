@@ -2488,7 +2488,8 @@ class vertex_t {
         // the app fields). The next occupant starts from its own role's defaults.
         clear_declarations();
         // And the pending-mark hint (#1712): the retire erases the occupant's key from the
-        // sweep set right after the map lock drops, so the next occupant starts unmarked.
+        // sweep set right after the map lock drops — every key whose hint is still down by
+        // then (#1884) — so the next occupant starts unmarked.
         set_flag(flag_t::PENDING_MARK, false);
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.
@@ -3144,8 +3145,8 @@ class vertex_t {
      * the same lock, and only once the key is gone (an eager write's retire, a covering
      * sweep's re-check, a mode flip). So a key in the sweep set always has its hint up; the
      * converse may lag — a raised hint over an absent key costs one slow-path probe that
-     * erases nothing. Retirement drops it under the map lock instead, just before the retire
-     * erases the key itself.
+     * erases nothing. Retirement drops it under the map lock instead, and its sweep-set
+     * cleanup then erases exactly the keys whose hint is still down (#1884).
      */
     void set_pending_mark(bool on) noexcept { set_flag(flag_t::PENDING_MARK, on); }
 
