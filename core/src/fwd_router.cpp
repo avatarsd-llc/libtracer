@@ -3810,63 +3810,51 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
         // over a delivery form that carries its own route, so the flow degrades to that
         // form instead of dropping — fall through.
     }
+    // ONE frame build for both delivery forms (#1795): `FWD{ op=WRITE, dst, src=<empty PATH>,
+    // payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136). Only the `dst` and the
+    // link it leaves on differ, so they are chosen first and the head is written once.
+    //
+    // Default: the canonical full route — the stored PATH TLV verbatim, copied ONCE at
+    // subscribe (ADR-0041 §2), on the link the edge names. A delivery copies nothing; `src`
+    // starts empty and each forwarding hop grows it (the way back). The refcounted route view
+    // (`sub.return_route`) stays alive for this call even if the slot is concurrently
+    // unsubscribed.
+    transport_t* out = link;
+    std::span<const std::byte> dst = route;
+    stack_writer<6> ref_head;  // the bound form's PATH_REF header; empty for the full route
     // The reverse-list delivery (RFC-0024 §7.1 amendment 1, #1223 step 4): consume the
     // stored list's element 0 — this node's OWN reference to the connection vertex the
     // subscribe arrived on — by validating it against this node's vertex map (§5.1 bounds +
     // generation, then §6.2's ACL at the dereferenced vertex under the edge's stored
     // subject) and egressing through the vertex it names. Elements 1.. go on the wire as
     // the delivery's bound `dst`. ANY refusal — the link re-dialled (generation moved), the
-    // child gone, the ACL revoked — falls through to the canonical route below, which is
-    // stored alongside precisely so this binding is an optimisation plus a liveness check
-    // and never the only way home.
+    // child gone, the ACL revoked — keeps the canonical route above, which is stored
+    // alongside precisely so this binding is an optimisation plus a liveness check and
+    // never the only way home.
     const std::span<const std::byte> rev = sub.reverse_route.bytes();
     if (rev.size() >= 4u + 2u * wire::kPathRefElementBytes) {
         const wire::grammar::span_cursor rcur{rev};
         const wire::path_ref_element_t e0 = read_path_ref_element(rcur, 4);
-        if (transport_t* const out = bound_egress(e0, sub.caller, graph::acl_right_t::WRITE)) {
-            const std::span<const std::byte> dst_body =
-                rev.subspan(4u + wire::kPathRefElementBytes);
-            constexpr std::array<std::byte, 5> op_tlv{
-                std::byte{0x01}, std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
-                std::byte{std::to_underlying(fwd_op_t::WRITE)}};
-            constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00},
-                                                         std::byte{0x00}, std::byte{0x00}};
-            const std::size_t body_len =
-                op_tlv.size() + 4u + dst_body.size() + empty_src.size() + val.total_length();
-            stack_writer<20> head;  // FWD header (<=6) + 5-byte op + 4-byte PATH_REF header
-            head.header(type_t::FWD, body_len);
-            head.raw(op_tlv);
-            head.header_route(type_t::PATH_REF, dst_body.size());
-            if (head.ok()) {
-                // The retained send (RFC-0028 §6.9): the head spans on the stack, the value by
-                // reference. A link that writes in-call gathers the lot; one that queues keeps
-                // the value and copies only the head — no iov table here, no payload copy
-                // anywhere on this leg.
-                const std::array<std::span<const std::byte>, 3> head_iov{
-                    head.span(), dst_body, std::span<const std::byte>(empty_src)};
-                out->send(std::span<const std::span<const std::byte>>(head_iov), val);
-                return;
-            }
+        if (transport_t* const bound = bound_egress(e0, sub.caller, graph::acl_right_t::WRITE)) {
+            out = bound;
+            dst = rev.subspan(4u + wire::kPathRefElementBytes);
+            // Cannot overflow: the responder stored at most `kMaxPathRefElements` elements
+            // (`op_resolve_walk.hpp`), so the body never needs the widened length.
+            static_assert(wire::kMaxPathRefElements * wire::kPathRefElementBytes <= 0xFFFFu);
+            ref_head.header_route(type_t::PATH_REF, dst.size());
         }
     }
-    // Default: full-route `FWD{ op=WRITE, dst=<return route>, src=<empty PATH>,
-    // payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136), scatter-gathered over
-    // the stored value's rope links (ADR-0053 ⑤): a fresh stack head + the ROPED stored
-    // route + each value segment, NO flatten. The route bytes were copied ONCE at subscribe
-    // (ADR-0041 §2); a delivery copies nothing — a multi-link value crosses as its own
-    // segments. src starts empty — each forwarding hop grows it (the way back). The
-    // refcounted route view (`sub.return_route`) stays alive for this call even if the slot
-    // is concurrently unsubscribed.
     constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
                                               std::byte{0x00},
                                               std::byte{std::to_underlying(fwd_op_t::WRITE)}};
     constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},
                                                  std::byte{0x00}};
     const std::size_t body_len =
-        op_tlv.size() + route.size() + empty_src.size() + val.total_length();
-    stack_writer<16> head;  // FWD header (≤6) + the 5-byte op TLV
+        op_tlv.size() + ref_head.span().size() + dst.size() + empty_src.size() + val.total_length();
+    stack_writer<20> head;  // FWD header (≤6) + the 5-byte op TLV + the PATH_REF header (≤4)
     head.header(type_t::FWD, body_len);
     head.raw(op_tlv);
+    head.raw(ref_head.span());
     if (!head.ok()) {
         // Unreachable for a head this size (the FWD header is at most 6 bytes), and counted
         // rather than silent if a future head ever outgrows its buffer.
@@ -3874,16 +3862,16 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
         return;
     }
 
-    // The retained send (RFC-0028 §6.9): head + stored route + empty src as three spans on the
-    // stack, and the value by reference. The per-delivery iov table this leg used to draw from
+    // The retained send (RFC-0028 §6.9): head + dst + empty src as three spans on the stack,
+    // and the value by reference. The per-delivery iov table this leg used to draw from
     // `graph_.control_source()` (#981) is gone with it: the link lowers `head ++ value.links()`
     // through its own inline table (`transport_t::send(head, value)`), and a link that QUEUES
     // the frame keeps the value (one refcount) and copies only the head — so neither this leg
     // nor a queued link copies the payload, and neither allocates for a value of up to five
     // links. A multi-link value still crosses as its own segments (ADR-0053 ⑤).
-    const std::array<std::span<const std::byte>, 3> head_iov{head.span(), route,
+    const std::array<std::span<const std::byte>, 3> head_iov{head.span(), dst,
                                                              std::span<const std::byte>(empty_src)};
-    link->send(std::span<const std::span<const std::byte>>(head_iov), val);
+    out->send(std::span<const std::span<const std::byte>>(head_iov), val);
 }
 
 // --- deferred remote AWAIT (ADR-0084) ------------------------------------------------
