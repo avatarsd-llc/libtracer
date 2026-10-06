@@ -110,7 +110,9 @@ closely.
 
 **Process shape.** Each family of the sweep (the fan-out ladder, the payload ladder,
 `lkv`, …) runs in its **own fresh process**, under one fixed set of allocator settings
-(`GLIBC_TUNABLES`: mmap and trim thresholds, arena count). Rows used to share one process
+(`GLIBC_TUNABLES`: mmap and trim thresholds, arena count), and records them in its output
+as an `ALLOC` line, which the gate prints and every history point carries
+([#1903](https://github.com/avatarsd-llc/libtracer/issues/1903)). Rows used to share one process
 heap, aged by every row ahead of them, so a row's value partly depended on its position in
 the sweep. A heap state that matters is now a named row instead: `lkv-*-heap` runs on a
 fresh heap and `lkv-*-heap-aged` on a deliberately fragmented one

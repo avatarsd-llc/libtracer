@@ -282,6 +282,21 @@ class Stamping(unittest.TestCase):
         """A transcript that predates the CLOCK line stamps nothing rather than a guess."""
         self.assertIsNone(hg.clock_floor("RESULT\tlibtracer\tinproc\t64\t1\t1\t1\t1\t0\t9\t9\t9\n"))
 
+    def test_alloc_state_is_read_off_the_transcript(self):
+        """The ALLOC lines every family process prints become one stamped fragment (#1903)."""
+        tun = ("glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=33554432:"
+               "glibc.malloc.arena_max=8")
+        text = f"CLOCK\t1.000\t21.874\nALLOC\tpinned\t{tun}\nALLOC\tpinned\t{tun}\n"
+        self.assertEqual(hg.alloc_state(text), "alloc pinned mmap_threshold=131072:"
+                                               "trim_threshold=33554432:arena_max=8")
+
+    def test_alloc_state_disagreeing_processes_say_mixed(self):
+        text = "ALLOC\tpinned\tglibc.malloc.arena_max=8\nALLOC\tunpinned\t-\n"
+        self.assertEqual(hg.alloc_state(text), "alloc MIXED pinned arena_max=8 | unpinned -")
+
+    def test_alloc_state_absent_is_none(self):
+        self.assertIsNone(hg.alloc_state("CLOCK\t1.000\t21.874\n"))
+
     def test_missing_compiler_does_not_raise(self):
         """A toolchain the guard cannot interrogate must not cost the commit its point."""
         self.assertEqual(hg.compiler_identity("definitely-not-a-compiler-xyz"),

@@ -892,7 +892,9 @@ are not comparable to each other: different denominator, by construction.
 - Hover any point for its exact value, the commit and its subject line — plus the host
   descriptor when the store records one, which the bench-local store does on every point.
   That descriptor carries the run's **clock floor**: the clock's resolution and the measured
-  cost of one timed sample, the finest a per-op row could resolve on that host.
+  cost of one timed sample, the finest a per-op row could resolve on that host. It also
+  carries the **allocator settings** every family process ran under (`alloc pinned` plus the
+  fixed glibc mmap and trim thresholds and arena count).
 
 ### Two latency series per in-process mode
 

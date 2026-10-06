@@ -26,6 +26,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstdio>
@@ -96,6 +97,48 @@ inline void pin_allocator_state(char** argv) {
     std::fprintf(stderr, "WARN allocator tunables not applied (exec: %s)\n", std::strerror(errno));
 #else
     (void)argv;
+#endif
+}
+
+/**
+ * @brief Print the allocator state this process runs under (#1903): `ALLOC <state> <tunables>`.
+ *
+ * One tab-separated line on stdout, ahead of the process's rows, so the transcript records the
+ * settings every row was measured under instead of leaving them implied by the source. `state`
+ * is `pinned` when the process runs under exactly @ref kAllocTunables (the re-exec of
+ * @ref pin_allocator_state took effect) and `unpinned` otherwise; `tunables` is the
+ * `GLIBC_TUNABLES` string the process actually has, or `-` when it has none. Every RESULT
+ * parser skips the line on its tag; `perf_gate.py` prints it under the verdict and
+ * `host_guard.py stamp` writes it onto each history point.
+ *
+ * HEAP-NEUTRAL by construction: the line is formatted into a stack buffer and written with
+ * `write(2)`, never through `stdout`. A family child prints nothing on stdout before its first
+ * row, so a `printf` here made stdio allocate its buffer (4 KiB on a pipe) AHEAD of the timed
+ * rows instead of after the first one, shifting every later allocation's address; that moved
+ * `inproc/64/1024/1` p50 by +3-5% with no library change. The `fflush` only pushes out a line
+ * the caller already buffered, so this one cannot overtake it; it allocates nothing.
+ */
+inline void emit_alloc_state() {
+    const char* cur = std::getenv("GLIBC_TUNABLES");
+    const bool pinned = std::getenv(kAllocPinnedEnv) != nullptr && cur != nullptr &&
+                        std::strcmp(cur, kAllocTunables) == 0;
+    char line[512];
+    const int n =
+        std::snprintf(line, sizeof line, "ALLOC\t%s\t%s\n", pinned ? "pinned" : "unpinned",
+                      cur != nullptr && *cur != '\0' ? cur : "-");
+    if (n <= 0) return;
+    const std::size_t len = std::min(static_cast<std::size_t>(n), sizeof line - 1);
+    std::fflush(stdout);
+#if defined(__linux__)
+    for (std::size_t off = 0; off < len;) {
+        const ssize_t w = ::write(STDOUT_FILENO, line + off, len - off);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return;
+        off += static_cast<std::size_t>(w);
+    }
+#else
+    std::fwrite(line, 1, len, stdout);
+    std::fflush(stdout);
 #endif
 }
 

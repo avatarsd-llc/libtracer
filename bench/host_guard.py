@@ -32,7 +32,8 @@ instruments, in the order the workflow uses them:
     property — `compact-forward` 1.8%, `fwd-demux-fixed` ~0%, `fold-b4` ~15% across
     placements of identical source — so a pair drawn from two builds cannot separate
     a busy neighbour from a relinked function.)
-  * `stamp` — write the host descriptor, the COMPILER IDENTITY, the CLOCK FLOOR (#1804)
+  * `stamp` — write the host descriptor, the COMPILER IDENTITY, the CLOCK FLOOR (#1804),
+    the ALLOCATOR SETTINGS (#1903)
     and any contamination verdict onto every emitted point, so the store records the
     conditions a number was taken under and not just the number.
 
@@ -456,6 +457,28 @@ def clock_floor(text: str) -> str | None:
     return None
 
 
+def alloc_state(text: str) -> str | None:
+    """@brief The allocator settings a bench transcript recorded, as a stamped one-liner (#1903).
+
+    Every gated bench process prints `ALLOC <pinned|unpinned> <GLIBC_TUNABLES>` ahead of its
+    rows; a default sweep prints one per family process. Returns e.g.
+    `alloc pinned mmap_threshold=131072:trim_threshold=33554432:arena_max=8` (the
+    `glibc.malloc.` prefix dropped) when every line agrees, `alloc MIXED ...` when they do not,
+    or None when the transcript predates the line.
+    """
+    seen: set[tuple[str, str]] = set()
+    for line in text.splitlines():
+        f = line.split("\t")
+        if len(f) == 3 and f[0] == "ALLOC":
+            seen.add((f[1], f[2].replace("glibc.malloc.", "")))
+    if not seen:
+        return None
+    if len(seen) == 1:
+        state, tun = next(iter(seen))
+        return f"alloc {state} {tun}"
+    return "alloc MIXED " + " | ".join(f"{s} {t}" for s, t in sorted(seen))
+
+
 def _cmd_stamp(args: argparse.Namespace) -> int:
     desc = args.desc
     if args.compiler:
@@ -464,6 +487,8 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
         path = pathlib.Path(args.clock_from)
         floor = clock_floor(path.read_text()) if path.exists() else None
         desc += SEP + (floor or "clock floor not recorded")
+        alloc = alloc_state(path.read_text()) if path.exists() else None
+        desc += SEP + (alloc or "allocator state not recorded")
     # Several verdicts can flag one sample (the A/A bracket, and since #1676 the
     # measurement-conditions ledger); each non-empty one is stamped, in order.
     for note in args.note or []:
@@ -524,7 +549,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--compiler", action="store_true",
                    help="append the compiler identity to the descriptor")
     s.add_argument("--clock-from", default=None,
-                   help="a bench transcript whose CLOCK line is appended (#1804)")
+                   help="a bench transcript whose CLOCK (#1804) and ALLOC (#1903) lines "
+                        "are appended")
     s.set_defaults(fn=_cmd_stamp)
 
     c = sub.add_parser("check", help="audit a stored data.js for flagged samples")

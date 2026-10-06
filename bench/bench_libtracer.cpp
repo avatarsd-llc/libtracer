@@ -2174,6 +2174,9 @@ int main(int argc, char** argv) {
             if (f.name != want) continue;
             // stderr, like the MODE marker: stdout stays the RESULT stream.
             std::fprintf(stderr, "FAMILY %.*s\n", static_cast<int>(f.name.size()), f.name.data());
+            // Each family records the allocator settings its own process runs under (#1903),
+            // so a family run alone by `perf_gate.py` states them as the sweep does.
+            bench::emit_alloc_state();
             const std::size_t start_kb = bench::rss_kb();
             f.run();
             bench::emit_family_rss(f.name, start_kb);
@@ -2196,6 +2199,7 @@ int main(int argc, char** argv) {
         if (want == "single" || want == "multi") {
             const family_set_t only = want == "multi" ? family_set_t::MULTI : family_set_t::SINGLE;
             bench::emit_clock_floor();  // the run's clock floor, ahead of its rows (#1804)
+            bench::emit_alloc_state();  // and the driver's allocator settings (#1903)
             return run_default_sweep(argv[0], &only);
         }
         std::fprintf(stderr, "error: unknown family set '%s'\n", argv[2]);
@@ -2214,6 +2218,7 @@ int main(int argc, char** argv) {
             // assert it got the arm it asked for reads it there.
             std::fprintf(stderr, "MODE %.*s\n", static_cast<int>(m.name.size()), m.name.data());
             bench::emit_clock_floor();
+            bench::emit_alloc_state();  // the settings this mode's rows run under (#1903)
             m.run();
             return 0;
         }
@@ -2227,5 +2232,6 @@ int main(int argc, char** argv) {
     // The default sweep: every family of @ref kFamilies, each in its own fresh process. The
     // clock floor is measured once, here in the parent, ahead of every family's rows (#1804).
     bench::emit_clock_floor();
+    bench::emit_alloc_state();  // the driver's allocator settings; each family prints its own
     return run_default_sweep(argv[0]);
 }

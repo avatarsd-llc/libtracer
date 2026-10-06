@@ -170,6 +170,24 @@ class FamiliesAreSelectableAndRefused(unittest.TestCase):
         self.assertNotIn("WARN allocator tunables", out.stderr,
                          "the family ran without the pinned allocator tunables")
 
+    def test_family_records_its_allocator_state_and_rss_delta(self):
+        """#1903: the run output itself says which allocator settings the rows ran under,
+        and what the family added to its process's resident set."""
+        out = subprocess.run([str(bench_binary()), "--family", "lkv-aged"],
+                             capture_output=True, text=True, timeout=RUN_S)
+        self.assertEqual(out.returncode, 0, out.stderr[-400:])
+        lines = out.stdout.splitlines()
+        alloc = [ln.split("\t") for ln in lines if ln.startswith("ALLOC\t")]
+        self.assertEqual(len(alloc), 1, "one ALLOC line per family process")
+        self.assertEqual(alloc[0][1], "pinned")
+        self.assertIn("glibc.malloc.mmap_threshold=", alloc[0][2])
+        first_row = next(i for i, ln in enumerate(lines) if ln.startswith("RESULT\t"))
+        self.assertLess(lines.index("\t".join(alloc[0])), first_row,
+                        "the ALLOC line must precede the rows it describes")
+        self.assertTrue(any(re.match(r"RSS family=lkv-aged start_kb=\d+ peak_kb=\d+ "
+                                     r"delta_kb=\d+$", ln) for ln in lines))
+        self.assertNotIn("max RSS", out.stdout)
+
     def test_printed_family_list_equals_the_source_table(self):
         bench = bench_binary()
         out = subprocess.run([str(bench), "no-such-mode"], capture_output=True, text=True,

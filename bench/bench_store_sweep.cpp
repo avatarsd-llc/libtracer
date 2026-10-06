@@ -65,6 +65,7 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "bench_process.hpp"
 #include "store_sweep_node.hpp"
 
 namespace {
@@ -389,6 +390,12 @@ int main(int argc, char** argv) {
     constexpr std::size_t kNArms = sizeof(kArms) / sizeof(kArms[0]);
 
     if (mode == "latency") {
+        // The gated mode (perf_gate.py's `store-lat-*` points) runs as one family in its own
+        // process under the fixed allocator state, like every other gated family (#1903).
+        // Only this mode: `hwm` and `throughput` feed pinned and charted figures that were
+        // taken under glibc's defaults, and they are not timed against a gate baseline.
+        bench::pin_allocator_state(argv);
+        bench::emit_alloc_state();
         std::printf("# RESULT_STORE_LAT round tag arm leg p50ps p99ps meanps n batch\n");
         for (std::size_t j = 0; j < kNArms; ++j) {
             // Rotate the arm order per round: exhausting one arm's runs before starting the

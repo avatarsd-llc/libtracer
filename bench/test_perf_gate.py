@@ -526,6 +526,7 @@ class PicosecondBatchRows(unittest.TestCase):
     publishes 0 latency, which must skip that leg, never divide by it or fail on it."""
 
     TRANSCRIPT = ("CLOCK\t1.000\t21.874\n"
+                  "ALLOC\tpinned\tglibc.malloc.arena_max=8\n"
                   "RESULT\tlibtracer\tfold-b4\t512\t1\t1\t250000000\t250000000\t0.0"
                   "\t3.912\t0\t3.950\n"
                   "RESULT\tlibtracer\tlkv-store-heap\t64\t1\t1\t40000000\t40000000"
@@ -537,9 +538,11 @@ class PicosecondBatchRows(unittest.TestCase):
             p.write_text("")
             with unittest.mock.patch.object(pg, "timed_run",
                                             lambda a, *_x, **_k: _measurement(a, self.TRANSCRIPT)), \
-                    unittest.mock.patch.object(pg, "CLOCK_FLOORS", []):
+                    unittest.mock.patch.object(pg, "CLOCK_FLOORS", []), \
+                    unittest.mock.patch.object(pg, "ALLOC_STATES", []):
                 rows = pg.run_bench_once(p)
                 floors = list(pg.CLOCK_FLOORS)
+                self.allocs = list(pg.ALLOC_STATES)
         return rows, floors
 
     def test_fractional_ns_survive_the_parse(self):
@@ -551,6 +554,19 @@ class PicosecondBatchRows(unittest.TestCase):
         rows, floors = self.rows()
         self.assertEqual(floors, [(1.0, 21.874)])
         self.assertEqual(len(rows), 2)
+
+    def test_alloc_line_is_recorded_not_a_row(self):
+        """#1903: the allocator state each process printed reaches the verdict's block."""
+        rows, _ = self.rows()
+        self.assertEqual(self.allocs, [("pinned", "glibc.malloc.arena_max=8")])
+        self.assertEqual(len(rows), 2)
+        self.assertIn("pinned glibc.malloc.arena_max=8 (2 process(es))",
+                      pg.alloc_line(self.allocs * 2))
+
+    def test_alloc_line_names_an_unpinned_process(self):
+        line = pg.alloc_line([("pinned", "a"), ("unpinned", "-")])
+        self.assertIn("WARNING 1 of 2 process(es) unpinned", line)
+        self.assertIn("not recorded", pg.alloc_line([]))
 
     def test_a_zero_latency_leg_is_skipped_not_judged(self):
         key = "lkv-store-heap/64/1/1"
