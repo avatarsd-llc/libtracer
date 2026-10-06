@@ -132,7 +132,12 @@ A different instrument entirely. `bench_forward_heap` replaces the global alloca
 with a counting wrapper and **arms it around exactly one operation**, so these are
 *exact* allocation counts and byte totals — not statistics, not sampling. Bytes are
 read from `malloc_usable_size`, so a resident figure is what the allocator really
-holds rather than what the caller asked for. The coarse process-level number beside them
+holds rather than what the caller asked for. A block allocated inside the window is charged
+at its request's **exact-fit** usable size (glibc's own rounding: 8 B header, 16 B alignment,
+32 B minimum chunk). When glibc hands back a larger leftover chunk whole, `malloc_usable_size`
+reads more, and which chunks are left over depends on what ran before the window, so the
+same binary read `vertex_app5_static` as 288 or 295 B/vertex from run to run
+([#1890](https://github.com/avatarsd-llc/libtracer/issues/1890)). The coarse process-level number beside them
 is each family's **RSS delta**: every `bench_libtracer` family runs in its own process and
 prints `RSS family=<name> start_kb= peak_kb= delta_kb=`, the high-water mark minus the
 resident set the family started from. It replaced a whole-run "max RSS" from

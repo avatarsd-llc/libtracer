@@ -69,6 +69,7 @@
  */
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -100,6 +101,88 @@
 // --- the counting allocator override (all variants) --------------------------
 
 namespace {
+#ifdef BENCH_HAS_USABLE_SIZE
+/*
+ * LIVE BYTES ARE CHARGED AT THE REQUEST'S EXACT-FIT SIZE (#1890), not at whatever block
+ * malloc happened to hand back. glibc serves a request from a larger free chunk whole when
+ * splitting it would leave less than its minimum chunk, so the same 104 B request reads a
+ * usable size of 104 or of 120 depending on which chunks earlier stages left free. That made
+ * `vertex_app5_static` read 288 or 295 B/vertex from ONE binary (about one run in four, on
+ * main as well), which the per-vertex ratchet then reported as a pullback. The heap's history
+ * before the window is not the library's cost, so a window block is charged at
+ * `exact_fit_usable(request)`: glibc's own request-to-chunk rounding (8 B header, 16 B
+ * alignment, 32 B minimum chunk), which IS `malloc_usable_size` whenever the block is an
+ * exact fit. The charge is recorded per block so its free subtracts the same figure.
+ * Requests at or above `kExactFitMax` (where glibc may mmap) and blocks allocated before the
+ * window keep `malloc_usable_size`, as before; so does the over-aligned path below, whose
+ * rounding is the measured cost (see `counted_aligned_alloc`).
+ */
+constexpr std::size_t kExactFitMax = 128 * 1024;
+
+/** @brief glibc's usable size for an exact-fit chunk serving @p req bytes (x86-64/aarch64). */
+constexpr std::size_t exact_fit_usable(std::size_t req) {
+    const std::size_t chunk = (req + sizeof(std::size_t) + 15) & ~std::size_t{15};
+    return (chunk < 32 ? 32 : chunk) - sizeof(std::size_t);
+}
+static_assert(exact_fit_usable(104) == 104 && exact_fit_usable(64) == 72 &&
+              exact_fit_usable(1) == 24);
+
+/** @brief One window block's charge: which block, in which window, for how much. */
+struct charge_t {
+    const void* p = nullptr;
+    unsigned window = 0;
+    std::size_t bytes = 0;
+};
+constexpr std::size_t kCharges = std::size_t{1} << 16;  // a window's live blocks, with room
+constexpr std::size_t kProbeCap = 64;                   // past this, fall back to usable size
+charge_t g_charges[kCharges];
+std::atomic_flag g_charges_lock = ATOMIC_FLAG_INIT;
+
+/** @brief The charge-table slot @p p hashes to. */
+std::size_t charge_slot(const void* p) {
+    return (reinterpret_cast<std::uintptr_t>(p) >> 4) * 0x9E3779B97F4A7C15ull >> 48;
+}
+
+/** @brief What a window block @p p of @p size requested bytes adds to the live balance. */
+std::size_t charge(void* p, std::size_t size) {
+    const std::size_t usable = malloc_usable_size(p);
+    const std::size_t fit = exact_fit_usable(size);
+    if (size >= kExactFitMax || fit > usable) return usable;
+    const unsigned w = probe::g_window.load(std::memory_order_relaxed);
+    while (g_charges_lock.test_and_set(std::memory_order_acquire)) {
+    }
+    std::size_t i = charge_slot(p), n = 0;
+    while (n < kProbeCap && g_charges[i].p != nullptr && g_charges[i].window == w &&
+           g_charges[i].p != p) {
+        i = (i + 1) & (kCharges - 1);
+        ++n;
+    }
+    const bool kept = n < kProbeCap;
+    if (kept) g_charges[i] = {p, w, fit};
+    g_charges_lock.clear(std::memory_order_release);
+    return kept ? fit : usable;
+}
+
+/** @brief What freeing @p p takes off the live balance: its window charge, if it has one. */
+std::size_t discharge(void* p) {
+    const unsigned w = probe::g_window.load(std::memory_order_relaxed);
+    std::size_t out = malloc_usable_size(p);
+    while (g_charges_lock.test_and_set(std::memory_order_acquire)) {
+    }
+    std::size_t i = charge_slot(p);
+    for (std::size_t n = 0; n < kProbeCap && g_charges[i].p != nullptr; ++n) {
+        if (g_charges[i].p == p && g_charges[i].window == w) {
+            out = g_charges[i].bytes;
+            g_charges[i].window = 0;  // a dead slot: lookups walk past it, inserts reuse it
+            break;
+        }
+        i = (i + 1) & (kCharges - 1);
+    }
+    g_charges_lock.clear(std::memory_order_release);
+    return out;
+}
+#endif
+
 void* counted_alloc(std::size_t size) {
     if (probe::g_refuse.load(std::memory_order_relaxed)) return nullptr;  // #1808's deferral row
     const bool armed = probe::g_armed.load(std::memory_order_relaxed);
@@ -111,7 +194,7 @@ void* counted_alloc(std::size_t size) {
     void* p = std::malloc(size ? size : 1);
 #ifdef BENCH_HAS_USABLE_SIZE
     if (armed && p != nullptr)
-        probe::g_live_bytes.fetch_add(static_cast<long long>(malloc_usable_size(p)),
+        probe::g_live_bytes.fetch_add(static_cast<long long>(charge(p, size ? size : 1)),
                                       std::memory_order_relaxed);
 #endif
     return p;
@@ -161,7 +244,7 @@ void counted_free(void* p) {
     if (probe::g_armed.load(std::memory_order_relaxed)) {
         probe::g_frees.fetch_add(1, std::memory_order_relaxed);
 #ifdef BENCH_HAS_USABLE_SIZE
-        probe::g_live_bytes.fetch_sub(static_cast<long long>(malloc_usable_size(p)),
+        probe::g_live_bytes.fetch_sub(static_cast<long long>(discharge(p)),
                                       std::memory_order_relaxed);
 #endif
     }

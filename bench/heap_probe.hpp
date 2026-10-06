@@ -69,8 +69,16 @@ struct counts_t {
     std::size_t max_bytes = 0; /**< largest single request (@ref g_max_bytes) */
 };
 
+/**
+ * @brief The current window's number, bumped by every @ref reset (#1890). The overriding TU
+ *        keys its per-block live-size record on it, so a record left by an earlier window
+ *        never matches a free in this one.
+ */
+inline std::atomic<unsigned> g_window{0};
+
 /** @brief Zero the counters (call before arming a fresh window). */
 inline void reset() {
+    g_window.fetch_add(1, std::memory_order_relaxed);
     g_allocs.store(0, std::memory_order_relaxed);
     g_frees.store(0, std::memory_order_relaxed);
     g_bytes.store(0, std::memory_order_relaxed);
