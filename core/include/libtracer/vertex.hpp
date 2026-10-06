@@ -2368,6 +2368,32 @@ class vertex_t {
     // -- ACL state (#81, ADR-0018/0020) -------------------------------------------------
 
     /**
+     * @brief Return every member a `vertex_policy_t` sets to an unregistered placeholder's
+     *        default: retention by role (no `RETAIN_NONE`), depth 1, no ring (so no ring
+     *        source and best-effort), the default share threshold, no app-field group.
+     *
+     * Retirement calls it, and so does a registration refused after its policy landed on the
+     * placeholder (#1778), so a later registration through a door that applies no policy (the
+     * write-create `ensure_vertex`) inherits none of it. The caller MUST hold the graph map
+     * lock; the stripe lock is taken here. Allocates nothing.
+     */
+    void clear_policy() noexcept {
+        set_flag(flag_t::RETAIN_NONE, false);
+        vertex_ext_t* const e = ext_.load(std::memory_order_acquire);
+        if (e == nullptr) return;
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        // `~ring_state_t` hands every held reservation back to the source that served it, so
+        // dropping the block here cannot leak the ring's byte budget.
+        tr::mem::drop_in(*e->src, e->ring);
+        e->ring = nullptr;
+        e->appended_since_flush = 0;  // cleared WITH `ring` — the drain's invariant
+        e->retention_depth = 1;
+        e->share_threshold_bytes = saturate_threshold(config_t::kShareThresholdBytes);
+        tr::mem::drop_in(*e->src, e->app);
+        e->app = nullptr;
+    }
+
+    /**
      * @brief Restore this vertex to the state an unregistered PLACEHOLDER carries — the
      *        `unregistered ⇒ carries no state` invariant retirement re-establishes
      *        (RFC-0009
@@ -2435,9 +2461,9 @@ class vertex_t {
         // and unreachable — nothing consults it while this bit is clear — and a re-registration
         // that installs a filter again prepends its own, newer node.
         set_flag(flag_t::ADMISSION, false);
-        // And the retention declaration (RFC-0028 §5.4): the next occupant retains by its own
-        // role's default until it declares otherwise.
-        set_flag(flag_t::RETAIN_NONE, false);
+        // And the policy (RFC-0028 §5.4 retention, the ring, the threshold, the app fields): the
+        // next occupant starts from its own role's defaults until it declares otherwise.
+        clear_policy();
         // And the pending-mark hint (#1712): the retire erases the occupant's key from the
         // sweep set right after the map lock drops, so the next occupant starts unmarked.
         set_flag(flag_t::PENDING_MARK, false);
@@ -2458,19 +2484,10 @@ class vertex_t {
             // reader). The remaining ext fields are mutated under the stripe lock.
             detached = e->handlers.exchange(nullptr, std::memory_order_acq_rel);
             const std::lock_guard lock(vertex_stripe_of(this).m);
-            // `~ring_state_t` hands every held reservation back to the source that served it,
-            // so dropping the block here cannot leak the ring's byte budget.
-            tr::mem::drop_in(*e->src, e->ring);
-            e->ring = nullptr;
             e->acl_present = false;
             e->aces.clear();
             e->eff_aces.clear();
             invalidate_acl_cache(*e);  // ADR-0078: nothing here a rebuilder can clobber
-            e->retention_depth = 1;
-            e->share_threshold_bytes = saturate_threshold(config_t::kShareThresholdBytes);
-            tr::mem::drop_in(*e->src, e->app);
-            e->app = nullptr;
-            e->appended_since_flush = 0;  // cleared WITH `ring` — the drain's invariant
         }
         // The edge block is stripe-guarded; clear it in its own critical section (both it and
         // the ext block may be absent). The graph has already adjusted descendant

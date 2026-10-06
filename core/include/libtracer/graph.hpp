@@ -2807,8 +2807,14 @@ class graph_t {
         explicit key_list_t(mem::block_source_t& src) noexcept : bytes_(src), ends_(src) {}
         /** @brief Append @p k. @retval false The source refused; the list is unchanged. */
         [[nodiscard]] bool push(std::span<const std::byte> k) noexcept {
-            return ends_.reserve(ends_.size() + 1) && bytes_.append(k.data(), k.size()) &&
-                   ends_.push_back(bytes_.size());  // reserved: cannot fail
+            // Both arrays grow by doubling, so N pushes copy O(N) bytes (an exact
+            // `reserve(size() + 1)` regrew on every push). A refused end entry takes the
+            // appended bytes back off, which shrinks and so cannot fail.
+            const std::size_t was = bytes_.size();
+            if (!bytes_.append(k.data(), k.size())) return false;
+            if (ends_.push_back(bytes_.size())) return true;
+            (void)bytes_.resize_for_overwrite(was);
+            return false;
         }
         /** @brief Keys held. */
         [[nodiscard]] std::size_t size() const noexcept { return ends_.size(); }
@@ -3102,9 +3108,14 @@ class graph_t {
         /** @brief Make room for one more slot. @retval false The source refused. */
         [[nodiscard]] bool reserve_next() noexcept {
             if (n_ < dir_.size() * kChunk) return true;
-            if (!dir_.reserve(dir_.size() + 1)) return false;
+            // The chunk first, then the directory entry, which grows by doubling (an exact
+            // `reserve(size() + 1)` regrew the directory on every chunk); a refused entry gives
+            // the chunk back.
             void* const c = dir_.source().try_alloc(kChunk * sizeof(vertex_t*), alignof(vertex_t*));
-            return c != nullptr && dir_.push_back(static_cast<vertex_t**>(c));
+            if (c == nullptr) return false;
+            if (dir_.push_back(static_cast<vertex_t**>(c))) return true;
+            dir_.source().release(c, kChunk * sizeof(vertex_t*), alignof(vertex_t*));
+            return false;
         }
         /** @brief Append @p v into the room `reserve_next` made. */
         void push_back(vertex_t* v) noexcept {

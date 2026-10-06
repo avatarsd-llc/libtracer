@@ -185,6 +185,24 @@ std::vector<std::byte> key_of(std::string_view p) {
     return {k.begin(), k.end()};
 }
 
+/**
+ * @brief A policy-less registration at @p p (the write-create door, which applies no policy)
+ *        inherits nothing a refused one left on the placeholder: no app field (`gain` is
+ *        undeclared), `LAST` retention and the default share threshold. It retires the vertex
+ *        again, so the sweep's retry finds a placeholder.
+ */
+bool inherits_nothing(graph_t& g, std::string_view p) {
+    if (found(g, p)) return false;
+    const std::vector<std::byte> key = key_of(p);
+    const auto h = g.ensure_vertex(key);  // the write-create door: no policy of its own
+    if (!h) return false;
+    const std::string field = std::string(p) + ":settings.app.gain";
+    const bool clean = !g.write(*path_t::parse(field), make_value({0x01})) &&
+                       g.retention(*h) == retention_t::LAST &&
+                       g.share_threshold_bytes(*h) == tr::graph::config_t::kShareThresholdBytes;
+    return g.retire(*h).has_value() && clean;
+}
+
 /** @brief Registration: a deep STREAM with every per-vertex declaration that allocates. */
 void test_register() {
     std::printf("register_vertex — descent, index, extension, policy, rights, admission:\n");
@@ -206,8 +224,27 @@ void test_register() {
         return verdict(g.register_vertex_key(key_of("/a/b/c"), role_t::STREAM, h, std::move(p),
                                              rows, catalog));
     };
-    const auto untouched = [](graph_t& g, none_t&) { return !found(g, "/a/b/c"); };
+    const auto untouched = [](graph_t& g, none_t&) { return inherits_nothing(g, "/a/b/c"); };
     report(drive<none_t>([](graph_t&) { return none_t{}; }, op, untouched), "register");
+}
+
+/** @brief Registration whose policy drops retention and moves the threshold: a refusal after
+ *         the policy landed leaves the placeholder with none of it (#1778 review). */
+void test_register_policy_reset() {
+    std::printf("register_vertex — a refused registration leaves no policy on the placeholder:\n");
+    const payload_right_t rows[] = {
+        payload_right_t{.type = tr::wire::type_t::VALUE, .right = tr::graph::acl_right_t::WRITE}};
+    const auto op = [&rows](graph_t& g, none_t&) {
+        vertex_policy_t p;
+        p.retention = retention_t::NONE;
+        p.share_threshold_bytes = 0;
+        p.ring_reliable = true;
+        p.app_fields = {app_field_t{.name = "gain", .access = app_access_t::RW}};
+        return verdict(g.register_vertex_key(key_of("/n/v"), role_t::STORED_VALUE, {}, std::move(p),
+                                             rows, {}));
+    };
+    const auto untouched = [](graph_t& g, none_t&) { return inherits_nothing(g, "/n/v"); };
+    report(drive<none_t>([](graph_t&) { return none_t{}; }, op, untouched), "register policy");
 }
 
 /** @brief Registration that enrolls the vertex in the UNCONDITIONAL sweep set. */
@@ -493,6 +530,18 @@ void test_init_exhaustion_message() {
           "and the message carries the size it was refused");
 
     err.clear();
+    const bool ceiling = aborts_with(
+        [] {
+            graph_t g;
+            g.set_vertex_ceiling(g.vertex_slot_count());
+            (void)g.register_vertex(*path_t::parse("/c"), role_t::STORED_VALUE);
+        },
+        err);
+    check(ceiling && err.find("register_vertex: the vertex ceiling") != std::string::npos &&
+              err.find("memory source") == std::string::npos,
+          "register_vertex past the vertex ceiling aborts naming the ceiling, not a source");
+
+    err.clear();
     const bool cat = aborts_with(
         [] {
             gate_source_t src;
@@ -521,6 +570,7 @@ void test_init_exhaustion_message() {
 
 int main() {
     test_register();
+    test_register_policy_reset();
     test_register_unconditional();
     test_register_placeholder();
     test_anchor();

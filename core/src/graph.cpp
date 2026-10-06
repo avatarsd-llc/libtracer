@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -605,14 +606,24 @@ void graph_t::register_child_type(std::string_view type, child_factory_t factory
 vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
                                          vertex_policy_t policy,
                                          std::span<const payload_right_t> rights) {
+    const std::size_t ceiling_refusals = vertex_ceiling_refusals_.load(std::memory_order_relaxed);
     result_t<vertex_handle_t> h =
         try_register_vertex(path, role, handlers, std::move(policy), rights);
     // PATH_IN_USE on a compile-site literal is a source bug, not a runtime outcome — fail loud
     // (ADR-0056, mirroring path_t(std::string_view)) rather than hand back a result the caller
     // would only `*`-deref unchecked. A genuine runtime path uses try_register_vertex.
-    // A refusal that is not the vertex ceiling's is the table source running dry at setup —
-    // a sizing bug, reported with the sub-pool and the bytes it was asked for before the
-    // abort (ADR-0056 amendment, ADR-0083).
+    // BACKPRESSURE is a sizing bug either way, reported before the abort: the vertex ceiling
+    // when this call bumped its refusal count (#1314), else the table source running dry, named
+    // with the sub-pool and the bytes it was asked for (ADR-0056 amendment, ADR-0083).
+    if (!h && h.error() == status_t::BACKPRESSURE &&
+        vertex_ceiling_refusals_.load(std::memory_order_relaxed) != ceiling_refusals) {
+        std::fprintf(stderr,
+                     "libtracer: register_vertex: the vertex ceiling (%zu vertices) refused a "
+                     "registration at initialization: a sizing bug, raise set_vertex_ceiling "
+                     "(ADR-0056)\n",
+                     vertex_ceiling_.load(std::memory_order_relaxed));
+        std::abort();
+    }
     if (!h && h.error() == status_t::BACKPRESSURE)
         mem::exhausted_at_init(*tables_, "register_vertex");
     if (!h) std::abort();
@@ -747,13 +758,16 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // a refused registration is never walked, because nothing flags its vertex, and a later
     // declaration at this address is found first anyway.
     // The policy's vertex-local members land on the still-unregistered node first (#1778): a
-    // refusal anywhere in this chain leaves a placeholder, which `find` does not answer for and
-    // the next registration here re-fills.
+    // refusal anywhere in this chain leaves a placeholder, which `find` does not answer for.
+    // The refusal also clears the policy back off it, so the next registration here, through a
+    // door that applies none (`ensure_vertex`), inherits nothing of the refused one.
     if ((policy != nullptr && !apply_policy(node, role, std::move(*policy))) ||
         !declare_payload_rights(node, rights, schema_catalog) ||
         !declare_admission(node, handlers.on_admit, handlers.on_app_field_admit) ||
-        !node->fill(role, handlers, *tables_))
+        !node->fill(role, handlers, *tables_)) {
+        node->clear_policy();
         return std::unexpected(status_t::BACKPRESSURE);
+    }
     if (!rights.empty() || !schema_catalog.empty()) node->mark_payload_rights();
     if (handlers.on_admit || handlers.on_app_field_admit) node->mark_admission();
     return vertex_handle_t{node};
