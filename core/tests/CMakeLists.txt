@@ -1492,6 +1492,20 @@ add_executable(lkv_slot_test lkv_slot_test.cpp)
 target_link_libraries(lkv_slot_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(lkv_slot_test)
 add_test(NAME lkv_slot COMMAND lkv_slot_test)
+# #1782 — the hazard node class and its slab source survive static destruction: nodes returned
+# after the library's statics are torn down still release slabs through a live source. The test
+# compiles its OWN copy of the node-class TU at -O0, which shadows the archive member: an
+# optimized build drops the destructor's vptr store, so a call into a destroyed source would
+# still "work" there, and the defect this pins (a source outside the never-destroyed storage)
+# reads as a pass. At -O0 it is a pure virtual call.
+add_executable(lkv_node_class_exit_test lkv_node_class_exit_test.cpp
+                                        ${CMAKE_CURRENT_SOURCE_DIR}/../src/lkv_node_pool.cpp)
+target_compile_options(lkv_node_class_exit_test PRIVATE -O0 -fno-lifetime-dse)
+target_link_libraries(lkv_node_class_exit_test PRIVATE libtracer)
+libtracer_test_warnings(lkv_node_class_exit_test)
+add_test(NAME lkv_node_class_exit COMMAND lkv_node_class_exit_test)
+set_property(TEST lkv_node_class_exit PROPERTY PASS_REGULAR_EXPRESSION
+             "returned the held nodes after static destruction: ok")
 
 # RFC-0028 slice 3 — `value_t`: one intrusive refcounted block per publish, drawn from the
 # vertex's injected source; the slot is one word. Pins the block and vertex shapes, the

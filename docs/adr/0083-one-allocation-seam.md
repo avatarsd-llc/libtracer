@@ -46,6 +46,8 @@ On an MCU, `std::vector`, `malloc` and global `new` are not usable allocation so
 
 8. **LKV nodes move onto the pool (Q8).** Hazard/LKV nodes get their own fixed-size class and a per-thread free list. The acceptance bar is within ±3 % of global `new` on bench-local. This ends the #873 phase-2 carve-out.
 
+   > **Note (2026-10-06, [#1782](https://github.com/avatarsd-llc/libtracer/issues/1782)).** As implemented, hazard-slot LKV nodes come from a **process-wide node class** (`core/src/lkv_node_pool.cpp`), not from a sub-pool of a graph's root: the hazard domain is process-wide, and a node moves between the threads and graphs that publish through it. No `:stats.mem` name reports that class (RFC-0010 Amendment 3's `:stats.mem.values` row is corrected by its 2026-10-06 erratum); a dedicated counter would be a future amendment. Decision 10's "per-thread" free list is each hazard participant's own list in front of the class.
+
 9. **Callbacks without heap (Q10, Q18).** `std::function` leaves core. Synchronous calls take a non-owning `function_ref`. [RFC-0028](../spec/rfcs/0028-lean-value-path.md) D10 stands: hooks stay non-owning `{fn, ctx}` slots. Inline storage sized at compile time applies **only** to stored callables that are not hooks, such as `transport_can.hpp:can_link_t::rx_fn_t` ([#1671](https://github.com/avatarsd-llc/libtracer/issues/1671)). A callable too big for that storage fails to compile.
 
 10. **Locking and counters (Q13, Q14, Q17, Q19).**

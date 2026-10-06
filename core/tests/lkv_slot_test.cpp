@@ -32,7 +32,11 @@
  *     `orphans` is read on; the three are what makes "costs the overflow threads and nothing
  *     else" a property rather than an aspiration;
  *   - **a declined publish is reported** — the whole point of `store` returning `bool`, driven
- *     here by replacing this binary's nothrow `operator new` rather than by inspection;
+ *     here by refusing the node class through the fault-injection probe rather than by
+ *     inspection;
+ *   - **a node draw makes no global-heap call** (#1782) — a cold participant's draws reach the
+ *     platform heap only as whole node-class slabs, counted on this binary's nothrow
+ *     `operator new`;
  *   - **the exit sweep spares live participants** (#898) — driven by an injected
  *     `final_sweep_t`, since a static-destruction object is otherwise unobservable, once as a
  *     deterministic snapshot of a blocked worker's lists and once as a race a sanitizer sees;
@@ -62,6 +66,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <string_view>
@@ -135,9 +140,9 @@ static_assert(!hazard_slot_t::may_spin, "the hazard slot must never spin-wait");
  *        release that lands inside a guarded section (the single-writer slot must never do
  *        that — a value's teardown is what the guard exists to keep out of the window).
  *
- * `malloc`, not `operator new`: `declined_publish` rigs the nothrow `operator new` to fail so
- * that the hazard slot's NODE allocation is the thing that declines, and the value itself must
- * still be mintable under that rig.
+ * `malloc`, not `operator new`, and no fault-injection probe: `declined_publish` refuses the
+ * hazard slot's NODE draw, and the value itself must still be mintable under that rig; and
+ * `node_draws_skip_the_heap` counts the nothrow `operator new`, which a value must not reach.
  */
 class counting_source_t final : public tr::mem::block_source_t {
    public:
@@ -626,26 +631,48 @@ void sweep_races_a_live_writer(std::size_t sweeps) {
 }
 
 /**
- * @brief Whether nothrow allocation in this binary is currently rigged to fail.
+ * @brief Whether the node class is currently refused (through @ref refuse_nodes).
  *
- * Only `hazard_slot_t::store`'s node allocation uses the nothrow form on the paths this test
- * exercises, so flipping this starves exactly the allocation under test.
+ * Only `hazard_slot_t::store`'s node draw consults the probe with a node's size on the paths this
+ * test exercises (the values come from @ref counting_source_t, which never consults it), so
+ * flipping this starves exactly the draw under test.
  */
 std::atomic<bool> g_starve{false};
+
+/** @brief The fault-injection probe (`tr::detail::probe_fail_hook`): refuse a node's draw while
+ *         @ref g_starve is set. */
+bool refuse_nodes(std::size_t bytes) noexcept {
+    return !(g_starve.load(std::memory_order_relaxed) &&
+             bytes == sizeof(tr::graph::detail_hp::node_t));
+}
+
+/** @brief Whether this thread's nothrow `operator new` calls are being counted. */
+thread_local bool t_count_heap = false;
+/** @brief Nothrow `operator new` calls counted on a watching thread. */
+std::atomic<std::size_t> g_heap_calls{0};
+/** @brief Of those, the ones smaller than a node-class slab: a node drawn from the heap. */
+std::atomic<std::size_t> g_heap_small{0};
+
+/** @brief Count one nothrow heap request of @p n bytes, if this thread is watching. */
+void note_heap(std::size_t n) noexcept {
+    if (!t_count_heap) return;
+    g_heap_calls.fetch_add(1, relaxed_);
+    if (n < 4096) g_heap_small.fetch_add(1, relaxed_);
+}
 
 }  // namespace
 
 /**
- * @brief Replacement nothrow `operator new` — the only way to reach a declined publish.
+ * @brief Replacement nothrow `operator new`: counts the request on a watching thread.
  *
- * Forwards to the throwing form on success, so every pointer handed out is still a real
- * `::operator new` pointer that the default `operator delete` (and a sanitizer's replacement
- * of it) pairs with correctly. Replacing the whole new/delete family with `malloc`/`free`
- * would have been simpler and would have blinded ASan for this translation unit, which is the
- * one leg this test most needs.
+ * Forwards to the throwing form, so every pointer handed out is still a real `::operator new`
+ * pointer that the default `operator delete` (and a sanitizer's replacement of it) pairs with
+ * correctly. Replacing the whole new/delete family with `malloc`/`free` would have been simpler
+ * and would have blinded ASan for this translation unit, which is the one leg this test most
+ * needs.
  */
 void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
-    if (g_starve.load(std::memory_order_relaxed)) return nullptr;
+    note_heap(n);
     try {
         return ::operator new(n);
     } catch (...) {
@@ -655,6 +682,21 @@ void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
 
 /** @brief The paired deallocation, for a constructor that throws out of the nothrow form. */
 void operator delete(void* p, const std::nothrow_t&) noexcept { ::operator delete(p); }
+
+/** @brief The over-aligned nothrow form, which a slab draw takes; counted the same way. */
+void* operator new(std::size_t n, std::align_val_t al, const std::nothrow_t&) noexcept {
+    note_heap(n);
+    try {
+        return ::operator new(n, al);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+/** @brief The paired deallocation of the over-aligned nothrow form. */
+void operator delete(void* p, std::align_val_t al, const std::nothrow_t&) noexcept {
+    ::operator delete(p, al);
+}
 
 namespace {
 
@@ -667,6 +709,7 @@ namespace {
  */
 void declined_publish() {
     std::printf("hazard_slot_t — a publish that cannot allocate is reported, not swallowed:\n");
+    tr::detail::probe_fail_hook = refuse_nodes;
     hazard_slot_t slot;
     check(slot.store(make_tagged(1)), "the main thread publishes normally");
 
@@ -697,11 +740,50 @@ void declined_publish() {
     });
     cold2.join();
     check(!slot.load(), "a clear succeeds even with no memory at all");
+    tr::detail::probe_fail_hook = nullptr;
+}
+
+/**
+ * @brief A node draw makes no global-heap call (#1782): the platform heap sees whole node-class
+ *        slabs only.
+ *
+ * A fresh thread publishes into slots nobody has written, so no publish displaces a node and
+ * every one draws from the node class rather than from the thread's free list — the arm that
+ * used to be one `new (std::nothrow) node_t` per draw.
+ */
+void node_draws_skip_the_heap() {
+    std::printf("hazard_slot_t — a node draw makes no global-heap call:\n");
+    constexpr std::size_t kDraws = 1000;
+    {
+        const std::unique_ptr<hazard_slot_t[]> slots(new hazard_slot_t[kDraws]);
+        bool published = true;
+        g_heap_calls.store(0);
+        g_heap_small.store(0);
+        std::thread cold([&] {
+            t_count_heap = true;
+            for (std::size_t i = 0; i < kDraws; ++i) {
+                value_t* v = make_tagged(i + 1);
+                if (!slots[i].store(v)) {
+                    published = false;
+                    value_t::release(v);
+                }
+            }
+            t_count_heap = false;
+        });
+        cold.join();
+        check(published, "every one of the cold publishes took");
+        check(g_heap_small.load() == 0, "no heap request was node-sized");
+        // A slab holds (4096 - 64) / 16 = 252 nodes, so 1000 draws need at most four fresh slabs.
+        check(g_heap_calls.load() <= kDraws / 252 + 1,
+              "and the heap was asked for a few whole slabs, not one block per draw");
+    }
+    check(g_live.load() == 0, "and every value is released once the slots die");
 }
 
 /** @brief The single-writer slot allocates nothing to publish, so starvation cannot reach it. */
 void single_writer_never_declines() {
     std::printf("single_writer_slot_t — nothing to allocate, so nothing to decline:\n");
+    tr::detail::probe_fail_hook = refuse_nodes;
     single_writer_slot_t slot;
     bool ok = false;
     std::thread cold([&] {
@@ -710,8 +792,9 @@ void single_writer_never_declines() {
         g_starve.store(false, std::memory_order_relaxed);
     });
     cold.join();
-    check(ok, "a publish succeeds with nothrow allocation rigged to fail");
+    check(ok, "a publish succeeds with the node class refused");
     slot.clear();
+    tr::detail::probe_fail_hook = nullptr;
 }
 
 /**
@@ -826,6 +909,7 @@ int main() {
 
     single_writer_never_declines();
     declined_publish();
+    node_draws_skip_the_heap();
     check(g_live.load() == 0, "the starvation probes freed every value too");
 
     return tr::testing::summary("lkv_slot");

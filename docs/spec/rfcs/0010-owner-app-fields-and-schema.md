@@ -1071,9 +1071,13 @@ can poll.
 
 | spelling | the seam | nouns |
 | --- | --- | --- |
-| `:stats.mem.values` | the value sub-pool derived from the graph's root (published values and LKV nodes) | `capacity`, `in_use`, `peak`, `refused`, `largest_refused` |
+| `:stats.mem.values` | the value sub-pool derived from the graph's root (published values) | `capacity`, `in_use`, `peak`, `refused`, `largest_refused` |
 | `:stats.mem.tables` | the table sub-pool derived from the graph's root (registration, child and label tables, core containers) | the same five |
 | `:stats.mem.net` | the net sub-pool derived from the graph's root, the default for router and transport sources when none is injected | the same five |
+
+> **Erratum (2026-10-06), [#1782](https://github.com/avatarsd-llc/libtracer/issues/1782) —
+> see §Erratum (2026-10-06) at the end of this document.** The `:stats.mem.values` row said
+> "published values and LKV nodes"; "and LKV nodes" is struck.
 
 `:stats.mem.control` and `:stats.mem.ring` keep their Amendment 1 meaning. A node that does
 not derive a given sub-pool answers that name with `SCHEMA_NOT_FOUND`, and a monitor reads
@@ -1122,3 +1126,19 @@ value as the owner holds it. Conformance vector §1 (`app-field-declare-read-wri
 unchanged for a node whose owner installs no read hook; a node that installs one serves the
 owner's value on both the local and the remote read, which §1's "identical bytes" property
 still holds for.
+
+## Erratum (2026-10-06) — `:stats.mem.values` does not count LKV nodes ([#1782](https://github.com/avatarsd-llc/libtracer/issues/1782))
+
+Amendment 3's §D.4 row for `:stats.mem.values` described the seam as "published values and LKV
+nodes". The LKV nodes it meant are `hazard_slot_t`'s indirection nodes, and the implementation
+that moved them off the global heap ([#1782](https://github.com/avatarsd-llc/libtracer/issues/1782))
+draws them from a **process-wide node class**, not from the value sub-pool derived from a
+graph's root: the hazard domain they belong to is process-wide, and a node moves between the
+threads (and so the graphs) that publish through it. No `:stats.mem` name reports that class.
+The row is corrected to "published values" (see the inline note there). A dedicated counter for
+the node class would be a new seam name, and so a future amendment, not part of this one.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). The
+text described a count the shipped behaviour never made; the seam's name, its nouns and every
+value a node answers are unchanged. No frame shape, type code, grammar rule, error identity or
+seam name moves.
