@@ -205,11 +205,11 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     return out;
 }
 
-std::optional<std::vector<std::byte>> path_key(const tlv_node_t& path) {
+std::optional<std::span<const std::byte>> path_key(const tlv_node_t& path) {
     // The canonical PATH-payload key IS the PATH body (RFC-0018): a packed sequence of
     // `[u8 len][bytes]` records with `opt.PL = 0`, so a PATH node carries it in
-    // `payload()` and there is nothing to re-assemble from children. One copy, no
-    // per-segment append, and byte-identical to what `path_t::parse` / `register_vertex`
+    // `payload()` and there is nothing to re-assemble from children. No copy at all (#1885),
+    // and byte-identical to what `path_t::parse` / `register_vertex`
     // store — the vertex-map key round-trips exactly.
     //
     // What this VALIDATES is the whole reason it is still fallible. The pre-RFC-0018 shape
@@ -223,7 +223,7 @@ std::optional<std::vector<std::byte>> path_key(const tlv_node_t& path) {
     if (path.opt().pl) return std::nullopt;
     const std::span<const std::byte> body = path.payload();
     if (!wire::packed_path_valid_key(body)) return std::nullopt;
-    return std::vector<std::byte>(body.begin(), body.end());
+    return body;
 }
 
 bool equal(const tlv_t& a, const tlv_t& b) noexcept {

@@ -80,8 +80,8 @@ class DeclaredBand(unittest.TestCase):
 class ShippedPins(unittest.TestCase):
     def test_bands_are_well_formed(self):
         pins = json.loads((pathlib.Path(__file__).parent / "symbol_ratchet.json").read_text())
+        # No pin need carry a band: #1885 retired the only one (snapshot_edges, now inlined).
         banded = [p for p in pins["symbols"] if "band" in p]
-        self.assertTrue(banded)
         for p in banded:
             lo, hi = p["band"]
             self.assertLessEqual(lo, p["bytes"], p["symbol"])

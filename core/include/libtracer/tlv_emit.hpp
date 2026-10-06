@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv.hpp"
 
@@ -275,5 +276,68 @@ inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
     emit_name(out, std::span<const std::byte>(reinterpret_cast<const std::byte*>(name.data()),
                                               name.size()));
 }
+
+/**
+ * @name The core-array forms (#1885)
+ *
+ * The same bytes appended to a `mem::bytes_t`, so a control-plane encoder stages on the
+ * graph's source instead of the global heap. Each call is all-or-nothing: it sizes its whole
+ * append first, and a `false` leaves @p out exactly as it was.
+ * @{
+ */
+
+/**
+ * @brief Append just a TLV header — the core-array form of @ref emit_header, same bytes by
+ *        delegation to @ref store_header.
+ * @retval false The source refused — @p out is unchanged.
+ */
+[[nodiscard]] inline bool emit_header(mem::bytes_t& out, type_t type, opt_t opt,
+                                      std::size_t body_len) noexcept {
+    std::byte h[6];
+    store_header(std::span<std::byte>(h, header_bytes(opt)), type, opt, body_len);
+    return out.append(h, header_bytes(opt));
+}
+
+/**
+ * @brief Append one TLV — the core-array form of @ref emit_tlv (same widening, same cleared
+ *        trailer bits).
+ * @retval false The source refused — @p out is unchanged.
+ */
+[[nodiscard]] inline bool emit_tlv(mem::bytes_t& out, type_t type, opt_t opt,
+                                   std::span<const std::byte> body) noexcept {
+    opt = opt.without_trailer();
+    if (body.size() > 0xFFFFu) opt.ll = true;
+    return out.reserve(out.size() + header_bytes(opt) + body.size()) &&
+           emit_header(out, type, opt, body.size()) && out.append(body.data(), body.size());
+}
+
+/** @brief Append a NAME TLV over opaque bytes (core-array form).
+ *  @retval false The source refused — @p out is unchanged. */
+[[nodiscard]] inline bool emit_name(mem::bytes_t& out, std::span<const std::byte> name) noexcept {
+    return emit_tlv(out, type_t::NAME, opt_t{}, name);
+}
+
+/** @brief Append a NAME TLV over a text segment (core-array form).
+ *  @retval false The source refused — @p out is unchanged. */
+[[nodiscard]] inline bool emit_name(mem::bytes_t& out, std::string_view name) noexcept {
+    return emit_name(out, std::span<const std::byte>(
+                              reinterpret_cast<const std::byte*>(name.data()), name.size()));
+}
+
+/**
+ * @brief Append a VALUE TLV of @p value, little-endian in @p width bytes (core-array form).
+ *
+ * Precondition: `width <= sizeof(T)`.
+ * @retval false The source refused — @p out is unchanged.
+ */
+template <std::unsigned_integral T>
+[[nodiscard]] inline bool emit_value_le(mem::bytes_t& out, T value,
+                                        std::size_t width = sizeof(T)) noexcept {
+    std::byte body[sizeof(T)];
+    detail::store_le(std::span<std::byte>(body, width), value, width);
+    return emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(body, width));
+}
+
+/** @} */
 
 }  // namespace tr::wire

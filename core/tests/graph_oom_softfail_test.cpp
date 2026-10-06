@@ -248,7 +248,9 @@ void test_small_fanout_allocation_free() {
 /** @brief Wide fan-out under OOM degrades to the inline prefix — drops, never aborts. */
 void test_wide_fanout_degrade() {
     std::printf("wide fan-out — overflow snapshot OOM degrades to the inline prefix:\n");
-    constexpr std::size_t kSubs = 12;  // > kInlineFanout (8)
+    // Past the wide arm's stack frame (8 x kInlineFanout views, #1885), so the snapshot has to
+    // reach the source at all: a fan-out inside the frame never sheds.
+    constexpr std::size_t kSubs = 9 * tr::graph::vertex_t::kInlineFanout + 4;
     constexpr std::uint64_t kShed = kSubs - tr::graph::vertex_t::kInlineFanout;
     graph_t g;
     auto v = g.register_vertex(path_t("/s/c"), role_t::STORED_VALUE);
@@ -256,7 +258,7 @@ void test_wide_fanout_degrade() {
     for (int& c : counts) (void)g.subscribe(path_t("/s/c"), count_cb, &c);
     const auto before = g.delivery_drops();
     {
-        const hook_guard_t frag(fail_big);  // the 12-view overflow reserve exceeds 512 B
+        const hook_guard_t frag(fail_big);  // the overflow reserve exceeds 512 B
         check(g.write(v, make_value({0x02})).has_value(), "the write itself still succeeds");
     }
     int delivered = 0;

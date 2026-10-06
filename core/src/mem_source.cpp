@@ -5,8 +5,9 @@
 
 #include "libtracer/mem_source.hpp"
 
-#include <cstdio>
 #include <cstdlib>
+
+#include "libtracer/init_fault.hpp"
 
 /**
  * @file
@@ -37,11 +38,12 @@ block_source_t& null_source() noexcept { return g_null_source; }
 
 void exhausted_at_init(const block_source_t& src, const char* what) noexcept {
     const source_stats_t s = src.stats();
-    std::fprintf(stderr,
-                 "libtracer: %s: the \"%s\" memory source refused an allocation at "
-                 "initialization (%zu bytes needed, %zu bytes in use): a sizing bug, give it "
-                 "more room (ADR-0056, ADR-0083)\n",
-                 what, src.name(), s.largest_refused, s.in_use);
+    // Reported through the build's sink, not written here: core owns no output stream (#1885).
+    graph::config_t::fault_sink_t::report(init_fault_t{.kind = init_fault_kind_t::SOURCE_EXHAUSTED,
+                                                       .call = what,
+                                                       .source = src.name(),
+                                                       .needed = s.largest_refused,
+                                                       .in_use = s.in_use});
     std::abort();
 }
 

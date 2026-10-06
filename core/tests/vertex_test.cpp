@@ -193,7 +193,7 @@ void test_edges_snapshot_clear_latch() {
     check(v.add_edge(mk_edge(), &latch3) == 2, "the third edge lands in slot 2");
 
     edge_snapshot_t buf;
-    std::vector<edge_view_t> heap;
+    tr::mem::block_array_t<edge_view_t> heap(tr::mem::heap_source());
     vertex_t::snapshot_drops_t drops;
     check(v.snapshot_edges(buf, heap, drops) == 3 && heap.empty(),
           "3 active edges snapshot into the inline buffer (no heap)");
@@ -245,7 +245,7 @@ void test_snapshot_under_concurrent_add() {
     std::size_t last = 0;
     go.store(true, std::memory_order_release);
     edge_snapshot_t buf;
-    std::vector<edge_view_t> heap;
+    tr::mem::block_array_t<edge_view_t> heap(tr::mem::heap_source());
     vertex_t::snapshot_drops_t drops;
     for (int i = 0; i < 2000; ++i) {
         const std::size_t n = v.snapshot_edges(buf, heap, drops);

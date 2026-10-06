@@ -48,7 +48,8 @@ namespace tr {
 template <std::size_t LineBytes, std::size_t Stripes>
 struct basic_mutex_guard_t;  // guard_mutex.hpp — the host guard: address-striped locks (hosted)
 using mutex_guard_t = basic_mutex_guard_t<64, 64>;  // its default sizing (guard_mutex.hpp)
-struct no_guard_t;  // guard.hpp — guards nothing; single-threaded builds only
+struct no_guard_t;           // guard.hpp — guards nothing; single-threaded builds only
+struct stderr_fault_sink_t;  // init_fault.hpp — the host default: one line on stderr
 
 }  // namespace tr
 
@@ -210,16 +211,19 @@ struct default_config_t {
      *
      * A publish copies the vertex's live edges into a fixed buffer of `edge_view_t` on its own
      * stack, so a fan-out up to this width reaches no allocator. A wider fan-out snapshots into
-     * the publishing thread's reusable overflow vector instead (zero-alloc once warm) and
-     * delivers to every subscriber exactly as before: the width selects a strategy, it refuses
-     * nothing and reports nothing.
+     * a frame of eight times this width on the same stack, and past that into a block from the
+     * graph's table source (#1885), and delivers to every subscriber exactly as before: the
+     * width selects a strategy, it refuses nothing and reports nothing. Only a table source
+     * that refuses the block sheds the tail, as a counted `fan_out_truncated` drop.
      *
      * The buffer is reserved on EVERY publish frame whether the vertex has one subscriber or
      * eight, at `kInlineFanout * sizeof(edge_view_t)` bytes: 384 B on a 64-bit host (48 B a
-     * view) and 224 B on rv32 (28 B). The host default keeps the allocation-free fast path for
-     * the widths the benches gate; a NARROW node whose vertices carry one or two subscribers
-     * spends that stack on every task that publishes. Measured on rv32 (`-Os`, GCC 15.2, real
-     * `core/src/graph.cpp`, `-fstack-usage`): `graph_t::fan_out`'s frame is 304 B at 8 and
+     * view) and 224 B on rv32 (28 B). The wide fan-out's frame sits in the same stack frame at
+     * eight times that (#1885): 3,072 B on a 64-bit host, 448 B on rv32 at 2. The
+     * host default keeps the allocation-free fast path for the widths the benches gate; a
+     * NARROW node whose vertices carry one or two subscribers spends that stack on every task
+     * that publishes. Measured on rv32 before #1885 (`-Os`, GCC 15.2, real
+     * `core/src/graph.cpp`, `-fstack-usage`): `graph_t::fan_out`'s frame was 304 B at 8 and
      * 128 B at 2 — the 168 B of six views plus 8 B of 16-byte frame rounding. Override
      * fragment: `static constexpr std::size_t kInlineFanout = 2;` — the ESP-IDF component
      * sets 2 on a chip target. At least 1.
@@ -454,6 +458,18 @@ struct default_config_t {
      * there by both the slot and the pool.
      */
     using guard_t = ::tr::mutex_guard_t;
+
+    /**
+     * @brief Where core reports a setup-time sizing fault before it aborts (#1885).
+     *
+     * Core has one such report: a memory source or the vertex ceiling refusing a call that
+     * initialization cannot do without (ADR-0056 amendment, ADR-0083). It hands the facts
+     * (`tr::init_fault_t`) to `fault_sink_t::report` and aborts when that returns, so core
+     * itself writes to no stream. The host default prints one line on `stderr`; a target with
+     * no stdio binds `tr::silent_fault_sink_t` or its own type with the same static `report`.
+     * Override fragment: `using fault_sink_t = my_uart_fault_sink_t;`.
+     */
+    using fault_sink_t = ::tr::stderr_fault_sink_t;
 
     /**
      * @brief Locks in the host guard's process-wide stripe table (#1716); a power of two.

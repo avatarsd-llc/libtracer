@@ -146,7 +146,7 @@ struct tlv_t {
 std::expected<tlv_t, err_t> decode(std::span<const std::byte>);  // borrowed
 std::expected<tlv_t, err_t> decode(const view::view_t&);         // the L1→L2 cast
 std::vector<std::byte>      encode(const tlv_t&);                // recomputes CRC
-std::vector<std::byte>      path_key(const tlv_t& path);         // canonical PATH key
+std::optional<std::span<const std::byte>> path_key(const tlv_node_t& path);  // canonical PATH key (borrowed)
 bool                        equal(const tlv_t&, const tlv_t&);   // spans by content
 
 // tlv_emit.hpp — bytes without a model object
@@ -388,7 +388,11 @@ Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `batch.hpp`,
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::wire::emit_tlv
+```{doxygenfunction} tr::wire::emit_tlv(std::vector<std::byte> &out, type_t type, opt_t opt, std::span<const std::byte> body)
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::emit_tlv(mem::bytes_t &out, type_t type, opt_t opt, std::span<const std::byte> body)
 :project: libtracer
 ```
 

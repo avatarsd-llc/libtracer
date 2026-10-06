@@ -228,10 +228,10 @@ static_assert(std::to_underlying(stats_seam_t::MEM_CONTROL) + std::size(kMemSeam
 }
 
 /** @brief Emit one census member — `NAME <noun> VALUE u64` (fixed 8-byte little-endian,
- *         the reference/05 integer convention), the shape every `:stats` block repeats. */
-void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint64_t value) {
-    wire::emit_name(out, noun);
-    wire::emit_value_le(out, value, 8);
+ *         the reference/05 integer convention), the shape every `:stats` block repeats.
+ *  @retval false The staging source refused (#1885). */
+[[nodiscard]] bool emit_counter(mem::bytes_t& out, std::string_view noun, std::uint64_t value) {
+    return wire::emit_name(out, noun) && wire::emit_value_le(out, value, 8);
 }
 
 /**
@@ -260,7 +260,9 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
 [[nodiscard, gnu::noinline, gnu::cold]] result_t<view::view_t> read_stats(const graph_t& g,
                                                                           const field_path_t& field,
                                                                           stats_seam_t seam) {
-    std::vector<std::byte> members;
+    // Every seam fills the same fixed-capacity carrier the net sampler fills, so ONE loop below
+    // shapes every seam's bytes (Amendment 2).
+    stats_block_t sampled;
     switch (seam) {
         case stats_seam_t::MEM_VALUES:
         case stats_seam_t::MEM_TABLES:
@@ -270,40 +272,45 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
             const mem_seam_t& row =
                 kMemSeams[std::to_underlying(seam) - std::to_underlying(stats_seam_t::MEM_CONTROL)];
             const mem::source_stats_t s = (g.*row.source)().stats();
-            emit_counter(members, "capacity", s.capacity);
-            emit_counter(members, "in_use", s.in_use);
-            emit_counter(members, "peak", s.peak);
-            emit_counter(members, "refused", s.refused);
-            emit_counter(members, "largest_refused", s.largest_refused);
+            sampled.add("capacity", s.capacity);
+            sampled.add("in_use", s.in_use);
+            sampled.add("peak", s.peak);
+            sampled.add("refused", s.refused);
+            sampled.add("largest_refused", s.largest_refused);
             break;
         }
         case stats_seam_t::GRAPH_DELIVERY: {
             const graph_t::delivery_drops_t d = g.delivery_drops();
-            emit_counter(members, "no_target", d.no_target);
-            emit_counter(members, "denied", d.denied);
-            emit_counter(members, "out_of_memory", d.out_of_memory);
-            emit_counter(members, "fan_out_truncated", d.fan_out_truncated);
+            sampled.add("no_target", d.no_target);
+            sampled.add("denied", d.denied);
+            sampled.add("out_of_memory", d.out_of_memory);
+            sampled.add("fan_out_truncated", d.fan_out_truncated);
             break;
         }
-        case stats_seam_t::NET: {
-            // Amendment 2: the block comes from the net plane's registered sampler, which
-            // fills a fixed-capacity carrier — so the ONE encoder below still shapes every
-            // seam's bytes and the sampling half never touches an allocator.
-            stats_block_t sampled;
+        case stats_seam_t::NET:
+            // Amendment 2: the block comes from the net plane's registered sampler, and the
+            // sampling half never touches an allocator.
             if (!g.sample_stats(field.steps[1].name, field.steps[2].name, &sampled))
                 return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-            for (std::size_t i = 0; i < sampled.count; ++i)
-                emit_counter(members, sampled.members[i].noun, sampled.members[i].value);
             break;
-        }
         case stats_seam_t::NONE:
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     }
-    std::vector<std::byte> block;
-    wire::emit_tlv(block, type_t::SETTINGS, opt_t{.pl = true}, members);
+    // Staged on this call's stack frame, spilling to the table source (#1885): a census
+    // block is small, so sampling a source does not normally draw from the one it samples.
+    std::array<std::byte, 512> scratch;
+    mem::bump_source_t frame(scratch, g.table_source());
+    mem::bytes_t members(frame);
+    bool staged = true;
+    for (std::size_t i = 0; staged && i < sampled.count; ++i)
+        staged = emit_counter(members, sampled.members[i].noun, sampled.members[i].value);
+    mem::bytes_t block(frame);
+    if (!staged ||
+        !wire::emit_tlv(block, type_t::SETTINGS, opt_t{.pl = true}, mem::as_span(members)))
+        return std::unexpected(status_t::BACKPRESSURE);
     // `block` is non-empty by construction; `nullopt` is exactly an alloc failure
     // → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto out = view::over_bytes(block, g.value_backend());
+    const auto out = view::over_bytes(mem::as_span(block), g.value_backend());
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
 }
@@ -322,21 +329,22 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
  *         (`wo` has no read surface; unset fields are omitted). A field @p live answers
  *         (`handlers_t::on_app_field_read`, #1878) lists the owner's bytes instead of the
  *         stored ones, so the container never disagrees with the named read.
- *  @return False when @p live answered a refused allocation (BACKPRESSURE). */
-[[nodiscard]] bool emit_app_container(std::vector<std::byte>& out,
-                                      const std::vector<app_field_t>& table,
+ *  @return False when @p live answered a refused allocation, or @p out's source refused
+ *          (BACKPRESSURE). */
+[[nodiscard]] bool emit_app_container(mem::bytes_t& out, const std::vector<app_field_t>& table,
                                       const app_field_read_hook_t& live) {
     for (const app_field_t& f : table) {
         if (f.access == app_access_t::WO) continue;
         const std::optional<value_ref_t> owner = live ? live(f.name) : std::nullopt;
         if (owner && !*owner) return false;
         if (!owner && f.value.empty()) continue;
-        wire::emit_name(out, f.name);
-        if (!owner)
-            out.insert(out.end(), f.value.begin(), f.value.end());
-        else
+        if (!wire::emit_name(out, f.name)) return false;
+        if (!owner) {
+            if (!out.append(f.value.data(), f.value.size())) return false;
+        } else {
             for (const view::view_t& l : (**owner).links())
-                out.insert(out.end(), l.bytes().begin(), l.bytes().end());
+                if (!out.append(l.bytes().data(), l.bytes().size())) return false;
+        }
     }
     return true;
 }
@@ -363,21 +371,32 @@ namespace {
  * The policy's reserved bits (6–15) are stored VERBATIM and never interpreted: §3.A says a
  * sender MUST write 0 and a receiver MUST ignore them — an ignore, not a reject — so a future
  * sender's bits round-trip through `:subscribers[]` rather than being refused by an older node.
+ *
+ * @retval false The target key could not be held, or @p src refused the cold half (#1885).
  */
-void parse_subscriber_tlv(const tlv_node_t& sub, subscriber_t& s) {
+[[nodiscard]] bool parse_subscriber_tlv(const tlv_node_t& sub, subscriber_t& s,
+                                        mem::block_source_t& src) {
     for (const tlv_node_t child : sub.children()) {
         if (child.type() == type_t::PATH && !s.target_key) {
             // An illegally-spelled target leaves target_key unset, which falls back to the
-            // full-route delivery path exactly as an older parser would (#681).
-            if (auto k = wire::path_key(child)) s.target_key = try_make_target_key(*std::move(k));
+            // full-route delivery path exactly as an older parser would (#681). A legal one
+            // that cannot be held refuses the admission as BACKPRESSURE (#1885): it was
+            // admitted without its target and then refused as a TYPE_MISMATCH.
+            const auto k = wire::path_key(child);
+            if (k && !(s.target_key = try_make_target_key({k->begin(), k->end()})) && !k->empty())
+                return false;
         } else if (child.type() == type_t::SETTINGS) {
             const wire::config_reader_t qos(&child);
-            if (qos.flag("delivery_compact").value_or(false))
-                s.ensure_remote().delivery_compact = true;  // cold half only when opted in
+            if (qos.flag("delivery_compact").value_or(false)) {
+                subscriber_remote_t* const r = s.ensure_remote(src);  // only when opted in
+                if (r == nullptr) return false;
+                r->delivery_compact = true;
+            }
             if (const std::optional<std::uint16_t> word = qos.u16("delivery_policy"))
                 s.policy.bits = *word;
         }
     }
+    return true;
 }
 
 }  // namespace
@@ -400,17 +419,21 @@ void parse_subscriber_tlv(const tlv_node_t& sub, subscriber_t& s) {
  *
  * @param record The record as written: one TLV, validated here.
  * @param s      Filled on success, its `source_view` the zero-copy retain a later
- *               `:subscribers[]` read ropes into the REPLY (ADR-0035); untouched on refusal.
- * @return False iff @p record is not one valid SUBSCRIBER TLV — the doors' one shared
- *         TYPE_MISMATCH. A `bool` rather than a `result_t<void>` because there is exactly one
- *         failure.
+ *               `:subscribers[]` read ropes into the REPLY (ADR-0035); untouched on a type
+ *               refusal. On a source refusal it may hold part of the record, and the door
+ *               drops it: the slot was never admitted.
+ * @param src    The graph's table source, which the cold half draws from.
+ * @return TYPE_MISMATCH iff @p record is not one valid SUBSCRIBER TLV — the doors' one shared
+ *         refusal of the record — and BACKPRESSURE when the key or the cold half could not be
+ *         held (#1885).
  */
-[[nodiscard]] bool parse_wire_subscriber(const view::view_t& record, subscriber_t& s) {
+[[nodiscard]] result_t<void> parse_wire_subscriber(const view::view_t& record, subscriber_t& s,
+                                                   mem::block_source_t& src) {
     const auto tlv = wire::tlv_node_t::over(record);
-    if (!tlv || tlv->type() != type_t::SUBSCRIBER) return false;
-    parse_subscriber_tlv(*tlv, s);
+    if (!tlv || tlv->type() != type_t::SUBSCRIBER) return std::unexpected(status_t::TYPE_MISMATCH);
+    if (!parse_subscriber_tlv(*tlv, s, src)) return std::unexpected(status_t::BACKPRESSURE);
     s.source_view = record;
-    return true;
+    return {};
 }
 
 /**
@@ -555,8 +578,9 @@ struct graph_t::field_surface_t {
         // same steps `subscribe_wire` runs. On `[N]` it sits AFTER the WRITE gate and AFTER the
         // sentinel discrimination above, which are that arm's alone. A record with no PATH
         // child names no local target, and this door has nowhere else to deliver.
-        if (!parse_wire_subscriber(value, s) || !s.target_key)
-            return std::unexpected(status_t::TYPE_MISMATCH);
+        if (const auto parsed = parse_wire_subscriber(value, s, g.table_source()); !parsed)
+            return std::unexpected(parsed.error());
+        if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
         // The fan-in gate context for this edge's deliveries (#81); the empty (local)
         // context needs no cold half. It is ALSO what makes the edge reclaimable: this
         // door leaves `subscriber_remote_t::link` empty (there is no return route to
@@ -577,7 +601,11 @@ struct graph_t::field_surface_t {
         // append is reached only through the public `graph_t::write(v, field, value, caller)`,
         // which an embedder may drive with an inbound link name. `[N]` has no such diversion
         // and IS reached from the wire.
-        if (!ctx.subject.empty()) s.ensure_remote().caller.assign(ctx.subject);
+        if (!ctx.subject.empty()) {
+            subscriber_remote_t* const r = s.ensure_remote(g.table_source());
+            if (r == nullptr || !r->caller.assign(ctx.subject))
+                return std::unexpected(status_t::BACKPRESSURE);
+        }
         // The single admission step (ADR-0049): SUBSCRIBE gate → append (or replace at
         // `slot` — §D.1's "admitted through the same admission door") → latch. A field-write
         // subscribe returns no host handle — discard it.
@@ -1048,10 +1076,12 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     const std::span<const std::byte> settings_children =
         v->has_payload_rights() ? declared_catalog(v) : std::span<const std::byte>{};
 
-    std::vector<std::byte> point_body;
-    wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment());
-    wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
-                   settings_children);  // SETTINGS
+    // Staged on the table source (#1885); a refusal anywhere is BACKPRESSURE.
+    mem::bytes_t point_body(*tables_);
+    if (!wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment()) ||
+        !wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
+                        settings_children))  // SETTINGS
+        return std::unexpected(status_t::BACKPRESSURE);
 
     // The owner part (RFC-0010 §B.2), present iff a descriptor table is installed —
     // `NAME "app" SETTINGS{ NAME <field> SETTINGS{…} … }` appended AFTER the synthesized
@@ -1062,28 +1092,34 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     // bytes verbatim. A vertex without a table keeps today's POINT byte-for-byte.
     const std::vector<app_field_t> table = v->app_fields_snapshot();
     if (!table.empty()) {
-        std::vector<std::byte> app_children;
+        mem::bytes_t app_children(*tables_);
+        mem::bytes_t desc(*tables_);
         for (const app_field_t& f : table) {
-            std::vector<std::byte> desc;
-            wire::emit_name(desc, "access");
+            desc.clear();
             const std::string_view a = to_string(f.access);
-            wire::emit_tlv(
-                desc, type_t::VALUE, opt_t{},
-                std::span<const std::byte>(reinterpret_cast<const std::byte*>(a.data()), a.size()));
-            desc.insert(desc.end(), f.descriptor.begin(), f.descriptor.end());
-            wire::emit_name(app_children, f.name);
-            wire::emit_tlv(app_children, type_t::SETTINGS, opt_t{.pl = true}, desc);
+            if (!wire::emit_name(desc, "access") ||
+                !wire::emit_tlv(desc, type_t::VALUE, opt_t{},
+                                std::span<const std::byte>(
+                                    reinterpret_cast<const std::byte*>(a.data()), a.size())) ||
+                !desc.append(f.descriptor.data(), f.descriptor.size()) ||
+                !wire::emit_name(app_children, f.name) ||
+                !wire::emit_tlv(app_children, type_t::SETTINGS, opt_t{.pl = true},
+                                mem::as_span(desc)))
+                return std::unexpected(status_t::BACKPRESSURE);
         }
-        wire::emit_name(point_body, "app");
-        wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true}, app_children);
+        if (!wire::emit_name(point_body, "app") ||
+            !wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
+                            mem::as_span(app_children)))
+            return std::unexpected(status_t::BACKPRESSURE);
     }
 
-    std::vector<std::byte> point;
-    wire::emit_tlv(point, type_t::POINT, opt_t{.pl = true}, point_body);  // POINT
+    mem::bytes_t point(*tables_);
+    if (!wire::emit_tlv(point, type_t::POINT, opt_t{.pl = true}, mem::as_span(point_body)))
+        return std::unexpected(status_t::BACKPRESSURE);  // POINT
 
     // `point` is a POINT TLV (never empty); `nullopt` is exactly an alloc failure
     // → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
-    const auto out = view::over_bytes(point, *value_backend_);
+    const auto out = view::over_bytes(mem::as_span(point), *value_backend_);
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
 }
@@ -1115,14 +1151,15 @@ result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byt
 
     // SETTINGS(PL=1){ NAME "kind" VALUE u8, NAME "key" VALUE <key> } — the two required
     // members, in the fixed order §B pins. 60 bytes for ed25519.
-    std::vector<std::byte> members;
-    wire::emit_name(members, "kind");
-    wire::emit_value_le(members, kind, 1);
-    wire::emit_name(members, "key");
-    wire::emit_tlv(members, type_t::VALUE, opt_t{}, key);
-
-    std::vector<std::byte> record;
-    wire::emit_tlv(record, type_t::SETTINGS, opt_t{.pl = true}, members);
+    // Staged on this call's stack frame (#1885): the record is bounded by the registry.
+    std::array<std::byte, 2 * kMaxIdentityRecordBytes> scratch;
+    mem::bump_source_t frame(scratch, *tables_);
+    mem::bytes_t members(frame);
+    mem::bytes_t record(frame);
+    if (!wire::emit_name(members, "kind") || !wire::emit_value_le(members, kind, 1) ||
+        !wire::emit_name(members, "key") || !wire::emit_tlv(members, type_t::VALUE, opt_t{}, key) ||
+        !wire::emit_tlv(record, type_t::SETTINGS, opt_t{.pl = true}, mem::as_span(members)))
+        return std::unexpected(status_t::BACKPRESSURE);
     // The single-writer half of @ref kMaxIdentityRecordBytes. Unreachable at today's
     // registry (ed25519 is 60 bytes and every other kind was refused above); it is here so
     // that a future §B addition whose record outgrows the reader's stack buffer fails
@@ -1135,7 +1172,8 @@ result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byt
     // authenticated nothing (RFC-0011 §C: the facet resolves above the READ gate on purpose),
     // is freed after the unlock, so no allocator call runs inside this leaf (#1778).
     mem::bytes_t fresh(*tables_);
-    if (!mem::assign_bytes(fresh, record)) return std::unexpected(status_t::BACKPRESSURE);
+    if (!mem::assign_bytes(fresh, mem::as_span(record)))
+        return std::unexpected(status_t::BACKPRESSURE);
     {
         const std::unique_lock lock(identity_mutex_);
         std::swap(identity_record_, fresh);
@@ -1190,20 +1228,23 @@ result_t<view::view_t> graph_t::read_settings(vertex_t* v) const {
     // gate accepts — which is now nothing, honestly, rather than seven names of which four
     // were never honoured. A vertex with no declared app fields reads an EMPTY `SETTINGS{}`,
     // which is honest rather than absent.
-    std::vector<std::byte> children;
+    // Staged on the table source (#1885); a refusal anywhere is BACKPRESSURE.
+    mem::bytes_t children(*tables_);
     const std::vector<app_field_t> table = v->app_fields_snapshot();
     if (!table.empty()) {
-        std::vector<std::byte> app_children;
-        if (!emit_app_container(app_children, table, app_field_reader(v)))
+        mem::bytes_t app_children(*tables_);
+        if (!emit_app_container(app_children, table, app_field_reader(v)) ||
+            !wire::emit_name(children, "app") ||
+            !wire::emit_tlv(children, type_t::SETTINGS, opt_t{.pl = true},
+                            mem::as_span(app_children)))
             return std::unexpected(status_t::BACKPRESSURE);
-        wire::emit_name(children, "app");
-        wire::emit_tlv(children, type_t::SETTINGS, opt_t{.pl = true}, app_children);
     }
-    std::vector<std::byte> out;
-    wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, children);
+    mem::bytes_t out(*tables_);
+    if (!wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, mem::as_span(children)))
+        return std::unexpected(status_t::BACKPRESSURE);
     // `out` is non-empty by construction; `nullopt` is exactly an alloc failure
     // → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto res = view::over_bytes(out, *value_backend_);
+    const auto res = view::over_bytes(mem::as_span(out), *value_backend_);
     if (!res) return std::unexpected(status_t::BACKPRESSURE);
     return *res;
 }
@@ -1215,14 +1256,14 @@ result_t<view::view_t> graph_t::read_settings_app(vertex_t* v) const {
     // SETTINGS when nothing has been written yet).
     const std::vector<app_field_t> table = v->app_fields_snapshot();
     if (table.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    std::vector<std::byte> children;
-    if (!emit_app_container(children, table, app_field_reader(v)))
+    mem::bytes_t children(*tables_);  // staged on the table source (#1885)
+    mem::bytes_t out(*tables_);
+    if (!emit_app_container(children, table, app_field_reader(v)) ||
+        !wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, mem::as_span(children)))
         return std::unexpected(status_t::BACKPRESSURE);
-    std::vector<std::byte> out;
-    wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, children);
     // `out` is non-empty by construction (the SETTINGS header at minimum); `nullopt` is
     // exactly an alloc failure → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto res = view::over_bytes(out, *value_backend_);
+    const auto res = view::over_bytes(mem::as_span(out), *value_backend_);
     if (!res) return std::unexpected(status_t::BACKPRESSURE);
     return *res;
 }

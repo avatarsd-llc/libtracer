@@ -16,6 +16,8 @@
 #pragma once
 
 #include "libtracer/frame.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/status.hpp"
 #include "libtracer/subscriber.hpp"
 
 namespace tr::graph {
@@ -25,9 +27,12 @@ namespace tr::graph {
  *        decode and type-check the record, parse it once, and retain it zero-copy. Defined in
  *        `graph_fields.cpp`.
  *
- * @return False iff @p record is not one valid SUBSCRIBER TLV — the doors' one shared
- *         TYPE_MISMATCH.
+ * @param src The graph's table source: the cold half draws from it (#1885).
+ * @return TYPE_MISMATCH iff @p record is not one valid SUBSCRIBER TLV — the doors' one shared
+ *         refusal of the record — and BACKPRESSURE when what the record needs could not be
+ *         held.
  */
-[[nodiscard]] bool parse_wire_subscriber(const view::view_t& record, subscriber_t& s);
+[[nodiscard]] result_t<void> parse_wire_subscriber(const view::view_t& record, subscriber_t& s,
+                                                   mem::block_source_t& src);
 
 }  // namespace tr::graph
