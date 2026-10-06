@@ -398,6 +398,47 @@ class LiveContention(unittest.TestCase):
         self.assertEqual(c.cpus, (cpu,))
 
 
+class TheJobStaysOffTheBenchCpu(unittest.TestCase):
+    """@brief The bench's own job must not count as contention on the bench CPU (#1890).
+
+    From 2026-10-03 every bench-local point was flagged "bench CPU contended": the job's
+    own Runner.Worker had inherited the bench CPU (perf.yml moves the runner there) and
+    queued behind the bench, so own-cgroup pressure read 80-100 with under 1% foreign
+    time. The fix moves the job's own processes onto the rest of its CPUs before anything
+    is timed; these tests pin the rule and that the workflow applies it.
+    """
+
+    WORKFLOW = pathlib.Path(__file__).resolve().parent.parent / ".github/workflows/perf-local.yml"
+
+    def test_off_cpus_is_the_job_set_minus_the_bench_cpu(self):
+        self.assertEqual(bc.off_cpus((2, 3, 4, 5, 6), (2,)), (3, 4, 5, 6))
+        self.assertEqual(bc.cpu_list(bc.off_cpus((2, 3, 4, 5, 6), (2,))), "3-6")
+
+    def test_a_single_cpu_job_is_left_where_it_is(self):
+        """Nothing to step aside to: the move is a no-op, never an empty affinity."""
+        self.assertEqual(bc.off_cpus((2,), (2,)), (2,))
+
+    def test_job_cpus_come_from_the_nearest_cgroup_cpuset(self):
+        """The slice's cpuset decides, not the affinity the shell inherited from the runner."""
+        files = {bc.PROC_SELF_CGROUP: "0::/bench.slice/runner.service\n",
+                 f"{bc.CGROUP_FS}/bench.slice/cpuset.cpus.effective": "2-6\n"}
+        self.assertEqual(bc.job_cpus(files.get), (2, 3, 4, 5, 6))
+
+    def test_cpu_list_round_trips(self):
+        for spec in ("2", "3-6", "0-1,7-30"):
+            self.assertEqual(bc.cpu_list(bc.parse_cpu_list(spec)), spec)
+
+    def test_the_workflow_moves_the_runner_off_before_anything_is_timed(self):
+        # Comments name the commands too; only the steps' own lines count.
+        text = "\n".join(ln for ln in self.WORKFLOW.read_text().splitlines()
+                         if not ln.lstrip().startswith("#"))
+        move = text.find("bench_conditions.py off-cpus --cpu \"$BENCH_CPU\"")
+        self.assertGreater(move, 0, "perf-local must move the runner's processes off BENCH_CPU")
+        self.assertIn("Runner\\.(Listener|Worker)", text[move - 400:move + 400])
+        for timed in ("bench_conditions.py run", "host_guard.py wait"):
+            self.assertLess(move, text.find(timed), f"the move must come before `{timed}`")
+
+
 class CLI(unittest.TestCase):
     """@brief The workflow seam: `run` passes the bench's exit code through and records;
     `summary` reads the record back into one verdict."""

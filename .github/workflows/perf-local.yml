@@ -216,6 +216,23 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # KEEP THE RUNNER OFF THE BENCH CPU (#1890). gate-pr (perf.yml) moves this runner's
+      # own processes ONTO CPU 2 so it can measure on 3-6, and the long-lived
+      # Runner.Listener keeps that affinity: every later job's Runner.Worker inherited
+      # CPU 2, the one CPU this leg measures on. From 2026-10-03 every invocation here read
+      # 80-100 own-cgroup CPU pressure with under 1% foreign time and ~10x the involuntary
+      # switches, and was flagged contended: the bench's own job queued behind the bench.
+      # So, before anything runs, move them onto the rest of this job's CPUs. Only THIS
+      # job's processes, matched the way perf.yml matches them.
+      - name: Move the runner's own processes off the bench CPU
+        run: |
+          cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
+          own="$(cat "$cg/cgroup.procs" "$cg"/*/cgroup.procs 2>/dev/null || true)"
+          rest="$(python3 bench/bench_conditions.py off-cpus --cpu "$BENCH_CPU")"
+          for pid in $(pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)'); do
+            if grep -qx "$pid" <<<"$own"; then taskset -a -p -c "$rest" "$pid" || true; fi
+          done
+
       - name: Capture host characteristics (stamped onto every recorded point)
         id: host
         run: |

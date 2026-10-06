@@ -228,11 +228,9 @@ class Conditions:
                 + (f" ({self.reason})" if self.reason else ""))
 
 
-def _cpuset(cpus: Iterable[int]) -> str:
-    """@brief `cpu2` or `cpus 0-3,6` — compact and unambiguous."""
+def cpu_list(cpus: Iterable[int]) -> str:
+    """@brief `3-6` or `0-3,6`: the kernel's cpu-list spelling, as `taskset -c` takes it."""
     c = sorted(set(cpus))
-    if len(c) == 1:
-        return f"cpu{c[0]}"
     runs, start = [], None
     for i, x in enumerate(c):
         if start is None:
@@ -240,7 +238,52 @@ def _cpuset(cpus: Iterable[int]) -> str:
         if i + 1 == len(c) or c[i + 1] != x + 1:
             runs.append(f"{start}" if start == x else f"{start}-{x}")
             start = None
-    return "cpus " + ",".join(runs)
+    return ",".join(runs)
+
+
+def parse_cpu_list(spec: str) -> tuple[int, ...]:
+    """@brief `2`, `2,3` or `2-6` (the kernel's cpu-list spelling) -> sorted CPU numbers."""
+    out: set[int] = set()
+    for part in spec.strip().split(","):
+        if part.strip():
+            lo, _, hi = part.strip().partition("-")
+            out.update(range(int(lo), int(hi or lo) + 1))
+    return tuple(sorted(out))
+
+
+def _cpuset(cpus: Iterable[int]) -> str:
+    """@brief `cpu2` or `cpus 0-3,6` — compact and unambiguous."""
+    c = sorted(set(cpus))
+    return f"cpu{c[0]}" if len(c) == 1 else "cpus " + cpu_list(c)
+
+
+def off_cpus(allowed: Iterable[int], bench: Iterable[int]) -> tuple[int, ...]:
+    """@brief Where the job's OWN processes go so they never queue on the bench CPU (#1890).
+
+    @p allowed minus @p bench. When nothing would be left, @p allowed unchanged: a job
+    with one CPU cannot step aside, and a move to an empty set would fail rather than
+    leave the conditions check to say so.
+    """
+    rest = tuple(sorted(set(allowed) - set(bench)))
+    return rest or tuple(sorted(set(allowed)))
+
+
+def job_cpus(read: Callable[[str], str | None] = _read) -> tuple[int, ...]:
+    """@brief The CPUs this job's cgroup may use (`cpuset.cpus.effective`).
+
+    Read from the cgroup, not from this process's affinity, which is whatever the runner
+    process that spawned it was left with. The nearest cgroup up the path that has the
+    file decides (the cpuset controller may be enabled on the slice and not below it);
+    falls back to that affinity where none has it.
+    """
+    cg = cgroup_pressure_path(read(PROC_SELF_CGROUP))
+    d = cg.rsplit("/", 1)[0] if cg else ""
+    while d.startswith(CGROUP_FS + "/"):  # the root constrains nothing
+        text = read(d + "/cpuset.cpus.effective")
+        if text and text.strip():
+            return parse_cpu_list(text)
+        d = d.rsplit("/", 1)[0]
+    return tuple(sorted(os.sched_getaffinity(0)))
 
 
 def _window_pct(us0: int | None, us1: int | None, wall_s: float) -> float | None:
@@ -323,13 +366,7 @@ class Measurement:
 def cpus_from_env() -> tuple[int, ...] | None:
     """@brief The pin requested by `BENCH_CPU` (e.g. `2` or `2,3`), or None (unpinned)."""
     spec = os.environ.get("BENCH_CPU", "").strip()
-    if not spec:
-        return None
-    out: set[int] = set()
-    for part in spec.split(","):
-        lo, _, hi = part.partition("-")
-        out.update(range(int(lo), int(hi or lo) + 1))
-    return tuple(sorted(out))
+    return parse_cpu_list(spec) if spec else None
 
 
 def single_cpu_from_env(cpus: tuple[int, ...] | None) -> tuple[int, ...] | None:
@@ -535,6 +572,11 @@ def _cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_off_cpus(args: argparse.Namespace) -> int:
+    print(cpu_list(off_cpus(job_cpus(), parse_cpu_list(args.cpu))))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -551,6 +593,10 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("summary", help="the verdict over every recorded invocation")
     s.add_argument("--record", required=True)
     s.set_defaults(fn=_cmd_summary)
+    o = sub.add_parser("off-cpus", help="this job's CPUs minus the bench CPU, as a cpu list")
+    o.add_argument("--cpu", required=True, help="the bench CPU(s) to keep the job's own "
+                   "processes off (#1890)")
+    o.set_defaults(fn=_cmd_off_cpus)
     args = ap.parse_args(argv)
     if args.cmd == "run":
         if args.argv[:1] == ["--"]:
