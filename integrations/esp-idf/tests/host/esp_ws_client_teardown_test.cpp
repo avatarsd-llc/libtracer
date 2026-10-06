@@ -73,6 +73,9 @@
 #include <vector>
 
 #include "fake_esp_transport.hpp"
+#include "gated_source.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/esp_ws_client_link.hpp"
 
 namespace {
@@ -150,14 +153,14 @@ std::vector<std::byte> payload() {
 /** @brief Build a link on the fake, WITHOUT asserting anything — the quiet half of
  *         @ref dialing_link, for the 50-iteration race case whose per-turn verdicts
  *         would otherwise bury the report. */
-std::unique_ptr<esp_ws_client_link_t> quiet_link() {
-    return std::make_unique<esp_ws_client_link_t>(
-        "127.0.0.1", 8080,
+tr::mem::poly_ptr_t<esp_ws_client_link_t> quiet_link() {
+    return tr::mem::make_poly<esp_ws_client_link_t>(
+        tr::mem::net_source(), "127.0.0.1", 8080,
         tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
 }
 
 /** @brief Build a link on the fake and wait for its first dial. */
-std::unique_ptr<esp_ws_client_link_t> dialing_link() {
+tr::mem::poly_ptr_t<esp_ws_client_link_t> dialing_link() {
     auto link = quiet_link();
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     return link;
@@ -598,6 +601,44 @@ void test_a_second_sender_does_not_wait_on_a_parked_write() {
     link.reset();
     check(drained_fake(), "and the link drained");
 }
+/**
+ * @brief #1880: the dial slot and the read scratch come from `memory.state`, and each is
+ *        returned by EXACTLY the party that last holds it.
+ *
+ * Two arms. A link torn down with no dial in flight returns both from its destructor. A
+ * link torn down MID-DIAL cannot: the condemned dial still reads the host, URI and headers
+ * out of the slot, so the destructor leaves it (and the strings in it) and the dial returns
+ * it as it resolves. The
+ * store's live count is the oracle for both — nothing kept, nothing returned twice.
+ */
+void test_the_dial_slot_returns_to_its_store_on_both_arms() {
+    std::printf("#1880 the dial slot returns to memory.state, from whoever holds it last:\n");
+    gated_source_t state;
+    const tr::net::esp_ws_client_config_t cfg{
+        .rx_bytes = kBufBytes, .tx_bytes = kBufBytes, .memory = {.rx = nullptr, .state = &state}};
+
+    fake_ws::reset();
+    {
+        auto link =
+            tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        check(wait_until([&] { return link->ok(); }, 2s), "a link on the store came up");
+        check(state.live > 0, "its dial slot and read scratch were drawn from the store");
+    }
+    check(drained_fake(), "it drained");
+    check(state.live == 0, "and its destructor returned everything it drew");
+
+    fake_ws::reset();
+    fake_ws::hang_connects(true);
+    {
+        auto link =
+            tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "a link dialed");
+    }
+    check(state.live > 0, "torn down mid-dial, the slot the dial still reads is held");
+    fake_ws::release_connects(/*succeed=*/false);
+    check(drained_fake(), "the orphaned dial resolved");
+    check(wait_until([&] { return state.live == 0; }, 2s), "and returned the slot itself");
+}
 }  // namespace
 
 int main() {
@@ -611,6 +652,7 @@ int main() {
     test_send_during_a_redial_reads_no_handle();
     test_the_blocking_bounds_are_derived_from_the_watchdog();
     test_a_second_sender_does_not_wait_on_a_parked_write();
+    test_the_dial_slot_returns_to_its_store_on_both_arms();
     // Nothing detached may still be running here: a condemned dial's recv thread outlives
     // its link by design, and one still inside the transport at process exit is a crash
     // under ASan/TSan and a leak under LSan. Every case drains, and this is the backstop.

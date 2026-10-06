@@ -10,6 +10,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`twai_link_config_t::memory` — the CAN link takes `link_memory_t`
+  ([#1880](https://github.com/avatarsd-llc/libtracer/issues/1880)).** The shape the two
+  WebSocket links take. Only `io` is read: the in-flight TX pool (`tx_queue_depth + 1` slots
+  and their flags) is drawn from it once, at construction. The default is the net sub-pool,
+  which is the process heap on a chip build, so existing code compiles unchanged and behaves
+  as before. The member is last in the aggregate.
+
+### Breaking
+
+- **The ESP-IDF links allocate through the one allocation seam
+  ([#1880](https://github.com/avatarsd-llc/libtracer/issues/1880), ADR-0083).**
+  `httpd_ws_link_t`, `esp_ws_client_link_t` and `twai_link_t` no longer hold a `std::vector`,
+  `std::string`, `std::unique_ptr`, `std::shared_ptr`, `std::function` or a bare `new`. This
+  is the migration #1780 made for the core transports. Connection state is drawn from
+  `memory.state`: the handler gate, the registered URI, the session table and each session
+  with its reassembly buffer, the resolution handles, the RX scratch, an RX frame too large
+  for it, the control-queue work items, and the client's dial slot and read scratch. Egress
+  is drawn from `memory.io`: the server's TX slot pool, its inline payload block, the large
+  class and a payload past both. A peer's routable name (`p<slot>`) and the refusal close
+  reason are held in place, so they cost no allocation. On a chip build both stores default
+  to the process heap, so the per-link RAM is unchanged; the ESP-IDF footprint delta is in the
+  pull request.
+  - **A refusal at construction aborts.** The gate, the URI, the RX scratch, the TX pool, a
+    valid large class and the client's dial slot and read scratch are drawn by the
+    constructor. A store that refuses them is a sizing bug, so the constructor aborts naming it
+    (`mem::exhausted_at_init`). Before, the server link degraded: a missing RX scratch moved
+    every frame to the per-frame path, a missing TX pool dropped every send, a missing large
+    class fell back to the per-frame payload, and a missing gate left `ok()` false.
+    **Migration:** size `memory.state` and `memory.io` to hold what the knobs ask for
+    (`httpd_ws_link_t::buffer_bytes()` reports what the server draws for its buffers).
+  - **A refusal at run time sheds one peer or one frame, counted.** A new session the store
+    cannot hold is refused like a peer past `max_peers` and counted on
+    `stats_t::peers_refused`. A reassembly buffer is a dropped message on the session's
+    `rx_drops`, a receive buffer past the scratch is `stats_t::rx_dropped_alloc`, a TX payload
+    is an enqueue drop, and a resolution handle is a `peer_link` that answers null.
+  - **Store lifetime.** Both stores must outlive the server's last callback into the link: the
+    destructor in owning mode, the adopting server in adopted mode. A queued work item or a
+    send that drains after the link is gone returns its block then. The client's
+    `memory.state` must outlive its recv thread, because a dial the destructor condemned
+    returns the dial slot when it resolves, up to `kDialTimeoutMs` later. The defaults are
+    process-wide and never destroyed. **Migration:** an application that injects its own
+    stores keeps them alive for that long.
+  - `httpd_ws_config_t::memory.io` was unused and is now the server's egress store.
+    **Migration:** none for the default. An application that set it to a small or refusing
+    store sizes it for the TX pool.
+  - `esp_ws_client_config_t::ws_path` and `::handshake_headers` are `std::string_view`, and the
+    constructor takes `std::string_view host`. The link copies all three into its dial slot.
+    **Migration:** pass views that live through the constructor call. Do not assign a
+    temporary `std::string` to either field: the view dangles before the constructor reads it.
+  - `httpd_ws_link_t::peer_stats_visitor_t` is `tr::function_ref_t<void(const peer_stats_t&)>`.
+    A lambda over any number of locals no longer allocates. **Migration:** pass a callable
+    that lives through the `enumerate_peer_stats` call, as every caller already does. A
+    visitor can no longer be stored in that type.
+  - The links are built with `mem::make_poly`, like the core transports. That lets one be
+    owned through `transport_ptr_t`, or handed to `can_transport_t`, without
+    `std::make_unique`. The host suites build every link this way.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added

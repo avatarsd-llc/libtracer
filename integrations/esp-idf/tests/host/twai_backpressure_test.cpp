@@ -46,6 +46,8 @@
 #include <vector>
 
 #include "fake_twai.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/twai_link.hpp"
 
 namespace {
@@ -137,7 +139,8 @@ void test_the_backpressure_window_is_per_frame_not_per_queue() {
 
     constexpr std::uint32_t kWindowMs = 300;
     constexpr int kWriters = 5;
-    auto link = std::make_unique<twai_link_t>(config_with_timeout(kWindowMs));
+    auto link =
+        tr::mem::make_poly<twai_link_t>(tr::mem::net_source(), config_with_timeout(kWindowMs));
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
 
@@ -190,7 +193,8 @@ void test_teardown_does_not_queue_behind_parked_writers() {
 
     constexpr std::uint32_t kWindowMs = 600;
     constexpr int kWriters = 5;
-    auto link = std::make_unique<twai_link_t>(config_with_timeout(kWindowMs));
+    auto link =
+        tr::mem::make_poly<twai_link_t>(tr::mem::net_source(), config_with_timeout(kWindowMs));
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
 
@@ -248,7 +252,8 @@ void test_the_window_is_clamped_to_the_watchdog_period() {
 
     fake_twai::reset();
     {
-        auto link = std::make_unique<twai_link_t>(config_with_timeout(60000));
+        auto link =
+            tr::mem::make_poly<twai_link_t>(tr::mem::net_source(), config_with_timeout(60000));
         check(link->ok(), "a link asking for a 60 s window came up");
         link->write_raw(frame(1));  // one take, with the window the link settled on
         const TickType_t asked = fake_twai::last_take_ticks();
@@ -260,7 +265,7 @@ void test_the_window_is_clamped_to_the_watchdog_period() {
     {
         // The control: an ordinary window is passed through untouched, so the
         // clamp is a ceiling rather than a replacement.
-        auto link = std::make_unique<twai_link_t>(config_with_timeout(20));
+        auto link = tr::mem::make_poly<twai_link_t>(tr::mem::net_source(), config_with_timeout(20));
         check(link->ok(), "a link asking for the default 20 ms window came up");
         link->write_raw(frame(1));
         check_eq(fake_twai::last_take_ticks(), pdMS_TO_TICKS(20),
@@ -281,7 +286,7 @@ void test_a_completed_transmit_returns_its_slot() {
     std::printf("a completed transmit returns its slot:\n");
     fake_twai::reset();
 
-    auto link = std::make_unique<twai_link_t>(config_with_timeout(300));
+    auto link = tr::mem::make_poly<twai_link_t>(tr::mem::net_source(), config_with_timeout(300));
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
 

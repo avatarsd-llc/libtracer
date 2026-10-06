@@ -45,6 +45,8 @@
 #include <vector>
 
 #include "fake_httpd.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -91,9 +93,9 @@ void drain() {
 }
 
 /** @brief A peer-named link that adopts the fake server (the directed-reply mode). */
-std::unique_ptr<httpd_ws_link_t> make_link() {
-    return std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                             tr::net::httpd_ws_config_t{.peer_named = true});
+tr::mem::poly_ptr_t<httpd_ws_link_t> make_link() {
+    return tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                               tr::net::httpd_ws_config_t{.peer_named = true});
 }
 
 /**
@@ -138,7 +140,7 @@ tr::net::transport_t* only_peer(httpd_ws_link_t& link) {
 }
 
 /** @brief Retire the link, the fake's sessions and its queue settings between cases. */
-void reset(std::unique_ptr<httpd_ws_link_t>& link) {
+void reset(tr::mem::poly_ptr_t<httpd_ws_link_t>& link) {
     link.reset();
     fake_httpd::instance().set_queue_refusing(false);
     fake_httpd::instance().close_all();

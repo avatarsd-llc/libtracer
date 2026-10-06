@@ -101,7 +101,7 @@ twai_link_t::twai_link_t(const twai_link_config_t& config)
     // hardware TX slot. A free pool slot therefore implies driver-side room,
     // so twai_node_transmit below never needs the driver's own (queue-full)
     // wait — the pool semaphore is the ONE backpressure point.
-    : tx_pool_(config.tx_queue_depth + 1),
+    : tx_pool_(config.tx_queue_depth + 1, config.memory.io_or_default()),
       tx_timeout_ms_(clamp_tx_timeout_ms(config.tx_timeout_ms)),
       stack_size_(config.stack_size) {
     // The ISR→dispatch handoff: fixed-size copies of the seam's frame record.

@@ -80,15 +80,19 @@
  *     watchdog fires (#835). REST sockets are untouched: the server's own
  *     send_wait_timeout still governs HTTP responses.
  *
- * Steady-state allocation — the RX scratch and the TX work-slot pool are allocated
+ * Steady-state allocation — the RX scratch and the TX work-slot pool are drawn
  * ONCE at construction, so typical graph traffic (control TLVs, value pushes,
- * directed replies) touches the heap in NEITHER direction:
- *   - RX: a frame that fits the once-allocated scratch is read into it and
+ * directed replies) draws nothing in EITHER direction. Every draw goes through the one
+ * allocation seam (ADR-0083, #1880): connection state — the slot table, each session and
+ * its reassembly buffer, the resolution handles, the RX scratch, the gate and the queued
+ * work items — from `memory.state`, and egress — the TX pool, its payload blocks and the
+ * large class — from `memory.io` (@ref httpd_ws_config_t::memory):
+ *   - RX: a frame that fits the once-drawn scratch is read into it and
  *     delivered borrowed — no per-frame allocation. Larger frames (up to the
- *     kMaxFrameBytes abuse cap) fall back to an exact-size nothrow buffer.
+ *     kMaxFrameBytes abuse cap) fall back to an exact-size buffer from `memory.state`.
  *   - TX: a send claims a pool slot lock-free (CAS) and gathers straight into its
  *     inline payload. A frame past the inline capacity keeps the pooled shell and
- *     takes a nothrow heap payload (`new (std::nothrow)`, drop-on-OOM backpressure —
+ *     takes an exact-size payload from `memory.io` (drop-on-refusal backpressure —
  *     never an abort). An exhausted pool has NO buffer behind it: the pool is this link's
  *     outstanding-send bound, and a send that finds it full is dropped and counted
  *     (@ref enqueue_drops) rather than posted from a heap-allocated work item, which
@@ -109,7 +113,8 @@
  *     one, so the peer set is walked with no container of its own. Until #961 that
  *     snapshot was a `std::vector`, whose THROWING allocator put an abort ahead of
  *     every nothrow fallback on this exact path.
- * Peer slots remain heap, grown on demand and RECYCLED in place (never shrunk), so
+ * Peer slots are drawn from `memory.state`, grown on demand and RECYCLED in place (never
+ * shrunk), so
  * the handle `peer_link` hands out stays pointer-valid for the link's life. Their
  * allocation is per SESSION (a new peer past the high-water mark), never per frame — and
  * so is the resolution handle's (#1013): the pool grows to the peer population once and
@@ -162,16 +167,16 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <memory>
 #include <mutex>
 #include <span>
-#include <string>
 #include <string_view>
-#include <vector>
 
 #include "esp_http_server.h"
+#include "libtracer/function_ref.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/mem_string.hpp"
 #include "libtracer/transport.hpp"
+#include "libtracer_esp/fixed_array.hpp"
 #include "libtracer_esp/link_stats.hpp"
 
 namespace tr::net {
@@ -221,7 +226,7 @@ struct httpd_ws_config_t {
      */
     std::uint32_t auth_deadline_ms = 0;
     /** @brief Reusable RX scratch capacity, bytes; 0 = `kDefaultRxScratchBytes`. A frame past
-     *         it still arrives, on a per-frame nothrow heap buffer. */
+     *         it still arrives, on a per-frame buffer drawn from `memory.state`. */
     std::size_t rx_scratch_bytes = 0;
     /** @brief TX work slots any sender may claim; 0 = `kDefaultTxPoolSlots`. The in-call
      *         reserve (`tx_reply_reserve`) is allocated ON TOP of it. On an ADOPTED server
@@ -229,8 +234,8 @@ struct httpd_ws_config_t {
      *         routes. */
     std::size_t tx_pool_slots = 0;
     /** @brief Inline payload capacity of one TX slot, bytes; 0 = `kDefaultTxInlineBytes`. A
-     *         frame past it keeps its pooled shell and takes a nothrow heap payload — unless
-     *         @ref tx_large covers it. */
+     *         frame past it keeps its pooled shell and takes a payload drawn from
+     *         `memory.io` — unless @ref tx_large covers it. */
     std::size_t tx_inline_bytes = 0;
     /** @brief The optional large TX size class (see @ref tx_large_class_t). */
     tx_large_class_t tx_large{};
@@ -238,8 +243,24 @@ struct httpd_ws_config_t {
      * @brief The link's memory (@ref link_memory_t). `rx` opts in to OWNING RX delivery by
      *        naming a bounded, caller-owned byte source; `nullptr` (THIS kind's default) keeps
      *        borrowed delivery and every property it has — see `httpd_ws_link_t::rx_backend`
-     *        for what it changes, what it costs, and the two lifetime rules on it. `io` is
-     *        unused by this kind (its TX buffers are the pre-allocated slot pool).
+     *        for what it changes, what it costs, and the two lifetime rules on it.
+     *
+     * `state` and `io` are the allocation seam (ADR-0083, #1880; null means the process net
+     * sub-pool, which is the process heap on a chip build). `state` holds the connection
+     * state: the handler gate, the registered URI, the session table and each session with
+     * its reassembly buffer, the resolution handles, the RX scratch, an RX frame too large
+     * for it, and the control-queue work items (a refusal's close, an administrative close,
+     * the teardown detach). `io` holds egress: the TX slot pool, its inline payload block,
+     * the large class, and a payload past both. What the constructor draws (the gate, the
+     * URI, the scratch and the TX pool) is sized by the knobs above, so a store that cannot
+     * hold it is a sizing bug and the constructor aborts naming it
+     * (`mem::exhausted_at_init`). A refusal after that sheds one peer or one frame and
+     * counts it — a new session is refused like a peer past `max_peers`, an RX frame is
+     * dropped as `rx_dropped_alloc`, and a TX payload as an enqueue drop.
+     *
+     * LIFETIME: both stores must outlive the server's last callback into this link — in
+     * owning mode the destructor, in adopted mode the adopting server, because a queued
+     * work item or a send that drains after the link is gone returns its block then.
      */
     link_memory_t memory{.rx = nullptr};
     /**
@@ -531,8 +552,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          */
         std::string_view subject;
     };
-    /** @brief Visitor for @ref enumerate_peer_stats. */
-    using peer_stats_visitor_t = std::function<void(const peer_stats_t&)>;
+    /** @brief Visitor for @ref enumerate_peer_stats — a non-owning reference to the caller's
+     *         callable, which is only called during the visit. */
+    using peer_stats_visitor_t = function_ref_t<void(const peer_stats_t&)>;
 
     /**
      * @brief Visit every OPEN session's counters, copied out under @ref peers_m_.
@@ -546,10 +568,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * this one is a pure copy-out by construction. That is what keeps a host's lock
      * order acyclic when it holds its own mutex across the call.
      *
-     * "No allocation" includes the VISITOR ITSELF: `std::function`'s inline buffer is
-     * one or two words on a 32-bit target, so a `[&]` closure over a handful of locals
-     * spills to the heap on every call. Callers on a periodic path should capture a
-     * single pointer to their own context struct.
+     * "No allocation" includes the VISITOR ITSELF: it is a `function_ref_t` to the
+     * caller's own closure (#1880), so a `[&]` lambda over any number of locals costs no
+     * allocation, where the `std::function` this replaced spilled one to the heap.
      */
     void enumerate_peer_stats(const peer_stats_visitor_t& visit) const;
 
@@ -911,13 +932,13 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     [[nodiscard]] std::size_t tx_slot_capacity() const noexcept;
 
     /** @brief Effective reusable RX scratch capacity, bytes — the ctor's
-     *         `rx_scratch_bytes` as this link actually allocated it (0 if the allocation
-     *         failed, in which case every frame takes the per-frame nothrow path). */
+     *         `rx_scratch_bytes` as this link drew it (0 only on a link that never came up,
+     *         in which case every frame takes the per-frame path). */
     [[nodiscard]] std::size_t rx_scratch_bytes() const noexcept;
 
     /** @brief Effective inline payload capacity of one TX work slot, bytes — the ctor's
      *         `tx_inline_bytes`. A frame past it keeps its pooled shell and takes a
-     *         nothrow heap payload, so this is the size above which a send allocates. */
+     *         payload from `memory.io`, so this is the size above which a send allocates. */
     [[nodiscard]] std::size_t tx_inline_bytes() const noexcept;
 
     /**
@@ -1339,6 +1360,27 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     struct refusal_req_t;     // a refusal-after-upgrade work item (defined in the .cpp)
     class peer_resolution_t;  // one RESOLUTION's directed endpoint (defined in the .cpp)
 
+    /** @brief Bytes a peer's routable name needs, NUL included: `p`, up to the 20 digits of a
+     *         64-bit slot index, and the terminator. */
+    static constexpr std::size_t kSlotNameChars = 22;
+    /**
+     * @brief A peer's routable name, `p<slot>` (ADR-0073 §2), held in place.
+     *
+     * A pure function of the slot index with a fixed upper length, so it is an array rather
+     * than an owned string: a claim, a departure and every log line that names a peer cost
+     * no allocation (#1880).
+     */
+    struct slot_name_t {
+        std::array<char, kSlotNameChars> text{}; /**< @brief The name, NUL-terminated. */
+        std::uint8_t len = 0;                    /**< @brief Characters before the NUL. */
+        /** @brief The name as a view (no NUL). */
+        [[nodiscard]] std::string_view view() const noexcept { return {text.data(), len}; }
+        /** @brief The name, NUL-terminated, for a log line. */
+        [[nodiscard]] const char* c_str() const noexcept { return text.data(); }
+        /** @brief True when no name is held (a free slot, or nothing owed). */
+        [[nodiscard]] bool empty() const noexcept { return len == 0; }
+    };
+
     /**
      * @brief Take a resolution handle for @p slot at its CURRENT generation — the object
      *        @ref peer_link returns (#1013). Caller holds @ref peers_m_.
@@ -1474,14 +1516,14 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     [[nodiscard]] session_t* claim_session(int fd, bool authenticated);
     /**
      * @brief Recycle a departed peer's slot and report what the routing plane is still
-     *        owed — the departed peer's NAME, or an empty string for nothing.
+     *        owed — the departed peer's NAME, or an empty name for nothing.
      *
      * Deliberately does NOT fire the departure notifier itself (#960). The caller holds
      * the handler gate to reach this at all, and the notifier is an unbounded foreign
      * callback into router → graph; firing it here would run it under that mutex. The
      * name comes back instead and @ref on_session_closed fires it with the gate released.
      */
-    [[nodiscard]] std::string reclaim_slot(session_t* slot, peer_handle_t& handle);
+    [[nodiscard]] slot_name_t reclaim_slot(session_t* slot, peer_handle_t& handle);
     /**
      * @brief Fire the routing plane's eviction hook for the departed @p peer.
      *
@@ -1559,12 +1601,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     void send_in_call(const session_ref_t& to, std::span<const std::span<const std::byte>> iov);
 
-    /** @brief Allocate the once-per-link RX scratch + TX slot pool and its inline payload
-     *         block (nothrow), at the sizes the constructor resolved. RX failure is
-     *         survivable (per-frame nothrow buffer); a link with no TX pool drops every
-     *         send on the counted path — see @ref enqueue_drops. The pool's two
-     *         allocations succeed or fail TOGETHER: a slot with no payload behind it is
-     *         not a claimable slot. */
+    /** @brief Draw the once-per-link RX scratch (`memory.state`) and the TX slot pool, its
+     *         inline payload block and a declared large class (`memory.io`), at the sizes the
+     *         constructor resolved. They are sized by the integrator's knobs, so a store
+     *         that refuses any of them is a sizing bug: the constructor aborts naming it
+     *         (`mem::exhausted_at_init`, ADR-0083, #1880). */
     void alloc_buffers();
     /**
      * @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool is
@@ -1772,11 +1813,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
                           std::size_t lost);
 
     /**
-     * @brief Allocate the handler-admission gate and point it at this link; false when
-     *        the allocation failed, in which case NO handler is registered (ok() stays
-     *        false) — the gate is what makes a registered handler safe to dispatch.
+     * @brief Draw the handler-admission gate from `memory.state` and point it at this link.
+     *        A refusal aborts the constructor (`mem::exhausted_at_init`) before any handler
+     *        is registered — the gate is what makes a registered handler safe to dispatch.
      */
-    [[nodiscard]] bool open_gate();
+    void open_gate();
 
     /**
      * @brief Teardown step ZERO: stop every dispatch into this link, and join the one
@@ -1866,8 +1907,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief The close code an @ref admission_verdict_t::REFUSE_AFTER_UPGRADE refusal sends,
      *         resolved from the config at construction. */
     std::uint16_t refusal_code_ = kCloseTryAgainLater;
-    /** @brief Its reason text, copied and cut to @ref kMaxCloseReasonBytes at construction. */
-    std::string refusal_reason_;
+    /** @brief Its reason text, copied and cut to @ref kMaxCloseReasonBytes at construction —
+     *         into the link itself, so it costs no allocation (#1880). */
+    std::array<char, kMaxCloseReasonBytes> refusal_reason_{};
+    /** @brief Bytes of @ref refusal_reason_ in use. */
+    std::uint8_t refusal_reason_len_ = 0;
     /**
      * @brief One socket that passed admission, whose entitlement is NOT YET KNOWN, and which
      *        has not yet claimed a session — the row of the pending-handshake ledger.
@@ -2116,12 +2160,25 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * — and therefore anything to detach — can exist at all.
      */
     std::atomic<void*> server_task_{nullptr};
-    std::string uri_;  // the WS URI registered (unregistered by the adopting dtor)
+    /** @brief The connection-state store, `memory.state` resolved (#1880). */
+    mem::block_source_t* const state_src_;
+    /** @brief The egress store, `memory.io` resolved (#1880). */
+    mem::block_source_t* const io_src_;
+    /** @brief The WS URI registered (unregistered by the adopting dtor), copied into
+     *         `memory.state` at construction. */
+    mem::string_t uri_;
     /** @brief Guards the slot vector and each slot's name/fd/open — the cross-thread
      *         reads (enumerate_peers / peer_link / a send's fd snapshot) against the
      *         httpd task's accept/close. The reassembly buffer is httpd-task-only. */
     mutable std::mutex peers_m_;
-    std::vector<std::unique_ptr<session_t>> slots_;  // grown on demand; recycled in place
+    /**
+     * @brief The session table, grown on demand from `memory.state` and recycled in place.
+     *
+     * Each entry is a session drawn from the same store and owned by this table: the
+     * destructor returns them, and a teardown that cannot retire the server's callbacks
+     * LEAKS them instead (@ref abandon_sessions).
+     */
+    mem::block_array_t<session_t*> slots_;
     /**
      * @brief The resolution-handle pool `peer_link` hands out of (#1013) — grown on
      *        demand, never shrunk, and recycled through @ref free_resolutions_.
@@ -2133,7 +2190,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * reason the slot shells are — the teardown that cannot retire the server's callbacks
      * LEAKS them rather than freeing memory a queued send may still address.
      */
-    std::vector<std::unique_ptr<peer_resolution_t>> resolutions_;
+    mem::block_array_t<peer_resolution_t*> resolutions_;
     /** @brief Retired handles, oldest first: `peer_link` recycles from the HEAD and
      *         @ref retire_resolution appends at the TAIL, so a handle just retired is the
      *         LAST one handed back out (see @ref kResolutionSpare). */
@@ -2154,7 +2211,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     static constexpr std::size_t kResolutionSpare = 4;
     /** @brief Once-allocated RX scratch (httpd-task-only, so lock-free by construction):
      *         a frame that fits reads here instead of a per-frame allocation. */
-    std::unique_ptr<std::byte[]> rx_scratch_;
+    fixed_array_t<std::byte> rx_scratch_;
     /** @brief The injected owning-RX source, or null for borrowed delivery — see
      *         @ref rx_backend. Written once by the constructor and never again, so the
      *         httpd task reads it with no synchronization at all. */
@@ -2217,7 +2274,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     std::atomic<std::uint32_t> egress_ticket_{0};
     /** @brief Once-allocated TX work-slot pool: claimed lock-free by sending tasks,
      *         released by the httpd task as each send drains. */
-    std::unique_ptr<tx_slot_t[]> tx_pool_;
+    fixed_array_t<tx_slot_t> tx_pool_;
     /**
      * @brief The slots' inline payload storage, one flat block of
      *        `tx_slots_total_ * tx_inline_bytes_`.
@@ -2228,7 +2285,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * allocation is both fewer heap headers and the shape that lets the teardown's
      * leak-instead-of-free arm abandon the slots and their payloads together.
      */
-    std::unique_ptr<std::byte[]> tx_inline_;
+    fixed_array_t<std::byte> tx_inline_;
     /** @brief Effective inline capacity of one slot — the ctor's `tx_inline_bytes`. */
     std::size_t tx_inline_bytes_ = 0;
     /** @brief Effective sender-claimable pool depth — the ctor's `tx_pool_slots`, what
@@ -2244,12 +2301,12 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * One block for the reason @ref tx_inline_ is one block: allocated once per link, never
      * grown, and abandoned as a unit by the teardown's leak-instead-of-free arm.
      */
-    std::unique_ptr<std::byte[]> tx_large_;
+    fixed_array_t<std::byte> tx_large_;
     /** @brief One claimed flag per large buffer, claimed by CAS exactly as @ref
      *         tx_slot_t::busy is. A separate array rather than a member of a shell type:
      *         the large class has no work item of its own — it lends a BUFFER to a work
      *         item that already holds a @ref tx_slot_t. */
-    std::unique_ptr<std::atomic<bool>[]> tx_large_busy_;
+    fixed_array_t<std::atomic<bool>> tx_large_busy_;
     /** @brief Effective capacity of one large buffer — the ctor's `tx_large_bytes`, zeroed
      *         if the declaration was rejected or its allocation failed, so the size and the
      *         pointer can never disagree (the @ref rx_scratch_bytes_ discipline). */

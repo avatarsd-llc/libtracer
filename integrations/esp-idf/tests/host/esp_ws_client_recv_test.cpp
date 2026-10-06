@@ -72,6 +72,8 @@
 
 #include "fake_esp_transport.hpp"
 #include "libtracer/config.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/segment.hpp"
@@ -200,9 +202,9 @@ void test_zero_recv_stack_arms_nothing() {
  * frame exists to deliver. The window itself — a peer that pushes before the sink is
  * installed — is what `test_defer_recv_holds_the_dial_until_armed` pins (#1102).
  */
-std::unique_ptr<tr::net::esp_ws_client_link_t> dialed_link(sink_t& sink) {
-    auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
-        "127.0.0.1", 8080,
+tr::mem::poly_ptr_t<tr::net::esp_ws_client_link_t> dialed_link(sink_t& sink) {
+    auto link = tr::mem::make_poly<tr::net::esp_ws_client_link_t>(
+        tr::mem::net_source(), "127.0.0.1", 8080,
         tr::net::esp_ws_client_config_t{.rx_bytes = kRxBytes, .tx_bytes = kRxBytes});
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     link->set_receiver(sink);

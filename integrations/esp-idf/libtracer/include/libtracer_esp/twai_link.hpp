@@ -65,6 +65,16 @@ struct twai_link_config_t {
                                             inflating `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`
                                             for every pthread — the RAM lever (libtracer #486).
                                             Size to the measured high-water mark plus margin. */
+    /**
+     * @brief The link's memory (@ref link_memory_t), the shape the WS links take (#1880).
+     *
+     * Only `io` is read: the in-flight TX pool (`tx_queue_depth + 1` slots and their
+     * flags) is drawn from it once, by the constructor, and a store that refuses it is a
+     * sizing bug that aborts there (`mem::exhausted_at_init`, ADR-0083). Null means the
+     * process net sub-pool. `rx` and `state` are unused: the ISR→dispatch handoff is a
+     * FreeRTOS queue of fixed records, created by the RTOS, not drawn from a source.
+     */
+    link_memory_t memory{};
 };
 
 /**

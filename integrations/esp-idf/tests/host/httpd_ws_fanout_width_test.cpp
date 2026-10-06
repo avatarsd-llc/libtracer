@@ -50,6 +50,8 @@
 #include <vector>
 
 #include "fake_httpd.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -89,9 +91,9 @@ const std::byte kBody[] = {std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
 constexpr std::uint32_t kSendTimeoutMs = 100;
 
 /** @brief A link that adopts the fake server, with the bound above. */
-std::unique_ptr<httpd_ws_link_t> make_link() {
-    return std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws",
+tr::mem::poly_ptr_t<httpd_ws_link_t> make_link() {
+    return tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
         tr::net::httpd_ws_config_t{.peer_named = true, .send_timeout_ms = kSendTimeoutMs});
 }
 
@@ -120,7 +122,7 @@ tr::net::transport_t* peer_of(httpd_ws_link_t& link, std::size_t index) {
 }
 
 /** @brief Retire the link, the fake's sessions and its queue settings between cases. */
-void reset(std::unique_ptr<httpd_ws_link_t>& link) {
+void reset(tr::mem::poly_ptr_t<httpd_ws_link_t>& link) {
     drain();
     link.reset();
     fake_httpd::instance().set_queue_refusing(false);

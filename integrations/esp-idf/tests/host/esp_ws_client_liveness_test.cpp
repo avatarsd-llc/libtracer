@@ -64,6 +64,8 @@
 #include <vector>
 
 #include "fake_esp_transport.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/esp_ws_client_link.hpp"
 
 namespace {
@@ -177,9 +179,9 @@ fake_ws::frame_t close_frame() {
  * roughly 3.8% of runs on a REQUIRED check. Waiting on the predicate the cases actually
  * assert removes the window instead of widening a timeout around it.
  */
-std::unique_ptr<tr::net::esp_ws_client_link_t> dialed_link() {
-    auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
-        "127.0.0.1", 8080,
+tr::mem::poly_ptr_t<tr::net::esp_ws_client_link_t> dialed_link() {
+    auto link = tr::mem::make_poly<tr::net::esp_ws_client_link_t>(
+        tr::mem::net_source(), "127.0.0.1", 8080,
         tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     check(wait_until([&] { return link->link_up(); }, 2s), "and came up");
@@ -284,8 +286,8 @@ void test_failed_dials_report_nothing() {
     down_counter_t down;
     {
         fake_ws::fail_connects(true);
-        auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
-            "127.0.0.1", 8080,
+        auto link = tr::mem::make_poly<tr::net::esp_ws_client_link_t>(
+            tr::mem::net_source(), "127.0.0.1", 8080,
             tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
         link->set_down_notifier(&down_counter_t::fire, &down);
         check(wait_until([] { return fake_ws::connect_count() >= 2; }, 6s),

@@ -60,6 +60,8 @@
 #include <vector>
 
 #include "fake_httpd.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -114,7 +116,7 @@ tr::net::transport_t* only_peer(httpd_ws_link_t& link) {
 }
 
 /** @brief Retire the link and the fake's sessions between cases. */
-void reset(std::unique_ptr<httpd_ws_link_t>& link) {
+void reset(tr::mem::poly_ptr_t<httpd_ws_link_t>& link) {
     link.reset();
     fake_httpd::instance().close_all();
     drain();
@@ -133,8 +135,8 @@ void reset(std::unique_ptr<httpd_ws_link_t>& link) {
  */
 void test_directed_frame_does_not_follow_the_descriptor() {
     std::printf("a directed frame queued for a departed peer, after the fd is reused:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     claim(kFd);
 
@@ -176,8 +178,8 @@ void test_directed_frame_does_not_follow_the_descriptor() {
  */
 void test_broadcast_frame_does_not_follow_the_descriptor() {
     std::printf("a broadcast frame queued for a departed peer, after the fd is reused:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim(kFd);
 
     link->send(std::span<const std::byte>(kBody));
@@ -212,8 +214,8 @@ void test_broadcast_frame_does_not_follow_the_descriptor() {
  */
 void test_inherited_failures_do_not_condemn_the_successor() {
     std::printf("a failing backlog gathered for a departed peer:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim(kFd);
 
     tr::net::transport_t* const to_a = only_peer(*link);
@@ -260,8 +262,8 @@ void test_inherited_failures_do_not_condemn_the_successor() {
  */
 void test_the_session_ctx_pointer_aliases_across_the_reuse() {
     std::printf("the server's session ctx pointer, across a descriptor reuse:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim(kFd);
     void* const ctx_a = fake_httpd::instance().session_ctx(kFd);
     check(ctx_a != nullptr, "A registered a session ctx (its peer slot)");
@@ -287,8 +289,8 @@ void test_the_session_ctx_pointer_aliases_across_the_reuse() {
  */
 void test_a_live_peer_still_receives_its_queued_frame() {
     std::printf("the ordinary path, with no departure in between:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim(kFd);
     fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
 
@@ -333,8 +335,8 @@ void test_a_live_peer_still_receives_its_queued_frame() {
  */
 void test_a_handle_resolved_before_the_reuse_does_not_reach_the_successor() {
     std::printf("a send on a handle resolved BEFORE the fd was reused (#1013):\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim(kFd);
 
     // Resolve A — and send NOTHING yet. This is the whole difference from case 1.
@@ -377,8 +379,8 @@ void test_a_handle_resolved_before_the_reuse_does_not_reach_the_successor() {
  */
 void test_the_handle_is_per_resolution_not_per_slot() {
     std::printf("the identity of the handle peer_link hands out:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim(kFd);
 
     tr::net::transport_t* const first = only_peer(*link);
@@ -405,8 +407,8 @@ void test_the_handle_is_per_resolution_not_per_slot() {
  */
 void test_re_resolving_after_the_reuse_reaches_the_successor() {
     std::printf("re-resolving after the reuse, as the routing plane does:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim(kFd);
     (void)only_peer(*link);  // A's resolution, abandoned unspent
 
@@ -437,8 +439,8 @@ void test_re_resolving_after_the_reuse_reaches_the_successor() {
  */
 void test_churn_does_not_exhaust_the_handle_pool() {
     std::printf("resolution handles across sustained session churn:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     bool all_resolved = true;
     bool all_delivered = true;
     for (int i = 0; i < 64; ++i) {

@@ -54,6 +54,8 @@
 #include "fake_httpd.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -129,8 +131,8 @@ void test_required_stack_is_public_and_applied() {
     check(httpd_ws_link_t::kRequiredHttpdStack >= 12288,
           "kRequiredHttpdStack still carries the measured ~12 KB figure");
     fake_httpd::start_config_slot() = httpd_config_t{};
-    auto link = std::make_unique<httpd_ws_link_t>(
-        static_cast<std::uint16_t>(8080),
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), static_cast<std::uint16_t>(8080),
         tr::net::httpd_ws_config_t{.max_peers = 4, .peer_named = true});
     check(link->ok(), "the port-binding link started");
     const httpd_config_t& cfg = fake_httpd::last_start_config();
@@ -157,8 +159,8 @@ void test_thin_stack_is_named_once() {
     // A healthy task: every claim samples, and none latches.
     fake_stack_high_water_bytes() = 65536;
     fake_stack_high_water_samples() = 0;
-    auto healthy = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true});
+    auto healthy = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true});
     claim(620);
     claim(621);
     check(fake_stack_high_water_samples() == 2,
@@ -170,8 +172,8 @@ void test_thin_stack_is_named_once() {
     // precisely the margin the measurement bought is not reported.
     fake_stack_high_water_bytes() = kFloor;
     fake_stack_high_water_samples() = 0;
-    auto boundary = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true});
+    auto boundary = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true});
     claim(630);
     claim(631);
     check(fake_stack_high_water_samples() == 2, "free == the floor is not thin");
@@ -182,8 +184,8 @@ void test_thin_stack_is_named_once() {
     // the answer does not change and the sample is an O(free-stack) scan.
     fake_stack_high_water_bytes() = kFloor - 1;
     fake_stack_high_water_samples() = 0;
-    auto thin = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto thin = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim(640);
     check(fake_stack_high_water_samples() == 1, "one byte under the floor is sampled");
     claim(641);
@@ -199,8 +201,8 @@ void test_thin_stack_is_named_once() {
 // ---------------------------------------------------------------------------
 void test_push_refreshes_lru_for_a_subscriber() {
     std::printf("#955 a pushed-to subscriber is no longer the LRU victim:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     constexpr int kChatty = 650;      // a peer that keeps SENDING (a polling tab, a REST client)
     constexpr int kSubscriber = 651;  // a peer that subscribed and thereafter only RECEIVES
@@ -233,8 +235,9 @@ void test_push_refreshes_lru_for_a_subscriber() {
 // ---------------------------------------------------------------------------
 void test_owning_mode_does_not_refresh() {
     std::printf("#955 the owning link does not refresh what it disabled:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(static_cast<std::uint16_t>(8081),
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link =
+        tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), static_cast<std::uint16_t>(8081),
+                                            tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the port-binding link started");
     constexpr int kFd = 660;
     claim(kFd);

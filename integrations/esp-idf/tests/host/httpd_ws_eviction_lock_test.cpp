@@ -50,6 +50,8 @@
 #include <thread>
 
 #include "fake_httpd.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -177,8 +179,8 @@ void test_gate_released_across_notifier() {
     std::printf("departure notifier vs the handler gate:\n");
     server_task_t task;
     probe_t probe;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     link->set_peer_down_notifier(&on_peer_down, &probe);
 
@@ -230,8 +232,8 @@ void test_dtor_joins_the_notification() {
     std::printf("destructor vs a departure notification in flight:\n");
     server_task_t task;
     probe_t probe;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_peer_down_notifier(&on_peer_down, &probe);
     claim_session(task, 800);
 
@@ -282,7 +284,7 @@ void test_flat_link_down_only_on_last_session() {
     std::printf("flat link: notify_down only on the LAST departure (#889):\n");
     server_task_t task;
     std::atomic<unsigned> downs{0};
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws");
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws");
     check(link->ok(), "the adopting link registered its URI");
     check(link->bus() == nullptr, "a flat link exposes no bus facet");
     link->set_down_notifier(&on_link_down, &downs);

@@ -192,12 +192,10 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <span>
-#include <string>
+#include <string_view>
 #include <thread>
-#include <vector>
 
 #if __has_include("sdkconfig.h")
 #include "sdkconfig.h"
@@ -206,6 +204,7 @@
 #include "esp_transport.h"
 #include "libtracer/transport.hpp"
 #include "libtracer/tx_handoff.hpp"
+#include "libtracer_esp/fixed_array.hpp"
 #include "libtracer_esp/link_stats.hpp"
 
 namespace tr::net {
@@ -221,8 +220,9 @@ namespace tr::net {
  */
 struct esp_ws_client_config_t {
     /** @brief The WS URI requested in the handshake (default "/ws", matching the
-     *         `httpd_ws_link_t` server mount). */
-    std::string ws_path = "/ws";
+     *         `httpd_ws_link_t` server mount). Borrowed for the constructor call only: the
+     *         link copies it into its dial slot, drawn from `memory.state` (#1880). */
+    std::string_view ws_path = "/ws";
     /**
      * @brief Extra HTTP header lines appended to the opening-handshake request, each
      *        `Name: value\r\n`-terminated (`esp_transport_ws` emits them verbatim); empty
@@ -231,8 +231,9 @@ struct esp_ws_client_config_t {
      *        carries no browser session cookie, so a token header here is how a dialing node
      *        authenticates itself. A CONSTRUCTOR knob, not a setter, because the recv thread
      *        dials as soon as it exists (#959). Applied to the first dial and every re-dial.
+     *        Borrowed for the constructor call only, like @ref ws_path (#1880).
      */
-    std::string handshake_headers{};
+    std::string_view handshake_headers{};
     /** @brief Reusable receive-buffer size (one inbound message must fit); our control TLVs
      *         are small, so the default is modest. */
     std::size_t rx_bytes = 2048;
@@ -270,10 +271,14 @@ struct esp_ws_client_config_t {
      * enqueue-then-write queue's slots and the base class's gather temporary all draw from
      * it. `nullptr` means the process heap (`mem::heap_source()`).
      *
-     * What stays outside both, because IDF offers no allocator hook for it:
-     * - the read scratch (`rx_bytes`), which the transport reads into. `esp_transport_ws`
-     *   reports a frame's length only after a read has already put payload bytes in the
-     *   buffer it was offered, so the receive block cannot be sized before the first read;
+     * `state` is the connection-state store (#1880): the dial slot (the copies of the host,
+     * URI and handshake headers every dial reads) and the read scratch (`rx_bytes`). Both
+     * are drawn once, by the constructor; a store that refuses them is a sizing bug, and the
+     * constructor aborts naming it (`mem::exhausted_at_init`, ADR-0083). The store must
+     * outlive the link's recv thread: a dial condemned by the destructor returns its slot
+     * when that dial resolves, up to `kDialTimeoutMs` after the destructor has returned.
+     *
+     * What stays outside all three, because IDF offers no allocator hook for it:
      * - the transport pair each dial builds (`esp_transport_tcp_init`/`esp_transport_ws_init`)
      *   and the WS transport's handshake buffer, `CONFIG_WS_BUFFER_SIZE` bytes. The
      *   application sizes that buffer through Kconfig, and `CONFIG_WS_DYNAMIC_BUFFER` frees
@@ -323,12 +328,13 @@ class esp_ws_client_link_t : public transport_t {
      *        caller — poll @ref ok for "the first dial landed" and @ref link_up for
      *        "a connection is standing right now" (#1059).
      *
-     * @param host     The peer's IPv4 dotted-quad or hostname (the graph plane's WS host).
+     * @param host     The peer's IPv4 dotted-quad or hostname (the graph plane's WS host),
+     *                 copied into the dial slot.
      * @param port     The peer's TCP port (its :80 esp_http_server, for the /ws mount).
      * @param config   The link's knobs (@ref esp_ws_client_config_t): memory, URI, handshake
      *                 headers, buffer sizes, recv-thread stack, deferred first dial.
      */
-    explicit esp_ws_client_link_t(std::string host, std::uint16_t port,
+    explicit esp_ws_client_link_t(std::string_view host, std::uint16_t port,
                                   const esp_ws_client_config_t& config = {});
 
     /**
@@ -659,20 +665,19 @@ class esp_ws_client_link_t : public transport_t {
     static void gather_into(std::byte* dst,
                             std::span<const std::span<const std::byte>> iov) noexcept;
 
-    const std::string host_;
-    const std::uint16_t port_;
-    const std::string ws_path_;
-    /** @brief Extra CRLF-terminated handshake header lines, empty = none. `const`, and that
-     *         is the fix (#959): it is written once by the ctor, BEFORE the recv thread that
-     *         reads it on every (re)dial exists, so there is no cross-thread write to order
-     *         and the first dial carries it. */
-    const std::string handshake_headers_;
-    /** @brief The dial slot (#1058) — allocated in the ctor, shared with the recv thread,
-     *         and the ONE piece of this object a condemned dial may still touch after the
-     *         destructor has returned. `const` because the slot is never replaced: it is
-     *         reused dial after dial, and its mutex is a LEAF (never taken with `write_m_`,
-     *         `st_m_` or `backoff_m_` held, and never held across the connect). */
-    const std::shared_ptr<dial_t> dial_;
+    /**
+     * @brief The dial slot (#1058) — drawn from `memory.state` in the ctor, shared with the
+     *        recv thread, and the ONE piece of this object a condemned dial may still touch
+     *        after the destructor has returned. It holds the link's only copy of the host,
+     *        URI and handshake headers (#1880), written once by the ctor BEFORE the recv
+     *        thread that reads them on every (re)dial exists (#959).
+     *
+     * `const` because the slot is never replaced: it is reused dial after dial, and its
+     * mutex is a LEAF (never taken with `write_m_`, `st_m_` or `backoff_m_` held, and never
+     * held across the connect). Exactly one party returns it: the destructor, or — when the
+     * destructor condemned a dial in flight — that dial, as it resolves.
+     */
+    dial_t* const dial_;
 
     // Both handles are written ONLY by the recv thread (connect_once tears them down
     // before a dial and adopts the freshly built pair out of `dial_` after it, holding no
@@ -683,7 +688,9 @@ class esp_ws_client_link_t : public transport_t {
     esp_transport_handle_t tcp_ = nullptr;  // parent TCP transport (owned)
     esp_transport_handle_t ws_ = nullptr;   // WS transport over tcp_ (owned)
 
-    std::vector<std::byte> rx_buf_;  // reusable RX fill (zero-copy read target)
+    /** @brief The reusable RX fill (zero-copy read target), `rx_bytes` drawn once from
+     *         `memory.state` (#1880). */
+    fixed_array_t<std::byte> rx_buf_;
     /** @brief The owning-RX source (`memory.rx`, #1661), or null for borrowed delivery.
      *         Written once by the constructor, before the recv thread exists. */
     mem::mem_backend_t* const rx_backend_;
