@@ -281,6 +281,30 @@
       yf(t[1]) + " → " + yf(t[2]) + " (" + (up ? "+" : "") + pct + "%)</title></polygon>";
   }
 
+  /*
+   * Gap markers (#1890): a commit inside a series' span with no trusted value for it is
+   * drawn as missing, not as nothing. A faint dashed bridge joins the recorded points
+   * either side, and each missing slot gets a hollow ring at the bridge's height. The
+   * bridge is dashed and the ring hollow so neither reads as a measurement; the ring's
+   * title names the commit and says the value was hidden or not recorded.
+   */
+  function gapMarks(se, X, Y, cc, suite) {
+    var s = "";
+    for (var j = 1; j < se.pts.length; j++) {
+      var a = se.pts[j - 1], b = se.pts[j];
+      if (b[0] === a[0] + 1) continue;
+      s += '<line class="ph-gap" stroke="' + cc + '" x1="' + X(a[0]).toFixed(1) + '" y1="' + Y(a[1]).toFixed(1) +
+        '" x2="' + X(b[0]).toFixed(1) + '" y2="' + Y(b[1]).toFixed(1) + '"/>';
+      for (var k = a[0] + 1; k < b[0]; k++) {
+        var f = (k - a[0]) / (b[0] - a[0]);
+        s += '<circle class="ph-gapdot" stroke="' + cc + '" cx="' + X(k).toFixed(1) + '" cy="' +
+          (Y(a[1]) + (Y(b[1]) - Y(a[1])) * f).toFixed(1) + '" r="2.2"><title>' + se.label + " · " +
+          (suite.shas[k] || "") + ": no trusted value</title></circle>";
+      }
+    }
+    return s;
+  }
+
   // ---------------------------------------------------------------- trend --
   function renderTrend(c, suite) {
     var N = suite.shas.length;
@@ -368,6 +392,7 @@
       se.pts.forEach(function (p, i3) {
         s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="' + (i3 === se.pts.length - 1 ? 3.4 : 2.2) + '" fill="' + cc + '"/>';
       });
+      s += gapMarks(se, X, Y, cc, suite);
     });
     // Step markers go on top of every line, so a marker is never hidden under a neighbour.
     c.series.forEach(function (se) {
@@ -975,6 +1000,10 @@
             + (host ? "<div class='host'>" + host + "</div>" : "");
           rows = c.series.map(function (se, si) {
             var v = byIdx[si][i], bt = bandAt[si] && bandAt[si][i];
+            // Inside the series' span, a missing value is said, not skipped (#1890).
+            if (v === undefined && se.pts.length && i > se.pts[0][0] && i < se.pts[se.pts.length - 1][0])
+              return '<div class="ph-nogap"><span class="dot" style="border:1px solid ' + col(se.ci) + '"></span>'
+                + se.label + " <i>no trusted value</i></div>";
             return v === undefined ? "" : '<div><span class="dot" style="background:' + col(se.ci) + '"></span>'
               + se.label + " <b>" + g.yf(v) + "</b>"
               + (bt ? ' <span class="ph-cv">cv ' + fmtPct(bt[5]) + " · p10–p90 " + g.yf(bt[1]) + "–" + g.yf(bt[2])

@@ -180,37 +180,80 @@ class ContaminationPredicate(unittest.TestCase):
 class RendererIgnoresFlaggedSamples(unittest.TestCase):
     """@brief The consumer half: a flagged sample must not shape the trend."""
 
-    def _store(self, extras: list[str], shas: list[str]) -> dict:
+    def _store(self, extras: list[str], shas: list[str],
+               values: list[float] | None = None) -> dict:
+        values = values or [100 + i for i in range(len(shas))]
         return {"entries": {"libtracer bench-local latency (ns, smaller is better)": [
             {"commit": {"id": sha, "message": f"commit {i}"},
-             "benches": [{"name": "inproc 64B/fan1/1ep p50 latency", "value": 100 + i,
+             "benches": [{"name": "inproc 64B/fan1/1ep p50 latency", "value": v,
                           "unit": "ns", "extra": extra}]}
-            for i, (sha, extra) in enumerate(zip(shas, extras))]}}
+            for i, (sha, extra, v) in enumerate(zip(shas, extras, values))]}}
 
-    def test_flagged_point_is_omitted_from_the_series(self):
+    def test_flagged_outlier_is_omitted_from_the_series(self):
         note = hg.contamination_note("A/A bracket 12.0% > 6.0% band")
         data = self._store(["clean host", f"clean host · {note}", "clean host"],
-                           ["a" * 40, "b" * 40, "c" * 40])
+                           ["a" * 40, "b" * 40, "c" * 40], [100, 150, 102])
         entries = list(data["entries"].values())[0]
-        skip = rh._contaminated_idx(entries)
+        skip = rh._untrusted_cells(entries)
         self.assertEqual(set(skip), {1})
         series = rh._series_by_name(entries, skip)
         idxs = [p[0] for p in series["inproc 64B/fan1/1ep p50 latency"]]
         self.assertEqual(idxs, [0, 2], "the flagged sample must leave a gap, not a point")
 
+    def test_flagged_row_inside_its_neighbours_is_drawn(self):
+        """#1890: a flagged run no longer hides a row that agrees with its own neighbours."""
+        note = hg.contamination_note("A/A bracket 12.0% > 6.0% band")
+        data = self._store(["h", f"h · {note}", "h"], ["a" * 40, "b" * 40, "c" * 40])
+        entries = list(data["entries"].values())[0]
+        series = rh._series_by_name(entries, rh._untrusted_cells(entries))
+        self.assertEqual([p[0] for p in series["inproc 64B/fan1/1ep p50 latency"]], [0, 1, 2])
+
     def test_clean_store_is_unchanged(self):
         """A quiet host must produce exactly what it produces today."""
         data = self._store(["clean host"] * 3, ["a" * 40, "b" * 40, "c" * 40])
         entries = list(data["entries"].values())[0]
-        self.assertEqual(rh._contaminated_idx(entries), {})
+        self.assertEqual(rh._untrusted_cells(entries), {})
         self.assertEqual(len(rh._series_by_name(entries, {})
                              ["inproc 64B/fan1/1ep p50 latency"]), 3)
 
     def test_payload_explains_the_gap(self):
         note = hg.contamination_note("A/A bracket 12.0% > 6.0% band")
-        data = self._store(["h", f"h · {note}", "h"], ["a" * 40, "b" * 40, "c" * 40])
+        data = self._store(["h", f"h · {note}", "h"], ["a" * 40, "b" * 40, "c" * 40],
+                           [100, 150, 102])
         out = rh.build(data, colors={})
         self.assertIn("1", out["suites"]["latency"]["contaminated"])
+
+    def test_gating_keeps_the_whole_run_verdict(self):
+        """The per-row rule is the charts'; `entry_contaminated` still flags the whole run."""
+        note = hg.contamination_note("A/A bracket 12.0% > 6.0% band")
+        data = self._store(["h", f"h · {note}", "h"], ["a" * 40, "b" * 40, "c" * 40])
+        entries = list(data["entries"].values())[0]
+        self.assertTrue(hg.entry_contaminated(entries[1], {}))
+
+
+class PerRowBracket(unittest.TestCase):
+    """@brief The bracket names the banked rows that failed their own A/A check (#1890)."""
+
+    def test_only_rows_over_the_band_are_named(self):
+        pre = transcript([("fwd-demux-fixed", 1000.0, 100.0), ("fwd-demux-scan", 1000.0, 100.0)])
+        post = transcript([("fwd-demux-fixed", 1001.0, 100.0), ("fwd-demux-scan", 800.0, 100.0)])
+        self.assertEqual(hg.bracket_failed_names(pre, post, 6.0),
+                         ["fwd-demux-scan 64B/fan1/1ep ns/delivery",
+                          "fwd-demux-scan 64B/fan1/1ep throughput"])
+        # The whole-run verdict over the same pair is unchanged: one row fails it.
+        clean, what, pct = hg.bracket_verdict(pre, post, 6.0)
+        self.assertFalse(clean)
+        self.assertIn("fwd-demux-scan", what)
+        self.assertAlmostEqual(pct, 20.0)
+
+    def test_stamp_flags_exactly_the_named_points(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "m.json"
+            p.write_text(json.dumps([{"name": "a", "value": 1}, {"name": "b", "value": 2}]))
+            hg.stamp([p], "studio", {"b"})
+            got = {it["name"]: it["extra"] for it in json.loads(p.read_text())}
+            self.assertEqual(got, {"a": "studio", "b": f"studio · {hg.ROW_TOKEN}"})
+            self.assertNotIn(hg.CONTAM_TOKEN, hg.ROW_TOKEN)
 
 
 class Stamping(unittest.TestCase):

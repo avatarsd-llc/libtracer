@@ -334,7 +334,12 @@ jobs:
       - name: A/A bracket verdict
         id: bracket
         if: steps.guard.outputs.bank == 'true'
-        run: python3 bench/host_guard.py bracket --pre bench/aa_pre.txt --post bench/aa_post.txt
+        # `--rows-out` names the banked rows that failed their own A/A check (#1890); the
+        # stamp step flags exactly those points, so the charts hide them per row while the
+        # whole-run `note` below still decides for every gating consumer.
+        run: |
+          python3 bench/host_guard.py bracket --pre bench/aa_pre.txt --post bench/aa_post.txt \
+            --rows-out bench/aa_rows.json
 
       # The measurement-conditions verdict (#1676), over EVERY timed invocation above —
       # decided once, here, by the one module that samples them. `line` goes next to the
@@ -517,7 +522,7 @@ jobs:
             --json bench/benchmark_throughput.json \
             --desc "$HOST_DESC · $COND_LINE" --compiler \
             --clock-from bench/bench_libtracer_raw.txt \
-            --note "$AA_NOTE" --note "$COND_NOTE"
+            --note "$AA_NOTE" --note "$COND_NOTE" --row-flags bench/aa_rows.json
         env:
           HOST_DESC: ${{ steps.host.outputs.desc }}
           AA_NOTE: ${{ steps.bracket.outputs.note }}
@@ -541,6 +546,7 @@ jobs:
             bench/bench_store_sweep_raw.txt
             bench/aa_pre.txt
             bench/aa_post.txt
+            bench/aa_rows.json
             bench/conditions.jsonl
           retention-days: 90
 

@@ -41,14 +41,17 @@ job: refusing to measure is a correct outcome, and a red job trains the reader t
 ignore red. And a suspect sample is FLAGGED, never deleted — the raw datum stays in
 the store where it can be re-examined, while the charts and any gating consumer stop
 believing it (`is_contaminated`, and `contaminated_samples.json` for the points that
-predate the guard).
+predate the guard). Gating consumers keep that whole-sample verdict; the charts read
+`untrusted_cells` instead, which hides only a flagged sample's untrusted rows (#1890).
 
 Stdlib only, like every other bench tool here.
 
     python3 bench/host_guard.py wait     --max-load-per-cpu 0.25 --timeout 600
-    python3 bench/host_guard.py bracket  --pre pre.txt --post post.txt --band 6
+    python3 bench/host_guard.py bracket  --pre pre.txt --post post.txt --band 6 \
+                                         --rows-out aa_rows.json
     python3 bench/host_guard.py stamp    --json a.json --json b.json --desc "..." \
-                                         --compiler --clock-from bench_libtracer_raw.txt
+                                         --compiler --clock-from bench_libtracer_raw.txt \
+                                         --row-flags aa_rows.json
     python3 bench/host_guard.py check    --data data.js          # audit the store
 """
 from __future__ import annotations
@@ -73,6 +76,12 @@ CONTAM_TOKEN = "CONTAMINATED"
 
 # Field separator inside `extra` — matches the descriptor perf-local.yml already builds.
 SEP = " · "
+
+# The token ONE point carries when its own row failed the A/A bracket (#1890). It rides
+# only on the points `bracket_failed_names` names, never on the whole run, and it is
+# spelled so `CONTAM_TOKEN` is not a substring of it: the run-level flag stays the only
+# thing `is_contaminated` reads.
+ROW_TOKEN = "AA-ROW-OVER-BAND"
 
 # Default quiescence bar, as 1-minute load average per logical CPU. 0.25 on the
 # 31-CPU bench host is a bar of ~7.75, which the workflow's own build blows through
@@ -155,6 +164,25 @@ def _medians(rows: dict[tuple, dict[str, list[float]]]) -> dict[tuple, dict[str,
             for k, mv in rows.items()}
 
 
+def bracket_rows(pre_text: str, post_text: str) -> list[tuple[tuple, str, float, float, float]]:
+    """@brief Every row the A/A null pair can compare, worst disagreement first.
+
+    One tuple per (point, metric) present in BOTH transcripts: `(key, metric, pre, post,
+    percent)`, where `key` is `parse_result_rows`' 5-tuple and `metric` is `deliv_s` or
+    `p50_ns`. The verdict and the per-row flags (#1890) are both read off this one list,
+    so "the worst row" and "the rows over the band" can never be computed two ways.
+    """
+    pre, post = _medians(parse_result_rows(pre_text)), _medians(parse_result_rows(post_text))
+    out = []
+    for key in set(pre) & set(post):
+        for metric in ("deliv_s", "p50_ns"):
+            a, b = pre[key].get(metric), post[key].get(metric)
+            if a and b and a > 0:
+                out.append((key, metric, a, b, abs(b - a) / a * 100.0))
+    out.sort(key=lambda r: (-r[4], r[0], r[1]))
+    return out
+
+
 def bracket_verdict(pre_text: str, post_text: str,
                     band: float = DEFAULT_BAND) -> tuple[bool, str, float]:
     """@brief Compare the A/A null pair taken either side of the measured run.
@@ -163,27 +191,44 @@ def bracket_verdict(pre_text: str, post_text: str,
     BOTH transcripts is compared on throughput and p50; the worst absolute
     disagreement decides. Exceeding @p band means the machine moved under the
     measurement — the sample is still banked, but flagged, because a datum taken in
-    known conditions is worth more than no datum at all.
+    known conditions is worth more than no datum at all. This WHOLE-RUN verdict is the
+    one gating consumers read; the rows that exceeded the band are named separately by
+    `bracket_failed_names`, for the charts (#1890).
 
     A pair with no comparable rows returns clean with a percent of 0.0 and a spoken
     reason: a missing transcript is the caller's problem to notice (the workflow
     warns on an empty one), and inventing a contamination verdict from no evidence
     would be its own kind of lie.
     """
-    pre, post = _medians(parse_result_rows(pre_text)), _medians(parse_result_rows(post_text))
-    worst_pct, worst_what = 0.0, "no comparable rows"
-    for key in sorted(set(pre) & set(post)):
-        for metric in ("deliv_s", "p50_ns"):
-            a, b = pre[key].get(metric), post[key].get(metric)
-            if not a or not b or a <= 0:
-                continue
-            pct = abs(b - a) / a * 100.0
-            if pct > worst_pct:
-                sysname, mode, size, fan, ep = key
-                worst_pct = pct
-                worst_what = (f"{sysname} {mode} {size}B/fan{fan}/{ep}ep {metric} "
-                              f"{a:.1f} -> {b:.1f}")
-    return worst_pct <= band, worst_what, worst_pct
+    rows = bracket_rows(pre_text, post_text)
+    if not rows:
+        return True, "no comparable rows", 0.0
+    (sysname, mode, size, fan, ep), metric, a, b, pct = rows[0]
+    return pct <= band, (f"{sysname} {mode} {size}B/fan{fan}/{ep}ep {metric} "
+                         f"{a:.1f} -> {b:.1f}"), pct
+
+
+# The banked series each bracket metric feeds, as name suffixes (perf_emit_benchmark.py's
+# spelling): throughput is banked twice, as deliveries/s and as its ns/delivery inversion.
+_BANKED_SUFFIXES = {"deliv_s": (" throughput", " ns/delivery"), "p50_ns": (" p50 latency",)}
+
+
+def bracket_failed_names(pre_text: str, post_text: str,
+                         band: float = DEFAULT_BAND) -> list[str]:
+    """@brief The banked series names of every bracket row that disagreed by more than
+    @p band (#1890), sorted.
+
+    The A/A probe is `bench_forward_demux`, which is also banked, so a row that failed
+    its own same-binary check is a row of the store. `stamp --row-flags` marks exactly
+    those points with `ROW_TOKEN`, and the charts hide them even where the rest of the
+    run is drawn.
+    """
+    from perf_emit_benchmark import series_tag  # sibling; deferred, stdlib only
+    out = set()
+    for key, metric, _, _, pct in bracket_rows(pre_text, post_text):
+        if pct > band:
+            out.update(series_tag(*key) + sfx for sfx in _BANKED_SUFFIXES[metric])
+    return sorted(out)
 
 
 def compiler_identity(cxx: str | None = None) -> str:
@@ -258,13 +303,86 @@ def entry_contaminated(entry: dict, known: dict[str, str] | None = None) -> str 
     return None
 
 
-def stamp(paths: list[pathlib.Path], desc: str) -> int:
-    """@brief Write @p desc into every point's `extra` in each emitted metrics JSON."""
+# The per-row re-classification of a flagged run (#1890), for the CHARTS only. A run is
+# flagged whole when one A/A row, or one invocation's conditions, failed; on 2026-10 that
+# was 28 runs of 30, so whole-run hiding emptied the trend board. Within a flagged run a
+# row stays drawn unless it is an outlier against its OWN series' neighbours: the median of
+# up to `ROW_NEIGHBOURS` recorded values either side, by more than `DEFAULT_BAND` or by
+# `ROW_SPREAD_K` x the neighbours' relative median absolute deviation, whichever is wider,
+# so a row that is noisy by nature (the bimodal multi-threaded rows, `fold-b4`) is judged
+# against its own spread and not against the quiet rows' band. A row with fewer than two
+# neighbours cannot be vouched for and is hidden. A flagged run with more than
+# `ROW_WHOLE_RUN_SHARE` of its rows hidden measured the machine, not the code, and is
+# hidden whole, as before.
+ROW_NEIGHBOURS = 4
+ROW_SPREAD_K = 3.0
+ROW_WHOLE_RUN_SHARE = 0.5
+
+
+def _row_outlier(vals: list[float], j: int, band: float) -> bool:
+    """@brief Is `vals[j]` an outlier against up to `ROW_NEIGHBOURS` values either side?"""
+    nb = vals[max(0, j - ROW_NEIGHBOURS):j] + vals[j + 1:j + 1 + ROW_NEIGHBOURS]
+    if len(nb) < 2:
+        return True
+    ref = statistics.median(nb)
+    if ref <= 0:
+        return False
+    spread = statistics.median(abs(x - ref) for x in nb) / ref * 100.0
+    return abs(vals[j] / ref - 1.0) * 100.0 > max(band, ROW_SPREAD_K * spread)
+
+
+def untrusted_cells(entries: list[dict], known: dict[str, str] | None = None,
+                    band: float = DEFAULT_BAND) -> dict[int, tuple[str, set[str] | None]]:
+    """@brief entry index -> (reason, hidden row names, or None for the whole run).
+
+    The CHARTS' trust rule (#1890); gating consumers keep `entry_contaminated`'s
+    whole-run verdict. An unflagged run is absent (every row drawn). A run on the
+    reviewed list is hidden whole: that list is a human verdict on the whole sample. A
+    flagged run hides the rows that carry `ROW_TOKEN` (they failed their own A/A
+    check) and the rows that are outliers against their own neighbours (see
+    `ROW_NEIGHBOURS`), or the whole run when more than `ROW_WHOLE_RUN_SHARE` of its rows
+    are hidden. Nothing in the store is changed: the rule is re-run on every render.
+    """
+    known = load_known_contaminated() if known is None else known
+    flagged = {i: r for i, e in enumerate(entries) if (r := entry_contaminated(e, known))}
+    series: dict[str, list[tuple[int, float]]] = {}
+    for i, e in enumerate(entries):
+        for b in e.get("benches", []):
+            try:
+                series.setdefault(b["name"], []).append((i, float(b["value"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+    hidden: dict[int, set[str]] = {i: set() for i in flagged}
+    for name, pts in series.items():
+        vals = [v for _, v in pts]
+        for j, (i, _) in enumerate(pts):
+            if i in hidden and _row_outlier(vals, j, band):
+                hidden[i].add(name)
+    out: dict[int, tuple[str, set[str] | None]] = {}
+    for i, reason in flagged.items():
+        e = entries[i]
+        sha = str((e.get("commit") or {}).get("id", ""))
+        rows = hidden[i] | {b.get("name") for b in e.get("benches", [])
+                            if ROW_TOKEN in (b.get("extra") or "")}
+        n = len(e.get("benches", [])) or 1
+        whole = (any(sha.startswith(p) for p in known)
+                 or len(rows) > ROW_WHOLE_RUN_SHARE * n)
+        out[i] = (reason, None if whole else rows)
+    return out
+
+
+def stamp(paths: list[pathlib.Path], desc: str, row_flags: set[str] | None = None) -> int:
+    """@brief Write @p desc into every point's `extra` in each emitted metrics JSON.
+
+    A point named in @p row_flags (its row failed the A/A bracket, #1890) also gets
+    `ROW_TOKEN`.
+    """
+    row_flags = row_flags or set()
     n = 0
     for p in paths:
         items = json.loads(p.read_text())
         for it in items:
-            it["extra"] = desc
+            it["extra"] = desc + (SEP + ROW_TOKEN if it.get("name") in row_flags else "")
             n += 1
         p.write_text(json.dumps(items, indent=1) + "\n")
     return n
@@ -305,10 +423,17 @@ def _cmd_bracket(args: argparse.Namespace) -> int:
     else:
         print(f"::warning::bench-local sample FLAGGED contaminated — the A/A null pair "
               f"disagreed by {pct:.1f}% (band {args.band:.1f}%): {what}. The point is "
-              f"still banked; charts and the blocking tier will ignore it.")
+              f"still banked; the blocking tier ignores it, and the charts hide its rows "
+              f"over the band and any row out of line with its neighbours (#1890).")
     _gh_output(clean="true" if clean else "false",
                note="" if clean else contamination_note(
                    f"A/A bracket {pct:.1f}% > {args.band:.1f}% band"))
+    if args.rows_out:
+        names = bracket_failed_names(pre, post, args.band)
+        pathlib.Path(args.rows_out).write_text(json.dumps(names, indent=1) + "\n")
+        if names:
+            print(f"host_guard: {len(names)} banked row(s) over the band, flagged per row "
+                  f"-> {args.rows_out}")
     return 0  # a flagged sample is recorded, not failed
 
 
@@ -344,7 +469,10 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
     for note in args.note or []:
         if note:
             desc += SEP + note
-    n = stamp([pathlib.Path(p) for p in args.json], desc)
+    rows: set[str] = set()
+    if args.row_flags and pathlib.Path(args.row_flags).exists():
+        rows = set(json.loads(pathlib.Path(args.row_flags).read_text() or "[]"))
+    n = stamp([pathlib.Path(p) for p in args.json], desc, rows)
     print(f"host_guard: stamped {n} points -> {desc}")
     return 0
 
@@ -356,12 +484,12 @@ def _cmd_check(args: argparse.Namespace) -> int:
     known = load_known_contaminated()
     flagged = 0
     for suite, entries in doc.get("entries", {}).items():
-        for i, e in enumerate(entries):
-            reason = entry_contaminated(e, known)
-            if reason:
-                flagged += 1
-                sha = e["commit"]["id"][:8]
-                print(f"  [{suite[:28]}...] sample {i} {sha}: {reason}")
+        for i, (reason, rows) in sorted(untrusted_cells(entries, known).items()):
+            flagged += 1
+            sha = entries[i]["commit"]["id"][:8]
+            shown = ("hidden whole" if rows is None
+                     else f"{len(rows)}/{len(entries[i]['benches'])} rows hidden on the charts")
+            print(f"  [{suite[:28]}...] sample {i} {sha}: {reason} ({shown})")
     print(f"host_guard: {flagged} flagged point-entries across the store")
     return 0
 
@@ -381,6 +509,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--pre", required=True)
     b.add_argument("--post", required=True)
     b.add_argument("--band", type=float, default=DEFAULT_BAND)
+    b.add_argument("--rows-out", default=None,
+                   help="write the banked names of the rows over the band here (JSON, #1890)")
     b.set_defaults(fn=_cmd_bracket)
 
     s = sub.add_parser("stamp", help="write host/compiler/flag onto every emitted point")
@@ -388,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--desc", required=True)
     s.add_argument("--note", action="append", default=[],
                    help="a verdict fragment to append (repeatable; empty ones are skipped)")
+    s.add_argument("--row-flags", default=None,
+                   help="a `bracket --rows-out` file: those points also get ROW_TOKEN (#1890)")
     s.add_argument("--cxx", default=None)
     s.add_argument("--compiler", action="store_true",
                    help="append the compiler identity to the descriptor")

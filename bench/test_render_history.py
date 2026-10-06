@@ -22,6 +22,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import render_history as rh  # noqa: E402
+import host_guard as hg  # noqa: E402
 
 JS = pathlib.Path(__file__).resolve().parent.parent / "docs" / "_static" / "perf_history.js"
 
@@ -237,25 +238,29 @@ class LadderFamiliesAreCharted(_NoGit):
             self.assertEqual(pvs, [float(s) for s in self.LADDER], fam)
 
 
-def _sweep_store() -> dict:
+def _sweep_store(moved: float = 2.0) -> dict:
     """@brief Three commits of the banked fan and payload sweeps, both engines, both suites.
 
     The middle commit is stamped contaminated, the way the bench-local host guard stamps a
-    sample measured under load, so a test can tell "picked" from "trusted".
+    sample measured under load, and every one of its values is scaled by @p moved, so a
+    test can tell "picked" from "trusted". At the default 2x every row is an outlier
+    against its neighbours and the whole pass is hidden; at 1.0 it agrees with them and
+    is drawn (#1890).
     """
-    def entry(c: str, k: int, metric: str, extra: str) -> dict:
+    def entry(c: str, k: int, metric: str, extra: str, m: float) -> dict:
         benches = []
         for eng in ("", "zenoh "):
             for fan in (1, 8):
                 benches.append({"name": f"{eng}inproc 64B/fan{fan}/1ep {metric}",
-                                "value": 100.0 * fan + k, "extra": extra})
+                                "value": (100.0 * fan + k) * m, "extra": extra})
             for size in (8, 1024):
                 benches.append({"name": f"{eng}inproc {size}B/fan1/1ep {metric}",
-                                "value": 1000.0 + k, "extra": extra})
+                                "value": (1000.0 + k) * m, "extra": extra})
         return {"commit": {"id": c * 40, "message": f"commit {c}"}, "benches": benches}
 
     def suite(metric: str) -> list[dict]:
-        return [entry(c, k, metric, "h · CONTAMINATED (test)" if c == "b" else "h")
+        return [entry(c, k, metric, "h · CONTAMINATED (test)" if c == "b" else "h",
+                      moved if c == "b" else 1.0)
                 for k, c in enumerate("abc")]
     return {"entries": {"bench-local latency": suite("p50 latency"),
                         "bench-local throughput": suite("throughput")}}
@@ -283,6 +288,11 @@ class ComparisonHistoryPicker(_NoGit):
         self.assertEqual(line["xs"], [1, 8])
         self.assertIsNone(line["v"][1])
         self.assertEqual(line["v"][2], [102.0, 802.0])
+
+    def test_flagged_pass_that_agrees_with_its_neighbours_is_pickable(self):
+        import render_compare as rc
+        line = rc.history(_sweep_store(moved=1.0))["charts"]["ltz-lat-fan"]["zenoh"]
+        self.assertEqual(line["v"][1], [101.0, 801.0])
 
     def test_bandwidth_is_rate_times_size(self):
         line = self._hist()["charts"]["ltz-mb-size"]["libtracer"]
@@ -314,6 +324,79 @@ class ComparisonHistoryPicker(_NoGit):
         body = JS.read_text()
         self.assertIn("ph-cmpon", body)
         self.assertIn('stroke-dasharray="7 5"', body)
+
+
+class PerRowTrust(_NoGit):
+    """@brief A flagged run hides only its untrusted rows, not every row (#1890).
+
+    The rule lives in `host_guard.untrusted_cells`; these cases pin it through the
+    renderer's own entry points, which is what the page draws.
+    """
+
+    ROWS = [f"inproc {s}B/fan1/1ep p50 latency" for s in (1, 8, 64, 1024)]
+
+    def _entries(self, flagged: dict[int, dict[str, float]], n: int = 9,
+                 row_flag: set[str] | None = None) -> list[dict]:
+        """@brief @p n runs of four quiet rows (100 ns, +-1%); @p flagged maps a run index
+        to the values it carries instead, and stamps that run contaminated."""
+        out = []
+        for i in range(n):
+            extra = "h · CONTAMINATED (A/A bracket 20.0% > 6.0% band)" if i in flagged else "h"
+            benches = []
+            for r in self.ROWS:
+                v = flagged.get(i, {}).get(r, 100.0 + (i % 3) - 1)
+                tok = f" · {hg.ROW_TOKEN}" if i in flagged and r in (row_flag or ()) else ""
+                benches.append({"name": r, "value": v, "extra": extra + tok})
+            out.append({"commit": {"id": str(i) * 40}, "benches": benches})
+        return out
+
+    def _drawn(self, entries: list[dict]) -> dict[str, list[int]]:
+        series = rh._series_by_name(entries, rh._untrusted_cells(entries))
+        return {name: [p[0] for p in pts] for name, pts in series.items()}
+
+    def test_only_the_outlier_row_of_a_flagged_run_is_hidden(self):
+        drawn = self._drawn(self._entries({4: {self.ROWS[2]: 160.0}}))
+        self.assertNotIn(4, drawn[self.ROWS[2]])
+        for r in (self.ROWS[0], self.ROWS[1], self.ROWS[3]):
+            self.assertIn(4, drawn[r], f"{r} agreed with its neighbours and must be drawn")
+
+    def test_a_row_that_failed_its_own_aa_check_stays_hidden(self):
+        """In band against its neighbours, but its own A/A pair disagreed: hidden."""
+        drawn = self._drawn(self._entries({4: {}}, row_flag={self.ROWS[1]}))
+        self.assertNotIn(4, drawn[self.ROWS[1]])
+        self.assertIn(4, drawn[self.ROWS[0]])
+
+    def test_a_run_that_moved_as_a_whole_is_hidden_whole(self):
+        moved = {r: 150.0 for r in self.ROWS[:3]}
+        entries = self._entries({4: moved})
+        cells = rh._untrusted_cells(entries)
+        self.assertIsNone(cells[4][1], "3 of 4 rows moved: the run measured the machine")
+        self.assertTrue(all(4 not in idx for idx in self._drawn(entries).values()))
+
+    def test_a_noisy_row_is_judged_against_its_own_spread(self):
+        """A bimodal row swings 100 <-> 130 by nature; a flagged 130 is not an outlier."""
+        entries = self._entries({4: {self.ROWS[3]: 130.0}})
+        for i, e in enumerate(entries):
+            if i != 4:
+                e["benches"][3]["value"] = 130.0 if i % 2 else 100.0
+        self.assertIn(4, self._drawn(entries)[self.ROWS[3]])
+
+    def test_an_unflagged_run_is_never_reclassified(self):
+        entries = self._entries({})
+        entries[4]["benches"][0]["value"] = 500.0
+        self.assertEqual(rh._untrusted_cells(entries), {})
+
+    def test_a_reviewed_sample_stays_hidden_whole(self):
+        entries = self._entries({})
+        known = {entries[4]["commit"]["id"][:8]: "reviewed"}
+        cells = hg.untrusted_cells(entries, known)
+        self.assertEqual(cells, {4: ("reviewed", None)})
+
+    def test_payload_counts_the_partly_drawn_run(self):
+        entries = self._entries({4: {self.ROWS[2]: 160.0}})
+        out = rh.build({"entries": {"bench-local latency": entries}}, colors={})
+        self.assertEqual(out["suites"]["latency"]["partial"], {"4": 1})
+        self.assertEqual(out["suites"]["latency"]["contaminated"], {})
 
 
 def _node() -> str | None:
@@ -383,6 +466,37 @@ class NoiseBand(_NoGit):
         # The tooltip row carries the window's CV.
         self.assertIn("bt = bandAt[si] && bandAt[si][i]", js)
         self.assertIn("cv ' + fmtPct(bt[5])", js)
+
+
+
+class GapMarkers(unittest.TestCase):
+    """@brief A commit with no trusted value is drawn as missing, not as nothing (#1890)."""
+
+    def _marks(self, pts: list) -> str:
+        import subprocess
+        node = _node()
+        if node is None:
+            self.skipTest("node is not installed; the markers are drawn by the page script")
+        fn = re.search(r"\n  function gapMarks\(.*?\n  \}\n", JS.read_text(), re.S).group(0)
+        call = (f"console.log(gapMarks({{label: 'fan 1', pts: {json.dumps(pts)}}}, "
+                "function (i) { return i * 10; }, function (v) { return v; }, 'red', "
+                "{shas: ['a', 'b', 'c', 'd', 'e', 'f']}));")
+        return subprocess.run([node, "-e", fn + call], capture_output=True, text=True,
+                              check=True, timeout=30).stdout
+
+    def test_each_missing_slot_inside_the_span_gets_a_marker(self):
+        out = self._marks([[0, 10.0], [3, 40.0], [4, 50.0]])
+        self.assertEqual(out.count('class="ph-gapdot"'), 2)
+        self.assertEqual(out.count('class="ph-gap"'), 1)
+        self.assertIn("b: no trusted value", out)
+        # The ring sits on the bridge between the recorded points either side.
+        self.assertIn('cx="10.0" cy="20.0"', out)
+
+    def test_no_marker_without_a_gap_or_outside_the_span(self):
+        self.assertEqual(self._marks([[2, 1.0], [3, 2.0], [4, 3.0]]).strip(), "")
+
+    def test_trend_view_draws_them(self):
+        self.assertIn("s += gapMarks(se, X, Y, cc, suite);", JS.read_text())
 
 
 if __name__ == "__main__":

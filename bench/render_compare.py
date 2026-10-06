@@ -203,8 +203,8 @@ def history(store: dict | None) -> dict | None:
     on the nearest following one, exactly as the history charts mark it). ``v[k]`` is the
     line's value at each ``xs`` for pick ``k``, or None where that pass recorded no value.
 
-    Contaminated samples are dropped through the same predicate the history charts use, so
-    a picked point is never one the trend charts refuse to draw. Commits are keyed by full
+    Untrusted points are dropped through the same per-row rule the history charts use
+    (#1890), so a picked point is never one the trend charts refuse to draw. Commits are keyed by full
     sha across the two suites (latency and throughput are banked separately), so a pick
     reads both from the same recorded pass.
     """
@@ -216,7 +216,7 @@ def history(store: dict | None) -> dict | None:
     meta: dict[str, dict] = {}
     values: dict[str, dict[str, float]] = {}  # sha -> store name -> value
     for entries in store["entries"].values():
-        skip = render_history._contaminated_idx(entries)
+        skip = render_history._untrusted_cells(entries)
         rels = {r["i"]: ("≈ " if r["approx"] else "") + r["label"]
                 for r in render_history.release_annotations(entries)}
         for i, e in enumerate(entries):
@@ -229,10 +229,13 @@ def history(store: dict | None) -> dict | None:
                              "msg": render_history._first_line(e["commit"].get("message", ""))}
             if i in rels:
                 meta[sha]["rel"] = rels[i]
-            if i in skip:
+            hidden = skip[i][1] if i in skip else set()
+            if hidden is None:
                 continue
             got = values.setdefault(sha, {})
             for b in e.get("benches", []):
+                if b.get("name") in hidden:
+                    continue
                 try:
                     got[b["name"]] = float(b["value"])
                 except (KeyError, TypeError, ValueError):
