@@ -88,9 +88,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     the token into a `mem::bytes_t` the ACL gate owns, instead of returning a
     `std::vector`. The gate's buffer is a 64-byte stack frame that spills to the graph's table
     source, so a gated operation no longer allocates for its subject. It takes precedence over
-    `subject_resolver` when both are installed. A `subject_resolver` alone still gates exactly
-    as before, through an adapter. `graph_t::hooks()` hands back what was installed, never the
-    adapter.
+    `subject_resolver` when both are installed. A `subject_resolver` alone still gates with the
+    same decisions, through an adapter that copies its vector into the gate's frame: one extra
+    slot read and copy per gated operation (about 8 ns on the `acl-inherit-d4` row) until the
+    caller moves to `subject_lookup`. `graph_t::hooks()` hands back what was installed, never
+    the adapter.
 - **A public-std ratchet in CI ([#1781](https://github.com/avatarsd-llc/libtracer/issues/1781)).**
   `tools/check_public_std.py` counts every owning `std` type in the installed headers
   (comments and strings excluded) against `tools/public_std_baseline.json`, which names the
