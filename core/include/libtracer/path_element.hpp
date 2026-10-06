@@ -46,6 +46,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "libtracer/packed_path.hpp"
@@ -307,6 +308,47 @@ struct path_element_census_t {
     return false;
 }
 
+namespace detail_label {
+
+/**
+ * @brief The byte range `[first, second)` of @p body that @ref emit_path_labelled replaces with
+ *        one label element, or `nullopt` when the splice has no reading (every refusal listed
+ *        there). The core-array splice's walk (#1781): the same steps as the `std::vector`
+ *        form's, which keeps its own copy on purpose — re-shaping that body onto this one grew
+ *        `fwd_router_t::route_fwd_forward` by 37 B on the symbol ratchet. The vector form is
+ *        removed by #1781's contract step, and this is then the only walk.
+ */
+[[nodiscard]] inline std::optional<std::pair<std::size_t, std::size_t>> labelled_run(
+    std::span<const std::byte> body, std::size_t first, std::size_t count, path_label_t label) {
+    if (!label.valid() || count == 0) return std::nullopt;
+    // The run bound, checked BEFORE any `first + count` is formed. An element is at least two
+    // bytes, so the element count never exceeds the body's byte count and this both rejects
+    // every out-of-range run and makes the additions below unable to wrap. Left unguarded,
+    // `{first = SIZE_MAX, count = 1}` wraps to an empty in-run window and splices a label into
+    // a body it was never meant to touch — a well-formed spelling of a DIFFERENT address, which
+    // is the mis-delivery class this design closes by construction everywhere else.
+    if (count > body.size() || first > body.size() - count) return std::nullopt;
+
+    // Locate the run by walking, so the refusal happens before a single byte is appended.
+    std::size_t index = 0;
+    std::size_t run_begin = body.size();
+    std::size_t run_end = body.size();
+    path_element_cursor_t cur(body);
+    while (const std::optional<path_element_t> el = cur.next()) {
+        if (!el->ok()) return std::nullopt;
+        const bool in_run = index >= first && index < first + count;
+        if (in_run && el->kind != path_element_kind_t::SEGMENT) return std::nullopt;
+        if (index == first) run_begin = el->at;
+        if (index == first + count - 1) run_end = el->at + el->bytes;
+        ++index;
+    }
+    if (first + count > index) return std::nullopt;
+
+    return std::pair{run_begin, run_end};
+}
+
+}  // namespace detail_label
+
 /**
  * @brief Append @p body to @p out with @p count elements from index @p first replaced by one
  *        label element — RFC-0027 amendment 6's multi-segment splice.
@@ -364,6 +406,37 @@ struct path_element_census_t {
     (void)spelled;
     out.insert(out.end(), body.begin() + static_cast<std::ptrdiff_t>(run_end), body.end());
     return true;
+}
+
+/** @brief The splice appended to a core byte array (#1781) — same refusals and the same
+ *         no-alias rule as the `std::vector` form above.
+ *  @retval false The splice has no reading (nothing appended), or the source refused. */
+[[nodiscard]] inline bool emit_path_labelled(mem::bytes_t& out, std::span<const std::byte> body,
+                                             std::size_t first, std::size_t count,
+                                             path_label_t label) noexcept {
+    const auto run = detail_label::labelled_run(body, first, count, label);
+    if (!run) return false;
+    return out.append(body.data(), run->first) && emit_path_label(out, label) &&
+           out.append(body.data() + run->second, body.size() - run->second);
+}
+
+/** @brief One element appended to a core byte array (#1781) — the `std::vector` form's
+ *         spelling rules.
+ *  @retval false The element has no legal spelling (nothing appended), or the source
+ *          refused. */
+[[nodiscard]] inline bool emit_path_element(mem::bytes_t& out,
+                                            const path_element_t& element) noexcept {
+    switch (element.kind) {
+        case path_element_kind_t::SEGMENT:
+            return emit_path_segment(out, element.payload);
+        case path_element_kind_t::LABEL:
+            return emit_path_label(out, element.label);
+        case path_element_kind_t::FOREIGN:
+            return emit_path_escape(out, element.escape_kind, element.payload);
+        case path_element_kind_t::MALFORMED:
+            break;
+    }
+    return false;
 }
 
 }  // namespace tr::wire

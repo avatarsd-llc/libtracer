@@ -12,7 +12,6 @@
 #include <span>
 #include <thread>
 #include <utility>
-#include <vector>  // graph_key only: the graph's register_vertex_key parameter type
 
 #include "libtracer/builtin_transports.hpp"
 #include "libtracer/byteorder.hpp"
@@ -127,15 +126,6 @@ void parse_config(const tlv_node_t* config, conn_settings_t& s) {
 /** @brief True when @p key is `<dir>/...` — @p dir followed by a segment separator. */
 [[nodiscard]] bool under_dir(std::string_view key, std::string_view dir) noexcept {
     return key.size() > dir.size() && key.starts_with(dir) && key[dir.size()] == '/';
-}
-
-/**
- * @brief The graph's key parameter: `graph_t::register_vertex_key` still takes its key as a
- *        `std::vector` by value, so this one boundary builds the graph's own container (the
- *        graph-core batch, #1778, owns that signature). Nothing here keeps it.
- */
-[[nodiscard]] std::vector<std::byte> graph_key(std::span<const std::byte> key) {
-    return {key.begin(), key.end()};
 }
 
 /**
@@ -570,7 +560,7 @@ result_t<void> transport_vertex_t::mint_module_locked(std::string_view module,
         return std::unexpected(status_t::BACKPRESSURE);
     const std::span<const std::byte> mod_key = parent_key(endpoint_key, kConnEndpointName);
     if (!graph_.find(mod_key)) {
-        auto mod = graph_.register_vertex_key(graph_key(mod_key), graph::role_t::STORED_VALUE, {});
+        auto mod = graph_.register_vertex_key(mod_key, graph::role_t::STORED_VALUE, {});
         if (!mod) return std::unexpected(mod.error());
     }
     if (graph_.find(mem::as_span(endpoint_key))) {
@@ -639,9 +629,8 @@ result_t<void> transport_vertex_t::mint_module_locked(std::string_view module,
         endpoints_.pop_back();
         return std::unexpected(status_t::BACKPRESSURE);
     }
-    auto endpoint =
-        graph_.register_vertex_key(graph_key(mem::as_span(endpoint_key)), graph::role_t::HANDLER,
-                                   handlers, {}, kRights, mem::as_span(encoded));
+    auto endpoint = graph_.register_vertex_key(mem::as_span(endpoint_key), graph::role_t::HANDLER,
+                                               handlers, {}, kRights, mem::as_span(encoded));
     if (!endpoint) {
         // Nothing may answer for a module whose endpoint does not exist: the context pushed
         // above would otherwise let a retried declaration's catalog check find it.
@@ -922,7 +911,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // two records, so it is read off that key's prefix rather than built twice.
     const std::span<const std::byte> module_key = parent_key(mount_key, name);
     if (!graph_.find(module_key))
-        (void)graph_.register_vertex_key(graph_key(module_key), graph::role_t::STORED_VALUE, {});
+        (void)graph_.register_vertex_key(module_key, graph::role_t::STORED_VALUE, {});
 
     // Resolve the connection's link. Precedence, WITHIN the module resolved above: a
     // provide_link-staged transport wins (the test/manual seam); otherwise the config `kind`
@@ -1014,8 +1003,8 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
 
     // Register the identity vertex at the composed /net/<name> key (graph owns addressing).
     // On failure the just-constructed socket (if any) is torn down by `owned`'s destructor.
-    result_t<vertex_handle_t> v = graph_.register_vertex_key(graph_key(mem::as_span(mount_key)),
-                                                             graph::role_t::STORED_VALUE, handlers);
+    result_t<vertex_handle_t> v =
+        graph_.register_vertex_key(mem::as_span(mount_key), graph::role_t::STORED_VALUE, handlers);
     if (!v) return v;  // PATH_IN_USE on a duplicate connection name
 
     // The engine is the sole writer of this connection's DIAL transitions (RFC-0014 §4):

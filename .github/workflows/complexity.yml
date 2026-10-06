@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
-# Cyclomatic-complexity ratchet on core/ and the agent-doc length cap (#1790).
+# Cyclomatic-complexity ratchet on core/ and the agent-doc length cap (#1790), plus the
+# public-std ratchet (#1781): `tools/check_public_std.py` counts every owning std type in
+# the installed headers (core/include/libtracer), comments and strings excluded, against
+# tools/public_std_baseline.json. A count may only go down, toward zero (ADR-0083 Decision 11).
 #
 # `tools/check_ccn.py` measures every function in core/include and core/src with a
 # pinned lizard: an unpinned function above CCN 15 fails, a pinned one may only go
@@ -31,6 +34,9 @@ on:
       - "tools/check_ccn.py"
       - "tools/ccn_pins.json"
       - "tools/tests/test_check_ccn.py"
+      - "tools/check_public_std.py"
+      - "tools/public_std_baseline.json"
+      - "tools/tests/test_check_public_std.py"
       - ".github/workflows/complexity.yml"
   pull_request:
     # Duplicated rather than a YAML anchor: GitHub Actions does not expand aliases.
@@ -42,6 +48,9 @@ on:
       - "tools/check_ccn.py"
       - "tools/ccn_pins.json"
       - "tools/tests/test_check_ccn.py"
+      - "tools/check_public_std.py"
+      - "tools/public_std_baseline.json"
+      - "tools/tests/test_check_public_std.py"
       - ".github/workflows/complexity.yml"
   workflow_dispatch:
 
@@ -84,3 +93,19 @@ jobs:
         env:
           BASE: ${{ steps.base.outputs.sha }}
         run: python3 tools/check_ccn.py ${BASE:+--base "$BASE"}
+
+  public-std:
+    runs-on: ubuntu-24.04
+    # A regex scan of ~100 headers; no install step. 10 = the short-job floor.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ratchet unit tests
+        run: python3 -m unittest discover -s tools/tests -p "test_check_public_std.py" -v
+      - name: No owning std type in the installed headers (ratchet toward zero)
+        run: python3 tools/check_public_std.py

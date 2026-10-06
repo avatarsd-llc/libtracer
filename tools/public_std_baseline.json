@@ -1,0 +1,136 @@
+{
+  "core/include/libtracer/acl_ace.hpp": {
+    "owner": "#1781 step 2: ace_t::subject becomes a view; the stored ACEs live in one table block per vertex",
+    "counts": {
+      "vector": 1
+    }
+  },
+  "core/include/libtracer/app_fields.hpp": {
+    "owner": "#1781 step 2: the owning app_field_t / app_fields_decl_t form moves onto a core table",
+    "counts": {
+      "string": 1,
+      "vector": 6
+    }
+  },
+  "core/include/libtracer/batch.hpp": {
+    "owner": "#1781 step 3 (contract): removed once callers use the core-array form added in step 1",
+    "counts": {
+      "vector": 3
+    }
+  },
+  "core/include/libtracer/byteorder.hpp": {
+    "owner": "#1781 step 3 (contract): removed once callers use the core-array form added in step 1",
+    "counts": {
+      "vector": 1
+    }
+  },
+  "core/include/libtracer/conn_spec.hpp": {
+    "owner": "#1781 step 2: the SPEC staging moves to bytes_t; step 3 removes the vector bytes()",
+    "counts": {
+      "vector": 6
+    }
+  },
+  "core/include/libtracer/frame.hpp": {
+    "owner": "#1781 step 2: tlv_t children become a span; step 3 removes the vector encode and path_key",
+    "counts": {
+      "vector": 3
+    }
+  },
+  "core/include/libtracer/graph.hpp": {
+    "owner": "#1781 step 3: subject_resolver, the vector read_subscribers / drain_unflushed and the child-factory key are removed",
+    "counts": {
+      "vector": 4
+    }
+  },
+  "core/include/libtracer/key_view.hpp": {
+    "owner": "#1781 step 3: split_levels removed; for_each_level is the allocation-free form",
+    "counts": {
+      "vector": 1
+    }
+  },
+  "core/include/libtracer/loopback.hpp": {
+    "owner": "#1781 step 2: the dev/test loopback inbox moves onto the seam",
+    "counts": {
+      "deque": 1,
+      "vector": 2
+    }
+  },
+  "core/include/libtracer/mem_heap.hpp": {
+    "owner": "#1783: the std-container try_* adapters retire with the throwing adapters",
+    "counts": {
+      "string": 1,
+      "vector": 3
+    }
+  },
+  "core/include/libtracer/mem_source_alloc.hpp": {
+    "owner": "#1783: the throwing source_allocator_t retires",
+    "counts": {
+      "vector": 1
+    }
+  },
+  "core/include/libtracer/packed_path.hpp": {
+    "owner": "#1781 step 3 (contract): removed once callers use the core-array form added in step 1",
+    "counts": {
+      "vector": 3
+    }
+  },
+  "core/include/libtracer/path.hpp": {
+    "owner": "#1781 step 2: path_t / field_path_t storage moves onto core containers (maintainer ruling on the value shape)",
+    "counts": {
+      "string": 1,
+      "vector": 4
+    }
+  },
+  "core/include/libtracer/path_element.hpp": {
+    "owner": "#1781 step 3 (contract): removed once callers use the core-array form added in step 1",
+    "counts": {
+      "vector": 2
+    }
+  },
+  "core/include/libtracer/path_label.hpp": {
+    "owner": "#1781 step 3 (contract): removed once callers use the core-array form added in step 1",
+    "counts": {
+      "vector": 1
+    }
+  },
+  "core/include/libtracer/rope.hpp": {
+    "owner": "#1781 step 2: the link spill moves onto the seam; step 3 removes the vector to_iovec",
+    "counts": {
+      "vector": 4
+    }
+  },
+  "core/include/libtracer/security_acl.hpp": {
+    "owner": "#1781 step 2: the ACE merge and parse/encode staging move onto core tables; step 3 removes the vector forms",
+    "counts": {
+      "vector": 12
+    }
+  },
+  "core/include/libtracer/subscriber.hpp": {
+    "owner": "#1885: subscriber_remote_t names and target_key_t move onto the seam",
+    "counts": {
+      "make_shared": 2,
+      "shared_ptr": 1,
+      "string": 2,
+      "vector": 5
+    }
+  },
+  "core/include/libtracer/tlv_emit.hpp": {
+    "owner": "#1781 step 3 (contract): removed once callers use the core-array form added in step 1",
+    "counts": {
+      "vector": 7
+    }
+  },
+  "core/include/libtracer/value.hpp": {
+    "owner": "#1781 step 3: the vector to_iovec is removed",
+    "counts": {
+      "vector": 3
+    }
+  },
+  "core/include/libtracer/vertex.hpp": {
+    "owner": "#1781 step 2: ACE storage, app-field snapshot and edge_sources move onto core tables; #1885: the snapshot_edges overflow buffer",
+    "counts": {
+      "string": 1,
+      "vector": 25
+    }
+  }
+}

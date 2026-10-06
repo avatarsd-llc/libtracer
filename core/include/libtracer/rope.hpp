@@ -318,6 +318,22 @@ class rope_t {
     }
 
     /**
+     * @brief Scatter-gather egress into CALLER storage (#1781): one span per link, in order,
+     *        no copy and no allocation.
+     *
+     * Writes the first `min(out.size(), link_count())` spans and returns @ref link_count, so a
+     * caller whose table was too short sees how long it must be (a stack array of the link
+     * counts it expects, or a `%tr::mem::block_array_t` it sizes first). Entries past the
+     * returned count are left untouched.
+     */
+    [[nodiscard]] std::size_t to_iovec(std::span<std::span<const std::byte>> out) const noexcept {
+        const std::span<const view_t> ls = links();
+        const std::size_t n = ls.size() < out.size() ? ls.size() : out.size();
+        for (std::size_t i = 0; i < n; ++i) out[i] = ls[i].bytes();
+        return ls.size();
+    }
+
+    /**
      * @brief Nothrow @ref to_iovec — fill @p out with one span per link (no copy),
      *        soft-failing instead of aborting when the span table cannot be grown.
      *

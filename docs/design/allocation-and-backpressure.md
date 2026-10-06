@@ -355,7 +355,7 @@ itself no longer has a way to drop one for want of memory — the frame is gathe
 ## Legs that throw, and their nothrow twins
 
 `rope_t::to_iovec` builds the scatter-gather span table by value, and its `reserve` throws on OOM —
-an `abort()` under `-fno-exceptions` (`core/include/libtracer/rope.hpp:rope_t::to_iovec`). The terminus reply
+an `abort()` under `-fno-exceptions` (`core/include/libtracer/rope.hpp:to_iovec() const`). The terminus reply
 egress builds that table on every send, so on a fragmented heap it was a reachable abort. The
 nothrow twin is `rope_t::try_to_iovec(std::vector<std::span<const std::byte>>& out) noexcept`
 (`rope.hpp:rope_t::try_to_iovec`): it clears `out`, sizes it to `link_count()` through `tr::detail::try_reserve`,

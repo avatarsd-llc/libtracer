@@ -213,6 +213,16 @@ inline constexpr std::size_t kPathLabelRecordBytes = kPackedEscapeOverhead + kPa
     return emit_path_escape(out, kPackedEscapeKindLabel, body);
 }
 
+/** @brief The label element appended to a core byte array (#1781).
+ *  @retval false @p label is the reserved zero generation (nothing appended), or the source
+ *          refused. */
+[[nodiscard]] inline bool emit_path_label(mem::bytes_t& out, path_label_t label) noexcept {
+    if (!label.valid()) return false;
+    std::array<std::byte, kPathLabelBodyBytes> body{};
+    path_label_store(body, label);
+    return emit_path_escape(out, kPackedEscapeKindLabel, body);
+}
+
 /**
  * @brief The label element for @p label — `00 16 04 <u32 LE>` — as a fixed 7-byte record, for a
  *        caller that keeps it in place rather than appending it (#1779: the router's per-child

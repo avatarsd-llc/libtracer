@@ -254,6 +254,46 @@ inline void emit_batch(std::vector<std::byte>& out, std::int64_t base_ns,
     for (const std::span<const std::byte>& s : samples) out.insert(out.end(), s.begin(), s.end());
 }
 
+/** @brief Append the base-time child to a core byte array (#1781).
+ *  @retval false The source refused; @p out is unchanged. */
+[[nodiscard]] inline bool emit_batch_time(mem::bytes_t& out, std::int64_t base_ns) noexcept {
+    const std::size_t at = out.size();
+    if (!out.resize_for_overwrite(at + kBatchTimeChildBytes)) return false;
+    store_batch_time(std::span<std::byte>(out.data() + at, kBatchTimeChildBytes), base_ns);
+    return true;
+}
+
+/** @brief Append the packed offset array to a core byte array (#1781).
+ *  @retval false The source refused; @p out is unchanged. */
+[[nodiscard]] inline bool emit_batch_offsets(mem::bytes_t& out,
+                                             std::span<const std::int32_t> offsets_ns) noexcept {
+    const std::size_t at = out.size();
+    const std::size_t n = 4u + offsets_ns.size() * kBatchOffsetBytes;
+    if (!out.resize_for_overwrite(at + n)) return false;
+    store_batch_offsets(std::span<std::byte>(out.data() + at, n), offsets_ns);
+    return true;
+}
+
+/** @brief FOLD @p samples into one batch record appended to a core byte array (#1781) — the
+ *         same bytes as the `std::vector` form above, in one reservation.
+ *  @retval false The source refused; @p out is unchanged. */
+[[nodiscard]] inline bool emit_batch(
+    mem::bytes_t& out, std::int64_t base_ns, std::span<const std::span<const std::byte>> samples,
+    std::span<const std::int32_t> offsets_ns = {},
+    batch_carriage_t carriage = batch_carriage_t::STANDALONE) noexcept {
+    std::size_t samples_bytes = 0;
+    for (const std::span<const std::byte>& s : samples) samples_bytes += s.size();
+    const std::size_t head = batch_head_bytes(samples_bytes, offsets_ns.size());
+    const std::size_t at = out.size();
+    if (!out.reserve(at + head + samples_bytes) || !out.resize_for_overwrite(at + head))
+        return false;
+    store_batch_head(std::span<std::byte>(out.data() + at, head), carriage, base_ns, samples_bytes,
+                     offsets_ns);
+    for (const std::span<const std::byte>& s : samples)
+        (void)out.append(s.data(), s.size());  // reserved above — cannot be refused
+    return true;
+}
+
 /**
  * @brief COMPOSE a batch as a rope — the app's own sample segments **referenced**, never copied
  *        (RFC-0025 §4.1.3, Amendment 4, clause 4).

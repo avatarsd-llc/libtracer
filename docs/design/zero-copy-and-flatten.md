@@ -57,7 +57,7 @@ where the mechanism lives:
   (`core/include/libtracer/tlv_arena.hpp:only, never bytes`, node type at `core/include/libtracer/tlv_arena.hpp:arena_tlv_t`). Decode allocates node
   bookkeeping, never payload, and is zero-copy over its input provided that input is contiguous.
   That contiguity constraint is what §3 and §4 turn on.
-- **Egress scatter-gathers.** `rope_t::to_iovec` (`core/include/libtracer/rope.hpp:rope_t::to_iovec`) emits one
+- **Egress scatter-gathers.** `rope_t::to_iovec` (`core/include/libtracer/rope.hpp:to_iovec() const`) emits one
   span per link into the original segments. The host WS server builds `[header, link0, link1, …]`
   and `sendmsg`s it with "no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1)"
   (`core/src/transport_ws.cpp:ws_server_transport_t::send(std::span<const std::span<const std::byte>> iov)`); TCP prepends a u32-LE length via `prefixed_iov_t`

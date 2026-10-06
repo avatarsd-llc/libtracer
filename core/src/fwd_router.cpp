@@ -3830,11 +3830,7 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     // itself: the link handed over IS the mount, and the token beside it is the mount's, so
     // the index insert is a subscript rather than the name door's scan of the live slots.
     // Un-carried, this was the ONE caller paying that scan per subscribe in steady state.
-    //
-    // The one owning string left in this file is the graph API's own parameter type
-    // (`subscribe_wire` takes the link by `std::string`); it goes when that signature does.
-    return graph_.subscribe_wire(*v, sub_view, route_view, std::string(split.link), {}, {},
-                                 split.token);
+    return graph_.subscribe_wire(*v, sub_view, route_view, split.link, {}, {}, split.token);
 }
 
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const graph::value_t& val) {

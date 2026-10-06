@@ -183,6 +183,28 @@ class conn_spec_t {
     }
 
     /**
+     * @brief The SPEC's wire bytes appended to a core byte array (#1781) — the same bytes as
+     *        the vector-returning @ref bytes, with nothing staged on the side.
+     * @retval false The source refused; @p out may hold a partial SPEC, which the caller drops.
+     */
+    [[nodiscard]] bool bytes(mem::bytes_t& out) const noexcept {
+        using wire::opt_t;
+        using wire::type_t;
+        constexpr std::string_view kConfig = "config";
+        const bool has_cfg = !cfg_.empty();
+        const std::size_t cfg_bytes =
+            has_cfg ? wire::header_bytes(opt_t{}) + kConfig.size() +
+                          wire::header_bytes(opt_t{.ll = cfg_.size() > 0xFFFFu}) + cfg_.size()
+                    : 0;
+        const std::size_t body = body_.size() + cfg_bytes;
+        return wire::emit_header(out, type_t::SPEC, opt_t{.pl = true, .ll = body > 0xFFFFu},
+                                 body) &&
+               out.append(body_.data(), body_.size()) &&
+               (!has_cfg || (wire::emit_name(out, kConfig) &&
+                             wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, cfg_)));
+    }
+
+    /**
      * @brief The SPEC as an owned @ref tr::view::view_t, ready to `write` to
      *        `/net/<module>/conn`.
      *

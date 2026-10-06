@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -223,6 +224,18 @@ inline constexpr std::uint8_t kPackedEscapeKindLabel = 0x16;
 [[nodiscard]] inline bool emit_path_segment(mem::bytes_t& out, std::string_view seg) noexcept {
     return emit_path_segment(out, std::span<const std::byte>(
                                       reinterpret_cast<const std::byte*>(seg.data()), seg.size()));
+}
+
+/** @brief The escape record appended to a core byte array (#1781).
+ *  @retval false @p payload is longer than @ref kPackedSegMaxBytes (nothing appended), or the
+ *          source refused. */
+[[nodiscard]] inline bool emit_path_escape(mem::bytes_t& out, std::uint8_t kind,
+                                           std::span<const std::byte> payload) noexcept {
+    if (payload.size() > kPackedSegMaxBytes) return false;
+    const std::array<std::byte, 3> head{static_cast<std::byte>(kPackedEscapeLen),
+                                        static_cast<std::byte>(kind),
+                                        static_cast<std::byte>(payload.size())};
+    return out.append(head.data(), head.size()) && out.append(payload.data(), payload.size());
 }
 
 }  // namespace tr::wire
