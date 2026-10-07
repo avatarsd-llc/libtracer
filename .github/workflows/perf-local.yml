@@ -236,8 +236,13 @@ jobs:
           cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
           own="$(cat "$cg/cgroup.procs" "$cg"/*/cgroup.procs 2>/dev/null || true)"
           rest="$(python3 bench/bench_conditions.py off-cpus --cpu "$BENCH_CPU_MULTI")"
+          # Record each process's affinity first: the restore step at the end puts it back.
+          : >"$RUNNER_TEMP/runner-affinity.txt"
           for pid in $(pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)'); do
-            if grep -qx "$pid" <<<"$own"; then taskset -a -p -c "$rest" "$pid" || true; fi
+            if grep -qx "$pid" <<<"$own"; then
+              echo "$pid $(taskset -c -p "$pid" | sed 's/.*: //')" >>"$RUNNER_TEMP/runner-affinity.txt"
+              taskset -a -p -c "$rest" "$pid" || true
+            fi
           done
 
       # The proof the move took: no runner process of this job may still run on the bench
@@ -715,3 +720,14 @@ jobs:
             git push origin HEAD:gh-pages || echo "::warning::host.txt push raced a concurrent gh-pages write"
           fi
           cd - && git worktree remove ../ghp
+
+      # Put the runner's processes back where the move above found them (#1890), whatever
+      # the job did. Runner.Listener outlives this job: left on the rest-of-job CPUs (CPU 6),
+      # every later job's Runner.Worker inherited a one-CPU mask.
+      - name: Restore the runner's own processes' CPU affinity
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          [ -s "$RUNNER_TEMP/runner-affinity.txt" ] || exit 0
+          while read -r pid cpus; do
+            taskset -a -p -c "$cpus" "$pid" || true  # a Worker may already have exited
+          done <"$RUNNER_TEMP/runner-affinity.txt"

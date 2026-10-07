@@ -456,10 +456,10 @@ class TheJobStaysOffTheBenchCpu(unittest.TestCase):
         # Comments name the commands too; only the steps' own lines count.
         text = "\n".join(ln for ln in self.WORKFLOW.read_text().splitlines()
                          if not ln.lstrip().startswith("#"))
-        move = text.find("bench_conditions.py off-cpus --cpu \"$BENCH_CPU\"")
+        move = text.find("bench_conditions.py off-cpus --cpu \"$BENCH_CPU_MULTI\"")
         self.assertGreater(move, 0, "perf-local must move the runner's processes off BENCH_CPU")
         self.assertIn("Runner\\.(Listener|Worker)", text[move - 400:move + 400])
-        check = text.find("bench_conditions.py runner-check --cpu \"$BENCH_CPU\"")
+        check = text.find("bench_conditions.py runner-check --cpu \"$BENCH_CPU_MULTI\"")
         self.assertGreater(check, move, "the runner-check must follow the move")
         for timed in (r"bench_conditions\.py run\b(?!-)", r"host_guard\.py wait"):
             first = re.search(timed, text)
