@@ -118,6 +118,18 @@ int main() {
             check(str_of(f.payload) == "Hello", "  payload unmasks to \"Hello\"");
             check(dec->second == 11, "  consumed == 11 bytes");
         }
+        // ...and the client encoders produce exactly those bytes (#1922: both mask through
+        // the same word-wide loop the decoder unmasks with).
+        const std::vector<std::byte> hello = bytes_of("Hello");
+        const std::vector<std::byte> want =
+            bytes_of({0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58});
+        check(client_frame_ref(opcode_t::TEXT, hello, 0x37FA213Du) == want,
+              "  put_client_frame(TEXT, \"Hello\", 0x37FA213D) == the §5.7 bytes");
+        std::array<std::byte, kMaxClientControlFrame> ctl{};
+        const std::size_t n = encode_client_control(ctl, opcode_t::PING, hello, 0x37FA213Du);
+        check(n == 11 &&
+                  std::ranges::equal(std::span(ctl).subspan(2, 9), std::span(want).subspan(2, 9)),
+              "  encode_client_control masks \"Hello\" to the same §5.7 bytes");
     }
 
     // Server BINARY frame: FIN=1, unmasked, 7-bit length. encode -> exact bytes.
