@@ -8,42 +8,25 @@
 # (@avatarsd-llc/libtracer-client, #56). All are ESM, scoped, and publish with
 # public access; the private workspace root is skipped by `npm publish --workspaces`.
 #
-# This is a SEPARATE, standalone workflow: it does NOT alter the required core
-# gates (build-test / sanitizers / tsan / format / doxygen) nor the ts.yml unit
-# gate. It runs ONLY on a manual `workflow_dispatch` — it is intentionally NOT
-# wired to the core release tag (see the `on:` note below). A dispatch defaults
-# to a dry run, so the pipeline is exercisable end-to-end without a token or an
-# actual publish.
+# This is a SEPARATE, standalone workflow that VALIDATES a publish and uploads
+# nothing: it runs `npm publish --dry-run` on a manual `workflow_dispatch`, so the
+# pipeline is exercisable end-to-end with no credential. It does NOT alter the
+# required core gates nor the ts.yml unit gate.
 #
-# Requires a repository secret `NPM_TOKEN` (an npm automation token for the
-# @avatarsd-llc org) for real publishes; the maintainer sets it. Provenance needs
-# `id-token: write` (OIDC) and the public npm registry.
+# Real publishes happen only in release.yml, the one workflow file each package
+# names as its npm Trusted Publisher (OIDC; npm allows one per package, and no
+# token exists). Re-publishing after a registry-side failure is a release.yml
+# dispatch with the existing tag and `only: npm`.
 name: publish-npm
 
 on:
-  # MANUAL RE-PUBLISH PATH ONLY — it is not how a release reaches npm.
-  #
-  # The release path is `release.yml`, which publishes npm alongside crates.io,
-  # PlatformIO and ESP on a `v*` tag, stamping every manifest from the tag. The
-  # TypeScript packages do NOT version independently: `tools/sync-version.py` is
-  # a single-source-of-truth stamper and the root `VERSION` file drives all of
-  # them, so one `vX.Y.Z` tag means X.Y.Z everywhere.
-  #
-  # This workflow exists for the cases that path cannot serve — re-publishing
-  # after a registry-side failure, or validating a publish with dry-run. It is
-  # dispatch-only for that reason, not because npm is decoupled from the tag.
-  # Republishing an already-published version still fails, which is why the
-  # dry-run input exists.
+  # VALIDATION ONLY. The release path is `release.yml`, which publishes npm alongside
+  # crates.io, PlatformIO and ESP on a `v*` tag, stamping every manifest from the tag
+  # (`tools/sync-version.py`; the root `VERSION` drives every package in lockstep).
   workflow_dispatch:
-    inputs:
-      dry-run:
-        description: "Dry run only (validate the publish, upload nothing)"
-        type: boolean
-        default: true
 
 permissions:
   contents: read
-  id-token: write # required for npm provenance (--provenance)
 
 jobs:
   publish:
@@ -74,16 +57,6 @@ jobs:
       - name: Build the workspace (tsc)
         run: npm run build
 
-      # Manual dispatch with dry-run=true: validate the manifests/tarballs only.
-      # No token needed; nothing is uploaded.
+      # Validate the manifests and tarballs only; nothing is uploaded.
       - name: Publish (dry run)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
         run: npm publish --workspaces --access public --dry-run
-
-      # Real publish: a manual dispatch with dry-run=false. Private packages
-      # (the workspace root) are skipped by `npm publish --workspaces`.
-      - name: Publish to npm
-        if: ${{ !inputs.dry-run }}
-        run: npm publish --workspaces --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
