@@ -208,6 +208,30 @@ template <std::size_t... N>
 }
 
 /**
+ * @brief Payload from which an in-process write row builds its values, and frees them, outside
+ *        the timed region, on both engines (#1905); see @ref kStagedBuffers.
+ *
+ * Below it the producer's allocation and copy are a small share of a write, and the rows keep
+ * the history they were banked with. From 1 KiB the copy is most of the size slope, so a row
+ * that timed it measured the producer, not the engine. `bench_libtracer`'s HEAP `inproc` rows
+ * and `bench_zenoh`'s `Bytes` construction switch at the same size, so the two engines' rows
+ * stay drawn on the same terms.
+ */
+inline constexpr std::size_t kProducerUntimedFrom = 1024;
+
+/**
+ * @brief Distinct payload buffers a staged row builds once and writes in turn (#1905).
+ *
+ * A staged row's producer allocates and copies these before any timing and frees them at the
+ * end, so no window holds a payload allocation, copy or free. Eight keeps the staged payload
+ * at 512 KiB for a 64 KiB row while the graph still receives a different buffer each write.
+ */
+inline constexpr std::size_t kStagedBuffers = 8;
+
+/** @brief Values a staged throughput phase hands out per untimed staging round. */
+inline constexpr std::size_t kStagedChunk = 256;
+
+/**
  * @brief Fan-out widths filling the two widest gaps in `kFanouts`, chosen where the
  *        dispatch cost model is expected to BREAK (#844).
  *
@@ -684,6 +708,79 @@ template <typename Op>
     // keeps the convention its history was recorded under.
     std::sort(ps.begin(), ps.end());
     t.p50_ps = ps[std::min(ps.size() - 1, ps.size() / 2)];
+    return t;
+}
+
+/**
+ * @brief @ref time_batches for an operation whose inputs are built ahead (#1905).
+ *
+ * The same calibration, window floor and estimators, with @p stage called untimed before every
+ * window, the calibration's included, to prepare what the next `batch` calls of @p op consume.
+ * Its `ops_per_s` is over the timed windows only, since part of the wall-clock went to staging.
+ * A function of its own rather than a parameter of @ref time_batches: a no-op stage threaded
+ * through that loop changed its code, and with it every batch row's figure, by a few percent.
+ *
+ * @param stage     Called with the coming window's batch, before the window starts.
+ * @param op        The operation; consumes one staged input per call.
+ * @param budget_ns Time budget, staging included.
+ * @param max_ops   Operation budget for the timed loop.
+ * @return The per-op figures; see @ref batch_timing_t.
+ */
+template <typename Stage, typename Op>
+[[nodiscard]] batch_timing_t time_staged_batches(Stage&& stage, Op&& op, std::uint64_t budget_ns,
+                                                 std::size_t max_ops) {
+    std::size_t batch = 1;
+    for (; batch < kMaxBatch; batch *= 2) {
+        stage(batch);
+        const std::uint64_t a = now_ns();
+        for (std::size_t i = 0; i < batch; ++i) op();
+        if (now_ns() - a >= kBatchWindowTargetNs) break;
+    }
+    const auto window = [&] {
+        stage(batch);
+        const std::uint64_t a = now_ns();
+        for (std::size_t i = 0; i < batch; ++i) op();
+        return now_ns() - a;
+    };
+    const std::size_t want =
+        std::max(kMinBatchSamples, std::min(samples_for_budget(window, budget_ns),
+                                            max_ops / std::max<std::size_t>(1, batch) + 1));
+    std::vector<double> ps(want);  // reserved and touched before timing (#1803)
+    ps.clear();
+
+    std::uint64_t min_window = std::numeric_limits<std::uint64_t>::max();
+    std::size_t ops = 0;
+    std::uint64_t timed = 0;
+    std::size_t recalibrations = 0;
+    std::uint64_t t0 = now_ns();
+    while (ps.size() < kMinBatchSamples || (now_ns() - t0 < budget_ns && ops < max_ops)) {
+        const std::uint64_t w = window();
+        if (w < kMinBatchWindowNs) {  // a misled calibration, recovered as time_batches does
+            if (batch >= kMaxBatch) window_floor_breached(w, batch);
+            batch *= 2;
+            ++recalibrations;
+            ps.clear();
+            min_window = std::numeric_limits<std::uint64_t>::max();
+            ops = 0;
+            timed = 0;
+            t0 = now_ns();
+            continue;
+        }
+        min_window = std::min(min_window, w);
+        ps.push_back(per_op_ps(w, batch));
+        ops += batch;
+        timed += w;
+    }
+
+    batch_timing_t t;
+    t.batch = batch;
+    t.recalibrations = recalibrations;
+    t.samples = ps.size();
+    t.min_window_ns = min_window;
+    t.ops_per_s = timed > 0 ? static_cast<double>(ops) * 1e9 / static_cast<double>(timed) : 0.0;
+    t.mean_ps = std::accumulate(ps.begin(), ps.end(), 0.0) / static_cast<double>(ps.size());
+    std::sort(ps.begin(), ps.end());
+    t.p50_ps = ps[std::min(ps.size() - 1, ps.size() / 2)];  // Latency::summarize's convention
     return t;
 }
 

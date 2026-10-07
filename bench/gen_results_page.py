@@ -182,8 +182,10 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "bench_libtracer.cpp", "inproc", ("dispatch", "routing", "memory"),
         "Drives the in-process hot path — resolve a vertex, write a value, notify, deliver — "
         "swept over fan-out, payload size, topic count, thread count, endpoint type, value "
-        "backend and dispatch mode. An `inproc` op includes the producer's own allocation and "
-        "copy of the value; `inproc-borrow` copies no payload but still allocates per write. "
+        "backend and dispatch mode. Below 1 KiB an `inproc` op includes the producer's own "
+        "allocation and copy of the value; from 1 KiB the value is built and freed off the "
+        "clock and the op is the write alone. `inproc-borrow` copies no payload but still "
+        "allocates per write. "
         "The fan-out, payload and topic sweeps also publish a `<mode>-batch` twin timed over a "
         "calibrated batch; the grid, `eptype-*`, `mixed` and `inproc-mt*` rows have none. "
         "Delivery rates are counted at the subscriber, and a `dce-canary` row fails the run "

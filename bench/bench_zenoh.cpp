@@ -27,10 +27,16 @@
  *     rather than hidden in the row.
  *   - **Equal payload bytes.** Each put carries @ref bench::value_wire_bytes bytes: the bytes
  *     libtracer moves for the row's value, header included. Rows stay keyed by the value size.
+ *   - **The producer's build on the same side of the clock.** Below
+ *     @ref bench::kProducerUntimedFrom each timed put builds its `Bytes` (an allocation and a
+ *     payload copy), as each libtracer `inproc` write builds its owned value; from 1 KiB both
+ *     engines build their values before the clock starts, free them after it stops, and time
+ *     the put alone (#1905).
  *   - **Resolution against resolution.** `inproc-path` puts through `Session::put` on a
  *     pre-built `KeyExpr`, resolved on every put, as libtracer's `inproc-path` writes by a
  *     pre-parsed path. The bound spelling is the `topics-bound` row.
  */
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -38,6 +44,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(__linux__)
@@ -138,6 +145,16 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
         else
             session.put(kes[i % E], Bytes(payload));
     };
+    // From 1 KiB the producer's `Bytes` (an allocation and a copy of the payload) is built
+    // before the clock starts and freed after it stops, as bench_libtracer's owned values are
+    // (#1905).
+    const bool staged = S >= kProducerUntimedFrom;
+    const auto put_built = [&](std::size_t i, Bytes&& b) {
+        if (addr == addr_t::BOUND)
+            pubs[i % E].put(std::move(b));
+        else
+            session.put(kes[i % E], std::move(b));
+    };
     std::this_thread::sleep_for(std::chrono::milliseconds(150));  // let pub<->sub match
 
     const std::size_t MSGS = publishes_for(F, budget);
@@ -152,12 +169,38 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
 
     recv.store(0);
     const runtime_cpu_t rt0 = runtime_cpu();
-    const auto t0 = now_ns();
-    for (std::size_t i = 0; i < MSGS; ++i) publish(i);
-    const auto deadline = Clock::now() + std::chrono::seconds(30);
-    while (recv.load(std::memory_order_relaxed) < want && Clock::now() < deadline)
-        std::this_thread::yield();
-    const std::uint64_t wall_ns = now_ns() - t0;
+    std::uint64_t wall_ns = 0;
+    if (staged) {
+        // The window is the sum of the put runs plus the final drain. The producer's `Bytes` are
+        // built once, `kStagedBuffers` of them, and each put takes a shallow clone, staged between
+        // runs: no allocation, copy or free of a payload is inside a run, as in bench_libtracer's
+        // staged rows (#1905).
+        std::vector<Bytes> bufs;
+        for (std::size_t b = 0; b < kStagedBuffers; ++b) bufs.emplace_back(payload);
+        std::vector<Bytes> built;
+        built.reserve(kStagedChunk);
+        for (std::size_t i = 0; i < MSGS;) {
+            const std::size_t n = std::min(kStagedChunk, MSGS - i);
+            built.clear();
+            for (std::size_t k = 0; k < n; ++k)
+                built.push_back(bufs[(i + k) % kStagedBuffers].clone());
+            const auto a = now_ns();
+            for (std::size_t k = 0; k < n; ++k, ++i) put_built(i, std::move(built[k]));
+            wall_ns += now_ns() - a;
+        }
+        const auto a = now_ns();
+        const auto deadline = Clock::now() + std::chrono::seconds(30);
+        while (recv.load(std::memory_order_relaxed) < want && Clock::now() < deadline)
+            std::this_thread::yield();
+        wall_ns += now_ns() - a;
+    } else {
+        const auto t0 = now_ns();
+        for (std::size_t i = 0; i < MSGS; ++i) publish(i);
+        const auto deadline = Clock::now() + std::chrono::seconds(30);
+        while (recv.load(std::memory_order_relaxed) < want && Clock::now() < deadline)
+            std::this_thread::yield();
+        wall_ns = now_ns() - t0;
+    }
     const runtime_cpu_t rt1 = runtime_cpu();
     const double secs = wall_ns / 1e9;
     const std::uint64_t got = recv.load(std::memory_order_relaxed);
@@ -176,6 +219,17 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
     constexpr std::uint64_t kSpinCap = 5'000'000;  // yields (~1s) before giving up a sample
     for (std::size_t i = 0; i < LATN; ++i) {
         const std::uint64_t want_i = recv.load(std::memory_order_relaxed) + F;
+        if (staged) {
+            Bytes b(payload);              // the producer's build, before the clock starts
+            const Bytes keep = b.clone();  // and its free, after the clock stops
+            const auto start = now_ns();
+            put_built(i, std::move(b));
+            for (std::uint64_t spins = 0;
+                 recv.load(std::memory_order_relaxed) < want_i && spins < kSpinCap; ++spins)
+                std::this_thread::yield();
+            lat.add(now_ns() - start);
+            continue;
+        }
         const auto start = now_ns();
         publish(i);
         for (std::uint64_t spins = 0;

@@ -39,6 +39,7 @@
 #include "bench_common.hpp"
 #include "bench_process.hpp"
 #include "delivery_count.hpp"
+#include "inproc_staged.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/mem_source.hpp"
@@ -162,17 +163,20 @@ void emit_batch_row(const char* mode, std::size_t S, std::size_t F, std::size_t 
  * writes through the path registry (lookup each publish) instead of the resolved
  * vertex_handle_t hot path — the honest "many topics" measurement.
  *
- * **What a HEAP row times includes the producer.** Each timed op builds the value it writes
- * (`owned_view`: one segment allocation and an S-byte copy) and then writes it, so above
- * 1 KiB part of the size slope is the producer's copy, not the library's. It stays inside the
- * timed region on purpose (#1805): the Zenoh rows these are drawn against copy the payload on
- * `put` too, and the history keyed `inproc` was recorded with it. The labels on the page and
- * in `docs/methodology.md` say so; `inproc-borrow` is the row without the copy.
+ * **What a HEAP row times depends on its payload (#1905).** Below @ref kProducerUntimedFrom
+ * each timed op builds the value it writes (`owned_view`: one segment allocation and an S-byte
+ * copy) and then writes it, as these rows always have (#1805). From 1 KiB the run is
+ * `bench::run_inproc_staged` (inproc_staged.cpp), which keeps the producer's buffers off the
+ * clock in every phase.
+ * `inproc-borrow` is the row whose producer copies nothing at any size.
  */
 void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                 const char* mode, std::uint64_t budget = kDeliveryBudget,
                 std::uint64_t latbudget = kLatencyDeliveryBudget,
                 tr::mem::block_source_t* src = nullptr, rows_t rows = rows_t::BOTH) {
+    if (alloc == alloc_t::HEAP && S >= kProducerUntimedFrom)
+        return run_inproc_staged(S, F, E, by_path, mode, budget, latbudget, src,
+                                 rows != rows_t::BATCH, rows != rows_t::QUANTIZED, value_tlv(S));
     // src==nullptr keeps the process-default source, which folds back onto the global-heap
     // LKV (make_shared) exactly as before #873 phase 1; an injected source routes the
     // per-write LKV allocate_shared through the graph's internal pmr adapter over it — the
@@ -659,51 +663,36 @@ void run_grid() {
 
 /** @brief Mixed workload: 128 topics with varied fan-out (1..16) and payloads (1..8192). */
 void run_mixed() {
-    graph_t g;
-    constexpr std::size_t E = 128;
-    std::vector<vertex_handle_t> verts;
-    std::vector<std::size_t> fan;
-    std::vector<std::vector<std::byte>> tlvs;
-    std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
-    std::size_t total_fan = 0;
-    for (std::size_t e = 0; e < E; ++e) {
-        path_t path = *path_t::parse("/bench/m" + std::to_string(e));
-        auto v = g.register_vertex(path, role_t::STORED_VALUE);
-        const std::size_t F = std::size_t{1} << (e % 5);  // 1,2,4,8,16
-        for (std::size_t f = 0; f < F; ++f) (void)g.subscribe(path, cb);
-        verts.push_back(v);
-        fan.push_back(F);
-        total_fan += F;
-        tlvs.push_back(value_tlv(kSizes[e % 5]));
-    }
+    // The topology lives in delivery_count.hpp, so its self-test can force it to lose
+    // deliveries and see the counted rate fall (#1905).
+    mixed_fixture_t fx(value_tlv, std::span<const std::size_t, 5>(kSizes));
+    constexpr std::size_t E = mixed_fixture_t::kTopics;
+    const auto put = [&](std::size_t i) {
+        const std::size_t e = i % E;
+        (void)fx.g.write(fx.verts[e], owned_view(fx.tlvs[e]));
+    };
     constexpr std::size_t MSGS = 100000;
-    for (std::size_t i = 0; i < 1000; ++i) (void)g.write(verts[i % E], owned_view(tlvs[i % E]));
+    for (std::size_t i = 0; i < 1000; ++i) put(i);
 
     // `want` is the arithmetic ceiling, summed outside the timed loop; the published figure is
     // what the subscribers COUNTED (#1805).
-    std::uint64_t want = 0;
-    for (std::size_t i = 0; i < MSGS; ++i) want += fan[i % E];
-    recv.store(0);
+    const std::uint64_t want = fx.want(MSGS);
+    fx.recv.store(0);
     const auto t0 = now_ns();
-    for (std::size_t i = 0; i < MSGS; ++i) {
-        const std::size_t e = i % E;
-        (void)g.write(verts[e], owned_view(tlvs[e]));
-    }
+    for (std::size_t i = 0; i < MSGS; ++i) put(i);
     const double secs = (now_ns() - t0) / 1e9;
-    const double deliv_s = delivered_rate("mixed", 0, total_fan / E, E, want,
-                                          recv.load(std::memory_order_relaxed), secs);
+    const double deliv_s = delivered_rate("mixed", 0, fx.total_fan / E, E, want,
+                                          fx.recv.load(std::memory_order_relaxed), secs);
 
     constexpr std::size_t kMixedLatN = 20000;
     Latency lat;
     lat.reserve(kMixedLatN);
     for (std::size_t i = 0; i < kMixedLatN; ++i) {
-        const std::size_t e = i % E;
         const auto a = now_ns();
-        (void)g.write(verts[e], owned_view(tlvs[e]));
+        put(i);
         lat.add(now_ns() - a);
     }
-    emit("libtracer", "mixed", 0, total_fan / E, E, MSGS / secs, deliv_s, 0.0, lat.summarize());
+    emit("libtracer", "mixed", 0, fx.total_fan / E, E, MSGS / secs, deliv_s, 0.0, lat.summarize());
 }
 
 /**
@@ -722,29 +711,15 @@ void run_inproc_mt(std::size_t T) {
     constexpr std::size_t LATN = 200'000;    // per-thread samples (latency phase)
 
     // Each thread owns everything it touches: its own graph, vertex, subscriber
-    // counter, payload buffer, and the single reused borrowed view.
-    struct worker_t {
-        graph_t g;
-        std::optional<vertex_handle_t> v;
-        std::vector<std::byte> buf;
-        view_t view;
-        std::atomic<std::uint64_t> recv{0};
-        std::vector<std::uint64_t> lat;
-    };
+    // counter, payload buffer, and the single reused borrowed view. The worker lives in
+    // delivery_count.hpp, so its self-test can force it to lose deliveries (#1905).
+    using worker_t = counting_writer_t;
     std::vector<std::unique_ptr<worker_t>> ws;
     ws.reserve(T);
     const std::vector<std::byte> tlv = value_tlv(S);
     for (std::size_t t = 0; t < T; ++t) {
         auto w = std::make_unique<worker_t>();
-        w->buf = tlv;  // per-thread copy => per-thread segment, no shared refcount
-        w->v = w->g.register_vertex(*path_t::parse("/bench/mt"), role_t::STORED_VALUE);
-        (void)w->g.subscribe(
-            *path_t::parse("/bench/mt"),
-            [](void* ctx, const tr::graph::value_t&) {
-                static_cast<worker_t*>(ctx)->recv.fetch_add(1, std::memory_order_relaxed);
-            },
-            w.get());
-        w->view = borrowed_view(w->buf);
+        w->wire(tlv);  // per-thread copy => per-thread segment, no shared refcount
         ws.push_back(std::move(w));
     }
 
@@ -1168,6 +1143,7 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
         const view_t warm = src.materialize(backend);
         (void)warm;
     }  // fault-in / warm caches
+    // THROUGHPUT: the whole loop timed as one block, as these rows always were.
     const std::uint64_t t0 = now_ns();
     for (std::size_t i = 0; i < iters; ++i) {
         if (copy) {
@@ -1190,19 +1166,33 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
     }
     const double secs = static_cast<double>(now_ns() - t0) / 1e9;
     const double ops = secs > 0 ? iters / secs : 0;
-    // ONE metric (#1804): the whole loop is timed as one block, so there is exactly one
-    // measurement here — operations per second. It used to be published three ways (as
-    // throughput, and as a p50 and a mean that were both `1e9 / ops` truncated to whole
-    // nanoseconds), which the gate then counted as three legs agreeing with each other. The
-    // latency columns are 0, read everywhere as "not measured"; the history still charts the
-    // same figure as ns/delivery. Measuring one iteration between two clock reads is not the
-    // fix either: an alloc+free costs the same order as `clock_gettime`.
-    const Latency::Summary lat{};
+    // LATENCY, measured on its own (#1905): the same operation in window-calibrated batches,
+    // p50 and mean per op in picoseconds, as many operations as the bulk loop ran. The row used
+    // to publish the bulk figure three ways, then once with its latency columns at 0 (#1804);
+    // now each column is its own measurement. No p99: a percentile of batch means is not an
+    // operation's tail. Taken AFTER the bulk loop, so the throughput leg runs on the heap
+    // state it was banked on.
+    // The same operation as the loop above, which is left exactly as it was banked: folding the
+    // two into one lambda moved the throughput leg 4-8% on every `lkv` row, the pool's included.
+    const auto one = [&] {
+        if (copy) {
+            const view_t flat = src.materialize(backend);
+            if (flat.empty()) ++exhausted;
+            bench::do_not_optimize(flat);
+        } else if (tr::view::segment_t* seg = backend.alloc(S); seg == nullptr) {
+            ++exhausted;
+        } else {
+            const tr::view::segment_ptr_t p = tr::view::segment_ptr_t::adopt(seg);
+            bench::do_not_optimize(p);
+        }
+    };
+    constexpr std::uint64_t kLatBudgetNs = 1'000'000'000ULL;  // a backstop; iters ends the loop
+    const bench::batch_timing_t t = bench::time_batches(one, kLatBudgetNs, iters);
     // Bandwidth only means something for the copy arm. The alloc-only arm moves NO
     // payload — it takes a block and gives it back — so reporting iters*S/secs there
     // published a fabricated figure (a "151 GB/s" zero-copy allocation).
     const double mb_per_s = copy ? static_cast<double>(iters) * S / (secs * 1e6) : 0.0;
-    emit("libtracer", mode, S, 1, 1, ops, ops, mb_per_s, lat);
+    bench::emit_batch("libtracer", mode, S, 1, 1, ops, ops, mb_per_s, t);
     return {ops, exhausted};
 }
 

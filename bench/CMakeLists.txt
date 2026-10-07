@@ -37,7 +37,7 @@ else()
     target_include_directories(libtracer BEFORE PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/preset)
 endif()
 
-add_executable(bench_libtracer bench_libtracer.cpp)
+add_executable(bench_libtracer bench_libtracer.cpp inproc_staged.cpp)
 target_link_libraries(bench_libtracer PRIVATE libtracer)
 target_compile_options(bench_libtracer PRIVATE -Wall -Wextra)
 

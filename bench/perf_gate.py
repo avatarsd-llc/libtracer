@@ -189,7 +189,9 @@ DEFAULT_TIER = "advisory"
 # ungated. Do not restate this list as "anywhere on the dispatch surface" —
 # docs/methodology.md did, and that sentence reaches the public performance page (#1041):
 #   inproc / inproc-borrow  — the canonical 1:1 writes: owned copy (producer alloc+copy
-#                             included) / loaned view (no copy, still two allocs a write)
+#                             included below 1 KiB; built and freed off the clock from
+#                             1 KiB, #1905)
+#                             / loaned view (no copy, still two allocs a write)
 #   fan-out 1024            — the subscriber fan-out loop
 #   inproc-path @ 8192 ep   — the resolver canary (registry lookup per write)
 #   mixed                   — the composed realistic topology
@@ -279,7 +281,9 @@ DEFAULT_TIER = "advisory"
 # rows also come from output the default sweep already emits, so they too add no wall-clock.
 # Both run in the sub-100 ns band, so `LAT_TICK_NS` tick-guards their latency legs and the
 # throughput leg (bulk-timed) carries them; the #1768 step (17.6 -> 47 ns, 27 -> 54 ns)
-# clears every leg.
+# clears every leg. Since #1905 those latency legs are their own measurement (a batch run
+# of the operation, in picoseconds) rather than the bulk figure read again; they stay
+# tick-guarded until the A/A null carries them.
 #
 # EDITORS: this list is the answer to "how many points does the per-PR gate watch?",
 # and `docs/methodology.md` (§What actually stops a regression) states that count and

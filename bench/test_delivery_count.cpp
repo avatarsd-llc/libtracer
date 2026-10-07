@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <span>
 #include <string>
 #include <vector>
@@ -225,10 +226,115 @@ void a_shed_stream_moves_the_eptype_stream_rate() {
           "...and the counted rate falls below the publish rate");
 }
 
+/**
+ * @brief A source that serves from the default root until told to refuse, and then refuses
+ *        every request: a topology is built on it healthy, then made to lose deliveries.
+ */
+class switchable_source_t final : public tr::mem::block_source_t {
+   public:
+    switchable_source_t() : tr::mem::block_source_t("switchable") {}
+
+    /** @brief Serve from the default root, or refuse once @ref refuse is set. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (refuse) {
+            ++refusals;
+            return nullptr;
+        }
+        return tr::mem::default_root().try_alloc(bytes, align);
+    }
+
+    /** @brief Hand back what the default root served. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::default_root().release(p, bytes, align);
+    }
+
+    bool refuse = false;        /**< @brief Refuse every request from now on. */
+    std::uint64_t refusals = 0; /**< @brief try_alloc calls refused. */
+};
+
+/** @brief The `mixed` row's five payload sizes (`bench::kSizes`). */
+constexpr std::size_t kMixedSizes[] = {1, 8, 64, 1024, 8192};
+
+/**
+ * @brief @p msgs writes, round-robin over the `mixed` topics, each one allowed to fail; a
+ *        write the graph cannot fund is a delivery lost, whichever way it reports it.
+ */
+[[nodiscard]] std::uint64_t mixed_writes(bench::mixed_fixture_t& fx, std::size_t msgs) {
+    fx.recv.store(0);
+    for (std::size_t i = 0; i < msgs; ++i) {
+        const std::size_t e = i % bench::mixed_fixture_t::kTopics;
+        try {
+            (void)fx.g.write(fx.verts[e], owned_view(fx.tlvs[e]));
+        } catch (const std::bad_alloc&) {  // the graph's pmr adapter reports a refusal so
+        }
+    }
+    return fx.recv.load();
+}
+
+/**
+ * @brief Lost deliveries move the `mixed` delivery rate (#1905).
+ *
+ * The same topology the row writes, on a source that is switched to refuse once it is built.
+ * The counted rate must fall below the arithmetic ceiling; the healthy twin must reach it.
+ */
+void a_lost_delivery_moves_the_mixed_rate() {
+    constexpr std::size_t kMsgs = 1280;
+    const std::span<const std::size_t, 5> sizes(kMixedSizes);
+    bench::mixed_fixture_t healthy(value_tlv, sizes);
+    const std::uint64_t want = healthy.want(kMsgs);
+    const std::uint64_t ok = mixed_writes(healthy, kMsgs);
+    check(ok == want, "a healthy mixed topology delivers its whole fan-out");
+
+    switchable_source_t src;
+    bench::mixed_fixture_t lossy(value_tlv, sizes, src);
+    src.refuse = true;
+    const std::uint64_t got = mixed_writes(lossy, kMsgs);
+    check(src.refusals > 0, "the mixed graph's source was asked and refused");
+    check(got < want, "a refusing mixed graph delivers less than its fan-out");
+    check(bench::delivered_rate("mixed", 0, 6, 128, want, got, 1.0) < static_cast<double>(want),
+          "...and the counted mixed rate falls below the arithmetic one");
+}
+
+/**
+ * @brief Lost deliveries move the `inproc-mt` delivery rate (#1905).
+ *
+ * One worker as the row builds it, on a source switched to refuse once it is wired. The
+ * worker's count must fall short of its writes; the healthy twin must match them.
+ */
+void a_lost_delivery_moves_the_inproc_mt_rate() {
+    constexpr std::size_t kMsgs = 1000;
+    const std::vector<std::byte> tlv = value_tlv(64);
+    const auto writes = [&](bench::counting_writer_t& w) {
+        w.recv.store(0);
+        for (std::size_t i = 0; i < kMsgs; ++i) {
+            try {
+                (void)w.g.write(*w.v, w.view);
+            } catch (const std::bad_alloc&) {
+            }
+        }
+        return w.recv.load();
+    };
+    bench::counting_writer_t healthy;
+    healthy.wire(tlv);
+    check(writes(healthy) == kMsgs, "a healthy inproc-mt worker delivers every write");
+
+    switchable_source_t src;
+    bench::counting_writer_t lossy(src);
+    lossy.wire(tlv);
+    src.refuse = true;
+    const std::uint64_t got = writes(lossy);
+    check(src.refusals > 0, "the worker graph's source was asked and refused");
+    check(got < kMsgs, "a refusing inproc-mt worker delivers fewer than it was written");
+    check(bench::delivered_rate("inproc-mt1", 64, 1, 1, kMsgs, got, 1.0) < kMsgs,
+          "...and the counted inproc-mt rate falls below the publish rate");
+}
+
 }  // namespace
 
 int main() {
     a_shed_stream_moves_the_eptype_stream_rate();
+    a_lost_delivery_moves_the_mixed_rate();
+    a_lost_delivery_moves_the_inproc_mt_rate();
     a_shed_delivery_counts_below_the_arithmetic();
     a_healthy_fan_out_counts_the_arithmetic();
     the_published_rate_is_the_counted_one();

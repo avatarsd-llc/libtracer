@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 
 #include "bench_common.hpp"
 
@@ -157,6 +158,32 @@ int main() {
     expect(s.batch > 1, "the recovered batch is larger than the misled one");
     expect(s.min_window_ns >= bench::kMinBatchWindowNs, "every kept window clears the floor");
     expect(s.samples == bench::kMinBatchSamples, "samples restart at the recovered batch");
+
+    // A staged loop (#1905): the stage is called, untimed, with the coming window's batch
+    // before every window, and the op consumes exactly what it built. Staging costs 50 ns per
+    // operation here and the op a few ns, so a rate that counted the staging would read under
+    // 20 M ops/s; the windows alone read hundreds of millions.
+    std::size_t staged = 0;
+    bool short_stage = false;
+    const bench::batch_timing_t st = bench::time_staged_batches(
+        [&](std::size_t n) {
+            if (staged != 0) short_stage = true;  // the last window left values unused
+            const std::uint64_t until = bench::now_ns() + n * 50;
+            while (bench::now_ns() < until) {
+            }
+            staged = n;
+        },
+        [&] {
+            if (staged == 0)
+                short_stage = true;
+            else
+                --staged;
+            tiny_op();
+        },
+        5'000'000ULL, std::numeric_limits<std::size_t>::max());
+    expect(!short_stage, "every window consumes exactly the batch its stage built");
+    expect(st.min_window_ns >= bench::kMinBatchWindowNs, "staged windows clear the floor too");
+    expect(st.ops_per_s > 1e8, "a staged rate is over the timed windows, not the staging");
 
     // The `dce-canary` verdict (#1805): kept work scales with its length, deleted work does not.
     expect(bench::dce_canary_holds(10'000, 75'000, 8, 64), "a 7.5x ratio on 8x work holds");
