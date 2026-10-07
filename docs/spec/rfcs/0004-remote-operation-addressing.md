@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0004 — Remote operation addressing: path-as-route + the `FWD`/`FIELD` frames
 
-<!-- status: accepted; superseded-in-part-by: RFC-0029 -->
+<!-- status: accepted; superseded-in-part-by: RFC-0029, RFC-0030 -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0004 |
 | **Title** | Remote operation addressing: path-as-route + the `FWD`/`FIELD` frames |
-| **Status** | **accepted** (2026-06-28). **Amended by [RFC-0029](0029-one-path-primitive.md)** (accepted 2026-09-30, §12.4): §B's "a reply does not accumulate `src`" is amended — a reply's `src` is the responder's address from the origin's vantage, accumulated head-first by every host on the way back, as a PAIR where one can be issued and as NAMEs where not; §F is reaffirmed and made spelling-independent. §A/§B remain the model; §D, §E and §E.1 are untouched, and §E.1's `COMPACT` is named RFC-0029 §9.2's single exception to stateless forwarding. **Amendment 3 (2026-10-03, §B)**: a remote `AWAIT`'s deadline is the requester's; `await_timeout` is a hint the terminus MAY ignore. |
+| **Status** | **accepted** (2026-06-28). **Amended by [RFC-0029](0029-one-path-primitive.md)** (accepted 2026-09-30, §12.4): §B's "a reply does not accumulate `src`" is amended — a reply's `src` is the responder's address from the origin's vantage, accumulated head-first by every host on the way back, as a PAIR where one can be issued and as NAMEs where not; §F is reaffirmed and made spelling-independent. §A/§B remain the model; §D, §E and §E.1 are untouched, and §E.1's `COMPACT` is named RFC-0029 §9.2's single exception to stateless forwarding. **Amendment 3 (2026-10-03, §B)**: a remote `AWAIT`'s deadline is the requester's; `await_timeout` is a hint the terminus MAY ignore. **Amended by [RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md)** (accepted 2026-10-07): §B, §C, §D, §H and Amendments 2–3. |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-06-28 |
 | **Accepted** | 2026-06-28 — maintainer/BDFL; no registered second-implementer to object, so the 14-day window is nominal (GOVERNANCE.md §Roles). Implementation tracked by ADR-0035. |

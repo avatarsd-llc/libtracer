@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0030 — The host API walks the graph: a graph-owned path object, creation refused by default, the reply as a remote write, `AWAIT` and `REPLY` retired
 
-<!-- status: proposed -->
+<!-- status: accepted -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0030 |
 | **Title** | The host API walks the graph: a graph-owned path object, creation refused by default, the reply as a remote write, `AWAIT` and `REPLY` retired |
-| **Status** | **proposed** (2026-10-07). The maintainer approves it. The direction of §§5–10 was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (stage 4 of "one walk"). This document turns that ruling into normative text, and §18 lists the choices the ruling left open, each with a recommendation. |
+| **Status** | **accepted** (2026-10-07; proposed the same day), maintainer-approved with every §18 recommendation; comment window waived by default and not invoked. The direction of §§5–10 was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (stage 4 of "one walk"). This document turns that ruling into normative text, and §18 lists the choices the ruling left open, each with a recommendation. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-07 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -956,6 +956,8 @@ set, not as a byte vector.
    leaner edge, not a receiver waiter.
 
 ## 18. Questions for the maintainer, each with a recommendation
+
+**Ruled 2026-10-07:** the maintainer accepted every recommendation below as written.
 
 1. **Does the terminus stamp its own arrival door (§8.4)?** *Recommendation: yes.* It is ruling 9's
    model at the last node, it makes the reply an ordinary walk, and it deletes the terminus-reply
