@@ -384,7 +384,11 @@ Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `batch.hpp`,
 :members:
 ```
 
-```{doxygenfunction} tr::wire::encode
+```{doxygenfunction} tr::wire::encode(const tlv_t&)
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::encode(const tlv_t&, mem::bytes_t&)
 :project: libtracer
 ```
 

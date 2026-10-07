@@ -788,6 +788,14 @@ a reply already being assembled.
 :project: libtracer
 ```
 
+```{doxygentypedef} tr::graph::subject_lookup_fn_t
+:project: libtracer
+```
+
+```{doxygentypedef} tr::graph::subject_resolver_fn_t
+:project: libtracer
+```
+
 ### Handlers and delivery policy
 
 ```{doxygenstruct} tr::graph::write_ctx_t
