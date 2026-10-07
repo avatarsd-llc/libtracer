@@ -204,6 +204,47 @@ struct reply_route_t {
 [[nodiscard]] view::rope_t assemble_error_reply(const reply_route_t& route, status_t status,
                                                 mem::mem_backend_t& egress);
 
+/**
+ * @brief The egress an acknowledgement reply is built through: segments placed in the CALLER's
+ *        storage while they fit, the injected egress backend once they do not (#1658).
+ *
+ * An acknowledgement (`kind=RESULT`, no payload) is a reply head and nothing else, so its head
+ * segment was the one allocation an acked remote write still made on the receive side after the
+ * ingress loan (RFC-0028 §6.9). The terminus sends the reply before its own frame returns, so
+ * the head can live in that frame: @ref alloc places the segment header and its bytes in the
+ * storage the caller passed to `op_resolver_t::resolve`, the head is written through the same
+ * span-form cursor (@ref emit_cursor_t), and no allocator is reached. A request that does not
+ * fit (a long route, a mint and an echo beside the head) draws the rest from @p overflow,
+ * exactly as before, so the store is a fast path and never a limit.
+ *
+ * Lives on the resolve's own stack frame and is used only during it. The segments it places
+ * name @ref caller_store_backend as their reclaimer, never this object, so a reply that is
+ * released after the resolve returns does not reach back into a dead frame.
+ */
+class reply_store_t final : public mem::mem_backend_t {
+   public:
+    /** @brief A store over @p store, overflowing into @p overflow. */
+    reply_store_t(std::span<std::byte> store, mem::mem_backend_t& overflow) noexcept
+        : mem_backend_t("reply_store"), free_(store), overflow_(overflow) {}
+
+    /**
+     * @brief Place a @p size-byte segment in the caller's storage, or draw it from the overflow
+     *        backend when the storage left cannot hold it.
+     * @retval nullptr The overflow backend refused.
+     */
+    [[nodiscard]] view::segment_t* alloc(std::size_t size, mem::alloc_hint_t hint) override;
+
+   private:
+    std::span<std::byte> free_;    /**< @brief The caller's storage not yet handed out. */
+    mem::mem_backend_t& overflow_; /**< @brief Where a segment that does not fit comes from. */
+};
+
+/**
+ * @brief The reclaimer of every segment @ref reply_store_t places in caller storage: it ends
+ *        the segment's lifetime and frees nothing, because the bytes are the caller's.
+ */
+[[nodiscard]] mem::mem_backend_t& caller_store_backend() noexcept;
+
 /** @brief Byte length of @ref error_status_tail — `STATUS{ ERROR{ VALUE u16 } }`, three
  *         4-byte headers plus the 2-byte registered code. */
 inline constexpr std::size_t kErrorStatusTailBytes = 14;

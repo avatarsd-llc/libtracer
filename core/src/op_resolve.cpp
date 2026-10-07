@@ -14,7 +14,7 @@ namespace tr::graph {
 result_t<view::rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, const inbound_ref_t& inbound,
                                               const view::view_t* frame_view,
                                               const wire::path_ref_element_t* dst_label_target,
-                                              bool* deferred) {
+                                              bool* deferred, std::span<std::byte> reply_store) {
     // The ACL SUBJECT, derived HERE — at the terminus, from the frame's peer handle — and
     // never carried down the routing path as a string (#375 Part 2 ruling). The scratch
     // outlives the whole walk, which is what lets the supplier format into it and hand back
@@ -38,9 +38,12 @@ result_t<view::rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, const inbo
     // route copy of a remote subscribe's life. Un-injected it IS `flat`, which is where
     // both have always been taken, so this resolve stays byte-unchanged.
     mem::mem_backend_t& flat_be = flat_ != nullptr ? *flat_ : mem::heap_backend();
+    // The acknowledgement's egress (#1658): the caller's storage first, `egress` past it. An
+    // empty store places nothing, so a caller that passes none is byte-unchanged.
+    mem::mem_backend_t& egress = egress_ != nullptr ? *egress_ : mem::heap_backend();
+    reply_store_t ack(reply_store, egress);
     return resolve_node(graph_, arena_node{&fwd, 0}, inbound.link, subject, frame_view, flat_be,
-                        egress_ != nullptr ? *egress_ : mem::heap_backend(),
-                        retained_backend(flat_be), reverse_ref_fn_, reverse_ref_ctx_,
+                        egress, ack, retained_backend(flat_be), reverse_ref_fn_, reverse_ref_ctx_,
                         path_label_fn_, path_label_ctx_, dst_label_target, link_token_seam(inbound),
                         await_defer_seam(deferred));
 }

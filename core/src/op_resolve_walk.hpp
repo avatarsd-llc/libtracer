@@ -644,8 +644,8 @@ template <class N, class ReplyError>
 [[nodiscard]] result_t<view::rope_t> apply_op(
     graph_t& graph, const parsed_fwd_t<N>& req, vertex_handle_t v, std::string_view inbound_link,
     std::string_view subject, const view::view_t* frame_view, mem::mem_backend_t& flat,
-    mem::mem_backend_t& egress, mem::mem_backend_t& retained, const reply_route_t& route,
-    const ReplyError& reply_error, const field_path_t& field,
+    mem::mem_backend_t& egress, mem::mem_backend_t& ack, mem::mem_backend_t& retained,
+    const reply_route_t& route, const ReplyError& reply_error, const field_path_t& field,
     op_resolver_t::reverse_ref_fn_t reverse_ref_fn, void* reverse_ref_ctx,
     op_resolver_t::path_label_fn_t path_label_fn, void* path_label_ctx,
     link_token_seam_t link_token, await_defer_seam_t await_defer) {
@@ -887,9 +887,8 @@ template <class N, class ReplyError>
                                      std::move(reverse_route), subject, link_token.ask());
             if (!w) return assemble_error_reply(route, w.error(), egress);
             const reply_route_t ok = labelled_route();
-            return or_backpressure(
-                assemble_reply(ok, reply_kind_t::RESULT, {}, {}, 0, egress, mint), ok,
-                egress);  // OK, empty payload
+            return or_backpressure(assemble_reply(ok, reply_kind_t::RESULT, {}, {}, 0, ack, mint),
+                                   ok, egress);  // OK, empty payload: the ack (#1658)
         }
 
         // The stored written value, by the vertex's copy-or-share threshold (RFC-0028
@@ -913,8 +912,9 @@ template <class N, class ReplyError>
         if (req.no_reply) return view::rope_t{};
         if (!w) return assemble_error_reply(route, w.error(), egress);
         const reply_route_t ok = labelled_route();
-        return or_backpressure(assemble_reply(ok, reply_kind_t::RESULT, {}, {}, 0, egress, mint),
-                               ok,
+        // The acknowledgement is built through `ack` (#1658): the caller's reply store when it
+        // passed one, so an acked write allocates no reply head; `egress` otherwise.
+        return or_backpressure(assemble_reply(ok, reply_kind_t::RESULT, {}, {}, 0, ack, mint), ok,
                                egress);  // OK, empty payload
     }
     // A FIELD selector has no await surface, and silently dropping it was a lie
@@ -1013,10 +1013,11 @@ template <class N>
 [[nodiscard]] result_t<view::rope_t> resolve_node(
     graph_t& graph, const N& root, std::string_view inbound_link, std::string_view subject,
     const view::view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
-    mem::mem_backend_t& retained, op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
-    void* reverse_ref_ctx = nullptr, op_resolver_t::path_label_fn_t path_label_fn = nullptr,
-    void* path_label_ctx = nullptr, const wire::path_ref_element_t* dst_label_target = nullptr,
-    link_token_seam_t link_token = {}, await_defer_seam_t await_defer = {}) {
+    mem::mem_backend_t& ack, mem::mem_backend_t& retained,
+    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
+    op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr,
+    const wire::path_ref_element_t* dst_label_target = nullptr, link_token_seam_t link_token = {},
+    await_defer_seam_t await_defer = {}) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     parsed_fwd_t<N>& req = *parsed;
@@ -1201,7 +1202,7 @@ template <class N>
         if (!found) return reply_error(found.error());
         v = *found;
     }
-    return apply_op(graph, req, *v, inbound_link, subject, frame_view, flat, egress, retained,
+    return apply_op(graph, req, *v, inbound_link, subject, frame_view, flat, egress, ack, retained,
                     route, reply_error, *field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
                     path_label_ctx, link_token, await_defer);
 }

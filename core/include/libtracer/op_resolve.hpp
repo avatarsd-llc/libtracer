@@ -434,13 +434,24 @@ class op_resolver_t {
      *                     sink, `*deferred` is set, and the reply is an EMPTY rope that the
      *                     caller does not send: the sink answers later. Null keeps the
      *                     synchronous AWAIT.
+     * @param reply_store  Caller storage an ACKNOWLEDGEMENT reply (`kind=RESULT`, no payload:
+     *                     a WRITE or a subscribe that succeeded) is built in, so acking costs
+     *                     no allocation (#1658). The head segment, and on a mint or an echo
+     *                     the segments beside it, are placed here while they fit; whatever
+     *                     does not fit draws from the `egress` backend as before, so the
+     *                     reply bytes never depend on the size. Every other reply ignores it.
+     *                     Empty (the default) builds every reply through `egress`.
+     * @warning A reply built in @p reply_store holds views into it: release the returned rope,
+     *          and every clone of it, before the storage goes out of scope. Pass storage only
+     *          when the reply is sent and dropped in the caller's frame, as the router does.
      * @return The reply as a @ref view::rope_t (head segment + roped payload views),
      *         or a `status_t` on a malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(
         const wire::tlv_arena_t& fwd, const inbound_ref_t& inbound = {},
         const view::view_t* frame_view = nullptr,
-        const wire::path_ref_element_t* dst_label_target = nullptr, bool* deferred = nullptr);
+        const wire::path_ref_element_t* dst_label_target = nullptr, bool* deferred = nullptr,
+        std::span<std::byte> reply_store = {});
 
     /**
      * @brief Resolve a rope-delivered request FWD (the lazy `tlv_view_t` tier) and
@@ -466,13 +477,16 @@ class op_resolver_t {
      *                     logical request differently is the drift ADR-0053 §7's single walk
      *                     exists to make impossible.
      * @param deferred     The deferred-AWAIT out-flag, as the arena overload documents.
+     * @param reply_store  Caller storage for an acknowledgement reply, with the lifetime rule
+     *                     the arena overload documents.
      * @return The reply as a @ref view::rope_t, or a `status_t` on a
      *         malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(
         const wire::tlv_view_t& fwd, const inbound_ref_t& inbound = {},
         const view::view_t* frame_view = nullptr,
-        const wire::path_ref_element_t* dst_label_target = nullptr, bool* deferred = nullptr);
+        const wire::path_ref_element_t* dst_label_target = nullptr, bool* deferred = nullptr,
+        std::span<std::byte> reply_store = {});
 
     /**
      * @brief The responder's own reverse-direction element supplier (RFC-0024 §7.1

@@ -543,6 +543,116 @@ void test_saturated_reply_degrades_to_addressed_backpressure() {
     }
 }
 
+// --- (e) the acknowledgement is built in the reply store (#1658) ----------------------
+
+/** @brief The bytes of @p reply, gathered — what a link puts on the wire. */
+std::vector<std::byte> gathered(const tr::view::rope_t& reply) {
+    std::vector<std::byte> out;
+    for (const tr::view::view_t& l : reply.links()) {
+        const std::span<const std::byte> b = l.bytes();
+        out.insert(out.end(), b.begin(), b.end());
+    }
+    return out;
+}
+
+/** @brief An acked `FWD{WRITE}` of a `u32` to `/sensor/temp`, answered back along @p src. */
+std::vector<std::byte> write_frame(std::span<const std::byte> src, bool mint = false) {
+    const std::vector<std::byte> dst = b_path({"sensor", "temp"});
+    const std::vector<std::byte> value = b_value_u32(0x1658u);
+    return mint ? b_fwd_mint(fwd_op_t::WRITE, dst, src, {}, value)
+                : b_fwd(fwd_op_t::WRITE, dst, src, {}, value);
+}
+
+/**
+ * @brief An acked remote WRITE is answered from the router's reply store: the injected egress
+ *        backend is never asked for the head, on either tier, and the bytes are the ones an
+ *        un-lent resolve emits.
+ *
+ * `served() == 0` alone would be vacuous if the write never reached the ack, so each arm also
+ * asserts the RESULT reply went out, and the byte comparison is against a resolver that was
+ * lent no store and so DID draw its head from egress (`served() == 1`, checked first).
+ */
+void test_ack_is_built_in_the_reply_store() {
+    std::printf("an acked remote WRITE builds its reply head in the reply store (#1658):\n");
+    const std::vector<std::byte> src = b_path({"origin"});
+    const std::vector<std::byte> frame = write_frame(src);
+
+    // The reference: a resolver lent no store builds the head through egress.
+    std::vector<std::byte> reference;
+    {
+        node_t n;
+        arming_backend_t egress;
+        tr::graph::op_resolver_t r(n.g, &tr::testing::raw_heap_backend(), &egress);
+        const auto arena = tr::wire::decode_into(frame, tr::mem::heap_source());
+        check(arena.has_value(), "instrument: the acked WRITE decodes");
+        if (!arena) return;
+        if (const auto reply = r.resolve(*arena, "in")) reference = gathered(*reply);
+        check(egress.served() == 1,
+              "instrument: an un-lent resolve draws its ack head from egress");
+        // The same resolve lent a store asks egress for nothing and emits the same bytes.
+        alignas(tr::view::segment_t) std::array<std::byte, 256> store;
+        const auto lent = r.resolve(*arena, "in", nullptr, nullptr, nullptr, store);
+        check(egress.served() == 1, "a resolve lent a store asks egress for nothing more");
+        check(lent && gathered(*lent) == reference, "and its reply is byte-identical");
+    }
+    check(read_reply(reference).is_fwd_reply && !read_reply(reference).kind_error,
+          "instrument: the reference is a kind=RESULT acknowledgement");
+
+    for (const bool ropes : {false, true}) {
+        node_t n;
+        arming_backend_t egress;
+        fwd_router_t router(n.g, raw_planes(&egress));
+        rec_link_t rope_in{/*ropes=*/true};
+        (void)router.add_child("in", n.in);
+        (void)router.add_child("rin", rope_in);
+        if (ropes) {
+            rope_in.inject(as_rope(frame, 3));  // the ROPE tier, multi-link
+        } else {
+            router.on_frame("in", frame);  // the SPAN (arena) tier
+        }
+        const auto& sent = ropes ? rope_in.sent : n.in.sent;
+        check(sent.size() == 1, ropes ? "the rope-tier terminus acks the write"
+                                      : "the span-tier terminus acks the write");
+        check(egress.served() == 0, "without asking the egress backend for anything");
+        check(sent.size() == 1 && sent[0] == reference,
+              "and the ack is byte-identical to the un-lent reference");
+    }
+}
+
+/**
+ * @brief The store is a fast path, never a limit: an ack whose head does not fit draws it from
+ *        egress exactly as before, and a mint rides the store beside the head.
+ */
+void test_reply_store_overflows_to_egress() {
+    std::printf("an ack that does not fit the store draws from egress, a mint rides it:\n");
+    {
+        // A 300-byte return route: the head alone outgrows the router's 256-byte store.
+        const std::string a(200, 'a');
+        const std::string b(100, 'b');
+        const std::vector<std::byte> src = b_path({a, b});
+        node_t n;
+        arming_backend_t egress;
+        fwd_router_t router(n.g, raw_planes(&egress));
+        (void)router.add_child("in", n.in);
+        router.on_frame("in", write_frame(src));
+        check(egress.served() == 1, "the oversized head is drawn from egress");
+        check(n.in.sent.size() == 1 && read_reply(n.in.sent[0]).is_fwd_reply &&
+                  !read_reply(n.in.sent[0]).kind_error &&
+                  read_reply(n.in.sent[0]).route_bytes == src.size() - 4,
+              "and the ack carries the whole route");
+    }
+    {
+        node_t n;
+        arming_backend_t egress;
+        fwd_router_t router(n.g, raw_planes(&egress));
+        (void)router.add_child("in", n.in);
+        router.on_frame("in", write_frame(b_path({"origin"}), /*mint=*/true));
+        check(n.in.sent.size() == 1 && read_reply(n.in.sent[0]).has_path_ref,
+              "instrument: the mint-requesting ack carries its PATH_REF");
+        check(egress.served() == 0, "and neither the head nor the mint was drawn from egress");
+    }
+}
+
 // --- (d) the default path is unchanged ----------------------------------------------
 
 /**
@@ -590,6 +700,10 @@ int main() {
     test_saturated_reply_degrades_to_addressed_backpressure();
     std::printf("\n");
     test_default_egress_unchanged();
+    std::printf("\n");
+    test_ack_is_built_in_the_reply_store();
+    std::printf("\n");
+    test_reply_store_overflows_to_egress();
 
     return tr::testing::summary("terminus_egress_backend");
 }
