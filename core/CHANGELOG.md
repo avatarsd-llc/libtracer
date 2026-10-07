@@ -14,15 +14,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
-### Security
-
-- **The ACL gate reads a settled hook slot during a republish
-  ([GHSA-j8p5-qwx8-fm7c](https://github.com/avatarsd-llc/libtracer/security/advisories/GHSA-j8p5-qwx8-fm7c)).**
-  A gated operation that overlaps a `graph_t::set_hooks` republish now waits the publish out
-  (`sink_slot_t::get_settled`: a bounded re-read of the slot's generation, yielding every 64
-  reads, with no clock and no sleep) and resolves with the settled hooks. A slot that does not
-  settle within the bound refuses the caller.
-
 ### Added
 
 - **`mem::chunked_map_t`: a failable sorted map in fixed-size leaves
@@ -311,7 +302,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
       `block_ptr_t` / `make_block`, and `exhausted_at_init`.
   - `wire::emit_path_segment` gains `mem::bytes_t&` overloads.
 
+## [0.18.1] — 2026-10-07
+
+### Security
+
+The four fixes below close three published advisories:
+[GHSA-j8p5-qwx8-fm7c](https://github.com/avatarsd-llc/libtracer/security/advisories/GHSA-j8p5-qwx8-fm7c),
+[GHSA-6v3p-95f5-frmw](https://github.com/avatarsd-llc/libtracer/security/advisories/GHSA-6v3p-95f5-frmw) and
+[GHSA-rjh7-42fv-fq8f](https://github.com/avatarsd-llc/libtracer/security/advisories/GHSA-rjh7-42fv-fq8f).
+
 ### Fixed
+
+- **An ACL check that overlaps a `graph_t::set_hooks` republish now reads the settled hooks.**
+  A gated operation that runs while the hooks are being republished waits the publish out
+  (`sink_slot_t::get_settled`: a bounded re-read of the slot's generation, yielding every 64
+  reads, with no clock and no sleep) and resolves with the settled hooks. A slot that does not
+  settle within the bound refuses the caller.
 
 - **Fixed an ACL check on the canonical-string forward hop.** A forwarded operation whose
   `dst` names the next hop as a NAME run is now authorized at that hop's connection vertex

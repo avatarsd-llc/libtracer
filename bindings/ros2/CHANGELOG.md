@@ -18,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-10-07
+
+No `rmw_tracer`-specific changes. `rmw_tracer` builds against the C++ core, so it picks up core's 0.18.1 fixes when it is rebuilt against this release. No API changes.
+
 ## [0.18.0] — 2026-10-05
 
 No `rmw_tracer`-specific changes. `rmw_tracer` builds against the C++ core, so the core 0.18.0 breaking changes apply when it is rebuilt against this release; see core's 0.18.0 section, in particular `wire::decode`'s removal (readers take `tlv_node_t`), the removed re-export aliases and the build switches that became config traits.

@@ -7,6 +7,10 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-10-07
+
+No TypeScript-binding changes. Released in lockstep with core.
+
 ## [0.18.0] — 2026-10-05
 
 ### Changed
