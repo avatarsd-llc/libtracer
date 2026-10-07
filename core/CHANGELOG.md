@@ -34,6 +34,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   cannot fail. The terminus's mint answer and the reverse route it stores are both written
   through it, so the two `emit_path_ref_into` result checks there, which could never fail, are
   gone. No wire byte changes.
+- **`tr::init_fault_t` and the `config_t::fault_sink_t` binding (`init_fault.hpp`)
+  ([#1885](https://github.com/avatarsd-llc/libtracer/issues/1885)).** Core no longer writes the
+  setup-time sizing message (a source or the vertex ceiling refusing `graph_t`, `register_vertex`
+  or `register_child_type`) to `stderr` itself: it hands an `init_fault_t` to
+  `config_t::fault_sink_t::report` and aborts when that returns. The default,
+  `tr::stderr_fault_sink_t`, prints the same line as before; a target without stdio binds
+  `tr::silent_fault_sink_t` or its own type in `libtracer/config_override.hpp`.
+- **`mem::bytes_t` forms of `wire::emit_header`, `emit_tlv`, `emit_name` and `emit_value_le`
+  ([#1885](https://github.com/avatarsd-llc/libtracer/issues/1885)).** Same bytes as the
+  `std::vector` forms; each returns `false` and leaves the array unchanged when its source
+  refuses.
 
 - **`handlers_t::on_app_field_read`: an on-demand read seam for app fields
   ([#1878](https://github.com/avatarsd-llc/libtracer/issues/1878)).** A field read could answer
@@ -70,6 +81,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   of a default graph's own table sub-pool; a no-op on a graph with an injected root.
 
 ### Breaking
+
+- **The graph core's remaining global-heap draws move onto the table source
+  ([#1885](https://github.com/avatarsd-llc/libtracer/issues/1885)).**
+  - `subscriber_remote_t::link` and `caller` are `mem::string_t`, and the record is built over a
+    source: `subscriber_remote_t(src)`. `subscriber_t::ensure_remote(src)` takes the source and
+    returns a pointer, `nullptr` when it refuses.
+  - `vertex_t::snapshot_edges` takes its overflow buffer as `mem::block_array_t<edge_view_t>&`.
+    `graph_t::fan_out` builds it over a frame on the publishing call's stack first and the table
+    source past it; the per-thread overflow vector is gone.
+  - `wire::path_key` returns `std::optional<std::span<const std::byte>>`, borrowed from the PATH
+    node, instead of copying the key into a `std::vector`.
+  - A subscribe whose target key cannot be held, or whose cold half the table source refuses,
+    answers `BACKPRESSURE` (it was refused as `TYPE_MISMATCH`, or admitted without its
+    `delivery_compact` opt-in, before).
+  - `:children`, `:schema`, `:settings`, `:settings.app`, `:stats` reads, `set_identity` and the
+    local target `subscribe` stage their TLVs on the table source or a stack frame over it, and
+    answer `BACKPRESSURE` when it refuses.
 
 - **One FWD header parse per hop: `rebuild_fwd_forward` takes the peek's `fwd_pre_t`
   ([#1794](https://github.com/avatarsd-llc/libtracer/issues/1794)).** `fwd_frame_view.hpp`:

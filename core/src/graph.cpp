@@ -10,7 +10,6 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -24,6 +23,7 @@
 #include "graph_fields.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/init_fault.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
@@ -47,6 +47,13 @@ namespace {
 
 /** @brief A canonical `NAME` TLV header: type, `opt = 0`, `u16` length. */
 inline constexpr std::size_t kNameHeaderBytes = 4;
+
+/**
+ * @brief The stack frame a wide fan-out snapshots into before it reaches the table source
+ *        (#1885): eight times the inline width, so it scales with the build's stated stack
+ *        budget — 64 views (3 KiB) on a 64-bit host, 16 on the ESP-IDF fragment's two.
+ */
+inline constexpr std::size_t kFanoutFrameBytes = 8 * vertex_t::kInlineFanout * sizeof(edge_view_t);
 
 /**
  * @brief The link an edge's cold half DELIVERS over — the one it holds (#1816); empty for an
@@ -642,11 +649,10 @@ vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handle
     // with the sub-pool and the bytes it was asked for (ADR-0056 amendment, ADR-0083).
     if (!h && h.error() == status_t::BACKPRESSURE &&
         vertex_ceiling_refusals_.load(std::memory_order_relaxed) != ceiling_refusals) {
-        std::fprintf(stderr,
-                     "libtracer: register_vertex: the vertex ceiling (%zu vertices) refused a "
-                     "registration at initialization: a sizing bug, raise set_vertex_ceiling "
-                     "(ADR-0056)\n",
-                     vertex_ceiling_.load(std::memory_order_relaxed));
+        config_t::fault_sink_t::report(
+            init_fault_t{.kind = init_fault_kind_t::VERTEX_CEILING,
+                         .call = "register_vertex",
+                         .ceiling = vertex_ceiling_.load(std::memory_order_relaxed)});
         std::abort();
     }
     if (!h && h.error() == status_t::BACKPRESSURE)
@@ -1654,7 +1660,7 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
     // whose natural reading ("I cannot name this caller") meant "grant everything", WRITE_ACL
     // and CREATE included. A remote op carries the inbound link's NAME, so it cannot spell
-    // this arm: the full-route form through `ensure_remote().caller`, and — since #974 — the
+    // this arm: the full-route form through `ensure_remote(src)->caller`, and — since #974 — the
     // COMPACT delivery fast path, whose two terminus write arms in `fwd_router_t::on_compact`
     // pass `inbound_name` too. #974 was that second one missing: unattributed, it landed here
     // and was waved through every ACE the first is checked against. Any further net-plane
@@ -1965,56 +1971,35 @@ void graph_t::fan_out(vertex_t* v, const value_t& value) {
     // value-agnostic — no per-subscriber comparison — so every active edge receives
     // `value`; WHICH vertices propagate is the per-vertex delivery_mode decided by the
     // sweep (RFC-0008). Small fan-out (the common case) placement-constructs into a RAW
-    // stack buffer — no per-publish heap allocation and no dead stack zeroing (an
+    // stack buffer — no per-publish allocation and no dead stack zeroing (an
     // edge_view_t array default-construct cost ~18 ns/op of rep-stos zeroing here).
     edge_snapshot_t inline_buf;
 
-    // Wide fan-out (> kInlineFanout) used to malloc a fresh overflow vector EVERY publish
-    // — the wide-fan-out alloc cliff (jitter on the very path that is the fan-out moat).
-    // Reuse ONE persistent thread-local buffer instead, so a WARM wide publish is zero-alloc
-    // (its capacity survives across publishes). Gated on the lock-free own_subs() count so
-    // the small-fan-out hot path (incl. the fan-1-vs-Zenoh path) pays NO TLS cost.
-    // snapshot_edges re-checks the width under the lock, so a race on the count only costs a
-    // rare fallback alloc, never correctness. Re-entrancy: dispatch runs OUTSIDE the lock and
-    // a subscriber callback may re-publish (a nested wide fan_out) — the `busy` flag detects
-    // that and routes the nested call to a fresh local buffer below, so the outer's buffer is
-    // never aliased. The flag resets on scope exit (incl. an exception out of dispatch), so a
-    // throwing callback can't wedge the thread onto the slow path.
-    if (v->own_subs() > vertex_t::kInlineFanout) {
-        static thread_local std::vector<edge_view_t> tls_buf;
-        static thread_local bool tls_busy = false;
-        if (!tls_busy) {
-            tls_busy = true;
-            struct reset_t {
-                bool& b;
-                ~reset_t() noexcept { b = false; }
-            } reset{tls_busy};
-            tls_buf.clear();  // keeps capacity — the amortised-zero-alloc reuse
-            vertex_t::snapshot_drops_t drops;
-            const std::size_t n = v->snapshot_edges(inline_buf, tls_buf, drops);
-            // Fold BEFORE dispatching: these deliveries were abandoned inside the
-            // snapshot, and dispatch re-enters the graph (a callback may publish, and a
-            // nested publish must not be able to swallow this tally).
-            if (drops.any()) count_snapshot_drops(drops);
-            if (tls_buf.empty())
-                for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
-            else
-                for (const edge_view_t& e : tls_buf) dispatch_edge(e, value);
-            return;
-        }
-        // Nested wide fan_out (rare): fall through to a fresh local buffer.
-    }
-
-    // Small fan-out (or a nested wide fan-out): fill the stack buffer; the empty local vector
-    // never allocates unless the overflow path above genuinely spilled.
-    std::vector<edge_view_t> heap_buf;
+    // Wide fan-out (> kInlineFanout) draws its snapshot from THIS call's own stack frame
+    // first and from the graph's table source past it, and a dry source is a counted
+    // truncation, never an abort (#1885) — the `mem::bump_source_t` shape the propagate paths
+    // use (#1778). It replaces a `thread_local` vector that grew to the widest fan-out its
+    // thread ever saw and never gave it back: a library-internal buffer, which is exactly what
+    // this tree does not keep. A frame per call also deletes that buffer's re-entrancy guard,
+    // since a callback that re-publishes gets a frame of its own. The frame is built only on
+    // the wide arm, so the small fan-out (incl. the fan-1-vs-Zenoh path) pays one compare for
+    // it; on the small arm `overflow` is reached only when a subscriber was added between
+    // own_subs() and the snapshot, and then it draws from the table source directly.
+    std::array<std::byte, kFanoutFrameBytes> scratch;
+    std::optional<mem::bump_source_t> frame;
+    if (v->own_subs() > vertex_t::kInlineFanout) frame.emplace(scratch, *tables_);
+    mem::block_array_t<edge_view_t> overflow(frame ? static_cast<mem::block_source_t&>(*frame)
+                                                   : *tables_);
     vertex_t::snapshot_drops_t drops;
-    const std::size_t n = v->snapshot_edges(inline_buf, heap_buf, drops);
+    const std::size_t n = v->snapshot_edges(inline_buf, overflow, drops);
+    // Fold BEFORE dispatching: these deliveries were abandoned inside the snapshot, and
+    // dispatch re-enters the graph (a callback may publish, and a nested publish must not be
+    // able to swallow this tally).
     if (drops.any()) count_snapshot_drops(drops);
-    if (heap_buf.empty())
+    if (overflow.empty())
         for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
-    else  // count race (a subscriber was added between own_subs() and the lock): one alloc
-        for (const edge_view_t& e : heap_buf) dispatch_edge(e, value);
+    else
+        for (const edge_view_t& e : overflow) dispatch_edge(e, value);
 }
 
 result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
@@ -3108,7 +3093,8 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // A refused entry (#1778: the table source is exhausted) refuses the ADMISSION, for the
     // same reason: an edge that no departure can find is a leak, not a degraded delivery.
     if (s.remote && !link_index_.index_vertex(
-                        s.remote->link.empty() ? s.remote->caller : s.remote->link, link_token, v))
+                        s.remote->link.empty() ? s.remote->caller.view() : s.remote->link.view(),
+                        link_token, v))
         return std::unexpected(status_t::BACKPRESSURE);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     // The hold is taken BEFORE the edge can be seen, for the reason the index entry above is:
@@ -3187,13 +3173,13 @@ void graph_t::notify_subscription(sub_event_t::kind_t kind, const vertex_t* v,
     // what an observer wants to see (sub_event_t::target carries the caveat). A slot with no
     // stored TLV, or one whose PATH is malformed, reports an EMPTY target rather than
     // suppressing the event — the mutation happened either way.
-    std::vector<std::byte> target;
+    std::span<const std::byte> target;  // borrowed from `sub_tlv` (#1885: no copy)
     if (!sub_tlv.empty()) {
         if (const auto tlv = wire::tlv_node_t::over(sub_tlv);
             tlv && tlv->type() == type_t::SUBSCRIBER) {
             for (const wire::tlv_node_t child : tlv->children()) {
                 if (child.type() != type_t::PATH) continue;
-                if (auto k = wire::path_key(child)) target = *std::move(k);
+                if (const auto k = wire::path_key(child)) target = *k;
                 break;
             }
         }
@@ -3227,20 +3213,27 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
     // header is emitted. An all-zero policy emits NOTHING — the absent case of RFC-0022
     // §3.A — so a caller that states no policy produces the exact bytes it did before, and
     // the existing `subscriber-path` conformance vector still describes this encoder.
-    std::vector<std::byte> qos;
+    //
+    // Staged on a stack frame first and the table source past it (#1885), and every refusal
+    // is BACKPRESSURE: nothing has been admitted yet.
+    std::array<std::byte, 256> scratch;
+    mem::bump_source_t frame(scratch, *tables_);
+    mem::bytes_t qos(frame);
     if (policy.bits != 0) {
-        std::vector<std::byte> members;
-        wire::emit_name(members, "delivery_policy");
-        wire::emit_value_le(members, policy.bits, 2);
-        wire::emit_tlv(qos, type_t::SETTINGS, opt_t{.pl = true}, members);
+        mem::bytes_t members(frame);
+        if (!wire::emit_name(members, "delivery_policy") ||
+            !wire::emit_value_le(members, policy.bits, 2) ||
+            !wire::emit_tlv(qos, type_t::SETTINGS, opt_t{.pl = true}, mem::as_span(members)))
+            return std::unexpected(status_t::BACKPRESSURE);
     }
-    std::vector<std::byte> sub;
-    sub.reserve(8 + key.size() + qos.size());
-    wire::emit_header(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, 4 + key.size() + qos.size());
-    wire::emit_header(sub, type_t::PATH, opt_t{}, key.size());
-    sub.insert(sub.end(), key.begin(), key.end());
-    sub.insert(sub.end(), qos.begin(), qos.end());
-    const std::optional<view::view_t> value = view::over_bytes(sub, *value_backend_);
+    mem::bytes_t sub(frame);
+    if (!sub.reserve(8 + key.size() + qos.size()) ||
+        !wire::emit_header(sub, type_t::SUBSCRIBER, opt_t{.pl = true},
+                           4 + key.size() + qos.size()) ||
+        !wire::emit_header(sub, type_t::PATH, opt_t{}, key.size()) ||
+        !sub.append(key.data(), key.size()) || !sub.append(qos.data(), qos.size()))
+        return std::unexpected(status_t::BACKPRESSURE);
+    const std::optional<view::view_t> value = view::over_bytes(mem::as_span(sub), *value_backend_);
     if (!value) return std::unexpected(status_t::BACKPRESSURE);
     field_path_t field;
     field.steps.push_back(field_step_t{.name = "subscribers", .indexed = true, .append = true});
@@ -3375,7 +3368,8 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // delivery_compact comes from this parse (the resolver's parallel subscriber_compact() is
     // retired).
     subscriber_t s;
-    if (!parse_wire_subscriber(source_view, s)) return std::unexpected(status_t::TYPE_MISMATCH);
+    if (const auto parsed = parse_wire_subscriber(source_view, s, *tables_); !parsed)
+        return std::unexpected(parsed.error());
     // RFC-0021 §4.A/§4.B.1: the `PATH` child, when it routes through a MOUNT, is the delivery
     // target spelled in THIS (the producer's) frame — the same frame a `FWD`'s `dst` is
     // resolved in, because a delivery IS a write (RFC-0004 §D). Binding it here is what makes
@@ -3390,15 +3384,17 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // outright. What is NOT tolerated is the mount-involving failure — §F: a target that
     // names a mount it cannot deliver through must be an error, never a silent degrade to the
     // arrival session, because that silence is exactly what made #491 look like it worked.
-    std::vector<std::byte> mount_route_tlv;  // outlives `route_view` below
+    mem::bytes_t mount_route_tlv(*tables_);  // outlives `route_view` below
     // The link this edge DELIVERS over — the arrival link until a mount-routed target moves
     // it. `caller` is left alone: it is the ACL subject context the SUBSCRIBE gate and
     // every delivery run under (#81, ADR-0026, RFC-0021 §E — the gate is the WRITER's, even
     // when the data goes somewhere else), so the two must not be the same variable. Since
     // #375 Part 2 they are not even the same STRING: at a FLAT listener every peer shares
     // one delivery link and each has its own subject.
-    std::string delivery_link = link;
-    if (s.target_key && !s.target_key->empty()) {
+    std::string_view delivery_link = link;  // copied into the cold half below
+    // The parse never holds an empty key (`try_make_target_key` answers null for one), so an
+    // engaged key is a non-empty PATH.
+    if (s.target_key) {
         if (const auto slot = wire_target_.get(); slot.fn != nullptr) {
             const wire_target_split_t split = slot.fn(slot.ctx, *s.target_key);
             if (split.unroutable) return std::unexpected(status_t::INVALID_PATH);
@@ -3407,12 +3403,13 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
                 // later delivery clones by refcount (ADR-0041 §2), the shape the accumulated
                 // `src` arrives in. An empty residual never reaches here: the descent reports
                 // a mount named exactly as `unroutable`.
-                wire::emit_tlv(mount_route_tlv, type_t::PATH, opt_t{}, split.residual);
+                if (!wire::emit_tlv(mount_route_tlv, type_t::PATH, opt_t{}, split.residual))
+                    return std::unexpected(status_t::BACKPRESSURE);
                 std::optional<view::view_t> route_view =
-                    view::over_bytes(mount_route_tlv, *value_backend_);
+                    view::over_bytes(mem::as_span(mount_route_tlv), *value_backend_);
                 if (!route_view) return std::unexpected(status_t::BACKPRESSURE);
                 return_route = *std::move(route_view);
-                delivery_link.assign(split.link);
+                delivery_link = split.link;
                 // The carried token moves with the key it names (#1437). The arrival's token
                 // spells the arrival link, and the index is about to be keyed on the MOUNT —
                 // so from here it is the wrong token, correctly rejected by the name compare
@@ -3434,19 +3431,22 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // the link (RFC-0004 §D). This door is the one that CLEARS the key the two field-write
     // arms REQUIRE, so it stays out of the shared helper.
     s.target_key.reset();
-    subscriber_remote_t& r = s.ensure_remote();  // a wire subscriber always carries the cold half
     // The fan-in gate context this edge's deliveries run under (#81) — the WRITER's subject
     // since #375 Part 2, and the link's own name for every caller that supplied none, which
     // is byte for byte what this door stored before the two claims were separated (ADR-0082).
-    r.caller = caller.empty() ? std::move(link) : std::move(caller);
-    r.return_route = std::move(return_route);
+    // It is also the context the SUBSCRIBE gate runs under (#81/ADR-0026), not the delivery
+    // link's.
+    const std::string_view gate_ctx = caller.empty() ? std::string_view(link) : caller;
+    // A wire subscriber always carries the cold half; it and both names draw from the table
+    // source (#1885), and a refusal there is BACKPRESSURE before anything was admitted.
+    subscriber_remote_t* const r = s.ensure_remote(*tables_);
+    if (r == nullptr || !r->caller.assign(gate_ctx) || !r->link.assign(delivery_link))
+        return std::unexpected(status_t::BACKPRESSURE);
+    r->return_route = std::move(return_route);
     // The completed reverse bound route (RFC-0024 §7.1 amendment 1) — empty for every
     // canonical-only subscribe, and stored WITHOUT validation beyond what the resolver
     // already did: element 0 is this node's own mint, re-validated on every delivery.
-    r.reverse_route = std::move(reverse_route);
-    r.link = std::move(delivery_link);
-    const std::string gate_ctx = r.caller;  // the SUBSCRIBE gate runs under the WRITER's subject
-                                            // (#81/ADR-0026), not the delivery one
+    r->reverse_route = std::move(reverse_route);
     // A wire subscribe carries no host handle back — discard the slot (unsubscribe is the
     // wire :subscribers[N] clear, not this door's return).
     if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx, std::nullopt, link_token); !r2)
@@ -3462,7 +3462,9 @@ result_t<view::view_t> graph_t::read_children(vertex_t* v) const {
     // Generic member enumeration (reference 05 §SPEC read-members): the DIRECT
     // children of v in the vertex map — keys of the form <v.key><one packed record>.
     // Each member is a minimal POINT{NAME} descriptor; order is unspecified.
-    std::vector<std::byte> members;
+    // Staged on the table source (#1885); a refusal anywhere is BACKPRESSURE.
+    mem::bytes_t members(*tables_);
+    bool staged = true;
     {
         const std::shared_lock lock(map_mutex_);
         // A direct child contributes ONE `POINT{NAME <segment>}` member (ADR-0057 — one
@@ -3480,20 +3482,21 @@ result_t<view::view_t> graph_t::read_children(vertex_t* v) const {
         // PATH — the RFC removes `NAME` from `PATH` bodies only and leaves the type and its
         // decoder standing everywhere else — so the member is RE-FRAMED here rather than
         // borrowed: same wire shape as before this RFC, one header write per child.
-        v->for_each_child([&members](const vertex_t& c) {
-            if (!c.enumerable_member()) return;
+        v->for_each_child([&members, &staged](const vertex_t& c) {
+            if (!staged || !c.enumerable_member()) return;
             const std::span<const std::byte> seg = child_segment(c);
             const std::size_t body = kNameHeaderBytes + seg.size();
-            wire::emit_header(members, type_t::POINT, opt_t{.pl = true, .ll = body > 0xFFFFu},
-                              body);
-            wire::emit_name(members, seg);
+            staged = wire::emit_header(members, type_t::POINT,
+                                       opt_t{.pl = true, .ll = body > 0xFFFFu}, body) &&
+                     wire::emit_name(members, seg);
         });
     }
-    std::vector<std::byte> out;
-    wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, members);
+    mem::bytes_t out(*tables_);
+    if (!staged || !wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, mem::as_span(members)))
+        return std::unexpected(status_t::BACKPRESSURE);
     // `out` is non-empty by construction; `nullopt` is exactly an alloc failure
     // → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto res = view::over_bytes(out, *value_backend_);
+    const auto res = view::over_bytes(mem::as_span(out), *value_backend_);
     if (!res) return std::unexpected(status_t::BACKPRESSURE);
     return *res;
 }

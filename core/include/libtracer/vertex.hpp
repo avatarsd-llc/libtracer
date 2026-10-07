@@ -2177,9 +2177,9 @@ class vertex_t {
                 // The link this edge was ADMITTED over — see the declaration comment. Not
                 // `link` alone: a `graph_t::field_write` admission stores the inbound link
                 // ONLY as the gate context, so keying on the delivery link skipped it
-                // forever (#943). No copy: both members are `std::string`.
-                const std::string& admitted_over =
-                    s.remote->link.empty() ? s.remote->caller : s.remote->link;
+                // forever (#943). No copy: both members are `mem::string_t`.
+                const std::string_view admitted_over =
+                    s.remote->link.empty() ? s.remote->caller.view() : s.remote->link.view();
                 if (admitted_over != link) continue;
                 routed += static_cast<std::size_t>(!s.remote->link.empty());
                 subscriber_t reclaimed;       // an inert shell: no view, no route, no cold half
@@ -2311,13 +2311,14 @@ class vertex_t {
      *        snapshot-under-pin half of the snapshot/dispatch-after-release discipline.
      *
      * Small fan-out (the common case, ≤ `kInlineFanout`) placement-constructs into
-     * @p inline_buf — no heap allocation AND no dead stack zeroing per publish; a
+     * @p inline_buf — no allocation AND no dead stack zeroing per publish; a
      * larger subscriber list reserves @p overflow once and fills it instead (then
-     * @p overflow is non-empty and holds ALL views).
+     * @p overflow is non-empty and holds ALL views). @p overflow draws from whatever source
+     * the caller built it over — `graph_t::fan_out` gives it the writing call's own stack
+     * frame first and the graph's table source past it (#1885).
      *
-     * The ONE way this can come back short is NOTHROW (#477 — this runs on the writer
-     * thread's fan-out, where a bad_alloc is an abort() under `-fno-exceptions`): an
-     * unreservable @p overflow degrades the snapshot to the first `kInlineFanout` views in
+     * The ONE way this can come back short is a refusal by value: an unreservable
+     * @p overflow degrades the snapshot to the first `kInlineFanout` views in
      * @p inline_buf, and the rest of this delivery is dropped. It is TALLIED into @p drops
      * (@ref snapshot_drops_t) so the caller can report it; it is not silent (#896).
      * The per-edge copy itself cannot fail at all since #1448 — it is two pointer copies
@@ -2338,14 +2339,15 @@ class vertex_t {
      * because displacing an array requires that same lock. Correctness never depends on the
      * constant; only scaling does.
      * @param inline_buf The caller's raw stack buffer (cleared on entry).
-     * @param overflow   The heap fallback for large fan-out (cleared on entry).
+     * @param overflow   The fallback for large fan-out, over the caller's source (cleared
+     *                   on entry).
      * @param drops      Out: what this snapshot SHED (@ref snapshot_drops_t), zeroed on
      *                   entry. By reference, not optional — a caller that may not see the
      *                   shed count is the #896 defect itself.
      * @return The number of views snapshotted (into whichever buffer was used).
      */
-    std::size_t snapshot_edges(edge_snapshot_t& inline_buf, std::vector<edge_view_t>& overflow,
-                               snapshot_drops_t& drops) {
+    std::size_t snapshot_edges(edge_snapshot_t& inline_buf,
+                               mem::block_array_t<edge_view_t>& overflow, snapshot_drops_t& drops) {
         inline_buf.clear();
         overflow.clear();
         drops = snapshot_drops_t{};
@@ -3289,18 +3291,14 @@ class vertex_t {
      */
     [[nodiscard]] static std::size_t copy_published(const edge_pub_t* p,
                                                     edge_snapshot_t& inline_buf,
-                                                    std::vector<edge_view_t>& overflow,
+                                                    mem::block_array_t<edge_view_t>& overflow,
                                                     snapshot_drops_t& drops) noexcept {
         if (p == nullptr) return 0;
-        // #981 residual: the wide-fan-out overflow buffer keeps `try_reserve`'s
-        // `-fno-exceptions` probe window — a task switch between the probe's free and the
-        // `reserve` abort()s the node (#850). `edge_view_t` still holds refcounted handles,
-        // so `block_array_t` (memcpy relocation) cannot hold it — the handles would be
-        // relocated without their destructors and the counts would leak. The inline prefix
-        // below is the mitigation that exists today: a fan-out up to `kCapacity` reaches no
-        // allocator at all, and since #1448 that is true whatever the edges are.
-        const bool use_heap =
-            p->count > edge_snapshot_t::kCapacity && tr::detail::try_reserve(overflow, p->count);
+        // The wide-fan-out buffer is ONE reservation of the exact published width, so the
+        // fills below never grow it, and a refused one is a value — the #981 probe window
+        // `try_reserve` left over a `std::vector` is gone with the vector (#1885). A fan-out
+        // up to `kCapacity` reaches no source at all, whatever the edges are (#1448).
+        const bool use_heap = p->count > edge_snapshot_t::kCapacity && overflow.reserve(p->count);
         const pub_edge_t* src = p->entries();
         std::size_t n = 0;
         for (std::uint32_t i = 0; i < p->count; ++i) {
@@ -3314,12 +3312,19 @@ class vertex_t {
                     if (src[i].active.load(std::memory_order_acquire)) ++drops.truncated;
                 break;
             }
-            edge_view_t e;
-            copy_entry(src[i], e);
-            if (use_heap)
-                overflow.push_back(std::move(e));  // reserved above — no reallocation
-            else
+            // The wide arm fills its slot IN PLACE (reserved above, so it cannot be refused).
+            // Built on the stack and moved in, the view is stored as words and read back as
+            // wider loads: a store-forwarding stall on every edge, +10-17 % per delivery on the
+            // wide fan-out rows (measured on #1885).
+            if (use_heap) {
+                const pub_edge_t& in = src[i];  // the fields `copy_entry` copies, built in place
+                (void)overflow.emplace_back(in.callback, in.callback_ctx, in.target_key, in.binding,
+                                            in.remote);
+            } else {
+                edge_view_t e;
+                copy_entry(src[i], e);
                 inline_buf.push_back(std::move(e));
+            }
             ++n;
         }
         return n;

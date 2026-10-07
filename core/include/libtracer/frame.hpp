@@ -362,15 +362,17 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
  * `PATH{NAME "sensor"}` and resolved `/sensor` (#436's shape, one tier up, and #681). A packed
  * body has no children to mistype, so that class of divergence is structurally gone.
  *
- * @note Returning `nullopt` rather than an empty vector is load-bearing. `graph_t::find_ptr`
+ * @note Returning `nullopt` rather than an empty span is load-bearing. `graph_t::find_ptr`
  *       walks segments from the root, so an EMPTY key exits its loop immediately and resolves
  *       the ROOT vertex — an empty-key rejection would convert this bug into a misroute to `/`,
  *       which is worse than the bug.
  *
  * @param path A validated PATH node, read in place (#1829).
- * @return The canonical key bytes, or `nullopt` if the body is not a run of literal packed
- *         records (ragged framing, an escape record, or a structured `opt.PL = 1` PATH).
+ * @return The canonical key bytes — borrowed from @p path's body, valid as long as the bytes it
+ *         reads (#1885: it copied them into a `std::vector`, a global-heap block per call) —
+ *         or `nullopt` if the body is not a run of literal packed records (ragged framing, an
+ *         escape record, or a structured `opt.PL = 1` PATH).
  */
-[[nodiscard]] std::optional<std::vector<std::byte>> path_key(const tlv_node_t& path);
+[[nodiscard]] std::optional<std::span<const std::byte>> path_key(const tlv_node_t& path);
 
 }  // namespace tr::wire

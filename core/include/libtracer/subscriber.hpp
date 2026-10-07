@@ -30,6 +30,8 @@
 #include "libtracer/config.hpp"
 #include "libtracer/edge_pin.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/mem_string.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/segment.hpp"
 #include "libtracer/value.hpp"
@@ -181,6 +183,9 @@ using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
  * ones being retired. A republish now copies a pointer and increments @ref refs.
  */
 struct subscriber_remote_t {
+    /** @brief An empty record whose names and own block come from @p src (#1885). */
+    explicit subscriber_remote_t(mem::block_source_t& src) noexcept : link(src), caller(src) {}
+
     /**
      * @brief This node's NAME for the link the subscribe arrived on.
      *
@@ -191,9 +196,11 @@ struct subscriber_remote_t {
      * it reads at exactly where they were is what kept that loop's instruction stream
      * identical across #1442. The slot-side readers (`edge_view_of`, `evict_link_edges`,
      * `evict_route_edges`) move their displacements instead — control-plane paths, none of
-     * them pinned.
+     * them pinned. A `mem::string_t` over the graph's table source since #1885; the record
+     * itself is returned to that same source (`link.source()`), so it carries no pointer of its
+     * own for it.
      */
-    std::string link;
+    mem::string_t link;
     /**
      * @brief The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
      *        `src` the subscribe arrived with).
@@ -240,7 +247,7 @@ struct subscriber_remote_t {
      * authorizes. A REMOTE subscriber's fan-in gate runs on the peer instead (its
      * `FWD{WRITE}` terminus checks the same right).
      */
-    std::string caller;
+    mem::string_t caller;
     /**
      * @brief Route-handle opt-in (`SUBSCRIBER.qos_settings.delivery_compact`, RFC-0004
      *        §E.1 / ADR-0035 slice 4).
@@ -368,7 +375,7 @@ class remote_ptr_t {
      *         lifetime (an unsubscribe), never per delivery, so its body stays off the
      *         per-edge path that inlines @ref reset. */
     [[gnu::noinline, gnu::cold]] static void free_record(subscriber_remote_t* p) noexcept {
-        delete p;
+        mem::drop_in(p->link.source(), p);  // the record and its names share one source
     }
 
     subscriber_remote_t* p_ = nullptr; /**< @brief The shared record, or null. */
@@ -519,12 +526,16 @@ struct subscriber_t {
      * nothing has cloned the handle yet; the assertion states that rather than trusting it,
      * because a write reached after a publish would mutate bytes a pinned reader may be
      * copying under no lock.
+     *
+     * The record and its two names draw from @p src, the graph's table source (#1885).
+     * @retval nullptr @p src refused the record; the slot is unchanged (BACKPRESSURE).
      */
-    subscriber_remote_t& ensure_remote() {
-        if (remote == nullptr) remote = remote_ptr_t::adopt(new subscriber_remote_t{});
-        assert(remote.use_count() == 1 &&
+    [[nodiscard]] subscriber_remote_t* ensure_remote(mem::block_source_t& src) noexcept {
+        if (remote == nullptr)
+            remote = remote_ptr_t::adopt(mem::make_in<subscriber_remote_t>(src, src));
+        assert(remote.use_count() <= 1 &&
                "the subscription cold half is immutable once published (#1442)");
-        return *remote.mutable_get();
+        return remote.mutable_get();
     }
 };
 
@@ -595,9 +606,9 @@ static_assert(sizeof(void*) != 8 || sizeof(remote_ptr_t) == 8,
  * clones; now the delivery does not even clone them, and nothing here is a borrowed span —
  * the handle owns.
  *
- * The width matters on its own: 160 B → 48 B. @ref edge_snapshot_t is `kCapacity` of these
- * on the publishing thread's stack, and a wide fan-out streams `F` of them through the
- * overflow vector, which is the `F * sizeof(edge_view_t)` term `bench/bench_common.hpp`
+ * The width matters on its own: 160 B → 48 B. @ref edge_snapshot_t is
+ * `kCapacity` of these on the publishing thread's stack, and a wide fan-out streams `F` of them
+ * through the overflow vector, which is the `F * sizeof(edge_view_t)` term `bench/bench_common.hpp`
  * names as the reason the mid fan-out ladder exists.
  */
 struct edge_view_t {

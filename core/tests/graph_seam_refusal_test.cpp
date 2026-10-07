@@ -558,6 +558,132 @@ void test_sweep() {
     }
 }
 
+/** @brief A SUBSCRIBER{PATH <target>, SETTINGS{delivery_compact 1}} record's bytes. */
+std::vector<std::byte> subscriber_record(std::string_view target) {
+    const std::vector<std::byte> key = key_of(target);
+    std::vector<std::byte> settings;
+    tr::wire::emit_name(settings, "delivery_compact");
+    tr::wire::emit_value_le(settings, std::uint8_t{1}, 1);
+    std::vector<std::byte> body;
+    tr::wire::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{}, key);
+    tr::wire::emit_tlv(body, tr::wire::type_t::SETTINGS, tr::wire::opt_t{.pl = true}, settings);
+    std::vector<std::byte> rec;
+    tr::wire::emit_tlv(rec, tr::wire::type_t::SUBSCRIBER, tr::wire::opt_t{.pl = true}, body);
+    return rec;
+}
+
+/** @brief The local target sugar (#1885): the record's staging and the edge's target key. */
+void test_subscribe_target() {
+    std::printf("subscribe to a local target — record staging, target key:\n");
+    const auto setup = [](graph_t& g) {
+        (void)g.register_vertex(*path_t::parse("/t/dst"), role_t::STORED_VALUE);
+        return g.register_vertex(*path_t::parse("/t"), role_t::STORED_VALUE);
+    };
+    const auto op = [](graph_t& g, vertex_handle_t&) {
+        return verdict(g.subscribe(*path_t::parse("/t"), *path_t::parse("/t/dst")));
+    };
+    const auto untouched = [](graph_t& g, vertex_handle_t& v) { return g.own_subs(v) == 0; };
+    report(drive<vertex_handle_t>(setup, op, untouched), "subscribe target");
+}
+
+/** @brief A wire subscriber (#1885): its target key, cold half and both names. */
+void test_subscribe_wire() {
+    std::printf("subscribe_wire — target key, cold half, link and caller names:\n");
+    const auto setup = [](graph_t& g) {
+        return g.register_vertex(*path_t::parse("/w"), role_t::STORED_VALUE);
+    };
+    const auto op = [](graph_t& g, vertex_handle_t& v) {
+        const std::vector<std::byte> rec = subscriber_record("/consumer/in");
+        const std::string link(64, 'l');  // names longer than any inline buffer
+        const std::string caller(64, 'c');
+        return verdict(g.subscribe_wire(v, make_value(rec), make_value({0x06, 0x00, 0x00, 0x00}),
+                                        link, {}, caller));
+    };
+    const auto untouched = [](graph_t& g, vertex_handle_t& v) { return g.own_subs(v) == 0; };
+    report(drive<vertex_handle_t>(setup, op, untouched), "subscribe_wire");
+}
+
+/** @brief The colon-field reads that stage a TLV (#1885): children, schema, settings. */
+void test_field_reads() {
+    std::printf("field reads — :children, :schema, :settings staging:\n");
+    const auto setup = [](graph_t& g) {
+        vertex_policy_t p;
+        p.app_fields = {app_field_t{.name = "gain", .access = app_access_t::RW}};
+        const vertex_handle_t v =
+            g.register_vertex(*path_t::parse("/r"), role_t::STORED_VALUE, {}, std::move(p));
+        (void)g.register_vertex(*path_t::parse("/r/a"), role_t::STORED_VALUE);
+        (void)g.register_vertex(*path_t::parse("/r/b"), role_t::STORED_VALUE);
+        (void)g.write(*path_t::parse("/r:settings.app.gain"), make_value({0x01}));
+        return v;
+    };
+    const auto nothing = [](graph_t&, vertex_handle_t&) { return true; };
+    for (const char* field : {"/r:children", "/r:schema", "/r:settings", "/r:settings.app"}) {
+        const auto op = [field](graph_t& g, vertex_handle_t&) {
+            return verdict(g.read(*path_t::parse(field)));
+        };
+        report(drive<vertex_handle_t>(setup, op, nothing), field);
+    }
+}
+
+/**
+ * @brief A wide fan-out's snapshot (#1885): the writing call's stack frame first, the table
+ *        source past it, and a counted truncation when that is dry. No thread keeps a buffer.
+ */
+void test_fan_out() {
+    std::printf("fan_out — the wide snapshot past its stack frame:\n");
+    // Past the frame (8 x kInlineFanout views), so the snapshot reaches the table source.
+    constexpr std::size_t kSubs = 9 * tr::graph::kInlineFanout + 1;
+    std::size_t delivered = 0;
+    const auto count = [](void* ctx, const tr::graph::value_t&) {
+        ++*static_cast<std::size_t*>(ctx);
+    };
+    gate_source_t src;
+    {
+        graph_t g{src};
+        const vertex_handle_t v = g.register_vertex(*path_t::parse("/fan"), role_t::STORED_VALUE);
+        for (std::size_t i = 0; i < kSubs; ++i)
+            (void)g.subscribe(*path_t::parse("/fan"), +count, &delivered);
+        check(g.own_subs(v) == kSubs, "the wide fan-out is subscribed");
+        // The value is stored before the snapshot, so the budget is swept until the store
+        // fits and the snapshot is what runs dry.
+        bool truncated = false;
+        for (std::size_t allow = 0; allow < 16 && !truncated; ++allow) {
+            delivered = 0;
+            const auto before = g.delivery_drops().fan_out_truncated;
+            src.arm(allow);
+            const bool wrote = g.write(*path_t::parse("/fan"), make_value({0x01})).has_value();
+            src.disarm();
+            const auto shed = g.delivery_drops().fan_out_truncated - before;
+            truncated = wrote && shed != 0;
+            if (truncated) {
+                check(delivered == tr::graph::kInlineFanout && delivered + shed == kSubs,
+                      "a refused snapshot delivers the inline prefix and counts the rest");
+            }
+        }
+        check(truncated, "a dry table source truncates the wide fan-out by value");
+        delivered = 0;
+        check(g.write(*path_t::parse("/fan"), make_value({0x02})).has_value() && delivered == kSubs,
+              "with room again every subscriber is delivered");
+        // Inside the frame, the snapshot draws nothing at all.
+        delivered = 0;
+        (void)g.register_vertex(*path_t::parse("/mid"), role_t::STORED_VALUE);
+        constexpr std::size_t kMid = 4 * tr::graph::kInlineFanout;
+        for (std::size_t i = 0; i < kMid; ++i)
+            (void)g.subscribe(*path_t::parse("/mid"), +count, &delivered);
+        const auto before = g.delivery_drops().fan_out_truncated;
+        bool framed = false;
+        for (std::size_t allow = 0; allow < 16 && !framed; ++allow) {
+            delivered = 0;
+            src.arm(allow);
+            framed = g.write(*path_t::parse("/mid"), make_value({0x03})).has_value();
+            src.disarm();
+        }
+        check(framed && delivered == kMid && g.delivery_drops().fan_out_truncated == before,
+              "a fan-out inside the stack frame is never truncated: it draws nothing");
+    }
+    check(src.live_ == 0, "and the graph gives back every block it drew");
+}
+
 #if defined(__unix__)
 /** @brief Run @p body in a forked child with stderr captured; answer what it printed and
  *         whether it died of SIGABRT. */
@@ -667,6 +793,10 @@ int main() {
     test_identity();
     test_for_each_vertex();
     test_sweep();
+    test_fan_out();
+    test_subscribe_target();
+    test_subscribe_wire();
+    test_field_reads();
 #if defined(__unix__)
     test_init_exhaustion_message();
 #endif

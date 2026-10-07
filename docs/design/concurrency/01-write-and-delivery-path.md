@@ -106,32 +106,33 @@ anomaly cannot appear. The coverage is the weakly-ordered `ubuntu-24.04-arm` CI 
 (core-ci `build-test-arm64`), which is the same memory model the shipped rv32 targets have;
 the host guards in `graph_test` pin the *program-order* half only, and say so.
 
-The two-buffer split is the point. `fan_out` chooses which pair of buffers to hand in from the
-lock-free `own_subs()` count:
+The two-buffer split is the point. `fan_out` chooses the source the overflow buffer draws from
+by the lock-free `own_subs()` count, and makes one call either way,
+`v->snapshot_edges(inline_buf, overflow, drops)` (`graph.cpp:graph_t::fan_out`):
 
-| shape | call | overflow buffer |
-| --- | --- | --- |
-| wide, `own_subs() > kInlineFanout` | `v->snapshot_edges(inline_buf, tls_buf, drops)` (`graph.cpp:graph_t::fan_out`) | a persistent `thread_local` vector, cleared but keeping capacity |
-| small, or a nested wide fan-out | `v->snapshot_edges(inline_buf, heap_buf, drops)` (`graph.cpp:graph_t::fan_out`) | an empty local vector that never allocates unless the snapshot spills |
+| shape | overflow buffer draws from |
+| --- | --- |
+| wide, `own_subs() > kInlineFanout` | a frame of `8 * kInlineFanout` views on the publishing call's own stack, then the graph's table source past it |
+| small | the graph's table source directly; reached only when the snapshot spills |
 
 `inline_buf` is an `edge_snapshot_t`, a raw byte array placement-constructed into, so a small
 fan-out neither allocates nor pays the zeroing a default-constructed `edge_view_t` array would
 (`subscriber.hpp:edge_snapshot_t`). Its width is `kInlineFanout` — the no-heap small-fan-out snapshot width,
-`edge_snapshot_t::kCapacity`, 8 (`vertex.hpp:vertex_t::kInlineFanout`, `subscriber.hpp:edge_snapshot_t::kCapacity`). A warm wide publish reuses the
-thread-local vector's capacity and so allocates nothing either.
+`edge_snapshot_t::kCapacity`, 8 (`vertex.hpp:vertex_t::kInlineFanout`, `subscriber.hpp:edge_snapshot_t::kCapacity`). A wide publish up to the frame's
+width allocates nothing either; a wider one takes one block from the table source and returns it
+when the delivery ends. No thread keeps a buffer between publishes (#1885 deleted the
+`thread_local` vector that did).
 
 `own_subs()` is read without the lock, so the width it reports can be stale.
 That costs nothing but a re-read: **`snapshot_edges` re-checks the width against the published
 array** (`graph.cpp:graph_t::fan_out`, `vertex.hpp:const bool use_heap =`), so a subscriber added between the count and
-the copy costs at most one fallback allocation on the small path and never a wrong answer. Re-entrancy is
-handled by a `tls_busy` flag: a subscriber callback that re-publishes takes the local-buffer
-path, so the outer fan-out's thread-local buffer is never aliased, and the flag resets on scope
-exit (`graph.cpp:graph_t::fan_out`).
+the copy costs at most one fallback allocation on the small path and never a wrong answer. Re-entrancy
+needs no handling: a subscriber callback that re-publishes runs a `fan_out` of its own, with its
+own frame (`graph.cpp:graph_t::fan_out`).
 
-Both allocations inside the snapshot are nothrow. An unreservable overflow vector degrades the
-snapshot to the first `kInlineFanout` views and drops the rest of that delivery; an edge whose
-owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:vertex_t::copy_published`).
-Neither can abort. A thread that cannot claim a pin cell — more concurrent publishers than
+The one allocation inside the snapshot is a refusal by value. An unreservable overflow buffer
+degrades the snapshot to the first `kInlineFanout` views and drops the rest of that delivery,
+counted as `fan_out_truncated` (`vertex.hpp:vertex_t::copy_published`). It cannot abort. A thread that cannot claim a pin cell — more concurrent publishers than
 `kEdgePinSlots` — copies the current array under the stripe mutex instead, which is the
 pre-#635 path for those threads and nobody else; correctness never depends on the constant.
 
