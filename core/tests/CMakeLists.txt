@@ -2363,6 +2363,13 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
     target_link_libraries(session_anchor_test PRIVATE libtracer)
     libtracer_test_warnings(session_anchor_test)
     add_test(NAME session_anchor COMMAND session_anchor_test)
+    # A forwarded WRITE through a mount — bus or point-to-point — is authorized at the mount's
+    # connection vertex: real TCP sessions under a restrictive `:acl`, each refusal paired with
+    # the identical admitted frame.
+    add_executable(mount_hop_acl_test mount_hop_acl_test.cpp)
+    target_link_libraries(mount_hop_acl_test PRIVATE libtracer)
+    libtracer_test_warnings(mount_hop_acl_test)
+    add_test(NAME mount_hop_acl COMMAND mount_hop_acl_test)
 endif()
 
 # The #830 ablation: target_canonical_resolves() proves WHICH of dispatch_edge_target's two
@@ -2423,6 +2430,7 @@ set(LIBTRACER_BUS_TESTS
     collect
     edge_eviction
     fwd_flatten_backend
+    mount_hop_acl
     mount_routing
     mount_shape_flip
     orchestrate_depart
@@ -2518,7 +2526,8 @@ endif()
 # together. Only these five: the remaining `bus` suites already fail CLEANLY on that build,
 # which is an acceptable answer for a test whose subject was compiled out, and converting all of
 # them would be a much larger diff for no additional safety.
-set(LIBTRACER_BUS_SKIPPABLE_TESTS edge_eviction send_stall session_anchor tcp ws_transport)
+set(LIBTRACER_BUS_SKIPPABLE_TESTS edge_eviction send_stall session_anchor tcp ws_transport
+    mount_hop_acl)
 foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_SKIPPABLE_TESTS)
     if(TEST ${_libtracer_bus_test})
         set_property(TEST ${_libtracer_bus_test} PROPERTY SKIP_RETURN_CODE 77)

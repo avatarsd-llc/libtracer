@@ -1959,6 +1959,23 @@ class fwd_router_t {
                                                   Reject&& reject,
                                                   wire::path_ref_element_t& terminus_target);
     /**
+     * @brief May @p caller carry this frame's op through the connection vertex of the
+     *        point-to-point child @p entry the NAME descent matched?
+     *
+     * The vertex is found by the entry's own mount key — the bytes the descent already holds,
+     * one keyed find — and asked `graph_t::allows(vertex, caller, right)`: the check
+     * @ref bound_egress runs for the bound and label spellings, so the verdict cannot depend
+     * on how the hop was spelled. A REPLY passes (nothing to authorize), and so does every hop
+     * on a graph that enforces no ACL (one relaxed load) or a hop with no matched mount
+     * (@p entry null). On a graph that enforces an ACL, a child with no connection vertex has
+     * nothing to grant the right and is refused, as is an op byte this build names no right
+     * for.
+     */
+    template <class Cursor>
+    [[nodiscard]] bool name_hop_allows(const child_registry_t::child_t* entry,
+                                       std::string_view caller, const Cursor& cur,
+                                       const fwd_pre_t& pre) const;
+    /**
      * @brief RFC-0027 §6.1's reply-leg rewrite: the span this hop prepends to `src`, either its
      *        mount run (the default, and today's behaviour) or the label that replaces it.
      *

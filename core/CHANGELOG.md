@@ -14,6 +14,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Security
+
+- **The ACL gate reads a settled hook slot during a republish
+  ([GHSA-j8p5-qwx8-fm7c](https://github.com/avatarsd-llc/libtracer/security/advisories/GHSA-j8p5-qwx8-fm7c)).**
+  A gated operation that overlaps a `graph_t::set_hooks` republish now waits the publish out
+  (`sink_slot_t::get_settled`: a bounded re-read of the slot's generation, yielding every 64
+  reads, with no clock and no sleep) and resolves with the settled hooks. A slot that does not
+  settle within the bound refuses the caller.
+
 ### Added
 
 - **`mem::chunked_map_t`: a failable sorted map in fixed-size leaves
@@ -301,6 +310,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     - `bytes_t`, `assign_bytes`, `as_span`, `bytes_less_t`, `make_in` / `drop_in`,
       `block_ptr_t` / `make_block`, and `exhausted_at_init`.
   - `wire::emit_path_segment` gains `mem::bytes_t&` overloads.
+
+### Fixed
+
+- **Fixed an ACL check on the canonical-string forward hop.** A forwarded operation whose
+  `dst` names the next hop as a NAME run is now authorized at that hop's connection vertex
+  exactly as the bound and label spellings are (`graph_t::allows`, for the operation's own
+  right), so the verdict no longer depends on how the hop is spelled. A refused hop answers
+  `NOT_FOUND`. This holds on every mount hop, point-to-point and bus alike. A REPLY and a hop
+  on a graph that enforces no ACL are unchanged.
+  `graph_t` gains `acl_enforced()`, the one-load test the hop asks first.
+
+- **Fixed an ACL check on the bound delivery into an accepted session.** A one-element bound
+  `dst` that names a bus session's anchor is now authorized at the mount's connection vertex
+  for WRITE, as the NAME spelling `<mount>/<peer>` is, in addition to the anchor itself. On a
+  graph that enforces an ACL, a mount with no connection vertex refuses the delivery.
+
+- **With ACL enforcement on, a link registered without a connection vertex no longer forwards;
+  register its connection vertex.** A NAME-spelled hop through such a mount is refused, as the
+  bound delivery through it already is.
 
 ## [0.18.0] — 2026-10-05
 
