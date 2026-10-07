@@ -120,7 +120,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [RFC-0017](spec/rfcs/0017-element-addressing-value-plane-index.md) | Element addressing: `[n]` on the value plane, and per-element delivery | draft |  |  |
 | [RFC-0018](spec/rfcs/0018-packed-path-segments.md) | Packed path segments: a `PATH` body becomes length-prefixed records | accepted |  |  |
 | [RFC-0019](spec/rfcs/0019-path-depth-bounded-by-bytes.md) | Path depth is bounded by bytes: the 32-segment `PATH` cap is deleted | superseded | [RFC-0023](spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md) |  |
-| [RFC-0020](spec/rfcs/0020-bus-name-not-a-routable-next-hop.md) | A bus link's connection NAME is not a routable next-hop (reject, never broadcast, on the request plane) | accepted |  |  |
+| [RFC-0020](spec/rfcs/0020-bus-name-not-a-routable-next-hop.md) | A bus link's connection NAME is not a routable next-hop (reject, never broadcast, on the request plane) | accepted | [RFC-0031](spec/rfcs/0031-bus-session-anchors-are-children-of-their-door.md) (part) |  |
 | [RFC-0021](spec/rfcs/0021-wire-subscriber-target-frame-of-reference.md) | The frame of reference of a wire SUBSCRIBER's PATH target | accepted |  |  |
 | [RFC-0022](spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) | Delivery policy is per-subscription; `settings_t` dissolves | accepted |  |  |
 | [RFC-0023](spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md) | The path segment cap is repriced: 32 → 255, derived from the wire's own widths | accepted |  | [RFC-0019](spec/rfcs/0019-path-depth-bounded-by-bytes.md) |
@@ -129,9 +129,9 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [RFC-0026](spec/rfcs/0026-ace-access-mask-canonical-u32.md) | The ACE `access_mask` canonical wire width is u32 | accepted |  |  |
 | [RFC-0027](spec/rfcs/0027-label-switched-path-compression.md) | Label-switched path compression: minting a per-host path label across the wire | superseded | [RFC-0029](spec/rfcs/0029-one-path-primitive.md) |  |
 | [RFC-0028](spec/rfcs/0028-lean-value-path.md) | The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait | accepted |  |  |
-| [RFC-0029](spec/rfcs/0029-one-path-primitive.md) | One path primitive: the owner-issued `(index, generation)` pair, carried per hop, local = forwarded | accepted |  | [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part), [RFC-0024](spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) (part), [RFC-0027](spec/rfcs/0027-label-switched-path-compression.md) |
+| [RFC-0029](spec/rfcs/0029-one-path-primitive.md) | One path primitive: the owner-issued `(index, generation)` pair, carried per hop, local = forwarded | accepted | [RFC-0031](spec/rfcs/0031-bus-session-anchors-are-children-of-their-door.md) (part) | [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part), [RFC-0024](spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) (part), [RFC-0027](spec/rfcs/0027-label-switched-path-compression.md) |
 | [RFC-0030](spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md) | The host API walks the graph: a graph-owned path object, creation refused by default, the reply as a remote write, `AWAIT` and `REPLY` retired | accepted |  | [ADR-0006](adr/0006-read-write-await-api-no-connect.md) (part), [ADR-0084](adr/0084-remote-await-completes-from-a-receiver-side-waiter.md), [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part) |
-| [RFC-0031](spec/rfcs/0031-bus-session-anchors-are-children-of-their-door.md) | Bus-session anchors are child vertices under their door: one walk and one gate reach a session, send-through is directed | proposed |  |  |
+| [RFC-0031](spec/rfcs/0031-bus-session-anchors-are-children-of-their-door.md) | Bus-session anchors are child vertices under their door: one walk and one gate reach a session, send-through is directed | accepted |  | [RFC-0020](spec/rfcs/0020-bus-name-not-a-routable-next-hop.md) (part), [RFC-0029](spec/rfcs/0029-one-path-primitive.md) (part) |
 
 ## Numbering gaps
 

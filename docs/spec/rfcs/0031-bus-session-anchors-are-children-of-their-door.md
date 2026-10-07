@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0031 — Bus-session anchors are child vertices under their door: one walk and one gate reach a session, send-through is directed
 
-<!-- status: proposed -->
+<!-- status: accepted -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0031 |
 | **Title** | Bus-session anchors are child vertices under their door: one walk and one gate reach a session, send-through is directed |
-| **Status** | **proposed** (2026-10-07). The direction of §§5–6 was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (§"Addendum: stages 5 and 6", "all rec"). This document turns that ruling into normative text, and §14 lists the choices the ruling left open, each with a recommendation. |
+| **Status** | **accepted** (2026-10-07; proposed the same day), maintainer-approved with every §14 recommendation; comment window waived by default and not invoked. The direction of §§5–6 was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (§"Addendum: stages 5 and 6", "all rec"). This document turns that ruling into normative text, and §14 lists the choices the ruling left open, each with a recommendation. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-07 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -621,6 +621,8 @@ shown to fail with its change ablated:
    transport's reporting, not a refusal in the graph.
 
 ## 14. Questions for the maintainer, each with a recommendation
+
+**Ruled 2026-10-07:** the maintainer accepted every recommendation below as written.
 
 1. **Does an anchor evaluate the door's ACL as the door does (§6.2), rather than as a bare child
    (only `INHERIT` ACEs)?** *Recommendation: yes.* It keeps every existing door verdict for sessions
