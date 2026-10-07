@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0020 — A bus link's connection NAME is not a routable next-hop (reject, never broadcast, on the request plane)
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: RFC-0031 -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0020 |
 | **Title** | A bus link's connection NAME is not a routable next-hop (reject, never broadcast, on the request plane) |
-| **Status** | **accepted** — 14-day comment window waived by sole maintainer, 2026-08-01 |
+| **Status** | **accepted** — 14-day comment window waived by sole maintainer, 2026-08-01 **Amended by [RFC-0031](0031-bus-session-anchors-are-children-of-their-door.md)** (accepted 2026-10-07): §3 is narrowed. |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-08-01 |
 | **Comment window** | waived by the sole maintainer, 2026-08-01 ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); `docs/implementations.md` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
