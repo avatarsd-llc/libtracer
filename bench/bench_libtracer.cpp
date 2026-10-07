@@ -950,18 +950,22 @@ void run_fold(std::size_t N) {
  */
 namespace acl_bench {
 
-/** @brief Install a subject resolver mapping a non-empty caller to its own bytes. */
+/** @brief Install a subject lookup writing a non-empty caller's own bytes as its token.
+ *
+ * The caller-storage form (#1781): the token lands in the gate's stack frame, so a gated op
+ * allocates nothing for it. The deprecated returning-form `subject_resolver` still works, through
+ * an adapter that copies its vector into the same frame. */
 void install_resolver(graph_t& g) {
     {
         auto hooks = g.hooks();
-        hooks.subject_resolver = {
-            [](void*,
-               std::string_view caller) -> std::expected<std::vector<std::byte>, tr::wire::err_t> {
-                // The empty (local) context is settled as trusted before the resolver runs (#905),
+        hooks.subject_lookup = {
+            [](void*, std::string_view caller,
+               tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+                // The empty (local) context is settled as trusted before the lookup runs (#905),
                 // so the setup writes never arrive here.
-                std::vector<std::byte> token(caller.size());
-                std::memcpy(token.data(), caller.data(), caller.size());
-                return token;
+                if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))
+                    return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+                return {};
             },
             nullptr};
         g.set_hooks(hooks);

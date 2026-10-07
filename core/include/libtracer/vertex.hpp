@@ -1872,6 +1872,31 @@ class vertex_t {
      */
     std::size_t drain_unflushed(std::vector<value_ref_t>& out,
                                 std::uint64_t* gap_before = nullptr) {
+        return drain_unflushed_into(out, gap_before);
+    }
+
+    /** @brief @ref drain_unflushed into a core array (#1781) — the same contract, with the
+     *         snapshot drawn from @p out's own source: a refused reservation drains nothing and
+     *         leaves the appends owed to the next flush. */
+    std::size_t drain_unflushed(tr::mem::block_array_t<value_ref_t>& out,
+                                std::uint64_t* gap_before = nullptr) {
+        return drain_unflushed_into(out, gap_before);
+    }
+
+   private:
+    /** @brief Reserve a drain snapshot in a `std::vector` without throwing (#477). */
+    [[nodiscard]] static bool reserve_drain(std::vector<value_ref_t>& out, std::size_t n) noexcept {
+        return tr::detail::try_reserve(out, n);
+    }
+    /** @brief Reserve a drain snapshot in a core array; its source may refuse. */
+    [[nodiscard]] static bool reserve_drain(tr::mem::block_array_t<value_ref_t>& out,
+                                            std::size_t n) noexcept {
+        return out.reserve(n);
+    }
+
+    /** @brief The one body of both @ref drain_unflushed spellings. */
+    template <class Out>
+    std::size_t drain_unflushed_into(Out& out, std::uint64_t* gap_before) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) {
@@ -1890,7 +1915,7 @@ class vertex_t {
             static_cast<std::size_t>(std::min<std::uint64_t>(e->appended_since_flush, r.count));
         // Nothrow-reserve BEFORE the cursor reset: a failed snapshot leaves the appends
         // marked un-flushed (deferred delivery), instead of a throwing assign (#477).
-        if (!tr::detail::try_reserve(out, take)) return 0;
+        if (!reserve_drain(out, take)) return 0;
         e->appended_since_flush = 0;
         out.clear();
         if (take == 0) return 0;
@@ -1898,10 +1923,11 @@ class vertex_t {
         const ring_entry_t* it = r.tail;
         for (std::size_t i = 1; i < take; ++i) it = it->prev;
         for (; it != nullptr; it = it->next)
-            out.push_back(it->value);  // within capacity — refcount shares, no byte copy
+            (void)out.push_back(it->value);  // within capacity — refcount shares, no byte copy
         return out.size();
     }
 
+   public:
     /**
      * @brief Copy the NEWEST `min(out.size(), ring count)` STREAM ring entries into @p out,
      *        oldest first — each a `value_ref_t` share of the entry's block (one refcount bump,
@@ -2404,6 +2430,20 @@ class vertex_t {
         for (const subscriber_t& s : b->slots)
             if (s.active && s.source_view.owner) out.push_back(s.source_view);
         return out;
+    }
+
+    /** @brief @ref edge_sources into a core array (#1781): @p out is replaced by every active
+     *         slot's SUBSCRIBER view, in slot order.
+     *  @retval false The array's source refused the table; @p out is left empty. */
+    [[nodiscard]] bool edge_sources(tr::mem::block_array_t<view::view_t>& out) {
+        out.clear();
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const edge_block_t* b = edges_locked();
+        if (b == nullptr) return true;
+        if (!out.reserve(b->slots.size())) return false;
+        for (const subscriber_t& s : b->slots)
+            if (s.active && s.source_view.owner) (void)out.push_back(s.source_view);  // reserved
+        return true;
     }
 
     // -- ACL state (#81, ADR-0018/0020) -------------------------------------------------

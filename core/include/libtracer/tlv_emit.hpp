@@ -299,6 +299,19 @@ inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
 }
 
 /**
+ * @brief Append trailer-timestamp bytes — the core-array form of @ref emit_trailer_ts, same
+ *        bytes by delegation to @ref store_trailer_ts.
+ * @retval false The source refused — @p out is unchanged.
+ */
+[[nodiscard]] inline bool emit_trailer_ts(mem::bytes_t& out, bool relative,
+                                          std::int64_t ns) noexcept {
+    std::byte ts[8];
+    const std::size_t n = trailer_ts_bytes(relative);
+    store_trailer_ts(std::span<std::byte>(ts, n), relative, ns);
+    return out.append(ts, n);
+}
+
+/**
  * @brief Append one TLV — the core-array form of @ref emit_tlv (same widening, same cleared
  *        trailer bits).
  * @retval false The source refused — @p out is unchanged.
@@ -336,6 +349,27 @@ template <std::unsigned_integral T>
     std::byte body[sizeof(T)];
     detail::store_le(std::span<std::byte>(body, width), value, width);
     return emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(body, width));
+}
+
+/**
+ * @brief Append a `PATH_REF` TLV over @p elements — the core-array form of @ref emit_path_ref.
+ * @retval false @p elements exceeds @ref kMaxPathRefElements, @p type is neither bound-path
+ *         code, or the source refused — @p out is unchanged on all three.
+ */
+[[nodiscard]] inline bool emit_path_ref(mem::bytes_t& out,
+                                        std::span<const path_ref_element_t> elements,
+                                        type_t type = type_t::PATH_REF) noexcept {
+    if (elements.size() > kMaxPathRefElements || !is_path_ref_type(type)) return false;
+    const std::size_t body = elements.size() * kPathRefElementBytes;
+    if (!out.reserve(out.size() + header_bytes(opt_t{}) + body) ||
+        !emit_header(out, type, opt_t{}, body))
+        return false;
+    for (const path_ref_element_t& e : elements) {
+        std::byte rec[kPathRefElementBytes];
+        path_ref_store_element(std::span<std::byte, kPathRefElementBytes>(rec), e);
+        if (!out.append(rec, kPathRefElementBytes)) return false;
+    }
+    return true;
 }
 
 /** @} */

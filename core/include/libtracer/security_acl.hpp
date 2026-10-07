@@ -343,48 +343,21 @@ class effective_acl_t {
     std::vector<ace_t> merged_; /**< @brief Effective ACEs, evaluation order. */
 };
 
-/**
- * @brief Parse a decoded `:acl` ACL TLV into typed ACEs (docs/reference/05 §0x0A).
- *
- * STRICT by construction, because an ACL is a security document: a shape the builder
- * never emits is rejected with `TYPE_MISMATCH` at write time rather than read
- * leniently, since leniency here does not lose a field — it INVERTS or WIDENS a grant
- * (#906). Rejected, per ACE:
- *
- * - a DENY ACE under a policy that cannot evaluate one (`Policy::kAcceptsDeny`), and
- *   any flag bit beyond `kAceInherit` — the inheritance-only subset both adapters honor
- *   today; richer NFSv4 flags gate on the graph's merge honoring them first;
- * - a missing `type` / `subject` / `access_mask`, or an empty `subject` token;
- * - a numeric field whose payload is empty or wider than the field
- *   (`%detail_acl::ace_field_ok` — `type`/`flags` u8, `access_mask` u32,
- *   `expires_ns` u64), which is where a big-endian u16 `type` of `0x0001` used to
- *   truncate from DENY to ALLOW;
- * - a KNOWN key carrying the wrong value TLV type — rejected, never skipped: a
- *   dropped `expires_ns` turns a time-limited grant permanent;
- * - an UNKNOWN key, a repeated key, a non-`NAME` child in a key slot, and an odd child
- *   count (a key with no value, or a value with no key).
- *
- * The walk is **pair-consuming**, the mechanics of `wire::config_reader_t` (#927): it
- * steps one whole `(NAME key, value)` pair at a time, so a value can never be re-read
- * as the next key — which a `subject` sent as a `NAME` (a spelling this function
- * accepts, for `EVERYONE@`) previously could be. The unknown-key ruling is the
- * OPPOSITE of that reader's, deliberately: config is where a newer peer legitimately
- * sends more than the receiver understands, so it skips the pair; an ACL is not, so a
- * silently dropped attribute would widen access.
- *
- * Every key runs through the same checks, driven by one `{key, width}` table
- * (`%detail_acl::kAceKeys`) and a seen-bitmask, so the required-field rule is a single
- * compare against `%detail_acl::kAceRequired` (#1799).
- *
- * @tparam Policy The accepting policy (defaults to the target's selection).
- * @param acl A validated ACL node (`ACL{ ACL{NAME/VALUE…}* }`), walked in place (#1829).
- * @return The typed ACE list, in wire order, or `TYPE_MISMATCH`.
- */
-template <class Policy = acl_policy_t>
-[[nodiscard]] result_t<std::vector<ace_t>> parse_acl(const wire::tlv_node_t& acl) {
+namespace detail_acl {
+
+/** @brief Append @p ace to a `std::vector` table. */
+inline void push_ace(std::vector<ace_t>& out, ace_t&& ace) { out.push_back(std::move(ace)); }
+/** @brief Append @p ace to a core table the caller reserved, so the append cannot be refused. */
+inline void push_ace(mem::block_array_t<ace_t>& out, ace_t&& ace) noexcept {
+    (void)out.push_back(std::move(ace));
+}
+
+/** @brief The one body of both @ref parse_acl spellings: @p out is cleared, then filled. */
+template <class Policy, class Out>
+[[nodiscard]] result_t<void> parse_acl_into(const wire::tlv_node_t& acl, Out& out) {
     using wire::tlv_node_t;
     using wire::type_t;
-    std::vector<ace_t> out;
+    out.clear();
     for (const tlv_node_t entry : acl.children()) {
         if (entry.type() != type_t::ACL || !entry.opt().pl)
             return std::unexpected(status_t::TYPE_MISMATCH);
@@ -437,9 +410,76 @@ template <class Policy = acl_policy_t>
                            raw[detail_acl::kAceSubject].end());
         ace.access_mask = tr::detail::load_le<std::uint32_t>(raw[detail_acl::kAceMask]);
         ace.expires_ns = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceExpires]);
-        out.push_back(std::move(ace));
+        push_ace(out, std::move(ace));  // the core-array caller reserved one slot per entry
     }
+    return {};
+}
+
+}  // namespace detail_acl
+
+/**
+ * @brief Parse a decoded `:acl` ACL TLV into typed ACEs (docs/reference/05 §0x0A).
+ *
+ * STRICT by construction, because an ACL is a security document: a shape the builder
+ * never emits is rejected with `TYPE_MISMATCH` at write time rather than read
+ * leniently, since leniency here does not lose a field — it INVERTS or WIDENS a grant
+ * (#906). Rejected, per ACE:
+ *
+ * - a DENY ACE under a policy that cannot evaluate one (`Policy::kAcceptsDeny`), and
+ *   any flag bit beyond `kAceInherit` — the inheritance-only subset both adapters honor
+ *   today; richer NFSv4 flags gate on the graph's merge honoring them first;
+ * - a missing `type` / `subject` / `access_mask`, or an empty `subject` token;
+ * - a numeric field whose payload is empty or wider than the field
+ *   (`%detail_acl::ace_field_ok` — `type`/`flags` u8, `access_mask` u32,
+ *   `expires_ns` u64), which is where a big-endian u16 `type` of `0x0001` used to
+ *   truncate from DENY to ALLOW;
+ * - a KNOWN key carrying the wrong value TLV type — rejected, never skipped: a
+ *   dropped `expires_ns` turns a time-limited grant permanent;
+ * - an UNKNOWN key, a repeated key, a non-`NAME` child in a key slot, and an odd child
+ *   count (a key with no value, or a value with no key).
+ *
+ * The walk is **pair-consuming**, the mechanics of `wire::config_reader_t` (#927): it
+ * steps one whole `(NAME key, value)` pair at a time, so a value can never be re-read
+ * as the next key — which a `subject` sent as a `NAME` (a spelling this function
+ * accepts, for `EVERYONE@`) previously could be. The unknown-key ruling is the
+ * OPPOSITE of that reader's, deliberately: config is where a newer peer legitimately
+ * sends more than the receiver understands, so it skips the pair; an ACL is not, so a
+ * silently dropped attribute would widen access.
+ *
+ * Every key runs through the same checks, driven by one `{key, width}` table
+ * (`%detail_acl::kAceKeys`) and a seen-bitmask, so the required-field rule is a single
+ * compare against `%detail_acl::kAceRequired` (#1799).
+ *
+ * @tparam Policy The accepting policy (defaults to the target's selection).
+ * @param acl A validated ACL node (`ACL{ ACL{NAME/VALUE…}* }`), walked in place (#1829).
+ * @return The typed ACE list, in wire order, or `TYPE_MISMATCH`.
+ */
+template <class Policy = acl_policy_t>
+[[nodiscard]] result_t<std::vector<ace_t>> parse_acl(const wire::tlv_node_t& acl) {
+    std::vector<ace_t> out;
+    if (const result_t<void> r = detail_acl::parse_acl_into<Policy>(acl, out); !r)
+        return std::unexpected(r.error());
     return out;
+}
+
+/**
+ * @brief @ref parse_acl into a core array (#1781): @p out is replaced by the typed ACEs in
+ *        wire order. The same strict shape rules; the table is drawn from @p out's source.
+ * @retval status_t::TYPE_MISMATCH The ACL is not a shape @ref parse_acl accepts.
+ * @retval status_t::BACKPRESSURE @p out's source refused the table.
+ * On any refusal @p out holds no ACE of this ACL.
+ */
+template <class Policy = acl_policy_t>
+[[nodiscard]] result_t<void> parse_acl(const wire::tlv_node_t& acl,
+                                       mem::block_array_t<ace_t>& out) {
+    // One slot per entry, reserved up front: the parse below then cannot be refused midway.
+    std::size_t entries = 0;
+    for ([[maybe_unused]] const wire::tlv_node_t entry : acl.children()) ++entries;
+    out.clear();
+    if (!out.reserve(entries)) return std::unexpected(status_t::BACKPRESSURE);
+    const result_t<void> r = detail_acl::parse_acl_into<Policy>(acl, out);
+    if (!r) out.clear();
+    return r;
 }
 
 /**
@@ -475,6 +515,63 @@ template <class Policy = acl_policy_t>
     std::vector<std::byte> out;
     wire::emit_tlv(out, type_t::ACL, opt_t{.pl = true}, body);
     return out;
+}
+
+namespace detail_acl {
+
+/** @brief Wire bytes of a `(NAME key, VALUE)` pair whose value body is @p value_len bytes. */
+[[nodiscard]] constexpr std::size_t pair_bytes(std::string_view key,
+                                               std::size_t value_len) noexcept {
+    return wire::header_bytes(wire::opt_t{}) + key.size() +
+           wire::header_bytes(wire::opt_t{.ll = value_len > 0xFFFFu}) + value_len;
+}
+
+/** @brief Body bytes of one encoded ACE entry — what @ref encode_acl writes inside its `ACL`. */
+[[nodiscard]] constexpr std::size_t ace_entry_bytes(const ace_t& ace) noexcept {
+    return pair_bytes("type", 1) + pair_bytes("flags", 1) +
+           pair_bytes("subject", ace.subject.size()) + pair_bytes("access_mask", 4) +
+           (ace.expires_ns != 0 ? pair_bytes("expires_ns", 8) : 0);
+}
+
+/** @brief Append one `(NAME key, VALUE u<width> LE)` pair.  @retval false The source refused. */
+[[nodiscard]] inline bool put_u(mem::bytes_t& out, std::string_view key, std::uint64_t v,
+                                std::size_t width) noexcept {
+    std::array<std::byte, 8> le{};
+    tr::detail::store_le(std::span<std::byte>(le), v, width);
+    return wire::emit_name(out, key) && wire::emit_tlv(out, wire::type_t::VALUE, wire::opt_t{},
+                                                       std::span<const std::byte>(le).first(width));
+}
+
+}  // namespace detail_acl
+
+/**
+ * @brief @ref encode_acl appended to a core byte array (#1781) — the same bytes, sized first
+ *        and written in one reservation, so a refusal appends nothing.
+ * @retval false The source refused the bytes; @p out is unchanged.
+ */
+[[nodiscard]] inline bool encode_acl(std::span<const ace_t> aces, mem::bytes_t& out) noexcept {
+    using wire::opt_t;
+    using wire::type_t;
+    std::size_t body = 0;
+    for (const ace_t& ace : aces) {
+        const std::size_t entry = detail_acl::ace_entry_bytes(ace);
+        body += wire::header_bytes(opt_t{.ll = entry > 0xFFFFu}) + entry;
+    }
+    if (!out.reserve(out.size() + wire::header_bytes(opt_t{.ll = body > 0xFFFFu}) + body))
+        return false;
+    // Reserved above, so no append below can be refused: the `&&` chain only sequences them.
+    bool ok = wire::emit_header(out, type_t::ACL, opt_t{.pl = true, .ll = body > 0xFFFFu}, body);
+    for (const ace_t& ace : aces) {
+        const std::size_t entry = detail_acl::ace_entry_bytes(ace);
+        ok = ok &&
+             wire::emit_header(out, type_t::ACL, opt_t{.pl = true, .ll = entry > 0xFFFFu}, entry) &&
+             detail_acl::put_u(out, "type", static_cast<std::uint8_t>(ace.type), 1) &&
+             detail_acl::put_u(out, "flags", ace.flags, 1) && wire::emit_name(out, "subject") &&
+             wire::emit_tlv(out, type_t::VALUE, opt_t{}, ace.subject) &&
+             detail_acl::put_u(out, "access_mask", ace.access_mask, 4) &&
+             (ace.expires_ns == 0 || detail_acl::put_u(out, "expires_ns", ace.expires_ns, 8));
+    }
+    return ok;
 }
 
 }  // namespace tr::graph

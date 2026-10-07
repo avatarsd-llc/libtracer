@@ -33,6 +33,13 @@ target_link_libraries(byteorder_test PRIVATE libtracer)
 libtracer_test_warnings(byteorder_test)
 add_test(NAME byteorder COMMAND byteorder_test)
 
+# The view / caller-storage spellings of the public API (#1781): byte-identical to the std
+# spellings they replace, refused by value over a refusing source.
+add_executable(public_api_views_test public_api_views_test.cpp)
+target_link_libraries(public_api_views_test PRIVATE libtracer)
+libtracer_test_warnings(public_api_views_test)
+add_test(NAME public_api_views COMMAND public_api_views_test)
+
 # The RFC-0002 protocol error registry (error.hpp) — every code's path, severity and
 # disposition against the reference registry table, row by row.
 add_executable(error_registry_test error_registry_test.cpp)

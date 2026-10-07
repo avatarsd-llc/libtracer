@@ -348,6 +348,19 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
 [[nodiscard]] std::vector<std::byte> encode(const tlv_t& tlv);
 
 /**
+ * @brief Serialize @p tlv, appending the frame bytes to a core byte array (#1781) — the same
+ *        bytes and the same refusals as the vector-returning @ref encode, in one reservation.
+ *
+ * The whole frame is sized first, so a refusal (an ill-formed `PATH_REF` or an incoherent
+ * timestamp anywhere in the tree, or the source declining the reservation) appends NOTHING.
+ *
+ * @param tlv The TLV tree to serialize.
+ * @param out Appended to; unchanged on a false return.
+ * @retval false @p tlv is refused (see the vector form), or the source refused the bytes.
+ */
+[[nodiscard]] bool encode(const tlv_t& tlv, mem::bytes_t& out) noexcept;
+
+/**
  * @brief The canonical PATH-payload key of a validated PATH node — the graph vertex-map key.
  *
  * The PATH body's packed `[u8 len][bytes]` segment records, copied (RFC-0018 — `opt.PL = 0`,

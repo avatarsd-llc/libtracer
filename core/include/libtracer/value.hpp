@@ -431,6 +431,16 @@ class value_t {
         return iov;
     }
 
+    /** @brief The links as byte spans into CALLER storage (#1781) — `rope_t::to_iovec`'s span
+     *         form: fills `min(out.size(), n)` spans and returns the link count, allocating
+     *         nothing. */
+    [[nodiscard]] std::size_t to_iovec(std::span<std::span<const std::byte>> out) const noexcept {
+        const std::span<const view::view_t> ls = links();
+        const std::size_t n = ls.size() < out.size() ? ls.size() : out.size();
+        for (std::size_t i = 0; i < n; ++i) out[i] = ls[i].bytes();
+        return ls.size();
+    }
+
     /** @brief Nothrow @ref to_iovec into @p out (cleared first).
      *  @retval false @p out could not be reserved; it is left empty. */
     [[nodiscard]] bool try_to_iovec(std::vector<std::span<const std::byte>>& out) const noexcept {

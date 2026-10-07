@@ -183,10 +183,15 @@ bool ram_edges_on(bool per_object) {
             return "192.168." + std::to_string(i / 250) + "." + std::to_string(i % 250) + ":9000";
         };
         if (!g.subscribe_wire(v, sub_v, route_v, link(kRamN)).has_value()) return false;
+        // The link names are built OUTSIDE the window (#1781): `subscribe_wire` takes the link
+        // as a view, so a name the caller builds per call is the caller's block, not the edge's.
+        std::vector<std::string> links;
+        links.reserve(kRamN);
+        for (std::size_t i = 0; i < kRamN; ++i) links.push_back(link(i));
         bool ok = true;
         probe::window_t win;
         for (std::size_t i = 0; i < kRamN; ++i)
-            ok = g.subscribe_wire(v, sub_v, route_v, link(i)).has_value() && ok;
+            ok = g.subscribe_wire(v, sub_v, route_v, links[i]).has_value() && ok;
         const probe::counts_t c = win.result();
         if (!ok) return false;
         print_ram("edge_wire", c, kRamN, per_object);

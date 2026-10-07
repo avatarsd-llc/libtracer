@@ -150,11 +150,19 @@ peer legitimately sends more than the receiver understands; an ACL is not.
 :members:
 ```
 
-```{doxygenfunction} tr::graph::parse_acl
+```{doxygenfunction} tr::graph::parse_acl(const wire::tlv_node_t&)
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::graph::encode_acl
+```{doxygenfunction} tr::graph::parse_acl(const wire::tlv_node_t&, mem::block_array_t<ace_t>&)
+:project: libtracer
+```
+
+```{doxygenfunction} tr::graph::encode_acl(std::span<const ace_t>)
+:project: libtracer
+```
+
+```{doxygenfunction} tr::graph::encode_acl(std::span<const ace_t>, mem::bytes_t&)
 :project: libtracer
 ```
 

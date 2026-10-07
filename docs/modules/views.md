@@ -164,7 +164,7 @@ only where the surrounding code has already established that the rope is one lin
 **`to_iovec()` allocates and can throw.** It `reserve`s a span table per call, which
 under `-fno-exceptions` turns an out-of-memory into `abort()`. Egress paths that build
 this table per send use `try_to_iovec(out)`, which probes the exact allocation first and
-returns `false` instead, leaving `out` empty (`rope.hpp:rope_t::to_iovec`). ⚠️ The probe is not a hard
+returns `false` instead, leaving `out` empty (`rope.hpp:to_iovec() const`). ⚠️ The probe is not a hard
 nothrow guarantee: `tr::detail::try_reserve` frees its probe block and *then* runs the
 throwing `reserve`, so on a multi-threaded node a racing allocation between the two can still
 abort ([#850](https://github.com/avatarsd-llc/libtracer/issues/850)); the header qualifies its

@@ -245,6 +245,24 @@ using subject_resolver_fn_t =
     std::expected<subject_token_t, wire::err_t> (*)(void* ctx, std::string_view caller);
 
 /**
+ * @brief The subject resolver writing into CALLER storage (#1781): caller context → subject
+ *        token, with no owning container crossing the seam.
+ *
+ * The same contract as @ref subject_resolver_fn_t — the error arm is a DENY, it is never
+ * invoked with an empty caller, and a token spelling `EVERYONE@` is refused at every gate —
+ * but the token is appended to @p out instead of returned. @p out is empty on entry and is
+ * drawn from a stack-first frame the ACL gate owns, which spills to the graph's table source
+ * only for a token past 64 bytes, so a gated operation allocates nothing for its subject. A
+ * refused append (the source is exhausted) should answer `wire::err_t::ACCESS_DENIED`: an
+ * unnamed caller fails closed.
+ *
+ * Install it as @ref graph_hooks_t::subject_lookup. It replaces @ref subject_resolver_fn_t,
+ * which is removed once its callers have moved (ADR-0083 Decision 11).
+ */
+using subject_lookup_fn_t = std::expected<void, wire::err_t> (*)(void* ctx, std::string_view caller,
+                                                                 mem::bytes_t& out);
+
+/**
  * @brief One EXTERNAL mutation of a producer's `:subscribers[]` — what @ref
  *        graph_hooks_t::subscription_observer reports.
  *
@@ -591,6 +609,15 @@ struct graph_hooks_t {
      * `%link_hold_fn_t` for when it fires.
      */
     graph_hook_t<link_hold_fn_t> link_hold{};
+
+    /**
+     * @brief The ACL enforcement switch in its caller-storage form (#1781): the same seam as
+     *        @ref subject_resolver, with the token written into a buffer the gate owns
+     *        (@ref subject_lookup_fn_t). Takes precedence when both are installed.
+     *
+     * Last in the aggregate so every existing designated initializer keeps compiling.
+     */
+    graph_hook_t<subject_lookup_fn_t> subject_lookup{};
 };
 
 /**
@@ -953,7 +980,7 @@ class graph_t {
      * @return The pinned @ref vertex_handle_t, or `PATH_IN_USE` if the key is already registered.
      */
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key(
-        std::vector<std::byte> key, role_t role, handlers_t handlers = {},
+        std::span<const std::byte> key, role_t role, handlers_t handlers = {},
         vertex_policy_t policy = {}, std::span<const payload_right_t> rights = {},
         std::span<const std::byte> schema_catalog = {});
 
@@ -1306,15 +1333,16 @@ class graph_t {
     [[nodiscard]] bool allows(vertex_handle_t v, std::string_view caller, acl_right_t right) const;
 
     /**
-     * @brief True iff this graph enforces an ACL at all — a subject resolver is installed.
+     * @brief True iff this graph enforces an ACL at all — a subject hook is installed
+     *        (`subject_lookup`, or `subject_resolver` through its adapter).
      *
-     * One relaxed load. With no resolver every @ref allows answers true for a remote caller,
-     * so a hop that would first have to LOCATE the vertex to evaluate at (a NAME-spelled
-     * forward hop) asks this first and skips the lookup on a node that enforces nothing. A
-     * hint, like `sink_slot_t::installed`: a resolver installed concurrently is observed by
-     * the next frame.
+     * One relaxed load of the slot the ACL gate reads. With no hook every @ref allows answers true
+     * for a remote caller, so a hop that would first have to LOCATE the vertex to evaluate at (a
+     * NAME-spelled forward hop) asks this first and skips the lookup on a node that enforces
+     * nothing. A hint, like `sink_slot_t::installed`: a resolver installed concurrently is observed
+     * by the next frame.
      */
-    [[nodiscard]] bool acl_enforced() const noexcept { return subject_resolver_.installed(); }
+    [[nodiscard]] bool acl_enforced() const noexcept { return subject_lookup_.installed(); }
 
     /**
      * @brief Free every value seam @ref retire parked — the EXPLICIT collector (#576).
@@ -1931,6 +1959,19 @@ class graph_t {
     [[nodiscard]] result_t<std::vector<view::view_t>> read_subscribers(
         vertex_handle_t v, std::string_view caller = {}) const;
     /**
+     * @brief @ref read_subscribers into a core array (#1781): @p out is replaced by the populated
+     *        slot SUBSCRIBER views in slot order, each a refcount clone.
+     *
+     * The table is drawn from @p out's own source (the caller's choice), so nothing here
+     * allocates on the graph's account.
+     * @return The number of views written.
+     * @retval status_t::PERMISSION_DENIED @p caller lacks READ.
+     * @retval status_t::BACKPRESSURE @p out's source refused the table; @p out is left empty.
+     */
+    [[nodiscard]] result_t<std::size_t> read_subscribers(vertex_handle_t v,
+                                                         mem::block_array_t<view::view_t>& out,
+                                                         std::string_view caller = {}) const;
+    /**
      * @brief Stream history into caller storage, oldest first (Stream role only) — RFC-0028 D11.
      *
      * Fills @p out with the NEWEST `min(out.size(), retained)` ring entries, oldest first, each
@@ -1981,6 +2022,14 @@ class graph_t {
      */
     [[nodiscard]] result_t<std::size_t> drain_unflushed(vertex_handle_t v,
                                                         std::vector<value_ref_t>& out,
+                                                        std::uint64_t* gap_before = nullptr);
+    /**
+     * @brief @ref drain_unflushed into a core array (#1781) — the same contract and the same
+     *        refusals. The snapshot is drawn from @p out's own source; a refused reservation
+     *        drains nothing (0) and leaves the entries owed to the next covering flush.
+     */
+    [[nodiscard]] result_t<std::size_t> drain_unflushed(vertex_handle_t v,
+                                                        mem::block_array_t<value_ref_t>& out,
                                                         std::uint64_t* gap_before = nullptr);
     /**
      * @brief Advance @p v's STREAM drain cursor to "now" WITHOUT draining (RFC-0008 §E) — an
@@ -2386,9 +2435,10 @@ class graph_t {
      * subscriber edge #1071 exists to prevent.
      */
     [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view::view_t source_view,
-                                                view::view_t return_route, std::string link,
+                                                view::view_t return_route, std::string_view link,
                                                 view::view_t reverse_route = {},
-                                                std::string caller = {}, link_id_t link_token = {});
+                                                std::string_view caller = {},
+                                                link_id_t link_token = {});
 
     /**
      * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.
@@ -2973,6 +3023,11 @@ class graph_t {
     // vertex mutex — the ancestor mutex-walk happens only inside the lazy rebuild
     // of a dirty cache (after a :acl write marked the written vertex's subtree).
     [[nodiscard]] bool acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const;
+    /** @brief The @ref subject_lookup_fn_t that adapts a resolver installed in the returning
+     *         form (@ref graph_hooks_t::subject_resolver): @p ctx is the graph, and the token
+     *         the resolver returns is copied into @p out. */
+    static std::expected<void, wire::err_t> lookup_via_resolver(void* ctx, std::string_view caller,
+                                                                mem::bytes_t& out);
     // Subtree-precise ADR-0050 cache invalidation: mark `v` and every descendant's
     // cached effective-ACE merge stale (release stores) after a :acl write on `v`,
     // via the ADR-0057 child links — wiring-frequency. Call with map_mutex_ held
@@ -3299,8 +3354,12 @@ class graph_t {
     // std::function predecessors had, since assigning a std::function destroys the old
     // target — freeing its captures while a reader is inside the call. An unset slot reads as
     // one relaxed load, which is what the null check on the plain member cost.
-    tr::sink_slot_t<remote_delivery_fn_t> remote_sink_;         // read on the write hot path
-    tr::sink_slot_t<subject_resolver_fn_t> subject_resolver_;   // read by the ACL gate
+    tr::sink_slot_t<remote_delivery_fn_t> remote_sink_;  // read on the write hot path
+    // The ACL gate reads ONLY `subject_lookup_` (#1781). A resolver installed in the returning
+    // form is kept in `subject_resolver_` and reached through `lookup_via_resolver`, which
+    // `set_hooks` installs in its place — so the disabled gate stays one relaxed load.
+    tr::sink_slot_t<subject_lookup_fn_t> subject_lookup_;       // read by the ACL gate
+    tr::sink_slot_t<subject_resolver_fn_t> subject_resolver_;   // the returning form, if set
     tr::sink_slot_t<sub_observer_fn_t> subscription_observer_;  // read on subscribe/clear
     tr::sink_slot_t<wire_target_fn_t> wire_target_;             // read on a wire subscribe only
     // The FIFTH (RFC-0010 Amendment 2): the net plane's `:stats` seam sampler, installed by

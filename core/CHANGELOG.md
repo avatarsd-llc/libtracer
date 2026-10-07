@@ -63,6 +63,45 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   value instead of it. The read semantics are RFC-0010 Amendment 4. A registration whose
   declaration node the table source refuses answers `BACKPRESSURE`, as for the admission filters.
 
+- **Core-container spellings of the public `std` signatures: the expand step of "no owning std
+  type crosses the core public API"
+  ([#1781](https://github.com/avatarsd-llc/libtracer/issues/1781), ADR-0083 Decision 11).**
+  Each sits beside the `std::vector` / `std::string` form it replaces, writes the same bytes,
+  and reports a refused allocation by value instead of throwing. The `std` forms are listed
+  under *Deprecated* below.
+  - Wire emitters into `mem::bytes_t&`, each `[[nodiscard]] bool`, beside the #1885 forms of
+    `wire::emit_header`, `emit_tlv`, `emit_name` and `emit_value_le`: `emit_trailer_ts`,
+    `emit_path_ref`, `emit_path_escape`, `emit_path_label`, `emit_path_element`,
+    `emit_path_labelled`, `emit_batch`, `emit_batch_time`, `emit_batch_offsets`, and
+    `detail::append_le`.
+  - `wire::encode(const tlv_t&, mem::bytes_t&)`: the whole frame is sized first, so a refusal
+    appends nothing.
+  - `rope_t::to_iovec(std::span<std::span<const std::byte>>)` and the same on `value_ref_t`:
+    scatter-gather into caller storage. They fill what fits and return the link count.
+  - `graph::encode_acl(aces, mem::bytes_t&)` and `graph::parse_acl(node,
+    mem::block_array_t<ace_t>&)`, which answers `BACKPRESSURE` when the table is refused.
+  - `net::conn_spec_t::bytes(mem::bytes_t&)`.
+  - `graph_t::read_subscribers(v, mem::block_array_t<view_t>&, caller)` and
+    `graph_t::drain_unflushed(v, mem::block_array_t<value_ref_t>&, gap)`. The table comes from
+    the array's own source.
+  - `vertex_t::edge_sources(mem::block_array_t<view::view_t>&)` and
+    `vertex_t::drain_unflushed(mem::block_array_t<value_ref_t>&, gap)`: the vertex-level forms
+    the two graph overloads above call.
+  - **`graph_hooks_t::subject_lookup`** (`subject_lookup_fn_t`): the subject resolver writing
+    the token into a `mem::bytes_t` the ACL gate owns, instead of returning a
+    `std::vector`. The gate's buffer is a 64-byte stack frame that spills to the graph's table
+    source, so a gated operation no longer allocates for its subject. It takes precedence over
+    `subject_resolver` when both are installed. A `subject_resolver` alone still gates with the
+    same decisions, through an adapter that copies its vector into the gate's frame: one extra
+    slot read and copy per gated operation (about 8 ns on the `acl-inherit-d4` row) until the
+    caller moves to `subject_lookup`. `graph_t::hooks()` hands back what was installed, never
+    the adapter.
+- **A public-std ratchet in CI ([#1781](https://github.com/avatarsd-llc/libtracer/issues/1781)).**
+  `tools/check_public_std.py` counts every owning `std` type in the installed headers
+  (comments and strings excluded) against `tools/public_std_baseline.json`, which names the
+  step that removes each. A count may only go down, and #1781 closes at zero except for the
+  `path.hpp` storage of `path_t` / `field_path_t`, which RFC-0029 S2 owns and which stays.
+
 - **`slab_class_stats_t::rounding`: the bytes a size class's live blocks lose to rounding up
   ([#1646](https://github.com/avatarsd-llc/libtracer/issues/1646)).** The class size less what
   each request asked, summed over the blocks `slab_pool_t::try_alloc` handed out; compiled only
@@ -272,6 +311,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   default) links none of it. A test that starved the node draw by replacing the nothrow
   `operator new` now does it through the fault-injection probe (`tr::detail::probe_fail_hook`,
   refusing `sizeof(detail_hp::node_t)`).
+
+- **Two graph inputs take views
+  ([#1781](https://github.com/avatarsd-llc/libtracer/issues/1781)).** Both are
+  source-compatible: an argument that compiled before still does.
+  - `graph_t::subscribe_wire` takes `link` and `caller` as `std::string_view` (they were
+    `std::string` by value). The net plane no longer builds a `std::string` per wire
+    subscribe to call it.
+  - `graph_t::register_vertex_key` takes `key` as `std::span<const std::byte>` (it was a
+    `std::vector` by value). The descent never kept the argument.
+  - `path_key_t`'s `const std::vector<std::byte>&` constructor is gone: the span constructor
+    binds the same arguments.
+
 - **The graph core draws its own state from the graph's table source
   ([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778), ADR-0083).** The vertex
   tree, the vertex index, the link index, subscriber edge tables, the seam park, the creation
@@ -326,6 +377,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     - `bytes_t`, `assign_bytes`, `as_span`, `bytes_less_t`, `make_in` / `drop_in`,
       `block_ptr_t` / `make_block`, and `exhausted_at_init`.
   - `wire::emit_path_segment` gains `mem::bytes_t&` overloads.
+
+### Deprecated
+
+- **The `std` spellings the #1781 expand step replaced
+  ([#1781](https://github.com/avatarsd-llc/libtracer/issues/1781)).** They are removed by the
+  contract step; nothing is marked `[[deprecated]]` meanwhile, so no build warns. Migration:
+  - `wire::emit_*(std::vector<std::byte>&, …)` and `detail::append_le(std::vector&, …)` →
+    the same call on a `mem::bytes_t`, checking the `bool`. Reserve the record's size first
+    and only a refused reservation can fail.
+  - `std::vector<std::byte> wire::encode(tlv)` → `wire::encode(tlv, out)`; an empty vector
+    meant "refused", the `false` return means the same.
+  - `rope_t::to_iovec()` / `try_to_iovec(std::vector&)` (and on `value_ref_t`) →
+    `to_iovec(span)` over a stack array or a `mem::block_array_t` sized to `link_count()`.
+  - `encode_acl(aces)` → `encode_acl(aces, out)`; `parse_acl(node)` →
+    `parse_acl(node, table)`.
+  - `conn_spec_t::bytes()` → `bytes(out)`.
+  - `graph_t::read_subscribers(v, caller)` and `drain_unflushed(v, std::vector&, gap)` → the
+    `mem::block_array_t` overloads.
+  - `vertex_t::edge_sources()` → `edge_sources(out)` over a `mem::block_array_t<view::view_t>`;
+    it returns `false`, leaving `out` empty, when the array's source refuses the table.
+  - `vertex_t::drain_unflushed(std::vector<value_ref_t>&, gap)` →
+    `drain_unflushed(mem::block_array_t<value_ref_t>&, gap)`; the count it returns is unchanged.
+  - `graph_hooks_t::subject_resolver` → `subject_lookup`: append the token to `out` and
+    return `{}`, or return the same error as before.
+  - `key_view_t::split_levels(std::vector&)` → `for_each_level(emit)`, which allocates nothing.
 
 ## [0.18.1] — 2026-10-07
 

@@ -362,10 +362,9 @@ class path_key_t {
     static constexpr std::size_t kInlineBytes = 16;
 
     path_key_t() noexcept = default;
-    /** @brief Copy @p b into the key (inline when it fits, else one heap block). */
+    /** @brief Copy @p b into the key (inline when it fits, else one heap block). Any contiguous
+     *         byte range binds here, so a `std::vector` or a core array needs no overload. */
     explicit path_key_t(std::span<const std::byte> b) { assign(b); }
-    /** @brief Copy the vector's bytes (compat shape for `path_key_t{vector}` callers). */
-    explicit path_key_t(const std::vector<std::byte>& b) { assign(b); }
 
     /** @brief Deep-copy @p o's bytes (inline or one spill block, as the length needs). */
     path_key_t(const path_key_t& o) { assign(o.bytes()); }

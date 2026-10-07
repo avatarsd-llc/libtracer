@@ -226,6 +226,77 @@ std::optional<std::span<const std::byte>> path_key(const tlv_node_t& path) {
     return body;
 }
 
+namespace {
+
+/** @brief Wire bytes a CRC trailer takes under @p opt: 0, 2 (CRC-16) or 4 (CRC-32C). */
+[[nodiscard]] std::size_t crc_bytes(opt_t opt) noexcept {
+    if (!opt.cr) return 0;
+    return opt.cw ? 2u : 4u;
+}
+
+[[nodiscard]] std::optional<std::size_t> tlv_bytes(const tlv_t& tlv) noexcept;
+
+/**
+ * @brief @p tlv's body length, or `nullopt` for every refusal the vector `encode` makes: an
+ *        ill-formed `PATH_REF`, a timestamp bit with no coherent value, or a refused child.
+ */
+[[nodiscard]] std::optional<std::size_t> body_bytes(const tlv_t& tlv) noexcept {
+    if (is_path_ref_type(tlv.type) &&
+        !path_ref_body_valid(tlv.opt.pl, tlv.opt.ll, tlv.payload.size()))
+        return std::nullopt;
+    if (tlv.opt.ts && (!tlv.trailer || !tlv.trailer->ts || tlv.trailer->ts->relative != tlv.opt.tf))
+        return std::nullopt;
+    if (!tlv.opt.pl) return tlv.payload.size();
+    std::size_t n = 0;
+    for (const tlv_t& child : tlv.children) {
+        const std::optional<std::size_t> c = tlv_bytes(child);
+        if (!c) return std::nullopt;
+        n += *c;
+    }
+    return n;
+}
+
+/** @brief @p tlv's whole encoded length — header, body and trailer — or `nullopt` if refused. */
+[[nodiscard]] std::optional<std::size_t> tlv_bytes(const tlv_t& tlv) noexcept {
+    const std::optional<std::size_t> body = body_bytes(tlv);
+    if (!body) return std::nullopt;
+    opt_t opt = tlv.opt;
+    if (*body > 0xFFFFu) opt.ll = true;
+    const std::size_t ts = tlv.opt.ts ? trailer_ts_bytes(tlv.opt.tf) : 0u;
+    return header_bytes(opt) + *body + ts + crc_bytes(tlv.opt);
+}
+
+/**
+ * @brief Append @p tlv (already sized and checked by @ref tlv_bytes) to @p out, whose capacity
+ *        was reserved for it — so no append below can move the block the CRC reads.
+ */
+void put_tlv(const tlv_t& tlv, mem::bytes_t& out) noexcept {
+    const std::size_t body = *body_bytes(tlv);
+    opt_t opt = tlv.opt;
+    if (body > 0xFFFFu) opt.ll = true;
+    (void)emit_header(out, tlv.type, opt, body);
+    const std::size_t at = out.size();
+    if (tlv.opt.pl) {
+        for (const tlv_t& child : tlv.children) put_tlv(child, out);
+    } else {
+        (void)out.append(tlv.payload.data(), tlv.payload.size());
+    }
+    if (tlv.opt.ts) (void)emit_trailer_ts(out, tlv.opt.tf, tlv.trailer->ts->value);
+    if (!tlv.opt.cr) return;
+    const std::span<const std::byte> covered(out.data() + at, out.size() - at);
+    const std::uint32_t crc = tlv.opt.cw ? crc::crc16_ccitt(covered) : crc::crc32c(covered);
+    (void)detail::append_le(out, crc, crc_bytes(tlv.opt));
+}
+
+}  // namespace
+
+bool encode(const tlv_t& tlv, mem::bytes_t& out) noexcept {
+    const std::optional<std::size_t> n = tlv_bytes(tlv);
+    if (!n || !out.reserve(out.size() + *n)) return false;
+    put_tlv(tlv, out);
+    return true;
+}
+
 bool equal(const tlv_t& a, const tlv_t& b) noexcept {
     if (a.type != b.type || a.opt != b.opt || a.trailer != b.trailer) return false;
     if (!std::ranges::equal(a.payload, b.payload)) return false;

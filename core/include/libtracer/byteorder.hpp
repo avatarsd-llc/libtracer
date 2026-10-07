@@ -14,12 +14,15 @@
  */
 #pragma once
 
+#include <array>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string_view>
 #include <vector>
+
+#include "libtracer/mem_source.hpp"
 
 namespace tr::detail {
 
@@ -59,6 +62,20 @@ template <std::unsigned_integral T>
 void append_le(std::vector<std::byte>& out, T value, std::size_t width = sizeof(T)) {
     for (std::size_t i = 0; i < width; ++i)
         out.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(value >> (8 * i))));
+}
+
+/**
+ * @brief Append the low `width` bytes of `value`, little-endian, to a core byte array — the
+ *        failable form of the vector overload above (#1781).
+ *
+ * Precondition: `width <= sizeof(T)`.
+ * @retval false The source refused; @p out is unchanged.
+ */
+template <std::unsigned_integral T>
+[[nodiscard]] bool append_le(mem::bytes_t& out, T value, std::size_t width = sizeof(T)) noexcept {
+    std::array<std::byte, sizeof(T)> le{};
+    store_le(std::span<std::byte>(le), value, width);
+    return out.append(le.data(), width);
 }
 
 /**
