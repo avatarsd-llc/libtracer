@@ -632,7 +632,7 @@ void test_reverse_list_is_typed_not_positional() {
     std::printf("the reverse list is identified by TYPE, not by position (§7.1 amendment 2):\n");
     graph_t g;
     op_resolver_t resolver(g);
-    const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
     const auto ends_with = [](const std::vector<std::byte>& frame,
                               const std::vector<std::byte>& tail) {

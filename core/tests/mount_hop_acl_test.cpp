@@ -17,10 +17,11 @@
  * `subject_lookup` (#1781), which the gate and `acl_enforced()` read directly.
  *
  * - the NAME spelling through the BUS mount (`net/tcp-server/srv/<peer>`);
- * - the NAME spelling through the POINT-TO-POINT mount (`net/tcp/x/...`);
- * - the BOUND spelling of a session delivery: a one-element `PATH_REF` naming the peer's
- *   session anchor. An anchor sits outside the path tree, so no ancestor `:acl` reaches it;
- *   the delivery must still be authorized at the mount it crosses.
+ * - the NAME spelling through the POINT-TO-POINT mount (`net/tcp/x/...`).
+ *
+ * The bound spelling of a session delivery is a PAIR naming the session's anchor since
+ * RFC-0029 S1 retired the `PATH_REF` address; `pair_hop_acl_test` drives it, with every other
+ * spelling, against the same `:acl`.
  *
  * A last case needs no bus and no listener: a point-to-point child mounted with NO connection
  * vertex in the graph. Enforcing, it has nothing to grant a right, so a NAME-spelled hop
@@ -57,7 +58,6 @@
 #include "libtracer/graph.hpp"
 #include "libtracer/loopback.hpp"
 #include "libtracer/path.hpp"
-#include "libtracer/path_ref.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport.hpp"
@@ -176,13 +176,6 @@ bytes_t b_value_u8(std::uint8_t v) {
     return out;
 }
 
-/** @brief A one-element `PATH_REF` `dst`. */
-bytes_t b_path_ref(tr::wire::path_ref_element_t e) {
-    bytes_t out;
-    (void)tr::wire::emit_path_ref(out, std::span<const tr::wire::path_ref_element_t>(&e, 1));
-    return out;
-}
-
 /** @brief A counting point-to-point transport. */
 struct recorder_t : tr::net::transport_t {
     std::atomic<std::size_t> n{0};
@@ -286,25 +279,6 @@ void name_spelling() {
           "point-to-point mount: p1's WRITE through it by NAME is refused");
     check(lands(*n.p0, tr::testing::b_path({"net", "tcp", "x", "foo"}), at_p2p),
           "point-to-point mount: p0's WRITE through it by NAME is admitted (the control)");
-}
-
-void bound_session_delivery() {
-    std::printf("a bound delivery into a session is authorized at its mount:\n");
-    node_t n;
-    const auto element = [&](std::string_view peer) {
-        const std::optional<vertex_handle_t> a = n.anchor(peer);
-        const auto slot = a ? n.g.vertex_slot(*a) : std::nullopt;
-        check(slot.has_value(), "the session anchor has a slot");
-        return slot ? tr::wire::path_ref_element_t{.index = slot->index,
-                                                   .generation = slot->generation}
-                    : tr::wire::path_ref_element_t{};
-    };
-    const auto at_p0 = [&] { return n.p0->count(); };
-    const auto at_p1 = [&] { return n.p1->count(); };
-    check(!lands(*n.p1, b_path_ref(element("p0")), at_p0),
-          "p1's bound WRITE into p0's session is refused at the mount");
-    check(lands(*n.p0, b_path_ref(element("p1")), at_p1),
-          "p0's bound WRITE into p1's session is admitted (the control)");
 }
 
 void vertexless_mount() {
@@ -435,7 +409,6 @@ static int run_cases() {
     vertexless_mount();
     if constexpr (!tr::net::kBusLinks) return tr::testing::summary("mount_hop_acl");
     name_spelling();
-    bound_session_delivery();
     upgrade_layout();
     return tr::testing::summary("mount_hop_acl");
 }

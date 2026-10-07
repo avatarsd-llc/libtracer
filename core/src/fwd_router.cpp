@@ -1978,11 +1978,12 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
     // The head element, read off the window the peek already opened. Only the HEAD can be this
     // hop's (RFC-0029 §4.2: element k is read by node k and by no other), so nothing past it is
     // looked at. The peek answered `PATH_LABEL`, so the head IS an escape record (`00` first)
-    // and `dst_body_off <= dst_end`; a record that is not `00 16 08` is not a PAIR and passes
+    // whose three framing bytes and declared payload all lie inside the `dst` (`read_packed_seg`
+    // bounds both): a head that frames as `00 16 08` therefore holds all 11 bytes, and needs no
+    // second length check here. A record that is not `00 16 08` is not a PAIR and passes
     // untouched — the label arm, then the terminus's own refusal of an escape-carrying `dst`,
     // answer every other shape exactly as they did before this arm existed.
     const std::size_t head = pre.dst_body_off;
-    if (pre.dst_end - head < wire::kPathPairRecordBytes) return head_dst_t::PASS;
     if (!wire::path_pair_record_valid(static_cast<std::uint8_t>(cur.byte_at(head + 1)),
                                       cur.byte_at(head + 2)))
         return head_dst_t::PASS;
@@ -2062,6 +2063,11 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
         // session gone between the deref and here is `NOT_FOUND`, below.
         if (!graph_.allows(*v, inbound_name, graph::acl_right_t::WRITE)) return head_dst_t::HANDLED;
         const child_registry_t::child_t* const entry = registry_.entry_by_name(ar->mount);
+        // An anchor lives OUTSIDE the path tree, so the check above walks no ancestor `:acl`
+        // and cannot see the mount's. The delivery crosses the mount exactly as the NAME
+        // spelling `<mount>/<peer>` does, so it is authorized by the gate that one runs, at the
+        // mount's connection vertex — failing closed on a mount with none. Same silence.
+        if (!name_hop_allows(entry, inbound_name, cur, pre)) return head_dst_t::HANDLED;
         egress = entry != nullptr ? child_registry_t::resolve_peer(*entry, ar->peer) : nullptr;
     }
     if (egress == nullptr) {
@@ -2358,38 +2364,24 @@ template <class Cursor>
 bool fwd_router_t::name_hop_allows(const child_registry_t::child_t* mount, std::string_view caller,
                                    const Cursor& cur, const fwd_pre_t& pre) const {
     // Asked only when this graph enforces an ACL at all — one relaxed load otherwise — and on
-    // EVERY mount hop: the point-to-point arm and the bus-peer arm alike, because both cross
-    // the mount's connection vertex and its `:acl` governs both.
+    // EVERY crossing of a mount: the point-to-point arm and the bus-peer arm of the NAME
+    // descent, and a PAIR naming one of the mount's session anchors, because each crosses the
+    // mount's connection vertex and its `:acl` governs them all.
     if (mount == nullptr || !graph_.acl_enforced()) return true;
     if (pre.op_body_len == 0) return true;  // no op byte ⇒ the terminus tier's refusal stands
-    // Masked (RFC-0024 §9.3): bits 7-6 are flags. AWAIT reads, so it asks for READ. A REPLY is
-    // routed, never authorized: it answers an operation every gate already passed on the way
-    // in, and refusing it here would strand the answer (RFC-0004 §B). An opcode this build
-    // cannot name has no right to evaluate, and guessing one is how a write-like future opcode
-    // would cross a READ-only gate, so it is refused as `route_bound_forward` refuses it.
-    graph::acl_right_t right = graph::acl_right_t::READ;
-    switch (static_cast<fwd_op_t>(cur.byte_at(pre.op_body_off) & graph::kFwdOpcodeMask)) {
-        case fwd_op_t::REPLY:
-            return true;
-        case fwd_op_t::READ:
-        case fwd_op_t::AWAIT:
-            break;
-        case fwd_op_t::WRITE:
-            right = graph::acl_right_t::WRITE;
-            break;
-        default:
-            return false;
-    }
-    // The connection vertex this NAME run descended to, found by the matched mount's own key —
-    // the canonical key `add_child` resolved the child's `conn_slot` from. Enforcing, a mount
-    // with no connection vertex has nothing to grant the right and refuses (fail closed), as
-    // the bound delivery into a session through such a mount already does.
+    // A REPLY is routed, never authorized: it answers an operation every gate already passed on
+    // the way in, and refusing it here would strand the answer (RFC-0004 §B). Every other op
+    // asks for the right `fwd_op_right` names, and one it names none for is refused.
+    const auto op_byte = static_cast<std::uint8_t>(cur.byte_at(pre.op_body_off));
+    if (static_cast<fwd_op_t>(op_byte & graph::kFwdOpcodeMask) == fwd_op_t::REPLY) return true;
+    const std::optional<graph::acl_right_t> right = fwd_op_right(op_byte);
+    // The mount's connection vertex, found by the mount's own key — the canonical key
+    // `add_child` resolved the child's `conn_slot` from. Enforcing, a mount with no connection
+    // vertex has nothing to grant the right and refuses (fail closed). ONE gate for every
+    // spelling: `bound_egress` asks `graph_t::allows` at the vertex a PAIR hop dereferences
+    // to, this function at the mount's — same function, same (vertex, caller, right).
     const std::optional<graph::vertex_handle_t> conn = graph_.find(mount->mount_tlv);
-    if (!conn) return false;
-    // ONE gate for every spelling: `bound_egress` asks `graph_t::allows` at the vertex a bound
-    // element dereferences to, this arm at the vertex the descent resolved — same function,
-    // same (vertex, caller, right).
-    return graph_.allows(*conn, caller, right);
+    return right && conn && graph_.allows(*conn, caller, *right);
 }
 
 template <class Cursor, class Observe, class Reject, class Terminus, class Reply>
