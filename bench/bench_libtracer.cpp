@@ -2058,6 +2058,12 @@ struct bench_family_t {
  * both compared A/B: `--family-set single` judged on foreign time and pressure, then
  * `--family-set multi` judged on foreign time only. Foreign CPU time on the bench CPUs, which
  * is how a real intruder shows, is scored on both.
+ *
+ * The SET also places each family's process (#1906): a SINGLE family narrows itself to one
+ * logical CPU, the lowest of the affinity mask it was started with (`bench::pin_to_one_cpu`),
+ * and a MULTI family keeps the whole mask and sizes its thread count from it
+ * (`bench::usable_cpus`). So a sweep given one CPU runs every MULTI family at T=1 only; give
+ * `--family-set multi` its own invocation on the CPUs its threads should have.
  *   - There is no `loopback` or `routers-hN` family: those modes benchmarked the ROUTER-flood
  *     bridge, retired in ADR-0040 — the net plane is explicit-source-routed FWD only, and its
  *     forward cost is measured by bench_forward_heap and the fwd_* tests.
@@ -2172,6 +2178,8 @@ int main(int argc, char** argv) {
         const std::string_view want{argv[2]};
         for (const bench_family_t& f : kFamilies) {
             if (f.name != want) continue;
+            // One logical CPU for a single-threaded family, however it was started (#1906).
+            if (f.set == family_set_t::SINGLE) bench::pin_to_one_cpu();
             // stderr, like the MODE marker: stdout stays the RESULT stream.
             std::fprintf(stderr, "FAMILY %.*s\n", static_cast<int>(f.name.size()), f.name.data());
             // Each family records the allocator settings its own process runs under (#1903),

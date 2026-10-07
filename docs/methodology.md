@@ -519,7 +519,8 @@ Details that make these trustworthy:
   alternating which one starts — so the two arms of a pair are seconds apart and a slow
   window in the machine is shared by both rather than donated to whichever one holds it.
   A single-threaded family is pinned to **one logical CPU** (the first of `BENCH_CPU`, or
-  `BENCH_CPU_SINGLE`); a multi-threaded family runs on the whole `BENCH_CPU` set, sizes its
+  `BENCH_CPU_SINGLE`; unpinned, the lowest CPU of its mask, which the family picks itself);
+  a multi-threaded family runs on the whole `BENCH_CPU` set as its own invocation, sizes its
   thread count from that affinity mask, and runs after every single-threaded one. Because
   the baseline is *the same PR's `main` rebuilt on the same runner in the same pass*, the
   comparison is machine-neutral.
@@ -1166,7 +1167,10 @@ cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
 cmake --build bench/build -j
 
 # Pin to a core, take the best of several runs, compare only same-machine numbers.
-taskset -c 2 ./bench/build/bench_libtracer          # the sweep matrix
+# The single-threaded families on one CPU, the multi-threaded ones on their own set: they
+# size their thread count from the affinity mask, so on CPU 2 alone they run T=1 only.
+taskset -c 2 ./bench/build/bench_libtracer --family-set single   # the sweep matrix
+taskset -c 2-5 ./bench/build/bench_libtracer --family-set multi  # the n-cores rows (T = 1, 2, 4)
 taskset -c 2 ./bench/build/bench_forward_heap        # the allocation probes (zero-alloc gate)
 
 # The network plane (§3b). Each takes a per-point wall-clock budget via

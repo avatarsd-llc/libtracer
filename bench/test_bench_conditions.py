@@ -456,10 +456,10 @@ class TheJobStaysOffTheBenchCpu(unittest.TestCase):
         # Comments name the commands too; only the steps' own lines count.
         text = "\n".join(ln for ln in self.WORKFLOW.read_text().splitlines()
                          if not ln.lstrip().startswith("#"))
-        move = text.find("bench_conditions.py off-cpus --cpu \"$BENCH_CPU\"")
+        move = text.find("bench_conditions.py off-cpus --cpu \"$BENCH_CPU_MULTI\"")
         self.assertGreater(move, 0, "perf-local must move the runner's processes off BENCH_CPU")
         self.assertIn("Runner\\.(Listener|Worker)", text[move - 400:move + 400])
-        check = text.find("bench_conditions.py runner-check --cpu \"$BENCH_CPU\"")
+        check = text.find("bench_conditions.py runner-check --cpu \"$BENCH_CPU_MULTI\"")
         self.assertGreater(check, move, "the runner-check must follow the move")
         for timed in (r"bench_conditions\.py run\b(?!-)", r"host_guard\.py wait"):
             first = re.search(timed, text)
@@ -500,6 +500,26 @@ class CLI(unittest.TestCase):
                                capture_output=True, text=True, env=env)
             self.assertEqual(s.returncode, 0)             # the verdict is data, not a crash
             self.assertIn("1 timed invocation(s)", s.stdout)
+
+    def test_run_multi_takes_a_cpu_range_and_skips_pressure(self):
+        """@brief `run --multi --cpu A-B` (#1906): the child runs on exactly that range, and
+        the invocation is judged on foreign time only, as a MULTI family is."""
+        tool = pathlib.Path(bc.__file__)
+        mine = sorted(os.sched_getaffinity(0))
+        spec = f"{mine[0]}-{mine[1]}" if len(mine) > 1 and mine[1] == mine[0] + 1 \
+            else str(mine[0])
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "raw.txt"
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("BENCH_CPU", "BENCH_CONDITIONS_RECORD", "GITHUB_OUTPUT",
+                                "GITHUB_STEP_SUMMARY")}
+            p = subprocess.run([sys.executable, str(tool), "run", "--multi", "--attempts", "1",
+                                "--cpu", spec, "--out", str(out), "--", sys.executable, "-c",
+                                "import os; print(sorted(os.sched_getaffinity(0)))"],
+                               capture_output=True, text=True, env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(out.read_text().strip(), str(list(bc.parse_cpu_list(spec))))
+            self.assertIn("not scored: multi-threaded", p.stderr)
 
 
 if __name__ == "__main__":

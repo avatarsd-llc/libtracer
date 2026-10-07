@@ -36,6 +36,7 @@
 #include <string_view>
 
 #if defined(__linux__)
+#include <sched.h>
 #include <spawn.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -142,6 +143,37 @@ inline void emit_alloc_state() {
 #endif
 }
 
+/**
+ * @brief Narrow this process to ONE logical CPU, the lowest of its affinity mask (#1906).
+ *
+ * A single-threaded family calls it before its first row. The methodology times every
+ * single-threaded measurement on one logical CPU: given several, the scheduler may migrate
+ * the thread mid-window, and the row then carries the migration. Whoever started the
+ * process (`bench_conditions.py`, `taskset`, the default sweep) picks the SET; this picks the
+ * one CPU inside it, so a family is pinned however it was started. A multi-threaded family
+ * does not call it: it keeps the whole mask and sizes its threads from it
+ * (`bench::usable_cpus`).
+ *
+ * Two syscalls and nothing else: no allocation, no output, no file, so the heap the first
+ * row starts from is unchanged. A mask that cannot be read or set leaves the process as it
+ * was; a mask of one CPU is a no-op.
+ */
+inline void pin_to_one_cpu() {
+#if defined(__linux__)
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    if (sched_getaffinity(0, sizeof mask, &mask) != 0) return;
+    for (int c = 0; c < CPU_SETSIZE; ++c) {
+        if (!CPU_ISSET(c, &mask)) continue;
+        cpu_set_t one;
+        CPU_ZERO(&one);
+        CPU_SET(c, &one);
+        (void)sched_setaffinity(0, sizeof one, &one);
+        return;
+    }
+#endif
+}
+
 /** @brief Whether @ref run_family_process can start a child here; otherwise run in-process. */
 #if defined(__linux__)
 inline constexpr bool kFamilyProcesses = true;
@@ -153,9 +185,10 @@ inline constexpr bool kFamilyProcesses = false;
  * @brief Run `argv0 --family <name>` as a fresh child process and wait for it.
  *
  * The child inherits this process's environment (the pinned tunables included), its CPU
- * affinity and its stdout, so its RESULT rows land in the same stream, in order, exactly as
- * an in-process family's would. stdout and stderr are flushed first so no buffered line of
- * the parent's can be interleaved after the child's.
+ * affinity (a single-threaded family then narrows it with @ref pin_to_one_cpu) and its stdout, so
+ * its RESULT rows land in the same stream, in order, exactly as an in-process family's would.
+ * stdout and stderr are flushed first so no buffered line of the parent's can be interleaved after
+ * the child's.
  *
  * @param argv0 This binary's own `argv[0]`, passed through for the child's usage text.
  * @param family The family name the child runs.
