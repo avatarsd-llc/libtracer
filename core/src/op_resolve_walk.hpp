@@ -763,10 +763,9 @@ template <class N, class ReplyError>
             wout.struct_header(type_t::POINT, wll, sub_len);
             const reply_route_t ok = labelled_route();
             return or_backpressure(
-                assemble_reply(ok, reply_kind_t::RESULT,
-                               std::span<const std::byte>(wrapper.data(), wout.p),
-                               std::span<const view::view_t>(subs.data(), subs.size()), sub_len,
-                               egress, mint),
+                assemble_reply(
+                    ok, reply_kind_t::RESULT, std::span<const std::byte>(wrapper.data(), wout.p),
+                    std::span<const view::view_t>(subs.data(), subs.size()), sub_len, egress, mint),
                 ok, egress);
         }
         // One read type (RFC-0028 D11): a `:field` read composes a value, a plain value
