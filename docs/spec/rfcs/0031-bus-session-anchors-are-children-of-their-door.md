@@ -340,6 +340,24 @@ the anchor's retirement makes every such chain stale. The first delivery then an
 delivery arm. The name-keyed eviction on departure (`fwd_router_t::link_down` of the peer name) is
 unchanged.
 
+### 6.7 A refusal at an anchor answers the same in every spelling
+
+**Normative.** A refusal at a session anchor has one shape for every spelling. That covers a
+generation mismatch, a departed session, and a denial by the anchor's gate (§6.1). The `src` decides
+whether anything is sent; the spelling does not:
+
+- **A non-empty `src`:** the host answers the refusal to `src` with the identity the NAME spelling
+  answers, `tr::path::not_found`. This holds whether the frame named the anchor by NAME or by PAIR,
+  and whether the anchor was the last element or a hop.
+- **An empty `src`:** nothing is sent (RFC-0030 §8.5). Every subscriber delivery carries an empty
+  `src` (RFC-0004 Amendment 2), so a refused delivery is a silent drop.
+
+The delivery leg therefore needs no carve-out. Its silence follows from the empty-`src` rule that
+every other frame follows. Today the two spellings differ: on the last-element PAIR arm, which
+the bound-delivery path in `fwd_router_t` serves, a refusal at the mount is dropped silently even
+when the frame is a `WRITE` with a non-empty `src`. The NAME spelling answers that same `WRITE` with
+`tr::path::not_found`. Slice 5c makes the PAIR arm answer like the NAME arm (§14 Q8).
+
 ## 7. Cost: throughput, latency and RAM across NARROW, MID and WIDE
 
 ### 7.1 Per-peer RAM of an anchor, against today
@@ -489,6 +507,7 @@ Every row is breaking. No compatibility shim is owed (ruling 10 of RFC-0029).
 | B6 | Arrival for a live anchor | refused `PATH_IN_USE`, generation kept | retire and revive, generation bumped (§5.3 rule 3, §14 Q4) |
 | B7 | `:children[]` of an anchored bus door | synthesized from `enumerate_peers` | the door's child anchors (§14 Q5) |
 | B8 | Anchor role | an empty `STORED_VALUE` | value-less (§14 Q6) |
+| B9a | Refusal at an anchor, PAIR spelling, non-empty `src` | silent drop on the last-element arm | `tr::path::not_found` to `src`, as the NAME spelling answers (§6.7) |
 | B9 | Host API (reference implementation) | `graph_t::register_session_anchor(id)`, `find_session_anchor`, `session_anchor_route`, `session_anchor_slots`; `fwd_router_t::session_anchor_id`; `session_anchor_id_t` | an anchor registered under its door by `(door, peer name)`; the id type, the route parse and the private census are deleted |
 
 Each implementation slice carries its own `CHANGELOG.md` entry under **Breaking** (`core/`, and
@@ -506,7 +525,7 @@ by #1939 (one walk, one gate), #1940 (the connection vertex is mandatory) and th
 | --- | --- | --- |
 | **5a anchors under the door** | §5.1–§5.3: register the anchor as a child of the door by `(door, peer name)`; delete the private root, the id type, the route parse, `find_session_anchor` and `session_anchor_slots`; the stage-1 descent finds anchors; the anchored-door rejection of §5.2; the arrival rule (§5.3 rule 3); the door takes its anchors with it (§5.3 rule 4); value-less anchors; `:children[]` from the real children. | `session_anchor_test` rewritten against the tree; the ws-server multi-peer test; `vertex_size_test` unchanged; the per-graph −1 `vertex_t` visible in `bench_forward_heap` |
 | **5b directed send-through** | §5.4 and §6.5: the PAIR arm admits an anchor (`fwd_router_t::bound_egress`); egress through the parent door's link to `peer_link(name)`; the `0x15` stamp on every frame. | `bench_forward_demux` at 1, 4 and `max_peers` sessions, 64 B to 16 KiB, inside the A/A band; never a byte on the shared endpoint (asserted on the in-memory links) |
-| **5c one gate** | §6.1–§6.3: one `allows` at the anchor on every arm; the anchor-as-door's-self predicate in `graph_t::acl_allows`; the override; delete the second gate and the `entry_by_name` lookup on the bound-delivery arm. | the ACL tests of §11.3; `acl-inherit-d4` on the perf gate |
+| **5c one gate** | §6.1–§6.3: one `allows` at the anchor on every arm; the anchor-as-door's-self predicate in `graph_t::acl_allows`; the override; delete the second gate and the `entry_by_name` lookup on the bound-delivery arm; the refusal shape of §6.7 on both spellings. | the ACL tests of §11.3; `acl-inherit-d4` on the perf gate |
 | **5d pages** | §9 text, the glossary and the status rows. | doc gates (`check_doc_citations.py`, the strict Sphinx build) |
 
 5a lands first. 5b and 5c each depend on 5a only.
@@ -526,7 +545,10 @@ by #1939 (one walk, one gate), #1940 (the connection vertex is mandatory) and th
 - `fwd/name-below-anchored-door-no-anchor-invalid`;
 - `fwd/reverse-0x15-stamps-anchor-pair`: a frame arriving from an anchored session carries the
   anchor's PAIR at the head of `0x15`;
-- `fwd/census-peer-stays-names`: across a census bus, `0x15` carries the NAME run.
+- `fwd/census-peer-stays-names`: across a census bus, `0x15` carries the NAME run;
+- `fwd/anchor-refusal-spelling-independent`: a `WRITE` with a non-empty `src` refused at an anchor
+  draws the same `tr::path::not_found` reply bytes whether `dst` names the anchor by NAME or by PAIR.
+  The same refusal with an empty `src` (a delivery) draws no frame.
 
 ### 11.3 Behaviour tests (the S set, on the wire and at the host API)
 
@@ -545,6 +567,8 @@ shown to fail with its change ablated:
   shared endpoint;
 - a census peer resolves through the link's peer list, is gated at the door, and has no vertex;
 - a FLAT listener allocates no anchor and no child list across 1,000 accept and close cycles;
+- §6.7: a gate refusal at an anchor answers `tr::path::not_found` to a non-empty `src` on both
+  spellings, and stays silent on a delivery;
 - RFC-0030 §9.2: a reply from a successor session in the same slot fails condition 2.
 
 ## 12. Alternatives considered
@@ -582,8 +606,9 @@ shown to fail with its change ablated:
 1. **The NAME arm through an anchored session regresses** on `bench_forward_demux` beyond the A/A
    band at any session count up to `max_peers`, at any payload size including above 1 KiB, against
    today's `resolve_peer` path. Then the child lookup of §7.3 is the wrong structure, not the model.
-2. **NAME and PAIR to one session can reach different verdicts.** §6.1 claims one gate. A reachable
-   counterexample means a second gate survived somewhere.
+2. **NAME and PAIR to one session can reach different verdicts, or different replies to one
+   refusal.** §6.1 claims one gate and §6.7 claims one refusal shape. A reachable counterexample
+   means a second gate or a second refusal arm survived somewhere.
 3. **A reachable sequence lets a stale anchor pair validate** for a successor session other than
    through a saturated generation. §5.3's rules are the whole guard.
 4. **An anchored session costs more RAM than today** on rv32, or a FLAT listener pays anything per
@@ -623,6 +648,13 @@ shown to fail with its change ablated:
    link state, reference/19)? *Recommendation: no, not in this RFC.* An anchor exists only while its
    session is up, so its existence is the liveness, and a departure is already observable as a
    `:children[]` change on the door. A value can be added by a later amendment if a consumer needs one.
+
+8. **Does a refusal at an anchor answer `tr::path::not_found` to a non-empty `src` on both spellings
+   (§6.7), with the delivery leg's silence following from its empty `src`?** *Recommendation: yes.*
+   The alternative keeps today's split: answer on the NAME spelling, drop on the PAIR spelling, with
+   the delivery leg written down as a carve-out. That makes the reply depend on the spelling, which
+   RFC-0029 §6.4 rules out, and it needs a branch that the empty-`src` rule already covers. The
+   identity is the one the NAME spelling answers today, so no existing NAME reply changes.
 
 ## 15. Discussion
 
