@@ -967,25 +967,32 @@ template <class N, class ReplyError>
 }
 
 /**
- * @brief The payload a creation hook is shown for a `WRITE` whose `dst` missed (RFC-0030 §7.2):
- *        null unless the request is a fieldless data write, which is the only kind that may
- *        create; else the written TLV, held in @p held.
+ * @brief Resolve a canonical `dst` (RFC-0030 §7): a hit is the vertex; a miss is `NOT_FOUND`
+ *        unless the request is a fieldless data write, the only kind that may create; then
+ *        the graph's creation walk, shown the written TLV.
  *
- * Shared from the frame (zero copy) where the frame has an owner; copied from the graph's
- * value source where it is borrowed, once per write. The graph asks only after the parent's
- * `CREATE` gate admitted the writer, so a denied writer provokes no copy. An empty rope is a
- * refused copy (`BACKPRESSURE`).
+ * A read, a `:field` write or any payload-less op that misses answers `NOT_FOUND` here without
+ * reaching a hook or the `CREATE` gate (§7.1). For a data write the TLV is shared from the frame
+ * (zero copy) where the frame has an owner, and copied from the graph's value source where it is
+ * borrowed, once per write however many hooked levels ask. The graph asks only after the
+ * parent's `CREATE` gate admitted the writer, so a denied writer provokes no copy. An empty
+ * rope is a refused copy (`BACKPRESSURE`).
  */
 template <class N>
-[[nodiscard]] const view::rope_t* creating_payload(const parsed_fwd_t<N>& req,
-                                                   const field_path_t& field,
-                                                   const view::view_t* frame_view, graph_t& graph,
-                                                   mem::mem_backend_t& flat,
-                                                   std::optional<stored_tlv_t>& held) {
-    if (!field.empty() || !req.payload) return nullptr;
-    // Built once per write: K hooked levels share one copy.
-    if (!held) held = share_or_copy_tlv(*req.payload, frame_view, 0, graph.value_source(), flat);
-    return &held->rope;
+[[nodiscard]] result_t<vertex_handle_t> find_dst(const parsed_fwd_t<N>& req,
+                                                 const field_path_t& field,
+                                                 std::span<const std::byte> key,
+                                                 std::string_view subject,
+                                                 const view::view_t* frame_view, graph_t& graph,
+                                                 mem::mem_backend_t& flat) {
+    if (const std::optional<vertex_handle_t> hit = graph.find(key)) return *hit;
+    if (!field.empty() || !req.payload) return std::unexpected(status_t::NOT_FOUND);
+    std::optional<stored_tlv_t> held;
+    return graph.find_or_create(key, subject, [&]() -> const view::rope_t& {
+        if (!held)
+            held = share_or_copy_tlv(*req.payload, frame_view, 0, graph.value_source(), flat);
+        return held->rope;
+    });
 }
 
 /**
@@ -1181,14 +1188,11 @@ template <class N>
         if (!dst_key) return reply_error(dst_key.error());
         // An unresolved dst answers NOT_FOUND for every op (RFC-0030 §7.1). The one exception is
         // the one RFC-0030 §7.2 makes for every origin alike: a fieldless data WRITE below a
-        // parent whose creation hook creates the target. The hook is shown the payload, built
-        // only when a hook is about to decide; with the hook policy closed (the default) the
-        // graph answers NOT_FOUND without asking for it, so a refusal draws nothing.
-        std::optional<stored_tlv_t> shown;
+        // parent whose creation hook creates the target. With the hook policy closed (the
+        // default) the graph answers NOT_FOUND without asking for the payload, so a refusal
+        // draws nothing.
         const result_t<vertex_handle_t> found =
-            graph.find_or_create(*dst_key, subject, [&]() -> const view::rope_t* {
-                return creating_payload(req, *field, frame_view, graph, flat, shown);
-            });
+            find_dst(req, *field, *dst_key, subject, frame_view, graph, flat);
         if (!found) return reply_error(found.error());
         v = *found;
     }

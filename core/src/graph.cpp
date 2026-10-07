@@ -1335,7 +1335,7 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
 
 result_t<vertex_handle_t> graph_t::find_or_create(std::span<const std::byte> key,
                                                   std::string_view caller,
-                                                  function_ref_t<const view::rope_t*()> payload) {
+                                                  function_ref_t<const view::rope_t&()> payload) {
     result_t<vertex_t*> p = find_or_create_ptr(key, caller, payload);
     if (!p) return std::unexpected(p.error());
     return vertex_handle_t{*p};
@@ -1355,7 +1355,7 @@ result_t<void> graph_t::hide_from_enumeration(vertex_handle_t vh) {
 
 result_t<vertex_t*> graph_t::find_or_create_ptr(std::span<const std::byte> key,
                                                 std::string_view caller,
-                                                function_ref_t<const view::rope_t*()> payload) {
+                                                function_ref_t<const view::rope_t&()> payload) {
     if (vertex_t* v = find_ptr(key)) return v;
     // RFC-0030 §7.1: a miss creates nothing, whatever the write's origin. The `mkdir -p` walk
     // that stood here (RFC-0005 §D) is gone, and with the hook policy closed (the default)
@@ -1380,15 +1380,12 @@ result_t<vertex_t*> graph_t::find_or_create_ptr(std::span<const std::byte> key,
         // The CREATE gate runs before the payload is asked for, so a writer the parent's ACL
         // denies provokes no draw (a span-delivered remote payload is copied to be shown).
         const creation_hook_t hook = creation_hook_for(parent);
-        const bool admitted = hook && acl_allows(parent, caller, acl_right_t::CREATE);
-        const view::rope_t* const value = admitted ? payload() : nullptr;
+        const view::rope_t* value = nullptr;
         if (!hook)  // no hook here: the miss is the answer
             failed = status_t::NOT_FOUND;
-        else if (!admitted)
+        else if (!acl_allows(parent, caller, acl_right_t::CREATE))
             failed = status_t::PERMISSION_DENIED;
-        else if (value == nullptr)  // not a fieldless data write, which alone may create
-            failed = status_t::NOT_FOUND;
-        else if (value->total_length() == 0)  // the payload could not be held
+        else if ((value = &payload())->total_length() == 0)  // the payload could not be held
             failed = status_t::BACKPRESSURE;
         else if (const result_t<void> r = hook(vertex_handle_t{parent}, pk, caller, *value); !r)
             failed = r.error();
@@ -2577,7 +2574,8 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
         if (node.vx == nullptr) {               // every site but the root, tagged above
             std::optional<view::rope_t> slice;  // built only if a creation hook is asked
             const result_t<vertex_t*> ensured = find_or_create_ptr(
-                mem::as_span(node.key), caller, [&] { return &slice.emplace(node.store); });
+                mem::as_span(node.key), caller,
+                [&]() -> const view::rope_t& { return slice.emplace(node.store); });
             if (!ensured) return std::unexpected(ensured.error());
             node.vx = *ensured;
             if (!acl_allows(node.vx, caller, acl_right_t::WRITE))
@@ -4090,13 +4088,13 @@ result_t<value_ref_t> graph_t::read(const path_t& path) const {
 
 result_t<void> graph_t::write(const path_t& path, view::rope_t value) {
     // A miss is NOT_FOUND unless the parent's creation hook creates the target (RFC-0030 §7).
-    // A `:field` write never creates: there is no vertex whose control surface it could address.
-    // The hit stays one lookup; only a miss pays the creation walk's call.
+    // A `:field` write never creates (§7.1: there is no vertex whose control surface it could
+    // address), so it never reaches the hook or the CREATE gate. The hit stays one lookup.
     vertex_t* v = find_ptr(path.key());
     if (v == nullptr) {
-        const bool data = path.field().empty();
+        if (!path.field().empty()) return std::unexpected(status_t::NOT_FOUND);
         const result_t<vertex_t*> made =
-            find_or_create_ptr(path.key(), {}, [&] { return data ? &value : nullptr; });
+            find_or_create_ptr(path.key(), {}, [&]() -> const view::rope_t& { return value; });
         if (!made) return std::unexpected(made.error());
         v = *made;
     }

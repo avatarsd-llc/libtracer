@@ -97,8 +97,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     payload, and registers the child itself or refuses (`NOT_FOUND`). Any other status the hook
     answers, such as `BACKPRESSURE`, passes through to the writer (RFC-0030 §7.2 erratum). A
     level the hook created is the parent of the next.
-  - New `graph_t::find_or_create(key, caller, payload)`: the resolve-or-create step every write
-    door shares; the remote terminus calls it.
+  - New `graph_t::find_or_create(key, caller, payload)`: the resolve-or-create step for a
+    fieldless data write, the only request that may create; the remote terminus calls it. A
+    read or a `:field` write to a missing vertex is a plain `NOT_FOUND`, and never reaches a
+    hook or the `CREATE` gate.
   - New compile-time policy `config_t::kCreationHooks`, **`false` on every profile**. Off, no
     vertex has a hook slot, every miss refuses and draws nothing, and `set_creation_hook`
     answers `SCHEMA_NOT_FOUND`. Turn it on with `static constexpr bool kCreationHooks = true;`

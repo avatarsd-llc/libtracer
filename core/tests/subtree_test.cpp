@@ -365,7 +365,8 @@ void test_write_creates_acl_gate() {
     // never runs: the parent's CREATE right is checked first (RFC-0030 §7.2 step 1).
     const path_t child{"/p/child"};
     const tr::view::rope_t payload = make_value({0x01});
-    const auto denied = g.find_or_create(child.key(), "peer", [&] { return &payload; });
+    const auto denied =
+        g.find_or_create(child.key(), "peer", [&]() -> const tr::view::rope_t& { return payload; });
     check(!denied.has_value() && denied.error() == status_t::PERMISSION_DENIED,
           "creation under /p without the CREATE right => PERMISSION_DENIED");
     check(!g.find(child.key()).has_value(), "denied create made no vertex");

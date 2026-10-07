@@ -1093,6 +1093,35 @@ void test_denied_creator_draws_nothing() {
     check(seen.calls == 0, "the hook never ran");
     check(drawn == 0, "the graph's source served nothing for the denied write");
     check(!g.find(path_t::parse("/dev/ota")->key()).has_value(), "nothing was created");
+
+    // §7.1: only a fieldless data write may create. A READ and a `:field` write to a missing
+    // child of the same hooked parent are a plain miss, NOT_FOUND, from the same denied subject:
+    // neither the hook nor the CREATE gate is consulted (a consulted gate would deny).
+    std::vector<std::byte> field_append;
+    {
+        std::vector<std::byte> body = b_name("subscribers");
+        append(body, b_value({0x01}));  // index_mode=ELEMENT, no index => "[]"
+        tr::wire::emit_tlv(field_append, type_t::FIELD, opt_t{.pl = true}, body);
+    }
+    const std::vector<std::byte> read_fwd =
+        b_fwd(fwd_op_t::READ, b_path({"dev", "gone"}), b_path({"reply-ep"}));
+    const std::vector<std::byte> field_fwd =
+        b_fwd(fwd_op_t::WRITE, b_path({"dev", "gone"}), b_path({"reply-ep"}), field_append,
+              b_subscriber({"sub-a"}));
+    for (const auto* f : {&read_fwd, &field_fwd}) {
+        auto r = resolve_bytes(resolver, *f, "peer");
+        check(r.has_value(), "the non-creating request is answered");
+        const auto d = decode_reply(*r);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR) &&
+                  status_error_code(d.tlv.children[4]) == 0x0020 /*tr::path::not_found*/,
+              "a non-creating remote request to a missing child is NOT_FOUND, not denied");
+    }
+    const auto local =
+        g.write(path_t("/dev/gone:settings.store_ref_min_bytes"), make_value({0x07}));
+    check(!local.has_value() && local.error() == status_t::NOT_FOUND,
+          "a local :field write to a missing child is NOT_FOUND");
+    check(seen.calls == 0, "no non-creating request reached the hook");
+    check(!g.find(path_t::parse("/dev/gone")->key()).has_value(), "nothing was created");
 }
 
 }  // namespace

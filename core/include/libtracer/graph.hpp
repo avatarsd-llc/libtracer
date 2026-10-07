@@ -2420,8 +2420,8 @@ class graph_t {
     [[nodiscard]] std::size_t share_threshold_bytes(vertex_handle_t v) const noexcept;
 
     /**
-     * @brief Resolve the target of a DATA write at @p key, creating a missing level only where
-     *        a parent's creation hook opts it in (RFC-0030 §7).
+     * @brief Resolve the target of a fieldless DATA write at @p key, creating a missing level
+     *        only where a parent's creation hook opts it in (RFC-0030 §7).
      *
      * A hit returns the vertex. A miss answers `NOT_FOUND` and creates nothing, whatever the
      * write's origin, unless the build allows creation hooks (`config_t::kCreationHooks`, off
@@ -2431,17 +2431,20 @@ class graph_t {
      * the next, so a deeper miss is decided by that new vertex's own hook: `mkdir -p` is
      * expressible only where every level opted in.
      *
+     * Only a fieldless data write may create (§7.1). Every other request (a read, a `:field`
+     * write, any op without a payload) resolves with @ref find instead, so a miss is
+     * `NOT_FOUND` without consulting a hook or the `CREATE` gate.
+     *
      * @param payload Produces the written payload the hook is shown, and is called only when a
-     *        hook is about to decide, after the `CREATE` gate admitted @p caller. It returns null
-     * when the request is not a fieldless data write (which never creates: `NOT_FOUND`), and an
-     * empty rope when the payload could not be held (`BACKPRESSURE`). It may be called more than
-     * once for one write.
+     *        hook is about to decide, after the `CREATE` gate admitted @p caller. It returns an
+     *        empty rope when the payload could not be held (`BACKPRESSURE`). It may be called
+     *        more than once for one write.
      * @retval INVALID_PATH @p key is not a well-formed canonical PATH payload (checked before a
      *         hook creates anything).
      */
     [[nodiscard]] result_t<vertex_handle_t> find_or_create(
         std::span<const std::byte> key, std::string_view caller,
-        function_ref_t<const view::rope_t*()> payload);
+        function_ref_t<const view::rope_t&()> payload);
 
     /**
      * @brief Install @p hook as @p parent's creation hook (RFC-0030 §7.2), replacing any
@@ -2641,7 +2644,7 @@ class graph_t {
     [[nodiscard]] vertex_t* find_ptr(std::span<const std::byte> key) const;
     [[nodiscard]] result_t<vertex_t*> find_or_create_ptr(
         std::span<const std::byte> key, std::string_view caller,
-        function_ref_t<const view::rope_t*()> payload);
+        function_ref_t<const view::rope_t&()> payload);
     // The whole body of @ref register_vertex_key, over BORROWED key bytes. The descent never
     // retains the key, so the public owning-vector overload is a convenience wrapper and the
     // graph's own callers (path registration) pass a span rather than paying a

@@ -1294,7 +1294,7 @@ void test_resolver_deny_arm_is_denied_at_every_gate() {
         const path_t ghost_made{"/g/ghostmade"};
         const path_t ok_made{"/g/okmade"};
         const tr::view::rope_t payload = make_value({0x01});
-        const auto shown = [&] { return &payload; };
+        const auto shown = [&]() -> const tr::view::rope_t& { return payload; };
         check(denied(g.find_or_create(ghost_made.key(), kUnnameable, shown)),
               "CREATE(hook): the UNNAMEABLE caller is DENIED");
         check(!g.find(ghost_made.key()).has_value(),
