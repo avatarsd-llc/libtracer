@@ -1,4 +1,4 @@
-studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 4 cpus · governor not-exposed · 7.1.5-76070105-generic
+studio · pinned cpu2 (multi-threaded: cpus 2-5) · AMD EPYC 9115 16-Core Processor · 1 cpus · governor not-exposed · 7.1.5-76070105-generic
 
 Architecture:                            x86_64
 CPU op-mode(s):                          32-bit, 64-bit
