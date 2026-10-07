@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -335,6 +336,48 @@ struct decode_result_t {
 namespace detail {
 
 /**
+ * @brief XOR @p data in place with the RFC 6455 masking key @p key (§5.3): byte `i` takes key
+ *        byte `i % 4` — eight bytes per step, not one (#1922).
+ *
+ * Up to seven head bytes reach the first 8-byte-aligned address, the key is rotated to that
+ * offset and widened to a 64-bit word, the aligned middle is XORed a word at a time, and the
+ * tail finishes byte-wise. Every word load and store goes through `std::memcpy` on an address
+ * known to be aligned, so a target without unaligned access (riscv32, xtensa) gets whole-word
+ * loads and none of them traps; the word is built from bytes, so endianness never enters.
+ * Applying the same key twice restores the input (x ^ k ^ k = x), so this one loop both
+ * unmasks a received frame (`decode_one`) and masks a client frame's copied payload
+ * (@ref put_client_frame, @ref ws::encode_client_control).
+ *
+ * @param data The bytes to mask or unmask, in place.
+ * @param key  The four key bytes, in wire order.
+ */
+inline void xor_mask(std::span<std::byte> data, const std::array<std::uint8_t, 4>& key) noexcept {
+    std::byte* const p = data.data();
+    const std::size_t n = data.size();
+    const std::size_t to_aligned = (8u - reinterpret_cast<std::uintptr_t>(p) % 8u) % 8u;
+    const std::size_t head = to_aligned < n ? to_aligned : n;
+    std::size_t i = 0;
+    for (; i < head; ++i) p[i] ^= static_cast<std::byte>(key[i % 4]);
+
+    // The key rotated to byte i, twice over: the word every aligned step XORs with.
+    const std::size_t r = i % 4;
+    const std::array<std::uint8_t, 8> rotated{key[r],           key[(r + 1) % 4], key[(r + 2) % 4],
+                                              key[(r + 3) % 4], key[r],           key[(r + 1) % 4],
+                                              key[(r + 2) % 4], key[(r + 3) % 4]};
+    std::uint64_t word_key = 0;
+    std::memcpy(&word_key, rotated.data(), sizeof word_key);
+    for (; n - i >= 8; i += 8) {
+        std::byte* const w = std::assume_aligned<8>(p + i);
+        std::uint64_t word = 0;
+        std::memcpy(&word, w, sizeof word);
+        word ^= word_key;
+        std::memcpy(w, &word, sizeof word);
+    }
+
+    for (; i < n; ++i) p[i] ^= static_cast<std::byte>(key[i % 4]);
+}
+
+/**
  * @brief The ONE RFC 6455 frame-decode implementation, shared by @ref ws::decode_frame and
  *        @ref ws::decode_frame_checked — they differ only in @p fail_on_violation and
  *        the DATA-frame bound @p max_payload.
@@ -420,8 +463,7 @@ namespace detail {
     // payload again (x ^ 0 = x), so decoding one buffer twice gives one answer.
     const std::span<std::byte> payload = buf.subspan(pos, static_cast<std::size_t>(len));
     if (masked) {
-        for (std::size_t i = 0; i < payload.size(); ++i)
-            payload[i] ^= static_cast<std::byte>(mask_key[i % 4]);
+        xor_mask(payload, mask_key);
         std::memset(buf.data() + pos - 4, 0, 4);
     }
 
@@ -667,8 +709,8 @@ inline constexpr std::size_t kMaxClientControlFrame = 2 + 4 + kMaxControlPayload
                                          static_cast<std::uint8_t>((mask_key >> 8) & 0xFFu),
                                          static_cast<std::uint8_t>(mask_key & 0xFFu)};
     for (std::size_t i = 0; i < 4; ++i) out[2 + i] = static_cast<std::byte>(mk[i]);
-    for (std::size_t i = 0; i < len; ++i)
-        out[6 + i] = static_cast<std::byte>(std::to_integer<std::uint8_t>(payload[i]) ^ mk[i % 4]);
+    if (len > 0) std::memcpy(out.data() + 6, payload.data(), len);
+    detail::xor_mask(std::span<std::byte>(out.data() + 6, len), mk);
     return 6 + len;
 }
 
@@ -726,10 +768,9 @@ inline std::size_t put_client_frame(std::span<std::byte> out, opcode_t op,
                                          static_cast<std::uint8_t>((mask_key >> 8) & 0xFFu),
                                          static_cast<std::uint8_t>(mask_key & 0xFFu)};
     for (std::uint8_t m : mk) out[n++] = static_cast<std::byte>(m);
-    for (std::size_t i = 0; i < len; ++i) {
-        out[n++] = static_cast<std::byte>(std::to_integer<std::uint8_t>(payload[i]) ^ mk[i % 4]);
-    }
-    return n;
+    if (len > 0) std::memcpy(out.data() + n, payload.data(), len);
+    xor_mask(out.subspan(n, len), mk);
+    return n + len;
 }
 
 }  // namespace detail
