@@ -468,17 +468,31 @@ requester. No forwarding hop and no terminus holds anything for a `READ` or a `W
 - The requester mints the token. It is one valid NAME segment (reference/03 §Reserved characters).
   Its bytes are opaque to every other node, and no other node may derive meaning from them.
 - A token MUST name **at most one live pending request**, and once that request ends (§9.4) the token
-  MUST NOT match again. The reference implementation spells it as the `(slot, generation)` of a slot
-  in the requester's **pending index**, hex-encoded behind a fixed prefix (today's `~o<hex>`
-  spelling, `core/src/fwd_originate.cpp`). Like a PAIR, it is minted, never hashed (ruling 1), and
-  matching it is a bounds check, a generation compare and a state test, at a cost independent of how
-  many requests are pending. A slot's generation advances every time its request ends, and it
-  saturates and never wraps. A saturated slot is retired.
+  MUST NOT match again, **including across a restart of the requester**. The token therefore carries
+  three parts:
+  - the requester's **per-boot epoch**: a value that changes on every boot. This is the same epoch
+    RFC-0029 §8.2 rule 4 defines, which also lives outside the pair. The requester reads it once at
+    boot. It adds a few bytes to the token and no field to any frame;
+  - the **slot** of the record in the requester's **pending index**;
+  - that slot's **generation**.
+
+  Without the epoch, a rebooted requester restarts its slots and generations at zero, and a reply
+  still in flight from before the reboot could match a fresh request with the same slot, generation,
+  door and shape. With it, every pre-boot token fails condition 1 of §9.2.
+- The reference implementation spells the token as `(epoch, slot, generation)`, hex-encoded behind a
+  fixed prefix (today's `~o<hex>` spelling, `core/src/fwd_originate.cpp`). Like a PAIR, it is
+  minted, never hashed (ruling 1). Matching it is an epoch compare, a bounds check, a generation
+  compare and a state test, at a cost independent of how many requests are pending. A slot's
+  generation advances every time its request ends, and it saturates and never wraps. A saturated slot
+  is retired.
 - The pending record stores, at minimum:
   - the **token**;
   - the **op** (`READ` or `WRITE`, and whether the `WRITE` is a `:subscribers[]` append);
-  - the **door** the request left by, as the door's PAIR, or "local" for a request that never left
-    the node;
+  - the **egress**: the door the request left by, as the door's PAIR, **plus the next-hop session**
+    when the door is a shared mount (a bus, or a multi-peer server). The session is the accepted
+    session's anchor where one exists (RFC-0029 §10, stage 5 of #1938), and otherwise the peer
+    identity the link itself reports, which is the `<peer>` segment of the door's mount run. A
+    request that never left the node records "local";
   - the **path object**, so a matched reply can teach it its chain;
   - the **state**: pending, or ended with its outcome.
 
@@ -490,8 +504,13 @@ requester. No forwarding hop and no terminus holds anything for a `READ` or a `W
    segment is a token naming a **pending** record (§9.1). The reply's `dst`, which the responder spelled
    from the request's `src`, is consumed hop by hop and arrives at the requester as the reply path the
    requester seeded.
-2. **It arrived through the door the record holds.** The requester compares the door it stamped on
-   arrival (§8.4) with the record's door. A reply to a request that never left the node is delivered in
+2. **It arrived through the egress the record holds.** The requester compares the door it stamped
+   on arrival (§8.4) with the record's door. On a shared mount it also compares the session the reply
+   arrived from with the record's next-hop session. On a bus, every peer on the segment can see the
+   request's `src` token, and a reply from any of them arrives through the same door, so a matching
+   door alone does not mean a matching peer. A link that cannot report the sending peer of an
+   arriving frame (a broadcast medium with no source identity) can only offer the door comparison,
+   and its documentation MUST say so. A reply to a request that never left the node is delivered in
    process and matches on the token alone.
 3. **Its payload is well-formed for the recorded op** (§8.6): an `ERROR`, or a result of the recorded
    op's shape.
@@ -501,9 +520,17 @@ A matched reply **ends** the record with outcome *answered* (§9.4) and hands th
 handle. If the reply carries a `0x15` chain, the requester installs it in the path object's cache
 (§8.7). The reply endpoint emits nothing.
 
-Nothing else is checked, and nothing else needs to be. In particular, the requester does not
-compare the reply's provenance with the request's `dst`. The token already names exactly one
-request, and the door names the link it can come back by.
+Nothing else is checked. In particular, the requester does not compare the reply's provenance with
+the request's `dst`. The token already names exactly one request, and the egress names the link and
+peer it can come back by.
+
+**Matching is correlation, not authentication.** §9.2 decides which pending request a reply belongs
+to, and it discards what belongs to none. It does not prove who wrote the reply. The responder can
+always answer, and so can any node on the path past the door: every such node sees the token, and its
+reply arrives through the recorded egress. Only two things narrow who else can answer: the identity
+the transport authenticates for the link or session, and an ACL on the reply path. Both are evaluated
+by the ordinary `allows` gate at the reply endpoint, like any write (RFC-0029 §6.4). An application
+that needs to know who answered relies on those, not on the token.
 
 ### 9.3 Unmatched, duplicate and late replies
 
@@ -522,7 +549,8 @@ The cases this covers, each by construction rather than by a special branch:
 | **Unmatched**: a token no record ever held, or one malformed as a segment | condition 1: no pending record |
 | **Duplicate**: a second reply to an answered request, for example a retransmission on a link that duplicates | condition 1: the slot's generation advanced when the first reply ended it |
 | **Late**: a reply after cancel, deadline, link down or teardown | condition 1: the record already ended, and its generation advanced |
-| **Wrong door**: the right token, through a different link | condition 2 |
+| **Pre-boot**: a reply to a request the requester issued before it last rebooted | condition 1: the token's epoch is not the current one |
+| **Wrong egress**: the right token, through a different link, or from a different peer on the same shared mount | condition 2 |
 | **Wrong shape**: a `READ`-shaped answer to an append, or the reverse | condition 3 |
 
 A late reply is never an error to anybody. The responder applied the operation, and the requester
@@ -545,9 +573,12 @@ does it for the one operation where the protocol owns the state.
 A record whose request never left the node (§6.1 step 1) ends inside the call that created it and
 never occupies a slot.
 
-**Exactly once.** Ending is a single atomic state transition on the record (pending → ended), and
-the slot's generation advances in the same step. Whichever trigger performs the transition owns the
-outcome. A trigger that finds the record already ended does nothing. A cancel that loses to an answer
+**Exactly once.** Ending is **one atomic step**: a single compare-and-swap on a word that holds both
+the record's state and the slot's generation, from (pending, g) to (ended, g + 1). The state change
+and the generation advance therefore cannot be observed apart. Whichever trigger's compare-and-swap
+succeeds owns the outcome. Every concurrent trigger, whether a second reply on another receive
+thread, a cancel or a link down, fails its compare-and-swap. This is what makes "ends exactly once"
+hold under concurrency, and not only in sequence. A trigger that finds the record already ended does nothing. A cancel that loses to an answer
 reports that it lost, as `fwd_router_t::cancel(origin_t&)` does today, so the application knows the
 outcome was delivered.
 
@@ -568,8 +599,9 @@ outstanding together) is withdrawn, because the condition it guarded against can
 request, any reply or any token. A hop that reboots mid-request still routes the reply, because the
 reply's route is in the frame (§8.4). A terminus answering a `READ` or `WRITE` holds nothing after
 it has emitted the reply write. The pending index is the **requester's** state for the **requester's**
-own requests. Losing it (a requester reboot) ends every handle, and every later reply is unmatched
-(§9.3). That changes no answer at any other node, so it is soft state in RFC-0029 §9.1's sense from
+own requests. Losing it (a requester reboot) ends every handle. Every later reply to a pre-boot
+request is unmatched (§9.3), because its token carries the old epoch (§9.1), even when its slot and
+generation coincide with a fresh post-boot request. That changes no answer at any other node, so it is soft state in RFC-0029 §9.1's sense from
 every node's point of view but the requester's, and the requester is the party that chose to wait.
 
 The one-shot edge of §10.4 is not hop state. It is an ordinary `:subscribers[]` entry on the
@@ -683,7 +715,7 @@ It now gets the same outcome from its own waiter.
 | **The receiver pays** | A terminus answering a `READ` or `WRITE` holds nothing afterwards. A one-shot edge installed by a remote append is charged to the link it arrived on and evicted with that link, which is ADR-0084's decision 2 carried into an ordinary edge. Creation from a peer draws from the graph's seam under the parent owner's hook, which owns its bound. |
 | **Compile-time by default** | Chain capacity (§5.4), pending-index capacity and growth (§10.2), creation-hook availability (§7.2), the waiter type (§10.3) and the ISR fast door (§5.3) are compile-time policies. No new runtime knob. |
 | **Delete, do not split** | Deleted: the `REPLY` arm and its terminus asymmetry, the `AWAIT` arm, the receiver waiter, `originate`/`origin_t`, suffix pairing, the `on_reply` sink, the write-create walk, and the reply-`src` rewrite at hops (one stamping rule replaces two). Added: the pending index and the hook slot. The per-file CCN totals are the judge (#1790, the CCN ratchet). |
-| **Population-independent lookups** | A reply matches in O(1) (token = slot and generation). A path object's local element is a pair dereference. The door walk is stage 1's. |
+| **Population-independent lookups** | A reply matches in O(1) (token = epoch, slot and generation). A path object's local element is a pair dereference. The door walk is stage 1's. |
 
 ## 12. Normative pages that change
 
@@ -837,7 +869,9 @@ change.
 - unmatched token;
 - duplicate reply;
 - late reply after cancel, after the app deadline and after link down;
-- wrong door;
+- wrong door, and on a shared mount, wrong peer behind the right door;
+- a reply in flight across a requester reboot, which must not match a fresh request that has the same
+  slot and generation;
 - wrong shape;
 - exactly-once under a cancel/answer race;
 - pending-index exhaustion answered by value;
@@ -880,9 +914,12 @@ set, not as a byte vector.
 - **Match by suffix and op** (RFC-0004 Amendment 3's implied fix). It needs the op on the wire,
   still falls back to arrival order between identical requests, and costs a scan. Rejected for the
   O(1) token.
-- **Match on the token alone, without the door check.** Simpler by one compare. But the door is
-  already known at both ends and costs nothing to compare, and a reply that arrives through a link its
-  request never left by is wrong by construction. Rejected.
+- **Match on the token alone, without the egress check.** Simpler by one compare. But the door, and
+  on a shared mount the session, are already known at both ends and cost nothing to compare. A reply
+  that arrives through a link, or from a peer, that its request never left toward is wrong by
+  construction. Rejected. The check stays correlation, not authentication (§9.2).
+- **A token with no epoch.** One field shorter. But it lets a reply that is in flight across a
+  requester reboot match a fresh request (§9.1). Rejected.
 - **Keep the terminus-reply asymmetry** (the terminus does not stamp). The terminus would then be the
   one receiver that does not stamp, the reply would not be an ordinary walk, and the maintainer's model
   (ruling 9) would have an exception at the last node. Rejected; see §18 Q1.
@@ -904,9 +941,11 @@ set, not as a byte vector.
    through a path object must stay within RFC-0029 §15 clause 3's priced 11 ns over the pointer
    handle, at every payload size, including above 1 KiB, and must not break an ISR-context write
    (reference/00 claim 6). If it does, §5.3 re-opens.
-2. **A reachable sequence lets a stale token match** other than through a saturated slot. The
-   generation advance in the ending transition (§9.4) is the whole guard. If a second match survives
-   it, the token needs another stamp.
+2. **A reachable sequence lets a stale token match** other than through a saturated slot. Two
+   guards cover it. Within a boot, the generation advance in the ending compare-and-swap (§9.4) is the
+   guard. Across a requester reboot, the per-boot epoch in the token (§9.1) is the guard. If a second
+   match survives both, for example an epoch source that repeats a value across boots, the token needs
+   another stamp.
 3. **The pending index is not population-independent** in practice (match cost grows with pending
    count on the receive thread). Then §10.2's structure is wrong, not the rule.
 4. **A reply's bytes grow on the wire** beyond the 4-byte `0x15` header over today's `REPLY` on the
