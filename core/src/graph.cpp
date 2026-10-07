@@ -658,7 +658,7 @@ vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handle
 result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_t role,
                                                        handlers_t handlers, vertex_policy_t policy,
                                                        std::span<const payload_right_t> rights) {
-    return register_with_policy(path.key(), role, handlers, std::move(policy), rights);
+    return register_vertex_key_span(path.key(), role, handlers, rights, {}, std::move(policy));
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
@@ -670,43 +670,16 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> ke
     // `path_key_t` — so the vector is pure convenience for a caller that already has one,
     // and callers that hold borrowed bytes take the span door instead of allocating a copy
     // to satisfy this signature (#1139).
-    return register_with_policy(key, role, handlers, std::move(policy), rights, schema_catalog);
-}
-
-result_t<vertex_handle_t> graph_t::register_with_policy(std::span<const std::byte> key, role_t role,
-                                                        const handlers_t& handlers,
-                                                        vertex_policy_t&& policy,
-                                                        std::span<const payload_right_t> rights,
-                                                        std::span<const std::byte> schema_catalog) {
-    // Refused BEFORE the descent, so an illegal policy registers nothing — not even the
-    // placeholder levels a descent would create.
-    if (!policy_legal(role, policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    // The vertex-local members are applied INSIDE the registration, before `fill`, so a refused
-    // one leaves an unregistered placeholder and nothing to undo (#1778). The delivery mode is
-    // the one member applied after the map lock drops — its arm takes the sweep lock, which
-    // never nests with the map lock — so its one allocation, the UNCONDITIONAL set entry, is
-    // taken FIRST: a sweep skips an entry whose vertex is not registered, a refused
-    // registration erases the entry it added, and landing the mode afterwards cannot fail.
-    const delivery_mode_t mode = policy.delivery_mode;
-    const result_t<bool> enrolled =
-        mode == delivery_mode_t::UNCONDITIONAL ? enroll_unconditional(key) : false;
-    if (!enrolled) return std::unexpected(enrolled.error());
-    result_t<vertex_handle_t> h =
-        register_vertex_key_span(key, role, handlers, rights, schema_catalog, std::move(policy));
-    if (!h && *enrolled) {
-        const std::lock_guard lock(sweep_mutex_);
-        (void)unconditional_.erase(key);
-    }
-    // The window between the registration and the mode is the "configure before frames flow"
-    // contract every wiring verb carries.
-    if (h && h->get()->delivery_mode() != mode) (void)apply_delivery_mode(h->get(), mode, key);
-    return h;
+    return register_vertex_key_span(key, role, handlers, rights, schema_catalog, std::move(policy));
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     std::span<const std::byte> key, role_t role, const handlers_t& handlers,
     std::span<const payload_right_t> rights, std::span<const std::byte> schema_catalog,
     vertex_policy_t policy) {
+    // Refused BEFORE the descent, so an illegal policy registers nothing — not even the
+    // placeholder levels a descent would create.
+    if (!policy_legal(role, policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     const std::unique_lock lock(map_mutex_);
     // Descend the Composite tree (ADR-0057), creating unregistered PLACEHOLDER nodes for
     // missing intermediate levels — invisible to find/read_children until a registration
@@ -782,14 +755,24 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // Each declaration raises its vertex flag as it lands (#1778). A node published for a
     // refused registration is never walked once the refusal lowers the flags again, and a later
     // declaration at this address is found first anyway.
-    // The policy's vertex-local members land on the still-unregistered node first (#1778): a
-    // refusal anywhere in this chain leaves a placeholder, which `find` does not answer for.
-    // The refusal clears every declaration back off it, so the next registration here, through
-    // a door that brings no policy (`ensure_vertex`), inherits nothing of the refused one.
-    if (!apply_policy(node, role, std::move(policy), nullptr) ||
+    // The policy lands on the still-unregistered node first (#1778), the delivery mode with its
+    // sweep-set entry included (#1920): a refusal anywhere in this chain leaves a placeholder,
+    // which `find` does not answer for and a sweep skips. The refusal clears every declaration
+    // back off it, and takes back a mode that landed with its entry, so the next registration
+    // here, through a door that brings no policy (`ensure_vertex`), inherits nothing of the
+    // refused one. The sweep lock nests inside the map lock here, and only in this direction:
+    // nothing takes the map lock under the sweep lock (ADR-0057).
+    const bool mode_moves = node->delivery_mode() != policy.delivery_mode;
+    if (!apply_policy(node, role, std::move(policy),
+                      mode_moves ? key : std::span<const std::byte>{}) ||
         !declare_payload_rights(node, rights, schema_catalog) ||
         !declare_admission(node, handlers) || !node->fill(role, handlers, *tables_)) {
         node->clear_declarations();
+        if (mode_moves) {
+            const std::lock_guard slock(sweep_mutex_);
+            node->set_delivery_mode(delivery_mode_t::IF_NEWER);
+            (void)unconditional_.erase(key);
+        }
         return std::unexpected(status_t::BACKPRESSURE);
     }
     return vertex_handle_t{node};
@@ -1165,12 +1148,12 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         for (const subscriber_t& e : table)
             if (e.active && e.remote != nullptr && !e.remote->link.empty())
                 hold_link(delivery_link(e.remote), false);
-    // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so no
-    // map⊃sweep nesting is introduced. A stale entry would otherwise (a) leak, and worse
-    // (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the
-    // leaked key, overriding the IF_NEWER reset revert_to_placeholder just applied. A
-    // concurrent sweep tolerates a not-yet-erased key: find_ptr skips the unregistered
-    // vertex, so delivery never lands on a retired one either way.
+    // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so the
+    // sweep lock is not held across the retire walk. A stale entry would otherwise (a) leak, and
+    // worse (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the leaked
+    // key, overriding the IF_NEWER reset revert_to_placeholder just applied. A concurrent sweep
+    // tolerates a not-yet-erased key: find_ptr skips the unregistered vertex, so delivery never
+    // lands on a retired one either way.
     //
     // Between the unlock and this lock another thread may register under the subtree and
     // enroll or mark the newcomer (#1884), so the run is filtered, not erased whole: each
@@ -1178,14 +1161,13 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     // the set. The retire walk above reset every retired vertex to IF_NEWER and dropped its
     // pending-mark hint; only a newcomer's own mode store or mark puts either back, and both
     // happen under the sweep lock held here. So an UNCONDITIONAL entry whose vertex is not
-    // UNCONDITIONAL is the retiree's, and a pending entry whose hint is down is too. A null
-    // UNCONDITIONAL entry is a registration's enrollment that has not reached its vertex yet;
-    // that registration fills it or erases it itself. The window is closed.
+    // UNCONDITIONAL is the retiree's, and a pending entry whose hint is down is too. The
+    // window is closed.
     {
         const std::lock_guard slock(sweep_mutex_);
         const auto [ui, uj] = subtree_run(unconditional_, mem::as_span(lo));
         (void)unconditional_.erase_if(ui, uj, [](const key_set_t::entry_t& e) {
-            return e.value != nullptr && e.value->delivery_mode() != delivery_mode_t::UNCONDITIONAL;
+            return e.value->delivery_mode() != delivery_mode_t::UNCONDITIONAL;
         });
         const auto [pi, pj] = subtree_run(pending_, mem::as_span(lo));
         pending_count_.fetch_sub(
@@ -1586,7 +1568,8 @@ result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
     mem::bytes_t key(*tables_);
     const bool mode_moves = vx->delivery_mode() != policy.delivery_mode;
     if ((mode_moves && !try_build_key(vx, key)) ||
-        !apply_policy(vx, vx->role(), std::move(policy), mode_moves ? &key : nullptr))
+        !apply_policy(vx, vx->role(), std::move(policy),
+                      mode_moves ? mem::as_span(key) : std::span<const std::byte>{}))
         return std::unexpected(status_t::BACKPRESSURE);
     return {};
 }
@@ -1597,16 +1580,16 @@ result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
  *
  * Every block a member can be refused is drawn first (`vertex_t::stage_policy`, and the owned
  * field table built aside), then the delivery mode lands with its sweep-set entry when
- * @p mode_key names the vertex (`set_policy`; a registration lands the mode itself, after the
- * map lock drops). Only then are the members applied, and none of them can be refused any
- * more: a refusal before that point leaves blocks with no observable effect.
+ * @p mode_key names the vertex (an empty key: the mode does not move). Only then are the
+ * members applied, and none of them can be refused any more: a refusal before that point
+ * leaves blocks with no observable effect.
  *
  * Order matters in one place: the ring source is bound BEFORE the retention, because binding
  * drains the ring and a depth set first would be applied to a ring about to be emptied anyway;
  * either order is correct, this one does the drain once.
  */
 bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
-                           const mem::bytes_t* mode_key) {
+                           std::span<const std::byte> mode_key) {
     const bool ring_moves = std::pair(vx->ring_source(), vx->ring_reliable()) !=
                             std::pair(policy.ring_source, policy.ring_reliable);
     // A HANDLER is NONE by role and carries no bit for it. Only `N` touches the extension
@@ -1635,8 +1618,7 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
     app_field_table_t built(*tables_);
     built.slots = want;  // a borrowed table is viewed in place and allocates nothing
     if (!vertex_t::build_owning_table(fields.owned(), built) ||
-        (mode_key != nullptr &&
-         !apply_delivery_mode(vx, policy.delivery_mode, mem::as_span(*mode_key))))
+        (!mode_key.empty() && !apply_delivery_mode(vx, policy.delivery_mode, mode_key)))
         return false;
     // Nothing below can be refused: every block is drawn and the mode has landed.
     if (ring_moves) (void)vx->set_ring_source(policy.ring_source, policy.ring_reliable, *tables_);
@@ -2899,32 +2881,20 @@ void graph_t::clear_pending(vertex_t* v, const value_t* delivered) {
     if (pending_.erase(mem::as_span(key))) pending_count_.fetch_sub(1, std::memory_order_relaxed);
 }
 
-result_t<bool> graph_t::enroll_unconditional(std::span<const std::byte> key) {
-    const std::lock_guard lock(sweep_mutex_);
-    if (unconditional_.contains(key)) return false;
-    mem::bytes_t k(*tables_);
-    if (!mem::assign_bytes(k, key) ||
-        unconditional_.try_emplace(std::move(k), nullptr).value == nullptr)
-        return std::unexpected(status_t::BACKPRESSURE);
-    return true;
-}
-
 bool graph_t::apply_delivery_mode(vertex_t* v, delivery_mode_t mode,
                                   std::span<const std::byte> key) {
     // The one failable step, taken before anything changes (#1778): the set entry, drawn only
-    // when the key is not enrolled yet, so a registration that enrolled it first cannot be
-    // refused here. It goes in UNDER the same lock as the mode store and the pending erase,
-    // so no sweep ever sees the key in both sets (#895). An entry the registration enrolled
-    // before @p v existed is null until here, where it learns its vertex (#1884); naming it on
-    // the way out of the set as well costs nothing, since the erase below drops it.
+    // when the key is not in the set yet. It goes in UNDER the same lock as the mode store and
+    // the pending erase, so no sweep ever sees the key in both sets (#895). An entry already
+    // there names @p v: a key has one node for the graph's life (ADR-0057), and a retiree's
+    // entry that `retire` has not dropped yet is kept from here on, because @p v is now
+    // UNCONDITIONAL (#1884).
     const std::lock_guard lock(sweep_mutex_);
     mem::bytes_t k(*tables_);
-    vertex_t** entry = unconditional_.find(key);
-    if (mode == delivery_mode_t::UNCONDITIONAL && entry == nullptr &&
+    if (mode == delivery_mode_t::UNCONDITIONAL && !unconditional_.contains(key) &&
         (!mem::assign_bytes(k, key) ||
-         (entry = unconditional_.try_emplace(std::move(k), v).value) == nullptr))
+         unconditional_.try_emplace(std::move(k), v).value == nullptr))
         return false;
-    if (entry != nullptr) *entry = v;
     v->set_delivery_mode(mode);
     // Leaving IF_NEWER retires any mark below, and the pending-mark hint (#1712) with it:
     // UNCONDITIONAL is swept via unconditional_ now (no double membership) and EXPLICIT is

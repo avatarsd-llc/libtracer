@@ -26,17 +26,25 @@
  * registrar takes no subscription of its own, so the run judges the sweep sets and not
  * subscribe-versus-retire.
  *
+ * A second race (#1920) re-registers the retired address itself, on a thread whose every
+ * allocation is refused. The retired vertex's entry is still in `unconditional_` when the
+ * registration starts, so an UNCONDITIONAL registration that needs no new entry completes, and
+ * one that does must answer BACKPRESSURE and leave the address unregistered. What it must never
+ * do is register a vertex that is not UNCONDITIONAL, or one no covering sweep delivers.
+ *
  * The round count defaults to @ref kRounds; a first argument overrides it, which is how the
  * 10^6-round acceptance run is made.
  */
 
 #include <atomic>
 #include <barrier>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <new>
 #include <thread>
 
 #include "libtracer/tracer.hpp"
@@ -49,6 +57,7 @@ using tr::graph::delivery_mode_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
+using tr::graph::status_t;
 using tr::graph::value_t;
 
 /** @brief Rounds a default run makes. A first command-line argument overrides it. */
@@ -168,10 +177,119 @@ void test_newcomer_entries_survive_a_retire(long rounds, bool ceiling) {
           "the newcomers survived some rounds (the racer was live)");
 }
 
+/**
+ * @brief A heap source that refuses every request made on a thread that raised @ref refuse_here,
+ *        so one racer can be starved while the other is served.
+ */
+class refusing_source_t final : public tr::mem::block_source_t {
+   public:
+    refusing_source_t() noexcept : tr::mem::block_source_t("refusing") {}
+
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (refuse_here) return nullptr;
+        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+
+    /** @brief Raised on the starved thread: every request it makes is refused. */
+    static thread_local bool refuse_here;
+};
+
+thread_local bool refusing_source_t::refuse_here = false;
+
+void test_refused_mode_landing_registers_nothing(long rounds, bool ceiling) {
+    std::printf("re-registration of a retired address, every allocation refused (#1920):\n");
+    refusing_source_t src;
+    graph_t g{src};
+    const auto root = g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
+    counter_t seen;
+    counter_t on_p;  // the window's slot table; nothing is assigned while it hangs, so it counts 0
+    check(g.subscribe(path_t("/r"), seen).has_value(), "the observer subscribes /r");
+    const tr::graph::vertex_policy_t unconditional{.delivery_mode = delivery_mode_t::UNCONDITIONAL};
+
+    std::barrier sync(3);
+    std::atomic<bool> stop{false};
+    std::thread retirer([&] {
+        for (;;) {
+            sync.arrive_and_wait();
+            if (stop.load(std::memory_order_relaxed)) return;
+            if (auto p = g.find(path_t("/r/p").key())) (void)g.retire(*p);
+            sync.arrive_and_wait();
+        }
+    });
+    tr::graph::result_t<tr::graph::vertex_handle_t> got = std::unexpected(status_t::NOT_FOUND);
+    std::thread registrar([&] {
+        refusing_source_t::refuse_here = true;
+        unsigned spin = 1;
+        for (;;) {
+            sync.arrive_and_wait();
+            if (stop.load(std::memory_order_relaxed)) return;
+            spin = spin * 1103515245u + 12345u;
+            for (unsigned i = (spin >> 16) & kJitterMask; i > 0; --i)
+                std::atomic_signal_fence(std::memory_order_seq_cst);
+            got = g.try_register_vertex(path_t("/r/p"), role_t::STORED_VALUE, {}, unconditional);
+            sync.arrive_and_wait();
+        }
+    });
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(kRunCeilingMs);
+    long done = 0;
+    long registered = 0;
+    long refused = 0;
+    long wrong_mode = 0;
+    long unswept = 0;
+    long half_made = 0;
+    for (; done < rounds; ++done) {
+        // Quiescent: the address is registered UNCONDITIONAL, by this thread, before each round.
+        if (!g.find(path_t("/r/p").key())) {
+            (void)g.try_register_vertex(path_t("/r/p"), role_t::STORED_VALUE, {}, unconditional);
+            for (int i = 0; i < kWindowSubs; ++i) (void)g.subscribe(path_t("/r/p"), on_p);
+        }
+        sync.arrive_and_wait();
+        sync.arrive_and_wait();
+        if (got) {
+            ++registered;
+            // The handle is the vertex pointer; the mode has no graph-level getter.
+            if (std::bit_cast<tr::graph::vertex_t*>(*got)->delivery_mode() !=
+                delivery_mode_t::UNCONDITIONAL)
+                ++wrong_mode;
+            // An assign marks nothing on an UNCONDITIONAL vertex: only its set entry delivers it.
+            (void)g.assign(*got, make_value({kY}));
+            seen.y.store(0, std::memory_order_relaxed);
+            (void)g.propagate(root);
+            if (seen.y.load(std::memory_order_relaxed) == 0) ++unswept;
+        } else if (got.error() == status_t::BACKPRESSURE) {
+            ++refused;
+            if (g.find(path_t("/r/p").key())) ++half_made;
+        }
+        if (wrong_mode + unswept + half_made > 0) break;  // the defect, observed
+        if (ceiling && (done & 0x3ff) == 0 && std::chrono::steady_clock::now() > deadline) break;
+    }
+    stop.store(true, std::memory_order_relaxed);
+    sync.arrive_and_wait();
+    retirer.join();
+    registrar.join();
+
+    std::printf(
+        "    %ld rounds, %ld registered, %ld refused; wrong mode=%ld unswept=%ld "
+        "half-made=%ld\n",
+        done, registered, refused, wrong_mode, unswept, half_made);
+    check(wrong_mode == 0, "a registration that answers success landed its UNCONDITIONAL mode");
+    check(unswept == 0, "a registered UNCONDITIONAL vertex is in its sweep set");
+    check(half_made == 0, "a registration refused BACKPRESSURE leaves the address unregistered");
+    // Liveness: the registrar was refused. A win needs the whole registration inside the
+    // retire's window, which a loaded host can starve, so wins are reported, not required.
+    check(refused > 0, "the registrar was refused (the race was live)");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const long rounds = argc > 1 ? std::strtol(argv[1], nullptr, 10) : kRounds;
     test_newcomer_entries_survive_a_retire(rounds, argc <= 1);
+    test_refused_mode_landing_registers_nothing(rounds, argc <= 1);
     return tr::testing::summary("retire_sweep_race");
 }
