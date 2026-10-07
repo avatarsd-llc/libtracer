@@ -25,6 +25,7 @@
 #include <cstring>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,27 @@ namespace bench::net {
 inline constexpr std::size_t kSizes[] = {16, 256, 1024, 8192};  // ≥ 9 (ts+phase)
 
 /**
+ * @brief The payload sizes of a stream transport (TCP, WebSocket): @ref kSizes, then 64 KiB.
+ *
+ * The 64 KiB row is the payload ladder's top (#1907), and the size where a per-byte cost on a
+ * stream path, such as the WebSocket unmask, is most of a frame (#1927). It runs after every
+ * @ref kSizes row, so no existing row moves. UDP keeps @ref kSizes: a 64 KiB datagram is over
+ * the IPv4 limit of 65507 payload bytes, and the Zenoh UDP rows stay on the same sizes as
+ * libtracer's.
+ */
+inline constexpr std::size_t kStreamSizes[] = {16, 256, 1024, 8192, 65536};
+
+/**
+ * @brief The payload sizes a `<proto>` run sweeps, on both engines.
+ * @param proto `udp`, `tcp` or `ws`.
+ * @return @ref kSizes for `udp`, @ref kStreamSizes otherwise.
+ */
+[[nodiscard]] inline std::span<const std::size_t> sizes_for(std::string_view proto) {
+    if (proto == "udp") return kSizes;
+    return kStreamSizes;
+}
+
+/**
  * @brief Paced latency probes per payload size — the sample count behind that size's percentiles.
  *
  * 4000 is the historical default and it is BELOW @ref bench::kTailSampleFloor: at n=4000 the
@@ -43,8 +65,9 @@ inline constexpr std::size_t kSizes[] = {16, 256, 1024, 8192};  // ≥ 9 (ts+pha
  * alone and the knob below is what a tail measurement turns up.
  *
  * `LIBTRACER_BENCH_LAT_MSGS` overrides it. At @ref kPaceNs the cost is linear and cheap:
- * 4000 probes is 0.6 s per size, 10000 is 1.5 s, so clearing the floor on all four sizes adds
- * about 3.6 s to a publisher run. Raise `run_net.sh`'s `timeout` alongside it.
+ * 4000 probes is 0.6 s per size, 10000 is 1.5 s, so clearing the floor adds about 0.9 s per
+ * size: 3.6 s to a UDP publisher run, 4.5 s to a TCP or WebSocket one (five sizes, see
+ * @ref sizes_for). Raise `run_net.sh`'s `timeout` alongside it.
  */
 [[nodiscard]] inline std::size_t latency_msgs() {
     const char* const env = std::getenv("LIBTRACER_BENCH_LAT_MSGS");

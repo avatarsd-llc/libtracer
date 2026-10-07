@@ -21,8 +21,9 @@ cd "$(dirname "$0")"
 # PUBLISHES those numbers, so it is the run that has to pay for them.
 #
 # The price is small and linear: at the 150 us pacing interval each extra 1000 probes is
-# 0.15 s per payload size, so 4000 -> 10000 costs +0.9 s per size, +3.6 s per publisher
-# process, and about +15 s across the four (engine x protocol) pairs this script drives.
+# 0.15 s per payload size, so 4000 -> 10000 costs +0.9 s per size: +3.6 s per UDP publisher
+# (four sizes) and +4.5 s per TCP one (five: the 64 KiB row, #1907), about +16 s across the
+# four (engine x protocol) pairs this script drives.
 # The `timeout`s below are raised to match with the same headroom they had before.
 # Override for a deeper tail — 100000 puts 99 samples above the p999 — but raise the
 # timeouts alongside it or the publisher is killed mid-sweep and the last size reports

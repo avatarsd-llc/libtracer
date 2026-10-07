@@ -74,7 +74,7 @@ void run_pub(std::string_view proto, std::uint16_t port) {
         pub.put(Bytes(payload));
     };
     const std::size_t lat_msgs = net::latency_msgs();
-    for (std::size_t S : net::kSizes) {
+    for (std::size_t S : net::sizes_for(proto)) {
         for (std::size_t i = 0; i < lat_msgs; ++i) {
             send(S, net::kLatency);
             const auto until = Clock::now() + std::chrono::nanoseconds(net::kPaceNs);

@@ -586,12 +586,17 @@ Details that make these trustworthy:
 - **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
   `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `compact-*` arms
-  and `fwd-demux-value`. 984 and 985 B sit either side of the heap's one-block boundary (984 B
+  and `fwd-demux-value`, and, since
+  [#1907](https://github.com/avatarsd-llc/libtracer/issues/1907), the pooled-backend
+  `inproc-pool`, `inproc-pool-borrow` and `inproc-pool-batch` rows. The two-process network
+  rows (`net-tcp`, `net-ws`) gain a 64 KiB row on both engines; UDP keeps its four sizes,
+  because a 64 KiB datagram is over the IPv4 limit. 984 and 985 B sit either side of the heap's one-block boundary (984 B
   plus the 48 B segment header is glibc's 1032 B per-thread-cache ceiling). Rows a family
   did not have before run after its existing rows, so no existing row moves. Above 8 KiB the
   operation budget shrinks in proportion to the payload, and the `compact-*` and
   `fwd-demux-value` ladder rows run at a quarter of their binary's time budget, so the
-  ladder adds seconds to a sweep rather than minutes. Only the 16 KiB rows are gated.
+  ladder adds seconds to a sweep rather than minutes. Only the 16 KiB rows are gated, and
+  not the `inproc-pool*` or network ones.
 - **The allocator-cliff family** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
   `cliff-alloc-heap` and `cliff-alloc-pool` time one segment alloc/free, each family in its
   own fresh process, at every size of the cliff ladder: 960–1096 B in steps of 8 plus 985 B,

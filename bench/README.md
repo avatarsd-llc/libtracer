@@ -130,7 +130,9 @@ Without `fetch_zenoh.sh`, only the libtracer numbers appear.
 over the loopback kernel path) via `run_net.sh`, which launches a two-process pub/sub pair
 — `bench_transports` (libtracer) and `bench_zenoh_net` (Zenoh) — for each engine and
 protocol, the **same two-process topology** so the comparison is fair; each subscriber
-emits `net-<proto>` RESULT rows. (WebSocket is built but held: libtracer's WS transport
+emits `net-<proto>` RESULT rows. The payloads are 16, 256, 1024 and 8192 B, plus 64 KiB on
+the stream transports (TCP, WebSocket; `bench::net::sizes_for`, #1907): a 64 KiB datagram
+is over the IPv4 UDP limit, so neither engine's UDP run carries it. (WebSocket is built but held: libtracer's WS transport
 shows order-of-magnitude single-run latency jitter under this bench. QUIC needs msquic + a
 TLS cert and the `-DLIBTRACER_WITH_QUIC` module, gated like the dedicated `quic` CI job.)
 
@@ -1694,10 +1696,12 @@ baseline ran every axis for minutes, both emitting well-formed rows under the sa
 Every data-path family runs over `bench::kPayloadLadder` — 64, 984, 985, 1024, 4096, 16384 and
 65536 B: `inproc` and `inproc-borrow` (the sizes `kSizes` lacks, after its rows), the four
 `lkv-*` rows, `eptype-stream`, both `compact-*` arms and `fwd-demux-value` (the forward hop,
-one link, keyed by its VALUE payload). 984 / 985 B straddle the heap's one-block boundary.
+one link, keyed by its VALUE payload), and, since #1907, `inproc-pool`, `inproc-pool-borrow`
+and `inproc-pool-batch` (the ladder sizes `kSizes` lacks, after their rows). 984 / 985 B straddle the heap's one-block boundary.
 Above 8 KiB the operation budget shrinks in proportion to the payload
 (`bench::ladder_budget`), and the `compact-*` / `fwd-demux-value` ladder rows take a quarter
-of their binary's time budget each. The 16 KiB row of each family is a gated point.
+of their binary's time budget each. The 16 KiB row of each family is a gated point, except
+the three `inproc-pool*` families, which are charted and not gated.
 
 #### Process shape: one fresh process per family, fixed allocator state (#1803)
 
