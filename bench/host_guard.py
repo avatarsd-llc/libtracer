@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import pathlib
 import re
@@ -93,8 +94,21 @@ DEFAULT_LOAD_PER_CPU = 0.25
 # Default A/A disagreement band, percent. The measured same-binary null floor on this
 # host is ~±4% on deliveries/s when the machine is ALREADY loaded and near 0% on p50
 # when it is quiet, so 6% sits above the noise and below the ~10% contamination this
-# guard exists to catch.
+# guard exists to catch. It is the PER-ROW band: the rows `bracket_failed_names` flags,
+# the charts' neighbour test and `step_detect`'s floor. The run-level verdict has its own
+# rule, below.
 DEFAULT_BAND = 6.0
+
+# The RUN-LEVEL A/A verdict (maintainer ruling 2026-10-07): a run is CONTAMINATED when its
+# p75 row's |delta| exceeds `AA_RUN_P75_BAND` OR any single row's exceeds `AA_RUN_ROW_CAP`.
+# It used to flag the run when the WORST of its ~45 one-second rows passed 6%, which a
+# clean host trips on nearly every run: on d678bf17 the median row was 0.9% and only 2
+# rows were over 6%. The p75 arm catches a machine that moved under most of the run; the
+# cap arm keeps one row the machine wrecked from hiding behind a quiet majority. Rows over
+# `DEFAULT_BAND` are still flagged one by one (`bracket_failed_names`), whatever the run's
+# verdict. Both thresholds live here and nowhere else.
+AA_RUN_P75_BAND = 6.0
+AA_RUN_ROW_CAP = 15.0
 
 
 def loadavg1() -> float:
@@ -184,29 +198,42 @@ def bracket_rows(pre_text: str, post_text: str) -> list[tuple[tuple, str, float,
     return out
 
 
-def bracket_verdict(pre_text: str, post_text: str,
-                    band: float = DEFAULT_BAND) -> tuple[bool, str, float]:
+def bracket_verdict(pre_text: str, post_text: str, p75_band: float = AA_RUN_P75_BAND,
+                    row_cap: float = AA_RUN_ROW_CAP) -> tuple[bool, str, float, float]:
     """@brief Compare the A/A null pair taken either side of the measured run.
 
-    Returns (clean, worst_row_description, worst_percent). Every point present in
-    BOTH transcripts is compared on throughput and p50; the worst absolute
-    disagreement decides. Exceeding @p band means the machine moved under the
-    measurement — the sample is still banked, but flagged, because a datum taken in
-    known conditions is worth more than no datum at all. This WHOLE-RUN verdict is the
-    one gating consumers read; the rows that exceeded the band are named separately by
-    `bracket_failed_names`, for the charts (#1890).
+    Returns (clean, worst_row_description, p75_percent, max_percent). Every point present
+    in BOTH transcripts is compared on throughput and p50, one row per (point, metric).
+    The run is flagged when the p75 row's disagreement exceeds @p p75_band OR any row's
+    exceeds @p row_cap (`AA_RUN_P75_BAND` / `AA_RUN_ROW_CAP`, ruling 2026-10-07). The p75
+    is nearest-rank, so it is a row that was measured, not an interpolation. A flagged
+    sample means the machine moved under the measurement — it is still banked, but
+    flagged, because a datum taken in known conditions is worth more than no datum at
+    all. This WHOLE-RUN verdict is the one gating consumers read; the rows that exceeded
+    `DEFAULT_BAND` are named separately by `bracket_failed_names`, for the charts (#1890).
 
-    A pair with no comparable rows returns clean with a percent of 0.0 and a spoken
+    A pair with no comparable rows returns clean with percents of 0.0 and a spoken
     reason: a missing transcript is the caller's problem to notice (the workflow
     warns on an empty one), and inventing a contamination verdict from no evidence
     would be its own kind of lie.
     """
     rows = bracket_rows(pre_text, post_text)
     if not rows:
-        return True, "no comparable rows", 0.0
-    (sysname, mode, size, fan, ep), metric, a, b, pct = rows[0]
-    return pct <= band, (f"{sysname} {mode} {size}B/fan{fan}/{ep}ep {metric} "
-                         f"{a:.1f} -> {b:.1f}"), pct
+        return True, "no comparable rows", 0.0, 0.0
+    pcts = sorted(r[4] for r in rows)
+    p75 = pcts[math.ceil(0.75 * len(pcts)) - 1]
+    (sysname, mode, size, fan, ep), metric, a, b, worst = rows[0]
+    clean = p75 <= p75_band and worst <= row_cap
+    return clean, (f"{sysname} {mode} {size}B/fan{fan}/{ep}ep {metric} "
+                   f"{a:.1f} -> {b:.1f}"), p75, worst
+
+
+def bracket_note(p75: float, worst: float, p75_band: float = AA_RUN_P75_BAND,
+                 row_cap: float = AA_RUN_ROW_CAP) -> str:
+    """@brief The `extra` fragment a flagged run carries: the measured p75 and max beside
+    the two thresholds they were judged against. No `SEP` inside: it is one field."""
+    return contamination_note(f"A/A bracket p75 {p75:.1f}% (band {p75_band:.1f}%), "
+                              f"max {worst:.1f}% (cap {row_cap:.1f}%)")
 
 
 # The banked series each bracket metric feeds, as name suffixes (perf_emit_benchmark.py's
@@ -417,18 +444,19 @@ def _cmd_wait(args: argparse.Namespace) -> int:
 def _cmd_bracket(args: argparse.Namespace) -> int:
     pre = pathlib.Path(args.pre).read_text() if pathlib.Path(args.pre).exists() else ""
     post = pathlib.Path(args.post).read_text() if pathlib.Path(args.post).exists() else ""
-    clean, what, pct = bracket_verdict(pre, post, args.band)
+    clean, what, p75, worst = bracket_verdict(pre, post, args.p75_band, args.row_cap)
+    rule = (f"p75 {p75:.1f}% vs band {args.p75_band:.1f}%, max {worst:.1f}% vs cap "
+            f"{args.row_cap:.1f}%")
     if clean:
-        print(f"host_guard: A/A bracket clean — worst {pct:.1f}% <= band {args.band:.1f}% "
-              f"({what})")
+        print(f"host_guard: A/A bracket clean — {rule} (worst row: {what})")
     else:
         print(f"::warning::bench-local sample FLAGGED contaminated — the A/A null pair "
-              f"disagreed by {pct:.1f}% (band {args.band:.1f}%): {what}. The point is "
-              f"still banked; the blocking tier ignores it, and the charts hide its rows "
-              f"over the band and any row out of line with its neighbours (#1890).")
+              f"disagreed: {rule} (worst row: {what}). The point is still banked; the "
+              f"blocking tier ignores it, and the charts hide its rows over the "
+              f"{args.band:.1f}% row band and any row out of line with its neighbours "
+              f"(#1890).")
     _gh_output(clean="true" if clean else "false",
-               note="" if clean else contamination_note(
-                   f"A/A bracket {pct:.1f}% > {args.band:.1f}% band"))
+               note="" if clean else bracket_note(p75, worst, args.p75_band, args.row_cap))
     if args.rows_out:
         names = bracket_failed_names(pre, post, args.band)
         pathlib.Path(args.rows_out).write_text(json.dumps(names, indent=1) + "\n")
@@ -533,7 +561,12 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("bracket", help="verdict on the A/A null pair around the run")
     b.add_argument("--pre", required=True)
     b.add_argument("--post", required=True)
-    b.add_argument("--band", type=float, default=DEFAULT_BAND)
+    b.add_argument("--band", type=float, default=DEFAULT_BAND,
+                   help="per-row band: rows over it are named in --rows-out (#1890)")
+    b.add_argument("--p75-band", type=float, default=AA_RUN_P75_BAND,
+                   help="run-level: flag the run when the p75 row is over this")
+    b.add_argument("--row-cap", type=float, default=AA_RUN_ROW_CAP,
+                   help="run-level: flag the run when any single row is over this")
     b.add_argument("--rows-out", default=None,
                    help="write the banked names of the rows over the band here (JSON, #1890)")
     b.set_defaults(fn=_cmd_bracket)

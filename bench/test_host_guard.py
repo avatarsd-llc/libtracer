@@ -105,47 +105,119 @@ class Bracket(unittest.TestCase):
 
     def test_identical_pair_is_clean(self):
         t = transcript([("inproc", 1.0e7, 100), ("compact-forward", 2.0e7, 43)])
-        clean, _, pct = hg.bracket_verdict(t, t)
+        clean, _, p75, pct = hg.bracket_verdict(t, t)
         self.assertTrue(clean)
-        self.assertEqual(pct, 0.0)
+        self.assertEqual((p75, pct), (0.0, 0.0))
 
     def test_noise_under_the_band_is_clean(self):
         pre = transcript([("inproc", 1.0e7, 100)])
         post = transcript([("inproc", 1.04e7, 102)])  # 4% — the measured null floor
-        clean, _, pct = hg.bracket_verdict(pre, post)
+        clean, _, _, pct = hg.bracket_verdict(pre, post)
         self.assertTrue(clean)
-        self.assertLess(pct, hg.DEFAULT_BAND)
+        self.assertLess(pct, hg.AA_RUN_P75_BAND)
 
     def test_a_neighbour_arriving_mid_run_is_caught(self):
         pre = transcript([("inproc", 1.0e7, 100)])
         post = transcript([("inproc", 0.85e7, 118)])  # the shape sample 141 has
-        clean, what, pct = hg.bracket_verdict(pre, post)
+        clean, what, _, pct = hg.bracket_verdict(pre, post)
         self.assertFalse(clean)
         self.assertGreater(pct, 10.0)
         self.assertIn("inproc", what)
 
-    def test_worst_row_decides_not_the_average(self):
-        # One contaminated row among many clean ones must still flag: averaging is
-        # how a real disturbance gets diluted into silence.
+    def test_one_wrecked_row_still_flags_through_the_cap(self):
+        # One contaminated row among many clean ones must still flag when it is past the
+        # cap: averaging is how a real disturbance gets diluted into silence.
         pre = transcript([("a", 1e7, 100), ("b", 1e7, 100), ("c", 1e7, 100)])
         post = transcript([("a", 1e7, 100), ("b", 1e7, 100), ("c", 0.7e7, 100)])
-        clean, what, pct = hg.bracket_verdict(pre, post)
+        clean, what, p75, pct = hg.bracket_verdict(pre, post)
         self.assertFalse(clean)
+        self.assertEqual(p75, 0.0)
         self.assertIn(" c ", what)
 
     def test_no_comparable_rows_does_not_invent_a_verdict(self):
-        clean, what, pct = hg.bracket_verdict("", "")
+        clean, what, p75, pct = hg.bracket_verdict("", "")
         self.assertTrue(clean)
-        self.assertEqual(pct, 0.0)
+        self.assertEqual((p75, pct), (0.0, 0.0))
         self.assertIn("no comparable rows", what)
 
     def test_p50_moves_alone_are_caught(self):
         # Throughput can sit still while latency steps; the guard reads both legs.
         pre = transcript([("inproc", 1e7, 100)])
         post = transcript([("inproc", 1e7, 130)])
-        clean, what, _ = hg.bracket_verdict(pre, post)
+        clean, what, _, _ = hg.bracket_verdict(pre, post)
         self.assertFalse(clean)
         self.assertIn("p50_ns", what)
+
+
+def _spread(pcts: list[float]) -> tuple[str, str]:
+    """@brief An A/A pair with one row per entry of @p pcts, each that many percent slow.
+
+    Throughput and p50 both move by exactly that percent, so every point is two rows of
+    the same disagreement and the row distribution is @p pcts, each value twice.
+    """
+    pre = transcript([(f"m{i}", 1e7, 100.0) for i in range(len(pcts))])
+    post = transcript([(f"m{i}", 1e7 * (1 - p / 100.0), 100.0 * (1 + p / 100.0))
+                       for i, p in enumerate(pcts)])
+    return pre, post
+
+
+class RunLevelRule(unittest.TestCase):
+    """@brief The run-level A/A rule (ruling 2026-10-07): p75 row over the band, or any
+    row over the cap. The worst row alone no longer decides."""
+
+    def test_thresholds(self):
+        self.assertEqual((hg.AA_RUN_P75_BAND, hg.AA_RUN_ROW_CAP), (6.0, 15.0))
+
+    def test_d678bf17_like_run_stays_clean(self):
+        # 45 rows, median ~0.9%, two rows over 6% and none over the cap: what the old
+        # worst-row rule flagged on nearly every clean run.
+        pcts = [0.9] * 43 + [7.5, 13.5]
+        clean, _, p75, worst = hg.bracket_verdict(*_spread(pcts))
+        self.assertTrue(clean)
+        self.assertLess(p75, hg.AA_RUN_P75_BAND)
+        self.assertAlmostEqual(worst, 13.5)
+
+    def test_p75_just_over_the_band_flags(self):
+        # 8 rows; the nearest-rank p75 is the 6th smallest. Put it at 6.1%, max under cap.
+        pcts = [0.0] * 2 + [1.0] * 3 + [6.1, 7.0, 8.0]
+        clean, _, p75, worst = hg.bracket_verdict(*_spread(pcts))
+        self.assertFalse(clean)
+        self.assertAlmostEqual(p75, 6.1)
+        self.assertLess(worst, hg.AA_RUN_ROW_CAP)
+
+    def test_p75_at_the_band_is_clean(self):
+        pcts = [0.0] * 2 + [1.0] * 3 + [5.9, 7.0, 8.0]
+        clean, _, p75, _ = hg.bracket_verdict(*_spread(pcts))
+        self.assertTrue(clean)
+        self.assertAlmostEqual(p75, 5.9)
+
+    def test_one_row_over_the_cap_flags_a_quiet_run(self):
+        pcts = [0.5] * 44 + [15.5]
+        clean, what, p75, worst = hg.bracket_verdict(*_spread(pcts))
+        self.assertFalse(clean)
+        self.assertLess(p75, 1.0)
+        self.assertAlmostEqual(worst, 15.5)
+        self.assertIn("m44", what)
+
+    def test_one_row_at_the_cap_is_clean(self):
+        clean, _, _, _ = hg.bracket_verdict(*_spread([0.5] * 44 + [14.9]))
+        self.assertTrue(clean)
+
+    def test_note_carries_the_measured_p75_and_max(self):
+        note = hg.bracket_note(6.4, 9.2)
+        self.assertTrue(hg.is_contaminated(note))
+        self.assertIn("p75 6.4%", note)
+        self.assertIn("max 9.2%", note)
+        self.assertNotIn(hg.SEP, note)  # one field of `extra`, not two
+
+    def test_rows_over_the_row_band_are_still_named_on_a_clean_run(self):
+        # The per-row marking for the charts is unchanged: a clean run's two rows over
+        # `DEFAULT_BAND` still carry ROW_TOKEN.
+        pre, post = _spread([0.9] * 43 + [7.5, 13.5])
+        self.assertTrue(hg.bracket_verdict(pre, post)[0])
+        names = hg.bracket_failed_names(pre, post)
+        self.assertEqual(len(names), 6)  # 2 points x (throughput, ns/delivery, p50)
+        self.assertTrue(any("m43" in n for n in names) and any("m44" in n for n in names))
 
 
 class ContaminationPredicate(unittest.TestCase):
@@ -241,7 +313,7 @@ class PerRowBracket(unittest.TestCase):
                          ["fwd-demux-scan 64B/fan1/1ep ns/delivery",
                           "fwd-demux-scan 64B/fan1/1ep throughput"])
         # The whole-run verdict over the same pair is unchanged: one row fails it.
-        clean, what, pct = hg.bracket_verdict(pre, post, 6.0)
+        clean, what, _, pct = hg.bracket_verdict(pre, post)
         self.assertFalse(clean)
         self.assertIn("fwd-demux-scan", what)
         self.assertAlmostEqual(pct, 20.0)
