@@ -102,6 +102,13 @@ Several named *modes* isolate distinct costs on the same axes:
 - `seam-class-c1` / `-c8` / `-c32`, `seam-direct`, `seam-fallback` — the allocation seam's
   two decisions: finding a block's size class among C classes, and a full `bump_source_t`
   falling back to its upstream pool (`seam-direct` is that pool alone).
+- `seam-values` / `seam-tables` — the shipped host slab pool
+  ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)): one `try_alloc` +
+  `release` on the value sub-pool (through the thread's cache) and on the table sub-pool
+  (one class lock per request), at every payload-ladder size and at 65552 B, the first
+  request past the last class, which falls back to the root. Each row refuses to print if
+  its size's class decision is not the one its label names, or if a timed request was
+  refused. Charted, not gated.
 - `inproc-pool-batch` — the window-calibrated twin of the heap-view `inproc-pool` rows.
 
 Every mode above except the `inproc-target-*` pair subscribes with an in-process
@@ -148,14 +155,21 @@ is each family's **RSS delta**: every `bench_libtracer` family runs in its own p
 prints `RSS family=<name> start_kb= peak_kb= delta_kb=`, the high-water mark minus the
 resident set the family started from. It replaced a whole-run "max RSS" from
 `/usr/bin/time -v`, which was the harness's peak, not any family's footprint
-([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)).
+([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). The single-family binaries
+`bench_compact_delivery`, `bench_forward_demux` and `bench_store_sweep latency` print the same
+line (`compact-delivery`, `forward-demux`, `store-lat`) after their last row; their start
+figure is read without a heap operation, because a `fopen` ahead of the rows shifts the heap
+those rows meet ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)).
 
 Beside the per-vertex probes, `bench_forward_heap` prints RAM **per callback edge**
 (`edge_callback`), **per wire subscriber edge** (`edge_wire`), **per link** (`link`, one
 router child) and **per 1 KiB value** (`vertex_value_1k`), each over 256 units and multiplied
 by 1000 so a fraction of a block survives the division; the heap blocks **per write** at every
-payload-ladder size, from the injected source and from the global heap; and the STREAM
-write's **stripe-lock sections** per write (counted through `--wrap=pthread_mutex_lock`, the
+payload-ladder size, from the injected source and from the global heap; the **size classes**
+one write selects (`seamclass`: its segment and its record, each rounded to its class in the
+host slab pool's `config_t::kSizeClasses`, with the blocks no class serves counted apart); and
+the STREAM write's **stripe-lock sections** per write, for one, two and four writers, a
+spilling write and a refused spill (counted through `--wrap=pthread_mutex_lock`, the
 instrument #1713's own test uses).
 
 **Per object, not per slab
@@ -644,9 +658,14 @@ Details that make these trustworthy:
   `RAM_POINTS`), the blocks per write, and the STREAM stripe-lock sections. Against main, no
   block or section count may grow at all and live bytes may not grow past the same +2%; a
   row main emits that the candidate does not fails. #1713's claims are checked with no
-  baseline: a steady STREAM write, a spilling one and four concurrent writers each take
-  **exactly one** stripe-lock section per write, the steady write takes nothing from the
+  baseline: a steady STREAM write, a spilling one and two or four concurrent writers each
+  take **exactly one** stripe-lock section per write, the steady write takes nothing from the
   global heap, and a write whose spill is refused delivers nothing until the next write.
+  The `seamclass` rows
+  ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)) ratchet the size classes
+  each write selects on the host slab pool's table: blocks, requested bytes, class bytes and
+  oversize blocks per write may not grow at all, and below the last class (64 KiB) a write
+  may draw no oversize block.
 - A per-vertex cost a **ratified clause already prices** is not a pullback, and the memory
   ratchet has one narrow way to say so: a **charged step** (`perf_gate.py`'s
   `MEM_CHARGED`), declared per probe, in bytes, naming the clause that charges it. A

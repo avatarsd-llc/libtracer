@@ -1360,17 +1360,23 @@ def segdraw_gate(cur: dict[int, dict[str, int]],
 #   RESULT ramprobe <what> blocks_x1000= bytes_x1000= n=        RAM per edge / link / value
 #   RESULT writeblocks <input> S=<size> seam_x1000= seam_bytes_x1000= heap_x1000= n=
 #   RESULT streamlock <case> sections_x1000= [heap_x1000=] delivered_x1000= n=
+#   RESULT seamclass S=<size> blocks_x1000= req_bytes_x1000= class_bytes_x1000= oversize_x1000= n=
+#
+# `seamclass` (#1908) is the size classes one write selects on the host slab pool's table,
+# segment and record together, at each payload-ladder size.
 #
 # Rules, all counts and none timed:
-#   ratchet   — against main, a block or section count may not grow at all, and a ramprobe's
+#   ratchet   — against main, a block, section or class-byte count may not grow at all, and a ramprobe's
 #               live bytes may not grow past MEM_REGRESS and by more than one byte per unit
 #               (the per-vertex rule; bytes are host-allocator dependent, blocks are not);
 #   presence  — a key main emits that the candidate does not is a FAIL, never "not gated"
 #               (#1847's rule, for these rows);
 #   invariant — #1713's claims, needing no baseline: the steady STREAM write (`w1`), the
-#               spilling write (`spill`) and four concurrent writers (`w4`) take exactly ONE
-#               stripe-lock section per write; `w1` takes nothing from the global heap; and a
-#               write whose spill is refused (`defer`) delivers nothing until the next one.
+#               spilling write (`spill`) and two or four concurrent writers (`w2`, `w4`) take
+#               exactly ONE stripe-lock section per write; `w1` takes nothing from the global
+#               heap; and a write whose spill is refused (`defer`) delivers nothing until the
+#               next one. And #1777's: every ladder write below the last class's size
+#               (SEAMCLASS_LAST) is served by classes, with no oversize block.
 #
 # EDITORS: RAM_POINTS is the list docs/methodology.md names as the gated RAM probes.
 RAM_POINTS = ["edge_callback", "edge_wire", "link", "vertex_value_1k"]
@@ -1383,12 +1389,19 @@ _EXACT_RES = (
     ("streamlock", re.compile(r"^RESULT streamlock (\w+) sections_x1000=(?P<sections_x1000>\d+)"
                               r"(?: heap_x1000=(?P<heap_x1000>\d+))? "
                               r"delivered_x1000=(?P<delivered_x1000>\d+)")),
+    ("seamclass", re.compile(r"^RESULT seamclass (S=\d+) blocks_x1000=(?P<blocks_x1000>\d+) "
+                             r"req_bytes_x1000=(?P<req_bytes_x1000>\d+) "
+                             r"class_bytes_x1000=(?P<class_bytes_x1000>\d+) "
+                             r"oversize_x1000=(?P<oversize_x1000>\d+)")),
 )
 # Fields that may not grow against main at all. `delivered_x1000` is not one: more delivered
 # is not a regression, and the `defer` invariant below pins the one case where it must be 0.
 _EXACT_RATCHET = ("blocks_x1000", "seam_x1000", "seam_bytes_x1000", "heap_x1000",
-                  "sections_x1000")
-ONE_SECTION_CASES = ("w1", "spill", "w4")
+                  "sections_x1000", "req_bytes_x1000", "class_bytes_x1000", "oversize_x1000")
+ONE_SECTION_CASES = ("w1", "spill", "w2", "w4")
+# The host table's last class (`config_t::kSizeClasses`, 64 KiB): a ladder payload below it
+# fits a class with its segment header; the 64 KiB payload's segment is one header past it.
+SEAMCLASS_LAST = 65536
 
 
 def exact_parse(out: str) -> dict[str, dict[str, int]]:
@@ -1412,7 +1425,8 @@ def exact_probe(bench_fwd: pathlib.Path) -> dict[str, dict[str, int]]:
 
 
 def exact_invariants(cur: dict[str, dict[str, int]]) -> list[str]:
-    """@brief #1713's STREAM claims on the candidate alone (see the block comment above)."""
+    """@brief #1713's STREAM claims and #1777's classed-write claim on the candidate alone
+    (see the block comment above)."""
     fails = []
     if any(k.startswith("ramprobe:") for k in cur):
         fails += [f"ramprobe:{p} is a gated RAM probe and the candidate did not emit it"
@@ -1430,12 +1444,19 @@ def exact_invariants(cur: dict[str, dict[str, int]]) -> list[str]:
     if defer is not None and defer["delivered_x1000"] != 0:
         fails.append("streamlock defer: a write whose spill was refused delivered part of its "
                      "window instead of deferring it (#477, #1713)")
+    for key, row in sorted(cur.items()):
+        if not key.startswith("seamclass:S="):
+            continue
+        size = int(key.removeprefix("seamclass:S="))
+        if size < SEAMCLASS_LAST and row["oversize_x1000"] != 0:
+            fails.append(f"seamclass S={size}: {row['oversize_x1000'] / 1000:g} oversize blocks "
+                         f"per write; below the last class every block is classed (#1777)")
     return fails
 
 
 def exact_gate(cur: dict[str, dict[str, int]],
                base: dict[str, dict[str, int]] | None) -> list[str]:
-    """@brief Ratchet, presence and invariant rules for the #1808 exact rows."""
+    """@brief Ratchet, presence and invariant rules for the #1808 and #1908 exact rows."""
     fails = exact_invariants(cur)
     for key, b in sorted((base or {}).items()):
         c = cur.get(key)

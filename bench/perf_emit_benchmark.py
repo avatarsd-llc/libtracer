@@ -141,7 +141,7 @@ def zeroheap_metrics(text: str) -> list[dict]:
 
 
 def exact_metrics(text: str) -> list[dict]:
-    """@brief bench_forward_heap's #1808 exact rows as series, each `_x1000` field divided
+    """@brief bench_forward_heap's #1808 and #1908 exact rows as series, each `_x1000` field divided
     back to its unit so a fraction (1.035 blocks per edge) is charted as one."""
     series = []
     for m in re.finditer(r"^RESULT ramprobe (\w+) blocks_x1000=(\d+) bytes_x1000=(\d+)",
@@ -157,6 +157,13 @@ def exact_metrics(text: str) -> list[dict]:
                        "value": int(m.group(3)) / 1000})
         series.append({"name": f"heap blocks per {tag}", "unit": "blocks",
                        "value": int(m.group(5)) / 1000})
+    for m in re.finditer(r"^RESULT seamclass S=(\d+) blocks_x1000=\d+ req_bytes_x1000=(\d+) "
+                         r"class_bytes_x1000=(\d+)", text, re.MULTILINE):
+        tag = f"write {m.group(1)}B (seamclass)"
+        series.append({"name": f"class bytes per {tag}", "unit": "bytes",
+                       "value": int(m.group(3)) / 1000})
+        series.append({"name": f"requested bytes per {tag}", "unit": "bytes",
+                       "value": int(m.group(2)) / 1000})
     for m in re.finditer(r"^RESULT streamlock (\w+) sections_x1000=(\d+)", text, re.MULTILINE):
         series.append({"name": f"stripe sections per STREAM write ({m.group(1)})",
                        "unit": "sections", "value": int(m.group(2)) / 1000})

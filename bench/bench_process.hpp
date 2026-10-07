@@ -36,6 +36,7 @@
 #include <string_view>
 
 #if defined(__linux__)
+#include <fcntl.h>
 #include <sched.h>
 #include <spawn.h>
 #include <sys/resource.h>
@@ -238,6 +239,35 @@ inline std::size_t rss_kb() {
 }
 
 /**
+ * @brief @ref rss_kb without touching the heap (#1908): `open(2)` and `read(2)` into a stack
+ *        buffer, where `fopen` allocates its `FILE` and a 4 KiB buffer.
+ *
+ * For a binary whose rows start right after it: `bench_compact_delivery`,
+ * `bench_forward_demux` and `bench_store_sweep latency` take their start figure here, ahead of
+ * the first row, and print @ref emit_family_rss after the last one. A `fopen` read there moved
+ * `inproc/64/1024/1` by +4.7% (#1914): the blocks it freed were reused by the first rows.
+ * `bench_libtracer` keeps @ref rss_kb, so its rows meet the heap they always met.
+ */
+inline std::size_t rss_kb_heap_neutral() {
+#if defined(__linux__)
+    const int fd = ::open("/proc/self/statm", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    char buf[96];
+    const ssize_t n = ::read(fd, buf, sizeof buf - 1);
+    ::close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    char* end = nullptr;
+    (void)std::strtoul(buf, &end, 10);  // the first field is the total size; skip it
+    const unsigned long resident = std::strtoul(end, nullptr, 10);
+    const long page = sysconf(_SC_PAGESIZE);
+    return page > 0 ? resident * static_cast<std::size_t>(page) / 1024 : 0;
+#else
+    return 0;
+#endif
+}
+
+/**
  * @brief Print one family's RSS delta (#1808): `RSS family=<name> start_kb= peak_kb= delta_kb=`.
  *
  * It replaces the whole-run "max RSS" that `/usr/bin/time -v` reported, which since #1803 was
@@ -248,7 +278,8 @@ inline std::size_t rss_kb() {
  * lands in the transcript beside the family's rows; every RESULT parser skips it on its tag.
  *
  * @param family   The family that just ran.
- * @param start_kb @ref rss_kb taken before the family's first row.
+ * @param start_kb @ref rss_kb (or @ref rss_kb_heap_neutral) taken before the family's first
+ *                 row.
  */
 inline void emit_family_rss(std::string_view family, std::size_t start_kb) {
 #if defined(__linux__)

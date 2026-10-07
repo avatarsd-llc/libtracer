@@ -1749,6 +1749,10 @@ stderr as `FAMILY-ORDER`). It exists to check the isolation: a shuffled run must
 inside its A/A spread. Each family also prints its own RSS delta on stdout, `RSS family=<name>
 start_kb= peak_kb= delta_kb=` (#1808): the high-water mark minus the resident set it started
 from, which replaces the whole-run `/usr/bin/time -v` max RSS (the harness's peak).
+`bench_compact_delivery`, `bench_forward_demux` and `bench_store_sweep latency` print the same
+line after their last row (`compact-delivery`, `forward-demux`, `store-lat`), with a start
+figure read by `bench::rss_kb_heap_neutral` so no heap operation runs ahead of their rows
+(#1908).
 
 What each in-process row publishes as its delivery figure is pinned the same way, by
 `bench/test_delivery_count` (`cmake --build build --target test_delivery_count`). It drives
@@ -1785,6 +1789,7 @@ craft libtracer":
 | `stream-spill` / `stream-defer` | batch-timed per CYCLE (#1808): six `assign`s then one `write` whose take spills past `ring_take_t::kInline`; four `assign`s then one covering `propagate`. Family `stream`. The refused-spill deferral is an exact row in `bench_forward_heap` (`RESULT streamlock defer`). |
 | `route-handle-egress-mt1` / `-mt2` / `-mt4` | T producer threads on one advertised `route_handle_t` flow, the reuse read (#1808). Throughput only; advisory, not gated. Family `route-handle` (MULTI). |
 | `seam-class-c1` / `-c8` / `-c32`, `seam-direct`, `seam-fallback` | the allocation seam (#1808): 64 B `try_alloc` + `release` on a `pool_source_t` whose 64 B class is the last of C; and a full `bump_source_t` falling back to its upstream pool, against that pool alone. Family `alloc-seam`. |
+| `seam-values` / `seam-tables` | the shipped host slab pool ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)): `try_alloc` + `release` on `tr::mem::host_root()`'s value sub-pool (through the thread's cache) and table sub-pool (one class lock per request), at 64, 984, 985, 1024, 4096, 16384 and 65536 B and at 65552 B, the first request past the last class, which falls back to the root. Batch rows after the #1808 seam rows in family `alloc-seam`. Each refuses (exit 2) if its size's class decision is not the one the label names, or if a timed request was refused. Charted, not gated. The exact half is `bench_forward_heap`'s gated `RESULT seamclass` rows: the classes one write's segment and record select at each payload-ladder size. |
 | `inproc-pool-batch` | the window-calibrated twin of the heap-view `inproc-pool` rows (#1808), in its own family so the quantized pool rows did not move. |
 | `topics-bound` / `topics-addr` | the topic-count pair over `kTopicLadder` (1 / 100 / 10 000 topics): a write through a pre-bound handle, and a write by pre-parsed path. Family `topics`, last in the default sweep since #1809 so the Zenoh topic charts have their libtracer rows in every run; `run_topics.sh` still runs both arm orders for a verdict. Charted, not gated. |
 | `mixed` | 128 topics, varied fan-out + payloads. |

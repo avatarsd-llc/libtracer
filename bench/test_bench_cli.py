@@ -188,6 +188,22 @@ class FamiliesAreSelectableAndRefused(unittest.TestCase):
                                      r"delta_kb=\d+$", ln) for ln in lines))
         self.assertNotIn("max RSS", out.stdout)
 
+    def test_alloc_seam_times_the_shipped_slab_pool_after_its_old_rows(self):
+        """#1908: the host slab pool's value and table sub-pools at every payload-ladder size
+        and one past the last class (the fallback to the root), appended after the #1808 rows
+        so none of those moves."""
+        out = subprocess.run([str(bench_binary()), "--family", "alloc-seam"],
+                             capture_output=True, text=True, timeout=RUN_S)
+        self.assertEqual(out.returncode, 0, out.stderr[-400:])
+        rows = [ln.split("\t") for ln in out.stdout.splitlines() if ln.startswith("RESULT\t")]
+        modes = [r[2] for r in rows]
+        self.assertEqual(modes[:5], ["seam-class-c1", "seam-class-c8", "seam-class-c32",
+                                     "seam-direct", "seam-fallback"])
+        sizes = ["64", "984", "985", "1024", "4096", "16384", "65536", "65552"]
+        for arm in ("seam-values", "seam-tables"):
+            self.assertEqual([r[3] for r in rows if r[2] == arm], sizes, arm)
+        self.assertNotIn("SEAM FAIL", out.stderr)
+
     def test_printed_family_list_equals_the_source_table(self):
         bench = bench_binary()
         out = subprocess.run([str(bench), "no-such-mode"], capture_output=True, text=True,

@@ -31,6 +31,7 @@
 #include "bench_common.hpp"
 #include "heap_probe.hpp"
 #include "libtracer/fwd_router.hpp"
+#include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tracer.hpp"
@@ -92,14 +93,34 @@ tr::view::view_t bytes_view(std::span<const std::byte> bytes) {
 void noop_cb(void*, const tr::graph::value_t&) {}
 
 /**
+ * @brief The block @p n bytes at @p align take from the host slab pool's size-class table
+ *        (`config_t::kSizeClasses`, #1777): that class's block size, or @p n itself when no
+ *        class serves it and the request falls back to the root as a block of its own.
+ * @param[out] oversize Set when no class serves the request.
+ */
+std::size_t host_class_bytes(std::size_t n, std::size_t align, bool& oversize) {
+    const tr::mem::host_pool_t& table = tr::mem::host_root().tables();
+    const std::size_t i = table.class_of(n, align);
+    oversize = i == tr::mem::host_pool_t::kNoClass;
+    return oversize ? n : table.class_bytes(i);
+}
+
+/**
  * @brief A malloc-backed source that counts what it serves, so a seam-served block never
  *        reaches the counted global `operator new` and the two columns stay disjoint.
+ *
+ * Each block is also classified against the host slab pool's table (@ref host_class_bytes):
+ * the bytes it would occupy there and whether it would fall past the last class.
  */
 class counting_seam_t final : public tr::mem::block_source_t {
    public:
     counting_seam_t() noexcept : block_source_t("exact-rows") {}
     std::atomic<std::size_t> blocks{0}; /**< @brief Blocks served. */
     std::atomic<std::size_t> bytes{0};  /**< @brief Bytes requested by those blocks. */
+    /** @brief The host class block bytes those requests select (@ref host_class_bytes). */
+    std::atomic<std::size_t> class_bytes{0};
+    /** @brief Of those blocks, the ones no host class serves (oversize, from the root). */
+    std::atomic<std::size_t> oversize{0};
     /** @brief The one request size refused while nonzero (the `defer` fixture's spill). */
     std::atomic<std::size_t> refuse_bytes{0};
     /** @brief Serve from `aligned_alloc`, counting. */
@@ -108,6 +129,9 @@ class counting_seam_t final : public tr::mem::block_source_t {
         if (refused != 0 && n == refused) return nullptr;
         blocks.fetch_add(1, std::memory_order_relaxed);
         bytes.fetch_add(n, std::memory_order_relaxed);
+        bool over = false;
+        class_bytes.fetch_add(host_class_bytes(n, align, over), std::memory_order_relaxed);
+        if (over) oversize.fetch_add(1, std::memory_order_relaxed);
         const std::size_t a = align < alignof(std::max_align_t) ? alignof(std::max_align_t) : align;
         const std::size_t rounded = ((n == 0 ? 1 : n) + a - 1) / a * a;
         return std::aligned_alloc(a, rounded);
@@ -327,6 +351,55 @@ bool write_blocks() {
     return true;
 }
 
+/**
+ * @brief Size-class selection per write on the host slab pool's table, at every payload-ladder
+ *        size (#1908): the acceptance evidence of #1777's size-classed pool, exact.
+ *
+ * The producer mints each value through a backend over the graph's own counting source, as
+ * a default graph's producer mints from the value sub-pool, so the window holds BOTH halves of
+ * a write: the segment (header and payload in one block) and the record the vertex keeps.
+ * Each block is classified against `config_t::kSizeClasses` (@ref host_class_bytes):
+ *
+ *     RESULT seamclass S=<size> blocks_x1000= req_bytes_x1000= class_bytes_x1000=
+ *            oversize_x1000= n=<writes>
+ *
+ * `req_bytes` is what the write asked for, `class_bytes` what the classes it selects hold
+ * (the rounding slack is their difference), and `oversize` the blocks no class serves, which
+ * fall back to the root as blocks of their own. 984 and 985 B straddle glibc's one-block
+ * boundary and must land in one class; a placement change that moves a ladder size into a
+ * bigger class, or past the last one, grows a column and fails the exact ratchet.
+ */
+bool seam_classes() {
+    constexpr std::size_t kWrites = 64;
+    for (const std::size_t S : bench::kPayloadLadder) {
+        counting_seam_t seam;                      // outlives the backend and the graph
+        tr::mem::source_backend_t segments{seam};  // the producer's mint, on the same seam
+        graph_t g(seam);
+        const vertex_handle_t v = g.register_vertex(*path_t::parse("/c"), role_t::STORED_VALUE);
+        const auto mint = [&] {
+            tr::view::segment_ptr_t seg = tr::view::segment_alloc(segments, S);
+            if (seg) std::memset(seg->bytes.data(), 3, S);
+            return tr::view::view_t::over(std::move(seg));
+        };
+        for (std::size_t i = 0; i < 8; ++i)
+            if (!g.write(v, mint()).has_value()) return false;  // warm
+        const std::size_t b0 = seam.blocks.load(), y0 = seam.bytes.load();
+        const std::size_t c0 = seam.class_bytes.load(), o0 = seam.oversize.load();
+        bool ok = true;
+        for (std::size_t i = 0; i < kWrites; ++i) ok = g.write(v, mint()).has_value() && ok;
+        if (!ok) return false;
+        const auto per = [&](std::size_t now, std::size_t then) {
+            return x1000(static_cast<long long>(now - then), kWrites);
+        };
+        std::printf(
+            "RESULT seamclass S=%zu blocks_x1000=%zu req_bytes_x1000=%zu class_bytes_x1000=%zu "
+            "oversize_x1000=%zu n=%zu\n",
+            S, per(seam.blocks.load(), b0), per(seam.bytes.load(), y0),
+            per(seam.class_bytes.load(), c0), per(seam.oversize.load(), o0), kWrites);
+    }
+    return true;
+}
+
 /** @brief The delivery count a STREAM case's subscriber keeps. */
 void count_cb(void* ctx, const tr::graph::value_t&) {
     static_cast<std::atomic<std::size_t>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
@@ -365,8 +438,9 @@ void print_lock(const char* what, std::size_t sections, std::size_t heap, std::s
  *  - `defer`: the same write with the spill refused — every global allocation, and the
  *    values source's spill-sized request, since the spill draws from the graph's values source
  *    (#1778) — so the window is deferred: delivered is 0, and the next write delivers it all.
- *  - `w4`: four writers on one vertex at once; sections per write (heap is not printed: each
- *    new thread stocks its own reclamation list once, which is not the write's cost).
+ *  - `w4` and `w2`: four, then two, writers on one vertex at once; sections per write (heap
+ *    is not printed: each new thread stocks its own reclamation list once, which is not the
+ *    write's cost). `w2` completes the 1 / 2 / 4 writer set of the timed `stream-w<T>` rows.
  *
  * Values and ring reservations come from injected counting sources, so the heap column is only
  * what the write path takes from the global heap.
@@ -444,25 +518,29 @@ bool stream_locks() {
     }
     print_lock("defer", sections, 0, deferred_delivered, kN);
 
-    constexpr std::size_t kThreads = 4, kPer = 2000;
-    std::atomic<std::size_t> total{0};
-    seen.store(0);
-    std::vector<std::thread> ts;
-    for (std::size_t t = 0; t < kThreads; ++t) {
-        ts.emplace_back([&] {
-            std::vector<tr::view::view_t> mine;
-            mine.reserve(kPer);
-            for (std::size_t i = 0; i < kPer; ++i) mine.push_back(heap_view(4, 3));
-            g_locks = 0;
-            for (tr::view::view_t& val : mine) (void)g.write(v, std::move(val));
-            total.fetch_add(g_locks);
-        });
+    // `w4`, then `w2` (#1908): the four-writer case runs first, as it did before `w2` existed,
+    // so its threads meet the same heap.
+    for (const std::size_t threads : {std::size_t{4}, std::size_t{2}}) {
+        constexpr std::size_t kPer = 2000;
+        std::atomic<std::size_t> total{0};
+        seen.store(0);
+        std::vector<std::thread> ts;
+        for (std::size_t t = 0; t < threads; ++t) {
+            ts.emplace_back([&] {
+                std::vector<tr::view::view_t> mine;
+                mine.reserve(kPer);
+                for (std::size_t i = 0; i < kPer; ++i) mine.push_back(heap_view(4, 3));
+                g_locks = 0;
+                for (tr::view::view_t& val : mine) (void)g.write(v, std::move(val));
+                total.fetch_add(g_locks);
+            });
+        }
+        for (std::thread& th : ts) th.join();
+        (void)g.propagate(v);
+        std::printf("RESULT streamlock w%zu sections_x1000=%zu delivered_x1000=%zu n=%zu\n",
+                    threads, x1000(static_cast<long long>(total.load()), threads * kPer),
+                    x1000(static_cast<long long>(seen.load()), threads * kPer), threads * kPer);
     }
-    for (std::thread& th : ts) th.join();
-    (void)g.propagate(v);
-    std::printf("RESULT streamlock w4 sections_x1000=%zu delivered_x1000=%zu n=%zu\n",
-                x1000(static_cast<long long>(total.load()), kThreads * kPer),
-                x1000(static_cast<long long>(seen.load()), kThreads * kPer), kThreads * kPer);
     g_watch.store(nullptr, std::memory_order_relaxed);
     return true;
 }
@@ -472,7 +550,8 @@ bool stream_locks() {
 namespace exact_rows {
 
 int print_all() {
-    if (!ram_edges() || !ram_links() || !ram_value_1k() || !write_blocks() || !stream_locks()) {
+    if (!ram_edges() || !ram_links() || !ram_value_1k() || !write_blocks() || !stream_locks() ||
+        !seam_classes()) {
         std::printf("FAIL: an exact-count fixture (#1808) did not do what its row claims\n");
         return 2;
     }

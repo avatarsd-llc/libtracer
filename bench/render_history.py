@@ -427,10 +427,25 @@ FAMILIES: list[dict] = [
                 ("live bytes per link (ramprobe)", "link (router child)"),
                 ("live bytes per vertex_value_1k (ramprobe)", "1 KiB value")],
          log=True, fmt="bytes", ylabel="live bytes per unit"),
+    dict(id="mem-seamclass", section="memory", suite="latency",
+         title="Size classes one write selects on the host slab pool",
+         cond="bench_forward_heap seamclass · segment + record per write, each block rounded "
+              "to its class in config_t::kSizeClasses (the 64 KiB payload's segment is "
+              "oversize, its own block from the root) · exact and gated (#1908)",
+         names=[
+                ("class bytes per write 64B (seamclass)", "64 B payload"),
+                ("class bytes per write 984B (seamclass)", "984 B payload"),
+                ("class bytes per write 985B (seamclass)", "985 B payload"),
+                ("class bytes per write 1024B (seamclass)", "1024 B payload"),
+                ("class bytes per write 4096B (seamclass)", "4096 B payload"),
+                ("class bytes per write 16384B (seamclass)", "16384 B payload"),
+                ("class bytes per write 65536B (seamclass)", "65536 B payload")],
+         log=True, fmt="bytes", ylabel="class bytes per write"),
     dict(id="mem-family-rss", section="memory", suite="latency",
          title="RSS each bench family adds to its fresh process",
-         cond="bench_libtracer · `RSS family=` peak minus start, per family (#1808); replaces the "
-              "whole-run max RSS, which was the harness peak",
+         cond="bench_libtracer · `RSS family=` peak minus start, per family (#1808), and the "
+              "single-family bench_compact_delivery and bench_forward_demux (#1908); replaces "
+              "the whole-run max RSS, which was the harness peak",
          names=[("inproc-size RSS delta", "inproc-size"),
                 ("inproc-fan RSS delta", "inproc-fan"),
                 ("inproc-path RSS delta", "inproc-path"),
@@ -438,7 +453,9 @@ FAMILIES: list[dict] = [
                 ("lkv RSS delta", "lkv"),
                 ("stream RSS delta", "stream"),
                 ("stream-mt RSS delta", "stream-mt"),
-                ("inproc-pool-batch RSS delta", "inproc-pool-batch")],
+                ("inproc-pool-batch RSS delta", "inproc-pool-batch"),
+                ("compact-delivery RSS delta", "compact-delivery"),
+                ("forward-demux RSS delta", "forward-demux")],
          log=True, fmt="num", ylabel="KB"),
     # -- throughput suite ---------------------------------------------------
     dict(id="deliver-fan", section="dispatch",
@@ -533,6 +550,14 @@ FAMILIES: list[dict] = [
               "seam-fallback: a full bump over a pool, vs seam-direct on that pool (#1808)",
          pat=r"^(seam-class-c\d+|seam-direct|seam-fallback) 64B/fan1/1ep",
          label=lambda m: m.group(1), key=lambda m: m.group(1), log=False,),
+    dict(id="alloc-slab", section="memory",
+         title="Host slab pool — value and table sub-pools by request size",
+         cond="try_alloc+release on tr::mem::host_root() · seam-values: the value sub-pool, "
+              "through this thread's cache · seam-tables: the table sub-pool, one class lock "
+              "per request · 65552 B is past the last class and falls back to the root (#1908)",
+         pat=r"^(seam-values|seam-tables) (\d+)B/fan1/1ep",
+         label=lambda m: f"{m.group(1)} {m.group(2)} B",
+         key=lambda m: f"{m.group(1)} {int(m.group(2)):06d}", log=False,),
     dict(id="cliff-heap", section="memory",
          title="Allocator cliff — heap segment alloc/free by size",
          cond="cliff-alloc-heap · fresh process · batch-timed · 960–1096 B in steps of 8, "
@@ -624,8 +649,10 @@ INSTRUMENT_SOURCES: list[tuple[str, list[str]]] = [
     (r"^fwd-demux-", ["bench/bench_forward_demux.cpp"]),
     (r"^compact-", ["bench/bench_compact_delivery.cpp"]),
     (r"^heap (allocs|bytes) per ", ["bench/bench_forward_heap.cpp"]),
-    (r" RSS delta$", ["bench/bench_libtracer.cpp", "bench/bench_process.hpp"]),
-    (r"\(ramprobe\)$|^seam blocks per |^heap blocks per \w+ write |^stripe sections ",
+    (r" RSS delta$", ["bench/bench_libtracer.cpp", "bench/bench_process.hpp",
+                      "bench/bench_compact_delivery.cpp", "bench/bench_forward_demux.cpp"]),
+    (r"\(ramprobe\)$|\(seamclass\)$|^seam blocks per |^heap blocks per \w+ write "
+     r"|^stripe sections ",
      ["bench/bench_forward_heap.cpp", "bench/exact_rows.cpp"]),
     (r"^conn-ram ", ["bench/bench_conn_ram.cpp"]),
     (r"^node-census ", ["bench/bench_ram_census_tcp.cpp"]),

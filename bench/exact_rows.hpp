@@ -1,8 +1,8 @@
 /**
  * @file
- * @brief The exact-count rows #1808 adds to `bench_forward_heap`: RAM per edge, per link and
- *        per 1 KiB value, blocks per write per payload size, and the STREAM write's
- *        stripe-lock sections.
+ * @brief The exact-count rows #1808 and #1908 add to `bench_forward_heap`: RAM per edge, per
+ *        link and per 1 KiB value, blocks per write per payload size, the size classes a write
+ *        selects, and the STREAM write's stripe-lock sections.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -18,10 +18,14 @@
  *     RESULT writeblocks <owned|rope2> S=<size> seam_x1000=<n> seam_bytes_x1000=<n>
  *            heap_x1000=<n> n=<writes>
  *     RESULT streamlock <case> sections_x1000=<n> heap_x1000=<n> delivered_x1000=<n> n=<writes>
+ *     RESULT seamclass S=<size> blocks_x1000=<n> req_bytes_x1000=<n> class_bytes_x1000=<n>
+ *            oversize_x1000=<n> n=<writes>
  *     RESULT slabfoot <what> live_x1000=<n> blocks_x1000=<n> n=<units> (ungated)
  *
- * (`writeblocks` is one line; it is wrapped here only. The `w4` streamlock row has no
- * `heap_x1000` field: see `stream_locks` in exact_rows.cpp.)
+ * (`writeblocks` and `seamclass` are one line each; they are wrapped here only. The `w4` and
+ * `w2` streamlock rows have no `heap_x1000` field: see `stream_locks` in exact_rows.cpp.
+ * `seamclass` (#1908) classifies every block of a write against the host slab pool's size-class
+ * table: see `seam_classes` there.)
  *
  * `slabfoot` is the one row nothing gates: the edge and 1 KiB-value probes' window on a
  * DEFAULT graph, whose blocks come from the host slab pool and are counted a whole slab at a
