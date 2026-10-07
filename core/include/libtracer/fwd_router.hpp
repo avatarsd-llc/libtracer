@@ -1965,10 +1965,11 @@ class fwd_router_t {
      * The vertex is found by the entry's own mount key — the bytes the descent already holds,
      * one keyed find — and asked `graph_t::allows(vertex, caller, right)`: the check
      * @ref bound_egress runs for the bound and label spellings, so the verdict cannot depend
-     * on how the hop was spelled. A REPLY and a child with no connection vertex pass (nothing
-     * to authorize, and no element could name it), and so does every hop on a graph that
-     * enforces no ACL (one relaxed load) or a bus hop (@p entry null). An op byte this build
-     * names no right for is refused.
+     * on how the hop was spelled. A REPLY passes (nothing to authorize), and so does every hop
+     * on a graph that enforces no ACL (one relaxed load) or a hop with no matched mount
+     * (@p entry null). On a graph that enforces an ACL, a child with no connection vertex has
+     * nothing to grant the right and is refused, as is an op byte this build names no right
+     * for.
      */
     template <class Cursor>
     [[nodiscard]] bool name_hop_allows(const child_registry_t::child_t* entry,

@@ -17,6 +17,10 @@
  * - the BOUND spelling of a session delivery: a one-element `PATH_REF` naming the peer's
  *   session anchor. An anchor sits outside the path tree, so no ancestor `:acl` reaches it;
  *   the delivery must still be authorized at the mount it crosses.
+ *
+ * A last case needs no bus and no listener: a point-to-point child mounted with NO connection
+ * vertex in the graph. Enforcing, it has nothing to grant a right, so a NAME-spelled hop
+ * through it is refused; the same graph without a subject resolver forwards it (the control).
  */
 
 #include <atomic>
@@ -236,11 +240,37 @@ void bound_session_delivery() {
           "p0's bound WRITE into p1's session is admitted (the control)");
 }
 
+void vertexless_mount() {
+    std::printf("a mount with no connection vertex refuses a NAME hop under enforcement:\n");
+    const auto forwards = [](bool enforce) {
+        graph_t g;
+        if (enforce) {
+            auto hooks = g.hooks();
+            hooks.subject_resolver = {caller_is_subject, nullptr};
+            g.set_hooks(hooks);
+        }
+        fwd_router_t router{g};
+        recorder_t bare;
+        check(router.add_child("net/tcp/bare", bare), "vertex-less child mounted");
+        check(!g.find(path_t("/net/tcp/bare").key()).has_value(),
+              "the mount has no connection vertex");
+        router.on_frame(
+            "admin",
+            tr::testing::b_fwd(fwd_op_t::WRITE, tr::testing::b_path({"net", "tcp", "bare", "foo"}),
+                               tr::testing::b_path({}), {}, b_value_u8(0x5A)));
+        const bool out = bare.n.load() != 0;
+        (void)router.remove_child("net/tcp/bare");
+        return out;
+    };
+    check(!forwards(true), "enforcing: a WRITE by NAME through a vertex-less mount is refused");
+    check(forwards(false), "not enforcing: the same WRITE is forwarded (the control)");
+}
+
 }  // namespace
 
 int main() {
-    if constexpr (!tr::net::kBusLinks)
-        return tr::testing::skipped("mount_hop_acl", "no bus module");
+    vertexless_mount();
+    if constexpr (!tr::net::kBusLinks) return tr::testing::summary("mount_hop_acl");
     name_spelling();
     bound_session_delivery();
     return tr::testing::summary("mount_hop_acl");
