@@ -310,6 +310,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   as `std::shared_ptr` does, and updates the count with a plain load and store while no second
   thread has ever started. Segments, the subscription cold half and the target key all use it.
   Where the C library publishes no such flag (newlib, musl) the count is always atomic.
+- **A value-less `HANDLER` vertex costs 56 B less heap at registration
+  ([#1640](https://github.com/avatarsd-llc/libtracer/issues/1640)).** The `:acl` state (the two
+  ACE lists and the cache word) moved off `vertex_ext_t` into a lazily allocated `acl_state_t`,
+  drawn on the first `:acl` write, and the STREAM drain cursor `appended_since_flush` moved into
+  the ring block it counts. `sizeof(vertex_ext_t)` drops from 104 B to 48 B on a 64-bit host and
+  from 72 B to 28 B on rv32, so every ext-bearing vertex that never carries an `:acl` is smaller:
+  a `HANDLER` with only `on_read` / `on_write` now draws 96 B (two blocks) over a plain leaf,
+  down from 152 B, and an app-field table adds the same saving. A describe table installed
+  BORROWED (`vertex_policy_t::app_fields` from a `static` array) still adds only its 64 B group
+  block and no declaration bytes. `sizeof(vertex_t)` and `sizeof(edge_view_t)` are unchanged.
+  `vertex_ext_t`'s members are not API; no signature or wire byte changes.
 
 - **The TCP and WS servers clear their delivering session after each frame
   ([#1915](https://github.com/avatarsd-llc/libtracer/issues/1915)).** `inbound_peer()` on a
