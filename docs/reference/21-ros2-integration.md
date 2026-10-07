@@ -182,11 +182,11 @@ whose depth is, by construction, not observable from the reader.
 
 ### 4. A publisher creates its own topic; a remote write does not
 
-A ROS node's own topics are vertices it owns, and a **local** data write to a nonexistent
-path creates it `mkdir -p` style, gated by the CREATE bit on the nearest existing ancestor
-([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)
-§Write-creates). So `rmw_create_publisher` for a node's own topic has a direct analogue: the
-publisher brings its vertex into being on its own node, and remote peers then subscribe to it by
+A ROS node's own topics are vertices it owns, and it registers them. A data write to a
+nonexistent path creates nothing unless the parent's owner installed a creation hook
+([RFC-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md)
+§7). So `rmw_create_publisher` for a node's own topic has a direct analogue: the
+publisher registers its vertex on its own node, and remote peers then subscribe to it by
 writing a SUBSCRIBER into its `:subscribers[]` ([CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER
 direction). That is the ordinary formation path, and nothing below narrows it.
 

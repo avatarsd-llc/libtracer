@@ -319,6 +319,8 @@ the lean default, a vertex has no hook slot and every miss refuses. The hook dra
 from the graph's injected seam. Any bound on how many children a peer may cause is the hook's
 decision. The library adds no synthetic limit (`CONTEXT.md` §Resource bound).
 
+**Erratum (2026-10-07, [#1945](https://github.com/avatarsd-llc/libtracer/issues/1945)).** Step 2's refusal-is-`not_found` covers a plain refusal only: any other status the hook itself answers (for example `tr::flow::backpressure` when the seam cannot draw the child) passes through to the writer unchanged.
+
 ### 7.3 What stands
 
 - **Owner registration.** The application creating its own vertices through the host API's

@@ -130,7 +130,7 @@ void test_retire_hides_vertex() {
 // ---------------------------------------------------------------------------
 // §B.4 / §C.2 / §E.1 — revive succeeds (not PATH_IN_USE), and is a fresh vertex.
 void test_revive_is_fresh() {
-    std::printf("§E.1: write-creates revives a retired path as a FRESH vertex:\n");
+    std::printf("§E.1: a registration revives a retired path as a FRESH vertex:\n");
     graph_t g;
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     vertex_handle_t b = g.register_vertex(path_t("/dev/b"), role_t::STORED_VALUE);

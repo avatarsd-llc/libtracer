@@ -2,7 +2,8 @@
  * @file
  * @brief The instrumented preset — the defaults with `graph_t`'s test/bench instrumentation
  *        counters compiled in (#1664), the two link modules opted in (#1670) and the
- *        test-only fault-injection hooks compiled in (#1719).
+ *        test-only fault-injection hooks compiled in (#1719), and creation hooks allowed
+ *        (#1945).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -25,6 +26,10 @@
  * that arms those hooks, so it opts in here. The `bench/` preset does not: a bench measures
  * the path a node ships.
  *
+ * **Creation hooks.** `kCreationHooks` defaults to `false` on every profile (RFC-0030 §18 Q5):
+ * a miss refuses and no vertex has a hook slot. The test build opts in so the opt-in creation
+ * path is exercised; the refusal path is the same answer either way.
+ *
  * **It yields to a fragment the build already supplies.** A CI leg that binds its own
  * configuration (a reclamation policy, the bus module closed, ...) lists its fragment later on
  * the include path; that fragment is the configuration under test and must not be shadowed.
@@ -46,13 +51,14 @@
 
 namespace tr::graph {
 
-/** @brief The defaults, with the instrumentation counters, both link modules and the
- *         fault-injection hooks compiled in. */
+/** @brief The defaults, with the instrumentation counters, both link modules, the
+ *         fault-injection hooks and creation hooks compiled in. */
 struct instrumented_config_t : default_config_t {
     static constexpr bool kInstrumentCounters = true;
     static constexpr bool kBusLinks = true;
     static constexpr bool kSelfHealLinks = true;
     static constexpr bool kFaultInjection = true;
+    static constexpr bool kCreationHooks = true;
 };
 
 using config_t = instrumented_config_t;

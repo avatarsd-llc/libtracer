@@ -1595,16 +1595,11 @@ void test_refused_dial_is_transport_down() {
  * creator can send that reaches a module nobody declared, because the address it would have to
  * write to does not exist.
  *
- * The two doors answer that absence differently, and both arms are asserted below.
- *  - **The wire** — the one a peer uses — answers `tr::path::not_found`: a remote `FWD{WRITE}`
- *    to an unresolved `dst` does NOT create (RFC-0005 §D amendment 1), and the identity is
- *    pinned on real reply bytes by the `conn/absent-endpoint-not-found` vector in
- *    `test_conformance_vectors`.
- *  - **The in-process host API** takes the ordinary local write-creates rule (`mkdir -p`,
- *    CREATE-gated on the nearest ancestor): the call SUCCEEDS and mints a plain
- *    `role_t::STORED_VALUE` vertex at that address holding the SPEC's bytes as a value. That is
- *    not a creator endpoint and it constructs nothing — which is exactly what this test pins,
- *    because "it looked like it worked" is the failure mode a derived module name had.
+ * Both doors answer that absence the same way since RFC-0030 §7.1: `tr::path::not_found`.
+ *  - **The wire** — the one a peer uses — is pinned on real reply bytes by the
+ *    `conn/absent-endpoint-not-found` vector in `test_conformance_vectors`.
+ *  - **The in-process host API** is asserted below: the write is NOT_FOUND and creates nothing,
+ *    so no plain vertex appears where a creator endpoint was expected either.
  */
 void test_unregistered_kind_is_schema_not_found() {
     std::printf("#621: an undeclared module has no creator endpoint (no derived name):\n");
@@ -1617,20 +1612,17 @@ void test_unregistered_kind_is_schema_not_found() {
           "the library derived no `udp-client` module, so it minted no endpoint");
     const auto w =
         node.write(path_t("/net/udp-client/conn"), conn_spec("x", kNeverBound, "udp", "127.0.0.1"));
-    // The local door's write-creates rule mints a value vertex here. What it does NOT do is
-    // the whole claim: no connection, no socket, no route.
-    check(w.has_value(), "the LOCAL door write-creates a plain vertex at the absent address");
+    // The local door creates nothing either (RFC-0030 §7.1): no connection, no socket, no
+    // route, and not even a plain value vertex at the absent address.
+    check(!w.has_value() && w.error() == tr::graph::status_t::NOT_FOUND,
+          "the LOCAL door answers NOT_FOUND at the absent address");
+    check(!node.find(path_t::parse("/net/udp-client/conn")->key()).has_value(),
+          "and it created no vertex there");
     check(!node.find(path_t::parse("/net/udp-client/x")->key()).has_value(),
           "nothing mounted under the old derived /net/udp-client name");
     check(net.settings_of("net/udp-client/x") == nullptr,
           "no connection record exists — the SPEC reached no creation path");
     check(router.registry().size() == 0, "and no link entered the router's demux table");
-    // Writing the same SPEC a second time now hits a REGISTERED vertex — and still creates
-    // nothing, because that vertex is a stored value, not a `role_t::HANDLER` endpoint.
-    const auto again =
-        node.write(path_t("/net/udp-client/conn"), conn_spec("x", kNeverBound, "udp", "127.0.0.1"));
-    check(again.has_value() && router.registry().size() == 0,
-          "a second write assigns that value vertex and still constructs nothing");
 }
 
 /**

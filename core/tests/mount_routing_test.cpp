@@ -835,7 +835,8 @@ void test_reject_and_terminus_agree_on_trailered_routes() {
     // fieldless WRITE used to take `resolve_node`'s write-creates branch, CREATE the vertex
     // and come back `kind=RESULT` — the case would have guarded (both replies leave through
     // the same assembler) while advertising terminus-refusal coverage it never ran. Since
-    // RFC-0005 amendment 1 (#1139) a fieldless WRITE refuses NOT_FOUND like everything else,
+    // RFC-0005 amendment 1 (#1139), and RFC-0030 §7.1 for every origin, a fieldless WRITE
+    // refuses NOT_FOUND like everything else,
     // so either op would exercise the refusal now. The READ stays: it is the op whose miss
     // answer was never in question.
     router.on_frame("net/ws-client/in",

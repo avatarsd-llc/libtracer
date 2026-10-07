@@ -67,9 +67,13 @@ int main() {
     check(ok, g.retire(air).has_value(),
           "retiring an already-retired vertex is a no-op, not an error");
 
-    // A later LOCAL write revives the address; the revived vertex inherits nothing (§B.6).
-    check(ok, g.write(path_t("/zone/air"), value_of("fresh")).has_value(),
-          "write-creates revives a retired address");
+    // A write does not revive it: the retired address is missing, and a miss creates nothing
+    // (RFC-0030 §7.1). A later registration does; the revived vertex inherits nothing (§B.6).
+    const auto w = g.write(path_t("/zone/air"), value_of("fresh"));
+    check(ok, !w && w.error() == status_t::NOT_FOUND,
+          "a write to the retired address is NOT_FOUND");
+    check(ok, g.try_register_vertex(path_t("/zone/air"), role_t::STORED_VALUE).has_value(),
+          "a registration revives a retired address");
     std::printf("generation %u -> %u across one retirement\n", gen_before,
                 g.retire_generation(air));
     return ok ? 0 : 1;

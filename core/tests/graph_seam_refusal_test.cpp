@@ -29,6 +29,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
@@ -187,7 +188,7 @@ std::vector<std::byte> key_of(std::string_view p) {
 }
 
 /**
- * @brief A policy-less registration at @p p (the write-create door, which applies no policy)
+ * @brief A policy-less registration at @p p (a plain `register_vertex_key`, which applies none)
  *        inherits nothing a refused one left on the placeholder: no app field (`gain` is
  *        undeclared), `LAST` retention and the default share threshold. It retires the vertex
  *        again, so the sweep's retry finds a placeholder.
@@ -195,7 +196,7 @@ std::vector<std::byte> key_of(std::string_view p) {
 bool inherits_nothing(graph_t& g, std::string_view p) {
     if (found(g, p)) return false;
     const std::vector<std::byte> key = key_of(p);
-    const auto h = g.ensure_vertex(key);  // the write-create door: no policy of its own
+    const auto h = g.register_vertex_key(key, role_t::STORED_VALUE);  // no policy of its own
     if (!h) return false;
     const std::string field = std::string(p) + ":settings.app.gain";
     const bool clean = !g.write(*path_t::parse(field), make_value({0x01})) &&
@@ -270,7 +271,7 @@ void test_register_unconditional() {
     };
     const auto untouched = [](graph_t& g, none_t&) {
         if (found(g, "/u/v")) return false;
-        const auto h = g.ensure_vertex(key_of("/u/v"));  // the write-create door: no policy
+        const auto h = g.register_vertex_key(key_of("/u/v"), role_t::STORED_VALUE);  // no policy
         if (!h) return false;
         std::size_t delivered = 0;
         const auto count = [](void* ctx, const tr::graph::value_t&) {
@@ -293,6 +294,48 @@ void test_register_unconditional() {
                },
                op, untouched),
            "register UNCONDITIONAL");
+}
+
+/**
+ * @brief The creation hook (RFC-0030 §7.2), both of its draws: installing one takes a
+ *        declaration node from the table source, and a write the hook creates for registers
+ *        the child from it. A refused install leaves no hook; a refused creation leaves no
+ *        child (or, refused after the hook registered it, an empty one), and its BACKPRESSURE
+ *        reaches the writer.
+ */
+void test_creation_hook() {
+    std::printf("set_creation_hook, and a write the hook creates for:\n");
+    if (!tr::graph::kCreationHooks) {
+        std::printf("  (skipped: this build binds kCreationHooks = false)\n");
+        return;
+    }
+    const auto parent = [](graph_t& g) {
+        return g.register_vertex(*path_t::parse("/p"), role_t::STORED_VALUE);
+    };
+    const auto install = [](graph_t& g, vertex_handle_t& p) {
+        return verdict(g.set_creation_hook(p, {&tr::testing::create_stored_value, &g}));
+    };
+    const auto no_hook = [](graph_t& g, vertex_handle_t&) {
+        const auto w = g.write(*path_t::parse("/p/x"), make_value({0x01}));
+        return !w && w.error() == status_t::NOT_FOUND && !found(g, "/p/x");
+    };
+    report(drive<vertex_handle_t>(parent, install, no_hook), "set_creation_hook");
+
+    const auto hooked = [](graph_t& g) {
+        const vertex_handle_t p = g.register_vertex(*path_t::parse("/p"), role_t::STORED_VALUE);
+        (void)tr::testing::allow_creation(g, p);
+        return p;
+    };
+    const auto create = [](graph_t& g, vertex_handle_t&) {
+        return verdict(g.write(*path_t::parse("/p/x"), make_value({0x01})));
+    };
+    // A refusal before the hook registered leaves no child. One after it (the value's own
+    // block) leaves the child the hook made, holding nothing: the registration is the app's
+    // and stands, as any registration does when a later write to it is refused.
+    const auto no_child = [](graph_t& g, vertex_handle_t&) {
+        return !found(g, "/p/x") || !g.read(*path_t::parse("/p/x")).has_value();
+    };
+    report(drive<vertex_handle_t>(hooked, create, no_child), "hook-created write");
 }
 
 /** @brief Registration over a placeholder: a refusal leaves no extension block on it. */
@@ -785,6 +828,7 @@ int main() {
     test_register_policy_reset();
     test_register_unconditional();
     test_register_placeholder();
+    test_creation_hook();
     test_anchor();
     test_subscribe();
     test_retire();

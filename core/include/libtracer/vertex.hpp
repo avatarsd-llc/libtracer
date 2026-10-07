@@ -1179,6 +1179,19 @@ class vertex_t {
         return test_flag(flag_t::ADMISSION, std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Record that this vertex carries a CREATION HOOK (RFC-0030 §7.2). The hook rides
+     *        the graph's admission node, like the app-field read seam; this bit is what keeps a
+     *        miss under a parent with no hook from walking the graph's list. Set by the graph
+     *        under the map lock; cleared with the other declarations.
+     */
+    void mark_creation_hook() noexcept { set_flag(flag_t::CREATION_HOOK, true); }
+
+    /** @brief True iff this vertex carries a creation hook (RFC-0030 §7.2). */
+    [[nodiscard]] bool has_creation_hook() const noexcept {
+        return test_flag(flag_t::CREATION_HOOK, std::memory_order_relaxed);
+    }
+
    public:
     /** @brief Recompute `flag_t::REGISTERED_CHILD`. Unique-map-lock callers only. */
     void refresh_registered_child() noexcept {
@@ -1287,8 +1300,9 @@ class vertex_t {
      * the four subtree walks in `graph.cpp` were **self-recursion**, one frame per graph level at
      * 32–208 B a level, and graph depth is a vertex's path segment count — which nothing on the
      * wire path bounds. `kMaxSegments` is enforced only in `path_t::parse`, the *local* string
-     * builder; `graph_t::ensure_vertex` takes raw key bytes and counts nothing, so a peer could
-     * already create a vertex deep enough to overflow the stack of a walk it then triggers
+     * builder; `graph_t::register_vertex_key` takes raw key bytes and counts nothing, so a
+     * registration (a creation hook's, driven by a peer) can make a vertex deep enough to
+     * overflow the stack of a walk it then triggers
      * (`:subscribers[]`, RETIRE, `:acl`). See #690.
      *
      * **Descends with no auxiliary storage at all** — no explicit stack, so nothing to allocate
@@ -2406,13 +2420,14 @@ class vertex_t {
      *
      * Retirement calls it, and so does a registration refused after its declarations landed on
      * the placeholder (#1778), so a later registration through a door that brings no policy
-     * (the write-create `ensure_vertex`) inherits none of it. The caller MUST hold the graph
+     * (a creation hook's own registration) inherits none of it. The caller MUST hold the graph
      * map lock; the stripe lock is taken here. Allocates nothing.
      */
     void clear_declarations() noexcept {
         set_flag(flag_t::RETAIN_NONE, false);
         set_flag(flag_t::PAYLOAD_RIGHTS, false);
         set_flag(flag_t::ADMISSION, false);
+        set_flag(flag_t::CREATION_HOOK, false);
         vertex_ext_t* const e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) return;
         const std::lock_guard lock(vertex_stripe_of(this).m);
@@ -3123,6 +3138,9 @@ class vertex_t {
                                      *          clear bit lets an eager write skip the key
                                      *          render and the graph-wide sweep lock its
                                      *          mark retirement would otherwise take. */
+        CREATION_HOOK = 1U << 7,    /**< @brief This vertex carries a creation hook (RFC-0030
+                                     *          §7.2) on the graph's admission list. Never set
+                                     *          in a build without `kCreationHooks`. */
     };
 
     /** @brief Set or clear @p f. An RMW, because the bits have different writers. */

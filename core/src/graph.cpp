@@ -703,13 +703,13 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
         vertex_t* child = node->child_by_record(record);
         if (child == nullptr) {
             // Charge the creation against the vertex-slot census BEFORE allocating (#1314).
-            // This is the one door every creation goes through — a local registration, the
-            // write-create `mkdir -p`, and every landing site an RFC-0005 §D branch write
-            // decomposes into — so counting here is what makes decomposition's governed
-            // vertices COUNTED vertices. Count, then act (#838's shape): past the ceiling the
-            // creation answers BACKPRESSURE, the injected-store exhaustion status, and the
-            // refusal is tallied so the bound is observable rather than inferred. Default is
-            // kNoVertexCeiling, so an un-sized node is byte-for-byte unchanged.
+            // This is the one door every creation goes through — a local registration, and
+            // every vertex a creation hook registers for a write that missed (RFC-0030 §7) —
+            // so counting here is what makes hook-created vertices COUNTED vertices. Count, then
+            // act (#838's shape): past the ceiling the creation answers BACKPRESSURE, the
+            // injected-store exhaustion status, and the refusal is tallied so the bound is
+            // observable rather than inferred. Default is kNoVertexCeiling, so an un-sized node is
+            // byte-for-byte unchanged.
             if (vertex_slots_.size() >= vertex_ceiling_.load(std::memory_order_relaxed)) {
                 vertex_ceiling_refusals_.fetch_add(1, std::memory_order_relaxed);
                 return std::unexpected(status_t::BACKPRESSURE);
@@ -765,7 +765,7 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // sweep-set entry included (#1920): a refusal anywhere in this chain leaves a placeholder,
     // which `find` does not answer for and a sweep skips. The refusal clears every declaration
     // back off it, and takes back a mode that landed with its entry, so the next registration
-    // here, through a door that brings no policy (`ensure_vertex`), inherits nothing of the
+    // here, through a door that brings no policy (a creation hook's), inherits nothing of the
     // refused one. The sweep lock nests inside the map lock here, and only in this direction:
     // nothing takes the map lock under the sweep lock (ADR-0057).
     const bool mode_moves = node->delivery_mode() != policy.delivery_mode;
@@ -812,7 +812,7 @@ bool graph_t::declare_admission(vertex_t* v, const handlers_t& h) {
     // member's doc for why that is what makes the read lock-free).
     admission_node_t* const node = mem::make_in<admission_node_t>(
         *tables_,
-        admission_node_t{v, h.on_admit, h.on_app_field_admit, h.on_app_field_read, nullptr});
+        admission_node_t{v, h.on_admit, h.on_app_field_admit, h.on_app_field_read, {}, nullptr});
     if (node == nullptr) return false;
     admissions_.prepend(node);
     v->mark_admission();
@@ -830,6 +830,38 @@ const graph_t::admission_node_t* graph_t::admission_for(const vertex_t* v) const
          n = n->next)
         if (n->v == v) return n;
     return nullptr;
+}
+
+result_t<void> graph_t::set_creation_hook(vertex_handle_t parent, creation_hook_t hook) {
+    if constexpr (!config_t::kCreationHooks) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    vertex_t* const v = parent.get();
+    // The unique map lock: `prepend` requires it, and it orders the install against a
+    // retirement, which clears the flag under the same hold.
+    const std::unique_lock lock(map_mutex_);
+    if (v == nullptr || !v->registered()) return std::unexpected(status_t::NOT_FOUND);
+    // A NEW node, newest first: a copy of the vertex's own admission node (its filters carry
+    // over unchanged) with the hook replaced. Nodes are immortal, so the old one stays readable
+    // by any walk already on it, and is never found again.
+    const admission_node_t* const own = admission_for(v);
+    admission_node_t* const node = mem::make_in<admission_node_t>(
+        *tables_, own != nullptr ? *own : admission_node_t{v, {}, {}, {}, {}, nullptr});
+    if (node == nullptr) return std::unexpected(status_t::BACKPRESSURE);
+    node->on_create = hook;
+    admissions_.prepend(node);
+    v->mark_creation_hook();
+    return {};
+}
+
+creation_hook_t graph_t::creation_hook_for(const vertex_t* v) const noexcept {
+    // The same walk @ref admission_for makes, behind its own flag, so a miss under a parent
+    // with no hook costs one relaxed bit test. Closed out, there is no slot to read.
+    if constexpr (config_t::kCreationHooks) {
+        if (!v->has_creation_hook()) return {};
+        for (const admission_node_t* n = admissions_.head.load(std::memory_order_acquire);
+             n != nullptr; n = n->next)
+            if (n->v == v) return n->on_create;
+    }
+    return {};
 }
 
 acl_right_t graph_t::declared_write_right(const vertex_t* v, wire::type_t type) const {
@@ -1301,9 +1333,10 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
     return total;
 }
 
-result_t<vertex_handle_t> graph_t::ensure_vertex(std::span<const std::byte> key,
-                                                 std::string_view caller) {
-    result_t<vertex_t*> p = ensure_vertex_ptr(key, caller);
+result_t<vertex_handle_t> graph_t::find_or_create(std::span<const std::byte> key,
+                                                  std::string_view caller,
+                                                  function_ref_t<const view::rope_t&()> payload) {
+    result_t<vertex_t*> p = find_or_create_ptr(key, caller, payload);
     if (!p) return std::unexpected(p.error());
     return vertex_handle_t{*p};
 }
@@ -1320,63 +1353,48 @@ result_t<void> graph_t::hide_from_enumeration(vertex_handle_t vh) {
     return {};
 }
 
-result_t<vertex_t*> graph_t::ensure_vertex_ptr(std::span<const std::byte> key,
-                                               std::string_view caller) {
+result_t<vertex_t*> graph_t::find_or_create_ptr(std::span<const std::byte> key,
+                                                std::string_view caller,
+                                                function_ref_t<const view::rope_t&()> payload) {
     if (vertex_t* v = find_ptr(key)) return v;
-    // Write-creates (RFC-0005): gate CREATE on the nearest EXISTING ancestor — its
-    // effective ACL is exactly what every vertex of the missing chain would inherit
-    // (the core subset's INHERIT walk, ADR-0020). No ancestor at all ⇒ open, the
-    // ACL-presence opt-in of docs/reference/05 §0x0A.
-    {
-        key_view_t k{key};
-        vertex_t* ancestor = nullptr;
-        while (!k.empty()) {
-            k = k.parent();
-            ancestor = find_ptr(k.bytes());
-            if (ancestor != nullptr || k.empty()) break;
-        }
-        if (ancestor != nullptr && !acl_allows(ancestor, caller, acl_right_t::CREATE))
-            return std::unexpected(status_t::PERMISSION_DENIED);
-    }
-    // Validate the key's NAME-encoding framing, then create every missing level
-    // shallowest-first (`mkdir -p`). TWO walks, storing nothing between them (#1139/#873):
-    // this used to collect the per-level prefixes into a `std::vector<key_view_t>` and copy
-    // each level into a fresh `std::vector<std::byte>` for the registration call, and BOTH
-    // drew from the global heap — bypassing the injected `ctl_` seam on a path a remote
-    // branch write can still drive, which is exactly the bypass ADR-0065 exists against.
-    // Removing the scratch entirely is a stronger bound than routing it to an injected
-    // source: it was the part that scaled with the key's DEPTH, which is the peer's choice.
-    // (The `vertex_t` objects a registration allocates are NOT addressed here — that is the
-    // wider #873 arena question.) `record_end` is pointer arithmetic, so the second walk
-    // costs no allocation. The validation pass must come FIRST and separately: raggedness is
-    // discovered at the LAST record, so a walk that created as it went would materialize
-    // the valid prefix of an illegally-spelled key before refusing it (#436's rule, one
-    // layer down from the resolver that enforces it on the wire).
+    // RFC-0030 §7.1: a miss creates nothing, whatever the write's origin. The `mkdir -p` walk
+    // that stood here (RFC-0005 §D) is gone, and with the hook policy closed (the default)
+    // this is the whole of the miss arm.
+    if constexpr (!config_t::kCreationHooks) return std::unexpected(status_t::NOT_FOUND);
+    // §7.2: walk shallowest-first; a missing level is decided by its parent's hook, and a level
+    // the hook created is the parent of the next. Validate the whole key FIRST: raggedness is
+    // found at the LAST record, so a walk that created as it went would let a hook materialize
+    // the valid prefix of an illegally-spelled key before refusing it (#436). The walk stores
+    // nothing between levels (#1139/#873).
     const key_view_t kv{key};
     if (!kv.for_each_level([](key_view_t) noexcept { return true; }))
         return std::unexpected(status_t::INVALID_PATH);
-    vertex_t* leaf = nullptr;
+    vertex_t* parent = root();
     std::optional<status_t> failed;
     (void)kv.for_each_level([&](key_view_t level) {
         const std::span<const std::byte> pk = level.bytes();
-        if (vertex_t* existing = find_ptr(pk)) {
-            leaf = existing;
+        if (vertex_t* const child = find_ptr(pk)) {
+            parent = child;
             return true;
         }
-        result_t<vertex_handle_t> made = register_vertex_key_span(pk, role_t::STORED_VALUE, {});
-        if (made) {
-            leaf = made->get();
-            return true;
-        }
-        if (made.error() == status_t::PATH_IN_USE) {  // lost a benign creation race
-            leaf = find_ptr(pk);
-            if (leaf != nullptr) return true;
-        }
-        failed = made.error();
-        return false;
+        // The CREATE gate runs before the payload is asked for, so a writer the parent's ACL
+        // denies provokes no draw (a span-delivered remote payload is copied to be shown).
+        const creation_hook_t hook = creation_hook_for(parent);
+        const view::rope_t* value = nullptr;
+        if (!hook)  // no hook here: the miss is the answer
+            failed = status_t::NOT_FOUND;
+        else if (!acl_allows(parent, caller, acl_right_t::CREATE))
+            failed = status_t::PERMISSION_DENIED;
+        else if ((value = &payload())->total_length() == 0)  // the payload could not be held
+            failed = status_t::BACKPRESSURE;
+        else if (const result_t<void> r = hook(vertex_handle_t{parent}, pk, caller, *value); !r)
+            failed = r.error();
+        else if ((parent = find_ptr(pk)) == nullptr)  // the hook said yes and made nothing
+            failed = status_t::NOT_FOUND;
+        return !failed;
     });
     if (failed) return std::unexpected(*failed);
-    return leaf;  // never null: the deepest level was just found or created
+    return parent;  // the deepest level: found, or created by its parent's hook
 }
 
 std::uint64_t graph_t::target_canonical_resolves() const noexcept {
@@ -2542,10 +2560,10 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     plan.back().vx = v;
     plan.back().notify = view::view_t(*head);
 
-    // Admission: resolve-or-create every landing vertex (write-creates, CREATE-
-    // gated) and gate WRITE on each BEFORE any store, so a denial rejects the
-    // whole branch with nothing landed. (Created-but-empty intermediates may
-    // persist past a later denial — the `mkdir -p` analogy; RFC-0005 §ACL.) A landing site
+    // Admission: resolve every landing vertex and gate WRITE on each BEFORE any store, so a
+    // denial or a miss rejects the whole branch with nothing landed. A missing landing site is
+    // NOT_FOUND unless its parent's creation hook creates it (RFC-0030 §7.1); a vertex a hook
+    // created stays if a later site refuses, as any registration would. A landing site
     // is a plan node with a VALUE of its own; `sites` lists them so the passes below walk
     // only those, and each site's outcome lives on its node. Failable, from the table source
     // (#477, #1778): a refusal => BACKPRESSURE.
@@ -2553,8 +2571,11 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     if (!sites.reserve(plan.size())) return std::unexpected(status_t::BACKPRESSURE);
     for (branch_node_t& node : plan) {
         if (node.store.empty()) continue;
-        if (node.vx == nullptr) {  // every site but the root, tagged above
-            const result_t<vertex_t*> ensured = ensure_vertex_ptr(mem::as_span(node.key), caller);
+        if (node.vx == nullptr) {               // every site but the root, tagged above
+            std::optional<view::rope_t> slice;  // built only if a creation hook is asked
+            const result_t<vertex_t*> ensured = find_or_create_ptr(
+                mem::as_span(node.key), caller,
+                [&]() -> const view::rope_t& { return slice.emplace(node.store); });
             if (!ensured) return std::unexpected(ensured.error());
             node.vx = *ensured;
             if (!acl_allows(node.vx, caller, acl_right_t::WRITE))
@@ -3719,7 +3740,7 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
     // (house style, parse_branch_node). The stack is `ctl_`-backed, so its bound is the
     // allocator and it needs no synthetic cap. This comment used to attribute that to graph
     // depth being "kMaxSegments-bounded structurally"; it is not — kMaxSegments is enforced
-    // only in path_t::parse, and a wire-driven write-create never passes through it. Per node:
+    // only in path_t::parse, and a hook-created vertex never passes through it. Per node:
     // the ACL gate (a denied
     // vertex PRUNES its whole subtree, siblings unaffected), the placeholder skip
     // (unregistered levels are not members, exactly as read_children), one read_stored()
@@ -4066,14 +4087,14 @@ result_t<value_ref_t> graph_t::read(const path_t& path) const {
 }
 
 result_t<void> graph_t::write(const path_t& path, view::rope_t value) {
+    // A miss is NOT_FOUND unless the parent's creation hook creates the target (RFC-0030 §7).
+    // A `:field` write never creates (§7.1: there is no vertex whose control surface it could
+    // address), so it never reaches the hook or the CREATE gate. The hit stays one lookup.
     vertex_t* v = find_ptr(path.key());
-    if (!v) {
-        // Write-creates (RFC-0005): a DATA write to a nonexistent path creates it,
-        // mkdir-p style, gated by CREATE on the nearest existing ancestor. The
-        // `:field` control surface does not create — a field write to a
-        // nonexistent vertex stays NOT_FOUND (there is no vertex to control).
+    if (v == nullptr) {
         if (!path.field().empty()) return std::unexpected(status_t::NOT_FOUND);
-        const result_t<vertex_t*> made = ensure_vertex_ptr(path.key(), {});
+        const result_t<vertex_t*> made =
+            find_or_create_ptr(path.key(), {}, [&]() -> const view::rope_t& { return value; });
         if (!made) return std::unexpected(made.error());
         v = *made;
     }

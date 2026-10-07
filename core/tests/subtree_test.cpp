@@ -161,10 +161,12 @@ void test_bubbling_to_late_created_descendant() {
     std::size_t hits = 0;
     auto on_hit = [&](const tr::graph::value_t&) { ++hits; };
     check(g.subscribe(path_t("/a"), on_hit).has_value(), "subscribe at /a first");
-    // The descendant is created afterwards (write-creates) — its creation-time
-    // ancestor-listener sum must still route its writes up.
-    check(g.write(path_t("/a/new/leaf"), make_value({0x42})).has_value(),
-          "write-creates /a/new/leaf under the live subscription");
+    // The descendant is created afterwards — its creation-time ancestor-listener sum must
+    // still route its writes up. (A registration two levels down, so a placeholder level is
+    // created on the way.)
+    check(g.try_register_vertex(path_t("/a/new/leaf"), role_t::STORED_VALUE).has_value(),
+          "/a/new/leaf is registered under the live subscription");
+    check(g.write(path_t("/a/new/leaf"), make_value({0x42})).has_value(), "and written");
     check(hits == 1, "the late-created descendant's write bubbles to /a");
 }
 
@@ -216,7 +218,11 @@ void test_branch_write_decomposition() {
     check(g.subscribe(path_t("/s/t"), on_st).has_value(), "subscribe at the leaf /s/t");
 
     // POINT{ NAME "s", VALUE 07, POINT{ NAME "t", VALUE AA BB },
-    //                            POINT{ NAME "u", VALUE CC } }  — /s/u not yet registered.
+    //                            POINT{ NAME "u", VALUE CC } }  — /s/u not yet registered,
+    // so /s opts in to creating it (RFC-0030 §7.2). A build without creation hooks registers
+    // it instead: the decomposition under test is the same either way.
+    if (!tr::testing::allow_creation(g, s))
+        (void)g.register_vertex(path_t("/s/u"), role_t::STORED_VALUE);
     const std::vector<std::byte> t_val = value_tlv({0xAA, 0xBB});
     const std::vector<std::byte> branch = point_tlv(
         "s", cat({value_tlv({0x07}), point_tlv("t", t_val), point_tlv("u", value_tlv({0xCC}))}));
@@ -241,7 +247,7 @@ void test_branch_write_decomposition() {
           "leaf store is a refcount SUBVIEW of the written frame (zero copy)");
     const auto r_u = g.read(path_t("/s/u"));
     check(r_u.has_value() && same_bytes((*r_u)->only(), value_tlv({0xCC})),
-          "write-created /s/u holds its decomposed VALUE");
+          "the created /s/u holds its decomposed VALUE");
 
     // Notifications: one per covered subscription point, with its slice.
     check(at_s.size() == 1, "root subscriber notified once for the whole branch");
@@ -293,17 +299,30 @@ void test_branch_write_strictness() {
 }
 
 void test_write_creates() {
-    std::printf("write-creates (mkdir-p, CREATE-gated):\n");
+    std::printf("creation: refused by default, opt-in per parent (RFC-0030 §7):\n");
     graph_t g;
-    // A data write to a nonexistent path creates it (and intermediates).
     const std::vector<std::byte> val{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
                                      std::byte{0x00}, std::byte{0x2A}};
-    check(g.write(path_t("/new/deep/leaf"), make_value(val)).has_value(),
-          "write to a nonexistent path creates it");
-    const auto r = g.read(path_t("/new/deep/leaf"));
-    check(r.has_value() && same_bytes((*r)->only(), val), "created leaf serves the written value");
-    check(g.find(path_t::parse("/new/deep")->key()).has_value(),
-          "intermediate levels are created too (mkdir-p)");
+    // A data write to a nonexistent path is NOT_FOUND and creates nothing, intermediates
+    // included: the `mkdir -p` walk is gone.
+    const auto refused = g.write(path_t("/new/deep/leaf"), make_value(val));
+    check(!refused.has_value() && refused.error() == status_t::NOT_FOUND,
+          "write to a nonexistent path is NOT_FOUND");
+    check(!g.find(path_t::parse("/new")->key()).has_value(), "and no intermediate was created");
+
+    // A branch write whose landing site is missing is refused whole: nothing lands.
+    const vertex_handle_t b = g.register_vertex(path_t("/b"), role_t::STORED_VALUE);
+    const std::vector<std::byte> branch = point_tlv("b", point_tlv("x", value_tlv({0x11})));
+    const auto miss = g.write(b, make_value(branch));
+    check(!miss.has_value() && miss.error() == status_t::NOT_FOUND,
+          "a branch write to a missing landing site is NOT_FOUND");
+    check(!g.find(path_t::parse("/b/x")->key()).has_value(), "no landing vertex was created");
+
+    // Opted in at /b, the same branch lands: the hook creates /b/x.
+    if (tr::testing::allow_creation(g, b)) {
+        check(g.write(b, make_value(branch)).has_value(), "the hook lets the branch land");
+        check(g.read(path_t("/b/x")).has_value(), "the created landing site serves its slice");
+    }
 
     // A :field write to a nonexistent vertex does NOT create.
     const auto f = g.write(path_t("/nope:settings.history_keep_last"), make_value({1, 0, 1, 0, 1}));
@@ -313,9 +332,10 @@ void test_write_creates() {
 }
 
 void test_write_creates_acl_gate() {
-    std::printf("write-creates CREATE-ACL gate (denied => PERMISSION_DENIED):\n");
+    std::printf("creation CREATE-ACL gate at the parent (denied => PERMISSION_DENIED):\n");
     graph_t g;
-    (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    const vertex_handle_t parent = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    if (!tr::testing::allow_creation(g, parent)) return;  // no hook slot: every miss refuses
     // Enforcement is on for the ATTRIBUTED caller "peer"; the empty (local) context stays
     // trusted without consulting the resolver (#905), which is what the setup writes use.
     {
@@ -340,12 +360,15 @@ void test_write_creates_acl_gate() {
     check(g.write(path_t("/p:acl"), make_value(acl)).has_value(),
           "install a WRITE-only (no CREATE) ACL on /p");
 
-    // The write-create door, under an ATTRIBUTED caller — the empty context is the local
-    // owner's and is trusted by convention, so the gate is only meaningful for a named one.
+    // The creation door, under an ATTRIBUTED caller — the empty context is the local owner's
+    // and is trusted by convention, so the gate is only meaningful for a named one. The hook
+    // never runs: the parent's CREATE right is checked first (RFC-0030 §7.2 step 1).
     const path_t child{"/p/child"};
-    const auto denied = g.ensure_vertex(child.key(), "peer");
+    const tr::view::rope_t payload = make_value({0x01});
+    const auto denied =
+        g.find_or_create(child.key(), "peer", [&]() -> const tr::view::rope_t& { return payload; });
     check(!denied.has_value() && denied.error() == status_t::PERMISSION_DENIED,
-          "write-create under /p without the CREATE right => PERMISSION_DENIED");
+          "creation under /p without the CREATE right => PERMISSION_DENIED");
     check(!g.find(child.key()).has_value(), "denied create made no vertex");
 
     // Writing to the existing /p itself is still allowed (WRITE granted).
@@ -390,8 +413,9 @@ void test_branch_write_acl_admission() {
 /**
  * @brief A branch write's landing sites are CHARGED against the vertex-slot census (#1314).
  *
- * Decomposition below an already-resolved, already-WRITE-gated `dst` creates its landing
- * vertices through the same `mkdir -p` door as any other write-create. They were governed
+ * Decomposition below an already-resolved, already-WRITE-gated `dst` creates a missing landing
+ * vertex only through its parent's creation hook (RFC-0030 §7), whose registration goes through
+ * the same door as any other. They were governed
  * (each passes CREATE/WRITE) but uncounted: nothing charged them, so "write more, write wider"
  * grew the node's vertex population without a bound. With a ceiling in force the creation
  * answers BACKPRESSURE and the refusal is tallied.
@@ -403,6 +427,8 @@ void test_branch_write_vertex_ceiling() {
     check(g.vertex_ceiling_refusals() == 0, "no refusals on a fresh graph");
 
     const vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    // Landing sites are created only where /s opted in (RFC-0030 §7.2).
+    if (!tr::testing::allow_creation(g, s)) return;  // no hook slot: every miss refuses
     // Pin the ceiling AT the current population: every further creation must be refused,
     // and the already-resolved /s must still take a plain write.
     const std::size_t at_rest = g.vertex_slot_count();
@@ -422,10 +448,10 @@ void test_branch_write_vertex_ceiling() {
     check(g.vertex_slot_count() == at_rest, "the census did not grow — nothing was allocated");
     check(!g.find(path_t{"/s/t"}.key()).has_value(), "no landing vertex materialized");
 
-    // The plain write-create door is charged by the same check — it is one door, not two.
-    const auto created = g.ensure_vertex(path_t{"/s/v"}.key());
+    // A plain write the hook creates for is charged by the same check — one door, not two.
+    const auto created = g.write(path_t("/s/v"), make_value({0x01}));
     check(!created.has_value() && created.error() == status_t::BACKPRESSURE,
-          "the write-create door is charged against the same census");
+          "a hook-created vertex is charged against the same census");
 
     // Lifting the ceiling lets the same branch land: the bound is the deployer's, not a
     // library-fixed limit.
