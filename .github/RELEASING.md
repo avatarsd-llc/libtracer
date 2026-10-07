@@ -133,8 +133,7 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
 **Every release is a tag on `main`; there are no release branches.** A patch
 release is a fix PR to `main` followed by the same cut-and-tag steps below, so it
 also ships whatever `[Unreleased]` already holds. If that includes `### Breaking`
-entries, the release is a minor bump rather than a patch, or the release body says
-which breaking entries it carries. Re-publishing one registry after a failure is a
+entries, the release is a minor bump, never a patch. Re-publishing one registry after a failure is a
 `release.yml` dispatch with the tag and `only`, never a new branch.
 
 1. **Changelog-cut PR (+ recommended version reconcile) — the LAST pre-tag
