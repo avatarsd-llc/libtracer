@@ -1949,6 +1949,15 @@ bool fwd_router_t::route_bound_session_delivery(std::string_view inbound_name,
     // never the cross-bus scan, so two servers' same-named peers stay distinct). A session
     // that departed between the deref and this lookup is a refusal like any other.
     const child_registry_t::child_t* const entry = registry_.entry_by_name(ar->mount);
+    // An anchor lives OUTSIDE the path tree, so the check above walks no ancestor `:acl` and
+    // cannot see the mount's. The delivery crosses the mount exactly as the NAME spelling
+    // `<mount>/<peer>` does, so it is authorized where that one is — at the mount's connection
+    // vertex, for WRITE (`name_hop_allows`). Enforcing, a mount with no connection vertex has
+    // nothing to grant the right and refuses (fail closed). Same denied-shaped silence.
+    if (entry != nullptr && graph_.acl_enforced()) {
+        const std::optional<graph::vertex_handle_t> conn = graph_.find(entry->mount_tlv);
+        if (!conn || !graph_.allows(*conn, inbound_name, graph::acl_right_t::WRITE)) return true;
+    }
     transport_t* const session =
         entry != nullptr ? child_registry_t::resolve_peer(*entry, ar->peer) : nullptr;
     if (session == nullptr) {
