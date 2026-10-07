@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-10-07
+
+No component-specific changes. The component vendors the C++ core, so it carries core's 0.18.1 fixes. Released in lockstep with core.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added

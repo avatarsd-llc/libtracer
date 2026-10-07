@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-10-07
+
 ### Fixed
 
 - **An ACL check that overlaps a `graph_t::set_hooks` republish now reads the settled hooks.**

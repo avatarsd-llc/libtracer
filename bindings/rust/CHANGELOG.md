@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-10-07
+
+No Rust-binding changes. The Rust crate is a native implementation and does not link the C++ core. Released in lockstep with core.
+
 ## [0.18.0] — 2026-10-05
 
 No Rust-binding API changes; five one-concept examples were added (#1785). The Rust crate is a native implementation and does not link the C++ core, so core's 0.18.0 breaking changes do not reach it. One behaviour to know: under RFC-0004 Amendment 3 the requester owns an AWAIT's deadline and a responder need not answer `TIMEOUT`, so an AWAIT sent to a 0.18.0 core responder should carry the caller's own deadline rather than rely on the responder default. Released in lockstep with core.
