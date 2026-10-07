@@ -157,9 +157,10 @@ resident set the family started from. It replaced a whole-run "max RSS" from
 `/usr/bin/time -v`, which was the harness's peak, not any family's footprint
 ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). The single-family binaries
 `bench_compact_delivery`, `bench_forward_demux` and `bench_store_sweep latency` print the same
-line (`compact-delivery`, `forward-demux`, `store-lat`) after their last row; their start
-figure is read without a heap operation, because a `fopen` ahead of the rows shifts the heap
-those rows meet ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)).
+line (`compact-delivery`, `forward-demux`, `store-lat`) after their last row. Their start
+figure is the process's high-water mark before the first row, one `getrusage` call, because
+any read of `/proc` ahead of their rows moved them
+([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)).
 
 Beside the per-vertex probes, `bench_forward_heap` prints RAM **per callback edge**
 (`edge_callback`), **per wire subscriber edge** (`edge_wire`), **per link** (`link`, one

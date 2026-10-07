@@ -401,7 +401,7 @@ int main(int argc, char** argv) {
         // The clock floor (#1904), after the header line so stdout's buffer already exists and
         // the line moves no allocation ahead of the timed rows.
         bench::emit_clock_floor();
-        const std::size_t start_kb = bench::rss_kb_heap_neutral();  // no heap op ahead of a row
+        const std::size_t start_kb = bench::peak_rss_kb();  // no heap op, no file, ahead of a row
         for (std::size_t j = 0; j < kNArms; ++j) {
             // Rotate the arm order per round: exhausting one arm's runs before starting the
             // next is the shape that produced the recorded 55.2 / 53.0 / 149.8 M deliv/s swing

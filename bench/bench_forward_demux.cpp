@@ -555,7 +555,7 @@ int main(int /*argc*/, char** argv) {
     bench::pin_allocator_state(argv);  // fixed allocator state (#1803)
     bench::emit_clock_floor();         // the run's clock floor, ahead of its rows (#1804)
     bench::emit_alloc_state();         // and the allocator settings they run under (#1903)
-    const std::size_t start_kb = bench::rss_kb_heap_neutral();  // no heap op ahead of a row
+    const std::size_t start_kb = bench::peak_rss_kb();  // no heap op, no file, ahead of a row
     std::vector<double> fixed;
     std::vector<double> scan;
 

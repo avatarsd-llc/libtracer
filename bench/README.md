@@ -1750,8 +1750,9 @@ inside its A/A spread. Each family also prints its own RSS delta on stdout, `RSS
 start_kb= peak_kb= delta_kb=` (#1808): the high-water mark minus the resident set it started
 from, which replaces the whole-run `/usr/bin/time -v` max RSS (the harness's peak).
 `bench_compact_delivery`, `bench_forward_demux` and `bench_store_sweep latency` print the same
-line after their last row (`compact-delivery`, `forward-demux`, `store-lat`), with a start
-figure read by `bench::rss_kb_heap_neutral` so no heap operation runs ahead of their rows
+line after their last row (`compact-delivery`, `forward-demux`, `store-lat`). Their start
+figure is the high-water mark before the first row (`bench::peak_rss_kb`, one `getrusage`):
+a `fopen`, or even an `open`/`read` of `/proc/self/statm`, ahead of their rows moved them
 (#1908).
 
 What each in-process row publishes as its delivery figure is pinned the same way, by

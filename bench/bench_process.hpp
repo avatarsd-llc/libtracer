@@ -36,7 +36,6 @@
 #include <string_view>
 
 #if defined(__linux__)
-#include <fcntl.h>
 #include <sched.h>
 #include <spawn.h>
 #include <sys/resource.h>
@@ -239,29 +238,22 @@ inline std::size_t rss_kb() {
 }
 
 /**
- * @brief @ref rss_kb without touching the heap (#1908): `open(2)` and `read(2)` into a stack
- *        buffer, where `fopen` allocates its `FILE` and a 4 KiB buffer.
+ * @brief This process's resident high-water mark so far, in KiB (`getrusage`); 0 where it
+ *        cannot be read (#1908).
  *
- * For a binary whose rows start right after it: `bench_compact_delivery`,
- * `bench_forward_demux` and `bench_store_sweep latency` take their start figure here, ahead of
- * the first row, and print @ref emit_family_rss after the last one. A `fopen` read there moved
- * `inproc/64/1024/1` by +4.7% (#1914): the blocks it freed were reused by the first rows.
- * `bench_libtracer` keeps @ref rss_kb, so its rows meet the heap they always met.
+ * The start figure of a binary whose rows start right after it: `bench_compact_delivery`,
+ * `bench_forward_demux` and `bench_store_sweep latency` read it ahead of the first row and
+ * print @ref emit_family_rss after the last one, so their delta is what the rows raised the
+ * high-water mark by. One `getrusage` call: no heap operation, no file. A `fopen` read there
+ * moved `inproc/64/1024/1` by +4.7% (#1914), and even an `open(2)` / `read(2)` of
+ * `/proc/self/statm` moved the `store-lat` net-fwd rows by +5-8% on the bench CPU, where
+ * this read left them at main's figure. `bench_libtracer` keeps @ref rss_kb, so its rows meet
+ * what they always met.
  */
-inline std::size_t rss_kb_heap_neutral() {
+inline std::size_t peak_rss_kb() {
 #if defined(__linux__)
-    const int fd = ::open("/proc/self/statm", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return 0;
-    char buf[96];
-    const ssize_t n = ::read(fd, buf, sizeof buf - 1);
-    ::close(fd);
-    if (n <= 0) return 0;
-    buf[n] = '\0';
-    char* end = nullptr;
-    (void)std::strtoul(buf, &end, 10);  // the first field is the total size; skip it
-    const unsigned long resident = std::strtoul(end, nullptr, 10);
-    const long page = sysconf(_SC_PAGESIZE);
-    return page > 0 ? resident * static_cast<std::size_t>(page) / 1024 : 0;
+    rusage ru{};
+    return getrusage(RUSAGE_SELF, &ru) == 0 ? static_cast<std::size_t>(ru.ru_maxrss) : 0;
 #else
     return 0;
 #endif
@@ -278,8 +270,7 @@ inline std::size_t rss_kb_heap_neutral() {
  * lands in the transcript beside the family's rows; every RESULT parser skips it on its tag.
  *
  * @param family   The family that just ran.
- * @param start_kb @ref rss_kb (or @ref rss_kb_heap_neutral) taken before the family's first
- *                 row.
+ * @param start_kb @ref rss_kb (or @ref peak_rss_kb) taken before the family's first row.
  */
 inline void emit_family_rss(std::string_view family, std::size_t start_kb) {
 #if defined(__linux__)
