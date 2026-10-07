@@ -234,8 +234,21 @@
         s2.steps = se.steps.filter(function (t) { return t[0] >= a && t[0] <= b; })
           .map(function (t) { return [t[0] - a, t[1], t[2]]; });
       }
+      if (se.sus) {
+        s2.sus = se.sus.filter(function (p) { return p[0] >= a && p[0] <= b; })
+          .map(function (p) { return [p[0] - a, p[1]]; });
+      }
+      s2.cpts = carriedPts(se, suite).filter(function (p) { return p[0] >= a && p[0] <= b; })
+        .map(function (p) { return [p[0] - a, p[1]]; });
       return s2;
     });
+    function shiftKeys(o) {
+      var r = {};
+      Object.keys(o || {}).forEach(function (k) {
+        if (+k >= a && +k <= b) r[+k - a] = Array.isArray(o[k]) ? [o[k][0] - a, o[k][1]] : o[k];
+      });
+      return r;
+    }
     return {
       c: c2,
       suite: {
@@ -244,7 +257,8 @@
         dates: suite.dates ? suite.dates.slice(a, b + 1) : undefined,
         host: suite.host,
         hosts: suite.hosts ? suite.hosts.slice(a, b + 1) : undefined,
-        releases: shift(suite.releases), instruments: shift(suite.instruments)
+        releases: shift(suite.releases), instruments: shift(suite.instruments),
+        carried: shiftKeys(suite.carried), unmeasured: shiftKeys(suite.unmeasured)
       }
     };
   }
@@ -289,20 +303,47 @@
    * title names the commit and says the value was hidden or not recorded.
    */
   function gapMarks(se, X, Y, cc, suite) {
-    var s = "";
+    var s = "", sus = {}, why = suite.unmeasured || {};
+    (se.sus || []).forEach(function (p) { sus[p[0]] = true; });
     for (var j = 1; j < se.pts.length; j++) {
       var a = se.pts[j - 1], b = se.pts[j];
       if (b[0] === a[0] + 1) continue;
       s += '<line class="ph-gap" stroke="' + cc + '" x1="' + X(a[0]).toFixed(1) + '" y1="' + Y(a[1]).toFixed(1) +
         '" x2="' + X(b[0]).toFixed(1) + '" y2="' + Y(b[1]).toFixed(1) + '"/>';
       for (var k = a[0] + 1; k < b[0]; k++) {
+        if (sus[k]) continue; // a suspect ring at the measured value marks this slot
         var f = (k - a[0]) / (b[0] - a[0]);
         s += '<circle class="ph-gapdot" stroke="' + cc + '" cx="' + X(k).toFixed(1) + '" cy="' +
           (Y(a[1]) + (Y(b[1]) - Y(a[1])) * f).toFixed(1) + '" r="2.2"><title>' + se.label + " · " +
-          (suite.shas[k] || "") + ": no trusted value</title></circle>";
+          (suite.shas[k] || "") + ": " + (why[k] || "no trusted value") + "</title></circle>";
       }
     }
     return s;
+  }
+
+  /*
+   * Carried points on the main axis (2026-10-07). A carried slot is a commit that changed
+   * no bench input, so its binaries are those of the slot `suite.carried[k][0]` (short sha
+   * `suite.carried[k][1]`), and it repeats that slot's value. `se.cpts`, when a range
+   * slice set it, already holds them: the source slot may lie outside the slice.
+   */
+  function carriedPts(se, suite) {
+    if (se.cpts) return se.cpts;
+    var by = {}, out = [], cf = suite.carried || {};
+    se.pts.forEach(function (p) { by[p[0]] = p[1]; });
+    Object.keys(cf).forEach(function (k) {
+      var v = by[cf[k][0]];
+      if (v !== undefined) out.push([+k, v]);
+    });
+    return out.sort(function (a, b) { return a[0] - b[0]; });
+  }
+
+  /* The trend line of one series: [[slot, value, carried?], ...] in slot order. */
+  function linePts(se, suite) {
+    var out = se.pts.map(function (p) { return [p[0], p[1], false]; });
+    carriedPts(se, suite).forEach(function (p) { out.push([p[0], p[1], true]); });
+    out.sort(function (a, b) { return a[0] - b[0]; });
+    return out;
   }
 
   // ---------------------------------------------------------------- trend --
@@ -376,23 +417,37 @@
       });
     });
     c.series.forEach(function (se) {
-      var cc = col(se.ci);
+      var cc = col(se.ci), lp = linePts(se, suite);
       // One polyline per run of consecutive slots (#1801): the axis is one slot per commit
       // for every series of the store, so a commit this series did not record is a GAP in
-      // its slot, never a straight segment that reads as a measured trend across it.
+      // its slot, never a straight segment that reads as a measured trend across it. A
+      // carried slot (no code change) continues the run.
       var runs = [], run = [];
-      se.pts.forEach(function (p, j) {
-        if (j && p[0] !== se.pts[j - 1][0] + 1) { runs.push(run); run = []; }
+      lp.forEach(function (p, j) {
+        if (j && p[0] !== lp[j - 1][0] + 1) { runs.push(run); run = []; }
         run.push(X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1));
       });
       if (run.length) runs.push(run);
       runs.forEach(function (r) {
         if (r.length > 1) s += '<polyline fill="none" stroke="' + cc + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="' + r.join(" ") + '"/>';
       });
-      se.pts.forEach(function (p, i3) {
-        s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="' + (i3 === se.pts.length - 1 ? 3.4 : 2.2) + '" fill="' + cc + '"/>';
+      lp.forEach(function (p, i3) {
+        if (p[2]) {
+          s += '<circle class="ph-carried" cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="1.8" fill="' + cc + '"><title>'
+            + se.label + " · " + (suite.shas[p[0]] || "") + ": no code change, same as " + ((suite.carried[p[0]] || [])[1] || "") + "</title></circle>";
+        } else {
+          s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="' + (i3 === lp.length - 1 ? 3.4 : 2.2) + '" fill="' + cc + '"/>';
+        }
       });
-      s += gapMarks(se, X, Y, cc, suite);
+      // Suspect points (a guard flagged their sample) are drawn, not dropped: a hollow
+      // ring at the measured value, off the line, clamped into the frame so one outlier
+      // cannot squash the trend's scale.
+      (se.sus || []).forEach(function (p) {
+        var y = Math.max(m.t, Math.min(m.t + ph, Y(p[1])));
+        s += '<circle class="ph-sus" stroke="' + cc + '" cx="' + X(p[0]).toFixed(1) + '" cy="' + y.toFixed(1) + '" r="3"><title>'
+          + se.label + " · " + (suite.shas[p[0]] || "") + ": " + yf(p[1]) + " suspect, its sample was flagged</title></circle>";
+      });
+      s += gapMarks({ label: se.label, pts: lp, sus: se.sus }, X, Y, cc, suite);
     });
     // Step markers go on top of every line, so a marker is never hidden under a neighbour.
     c.series.forEach(function (se) {
@@ -1003,8 +1058,21 @@
           head = "<div class='sha'><code>" + suite.shas[i] + "</code>" + day + rel + "</div>"
             + (suite.msgs && suite.msgs[i] ? "<div class='msg'>" + suite.msgs[i] + "</div>" : "")
             + (host ? "<div class='host'>" + host + "</div>" : "");
+          var cf = suite.carried || {}, um = suite.unmeasured || {};
+          if (cf[i] !== undefined) head += "<div class='ph-nogap'><i>no code change, same as <code>" + cf[i][1] + "</code></i></div>";
+          else if (um[i]) head += "<div class='ph-nogap'><i>" + um[i] + "</i></div>";
           rows = c.series.map(function (se, si) {
-            var v = byIdx[si][i], bt = bandAt[si] && bandAt[si][i];
+            var v = byIdx[si][i], bt = bandAt[si] && bandAt[si][i], cv = null;
+            if (v === undefined && cf[i] !== undefined)
+              carriedPts(se, suite).forEach(function (p) { if (p[0] === i) cv = p[1]; });
+            if (cv !== null)
+              return '<div class="ph-nogap"><span class="dot" style="background:' + col(se.ci) + '"></span>'
+                + se.label + " <b>" + g.yf(cv) + "</b> <i>carried</i></div>";
+            var sv = null;
+            (se.sus || []).forEach(function (p) { if (p[0] === i) sv = p[1]; });
+            if (v === undefined && sv !== null)
+              return '<div class="ph-nogap"><span class="dot" style="border:1px solid ' + col(se.ci) + '"></span>'
+                + se.label + " <b>" + g.yf(sv) + "</b> <i>suspect</i></div>";
             // Inside the series' span, a missing value is said, not skipped (#1890).
             if (v === undefined && se.pts.length && i > se.pts[0][0] && i < se.pts[se.pts.length - 1][0])
               return '<div class="ph-nogap"><span class="dot" style="border:1px solid ' + col(se.ci) + '"></span>'

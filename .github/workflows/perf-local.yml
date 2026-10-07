@@ -16,8 +16,10 @@
 # the chart tooltip) and captured in full next to the store (`host.txt`).
 #
 # SECURITY (public repo + self-hosted runner): fork code must never execute on the
-# bench machine. Triggers are push-to-main ONLY — no pull_request — plus the
-# repository guard on the job. Keep it that way.
+# bench machine. Triggers are push to `main` or a `v*` tag, the schedule and a manual
+# dispatch — no pull_request, no workflow_run — plus the repository guard and a
+# main-or-release-tag ref guard on the job. A backfill commit must be in the history of
+# `main`. Keep it that way.
 #
 # NOISE: the bench host also serves other repos' CI, so single points can catch a
 # noisy neighbour. The series is read by medians over points, the alert threshold
@@ -53,6 +55,17 @@
 # is a BOUND ON THE GAP, not a point per commit: any regression range stays narrow
 # enough to bisect. Contaminated points do not count as coverage — a sample the A/A
 # pair flagged answers "what was the machine doing", not "what did the code cost".
+#
+# A POINT PER PUSH (2026-10-07). The page draws one slot per first-parent `main` commit,
+# not one per stored sample (`render_history.onto_main_axis`). A push the `paths:` filter
+# drops built byte-identical bench binaries to its nearest bench-relevant ancestor, so the
+# page carries that commit's point forward, marked "no code change, same as <sha>", instead
+# of spending a bench window to re-measure the same binary. Every push that passes the
+# filter queues its own run (the per-sha concurrency group below), so no bench-relevant
+# commit loses its point to a newer push; the busy-host guard FLAGS a sample instead of
+# skipping it. A release tag gets its own run (`tags:`), skipped when its commit already
+# has a point, and `workflow_dispatch` with `commit` backfills one past commit. docs.yml
+# rebuilds the page when this workflow completes (its `workflow_run:` trigger).
 #
 # STORE SWEEP (#1428): the ADR-0079 per-configuration sweep banks its DETERMINISTIC
 # columns here — the `hwm` store `used()` occupancy per (arm, T), which additionally
@@ -99,6 +112,10 @@ on:
       - 'core/**'
       - 'bench/**'
       - '.github/workflows/perf-local.yml'
+    # A release tag measures its commit (paths are not evaluated for tag pushes). The
+    # density job skips it when that commit already has a point, which is the usual
+    # case: a release is a `main` merge, measured when it landed.
+    tags: ['v*']
   # The catch-up leg (#1301). It measures ONLY when the density check says the store
   # has fallen behind, so a quiet week costs one cheap hosted-runner job a day and
   # nothing on the bench machine. Kept off the hour to miss the cron stampede.
@@ -110,11 +127,22 @@ on:
         description: 'Measure even if the store is inside the density bound'
         type: boolean
         default: false
+      commit:
+        description: >-
+          Backfill: measure core/ at this past main commit with the bench/ tree of the
+          dispatched ref, and bank the point under that commit. Empty measures the ref.
+        type: string
+        default: ''
 
-# One measurement at a time; never cancel a measurement mid-run (a half-measured
-# point is worse than a late one — the next push queues behind it).
+# Never cancel a measurement mid-run (a half-measured point is worse than a late one).
+# A push gets a group of its OWN sha: GitHub keeps one QUEUED run per group and cancels
+# the older one when a newer run queues, which with one shared group cost 26 queued push
+# runs their point between 2026-09-23 and 2026-10-07 (merge bursts on 10-03 and 10-04).
+# Runs still measure one at a time, because one runner (`studio-bench`) carries the
+# `bench-local` label and takes one job at a time. Scheduled and manual runs share one
+# group: a catch-up superseded by a newer catch-up loses nothing.
 concurrency:
-  group: perf-local
+  group: perf-local-${{ github.event_name == 'push' && github.sha || 'catchup' }}
   cancel-in-progress: false
 
 jobs:
@@ -132,6 +160,7 @@ jobs:
     outputs:
       measure: ${{ steps.decide.outputs.measure }}
       gap: ${{ steps.gap.outputs.gap }}
+      commit: ${{ steps.decide.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -154,16 +183,38 @@ jobs:
             --shas-file "$RUNNER_TEMP/bench_shas.txt" \
             --max-gap 8
 
-      # A push measures unconditionally — that is the primary leg and the density
-      # check is only advice to it. A schedule measures ONLY to close a gap, and a
-      # manual dispatch can override.
+      # A branch push measures unconditionally — that is the primary leg and the density
+      # check is only advice to it. A tag push measures only when its commit has no point
+      # yet. A schedule measures ONLY to close a gap, and a manual dispatch can override
+      # (a backfill `commit` always measures).
       - name: Decide whether this run measures
         id: decide
         env:
           DUE: ${{ steps.gap.outputs.due }}
           FORCED: ${{ inputs.force }}
+          BACKFILL: ${{ inputs.commit }}
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ] || [ "$FORCED" = "true" ] \
+          set -euo pipefail
+          commit=""
+          if [ -n "${BACKFILL:-}" ]; then
+            commit="$(git rev-parse --verify "${BACKFILL}^{commit}")"
+            git merge-base --is-ancestor "$commit" HEAD || {
+              echo "::error::backfill commit $commit is not in the history of the dispatched ref"
+              exit 1
+            }
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          here="$(git rev-parse HEAD^{commit})"
+          if [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
+            if grep -q "\"$here\"" "$RUNNER_TEMP/data.js"; then
+              echo "measure=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::tag ${GITHUB_REF_NAME} is commit ${here:0:8}, which already has a point"
+            else
+              echo "measure=true" >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "$EVENT" = "push" ] || [ "$FORCED" = "true" ] || [ -n "$commit" ] \
              || [ "$DUE" = "true" ]; then
             echo "measure=true" >> "$GITHUB_OUTPUT"
           else
@@ -176,10 +227,15 @@ jobs:
     # `always() && != 'false'` and not `== 'true'`: a density check that fails or is
     # cancelled must never cost a push its point. The check exists to ADD samples the
     # push trigger misses; letting it subtract one would invert it. Only an explicit
-    # "not needed" — the scheduled-run case — skips the measurement.
+    # "not needed" — the scheduled-run case — skips the measurement. Only `main` and a
+    # release tag reach the bench machine (a dispatch from any other branch does not), and
+    # a backfill whose commit the density job could not resolve measures nothing rather
+    # than silently measuring the ref.
     if: >-
       always() &&
       github.repository == 'avatarsd-llc/libtracer' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      (inputs.commit == '' || inputs.commit == null || needs.density.outputs.commit != '') &&
       needs.density.outputs.measure != 'false'
     runs-on: [self-hosted, bench-local]
     # The loosest ceiling in the repo, deliberately. Measured max 18.15 min, p50 6.62,
@@ -261,6 +317,22 @@ jobs:
           { echo "${desc}"; echo; lscpu; } > bench/host.txt
           { echo "### bench-local host"; echo '```'; echo "${desc}"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+      # BACKFILL (`workflow_dispatch` with `commit`). The bench tree, the tooling and this
+      # workflow stay at the dispatched ref, so the point is taken with today's instrument;
+      # only core/, the code under test, is swapped for the past commit's. That is the
+      # comparison a trend line needs (one instrument across the axis), and it keeps every
+      # step below on the tooling it was written for. The stamp says so on every point.
+      - name: Backfill — take core/ from the past commit
+        if: needs.density.outputs.commit != ''
+        env:
+          COMMIT: ${{ needs.density.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$COMMIT"
+          rm -rf core
+          git archive "$COMMIT" core | tar -x
+          echo "BACKFILL_NOTE=backfill: core@${COMMIT:0:8} measured with bench@${GITHUB_SHA:0:8}" >> "$GITHUB_ENV"
+
       # Deliberately `-j "$(nproc)"`, not BUILD_JOBS (#1637): this runner (`studio-bench`)
       # is un-quota'd so bench timings stay clean, and these steps only COMPILE — the
       # benches themselves run serially, pinned to one CPU, after the quiescence guard.
@@ -274,11 +346,15 @@ jobs:
       # QUIESCENCE (#1236). The build above just ran `-j$(nproc)` and the 1-minute load
       # average is still carrying it, so this WAITS for the machine rather than checking
       # it — a bare check placed here would refuse every run. A host that never settles
-      # skips its sample and leaves the job green: refusing to measure is a correct
-      # outcome, and a red job trains the reader to ignore red.
-      - name: Wait for the host to go quiet (skip the sample if it does not)
+      # FLAGS its sample (2026-10-07) and leaves the job green. It used to skip the sample,
+      # and the load average counts the whole workstation, the CI runners on other CPUs
+      # included: 36 of 84 successful push runs from 2026-09-23 to 2026-10-07 waited the
+      # full 15 min and banked nothing. 300 s covers this job's own build decaying out of
+      # the 1-minute average; past that the load is neighbours, which waiting does not fix
+      # and the per-CPU verdicts below measure directly.
+      - name: Wait for the host to go quiet (flag the sample if it does not)
         id: guard
-        run: python3 bench/host_guard.py wait --timeout 900
+        run: python3 bench/host_guard.py wait --timeout 300
 
       # The A/A null pair, leg one. Same binary either side of the measured run, so the
       # text layout is held constant and the only thing left that can move the number is
@@ -287,7 +363,6 @@ jobs:
       # across placements of identical source, where fold-b4 swings ~15%), so movement
       # in it is unambiguous.
       - name: A/A null — before the measured run
-        if: steps.guard.outputs.bank == 'true'
         env:
           LIBTRACER_BENCH_SECONDS: "1"
         run: |
@@ -367,7 +442,6 @@ jobs:
       # under the measurement; the sample is still banked (a datum taken in known
       # conditions beats no datum) but carries the verdict into the store.
       - name: A/A null — after the measured run
-        if: steps.guard.outputs.bank == 'true'
         env:
           LIBTRACER_BENCH_SECONDS: "1"
         run: |
@@ -376,7 +450,6 @@ jobs:
 
       - name: A/A bracket verdict
         id: bracket
-        if: steps.guard.outputs.bank == 'true'
         # `--rows-out` names the banked rows that failed their own A/A check (#1890); the
         # stamp step flags exactly those points, so the charts hide them per row while the
         # whole-run `note` below still decides for every gating consumer.
@@ -391,7 +464,6 @@ jobs:
       # keeps the point out of the density count and the rolling-drift baseline below.
       - name: Measurement-conditions verdict (bench CPU foreign time + CPU pressure)
         id: conditions
-        if: steps.guard.outputs.bank == 'true'
         run: python3 bench/bench_conditions.py summary --record "$BENCH_CONDITIONS_RECORD"
 
       # --- RAM census (#1228) ----------------------------------------------------
@@ -402,10 +474,8 @@ jobs:
       # counts, not time), so running them inside the bracket would widen the window
       # the A/A pair is supposed to bracket for nothing.
       #
-      # They are also NOT conditioned on the quiescence guard's `bank`. That split is
-      # deliberate: banking a *series* point on a busy host is what #1236 exists to
-      # refuse, but the RAM figures do not move with load, so the GATE below still
-      # gets to render a verdict on a commit whose timing sample was skipped.
+      # The RAM figures do not move with load, so the GATE below renders its verdict
+      # whatever the quiescence guard said; a busy host only flags the timing rows.
       #
       # --no-can: the CAN arms need a privileged kernel `vcan0` this host does not
       # carry (can-vcan-e2e.yml owns that path). The pin file does not pin a CAN arm,
@@ -523,7 +593,6 @@ jobs:
           esac
 
       - name: Emit history metrics + stamp the host onto every point
-        if: steps.guard.outputs.bank == 'true'
         run: |
           args=""
           for f in bench/bench_libtracer_raw.txt bench/bench_forward_demux_raw.txt \
@@ -565,9 +634,11 @@ jobs:
             --json bench/benchmark_throughput.json \
             --desc "$HOST_DESC · $COND_LINE" --compiler \
             --clock-from bench/bench_libtracer_raw.txt \
-            --note "$AA_NOTE" --note "$COND_NOTE" --row-flags bench/aa_rows.json
+            --note "$AA_NOTE" --note "$COND_NOTE" --note "$BUSY_NOTE" \
+            --note "${BACKFILL_NOTE:-}" --row-flags bench/aa_rows.json
         env:
           HOST_DESC: ${{ steps.host.outputs.desc }}
+          BUSY_NOTE: ${{ steps.guard.outputs.note }}
           AA_NOTE: ${{ steps.bracket.outputs.note }}
           COND_LINE: ${{ steps.conditions.outputs.line }}
           COND_NOTE: ${{ steps.conditions.outputs.note }}
@@ -576,7 +647,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bench-local-${{ github.sha }}
+          name: bench-local-${{ needs.density.outputs.commit || github.sha }}
           path: |
             bench/host.txt
             bench/bench_libtracer_raw.txt
@@ -593,11 +664,13 @@ jobs:
             bench/conditions.jsonl
           retention-days: 90
 
-      # BANKING is conditional (#1236): a busy host contributes no point at all. The
-      # transcripts above are uploaded either way, so a skipped sample is still
-      # evidence — it is only the persisted series that stays clean.
+      # BANKING is unconditional (2026-10-07). A sample a guard distrusts is banked
+      # FLAGGED (`CONTAMINATED` in `extra`): the page draws it marked, and no gating
+      # consumer, density count or rolling baseline trusts it (#1236). `ref` names the
+      # commit the point belongs to: the backfill commit, or (empty) the run's own.
+      # A backfilled point does not follow the store's previous entry, so it raises
+      # no per-step alert comment.
       - name: Track latency + memory history (fixed host)
-        if: steps.guard.outputs.bank == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: libtracer bench-local latency (ns, smaller is better, fixed pinned host)
@@ -607,16 +680,16 @@ jobs:
           auto-push: true
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench-local
+          ref: ${{ needs.density.outputs.commit }}
           # Tighter than the hosted store's 125%: the machine is fixed, so creep at
           # 115% is signal, not lottery. Still a soft alert — the hard verdicts stay
           # with perf.yml's same-runner interleaved gates.
           alert-threshold: '115%'
-          comment-on-alert: true
+          comment-on-alert: ${{ needs.density.outputs.commit == '' }}
           fail-on-alert: false
           alert-comment-cc-users: '@avatarsd'
 
       - name: Track throughput history (fixed host)
-        if: steps.guard.outputs.bank == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: libtracer bench-local throughput (deliveries/s, bigger is better, fixed pinned host)
@@ -626,8 +699,9 @@ jobs:
           auto-push: true
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench-local
+          ref: ${{ needs.density.outputs.commit }}
           alert-threshold: '115%'
-          comment-on-alert: true
+          comment-on-alert: ${{ needs.density.outputs.commit == '' }}
           fail-on-alert: false
           alert-comment-cc-users: '@avatarsd'
 
@@ -650,7 +724,6 @@ jobs:
       # gates (this workflow renders no pass/fail on a commit — see the header).
       - name: Rolling-baseline drift + toolchain identity (soft)
         id: drift
-        if: steps.guard.outputs.bank == 'true'
         run: |
           git fetch --no-tags --depth=1 origin gh-pages
           git show FETCH_HEAD:dev/bench-local/data.js > "$RUNNER_TEMP/data.js"
@@ -665,7 +738,6 @@ jobs:
       # Inflating the newest point by half must produce the warning; if it does not,
       # the leg above is decorative and this step says so.
       - name: The drift comparator must warn on an induced step (dry run)
-        if: steps.guard.outputs.bank == 'true'
         run: |
           doctored="${RUNNER_TEMP:-.}/doctored_data.js"
           python3 - "$RUNNER_TEMP/data.js" "$doctored" <<'PY'
@@ -699,7 +771,6 @@ jobs:
       # window, into the job summary — the per-wave perf report reads it from there. Soft,
       # like the drift leg: it reports and never fails the bench.
       - name: Sustained steps over the recent window (soft)
-        if: steps.guard.outputs.bank == 'true'
         continue-on-error: true
         run: python3 bench/step_detect.py --data "$RUNNER_TEMP/data.js" --recent 5 --markdown
 
