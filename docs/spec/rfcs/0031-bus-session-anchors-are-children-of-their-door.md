@@ -281,7 +281,8 @@ the NAME spelling reaches today, so no deployment's grant set moves when its ses
 The general rule of reference/05 §`0x0A` is that a bare child evaluates only the ancestor ACEs that
 carry `INHERIT`. This RFC does **not** apply it to anchors (§14 Q1). Under that rule a door ACE without
 `INHERIT` would stop applying to the door's sessions, and a door bearing only such ACEs would leave
-them with an empty effective list, which reference/05 defines as unrestricted. The reference
+them with an empty effective list, which is unrestricted on the core subset (reference/05 §`0x0A`;
+under the full model's strict mode it is denied by default). The reference
 implementation realizes the anchor rule as one predicate in the existing bearer walk
 (`graph_t::acl_allows`): an anchor counts as its door's "self".
 
@@ -306,7 +307,8 @@ session and the slot. The anchor override is for a decision about one live sessi
 
 **Normative; discharges RFC-0030 §9.1.** On an anchored bus, the pending record's "next-hop
 session" is **the anchor's PAIR**. RFC-0030 §9.2 condition 2 compares it with the session the reply
-arrived from, which the receiving node stamps (RFC-0030 §8.4). Because a returning peer revives the
+arrived from. The requester observes that session locally, at the ingress door, when the reply
+arrives; it is not a value stamped into `src` or `0x15` (RFC-0030 §8.4 stamps only the door). Because a returning peer revives the
 anchor at a new generation (§5.3), a reply from a successor session in the same slot, with the same
 name, fails condition 2 even when it presents a live token. That is a guard RFC-0030 §9.2 could only
 offer by name before this RFC.
@@ -375,8 +377,8 @@ one. Per session, against today:
 | `:acl` | never written: no walk reaches it | allocated only when an override is written (§6.3) |
 
 With the door `net/ws` and the peer `p0`, the key record goes from 11 B to 3 B. A plain anchor stays
-at the measured cost of a plain vertex: about **111 B on a 64-bit host** (`handler_vertex_heap_test`,
-[#1959](https://github.com/avatarsd-llc/libtracer/pull/1959)) and **about 110–120 B on rv32**
+at the measured cost of a plain vertex: about **111 B on a 64-bit host**, as measured by `handler_vertex_heap_test` in the still-open
+[#1959](https://github.com/avatarsd-llc/libtracer/pull/1959) (a PR measurement, not a shipped number), and **about 110–120 B on rv32**
 (ADR-0044 §Amendment, `bench_forward_heap`), less `len(mount) + 2` B of key. §13 clause 4 holds
 the claim to "never more than today".
 
@@ -392,7 +394,7 @@ Per node and per door:
 | --- | --- | --- | --- |
 | **NARROW** (single-upstream MCU) | FLAT listener or a dialer; or `kBusLinks` closed | 0 B | 0 B, and −64 B per graph |
 | **MID** (board serving a few browser tabs) | `peer_named = true`, `max_peers` ≈ 4 | ≈ 0.5 KB at 4 sessions | the same, less `4 × (len(mount) + 2)` B |
-| **WIDE** (gateway) | `peer_named = true`, hundreds of sessions | ≈ 111 B × sessions on a host | the same, less `(len(mount) + 2)` B × sessions |
+| **WIDE** (gateway) | `peer_named = true`, hundreds of sessions | ≈ 111 B × sessions on a host (the #1959 measurement) | the same, less `(len(mount) + 2)` B × sessions |
 
 ### 7.2 `peer_named = false` keeps FLAT links free
 
@@ -586,7 +588,7 @@ shown to fail with its change ablated:
   ADR-0073 §2.
 - **Bare-child inheritance for anchors** (only `INHERIT` door ACEs reach a session). It is the general
   rule with no special case, but it changes the verdict for every deployment whose door ACEs lack
-  `INHERIT`, and it can leave sessions with an empty, hence unrestricted, effective list. Rejected in
+  `INHERIT`, and it can leave sessions with an empty effective list, which is unrestricted on the core subset. Rejected in
   favour of §6.2; see §14 Q1.
 - **Fall back to the link's peer list when an accepted session has no anchor.** One fewer branch,
   but the same session would then be reachable as two vertices with two gates, which is the state
