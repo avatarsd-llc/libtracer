@@ -1,8 +1,8 @@
 # The API is read / write / await + a field-write control surface — no connect/disconnect/subscribe
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: RFC-0030 -->
 
-Status: accepted
+Status: accepted **Superseded in part by [RFC-0030](../spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md)** (accepted 2026-10-07): await becomes a host-API form over a one-shot subscription; read and write stand.
 
 The entire data API is **three calls — `read`, `write`, `await`** — plus refcount management. Every control surface (subscriptions, QoS, ACLs, liveness) is a **field-write** to a `:`-addressed vertex field: subscribing *is* writing a SUBSCRIBER TLV into a `:subscribers[]` slot. There is **no** `connect` / `disconnect` / `subscribe` primitive.
 

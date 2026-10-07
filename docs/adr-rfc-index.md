@@ -17,7 +17,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [ADR-0003](adr/0003-retire-list-type-code-0x05.md) | Retire type code 0x05 (LIST); nesting is opt.PL=1 on a purpose-specific type byte | accepted |  |  |
 | [ADR-0004](adr/0004-crc-in-optional-trailer.md) | CRC lives in the optional append-only trailer (opt.CR), CRC-32C default | accepted |  |  |
 | [ADR-0005](adr/0005-fixed-width-length-opt-ll.md) | Length is fixed-width LE selected by opt.LL (u16 / u32), capped at u32 | accepted |  |  |
-| [ADR-0006](adr/0006-read-write-await-api-no-connect.md) | The API is read / write / await + a field-write control surface — no connect/disconnect/subscribe | accepted |  |  |
+| [ADR-0006](adr/0006-read-write-await-api-no-connect.md) | The API is read / write / await + a field-write control surface — no connect/disconnect/subscribe | accepted | [RFC-0030](spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md) (part) |  |
 | [ADR-0007](adr/0007-normative-wire-format-by-incorporation.md) | Normative wire format lives in reference/01 + 05, incorporated by reference from the spec | accepted |  |  |
 | [ADR-0008](adr/0008-schema-driven-array-indexing.md) | Schema-driven array indexing: array-ness is an L4 schema property, not a wire type or `opt` bit | accepted |  |  |
 | [ADR-0009](adr/0009-built-in-error-model-tr-concept-namespace.md) | Built-in error model: a `tr::` concept namespace, registered-code-or-string identity, severity + disposition in a registry | accepted |  |  |
@@ -95,7 +95,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [ADR-0081](adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md) | Pre-sink ingress is held in the transport's native flow-control window or dropped with a named counter — never parked inside the library | accepted |  |  |
 | [ADR-0082](adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md) | The auth subject and `peer_named` are two different claims — who wrote this, versus where the peer appears in the graph — and the `peer_named` default stays `false` | accepted |  |  |
 | [ADR-0083](adr/0083-one-allocation-seam.md) | One allocation seam: every core allocation draws from one injected block source, placed by one module | accepted |  | [ADR-0039](adr/0039-pmr-memory-model-host-aligned-allocation.md) (part) |
-| [ADR-0084](adr/0084-remote-await-completes-from-a-receiver-side-waiter.md) | A remote AWAIT completes from a one-shot receiver-side waiter charged to the receiving link, and never holds that link's receive context | accepted |  |  |
+| [ADR-0084](adr/0084-remote-await-completes-from-a-receiver-side-waiter.md) | A remote AWAIT completes from a one-shot receiver-side waiter charged to the receiving link, and never holds that link's receive context | superseded | [RFC-0030](spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md) |  |
 | [ADR-0085](adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md) | A link's ingress drain is bounded by a compile-time budget, and a spent budget waits for the core's idle task, never for a clock | accepted |  |  |
 
 ## RFCs
@@ -105,7 +105,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [RFC-0001](spec/rfcs/0001-v01-consistency-consolidation.md) | Protocol-v1 wire-format consistency consolidation | accepted |  |  |
 | [RFC-0002](spec/rfcs/0002-protocol-error-model.md) | Protocol error model: the `tr::` concept namespace | accepted |  |  |
 | [RFC-0003](spec/rfcs/0003-bridged-wildcard-delivery-path.md) | Concrete-path delivery for bridged wildcard subscriptions | superseded |  |  |
-| [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) | Remote operation addressing: path-as-route + the `FWD`/`FIELD` frames | accepted | [RFC-0029](spec/rfcs/0029-one-path-primitive.md) (part) |  |
+| [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) | Remote operation addressing: path-as-route + the `FWD`/`FIELD` frames | accepted | [RFC-0029](spec/rfcs/0029-one-path-primitive.md) (part), [RFC-0030](spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md) (part) |  |
 | [RFC-0005](spec/rfcs/0005-subtree-subscriptions.md) | Subtree subscriptions: vertical bubbling, branch-write decomposition, write-creates | accepted |  |  |
 | [RFC-0006](spec/rfcs/0006-resource-bounded-nesting-depth.md) | Nesting depth is receiver-resource-bounded: the fixed cap of 32 is removed | accepted |  |  |
 | [RFC-0007](spec/rfcs/0007-delivery-terminates-at-target.md) | SUBSCRIBER delivery terminates at the target: no automatic re-dispatch to the target's subscribers | accepted |  |  |
@@ -129,6 +129,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [RFC-0027](spec/rfcs/0027-label-switched-path-compression.md) | Label-switched path compression: minting a per-host path label across the wire | superseded | [RFC-0029](spec/rfcs/0029-one-path-primitive.md) |  |
 | [RFC-0028](spec/rfcs/0028-lean-value-path.md) | The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait | accepted |  |  |
 | [RFC-0029](spec/rfcs/0029-one-path-primitive.md) | One path primitive: the owner-issued `(index, generation)` pair, carried per hop, local = forwarded | accepted |  | [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part), [RFC-0024](spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) (part), [RFC-0027](spec/rfcs/0027-label-switched-path-compression.md) |
+| [RFC-0030](spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md) | The host API walks the graph: a graph-owned path object, creation refused by default, the reply as a remote write, `AWAIT` and `REPLY` retired | accepted |  | [ADR-0006](adr/0006-read-write-await-api-no-connect.md) (part), [ADR-0084](adr/0084-remote-await-completes-from-a-receiver-side-waiter.md), [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part) |
 
 ## Numbering gaps
 

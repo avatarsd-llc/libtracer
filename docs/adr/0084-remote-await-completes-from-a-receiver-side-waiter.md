@@ -1,8 +1,8 @@
 # A remote AWAIT completes from a one-shot receiver-side waiter charged to the receiving link, and never holds that link's receive context
 
-<!-- status: accepted -->
+<!-- status: superseded; superseded-by: RFC-0030 -->
 
-Status: **accepted** (2026-10-03, maintainer ruling; ships in v0.18.0 with [RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) Amendment 3). Closes the deferred-reply-completion follow-on recorded in [ADR-0044](0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md) ("Probe-on-demand ... needs deferred/await-style reply completion at the terminus first"). Composes with [ADR-0006](0006-read-write-await-api-no-connect.md) (the read/write/await data API), [ADR-0067](0067-bounded-recycling-source-and-per-owner-topology.md) §3 (each link's own rx source) and the no-library-internal-buffer rule ([`CONTEXT.md`](../../CONTEXT.md) §Resource bound).
+Status: **accepted** (2026-10-03, maintainer ruling; ships in v0.18.0 with [RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) Amendment 3). Closes the deferred-reply-completion follow-on recorded in [ADR-0044](0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md) ("Probe-on-demand ... needs deferred/await-style reply completion at the terminus first"). Composes with [ADR-0006](0006-read-write-await-api-no-connect.md) (the read/write/await data API), [ADR-0067](0067-bounded-recycling-source-and-per-owner-topology.md) §3 (each link's own rx source) and the no-library-internal-buffer rule ([`CONTEXT.md`](../../CONTEXT.md) §Resource bound). **Superseded by [RFC-0030](../spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md)** (accepted 2026-10-07): the reply is a remote write matched to its request, and `AWAIT` retires.
 
 ## Context
 
