@@ -43,7 +43,7 @@
  *
  * @section tags Output
  *
- *     RESULT_STORE_LAT   round tag arm leg p50ps p99ps meanps n batch
+ *     RESULT_STORE_LAT   round tag arm leg p50ps p99ps meanps n batch   (p99ps is always 0)
  *     RESULT_STORE_TPUT  round tag arm leg threads per_thread_ops_s agg_ops_s ns_per_op
  *     RESULT_STORE_HWM   arm threads store idx used capacity classes overflow
  *     RESULT_STORE_CHAN  arm threads channel blocks bytes peak_live refusals
@@ -77,11 +77,12 @@ using bench_store::kThreads;
 using bench_store::name_of;
 using bench_store::node_t;
 
-/** @brief Picoseconds per nanosecond — the latency arm accumulates in ps. */
-constexpr std::uint64_t kPsPerNs = 1000;
-
-/** @brief Timed samples per latency cell; each sample is one calibrated batch. */
-constexpr std::size_t kSamplesPerCell = 256;
+/**
+ * @brief Timing budget per latency cell (#1904): about 125-250 windows of 40-80 us, each one
+ *        calibrated batch. It replaced a fixed 256 windows of 20-40 us, so a cell costs about
+ *        what it did.
+ */
+constexpr std::uint64_t kCellBudgetNs = 10'000'000;
 
 /** @brief Wall-clock per throughput point. */
 constexpr auto kWindow = std::chrono::milliseconds(200);
@@ -133,12 +134,19 @@ void step(node_t& n, bench_store::lane_t& l, leg_t leg) {
     }
 }
 
-/** @brief `RESULT_STORE_LAT` — one arm's one leg in one round. */
+/**
+ * @brief `RESULT_STORE_LAT` — one arm's one leg in one round (#1904).
+ *
+ * p50 and mean are per-op picoseconds, rounded to the nearest whole picosecond. The `p99ps`
+ * column is always 0: a percentile of batch means measures interference between windows, not
+ * the tail of one operation, so it is not reported (the column stays so the row keeps its ten
+ * fields for every parser).
+ */
 void emit_lat(int round, const char* tag, const char* arm, const char* leg,
-              const bench::Latency::Summary& s, std::size_t batch) {
-    std::printf("RESULT_STORE_LAT\t%d\t%s\t%s\t%s\t%llu\t%llu\t%llu\t%zu\t%zu\n", round, tag, arm,
-                leg, static_cast<unsigned long long>(s.p50), static_cast<unsigned long long>(s.p99),
-                static_cast<unsigned long long>(s.mean), s.n, batch);
+              const bench::batch_timing_t& t) {
+    std::printf("RESULT_STORE_LAT\t%d\t%s\t%s\t%s\t%llu\t0\t%llu\t%zu\t%zu\n", round, tag, arm, leg,
+                static_cast<unsigned long long>(t.p50_ps + 0.5),
+                static_cast<unsigned long long>(t.mean_ps + 0.5), t.samples, t.batch);
     std::fflush(stdout);
 }
 
@@ -172,20 +180,13 @@ void emit_chan(const char* arm, std::size_t threads, const char* channel,
     bench_store::lane_t& l = n.lane(0);
 
     for (const leg_t leg : kLegs) {
-        // The batch is sized by WINDOW rather than by plateau: the plateau rule compares two
-        // TIMED quantities, so the machine gets a vote in which batch is latched, and
-        // bench_common.hpp records same-binary A/A differences of up to ~8 % from that lottery
-        // alone — larger than the effect this sweep is looking for.
-        const std::size_t batch = bench::calibrate_batch_for_window([&] { step(n, l, leg); });
-        bench::Latency lat;
-        lat.reserve(kSamplesPerCell);
-        for (std::size_t s = 0; s < kSamplesPerCell; ++s) {
-            const std::uint64_t a = bench::now_ns();
-            for (std::size_t i = 0; i < batch; ++i) step(n, l, leg);
-            const std::uint64_t window = bench::now_ns() - a;
-            lat.add(window * kPsPerNs / batch);
-        }
-        emit_lat(round, tag, name_of(arm), name_of(leg), lat.summarize(), batch);
+        // The harness's one batch loop (#1904): the batch is sized by WINDOW rather than by
+        // plateau (the plateau rule compares two TIMED quantities, so the machine gets a vote
+        // in which batch is latched), every kept window is at least 20 us, and the per-op
+        // figure is a picosecond double.
+        const bench::batch_timing_t t =
+            bench::time_batches([&] { step(n, l, leg); }, kCellBudgetNs);
+        emit_lat(round, tag, name_of(arm), name_of(leg), t);
     }
     return n.faults("latency", 1);
 }
@@ -397,6 +398,9 @@ int main(int argc, char** argv) {
         bench::pin_allocator_state(argv);
         bench::emit_alloc_state();
         std::printf("# RESULT_STORE_LAT round tag arm leg p50ps p99ps meanps n batch\n");
+        // The clock floor (#1904), after the header line so stdout's buffer already exists and
+        // the line moves no allocation ahead of the timed rows.
+        bench::emit_clock_floor();
         for (std::size_t j = 0; j < kNArms; ++j) {
             // Rotate the arm order per round: exhausting one arm's runs before starting the
             // next is the shape that produced the recorded 55.2 / 53.0 / 149.8 M deliv/s swing

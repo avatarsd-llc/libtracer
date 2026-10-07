@@ -308,10 +308,10 @@ bool run_point(topo_t topo, std::size_t T) {
     const std::uint64_t ops = total_ops.load();
     const double agg_ops_s = secs > 0 ? static_cast<double>(ops) / secs : 0.0;
     const double per_thread_ops_s = agg_ops_s / static_cast<double>(T);
-    const std::uint64_t ns_per_op =
-        per_thread_ops_s > 0 ? static_cast<std::uint64_t>(1e9 / per_thread_ops_s) : 0;
-
-    const bench::Latency::Summary lat{ns_per_op, ns_per_op, ns_per_op};
+    // ONE metric (#1904): the whole window is timed as one block, so the rate is the only
+    // measurement. Its latency columns are 0, read everywhere as "not measured", instead of
+    // the same figure inverted and printed three times as a p50, a p99 and a mean.
+    const bench::Latency::Summary lat{};
     bench::emit("libtracer", mode_of(topo), /*size_bytes=*/kRopeLinks, /*fanout=*/T,
                 /*endpoints=*/1, per_thread_ops_s, agg_ops_s, /*mb_per_s=*/0.0, lat);
 
