@@ -1,8 +1,10 @@
-# The libtracer specification
+# The Tracer specification
 
-The **normative** specification of the libtracer wire protocol. This page is the
+The **normative** specification of the Tracer wire protocol. This page is the
 entry point: what is normative, how the layers relate, and in what order to read
-them. The specification itself is [Protocol v1](v1.md).
+them. The specification itself is [Protocol v1](v1.md). The protocol is named
+**Tracer**; **libtracer** is its reference implementation, and the library, its
+packages and its repository keep that name.
 
 ## What is normative
 

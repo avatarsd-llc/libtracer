@@ -882,7 +882,7 @@ exist is open ([#584](https://github.com/avatarsd-llc/libtracer/issues/584)).
 
 ### Hex example
 
-Empty STATUS=OK (the smallest valid libtracer TLV — used as the unsubscribe sentinel and the implicit OK reply):
+Empty STATUS=OK (the smallest valid Tracer TLV — used as the unsubscribe sentinel and the implicit OK reply):
 
 ```
 09 00 00 00
@@ -1425,7 +1425,7 @@ Long-term registry for future core extensions, post-v1. Allocation procedure: PR
 **One code is assigned: `0x80` = BATCH.** [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 (Amendment 3, 2026-08-21, clause 6) promotes `0x80` from a worked example to the **formal record type of the batch convention** — a structured (`opt.PL=1`) written value whose children are the sample frames, carrying one payload `TIME` (§`0x0C`) child as the batch base and, for a non-uniform stream, a packed `i32` offset array ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.2.1, Amendment 1). Three properties of the range survive the assignment intact:
 
 - **No new grammar.** A BATCH is an ordinary structured TLV every conforming decoder already decodes. No core-range type code is minted, no `opt` bit is added, and the graph still never interprets the record (claim 5) — the §4.3 stream descriptor tells consumers how to read it.
-- **The protocol still does not opine on the range.** A deployment already using `0x80` for its own record is not made non-conforming; the register-a-prefix advice above still applies, and this range remains per-deployment. What changed is that libtracer's *own* convention now has a number.
+- **The protocol still does not opine on the range.** A deployment already using `0x80` for its own record is not made non-conforming; the register-a-prefix advice above still applies, and this range remains per-deployment. What changed is that Tracer's *own* convention now has a number.
 - **Nothing on the wire changes.** No conformance vector's bytes move, and a receiver that has never heard of BATCH treats `0x80` exactly as it did before.
 
 **The assignment is scoped to a STANDALONE flush** ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 clause 6, erratum 2026-08-23). When the flush is **folded** into a `propagate(v, FOLD)` branch write, the batch is seated in the swept node's **single structured `VALUE`** (`opt.PL=1`) instead — because a branch-write node's grammar ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §B: leading `NAME`, at most one `VALUE`, recursive `POINT` children) admits no `0x80` child, and the folded frame's node shape is held byte-for-byte at that grammar. **One layout, two spellings by carriage**: the `TIME` base, the sample-frame children and the non-uniform offset array are identical in both; only the header type byte differs (`0x80` → `VALUE`). A folded batch therefore never presents a user-range byte to the graph at all, which is why the graph-never-interprets rule survives the fold untouched.
