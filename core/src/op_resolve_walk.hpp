@@ -967,6 +967,25 @@ template <class N, class ReplyError>
 }
 
 /**
+ * @brief The payload a creation hook is shown for a `WRITE` whose `dst` missed (RFC-0030 §7.2):
+ *        null unless the request is a fieldless data write, which is the only kind that may
+ *        create; else the written TLV, held in @p held.
+ *
+ * Shared from the frame (zero copy) where the frame has an owner; copied from the graph's
+ * value source where it is borrowed. An empty rope is a refused copy (`BACKPRESSURE`).
+ */
+template <class N>
+[[nodiscard]] const view::rope_t* creating_payload(const parsed_fwd_t<N>& req,
+                                                   const field_path_t& field,
+                                                   const view::view_t* frame_view, graph_t& graph,
+                                                   mem::mem_backend_t& flat,
+                                                   std::optional<stored_tlv_t>& held) {
+    if (!field.empty() || !req.payload) return nullptr;
+    held = share_or_copy_tlv(*req.payload, frame_view, 0, graph.value_source(), flat);
+    return &held->rope;
+}
+
+/**
  * @brief The ONE templated resolve walk (ADR-0053 §7): apply an @p N-read request FWD against @p
  *        graph and build the FWD{REPLY} rope.
  *
@@ -1117,8 +1136,8 @@ template <class N>
     // no re-resolution, no nearest match, no fall-through to the canonical walk. The origin
     // still holds the canonical path, and re-resolving it is the origin's recovery, not this
     // node's. (§5.3's NACK carrying the failing hop index is still deferred: §9.2's spelling
-    // question is open, and a drop is already conformant.) No write-creates either:
-    // `ensure_vertex` mkdir-p's an ADDRESS, and an element is not one.
+    // question is open, and a drop is already conformant.) No creation either: a creation
+    // hook decides a missing child by NAME (RFC-0030 §7.2), and an element is not one.
     //
     // The compressions the REPLY may carry are decided here, once. A compressed `dst` is never
     // handed a label mint: §11.2 for the bound form, and for the labelled form §6.1's own
@@ -1152,30 +1171,23 @@ template <class N>
         // A body that does not tile into literal packed records makes the dst unaddressable,
         // not merely unknown: it is a malformed address, so it answers INVALID_PATH rather than
         // NOT_FOUND (#436, and RFC-0018's escape-in-key-context rule). The distinction outlives
-        // the write-creates arm this used to guard (#1139): the two refusals carry different
+        // the write-creates arm this once guarded (#1139): the two refusals carry different
         // dispositions, and a malformed address must not be reported as an address that merely
         // does not exist yet and might on the next retry.
         const result_t<std::span<const std::byte>> dst_key = path_lookup_key(req.dst);
         if (!dst_key) return reply_error(dst_key.error());
-        v = graph.find(*dst_key);
-        // An unresolved dst answers NOT_FOUND for EVERY op, the fieldless WRITE included
-        // (RFC-0005 amendment 1, #1139). This arm used to write-create: a remote data WRITE
-        // mkdir-p'd its target and every missing level above it, consulting no type catalog,
-        // counting nothing, bounded by no depth, and — where the graph held no ancestor at
-        // all — gated by no ACL, since the CREATE check is on the nearest EXISTING ancestor
-        // and a brand-new top-level subtree has none. Creation from a peer now goes through
-        // the ADR-0059 creator endpoint, where it is typed, catalogued and ACL-gated; the
-        // caller backs off and retries until whoever owns that structure establishes it.
-        //
-        // The appearance mechanism RFC-0005 §1 hangs on this survives the change, because a
-        // create through the creator endpoint IS a write to a vertex and bubbles to the parent
-        // subscriber exactly as before — only the ORIGIN of an appearance moves, from "any
-        // peer writing any address" to "a create the device's own catalog admitted".
-        //
-        // The LOCAL `graph_t::write` overload keeps write-creating, deliberately: the
-        // in-process caller is the node's own trusted code and owns its graph's structure. The
-        // asymmetry is the point of the amendment, not an oversight left in it.
-        if (!v) return reply_error(status_t::NOT_FOUND);
+        // An unresolved dst answers NOT_FOUND for every op (RFC-0030 §7.1). The one exception is
+        // the one RFC-0030 §7.2 makes for every origin alike: a fieldless data WRITE below a
+        // parent whose creation hook creates the target. The hook is shown the payload, built
+        // only when a hook is about to decide; with the hook policy closed (the default) the
+        // graph answers NOT_FOUND without asking for it, so a refusal draws nothing.
+        std::optional<stored_tlv_t> shown;
+        const result_t<vertex_handle_t> found =
+            graph.find_or_create(*dst_key, subject, [&]() -> const view::rope_t* {
+                return creating_payload(req, *field, frame_view, graph, flat, shown);
+            });
+        if (!found) return reply_error(found.error());
+        v = *found;
     }
     return apply_op(graph, req, *v, inbound_link, subject, frame_view, flat, egress, retained,
                     route, reply_error, *field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,

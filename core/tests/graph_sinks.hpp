@@ -26,9 +26,12 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <expected>
+#include <span>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "libtracer/graph.hpp"
 #include "libtracer/view.hpp"
@@ -116,5 +119,30 @@ class sub_observer_guard_t {
 /** @brief CTAD so a call site spells `const sub_observer_guard_t obs(g, [&]{…});`. */
 template <typename F>
 sub_observer_guard_t(tr::graph::graph_t&, F) -> sub_observer_guard_t<F>;
+
+/**
+ * @brief A creation hook (RFC-0030 §7.2) that makes every missing child of its parent a plain
+ *        `STORED_VALUE` vertex — what a test installs to keep "a write creates" below one
+ *        parent. `ctx` is the graph.
+ */
+inline tr::graph::result_t<void> create_stored_value(void* ctx, tr::graph::vertex_handle_t,
+                                                     std::span<const std::byte> child_key,
+                                                     std::string_view, const tr::view::rope_t&) {
+    auto& g = *static_cast<tr::graph::graph_t*>(ctx);
+    const auto made =
+        g.register_vertex_key(std::vector<std::byte>(child_key.begin(), child_key.end()),
+                              tr::graph::role_t::STORED_VALUE);
+    if (!made) return std::unexpected(made.error());
+    return {};
+}
+
+/**
+ * @brief Install @ref create_stored_value on @p parent.
+ * @retval false The build has no creation-hook slot (`kCreationHooks` off), or the install
+ *         was refused; a caller gates the assertions that need creation on it.
+ */
+inline bool allow_creation(tr::graph::graph_t& g, tr::graph::vertex_handle_t parent) {
+    return g.set_creation_hook(parent, {&create_stored_value, &g}).has_value();
+}
 
 }  // namespace tr::testing

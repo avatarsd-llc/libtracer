@@ -211,6 +211,14 @@ sequenceDiagram
 
 ### D. Write-creates (`mkdir -p`, CREATE-gated)
 
+> **⚠ Amended by [RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md) §7
+> (accepted 2026-10-07).** The creation MUST below, and Amendment 1's local/remote asymmetry,
+> are withdrawn: a data write whose walk misses answers `tr::path::not_found` and creates
+> nothing, whatever its origin (the local host API, a `FWD{WRITE}` terminus, or a branch
+> write's landing site). Creation is opt-in app logic on the parent, a creation hook
+> (RFC-0030 §7.2), gated by `CREATE` on that parent. The text of this section and of
+> Amendment 1 is kept as the record.
+
 - A **data write** (no `:field` selector) targeting a vertex that does not
   exist MUST create it — and every missing intermediate level — as
   stored-value vertices, then proceed as a normal write. This replaces the

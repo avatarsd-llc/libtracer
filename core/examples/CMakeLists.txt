@@ -108,7 +108,7 @@ set(LIBTRACER_GRAPH_EXAMPLES
     graph_register
     graph_read_write
     graph_await
-    graph_write_creates
+    graph_creation_hook
     graph_children
     graph_retire
     graph_handler_vertex

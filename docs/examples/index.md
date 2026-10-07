@@ -20,7 +20,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [Register a vertex, and address it](graph-register.md) | L4 graph | `path_t` parses once; the vertex map is keyed on PATH bytes; `PATH_IN_USE`; placeholders |
 | [Read and write](graph-read-write.md) | L4 graph | one store per vertex, last-writer-wins; `read` returns a reference to the published value |
 | [`await`](graph-await.md) | L4 graph | the readiness plane: single-shot, at its own vertex only, `TIMEOUT` on the deadline |
-| [Write-creates](graph-write-creates.md) | L4 graph | a LOCAL data write materializes its target and its missing intermediates |
+| [Creation](graph-creation-hook.md) | L4 graph | a write to a missing vertex is refused; a parent opts in with a creation hook |
 | [`:children[]`](graph-children.md) | L4 graph | enumerate a parent's members, one level, through the `:` control plane |
 | [Retirement](graph-retire.md) | L4 graph | logically absent, not erased: `NOT_FOUND`, live handles, the generation stamp |
 | [A HANDLER vertex](graph-handler-vertex.md) | L4 graph | the role decides what a write means: `on_write` executes, `on_read` computes |
@@ -261,7 +261,7 @@ Composition axes <tree-of-ropes>
 Register a vertex, and address it <graph-register>
 Read and write <graph-read-write>
 await <graph-await>
-Write-creates <graph-write-creates>
+Creation <graph-creation-hook>
 :children[] <graph-children>
 Retirement <graph-retire>
 A HANDLER vertex <graph-handler-vertex>

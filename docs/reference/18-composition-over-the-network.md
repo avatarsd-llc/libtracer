@@ -356,7 +356,7 @@ four instruments, and withholds history.
   §Erratum 2026-08-24).
 - **New vertices announce themselves by existing.** A child's *appearance* is just its first
   write bubbling to the parent's subscribers, so a subtree subscriber learns about vertices
-  created after it joined without polling `:children[]` (RFC-0005 §A; CONTEXT.md §Write-creates).
+  created after it joined without polling `:children[]` (RFC-0005 §A; RFC-0030 §7.3).
 - **Compaction re-establishes itself in-band.** A route handle is re-advertised on (re)connect —
   that *is* the self-heal (RFC-0004 §E.1); a path label the joiner does not know draws a
   `NOT_FOUND`-class error and the sender falls back to the full string path and re-mints from

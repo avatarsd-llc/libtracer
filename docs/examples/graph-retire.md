@@ -21,7 +21,8 @@ notification).
 - **It is idempotent and silent.** Retiring an already-retired vertex succeeds and does
   nothing; the retirement delivers along no edge and wakes no `await` (§B.5), which is why
   disappearance is observable only by polling.
-- **Revival inherits nothing.** A later local write-creates revives the address, and the
+- **Revival inherits nothing.** A write does not revive the address (a miss creates nothing);
+  a later registration does, and the
   revived vertex takes its *live ancestor's* ACL policy, never the retired owner's (§B.6) — a
   stale grant cannot outlive the retirement.
 - **`collect()` is the embedder's, and is not needed here.** A retired vertex parks its
@@ -38,5 +39,5 @@ notification).
 ```
 
 See also: [graph module](../modules/graph.md) ·
-[write-creates](graph-write-creates.md) (the other half of the lifecycle) ·
+[creation](graph-creation-hook.md) (the other half of the lifecycle) ·
 [graph model reference](../reference/02-graph-model.md).

@@ -306,13 +306,11 @@ solely by a `NAME` write or an owner-local retire. The link underneath is a stat
 machine managed automatically (RFC-0014).
 
 - **There is no lazy *vertex* creation.** A plain data write to an absent or retired
-  `/net/<module>/<name>` does not create or revive it, a stated exception to the
-  write-creates rule of [RFC-0005 — Subtree subscriptions](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §D
-  and to revive-by-data-write (RFC-0009 §E.1) — a config-less connection would violate
-  the atomicity creation protects. Re-creation is `SPEC`-only. **The only lazy
-  establishment is reconnection.** (Since §D amendment 1 the *remote* arm needs no exception
-  at all — a peer's write to an unresolved address is `not_found` everywhere. The exception
-  still binds the local host API, which does write-create.)
+  `/net/<module>/<name>` does not create or revive it — a config-less connection would
+  violate the atomicity creation protects. Re-creation is `SPEC`-only. **The only lazy
+  establishment is reconnection.** Since [RFC-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md) §7.1 this needs no exception
+  at all: a data write to a missing address is `not_found` everywhere, local or remote,
+  unless the parent's owner installed a creation hook, and the net plane installs none.
 - **Refcount gates `DIAL` links.** A *binding* is anything that needs the peer
   reachable — a standing subscription or `await` routed through the link, plus a
   transient hold for the duration of a one-shot `read`/`write`/`FWD`. It is **per-hop
@@ -490,9 +488,9 @@ automatic**:
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which un-routes the link
   and cascade-evicts the subscriptions routed through it (§Boundaries of the formation
   model, *hard* teardown).
-- **Expecting a data write to revive a retired connection.** Connection vertices are an
-  exception to write-creates; the write fails and the peer stays unreachable until a
-  `SPEC` recreates it.
+- **Expecting a data write to revive a retired connection.** A data write to a missing
+  vertex creates nothing (RFC-0030 §7.1); the write fails and the peer stays unreachable
+  until a `SPEC` recreates it.
 - **Walking a folded topology without a visited set.** FWD loop-freedom protects a
   *delivery*, because `dst` is consumed monotonically; it protects nothing about a
   recursive enumeration. A walker that keys its visited set on transport address rather

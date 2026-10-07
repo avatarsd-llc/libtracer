@@ -886,6 +886,26 @@ struct default_config_t {
     static constexpr bool kFaultInjection = false;
 
     /**
+     * @brief Whether a vertex can carry a CREATION HOOK (RFC-0030 §7.2): app logic on a parent
+     *        that decides whether a data write to a missing child creates it.
+     *
+     * A data write whose walk misses answers `tr::path::not_found` and creates nothing, whatever
+     * its origin (RFC-0030 §7.1): the local host API, a `FWD{WRITE}` terminus, or a branch
+     * write's landing site. The hook is the one way back to "write creates", and only below a
+     * parent whose owner installed one with `graph_t::set_creation_hook`.
+     *
+     * **Default `false` on every profile — the lean choice** (RFC-0030 §18 Q5). Closed out, no
+     * vertex has a hook slot, `graph_t::set_creation_hook` does not exist, and every miss
+     * refuses: the miss arm compiles to the `not_found` answer and draws nothing.
+     *
+     * **Who sets it.** An application that wants opt-in creation, for example an OTA-style flow
+     * where a write names the image it brings. The core test build sets it in its preset
+     * fragment `core/tests/instrumented/libtracer/config_override.hpp`. Override fragment:
+     * `static constexpr bool kCreationHooks = true;`
+     */
+    static constexpr bool kCreationHooks = false;
+
+    /**
      * @brief Whether a connection SPEC may carry the `insecure` key of the `quic` and
      *        `webtransport` kinds — the dial-side switch that skips server-certificate
      *        verification.
@@ -1037,6 +1057,8 @@ using acl_policy_t = config_t::acl_policy_t;
 inline constexpr bool kInstrumentCounters = config_t::kInstrumentCounters;
 /** @brief @ref default_config_t::kFaultInjection for this build. */
 inline constexpr bool kFaultInjection = config_t::kFaultInjection;
+/** @brief @ref default_config_t::kCreationHooks for this build. */
+inline constexpr bool kCreationHooks = config_t::kCreationHooks;
 /** @brief @ref default_config_t::kForceGuardedRmw for this build. */
 inline constexpr bool kForceGuardedRmw = config_t::kForceGuardedRmw;
 

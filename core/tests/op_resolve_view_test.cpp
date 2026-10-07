@@ -359,8 +359,9 @@ int main() {
     differential("READ /nope/missing (ERROR NOT_FOUND)", seed_temp_empty,
                  b_fwd(fwd_op_t::READ, b_path({"nope", "missing"}), b_path({"reply-ep"})));
 
-    // Write-create (RFC-0005) — a remote DATA write to a fresh path creates it.
-    differential("WRITE /fresh/leaf write-create (RESULT)", seed_temp_empty,
+    // A remote DATA write to a missing path creates nothing (RFC-0030 §7.1): ERROR NOT_FOUND,
+    // byte-identical across tiers.
+    differential("WRITE /fresh/leaf missing (ERROR NOT_FOUND)", seed_temp_empty,
                  b_fwd(fwd_op_t::WRITE, b_path({"fresh", "leaf"}), b_path({"reply-ep"}), {},
                        b_value({0x5A})),
                  "cli");
@@ -431,12 +432,12 @@ int main() {
               "the echoed stamp is on the reply and equals the request's");
     }
 
-    // A WRITE must not mkdir-p an illegally-spelled path, and must say INVALID_PATH rather
-    // than NOT_FOUND about it. Since RFC-0005 amendment 1 (#1139) the remote arm creates
-    // nothing at all, so the no-vertex assertion below is over-determined — the DISPOSITION
+    // A WRITE must not create at an illegally-spelled path, and must say INVALID_PATH rather
+    // than NOT_FOUND about it. Since RFC-0030 §7.1 a miss creates nothing unless a parent's
+    // hook opts in, so the no-vertex assertion below is over-determined — the DISPOSITION
     // is what this case now guards: `invalid` tells the peer to stop, `not_found` would send
     // it retrying an address it can never spell (#436).
-    differential("WRITE PATH{VALUE} illegal child (ERROR, no write-create)", seed_temp_empty,
+    differential("WRITE PATH{VALUE} illegal child (ERROR, no creation)", seed_temp_empty,
                  b_fwd(fwd_op_t::WRITE, b_path_value_children({"fresh", "leaf"}),
                        b_path({"reply-ep"}), {}, b_value({0x5A})),
                  "cli");
@@ -449,7 +450,7 @@ int main() {
         const auto arena = tr::wire::decode_into(wframe, tr::mem::heap_source());
         (void)r.resolve(*arena, "cli");
         check(!g.find(path_t::parse("/fresh/leaf")->key()).has_value(),
-              "the rejected WRITE created no vertex (rejection precedes write-create)");
+              "the rejected WRITE created no vertex (rejection precedes creation)");
     }
 
     return tr::testing::summary("op_resolve_view");

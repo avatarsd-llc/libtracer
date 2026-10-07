@@ -742,10 +742,10 @@ Precedence is by position, with zero merge logic: the two parts describe disjoin
 A write whose payload TLV is a POINT is a **branch write** ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)): the written tree is rooted **at the target vertex** — the root POINT's `NAME` MUST equal the target's leaf segment (mismatch ⇒ `ERROR{tr::path::invalid}`) — and it **decomposes**:
 
 - Each **value-carrying node** (a POINT with a `VALUE` child) is stored at the corresponding descendant vertex — the target's path extended by the chain of NAMEs — as a refcount-bumped **subview of the written frame** (zero copy, never re-encoded). Values are the truth at the vertices where they land; a branch is a view.
-- A landing vertex that does not exist is **created**, `mkdir -p` style, gated by the `CREATE` access bit on the nearest existing ancestor's effective ACL (§`0x0A`) — this is the same **write-creates** rule that applies to any data write to a nonexistent path.
+- A landing vertex that does not exist is **not created**: the branch is refused with `ERROR{tr::path::not_found}` and nothing lands, the same answer any data write to a missing path gets ([RFC-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md) §7.1). The one exception is the same for every write: a parent whose owner installed a creation hook may create the missing child, after the `CREATE` access bit on the parent's effective ACL (§`0x0A`) admits the writer (RFC-0030 §7.2).
 - Each covered subscription point is notified **once** with the smallest subview covering every value landed at-or-below it: the `VALUE` slice at a leaf landing site, the node's whole POINT subtree at an interior node, and the written TLV as-is at the root (and, via §`0x04` bubbling, above it).
 - **Strict shape** in a branch write: a node's children are exactly the leading `NAME`, at most one `VALUE`, and zero or more POINT sub-branches; anything else — or any trailer-carrying node in the tree — is rejected with `ERROR{tr::schema::type_mismatch}` and nothing lands (stored values are trailer-less at rest, [ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md) §4). A branch with no `VALUE` anywhere is a valid no-op.
-- **One store per vertex; no branch transaction.** A read of any vertex returns its latest stored value — never behind what a subscriber saw, legitimately newer. Admission (shape + ACL + creation gating) is all-or-nothing, but application is per-leaf: cross-leaf atomicity is **explicitly not promised**; snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)).
+- **One store per vertex; no branch transaction.** A read of any vertex returns its latest stored value — never behind what a subscriber saw, legitimately newer. Admission (shape + ACL + landing-site resolution) is all-or-nothing, but application is per-leaf: cross-leaf atomicity is **explicitly not promised**; snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)).
 
 ```{mermaid}
 sequenceDiagram
@@ -753,11 +753,11 @@ sequenceDiagram
     participant P as Producer
     participant S as /s
     participant T as /s/t
-    participant U as /s/u (does not exist yet)
+    participant U as /s/u (registered by its owner)
     P->>S: write POINT{NAME s, POINT{NAME t, VALUE a}, POINT{NAME u, VALUE b}}
     Note over S: decompose — admit (shape, CREATE/WRITE gates), then land subviews
     S->>T: store VALUE-a slice (refcount subview, zero copy)
-    S->>U: write-creates /s/u, store VALUE-b slice
+    S->>U: store VALUE-b slice (refcount subview, zero copy)
     T-->>P: /s/t subscribers notified with the VALUE-a slice
     S-->>P: /s subscribers (and ancestors, bubbled) notified with the written POINT as-is
 ```

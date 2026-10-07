@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "libtracer/error.hpp"
+#include "libtracer/function_ref.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/link_id.hpp"
 #include "libtracer/link_index.hpp"
@@ -484,6 +485,31 @@ struct graph_hook_t {
     Fn fn = nullptr;     /**< @brief The callback, or null when the seam is not installed. */
     void* ctx = nullptr; /**< @brief Handed back as @ref fn's first argument; caller-owned. */
 };
+
+/**
+ * @brief The CREATION HOOK (RFC-0030 §7.2): a parent vertex's app logic that decides whether a
+ *        data write to a missing child creates it.
+ *
+ * Called with the parent, the missing child's full canonical key (its last segment is the
+ * child's name, `key_view_t{child_key}.last_segment()`), the writer's subject (empty for the
+ * node's own local write) and the written payload. To create, the hook registers exactly ONE
+ * vertex at `child_key` — typed, configured and policied as the application decides, through
+ * the ordinary registration calls — and returns success. To refuse, it returns
+ * `std::unexpected(status_t::NOT_FOUND)`, which is what the writer is told. Any other status
+ * (for example `BACKPRESSURE` from a registration the graph's source refused) passes through to
+ * the writer unchanged.
+ *
+ * The graph has already evaluated the parent's `CREATE` right for the subject before the call;
+ * a denial never reaches the hook. A hook that answers success but registers nothing answers
+ * the writer `NOT_FOUND`. Any bound on how many children a peer may cause is the hook's own
+ * decision; the library adds none (`CONTEXT.md` §Resource bound).
+ *
+ * @warning All arguments are BORROWED for the call. The hook runs on the writer's thread with
+ *          no graph lock held, so it may register vertices; it must not retire the parent.
+ */
+using creation_hook_t =
+    hook_t<result_t<void>(vertex_handle_t parent, std::span<const std::byte> child_key,
+                          std::string_view subject, const view::rope_t& payload)>;
 
 /**
  * @brief The graph's five wiring seams as ONE aggregate (RFC-0028 §4.12, D12) — what
@@ -942,8 +968,8 @@ class graph_t {
      * dereferenceable forever (ADR-0057 insert-only) — the vertex is *emptied*, not
      * erased. Retirement **re-virginizes** each vertex (§B.6): it clears the previous
      * owner's `:acl`, value seam, stored value, history, app-field table, subscribers,
-     * owner-side storage declarations, and delivery mode, so a later write-creates revive
-     * of the same address
+     * owner-side storage declarations, delivery mode and creation hook, so a later
+     * registration that revives the same address
      * inherits **nothing** of the retired owner — in particular the revived path inherits
      * its live ancestor's ACL policy, never the retired one's (the §Discussion-7 ruling:
      * an ACL does not survive churn). `write_seq_` survives (forward-only per address,
@@ -1069,7 +1095,8 @@ class graph_t {
      * The census already counts every `vertex_t` this graph ever allocated — including the
      * placeholders a descent materializes and the landing sites an RFC-0005 §D branch write
      * decomposes into. What it did not do was *charge* anything: every creation door
-     * (registration, the write-create `mkdir -p`, branch-write decomposition) allocated until
+     * (registration, then the write-create `mkdir -p` and branch-write decomposition, which
+     * RFC-0030 §7 replaced with a parent's creation hook) allocated until
      * the allocator itself refused. A branch writer that is already resolved and already
      * WRITE-gated is therefore governed — every landing site passes its CREATE/WRITE gate —
      * but its landing sites cost nothing, so "more writes, wider writes" is an unbounded
@@ -1096,10 +1123,9 @@ class graph_t {
      *       ceiling is a high-water mark on ALLOCATIONS, not a live occupancy that a retire
      *       gives back. That matches what it is bounding — memory a peer made this node
      *       commit — and it is why no release path is needed.
-     * @note A refusal mid-descent leaves the levels already created in place, exactly like an
-     *       ACL denial partway down a write-create chain ("created-but-empty intermediates may
-     *       persist past a later denial", RFC-0005 §ACL). The bound holds regardless: those
-     *       levels are themselves charged.
+     * @note A refusal mid-descent leaves the levels already created in place, exactly like a
+     *       refusal partway down a chain of creation hooks (each level a hook created stays).
+     *       The bound holds regardless: those levels are themselves charged.
      * @note Session identity anchors are NOT charged here. They take a census slot but are
      *       created through @ref register_session_anchor, which is already bounded by the
      *       listener's `max_peers` accept policy; charging them twice would let graph growth
@@ -2031,10 +2057,9 @@ class graph_t {
      * It does NOT rely on `kMaxSegments`, and this comment used to claim it did ("graph depth
      * is `kMaxSegments`-bounded structurally"). That claim is false: `kMaxSegments` is enforced
      * only in `path_t::parse` (`core/src/path.cpp:110`), the LOCAL string→bytes builder.
-     * `ensure_vertex` takes raw key bytes and counts nothing, so a write-create already
-     * registers a vertex at any depth — locally without limit, and from the wire at whatever
-     * depth a branch write's POINT nesting reaches (RFC-0005 §D amendment 1 took the
-     * unresolved-`dst` arm away, but not decomposition's landing sites). The iterative walk is safe
+     * `register_vertex_key` takes raw key bytes and counts nothing, so a vertex can be
+     * registered at any depth, and a creation hook may register one at whatever depth the
+     * writes it admits reach (RFC-0030 §7). The iterative walk is safe
      * because it is iterative and resource-bounded — which is the real reason, and the only one
      * that survives `kMaxSegments` being lifted.
      *
@@ -2395,30 +2420,43 @@ class graph_t {
     [[nodiscard]] std::size_t share_threshold_bytes(vertex_handle_t v) const noexcept;
 
     /**
-     * @brief Find-or-create the vertex at @p key (write-creates, RFC-0005).
+     * @brief Resolve the target of a DATA write at @p key, creating a missing level only where
+     *        a parent's creation hook opts it in (RFC-0030 §7).
      *
-     * Resolves @p key; when absent, creates the vertex — and every missing
-     * intermediate level, `mkdir -p` style, each a STORED_VALUE vertex — gated by
-     * the CREATE right on the nearest EXISTING ancestor's effective ACL under
-     * @p caller (PERMISSION_DENIED when denied; a graph holding no ancestor at all
-     * is open, matching ACL-presence opt-in). A creation race lost to a concurrent
-     * caller is benign (the winner's vertex is returned). @p key must be a
-     * well-formed, non-empty canonical PATH-payload (else INVALID_PATH).
+     * A hit returns the vertex. A miss answers `NOT_FOUND` and creates nothing, whatever the
+     * write's origin, unless the build allows creation hooks (`config_t::kCreationHooks`, off
+     * by default) and the parent of the first missing level carries one. Then the parent's
+     * `CREATE` right is evaluated for @p caller (`PERMISSION_DENIED`, and the hook does not
+     * run), and the hook decides. A level the hook created is the parent of the next, so a
+     * deeper miss is decided by that new vertex's own hook: `mkdir -p` is expressible only where
+     * every level opted in.
      *
-     * @note This is the LOCAL creation door and the branch-write decomposition's landing
-     *       door — NOT the remote miss handler. Since RFC-0005 §D amendment 1
-     *       ([#1139](https://github.com/avatarsd-llc/libtracer/issues/1139)) a peer's
-     *       fieldless `FWD{WRITE}` to an unresolved `dst` answers NOT_FOUND and never
-     *       reaches here; a peer creates through the ADR-0059 creator endpoint. The
-     *       asymmetry is deliberate: the in-process caller owns its graph's structure.
-     * @note No SCRATCH allocation. The level walk stores nothing and the registration takes
-     *       borrowed key bytes, so the per-call temporaries that used to scale with the key's
-     *       DEPTH — the part a peer chose the size of — no longer draw from the global heap
-     *       behind the injected `block_source_t`'s back (#1139, #873). The `vertex_t` objects
-     *       themselves are still heap-allocated; that is the larger #873 arena question.
+     * @param payload Produces the written payload the hook is shown, and is called only when a
+     *        hook is about to decide. It returns null when the request is not a fieldless data
+     *        write (which never creates: `NOT_FOUND`), and an empty rope when the payload could
+     *        not be held (`BACKPRESSURE`). It may be called more than once for one write.
+     * @retval INVALID_PATH @p key is not a well-formed canonical PATH payload (checked before a
+     *         hook creates anything).
      */
-    [[nodiscard]] result_t<vertex_handle_t> ensure_vertex(std::span<const std::byte> key,
-                                                          std::string_view caller = {});
+    [[nodiscard]] result_t<vertex_handle_t> find_or_create(
+        std::span<const std::byte> key, std::string_view caller,
+        function_ref_t<const view::rope_t*()> payload);
+
+    /**
+     * @brief Install @p hook as @p parent's creation hook (RFC-0030 §7.2), replacing any
+     *        previous one. An empty @p hook removes it.
+     *
+     * Local host API only: no wire operation reaches here. The hook is a declaration of the
+     * parent's current owner, so retiring @p parent drops it. Its `ctx` must outlive the
+     * installation.
+     *
+     * @retval SCHEMA_NOT_FOUND This build does not allow creation hooks
+     *         (`config_t::kCreationHooks` is `false`, the default): no vertex has the slot, so
+     *         the request is refused rather than dropped.
+     * @retval NOT_FOUND @p parent is retired or was never registered.
+     * @retval BACKPRESSURE The graph's table source refused the declaration; nothing changed.
+     */
+    [[nodiscard]] result_t<void> set_creation_hook(vertex_handle_t parent, creation_hook_t hook);
 
     /**
      * @brief Drop @p vh out of its parent's `:children[]` listing, keeping it registered and
@@ -2598,13 +2636,14 @@ class graph_t {
 
     // Internal (raw `vertex_t*`) forms of the public handle-returning resolvers: the graph's
     // own machinery threads raw pointers (ADR-0056 — internal methods keep `vertex_t*`), and
-    // the public @ref find / @ref ensure_vertex wrap these once at the boundary.
+    // the public @ref find / @ref find_or_create wrap these once at the boundary.
     [[nodiscard]] vertex_t* find_ptr(std::span<const std::byte> key) const;
-    [[nodiscard]] result_t<vertex_t*> ensure_vertex_ptr(std::span<const std::byte> key,
-                                                        std::string_view caller);
+    [[nodiscard]] result_t<vertex_t*> find_or_create_ptr(
+        std::span<const std::byte> key, std::string_view caller,
+        function_ref_t<const view::rope_t*()> payload);
     // The whole body of @ref register_vertex_key, over BORROWED key bytes. The descent never
     // retains the key, so the public owning-vector overload is a convenience wrapper and the
-    // graph's own callers (write-creates, path registration) pass a span rather than paying a
+    // graph's own callers (path registration) pass a span rather than paying a
     // heap copy just to spell the call (#1139/#873).
     // @p policy is refused before the descent when it is illegal for @p role, and otherwise
     // applied to the node before it is filled, its delivery mode included, so a refused one
@@ -3540,6 +3579,21 @@ class graph_t {
      *         declared a row for it. Lock-free; the caller has already tested the flag. */
     [[nodiscard]] acl_right_t declared_write_right(const vertex_t* v, wire::type_t type) const;
 
+    /** @brief The creation-hook slot of a build without `config_t::kCreationHooks`: it holds
+     *         nothing, an install stores nothing, and it reads back as the empty hook. */
+    struct no_creation_hook_t {
+        /** @brief Store nothing. */
+        no_creation_hook_t& operator=(const creation_hook_t& /*hook*/) noexcept { return *this; }
+        /** @brief Read back as the empty hook. */
+        operator creation_hook_t() const noexcept {
+            return {};
+        }  // NOLINT(google-explicit-constructor)
+    };
+    /** @brief What an admission node holds for the creation hook: the hook itself when the
+     *         build allows one, else an empty type that costs the node no bytes. */
+    using creation_slot_t =
+        std::conditional_t<config_t::kCreationHooks, creation_hook_t, no_creation_hook_t>;
+
     /**
      * @brief One vertex's ADMISSION filters (`handlers_t::on_admit` and
      *        `handlers_t::on_app_field_admit`), as a node of the graph's insert-only, immortal
@@ -3555,6 +3609,10 @@ class graph_t {
          *         but owner control-plane data on the few vertices that install it, so it
          *         rides this node for the reason `%admissions_` states. */
         app_field_read_hook_t on_app_field_read;
+        /** @brief The creation hook (RFC-0030 §7.2), or empty. Not a filter either, and it
+         *         rides this node for the same reason. Zero bytes in a build without
+         *         `config_t::kCreationHooks`. */
+        [[no_unique_address]] creation_slot_t on_create{};
         admission_node_t* next = nullptr; /**< @brief The previously declared node. */
     };
 
@@ -3593,6 +3651,11 @@ class graph_t {
     /** @brief @p v's app-field read seam (`handlers_t::on_app_field_read`, #1878), or an empty
      *         hook when it installed none — one flag test for the vertices without one. */
     [[nodiscard]] app_field_read_hook_t app_field_reader(const vertex_t* v) const noexcept;
+
+    /** @brief @p v's creation hook (RFC-0030 §7.2), or an empty hook when it carries none —
+     *         one flag test for the vertices without one, and always empty in a build without
+     *         `config_t::kCreationHooks`. */
+    [[nodiscard]] creation_hook_t creation_hook_for(const vertex_t* v) const noexcept;
 };
 
 }  // namespace tr::graph

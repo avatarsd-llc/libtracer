@@ -128,7 +128,7 @@ none — and remains a conforming node that any forwarder routes and any peer re
 | **`:acl` (ALLOW-only MCU subset)** | device-local authorization: who may read/write/subscribe/create | open device (fine on a trusted bus) |
 | **In-band creation** (a `SPEC` write — to a creator endpoint for connections, to `:children[]` for your own registered types) | orchestrators instantiate your connections and controllers at run time, bounded by your own catalog | fixed function; wiring baked at build |
 | **Vertex retirement** | a dynamic child can be withdrawn: its address answers `PATH_NOT_FOUND`, its subscriber edges are evicted, and a later revive inherits nothing of the old owner | the tree only grows; a withdrawn child stays addressable and keeps delivering |
-| **Write-creates** | your own local writes materialize vertices `mkdir -p`-style under CREATE ACL (a *peer* creates through the creator endpoint — a remote write to an unresolved address is `PATH_NOT_FOUND`) | static tree only |
+| **Opt-in creation** | a parent you choose creates the missing child a write names, through your own creation hook and under its CREATE ACL (compile-time `kCreationHooks`, off by default; without it every write to an unresolved address is `PATH_NOT_FOUND`) | static tree only |
 | **Multiple transports + FWD** | the device becomes a forwarder — one address space across CAN + IP | leaf node on one link |
 | **Header-elided framing** (e.g. CAN) | zero protocol overhead on constrained buses; the TLV header never hits the wire | full-TLV frames everywhere |
 | **Address-shift slicing** | payloads beyond one frame, grouped by `(origin, ts)` | payloads bounded by transport frame |

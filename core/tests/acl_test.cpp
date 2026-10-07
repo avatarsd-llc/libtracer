@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -1225,7 +1226,7 @@ void test_gates_no_test_defended() {
  * which the resolver CAN name, must pass it. Without that half a gate wired to refuse
  * everyone would score identically, and a 2026-07-31 mutation sweep found most of these
  * gates carried no test at all. Each is exercised individually: READ, WRITE, SUBSCRIBE,
- * CREATE (both doors — `:children[]` and write-creates), READ_ACL and WRITE_ACL.
+ * CREATE (both doors — `:children[]` and a creation hook), READ_ACL and WRITE_ACL.
  */
 void test_resolver_deny_arm_is_denied_at_every_gate() {
     std::printf("the resolver's ERROR arm DENIES at every gate (#905):\n");
@@ -1286,17 +1287,20 @@ void test_resolver_deny_arm_is_denied_at_every_gate() {
               "CREATE(:children[]): the allowed create really made the vertex");
     }
 
-    // CREATE, door 2 — write-creates, gated on the nearest existing ancestor
-    // (graph.cpp:601). A different door from `:children[]`, on the same right.
-    {
+    // CREATE, door 2 — a creation hook (RFC-0030 §7.2), gated on the PARENT's CREATE right
+    // before the hook runs. A different door from `:children[]`, on the same right. Skipped in
+    // a build without creation hooks, where every miss is NOT_FOUND whoever the caller is.
+    if (tr::testing::allow_creation(g, v)) {
         const path_t ghost_made{"/g/ghostmade"};
         const path_t ok_made{"/g/okmade"};
-        check(denied(g.ensure_vertex(ghost_made.key(), kUnnameable)),
-              "CREATE(write-creates): the UNNAMEABLE caller is DENIED");
+        const tr::view::rope_t payload = make_value({0x01});
+        const auto shown = [&] { return &payload; };
+        check(denied(g.find_or_create(ghost_made.key(), kUnnameable, shown)),
+              "CREATE(hook): the UNNAMEABLE caller is DENIED");
         check(!g.find(ghost_made.key()).has_value(),
-              "CREATE(write-creates): the denied create made no vertex");
-        check(g.ensure_vertex(ok_made.key(), "peer-ok").has_value(),
-              "CREATE(write-creates): the nameable caller may create");
+              "CREATE(hook): the denied create made no vertex");
+        check(g.find_or_create(ok_made.key(), "peer-ok", shown).has_value(),
+              "CREATE(hook): the nameable caller may create");
     }
 
     // READ_ACL — its own right, distinct from acting on the vertex (graph.cpp:2313).
@@ -1408,7 +1412,10 @@ void test_empty_caller_is_trusted_without_the_resolver() {
               .has_value(),
           "local WRITE_ACL succeeds");
     check(g.read(path_t("/l:acl")).has_value(), "local READ_ACL succeeds");
-    check(g.ensure_vertex(path_t{"/l/kid"}.key(), {}).has_value(), "local CREATE succeeds");
+    // The local owner creates by registering (a creation hook is the app's own logic, and the
+    // gate it runs behind is the parent's CREATE, which the empty context passes).
+    check(g.try_register_vertex(path_t{"/l/kid"}, role_t::STORED_VALUE).has_value(),
+          "local CREATE succeeds");
     check(g.subscribe(path_t("/l"), path_t("/l/kid")).has_value(),
           "local SUBSCRIBE succeeds (the subscribe() sugar runs under the empty context)");
 

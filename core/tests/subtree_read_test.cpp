@@ -299,7 +299,12 @@ void test_branch_write_round_trip() {
     graph_t g;
     vertex_handle_t w = g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
     // POINT{ NAME w, VALUE 07, POINT{ NAME t, VALUE AA BB }, POINT{ NAME u, POINT{ NAME
-    // d, VALUE CC } } } — RFC-0005 decomposition creates /w/t, /w/u, /w/u/d.
+    // d, VALUE CC } } } — decomposition lands at /w/t and /w/u/d. A missing landing site is
+    // refused (RFC-0030 §7.1), so the subtree is registered first; its shape is what this
+    // test round-trips, not how it came to exist.
+    (void)g.register_vertex(path_t("/w/t"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/w/u"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/w/u/d"), role_t::STORED_VALUE);
     const std::vector<std::byte> branch =
         point_tlv("w", cat({value_tlv({0x07}), point_tlv("t", value_tlv({0xAA, 0xBB})),
                             point_tlv("u", point_tlv("d", value_tlv({0xCC})))}));

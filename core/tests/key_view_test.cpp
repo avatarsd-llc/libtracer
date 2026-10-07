@@ -9,7 +9,7 @@
  * Those call sites are covered end-to-end by graph/acl/subtree/children tests;
  * this pins the navigation contract directly, including the segment-boundary
  * property (a byte-prefix of a valid key aligns only on a record boundary) and the
- * malformed-framing rejection that gates write-create.
+ * malformed-framing rejection that gates hook-driven creation.
  *
  * Under RFC-0018 a key record is `[u8 len][bytes]` rather than a NAME TLV. Only the
  * fixture at the top of this file moved: every assertion below is the one that guarded
@@ -161,7 +161,7 @@ int main() {
         check(ragged_levels.empty(), "ragged split appends nothing");
 
         // for_each_level — the allocation-free walk `split_levels` is built on, and the one
-        // the write-create path uses so it draws nothing from the heap (#1139/#873).
+        // the creation walk uses so it draws nothing from the heap (#1139/#873).
         std::vector<key_view_t> walked;
         check(key_view_t{abc}.for_each_level([&](key_view_t lv) {
             walked.push_back(lv);
@@ -173,7 +173,7 @@ int main() {
               "for_each_level yields the SAME levels, in the same mkdir -p order");
 
         // Raggedness is only discovered at the LAST record, so the walk visits the valid
-        // prefix before it reports failure. That is exactly why `ensure_vertex` validates in
+        // prefix before it reports failure. That is exactly why `find_or_create` validates in
         // a separate pass before it creates anything.
         std::size_t seen = 0;
         check(!key_view_t{ragged}.for_each_level([&](key_view_t) {

@@ -917,37 +917,41 @@ void test_transport_down_reaches_the_wire() {
           "it is NOT tr::path::not_found — the code whose disposition says stop retrying");
 }
 
-void test_remote_write_does_not_create() {
+/** @brief A remote fieldless `WRITE` of `0x5A` to @p path, answered by @p resolver. */
+[[nodiscard]] auto remote_write(op_resolver_t& resolver,
+                                std::initializer_list<std::string_view> path) {
+    const auto fwd =
+        b_fwd(fwd_op_t::WRITE, b_path(path), b_path({"reply-ep"}), {}, b_value({0x5A}));
+    auto reply = resolve_bytes(resolver, fwd);
+    check(reply.has_value(), "a WRITE to a missing path is ANSWERED (addressed reply)");
+    return decode_reply(*reply);
+}
+
+/** @brief Whether @p dec is an addressed `ERROR` reply carrying `tr::path::not_found`. */
+[[nodiscard]] bool is_not_found(const auto& dec) {
+    return value_u8(dec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR) &&
+           status_error_code(dec.tlv.children[4]) == 0x0020 /*tr::path::not_found*/;
+}
+
+void test_write_to_a_missing_vertex_is_refused() {
     std::printf(
-        "RFC-0005 amendment 1 (#1139): a remote data WRITE to an unregistered path is "
-        "NOT_FOUND and creates nothing:\n");
+        "RFC-0030 §7.1 (#1945): a data WRITE to a missing vertex is NOT_FOUND and creates "
+        "nothing, remote and local alike:\n");
     graph_t g;
     op_resolver_t resolver(g);
+    (void)g.register_vertex(path_t("/"), role_t::STORED_VALUE);
 
-    // The arm the amendment moved. This used to mkdir-p `/fresh/leaf` and reply RESULT,
-    // uncounted, depth-unbounded and — with no ancestor in the graph to hang a CREATE check
-    // on — ungated. Creation from a peer is the ADR-0059 creator endpoint's job now.
-    const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"fresh", "leaf"}), b_path({"reply-ep"}), {},
-                           b_value({0x5A}));
-    auto reply = resolve_bytes(resolver, fwd);
-    check(reply.has_value(), "WRITE to an unregistered path is ANSWERED (addressed refusal)");
-    const auto dec = decode_reply(*reply);
-    check(value_u8(dec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
-          "remote fieldless WRITE to an unregistered path => kind=ERROR");
-    check(status_error_code(dec.tlv.children[4]) == 0x0020 /*tr::path::not_found*/,
-          "the code is tr::path::not_found — the caller backs off until the owner establishes it");
+    check(is_not_found(remote_write(resolver, {"fresh", "leaf"})),
+          "remote fieldless WRITE to a missing path => ERROR tr::path::not_found");
     check(!g.find(path_t::parse("/fresh/leaf")->key()).has_value(), "no target vertex was created");
-    check(!g.find(path_t::parse("/fresh")->key()).has_value(),
-          "and no intermediate level was created either — the whole mkdir-p chain is gone");
+    check(!g.find(path_t::parse("/fresh")->key()).has_value(), "and no intermediate level either");
 
-    // The LOCAL host API is deliberately unchanged: the node's own trusted code may build
-    // its own structure. The asymmetry IS the amendment.
-    check(g.write(path_t("/fresh/leaf"), make_value(b_value({0x5A}))).has_value(),
-          "the LOCAL write() still write-creates the same path");
-    check(g.find(path_t::parse("/fresh")->key()).has_value(),
-          "and still mkdir-p's the intermediate level");
-    check(g.read(path_t("/fresh/leaf")).has_value(),
-          "the locally created vertex serves the written value");
+    // The local arm gives the same answer now: RFC-0005 Amendment 1's asymmetry is withdrawn.
+    const auto local = g.write(path_t("/fresh/leaf"), make_value(b_value({0x5A})));
+    check(!local.has_value() && local.error() == status_t::NOT_FOUND,
+          "the LOCAL write() to the same missing path is NOT_FOUND too");
+    check(!g.find(path_t::parse("/fresh")->key()).has_value(),
+          "and the local write created no intermediate level either");
 
     // A remote FIELD write to a nonexistent path answers the same way, and always did —
     // there is no vertex whose control surface it could address.
@@ -959,12 +963,71 @@ void test_remote_write_does_not_create() {
     const auto ffwd = b_fwd(fwd_op_t::WRITE, b_path({"other", "leaf"}), b_path({"reply-ep"}),
                             field_sel, b_value({1}));
     auto freply = resolve_bytes(resolver, ffwd);
-    const auto fdec = decode_reply(*freply);
-    check(value_u8(fdec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
-          "field write to an unregistered path => kind=ERROR");
-    check(status_error_code(fdec.tlv.children[4]) == 0x0020 /*tr::path::not_found*/,
+    check(is_not_found(decode_reply(*freply)),
           "field write keeps tr::path::not_found (no vertex to control)");
     check(!g.find(path_t::parse("/other/leaf")->key()).has_value(), "field write created nothing");
+}
+
+/** @brief What the test's creation hook saw, and whether it should refuse. */
+struct creation_seen_t {
+    graph_t* g = nullptr;    /**< @brief The graph the hook registers into. */
+    int calls = 0;           /**< @brief How many times the hook ran. */
+    std::size_t payload = 0; /**< @brief The last payload's length in bytes. */
+    bool refuse = false;     /**< @brief Refuse instead of creating. */
+};
+
+/** @brief The app's creation logic: register the missing child as a stored value. */
+tr::graph::result_t<void> create_stored(void* ctx, tr::graph::vertex_handle_t /*parent*/,
+                                        std::span<const std::byte> child_key,
+                                        std::string_view /*subject*/,
+                                        const tr::view::rope_t& payload) {
+    auto& seen = *static_cast<creation_seen_t*>(ctx);
+    ++seen.calls;
+    seen.payload = payload.total_length();
+    if (seen.refuse) return std::unexpected(status_t::NOT_FOUND);
+    const auto made = seen.g->register_vertex_key(
+        std::vector<std::byte>(child_key.begin(), child_key.end()), role_t::STORED_VALUE);
+    if (!made) return std::unexpected(made.error());
+    return {};
+}
+
+void test_write_creates_through_the_parent_hook() {
+    std::printf("RFC-0030 §7.2 (#1945): a parent's creation hook opts a missing child in:\n");
+    if constexpr (!tr::graph::kCreationHooks) {
+        std::printf("  (skipped: this build binds kCreationHooks = false)\n");
+    } else {
+        graph_t g;
+        op_resolver_t resolver(g);
+        const auto dev = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+        creation_seen_t seen{.g = &g};
+        check(g.set_creation_hook(dev, {&create_stored, &seen}).has_value(),
+              "the app installs a creation hook on /dev");
+
+        const auto remote = remote_write(resolver, {"dev", "ota"});
+        check(value_u8(remote.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+              "a remote WRITE to the missing /dev/ota now succeeds");
+        check(seen.calls == 1 && seen.payload > 0, "the hook ran once and saw the payload");
+        const auto stored = g.read(path_t("/dev/ota"));
+        check(stored.has_value(), "the vertex the hook created serves the written value");
+
+        check(g.write(path_t("/dev/local"), make_value(b_value({0x5A}))).has_value(),
+              "a LOCAL write to the missing /dev/local creates through the same hook");
+        check(seen.calls == 2 && g.read(path_t("/dev/local")).has_value(),
+              "the hook ran again, and the value landed");
+
+        // A miss below a vertex with no hook is still refused: the root carries none.
+        check(is_not_found(remote_write(resolver, {"elsewhere"})),
+              "a write beside /dev, where no hook opted in, is still NOT_FOUND");
+
+        // The hook's refusal is the writer's NOT_FOUND, and nothing is left behind.
+        seen.refuse = true;
+        check(is_not_found(remote_write(resolver, {"dev", "nope"})),
+              "a refusing hook answers the remote writer NOT_FOUND");
+        const auto refused_local = g.write(path_t("/dev/nope"), make_value(b_value({1})));
+        check(!refused_local.has_value() && refused_local.error() == status_t::NOT_FOUND,
+              "and the local writer NOT_FOUND");
+        check(!g.find(path_t::parse("/dev/nope")->key()).has_value(), "nothing was created");
+    }
 }
 
 }  // namespace
@@ -1381,7 +1444,8 @@ int main() {
     test_out_of_range_index_mode();
     test_undefined_opcode_answers_addressed_error();
     test_transport_down_reaches_the_wire();
-    test_remote_write_does_not_create();
+    test_write_to_a_missing_vertex_is_refused();
+    test_write_creates_through_the_parent_hook();
     test_subscription_observer();
     test_ts_echo();
     test_tf1_reserved_root();
