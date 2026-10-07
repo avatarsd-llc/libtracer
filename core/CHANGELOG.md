@@ -30,6 +30,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   on a graph that enforces no ACL are unchanged.
   `graph_t` gains `acl_enforced()`, the one-load test the hop asks first.
 
+- **Fixed an ACL check on the bound delivery into an accepted session.** A one-element bound
+  `dst` that names a bus session's anchor is now authorized at the mount's connection vertex
+  for WRITE, as the NAME spelling `<mount>/<peer>` is, in addition to the anchor itself. On a
+  graph that enforces an ACL, a mount with no connection vertex refuses the delivery.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added
