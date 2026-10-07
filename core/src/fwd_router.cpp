@@ -168,6 +168,12 @@ struct mount_hit_t {
      * to serve anyway, because a bus peer is `unroutable` at the subscriber door.
      */
     const child_registry_t::child_t* entry = nullptr;
+    /**
+     * @brief The registry slot the descent matched, on BOTH egress arms — the mount whose
+     *        connection vertex the NAME-spelled hop is authorized at. Null when no mount
+     *        matched (or the hit is `rejected`).
+     */
+    const child_registry_t::child_t* mount = nullptr;
 };
 
 /**
@@ -233,7 +239,12 @@ template <class SegAt, class Retain>
         if (!next->empty()) {
             if (transport_t* const p = child_registry_t::resolve_peer(*c, *next)) {
                 const std::string_view peer = retain(k);
-                return mount_hit_t{p, peer, k + 1, peer};
+                return mount_hit_t{.link = p,
+                                   .peer = peer,
+                                   .strip_k = k + 1,
+                                   .link_name = peer,
+                                   .entry = nullptr,
+                                   .mount = c};
             }
         }
         // ADR-0073 §3 (RFC-0020): the bus link's own NAME is not a routable next-hop.
@@ -245,7 +256,8 @@ template <class SegAt, class Retain>
         rej.rejected = true;
         return rej;
     }
-    return mount_hit_t{.link = eg.link, .peer = {}, .strip_k = k, .link_name = c->name, .entry = c};
+    return mount_hit_t{
+        .link = eg.link, .peer = {}, .strip_k = k, .link_name = c->name, .entry = c, .mount = c};
 }
 
 /**
@@ -2244,6 +2256,44 @@ void fwd_router_t::on_frame_rope_bus(const child_rx_ctx_t& ctx, peer_handle_t pe
     on_frame_rope_impl(name, std::move(frame), &ctx, true, peer);
 }
 
+template <class Cursor>
+bool fwd_router_t::name_hop_allows(const child_registry_t::child_t* mount, std::string_view caller,
+                                   const Cursor& cur, const fwd_pre_t& pre) const {
+    // Asked only when this graph enforces an ACL at all — one relaxed load otherwise — and on
+    // EVERY mount hop: the point-to-point arm and the bus-peer arm alike, because both cross
+    // the mount's connection vertex and its `:acl` governs both.
+    if (mount == nullptr || !graph_.acl_enforced()) return true;
+    if (pre.op_body_len == 0) return true;  // no op byte ⇒ the terminus tier's refusal stands
+    // Masked (RFC-0024 §9.3): bits 7-6 are flags. AWAIT reads, so it asks for READ. A REPLY is
+    // routed, never authorized: it answers an operation every gate already passed on the way
+    // in, and refusing it here would strand the answer (RFC-0004 §B). An opcode this build
+    // cannot name has no right to evaluate, and guessing one is how a write-like future opcode
+    // would cross a READ-only gate, so it is refused as `route_bound_forward` refuses it.
+    graph::acl_right_t right = graph::acl_right_t::READ;
+    switch (static_cast<fwd_op_t>(cur.byte_at(pre.op_body_off) & graph::kFwdOpcodeMask)) {
+        case fwd_op_t::REPLY:
+            return true;
+        case fwd_op_t::READ:
+        case fwd_op_t::AWAIT:
+            break;
+        case fwd_op_t::WRITE:
+            right = graph::acl_right_t::WRITE;
+            break;
+        default:
+            return false;
+    }
+    // The connection vertex this NAME run descended to, found by the matched mount's own key —
+    // the canonical key `add_child` resolved the child's `conn_slot` from. A mount with no
+    // connection vertex has no `:acl` to evaluate, and no bound element can name it either, so
+    // both spellings answer alike.
+    const std::optional<graph::vertex_handle_t> conn = graph_.find(mount->mount_tlv);
+    if (!conn) return true;
+    // ONE gate for every spelling: `bound_egress` asks `graph_t::allows` at the vertex a bound
+    // element dereferences to, this arm at the vertex the descent resolved — same function,
+    // same (vertex, caller, right).
+    return graph_.allows(*conn, caller, right);
+}
+
 template <class Cursor, class Observe, class Reject, class Terminus, class Reply>
 bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor& cur,
                                      const child_rx_ctx_t* inbound_ctx, bool from_peer,
@@ -2317,6 +2367,13 @@ bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor
                                     ? resolve_mount_at(registry_, cur, rd, pre)
                                     : mount_hit_t{};
         if (hit.link != nullptr) {
+            // The hop's authorization at the connection vertex the descent resolved, through
+            // the SAME gate the bound and label arms run (`bound_egress`), so a hop's verdict
+            // never depends on how it was spelled.
+            if (!name_hop_allows(hit.mount, inbound_name, cur, pre)) {
+                reject(graph::status_t::NOT_FOUND);
+                return true;
+            }
             // §11.2, and §6.1's mint decision, made HERE rather than inside the hop. The
             // address is a canonical `PATH` and not a `PATH_REF`, so this leg MAY mint — it is
             // the leg RFC-0027 exists for, the first string-spelled walk of a route whose reply

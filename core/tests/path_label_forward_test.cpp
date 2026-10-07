@@ -492,10 +492,12 @@ int main() {
             // spelling too, which is the comparison.
             const auto gate = [&](hop_t& h) {
                 // The subject IS the caller context (ADR-0018's test resolver), so a frame
-                // arriving on `cli` is subject "cli". The ALLOW arm grants WRITE at the
-                // connection vertex the label dereferences to; the DENY arm grants READ there
-                // and nothing else, so a WRITE is refused at the vertex rather than at the
-                // door — which is exactly the §8.2 re-check under assertion.
+                // arriving on `cli` is subject "cli". The ALLOW arm grants READ and WRITE at
+                // the connection vertex the label dereferences to; the DENY arm grants READ
+                // there and nothing else, so a WRITE is refused at the vertex rather than at
+                // the door — which is exactly the §8.2 re-check under assertion. READ is
+                // granted in both arms because the minting round trip is itself a READ that
+                // crosses this same vertex by name, and that hop is gated too.
                 {
                     auto hooks = h.g.hooks();
                     hooks.subject_resolver = {caller_is_subject, nullptr};
@@ -503,9 +505,11 @@ int main() {
                 }
                 (void)h.g.write(
                     path_t("/net/uplink/b:acl"),
-                    owned(allow_acl(kInLink, static_cast<std::uint32_t>(
-                                                 allow ? tr::graph::acl_right_t::WRITE
-                                                       : tr::graph::acl_right_t::READ))));
+                    owned(allow_acl(
+                        kInLink,
+                        static_cast<std::uint32_t>(tr::graph::acl_right_t::READ) |
+                            (allow ? static_cast<std::uint32_t>(tr::graph::acl_right_t::WRITE)
+                                   : 0u))));
             };
             gate(lab);
             gate(str);
@@ -543,21 +547,13 @@ int main() {
                 check(dst_body_of(lab.up.sent.back()) == dst_body_of(str.up.sent.back()),
                       "…and what they forward is byte-identical (§8.2's mandated comparison)");
             } else {
-                // DENY, and the honest statement of what this arm shows. §8.2 requires a
-                // labelled operation to evaluate `acl_allows` at the dereferenced vertex; the
-                // label arm does, through the same `bound_egress` a bound hop runs. The
-                // CANONICAL mount descent does not — a forwarder's string leg carries no
-                // per-vertex gate at all, because the name-addressed operation is gated at the
-                // TERMINUS, where its ancestor ACLs are.
-                //
-                // So the two arms are not symmetric here, and the asymmetry runs in the SAFE
-                // direction: the label spelling is never more permissive than the string one.
-                // That is the property §8.1 actually needs — a label cannot be used to reach
-                // something its holder could not reach canonically — and it is what is asserted,
-                // rather than an equality that would only hold by weakening the label arm.
+                // DENY. The authorization at a hop is one function of (vertex, caller, right),
+                // whichever spelling reached the vertex: the label arm evaluates it through
+                // `bound_egress`, and the canonical mount descent evaluates the same check at
+                // the connection vertex it crosses. The two arms are therefore symmetric, and
+                // that equality is what is asserted.
                 check(!lab_forwarded, "DENY: the labelled operation is refused at the vertex");
-                check(!lab_forwarded || str_forwarded,
-                      "…and the label spelling is NEVER more permissive than the string one");
+                check(!str_forwarded, "…and so is the string spelling — one verdict for both");
             }
         }
     }
