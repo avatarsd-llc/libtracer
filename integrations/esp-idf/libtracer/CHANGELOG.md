@@ -69,6 +69,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     owned through `transport_ptr_t`, or handed to `can_transport_t`, without
     `std::make_unique`. The host suites build every link this way.
 
+## [0.18.1] — 2026-10-07
+
+No component-specific changes. The component vendors the C++ core, so it carries core's 0.18.1 fixes. Released in lockstep with core.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added
