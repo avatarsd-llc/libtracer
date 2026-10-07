@@ -162,6 +162,10 @@ void test_target_key_on_the_seam() {
         check(g_allocs == 0, "(a) admission draws nothing around the table source");
         check(src.live_ > before, "(a) the table source holds the edge and its key");
 
+        // Warm-up write: a build that binds `hazard_slot_t` draws its process-wide node pool's
+        // first slab from the platform heap on the first store anywhere (`lkv_node_pool.cpp`).
+        // That is first-use growth of the slot, not the snapshot, so (b) measures the second.
+        check(g.write(from, value).has_value(), "(b) warm-up write");
         g_allocs = 0;
         g_arm = true;
         const bool wrote = g.write(from, value).has_value();
