@@ -351,7 +351,7 @@ class PerRowTrust(_NoGit):
         return out
 
     def _drawn(self, entries: list[dict]) -> dict[str, list[int]]:
-        series = rh._series_by_name(entries, rh._untrusted_cells(entries))
+        series, _ = rh._series_by_name(entries, rh._untrusted_cells(entries))
         return {name: [p[0] for p in pts] for name, pts in series.items()}
 
     def test_only_the_outlier_row_of_a_flagged_run_is_hidden(self):
@@ -496,7 +496,112 @@ class GapMarkers(unittest.TestCase):
         self.assertEqual(self._marks([[2, 1.0], [3, 2.0], [4, 3.0]]).strip(), "")
 
     def test_trend_view_draws_them(self):
-        self.assertIn("s += gapMarks(se, X, Y, cc, suite);", JS.read_text())
+        self.assertIn("s += gapMarks({ label: se.label, pts: lp, sus: se.sus }, X, Y, cc, suite);",
+                      JS.read_text())
+
+
+class MainAxis(unittest.TestCase):
+    """@brief One slot per first-parent `main` commit: carried forward or marked (2026-10-07)."""
+
+    SUITE = "libtracer bench-local latency (ns, smaller is better, fixed pinned host)"
+
+    @staticmethod
+    def _entry(sha: str, v: float, extra: str = "h") -> dict:
+        return {"commit": {"id": sha, "message": sha, "timestamp": "2026-10-0" + sha[0]},
+                "benches": [{"name": "inproc 64B/fan1/1ep p50 latency", "value": v,
+                             "unit": "ns", "extra": extra}]}
+
+    def _axis(self, stored, hist, touched):
+        h = [(s, "2026-10-01T00:00:00+00:00", "subject " + s) for s in hist]
+        data = {"entries": {self.SUITE: stored}}
+        return rh.onto_main_axis(data, history=(h, set(touched)))["entries"][self.SUITE]
+
+    def test_a_docs_only_commit_carries_the_point_of_its_code_version(self):
+        # 2 touched bench inputs, 3 did not (docs-only), 4 touched them again.
+        out = self._axis([self._entry("1", 10.0), self._entry("2", 20.0),
+                          self._entry("4", 40.0)], ["1", "2", "3", "4"], ["1", "2", "4"])
+        self.assertEqual([e["commit"]["id"] for e in out], ["1", "2", "3", "4"])
+        self.assertEqual(out[2]["axis"], {"same_as": "2"})
+        self.assertEqual(out[2]["benches"], [])
+        meta = rh._axis_meta(out)
+        self.assertEqual(meta["carried"], {"2": [1, "2"]})
+
+    def test_a_skipped_code_change_is_marked_unmeasured_not_carried(self):
+        out = self._axis([self._entry("1", 10.0), self._entry("3", 30.0)],
+                         ["1", "2", "3"], ["1", "2", "3"])
+        self.assertIn("unmeasured", out[1]["axis"])
+        self.assertIn("core/ or bench/ changed", out[1]["axis"]["unmeasured"])
+
+    def test_the_tip_waiting_for_its_run_is_pending(self):
+        out = self._axis([self._entry("1", 10.0)], ["1", "2"], ["1", "2"])
+        self.assertIn("not measured yet", out[1]["axis"]["unmeasured"])
+
+    def test_a_later_measurement_of_the_same_code_is_carried_back(self):
+        # 2 is docs-only after 1, and the schedule measured 3 (docs-only too) later.
+        out = self._axis([self._entry("3", 30.0)], ["1", "2", "3"], ["1"])
+        self.assertEqual([e["commit"]["id"] for e in out], ["3"])  # the axis starts at 3
+        out = self._axis([self._entry("1", 10.0), self._entry("4", 44.0)],
+                         ["1", "2", "3", "4"], ["1", "3"])
+        self.assertEqual(out[1]["axis"], {"same_as": "1"})
+        self.assertEqual(out[2]["axis"], {"same_as": "4"})  # 3 and 4 share code
+
+    def test_a_backfilled_point_lands_at_its_commit_not_at_the_end(self):
+        # Stored order is banking order: 2 was backfilled after 3.
+        out = self._axis([self._entry("1", 10.0), self._entry("3", 30.0),
+                          self._entry("2", 20.0)], ["1", "2", "3"], ["1", "2", "3"])
+        self.assertEqual([e["commit"]["id"] for e in out], ["1", "2", "3"])
+        self.assertEqual(rh._axis_meta(out), {})
+
+    def test_no_history_leaves_the_store_unchanged(self):
+        data = {"entries": {self.SUITE: [self._entry("1", 1.0)]}}
+        self.assertIs(rh.onto_main_axis(data, history=([("x", "", "")], set())), data)
+
+    def test_bench_paths_match_the_workflow_filter(self):
+        wf = (pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows"
+              / "perf-local.yml").read_text()
+        block = re.search(r"\n    paths:\n(.*?)\n    # A release tag", wf, re.S).group(1)
+        filt = [re.sub(r"/\*\*$", "", m) for m in re.findall(r"- '([^']+)'", block)]
+        self.assertEqual(filt, rh.BENCH_PATHS)
+        self.assertIn(" ".join(rh.BENCH_PATHS[:2]) + " \\\n            "
+                      + rh.BENCH_PATHS[2], wf)
+
+
+class SuspectAndCarried(_NoGit):
+    """@brief Flagged points are drawn marked, and carried slots continue the line."""
+
+    def test_payload_carries_suspect_points(self):
+        note = hg.contamination_note("A/A bracket 40.0% > 6.0% band")
+        store = _store()
+        entries = store["entries"]["libtracer latency (ns, smaller is better)"]
+        for b in entries[1]["benches"]:
+            b["extra"] = "h · " + note
+        built = rh.build(store, {})
+        series = [s for c in built["charts"] for s in c["series"]]
+        self.assertTrue(series)
+        self.assertTrue(all(s.get("sus") for s in series), "every flagged row must be kept")
+
+    def _run_js(self, body: str) -> str:
+        import subprocess
+        node = _node()
+        if node is None:
+            self.skipTest("node is not installed")
+        js = JS.read_text()
+        fns = "".join(re.search(r"\n  function %s\(.*?\n  \}\n" % n, js, re.S).group(0)
+                      for n in ("carriedPts", "linePts"))
+        return subprocess.run([node, "-e", fns + body], capture_output=True, text=True,
+                              check=True, timeout=30).stdout
+
+    def test_carried_slots_join_the_line(self):
+        out = self._run_js("console.log(JSON.stringify(linePts({pts: [[0, 5], [3, 7]]}, "
+                           "{carried: {'1': [0, 'aaa'], '2': [0, 'aaa'], '4': [3, 'ddd']}})));")
+        self.assertEqual(json.loads(out), [[0, 5, False], [1, 5, True], [2, 5, True],
+                                           [3, 7, False], [4, 7, True]])
+
+    def test_trend_view_draws_suspect_rings_and_carried_dots(self):
+        js = JS.read_text()
+        self.assertIn('class="ph-sus"', js)
+        self.assertIn('class="ph-carried"', js)
+        self.assertIn("no code change, same as", js)
 
 
 if __name__ == "__main__":

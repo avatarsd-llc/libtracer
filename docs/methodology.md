@@ -343,9 +343,11 @@ Details that make these trustworthy:
   merged on an unverified green. On the pinned host the same verdict is stamped next to the
   host descriptor on every recorded point (and so in every chart tooltip), and a contended
   sample carries the `CONTAMINATED` flag: it stays in the store as evidence, but it never
-  counts as coverage and never enters the rolling-drift baseline. The trend charts are not a
-  gating consumer: on a flagged sample they hide only the rows that failed their own A/A
-  check or are outliers against their own neighbours (#1890). GitHub-hosted runners
+  counts as coverage and never enters the rolling-drift baseline. A host whose load average
+  never settles flags its sample the same way rather than skipping it. The trend charts are
+  not a gating consumer: on a flagged sample they keep off the line only the rows that failed
+  their own A/A check or are outliers against their own neighbours (#1890), and draw those
+  rows as marked suspect points. GitHub-hosted runners
   cannot be isolated: they run unpinned, their conditions are read over the whole affinity
   set, and the interleaved A/B remains their primary defence. The allocation-count
   instruments (the zero-alloc gate, the memory probes, the RAM censuses) are exempt —

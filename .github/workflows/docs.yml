@@ -18,14 +18,25 @@ name: docs
 # always reports the verdict.
 #
 # A push to main always builds and deploys, exactly as a matching push did before.
-# Skipping there would be unsafe with the shared `pages` group below: GitHub keeps one
-# PENDING run per group, so a later push that touched no docs input could replace a
-# pending push that did, and its skipped build would leave that content undeployed.
+#
+# ── THE PAGE FOLLOWS THE BENCH STORE (2026-10-07) ───────────────────────────────────
+# The Performance page is generated from the gh-pages bench stores at build time, and a
+# push builds within seconds of the merge, while perf-local banks that merge's point
+# 5-20 min later. Its push to gh-pages uses GITHUB_TOKEN, which triggers no workflow, so
+# the newest point reached the page only when some LATER push happened to rebuild it.
+# `workflow_run` closes that: every completed, successful perf-local run rebuilds and
+# redeploys `main`. It is a hosted job. perf-local itself triggers only on pushes to
+# `main` or a `v*` tag, the schedule and manual dispatch, never from a fork, and the
+# `changes` job checks the triggering run's repository, branch and event again before
+# anything builds.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_run:
+    workflows: [perf-local]
+    types: [completed]
 
 permissions:
   contents: read
@@ -46,16 +57,32 @@ permissions:
 # A pull_request run never reaches the deploy job (`if: github.ref == 'refs/heads/main'`
 # on both the artifact upload and the deploy job), so it has no claim on the deployment
 # lock. PR builds therefore get their own per-PR group, where cancel-in-progress is not
-# only safe but wanted: a force-push supersedes its own earlier build. Pushes to main
-# keep the shared `pages` group and still never cancel an in-flight publish.
+# only safe but wanted: a force-push supersedes its own earlier build.
+#
+# `main` builds no longer share a WORKFLOW-level group (2026-10-07). The whole run held
+# `pages` until its deploy finished, so one deploy that hung in `waiting` (run
+# 37443785572, e95d1fca, 2026-10-06 09:55, no reviewer and no wait timer configured) held
+# the group for a day, and every later push run queued behind it and was cancelled by the
+# next one: 13 consecutive main pushes, 7f07e5c4 through 7894a2e3, never deployed. Builds
+# now run in a group of their own run, and only the `deploy` JOB takes `pages`, with
+# cancel-in-progress: a newer deploy cancels an older or wedged one, and a deploy whose
+# commit is no longer the head of `main` skips itself, so an older build cannot overwrite
+# a newer page.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || format('docs-main-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Decides whether a pull request can affect the docs build. Hosted, read-only, and
   # it executes nothing from the diff beyond `git diff`.
   changes:
+    # A `workflow_run` rebuild runs only for a SUCCESSFUL perf-local run of this
+    # repository's `main` or a release tag, started by a push, the schedule or a dispatch.
+    if: >-
+      github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -383,7 +410,9 @@ jobs:
   # (failure, cancellation, or a skip the decision did not ask for).
   build-required:
     name: build
-    if: always()
+    # Not on a workflow_run rebuild: no pull request reads its check, and a skipped
+    # `changes` there is a decision, not a failure.
+    if: always() && github.event_name != 'workflow_run'
     needs: [changes, docs-build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -412,6 +441,10 @@ jobs:
     needs: docs-build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # The deployment lock (see the workflow `concurrency:` above): newest deploy wins.
+    concurrency:
+      group: pages
+      cancel-in-progress: true
     # #1403 bounded the build job above and left this job unbounded — it is a single
     # actions/deploy-pages@v4 call against a GitHub service and can hang the same way.
     # Measured max 1.05 min over the 10 deploy runs (healthy max 0.38, p50 0.23);
@@ -421,6 +454,22 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Builds run in parallel now, so an older build can reach this job after a newer
+      # one deployed. Only the build of `main`'s head deploys; a newer run owns the rest.
+      - name: Deploy only the head of main
+        id: fresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)" || head=""
+          if [ -n "$head" ] && [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::notice::main moved to ${head:0:8} since this build of ${GITHUB_SHA:0:8}; its own run deploys"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Deploy to GitHub Pages
         id: deployment
+        if: steps.fresh.outputs.deploy == 'true'
         uses: actions/deploy-pages@v4

@@ -23,7 +23,13 @@ instruments, in the order the workflow uses them:
     bare pre-flight check: the workflow's own `cmake --build -j31` immediately
     precedes the measurement and pushes the 1-minute load average far above any
     sane bar, so a check would refuse every run and a guard that always refuses is
-    a guard that gets deleted. Waiting is what makes the bar enforceable.
+    a guard that gets deleted. Waiting is what makes the bar enforceable. A host
+    that never goes quiet FLAGS the sample (`note`), it no longer skips it: the
+    load average counts the whole workstation, including the CI runners pinned to
+    other CPUs, and from 2026-09-23 to 2026-10-07 it skipped 36 of 84 successful
+    push runs, the v0.18.0 merge among them, so they banked nothing at all. The
+    per-CPU instruments (the A/A bracket and `bench_conditions.py`) judge the bench
+    CPU itself; the load average is now one more stamped verdict beside them.
   * `bracket` — the A/A null pair, run before and after the measured transcript. The
     two runs use the SAME binary, which is what makes it a host instrument rather
     than a code one: with the text layout held constant the only thing left to move
@@ -37,9 +43,8 @@ instruments, in the order the workflow uses them:
     and any contamination verdict onto every emitted point, so the store records the
     conditions a number was taken under and not just the number.
 
-Two rules run through all of it. A busy host SKIPS its sample and never fails the
-job: refusing to measure is a correct outcome, and a red job trains the reader to
-ignore red. And a suspect sample is FLAGGED, never deleted — the raw datum stays in
+Two rules run through all of it. A busy host never fails the job: a red job
+trains the reader to ignore red. And a suspect sample is FLAGGED, never deleted — the raw datum stays in
 the store where it can be re-examined, while the charts and any gating consumer stop
 believing it (`is_contaminated`, and `contaminated_samples.json` for the points that
 predate the guard). Gating consumers keep that whole-sample verdict; the charts read
@@ -133,8 +138,9 @@ def wait_for_quiet(bar: float, timeout: float, poll: float = 15.0,
                    read=loadavg1) -> tuple[bool, float, float]:
     """@brief Poll the load average until it falls to @p bar, or @p timeout expires.
 
-    Returns (quiet, observed_load, waited_seconds). `quiet=False` is the SKIP signal,
-    never a failure: the caller banks nothing and the job stays green.
+    Returns (quiet, observed_load, waited_seconds). `quiet=False` is a FLAG, never a
+    failure: the caller banks the sample stamped with `busy_note`, and the job stays
+    green.
 
     The clock and the reader are injected so the decision rule can be tested without
     a real machine or a real wall clock.
@@ -426,6 +432,11 @@ def _gh_output(**kv: object) -> None:
             fh.write(f"{k}={v}\n")
 
 
+def busy_note(load: float, bar: float) -> str:
+    """@brief The `extra` fragment a sample carries when the host never went quiet."""
+    return contamination_note(f"host load {load:.1f} > bar {bar:.1f}")
+
+
 def _cmd_wait(args: argparse.Namespace) -> int:
     ncpu = args.ncpu or os.cpu_count() or 1
     bar = load_bar(ncpu, args.max_load_per_cpu)
@@ -434,11 +445,13 @@ def _cmd_wait(args: argparse.Namespace) -> int:
         print(f"host_guard: quiet after {waited:.0f}s — load {load:.2f} <= bar {bar:.2f} "
               f"({ncpu} cpus)")
     else:
-        print(f"::notice::bench-local sample SKIPPED — host busy after {waited:.0f}s: "
-              f"load {load:.2f} > bar {bar:.2f} ({ncpu} cpus). Nothing was banked; "
-              f"the job is green because refusing to measure is the correct outcome.")
-    _gh_output(bank="true" if quiet else "false", load=f"{load:.2f}", bar=f"{bar:.2f}")
-    return 0  # a busy host is a SKIP, never a failure
+        print(f"::notice::bench-local sample FLAGGED — host busy after {waited:.0f}s: "
+              f"load {load:.2f} > bar {bar:.2f} ({ncpu} cpus). The sample is still "
+              f"banked, stamped CONTAMINATED, so the page shows it marked and no gating "
+              f"consumer or density count trusts it.")
+    _gh_output(quiet="true" if quiet else "false", load=f"{load:.2f}", bar=f"{bar:.2f}",
+               note="" if quiet else busy_note(load, bar))
+    return 0  # a busy host is a FLAG, never a failure
 
 
 def _cmd_bracket(args: argparse.Namespace) -> int:
@@ -551,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    w = sub.add_parser("wait", help="hold until the host is quiet; skip the sample if not")
+    w = sub.add_parser("wait", help="hold until the host is quiet; flag the sample if not")
     w.add_argument("--max-load-per-cpu", type=float, default=DEFAULT_LOAD_PER_CPU)
     w.add_argument("--timeout", type=float, default=600.0)
     w.add_argument("--poll", type=float, default=15.0)

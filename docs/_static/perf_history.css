@@ -166,6 +166,8 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
 /* Gap markers (#1890): a commit with no trusted value, drawn as missing. */
 .ph-hist .ph-gap { stroke-width: 1; stroke-dasharray: 2 4; opacity: .45; }
 .ph-hist .ph-gapdot { fill: none; stroke-width: 1.2; opacity: .8; }
+.ph-hist .ph-carried { opacity: .45; }
+.ph-hist .ph-sus { fill: none; stroke-width: 1.4; stroke-dasharray: 2 1.5; opacity: .9; }
 .ph-hist .ph-tip .ph-nogap { opacity: .7; }
 
 /* sweep view: commit recency ramp */

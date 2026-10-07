@@ -778,30 +778,34 @@ def _untrusted_cells(entries: list[dict]) -> dict[int, tuple[str, set[str] | Non
 
 def _series_by_name(entries: list[dict],
                     skip: dict[int, tuple[str, set[str] | None]] | None = None
-                    ) -> dict[str, list[list[float]]]:
-    """@brief name -> [[entry_idx, value], ...] (sparse; a series may start late).
+                    ) -> tuple[dict[str, list[list[float]]], dict[str, list[list[float]]]]:
+    """@brief (trusted, suspect): each name -> [[entry_idx, value], ...], sparse.
 
-    Untrusted points (@p skip, from `_untrusted_cells`) are OMITTED rather than drawn,
-    which the sparse shape already expresses as a gap, and which the trend view marks
-    (#1890). Drawing them was the defect: a quarter of the board stepping at one commit
-    reads as a regression at that commit, and it was the machine. Omitting a whole run
-    for one bad row was the opposite defect, so a flagged run loses only the rows
-    `host_guard` hides. The datum survives in the store; only the line stops asserting it.
+    Untrusted points (@p skip, from `_untrusted_cells`) stay off the LINE: a quarter of
+    the board stepping at one commit reads as a regression at that commit, and it was the
+    machine. They are no longer dropped, though (2026-10-07). On 2026-10 almost every run
+    carried the run-level flag, so dropping them left the trend board mostly holes. They
+    go to `suspect`, which the trend view draws as a hollow ring at the measured value,
+    off the line and named in the tooltip. A flagged run hidden whole puts every row
+    there; one hidden in part, only the rows `host_guard` hides. A series with only
+    suspect points is still listed in `trusted`, with no points, so its card shows it.
     """
     skip = skip or {}
     out: dict[str, list[list[float]]] = {}
+    sus: dict[str, list[list[float]]] = {}
     for i, e in enumerate(entries):
         rows = skip[i][1] if i in skip else set()
-        if rows is None:
-            continue
         for b in e.get("benches", []):
-            if b.get("name") in rows:
-                continue
             try:
-                out.setdefault(b["name"], []).append([i, float(b["value"])])
+                pt = [i, float(b["value"])]
             except (KeyError, TypeError, ValueError):
                 continue
-    return out
+            if rows is None or b.get("name") in rows:
+                sus.setdefault(b["name"], []).append(pt)
+                out.setdefault(b["name"], [])
+            else:
+                out.setdefault(b["name"], []).append(pt)
+    return out, sus
 
 
 def _first_line(msg: str, limit: int = 72) -> str:
@@ -898,6 +902,7 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
     """
     suites: dict[str, dict] = {}
     suite_series: dict[str, dict[str, list[list[float]]]] = {}
+    suite_sus: dict[str, dict[str, list[list[float]]]] = {}
     suite_rows: dict[str, dict[str, dict]] = {}  # unfiltered rows, for the step detector
     for suite_name, entries in data.get("entries", {}).items():
         if not entries:
@@ -923,9 +928,10 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
             # rows hidden (#1890).
             "contaminated": {str(i): r for i, (r, rows) in untrusted.items() if rows is None},
             "partial": {str(i): len(rows) for i, (_, rows) in untrusted.items() if rows},
+            **_axis_meta(entries),
             **_host_meta(entries),
         }
-        suite_series[k] = _series_by_name(entries, untrusted)
+        suite_series[k], suite_sus[k] = _series_by_name(entries, untrusted)
         if steps:
             suite_rows[k] = step_detect.rows_of(entries)
 
@@ -971,6 +977,9 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
             # is one color everywhere — switching metric must not reshuffle the legend.
             ci = colors.setdefault(label, len(colors))
             s = {"label": label, "ci": ci, "pts": pts}
+            sus = suite_sus.get(suite, {}).get(name)
+            if sus:
+                s["sus"] = sus
             if pv is not None:
                 s["pv"] = pv
             if rm is not None:
@@ -1133,7 +1142,10 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
     Each store is first put on ONE commit axis (@ref align_store, #1801), so every trend
     chart of a store shares the same domain and tick spacing whichever suite it draws.
     """
-    data, local = align_store(data), align_store(local)
+    # bench-local, the trend instrument, is drawn on `main`'s own axis: a slot per
+    # first-parent commit, carried forward or marked where it has no point. The hosted
+    # store keeps its stored axis; it is the portability envelope, not a trend.
+    data, local = align_store(data), onto_main_axis(align_store(local))
     colors: dict[str, int] = {}
     # bench-local is built FIRST so the shared color map is assigned in the default view's
     # order; the hosted store is built without the ratio view (not same-pass).
@@ -1257,6 +1269,166 @@ def align_store(data: dict | None) -> dict | None:
         for e in entries:
             if not e["benches"] and "message" not in e["commit"]:
                 e["commit"] = commits.get(e["commit"].get("id", ""), e["commit"])
+    return out
+
+
+# The inputs perf-local.yml builds and measures: its `paths:` filter, and the density
+# leg's git-log pathspec. A first-parent `main` commit that touched none of them built
+# byte-identical bench binaries to its nearest ancestor that did. test_render_history
+# checks this against the workflow file, so the three lists cannot drift apart.
+BENCH_PATHS = ["core", "bench", ".github/workflows/perf-local.yml"]
+
+
+def _git_lines(*args: str) -> list[str] | None:
+    """@brief A git command's stdout lines in the repository, or None when it fails."""
+    try:
+        p = subprocess.run(["git", *args], capture_output=True, text=True, cwd=REPO,
+                           timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return p.stdout.splitlines() if p.returncode == 0 else None
+
+
+def _main_history() -> tuple[list[tuple[str, str, str]], set[str]] | None:
+    """@brief (first-parent `main`, oldest first, as (sha, iso date, subject); the shas
+    that touched `BENCH_PATHS`), or None without a usable history.
+
+    `origin/main` where it resolves, so a pull request's docs build draws the axis of
+    `main` and not of its own merge commit; HEAD otherwise (a local checkout).
+    """
+    ref = "origin/main" if _git_lines("rev-parse", "--verify", "-q", "origin/main") else "HEAD"
+    log = _git_lines("log", "--first-parent", "--reverse", "--format=%H%x09%cI%x09%s", ref)
+    files = _git_lines("log", "--first-parent", "--format=@%H", "--name-only", ref, "--",
+                       *BENCH_PATHS)
+    if not log or files is None:
+        return None
+    hist = []
+    for ln in log:
+        f = ln.split("\t", 2)
+        if len(f) == 3:
+            hist.append((f[0], f[1], f[2]))
+    # A commit whose bench-input change is Markdown only (a release merge edits nothing in
+    # core/ but core/CHANGELOG.md) builds the same binaries, so it is not a new version.
+    touched, sha = set(), ""
+    for ln in files:
+        if ln.startswith("@"):
+            sha = ln[1:]
+        elif ln.strip() and not ln.endswith(".md"):
+            touched.add(sha)
+    return hist, touched
+
+
+def onto_main_axis(data: dict | None, history=None) -> dict | None:
+    """@brief The aligned store on `main`'s axis: one slot per first-parent commit.
+
+    The stored axis had a slot only per MEASURED commit, so a commit the `paths:` filter
+    skipped, a run the busy-host guard skipped and a run a newer push superseded all
+    vanished without a trace, and a backfilled point landed at the end of the axis. From
+    2026-09-23 to 2026-10-07, 144 commits reached `main` and 48 had a point.
+
+    Each first-parent commit from the store's first one to the tip of `main` gets a
+    slot. A commit with no stored point gets an empty entry carrying `axis`:
+
+    - `{"same_as": sha}` when a commit with the SAME bench inputs (no commit changing a
+      non-Markdown file under `BENCH_PATHS` between them) has a point: the binaries are identical, so the page
+      carries that point forward, marked "no code change, same as <sha>". The nearest
+      earlier such point wins, else the nearest later one.
+    - `{"unmeasured": reason}` otherwise: its code changed and was never measured, or
+      its run is still pending at the tip.
+
+    A stored commit that is not on the first-parent line keeps its place after the
+    stored commit before it. Without a git history (a fork, a shallow clone) the store
+    is returned unchanged. @p history is (`_main_history`'s value), injected for tests.
+    """
+    if not data or not data.get("entries"):
+        return data
+    got = history if history is not None else _main_history()
+    if not got:
+        return data
+    hist, touched = got
+    suites = data["entries"]
+    first = next(iter(suites.values()))
+    stored = [e.get("commit", {}).get("id", "") for e in first]
+    pos = {sha: i for i, (sha, _, _) in enumerate(hist)}
+    on_main = [pos[s] for s in stored if s in pos]
+    if not on_main:
+        return data
+    span = hist[min(on_main):]
+    # The code version of every commit: the nearest first-parent ancestor (itself
+    # included) that touched the bench inputs. Walked over the WHOLE history, so the
+    # first slot of the span knows its version too.
+    version: dict[str, str] = {}
+    cur = ""
+    for sha, _, _ in hist:
+        if sha in touched or not cur:
+            cur = sha
+        version[sha] = cur
+    axis = [sha for sha, _, _ in span]
+    # Off-line stored commits go after the stored commit before them.
+    prev = None
+    for s in stored:
+        if s in pos:
+            prev = s
+        elif s:
+            at = axis.index(prev) + 1 if prev in axis else 0
+            while at < len(axis) and axis[at] not in pos:
+                at += 1  # after any earlier off-line commit already placed there
+            axis.insert(at, s)
+            version[s] = s
+    meta = {sha: (date, subj) for sha, date, subj in span}
+    out = {k: v for k, v in data.items() if k != "entries"}
+    out["entries"] = {}
+    for name, entries in suites.items():
+        by = {e.get("commit", {}).get("id", ""): e for e in entries}
+        groups: dict[str, list[int]] = {}  # code version -> measured slots, ascending
+        for j, sha in enumerate(axis):
+            if by.get(sha, {}).get("benches"):
+                groups.setdefault(version.get(sha, sha), []).append(j)
+        last_measured = max((js[-1] for js in groups.values()), default=-1)
+        rows = []
+        for j, sha in enumerate(axis):
+            e = by.get(sha)
+            if e and e.get("benches"):
+                rows.append(e)
+                continue
+            date, subj = meta.get(sha, ("", ""))
+            commit = (e or {}).get("commit") or {"id": sha, "message": subj, "timestamp": date}
+            same = groups.get(version.get(sha, sha), [])
+            before = [x for x in same if x < j]
+            if same:
+                axis_note = {"same_as": axis[before[-1] if before else same[0]]}
+            elif j > last_measured:
+                axis_note = {"unmeasured": "not measured yet: its perf-local run has not "
+                                           "banked a point"}
+            else:
+                axis_note = {"unmeasured": "not measured: core/ or bench/ changed here and "
+                                           "no perf-local run banked a point"}
+            rows.append({"commit": commit, "benches": [], "axis": axis_note})
+        out["entries"][name] = rows
+    return out
+
+
+def _axis_meta(entries: list[dict]) -> dict:
+    """@brief A suite's carried-forward and unmeasured slots (`onto_main_axis`).
+
+    `carried` maps a slot to `[source slot, source short sha]`, the point it repeats;
+    `unmeasured` maps a slot to why it has none. Both are keyed by the slot index as a
+    string, like `contaminated`.
+    """
+    idx = {e.get("commit", {}).get("id", ""): i for i, e in enumerate(entries)
+           if e.get("benches")}
+    carried, unmeasured = {}, {}
+    for i, e in enumerate(entries):
+        note = e.get("axis") or {}
+        if note.get("same_as") in idx:
+            carried[str(i)] = [idx[note["same_as"]], note["same_as"][:7]]
+        elif "unmeasured" in note:
+            unmeasured[str(i)] = note["unmeasured"]
+    out = {}
+    if carried:
+        out["carried"] = carried
+    if unmeasured:
+        out["unmeasured"] = unmeasured
     return out
 
 

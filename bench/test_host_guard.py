@@ -99,6 +99,34 @@ class WaitForQuiet(unittest.TestCase):
         args = argparse.Namespace(max_load_per_cpu=0.0001, timeout=0.0, poll=1.0, ncpu=31)
         self.assertEqual(hg._cmd_wait(args), 0)
 
+    def test_busy_host_flags_the_sample_instead_of_skipping_it(self):
+        """A host that never settles banks a FLAGGED sample: the page shows it marked."""
+        import argparse
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "out"
+            out.write_text("")
+            old = os.environ.get("GITHUB_OUTPUT")
+            os.environ["GITHUB_OUTPUT"] = str(out)
+            try:
+                args = argparse.Namespace(max_load_per_cpu=0.0001, timeout=0.0, poll=1.0,
+                                          ncpu=31)
+                hg._cmd_wait(args)
+            finally:
+                if old is None:
+                    del os.environ["GITHUB_OUTPUT"]
+                else:
+                    os.environ["GITHUB_OUTPUT"] = old
+            kv = dict(ln.split("=", 1) for ln in out.read_text().splitlines() if "=" in ln)
+        self.assertNotIn("bank", kv)  # nothing downstream may gate banking on it again
+        if kv["quiet"] == "false":  # the bar is ~0, so only an idle-at-zero host is quiet
+            self.assertTrue(hg.is_contaminated(kv["note"]))
+            self.assertIn("host load", kv["note"])
+
+    def test_busy_note_is_a_contamination_flag(self):
+        self.assertTrue(hg.is_contaminated(hg.busy_note(57.1, 7.75)))
+
 
 class Bracket(unittest.TestCase):
     """@brief The A/A null pair: same binary either side of the measured run."""
@@ -268,24 +296,27 @@ class RendererIgnoresFlaggedSamples(unittest.TestCase):
         entries = list(data["entries"].values())[0]
         skip = rh._untrusted_cells(entries)
         self.assertEqual(set(skip), {1})
-        series = rh._series_by_name(entries, skip)
+        series, sus = rh._series_by_name(entries, skip)
         idxs = [p[0] for p in series["inproc 64B/fan1/1ep p50 latency"]]
-        self.assertEqual(idxs, [0, 2], "the flagged sample must leave a gap, not a point")
+        self.assertEqual(idxs, [0, 2], "the flagged sample must stay off the line")
+        self.assertEqual(sus["inproc 64B/fan1/1ep p50 latency"], [[1, 150.0]],
+                         "the flagged sample is kept, marked suspect, not dropped")
 
     def test_flagged_row_inside_its_neighbours_is_drawn(self):
         """#1890: a flagged run no longer hides a row that agrees with its own neighbours."""
         note = hg.contamination_note("A/A bracket 12.0% > 6.0% band")
         data = self._store(["h", f"h · {note}", "h"], ["a" * 40, "b" * 40, "c" * 40])
         entries = list(data["entries"].values())[0]
-        series = rh._series_by_name(entries, rh._untrusted_cells(entries))
+        series, sus = rh._series_by_name(entries, rh._untrusted_cells(entries))
         self.assertEqual([p[0] for p in series["inproc 64B/fan1/1ep p50 latency"]], [0, 1, 2])
+        self.assertEqual(sus, {})
 
     def test_clean_store_is_unchanged(self):
         """A quiet host must produce exactly what it produces today."""
         data = self._store(["clean host"] * 3, ["a" * 40, "b" * 40, "c" * 40])
         entries = list(data["entries"].values())[0]
         self.assertEqual(rh._untrusted_cells(entries), {})
-        self.assertEqual(len(rh._series_by_name(entries, {})
+        self.assertEqual(len(rh._series_by_name(entries, {})[0]
                              ["inproc 64B/fan1/1ep p50 latency"]), 3)
 
     def test_payload_explains_the_gap(self):
