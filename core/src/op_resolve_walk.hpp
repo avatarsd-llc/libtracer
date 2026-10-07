@@ -877,9 +877,9 @@ template <class N, class ReplyError>
             // because every op needs a subject; a token is needed by remote SUBSCRIBE
             // alone, and a control-plane saving charged to every terminus frame is the
             // mistake #1290's prototype was killed for.
-            result_t<void> w = graph.subscribe_wire(
-                v, sub_value, return_route, inbound_link, std::move(reverse_route), subject,
-                link_token.ask());
+            result_t<void> w =
+                graph.subscribe_wire(v, sub_value, return_route, inbound_link,
+                                     std::move(reverse_route), subject, link_token.ask());
             if (!w) return assemble_error_reply(route, w.error(), egress);
             const reply_route_t ok = labelled_route();
             return or_backpressure(

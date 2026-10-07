@@ -1336,11 +1336,11 @@ class graph_t {
      * @brief True iff this graph enforces an ACL at all — a subject hook is installed
      *        (`subject_lookup`, or `subject_resolver` through its adapter).
      *
-     * One relaxed load of the slot the ACL gate reads. With no hook every @ref allows answers true for a remote caller,
-     * so a hop that would first have to LOCATE the vertex to evaluate at (a NAME-spelled
-     * forward hop) asks this first and skips the lookup on a node that enforces nothing. A
-     * hint, like `sink_slot_t::installed`: a resolver installed concurrently is observed by
-     * the next frame.
+     * One relaxed load of the slot the ACL gate reads. With no hook every @ref allows answers true
+     * for a remote caller, so a hop that would first have to LOCATE the vertex to evaluate at (a
+     * NAME-spelled forward hop) asks this first and skips the lookup on a node that enforces
+     * nothing. A hint, like `sink_slot_t::installed`: a resolver installed concurrently is observed
+     * by the next frame.
      */
     [[nodiscard]] bool acl_enforced() const noexcept { return subject_lookup_.installed(); }
 

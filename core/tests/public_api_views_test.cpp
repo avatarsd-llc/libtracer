@@ -188,8 +188,7 @@ void test_encode_match() {
     const auto node = wire::tlv_node_t::over(std::span<const std::byte>(path_frame));
     check(node.has_value(), "PATH frame validates");
     const auto viewed = wire::path_key(*node);
-    check(viewed && std::ranges::equal(*viewed, key) &&
-              viewed->data() >= path_frame.data() &&
+    check(viewed && std::ranges::equal(*viewed, key) && viewed->data() >= path_frame.data() &&
               viewed->data() + viewed->size() <= path_frame.data() + path_frame.size(),
           "path_key is the key, as a view of the frame's own PATH body");
 }
