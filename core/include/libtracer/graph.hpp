@@ -1280,6 +1280,17 @@ class graph_t {
     [[nodiscard]] bool allows(vertex_handle_t v, std::string_view caller, acl_right_t right) const;
 
     /**
+     * @brief True iff this graph enforces an ACL at all — a subject resolver is installed.
+     *
+     * One relaxed load. With no resolver every @ref allows answers true for a remote caller,
+     * so a hop that would first have to LOCATE the vertex to evaluate at (a NAME-spelled
+     * forward hop) asks this first and skips the lookup on a node that enforces nothing. A
+     * hint, like `sink_slot_t::installed`: a resolver installed concurrently is observed by
+     * the next frame.
+     */
+    [[nodiscard]] bool acl_enforced() const noexcept { return subject_resolver_.installed(); }
+
+    /**
      * @brief Free every value seam @ref retire parked — the EXPLICIT collector (#576).
      *
      * @ref retire detaches a vertex's value seam and **parks** it: the seam is read

@@ -510,6 +510,28 @@ int main() {
         (void)inbox.wait(kBudget);
     }
 
+    // ===== 7b) the SAME hop spelled as a NAME run gets the SAME verdict ==================
+    std::printf("The canonical-string spelling of that hop is gated identically:\n");
+    {
+        // The ACL from (7) still stands: READ only, at A's connection vertex for `b`, for the
+        // inbound subject. A canonical `dst` that walks through that vertex by NAME must be
+        // refused the WRITE the bound spelling is refused, and granted the READ it is granted.
+        const auto first_hop = r_cli.bound_dispatch(target, acl_right_t::READ);
+        check(first_hop.has_value(), "the client still has its first-hop link to A");
+        const std::vector<std::byte> by_name = b_path({"net", "uplink", "b", "sensor", "temp"});
+        const std::size_t before = at_b.count();
+        if (first_hop)
+            first_hop->link->send(
+                b_fwd_raw_op(kWrite, by_name, b_path({"reply-ep"}), {}, b_value_u32(0xFEEDFACEu)));
+        check(!at_b.wait_for_count(before + 1, kDropBudget),
+              "a canonical WRITE through a relay that grants only READ stops at that relay");
+        (void)inbox.wait(kBudget);  // its answer (the relay's refusal), so the next is the READ's
+        if (first_hop) first_hop->link->send(b_fwd_raw_op(kRead, by_name, b_path({"reply-ep"})));
+        check(at_b.wait_for_count(before + 1, kBudget),
+              "and the canonical READ the SAME ACL grants goes through — the denial is the ACL's");
+        (void)inbox.wait(kBudget);
+    }
+
     // ===== 8) the conformance vectors, byte-exact against what this hop emits ============
     //
     // The harness routes nothing (HARNESS.md §"the execution model has ONE forwarder"), so a

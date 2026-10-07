@@ -302,6 +302,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
       `block_ptr_t` / `make_block`, and `exhausted_at_init`.
   - `wire::emit_path_segment` gains `mem::bytes_t&` overloads.
 
+### Fixed
+
+- **Fixed an ACL check on the canonical-string forward hop.** A forwarded operation whose
+  `dst` names the next hop as a NAME run is now authorized at that hop's connection vertex
+  exactly as the bound and label spellings are (`graph_t::allows`, for the operation's own
+  right), so the verdict no longer depends on how the hop is spelled. A refused hop answers
+  `NOT_FOUND`. This holds on every mount hop, point-to-point and bus alike. A REPLY and a hop
+  on a graph that enforces no ACL are unchanged.
+  `graph_t` gains `acl_enforced()`, the one-load test the hop asks first.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added
