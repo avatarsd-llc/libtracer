@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Render the Tracer Internet-Draft and check it (#1964).
+#
+# docs/ietf/build.sh turns the kramdown-rfc source into RFCXML v3, renders text
+# and HTML with xml2rfc, and runs idnits on the text. It fails on any kramdown-rfc or
+# xml2rfc warning or error and on any idnits error, flaw or warning. The one exception
+# is the idnits "first submitted" warning, which a never-posted draft cannot avoid (see
+# the script). CI and a local run use the same script.
+#
+# RUNNER ROUTING: GitHub-hosted only, never self-hosted. The job fetches its toolchain
+# and reference data from the network (RubyGems, PyPI, bib.ietf.org, the Datatracker
+# for idnits), needs nothing the self-hosted image carries, and fires only on a change
+# to the draft or to this file.
+#
+# Toolchain pins: kramdown-rfc and xml2rfc by version. idnits v2 is a single script
+# with no release artifact, so it is fetched from a pinned commit of
+# ietf-tools/idnits and checked against its sha256. idnits v2 needs gawk.
+name: internet-draft
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/ietf/**"
+      - ".github/workflows/internet-draft.yml"
+  pull_request:
+    # Duplicated rather than a YAML anchor: GitHub Actions does not expand aliases.
+    paths:
+      - "docs/ietf/**"
+      - ".github/workflows/internet-draft.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: internet-draft-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  KRAMDOWN_RFC_VERSION: "1.7.43"
+  XML2RFC_VERSION: "3.34.1"
+  IDNITS_COMMIT: "dfbd43e9c1f9f7224a96e25ec8be085d8de850e9" # v2 branch, idnits 2.17.1
+  IDNITS_SHA256: "e070604fc65ca732e2cb3d1543c99ce7dde579c0d291fb21d85585b0337fece9"
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the toolchain (kramdown-rfc, xml2rfc, idnits)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gawk
+          gem install --user-install --no-document kramdown-rfc -v "$KRAMDOWN_RFC_VERSION"
+          echo "$(ruby -e 'print Gem.user_dir')/bin" >> "$GITHUB_PATH"
+          python -m pip install --quiet "xml2rfc==$XML2RFC_VERSION"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/idnits" \
+            "https://raw.githubusercontent.com/ietf-tools/idnits/$IDNITS_COMMIT/idnits"
+          echo "$IDNITS_SHA256  $HOME/.local/bin/idnits" | sha256sum -c -
+          chmod +x "$HOME/.local/bin/idnits"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Render and check the draft
+        run: docs/ietf/build.sh "$RUNNER_TEMP/draft"
+      - name: Upload the rendered draft
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: draft-avatarsd-tracer
+          path: |
+            ${{ runner.temp }}/draft/*.xml
+            ${{ runner.temp }}/draft/*.txt
+            ${{ runner.temp }}/draft/*.html
+            ${{ runner.temp }}/draft/*.log
+          if-no-files-found: error
