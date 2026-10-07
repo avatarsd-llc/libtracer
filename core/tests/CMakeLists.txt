@@ -1111,6 +1111,13 @@ target_link_libraries(retire_sweep_race_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(retire_sweep_race_test)
 add_test(NAME retire_sweep_race COMMAND retire_sweep_race_test)
 
+# #1919 — subscribe/unsubscribe against retire of the same vertex: the mutator's scan of parked
+# edge arrays reads the slot table's source outside the stripe lock. A TSan target.
+add_executable(subscribe_retire_race_test subscribe_retire_race_test.cpp)
+target_link_libraries(subscribe_retire_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(subscribe_retire_race_test)
+add_test(NAME subscribe_retire_race COMMAND subscribe_retire_race_test)
+
 # #1712: the per-vertex pending-mark hint — an unmarked observed write skips the key render and
 # the sweep lock (global-new counter difference), plus the mark/clear race the tsan lane runs.
 add_executable(pending_mark_test pending_mark_test.cpp)

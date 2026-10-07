@@ -814,7 +814,8 @@ class block_array_t {
         : src_(o.src_), data_(o.data_), end_(o.end_), cap_(o.cap_) {
         o.data_ = o.end_ = o.cap_ = nullptr;
     }
-    /** @brief Move-assignable (destroys and releases this array's contents first). */
+    /** @brief Move-assignable (destroys and releases this array's contents first). @p o is left
+     *         empty and keeps its source: neither move writes the moved-from source. */
     block_array_t& operator=(block_array_t&& o) noexcept {
         if (this != &o) {
             give_back();
