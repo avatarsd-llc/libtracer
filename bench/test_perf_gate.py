@@ -207,6 +207,21 @@ class ThresholdBoundary(unittest.TestCase):
         self.assertAlmostEqual(pg.leg_factor("k", "deliv_s", null)[0], 1 / 1.09)
         self.assertFalse(pg.leg_factor("k", "p50_ns", null)[1], "the null measured the grain")
 
+    def test_the_cliff_rows_take_five_spreads_and_every_row_is_capped(self):
+        """#1888's pin on `CLIFF_NULL_K`: 5 s on a cliff key, 3 s on any other, and a large
+        s returns the flat factor with source `cap` on both."""
+        cliff, row = f"{pg.CLIFF_MODES[0]}/1024/1/1", "inproc/64/1/1"
+        small = {cliff: {leg: 0.015 for leg in pg.LEGS}, row: {leg: 0.015 for leg in pg.LEGS}}
+        self.assertAlmostEqual(pg.leg_factor(cliff, "p50_ns", small)[0], 1 + 5 * 0.015)
+        self.assertAlmostEqual(pg.leg_factor(row, "p50_ns", small)[0], 1 + 3 * 0.015)
+        self.assertAlmostEqual(pg.leg_factor(cliff, "deliv_s", small)[0], 1 / (1 + 5 * 0.015))
+        self.assertAlmostEqual(pg.leg_factor(row, "deliv_s", small)[0], 1 / (1 + 3 * 0.015))
+        big = {cliff: {leg: 0.2 for leg in pg.LEGS}, row: {leg: 0.2 for leg in pg.LEGS}}
+        for k in (cliff, row):
+            for leg in pg.LEGS:
+                self.assertEqual(pg.leg_factor(k, leg, big),
+                                 (pg._FLAT[leg], leg != "deliv_s", "cap"))
+
     def test_a_row_the_null_lacks_falls_back_to_flat_and_says_so(self):
         self.assertEqual(pg.leg_factor("new/64/1/1", "p50_ns", {}),
                          (pg.LAT_REGRESS, True, "flat"))
@@ -1580,6 +1595,109 @@ class AaNullBankAndReplay(unittest.TestCase):
         ses = aa_null.session_ratios(self.raw([0, 0], 0.0, rounds=10, gone={(0, 9)})
                                      ["samples"]["inproc/64/1/1"], "p50_ns", 8)
         self.assertEqual(len(ses), 2 * 2)  # windows 0-7 and 1-8, both directions
+
+
+class AaNullPoolsRunnerStops(unittest.TestCase):
+    """@brief The 25+ round null (#1909, absorbing #1888): measured in several windows, each
+    one runner stop, pooled into one fit without a gate window straddling two stops, and
+    banked with the rounds, the windows and the held-out replay in its meta."""
+
+    raw = staticmethod(AaNullBankAndReplay.raw)
+
+    def window(self, rounds: int, date: str, offsets=(0, 0, 0), noise=0.01) -> dict:
+        r = self.raw(list(offsets), noise, rounds=rounds)
+        r.update(date=date, host="bench", conditions="clean")
+        return r
+
+    def test_a_pooled_fit_never_takes_a_window_across_two_stops(self):
+        import aa_null
+        pooled = aa_null.pool([self.window(8, "d1"), self.window(8, "d2")])
+        self.assertEqual(pooled["rounds"], 16)
+        ses = aa_null.session_ratios(pooled["samples"]["inproc/64/1/1"][:2], "p50_ns", 8)
+        self.assertEqual(len(ses), 2 * 2)  # one window per stop, both directions; not 9 x 2
+
+    def test_the_replay_never_takes_a_session_across_two_stops(self):
+        import aa_null
+        a, b = self.window(8, "d1"), self.window(8, "d2")
+        ev = aa_null.evaluate(aa_null.pool([a, b]), {})
+        self.assertEqual(ev["sessions"], 2 * 6)  # one window per stop, 6 ordered build pairs
+
+    def test_the_meta_records_the_rounds_and_the_windows_they_came_from(self):
+        import aa_null
+        out = aa_null.bank(aa_null.pool([self.window(13, "2026-10-08"),
+                                         self.window(12, "2026-10-09")]))
+        meta = out["meta"]
+        self.assertEqual(meta["rounds"], 25)
+        self.assertEqual([(w["date"], w["rounds"]) for w in meta["windows"]],
+                         [("2026-10-08", 13), ("2026-10-09", 12)])
+        self.assertEqual(meta["banked"], "2026-10-09")
+
+    def test_one_measurement_still_banks_as_one_window(self):
+        import aa_null
+        meta = aa_null.bank(self.window(10, "2026-10-08"))["meta"]
+        self.assertEqual([(w["date"], w["rounds"]) for w in meta["windows"]],
+                         [("2026-10-08", 10)])
+
+    def test_windows_of_different_builds_do_not_pool(self):
+        import aa_null
+        b = self.window(8, "d2", offsets=(0, 0))
+        with self.assertRaises(ValueError):
+            aa_null.pool([self.window(8, "d1"), b])
+
+    def test_the_held_out_replay_is_banked_with_the_null(self):
+        import aa_null
+        fit = aa_null.pool([self.window(13, "d1"), self.window(13, "d2")])
+        out = aa_null.bank(fit, held_out=self.window(10, "d3"))
+        h = out["meta"]["held_out"]
+        self.assertEqual(h["rounds"], 10)
+        self.assertGreater(h["sessions"], 0)
+        self.assertEqual(h["false_fail_sessions"], 0)
+        self.assertEqual((h["rows_caught_every_session"], h["rows"]), (1, 1))
+
+    def _cli_bank(self, windows: list[dict], *extra: str) -> tuple[int, pathlib.Path]:
+        import aa_null
+        d = pathlib.Path(tempfile.mkdtemp())
+        argv = ["bank", "--out", str(d / "null.json")]
+        for i, w in enumerate(windows):
+            (d / f"w{i}.json").write_text(json.dumps(w))
+            argv += ["--raw", str(d / f"w{i}.json")]
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            rc = aa_null.main(argv + list(extra))
+        return rc, d / "null.json"
+
+    def test_the_cli_refuses_a_fit_under_25_rounds(self):
+        rc, out = self._cli_bank([self.window(15, "d1")])
+        self.assertNotEqual(rc, 0)
+        self.assertFalse(out.exists(), "a short fit must not overwrite the null")
+
+    def test_the_cli_pools_several_raw_files_into_one_fit(self):
+        rc, out = self._cli_bank([self.window(13, "d1"), self.window(13, "d2")])
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.read_text())["meta"]["rounds"], 26)
+
+
+class AaNullCampaignScript(unittest.TestCase):
+    """@brief `aa_null_campaign.sh` (#1909): the bench host's A/A bank. It stops the bench
+    runner for each window, so it must restart it on every exit and never stop it under a
+    queued or running perf job."""
+
+    SCRIPT = pg.HERE / "aa_null_campaign.sh"
+
+    def test_the_runner_is_restarted_on_every_exit(self):
+        text = self.SCRIPT.read_text()
+        self.assertRegex(text, r"trap\s+\S*restart\S*\s+EXIT")
+        self.assertIn("systemctl start", text)
+
+    def test_it_waits_for_both_perf_workflows_before_stopping_the_runner(self):
+        text = self.SCRIPT.read_text()
+        for wf in ("perf.yml", "perf-local.yml"):
+            self.assertIn(wf, text)
+        for status in ("queued", "in_progress"):
+            self.assertIn(status, text)
+
+    def test_it_holds_out_a_window_the_fit_does_not_use(self):
+        self.assertIn("--held-out", self.SCRIPT.read_text())
 
 
 class HistoryKeepsOneRunnersTuple(unittest.TestCase):
