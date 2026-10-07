@@ -24,6 +24,11 @@
 #include "libtracer/guard.hpp"
 #include "libtracer/guard_mutex.hpp"  // the host default graph::guard_t names its type
 
+// Discovery, not a knob: glibc 2.32+ publishes __libc_single_threaded here (#1912).
+#if __has_include(<sys/single_threaded.h>)
+#include <sys/single_threaded.h>
+#endif
+
 /**
  * @file
  * @brief L1 (`tr::view`) refcounted `segment_t` and its owning `segment_ptr_t`.
@@ -44,6 +49,24 @@ namespace detail {
  * the guarded binding by naming @ref basic_ref_count_t's `kNative` parameter itself.
  */
 inline constexpr bool kNativeRefCount = std::atomic<std::uint_least32_t>::is_always_lock_free;
+
+/**
+ * @brief Whether the process has never started a second thread (#1912).
+ *
+ * The test `std::shared_ptr` makes before every count update (libstdc++'s
+ * `__gnu_cxx::__is_single_threaded`): while it answers true no other thread can name a count,
+ * so the native binding may update it with a plain load and store instead of a locked RMW.
+ * Starting a thread clears the flag before the thread runs, and that start orders every
+ * earlier plain update before the new thread's first access. Where the C library does not
+ * publish the flag (an MCU's newlib, musl) this answers false and the count is always atomic.
+ */
+[[nodiscard]] inline bool process_single_threaded() noexcept {
+#if __has_include(<sys/single_threaded.h>)
+    return ::__libc_single_threaded != 0;
+#else
+    return false;
+#endif
+}
 
 /**
  * @brief Intrusive refcount with the spec's orderings; @p kNative picks the binding.
@@ -77,7 +100,10 @@ class basic_ref_count_t {
     /** @brief Add one reference (relaxed: a new reference orders nothing). */
     void inc_relaxed() noexcept {
         if constexpr (kNative) {
-            count_.fetch_add(1, std::memory_order_relaxed);
+            if (process_single_threaded())  // no other thread exists to race (#1912)
+                count_.store(count_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            else
+                count_.fetch_add(1, std::memory_order_relaxed);
         } else {
             const guard_scope_t<G> section = open();
             count_.store(count_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
@@ -87,7 +113,10 @@ class basic_ref_count_t {
     /** @brief Drop one reference; returns the count BEFORE the drop. */
     [[nodiscard]] std::uint_least32_t dec_acq_rel() noexcept {
         if constexpr (kNative) {
-            return count_.fetch_sub(1, std::memory_order_acq_rel);
+            if (!process_single_threaded()) return count_.fetch_sub(1, std::memory_order_acq_rel);
+            const std::uint_least32_t before = count_.load(std::memory_order_relaxed);
+            count_.store(before - 1, std::memory_order_relaxed);
+            return before;
         } else {
             const guard_scope_t<G> section = open();
             // Relaxed inside the section: its lock / unlock are the acquire / release.

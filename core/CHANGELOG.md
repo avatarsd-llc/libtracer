@@ -145,6 +145,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     answers `SCHEMA_NOT_FOUND`. Turn it on with `static constexpr bool kCreationHooks = true;`
     in `libtracer/config_override.hpp`. The core test preset turns it on.
   - The `graph_write_creates` example is now `graph_creation_hook`.
+- **`target_key_t` is drawn from the graph's table source
+  ([#1912](https://github.com/avatarsd-llc/libtracer/issues/1912)).** It was a
+  `std::shared_ptr<const std::vector<std::byte>>`, two platform-heap draws per path-target
+  admission outside the seam; it is now an intrusive handle over one block of the source (the
+  count, the source and the key bytes). `*key` is a `std::span<const std::byte>` rather than a
+  vector. `try_make_target_key(src, key)` takes the source and a span instead of a vector it
+  moved from, and answers null when the source refuses, so the vector built outside the probe
+  is gone. The handle keeps the `shared_ptr`'s width, so `sizeof` of `subscriber_t`,
+  `edge_view_t` and `pub_edge_t` is unchanged.
 
 - **The graph core's remaining global-heap draws move onto the table source
   ([#1885](https://github.com/avatarsd-llc/libtracer/issues/1885)).**
@@ -294,6 +303,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     `send_compact`).
 
 ### Changed
+
+- **The intrusive refcount skips its locked RMW while the process is single-threaded
+  ([#1912](https://github.com/avatarsd-llc/libtracer/issues/1912)).**
+  `view::detail::ref_count_t`'s native binding tests glibc's `__libc_single_threaded` first,
+  as `std::shared_ptr` does, and updates the count with a plain load and store while no second
+  thread has ever started. Segments, the subscription cold half and the target key all use it.
+  Where the C library publishes no such flag (newlib, musl) the count is always atomic.
 
 - **The TCP and WS servers clear their delivering session after each frame
   ([#1915](https://github.com/avatarsd-llc/libtracer/issues/1915)).** `inbound_peer()` on a

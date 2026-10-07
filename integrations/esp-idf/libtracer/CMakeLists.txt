@@ -338,9 +338,10 @@ endif()
 # publish reserves `kInlineFanout * sizeof(edge_view_t)` bytes of the publishing task's stack
 # for its subscriber snapshot (28 B a view on rv32), whatever the vertex's fan-out. A chip node's
 # vertices carry one or two subscribers, so 2 keeps every such publish off the allocator and
-# gives the other six slots back: graph_t::fan_out's frame measures 304 B at 8 and 128 B at 2
-# (rv32 -Os, GCC 15.2, -fstack-usage) on every publishing task; a wider fan-out
-# still delivers to every subscriber through the overflow vector. The `linux` host target keeps
+# gives the other six slots back: graph_t::fan_out's frame measures 2,128 B at 8 and 608 B at
+# 2 (rv32 -Os, GCC 15.2, -fstack-usage, after #1885's wide frame of 8 x kInlineFanout views) on
+# every publishing task; a wider fan-out still delivers to every subscriber, from one block of
+# the graph's table source past that frame. The `linux` host target keeps
 # core's default (8), as it does the slot.
 if(IDF_TARGET STREQUAL "linux")
     set(LIBTRACER_INLINE_FANOUT 8)

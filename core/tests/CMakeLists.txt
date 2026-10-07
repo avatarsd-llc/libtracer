@@ -2845,3 +2845,9 @@ add_executable(fault_injection_trait_test fault_injection_trait_test.cpp)
 target_link_libraries(fault_injection_trait_test PRIVATE libtracer)
 libtracer_test_warnings(fault_injection_trait_test)
 add_test(NAME fault_injection_trait COMMAND fault_injection_trait_test)
+
+# #1912 — a path-target edge's key lives on the graph's table source.
+add_executable(target_key_seam_test target_key_seam_test.cpp)
+target_link_libraries(target_key_seam_test PRIVATE libtracer)
+libtracer_test_warnings(target_key_seam_test)
+add_test(NAME target_key_seam COMMAND target_key_seam_test)

@@ -123,6 +123,24 @@ width allocates nothing either; a wider one takes one block from the table sourc
 when the delivery ends. No thread keeps a buffer between publishes (#1885 deleted the
 `thread_local` vector that did).
 
+**A wide fan-out sizes its own source (#1912).** That block is `F * sizeof(edge_view_t)`
+bytes for `F` live subscribers: 48 B a view on a 64-bit host, so 384 KiB at fan-out 8192. The
+host default root serves classes up to 64 KiB (`config.hpp:default_config_t::kSizeClasses`),
+and a request past the last class is its own block from the root, drawn and returned on
+every publish. Under glibc that is an `mmap` / `munmap` pair per publish once the block
+passes the mmap threshold. A node that publishes at that width supplies a source sized for it:
+a `slab_pool_t` whose table reaches the widest snapshot, passed to `graph_t`'s constructor, or
+a build whose `kSizeClasses` override does the same. The library keeps no per-vertex or
+per-thread buffer for it: that would be the retained buffer #1885 deleted, and raising the
+default top class would cost every host multi-MiB slabs for a width most never reach.
+
+The bench pins the allocator (`bench_process.hpp`: `GLIBC_TUNABLES` with a fixed 128 KiB mmap
+threshold, #1803), so its fan-out-8192 rows pay that `mmap` on every publish. Under glibc's
+default dynamic threshold, which rises past the block's size once the first such block is
+freed, the same rows read about 4 % faster than before #1885 (measured on #1911). Read the
+`inproc-remote` and `inproc-target-*` rows at fan-out 8192 as the cost of
+an oversize draw from the default root, not as a cost of the fan-out itself.
+
 `own_subs()` is read without the lock, so the width it reports can be stale.
 That costs nothing but a re-read: **`snapshot_edges` re-checks the width against the published
 array** (`graph.cpp:graph_t::fan_out`, `vertex.hpp:const bool use_heap =`), so a subscriber added between the count and
