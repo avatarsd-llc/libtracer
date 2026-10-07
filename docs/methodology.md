@@ -346,6 +346,16 @@ Details that make these trustworthy:
   set, and the interleaved A/B remains their primary defence. The allocation-count
   instruments (the zero-alloc gate, the memory probes, the RAM censuses) are exempt —
   load cannot move a count.
+- **The pinned host's A/A bracket.** Each bench-local sample runs the same
+  `bench_forward_demux` binary before and after the measured run, about 45 one-second rows
+  (throughput and p50 per point). The whole sample is flagged `CONTAMINATED` when the
+  **p75 row** disagrees by more than **6 %** or **any single row** by more than **15 %**
+  (`AA_RUN_P75_BAND` and `AA_RUN_ROW_CAP` in
+  [`host_guard.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/host_guard.py)),
+  and the flag records the measured p75 and max. Until 2026-10-07 the worst row alone
+  decided at 6 %, which flagged nearly every run on a clean host: on `d678bf17` the median
+  row was 0.9 % and two rows of 45 were over 6 %. Rows over 6 % are still marked one by one
+  for the charts, whatever the sample's verdict.
 - The per-PR gate watches **thirty-five canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
