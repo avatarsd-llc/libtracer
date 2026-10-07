@@ -1,13 +1,13 @@
 # Reference 01 — Data format
 
-> **Status**: normative, v1, 2026-05-03 (incorporated by [docs/spec/v1.md](../spec/v1.md) §3 per RFC-0001 §A.2). Byte-precise definition of every libtracer frame on the wire. A second-implementer SHOULD be able to write an interoperable parser/sender from this section alone.
-> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in the [ADR set](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and git history. For a worked byte-level walkthrough of these same rules — annotated frames, one byte at a time — see [wire format, bit by bit](../modules/wire-format-bits.md). To inspect real libtracer frames on the wire, the [**Wireshark dissector**](https://github.com/avatarsd-llc/libtracer/tree/main/tools/wireshark) decodes this format live (a single-file Lua dissector, vector-tested against the conformance frames).
+> **Status**: normative, v1, 2026-05-03 (incorporated by [docs/spec/v1.md](../spec/v1.md) §3 per RFC-0001 §A.2). Byte-precise definition of every Tracer frame on the wire. A second-implementer SHOULD be able to write an interoperable parser/sender from this section alone.
+> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in the [ADR set](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and git history. For a worked byte-level walkthrough of these same rules — annotated frames, one byte at a time — see [wire format, bit by bit](../modules/wire-format-bits.md). To inspect real Tracer frames on the wire, the [**Wireshark dissector**](https://github.com/avatarsd-llc/libtracer/tree/main/tools/wireshark) decodes this format live (a single-file Lua dissector, vector-tested against the conformance frames).
 
 ---
 
 ## Frame layout
 
-Every libtracer TLV is a **header + payload + optional trailer**. The payload is a contiguous, untouched user region; metadata never interleaves with it.
+Every Tracer TLV is a **header + payload + optional trailer**. The payload is a contiguous, untouched user region; metadata never interleaves with it.
 
 ```
 Offset      Field         Width       Notes
@@ -261,7 +261,7 @@ The `type` byte lives at offset 0 of the wire header (L2) but its meaning is L3.
 
 ### Versioning and compatibility
 
-**libtracer v1 is the wire format. It does not evolve.** There is no version bit in the header. Future incompatible changes — should they ever be needed — are versioned at the **discovery layer**: a different mDNS service name (`_libtracer-v2._tcp` vs `_libtracer._tcp`), a different default TCP port, a different CAN-ID prefix, etc. Peers learn each other's wire-format identity at discovery time; per-frame versioning is unnecessary and absent.
+**Tracer v1 is the wire format. It does not evolve.** There is no version bit in the header. Future incompatible changes — should they ever be needed — are versioned at the **discovery layer**: a different mDNS service name (`_libtracer-v2._tcp` vs `_libtracer._tcp`), a different default TCP port, a different CAN-ID prefix, etc. Peers learn each other's wire-format identity at discovery time; per-frame versioning is unnecessary and absent.
 
 This is a deliberate design commitment: get the wire format right once. The wire is the most expensive thing to evolve; minimizing its evolution surface forces design rigor here and pushes flexibility into modules, schemas, and the type-code-extension path below.
 
@@ -466,7 +466,7 @@ For future readers wondering about paths not taken:
 
 - **LEB128 / varint length** — branchy parser, unpredictable payload offset, hostile to streaming and SIMD. Rejected in favor of fixed-width with a single LL bit.
 - **Finite-pool length encoding** — a fixed set of length slot-classes on the wire. Rejected in favor of the LL bit; the slot-class concept survives only as a receive-buffer pooling convention internal to the runtime, not on the wire.
-- **Variable-width type field / type tree** — would let a router dispatch by content shape without payload parse. Rejected because libtracer routes by **path**, not type; schema is per-vertex (`:schema`); and adding wire-level type-tree encoding fights claim 5 ("the graph imposes no shape on user data"). Self-describing payloads use NAME-tagged children inside a structured TLV (a user-range type code with `PL=1`) instead. Cap'n Proto / FlatBuffers solved the schema-on-the-wire problem already; libtracer is deliberately schema-by-introspection.
+- **Variable-width type field / type tree** — would let a router dispatch by content shape without payload parse. Rejected because Tracer routes by **path**, not type; schema is per-vertex (`:schema`); and adding wire-level type-tree encoding fights claim 5 ("the graph imposes no shape on user data"). Self-describing payloads use NAME-tagged children inside a structured TLV (a user-range type code with `PL=1`) instead. Cap'n Proto / FlatBuffers solved the schema-on-the-wire problem already; Tracer is deliberately schema-by-introspection.
 
 - **Generic `LIST` type code** — a generic structured-container type code with no specific semantic. Every structured TLV in the registry has a specific purpose (SUBSCRIBER, POINT, ACL, SETTINGS, STATUS, ERROR); user-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`. The `PL` bit alone signals "has nested children"; the type byte tells what those children mean. Type code `0x05` is reserved with no assigned meaning and is not available for reuse (collision-prevention).
 

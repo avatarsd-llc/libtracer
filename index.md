@@ -1,16 +1,18 @@
 # libtracer
 
-**libtracer** is a spec-first, high-performance protocol for distributed state
+**Tracer** is a spec-first, high-performance protocol for distributed state
 and messaging over a single zero-copy wire format — pub/sub streams,
 read/write/await, live configuration, and introspection across one graph of
 addressable **vertices**, from Cortex-M microcontrollers to Linux gateways. The
 same TLV bytes are the wire encoding, the in-memory representation, and the
-graph node — so an in-process hand-off moves **zero bytes**, a steady-state
-forward hop makes **zero heap allocations**, and a plain write lands in **tens
-of nanoseconds**.
-Measured up to **9× the delivery rate of zenoh-c** at equal payloads and
-semantics, with lower latency at every point — all of it CI-gated on every
-merge.
+graph node.
+
+**libtracer** is Tracer's reference implementation: the C++ core, its bindings
+and integrations, and the packages this site documents. In it an in-process
+hand-off moves **zero bytes**, a steady-state forward hop makes **zero heap
+allocations**, and a plain write lands in **tens of nanoseconds**. Measured up
+to **9× the delivery rate of zenoh-c** at equal payloads and semantics, with
+lower latency at every point — all of it CI-gated on every merge.
 
 ```{raw} html
 <script type="application/ld+json">
