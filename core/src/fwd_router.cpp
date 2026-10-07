@@ -2292,11 +2292,11 @@ bool fwd_router_t::name_hop_allows(const child_registry_t::child_t* mount, std::
             return false;
     }
     // The connection vertex this NAME run descended to, found by the matched mount's own key —
-    // the canonical key `add_child` resolved the child's `conn_slot` from. A mount with no
-    // connection vertex has no `:acl` to evaluate, and no bound element can name it either, so
-    // both spellings answer alike.
+    // the canonical key `add_child` resolved the child's `conn_slot` from. Enforcing, a mount
+    // with no connection vertex has nothing to grant the right and refuses (fail closed), as
+    // the bound delivery into a session through such a mount already does.
     const std::optional<graph::vertex_handle_t> conn = graph_.find(mount->mount_tlv);
-    if (!conn) return true;
+    if (!conn) return false;
     // ONE gate for every spelling: `bound_egress` asks `graph_t::allows` at the vertex a bound
     // element dereferences to, this arm at the vertex the descent resolved — same function,
     // same (vertex, caller, right).

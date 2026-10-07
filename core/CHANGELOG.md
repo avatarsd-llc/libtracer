@@ -35,6 +35,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   for WRITE, as the NAME spelling `<mount>/<peer>` is, in addition to the anchor itself. On a
   graph that enforces an ACL, a mount with no connection vertex refuses the delivery.
 
+- **With ACL enforcement on, a link registered without a connection vertex no longer forwards;
+  register its connection vertex.** A NAME-spelled hop through such a mount is refused, as the
+  bound delivery through it already is.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added
