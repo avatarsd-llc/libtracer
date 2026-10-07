@@ -33,7 +33,7 @@
   "core/include/libtracer/frame.hpp": {
     "owner": "#1781 step 2: tlv_t children become a span; step 3 removes the vector encode and path_key",
     "counts": {
-      "vector": 3
+      "vector": 2
     }
   },
   "core/include/libtracer/graph.hpp": {
@@ -110,7 +110,6 @@
     "counts": {
       "make_shared": 2,
       "shared_ptr": 1,
-      "string": 2,
       "vector": 5
     }
   },
@@ -129,8 +128,7 @@
   "core/include/libtracer/vertex.hpp": {
     "owner": "#1781 step 2: ACE storage, app-field snapshot and edge_sources move onto core tables; #1885: the snapshot_edges overflow buffer",
     "counts": {
-      "string": 1,
-      "vector": 25
+      "vector": 23
     }
   }
 }
