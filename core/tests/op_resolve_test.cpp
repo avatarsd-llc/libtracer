@@ -28,6 +28,7 @@
 #include <iterator>
 #include <memory>
 #include <memory_resource>
+#include <new>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -38,6 +39,7 @@
 #include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/packed_path.hpp"
+#include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -1030,6 +1032,69 @@ void test_write_creates_through_the_parent_hook() {
     }
 }
 
+/** @brief A block source that counts what it serves, so a test can assert "drew nothing". */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    counting_source_t() noexcept : tr::mem::block_source_t("counting") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        ++draws;
+        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+    std::size_t draws = 0; /**< @brief Blocks served since construction. */
+};
+
+/**
+ * @brief Review of #1999: the parent's CREATE gate runs BEFORE the payload is held. A remote
+ *        writer the ACL denies gets PERMISSION_DENIED, the hook never runs, and the graph's
+ *        source serves nothing (the span-tier frame would otherwise be copied to show it).
+ */
+void test_denied_creator_draws_nothing() {
+    std::printf("RFC-0030 §7.2 (#1945): a writer denied CREATE draws nothing:\n");
+    if (!tr::graph::kCreationHooks) {
+        std::printf("  (skipped: this build binds kCreationHooks = false)\n");
+        return;
+    }
+    counting_source_t src;
+    graph_t g{src};
+    op_resolver_t resolver(g);
+    const auto dev = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+    creation_seen_t seen{.g = &g};
+    check(g.set_creation_hook(dev, {&create_stored, &seen}).has_value(), "hook on /dev");
+    // Enforcement on for a NAMED caller; /dev grants WRITE (inherited) but not CREATE.
+    auto hooks = g.hooks();
+    hooks.subject_resolver = {
+        [](void*, std::string_view) -> std::expected<tr::graph::subject_token_t, tr::wire::err_t> {
+            return tr::graph::subject_token_t{std::byte{'u'}};
+        },
+        nullptr};
+    g.set_hooks(hooks);
+    std::vector<std::byte> everyone;
+    for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
+    const std::vector<tr::graph::ace_t> aces{
+        {.flags = tr::graph::kAceInherit,
+         .subject = everyone,
+         .access_mask = static_cast<std::uint32_t>(tr::graph::acl_right_t::WRITE)}};
+    check(g.write(path_t("/dev:acl"), make_value(tr::graph::encode_acl(aces))).has_value(),
+          "/dev grants WRITE, not CREATE");
+
+    const std::size_t before = src.draws;
+    const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"dev", "ota"}), b_path({"reply-ep"}), {},
+                           b_value({0x5A, 0x5A, 0x5A, 0x5A}));
+    auto reply = resolve_bytes(resolver, fwd, "peer");
+    const std::size_t drawn = src.draws - before;
+    check(reply.has_value(), "the denied WRITE is answered");
+    const auto dec = decode_reply(*reply);
+    check(value_u8(dec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR) &&
+              status_error_code(dec.tlv.children[4]) == 0x0050 /*tr::access::denied*/,
+          "the remote writer gets PERMISSION_DENIED, not BACKPRESSURE or NOT_FOUND");
+    check(seen.calls == 0, "the hook never ran");
+    check(drawn == 0, "the graph's source served nothing for the denied write");
+    check(!g.find(path_t::parse("/dev/ota")->key()).has_value(), "nothing was created");
+}
+
 }  // namespace
 
 void test_out_of_range_index_mode() {
@@ -1446,6 +1511,7 @@ int main() {
     test_transport_down_reaches_the_wire();
     test_write_to_a_missing_vertex_is_refused();
     test_write_creates_through_the_parent_hook();
+    test_denied_creator_draws_nothing();
     test_subscription_observer();
     test_ts_echo();
     test_tf1_reserved_root();

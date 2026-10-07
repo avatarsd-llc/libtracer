@@ -895,8 +895,8 @@ struct default_config_t {
      * parent whose owner installed one with `graph_t::set_creation_hook`.
      *
      * **Default `false` on every profile — the lean choice** (RFC-0030 §18 Q5). Closed out, no
-     * vertex has a hook slot, `graph_t::set_creation_hook` does not exist, and every miss
-     * refuses: the miss arm compiles to the `not_found` answer and draws nothing.
+     * vertex has a hook slot, `graph_t::set_creation_hook` answers `SCHEMA_NOT_FOUND`, and every
+     * miss refuses: the miss arm compiles to the `not_found` answer and draws nothing.
      *
      * **Who sets it.** An application that wants opt-in creation, for example an OTA-style flow
      * where a write names the image it brings. The core test build sets it in its preset

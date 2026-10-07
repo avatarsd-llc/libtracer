@@ -1377,14 +1377,19 @@ result_t<vertex_t*> graph_t::find_or_create_ptr(std::span<const std::byte> key,
             parent = child;
             return true;
         }
+        // The CREATE gate runs before the payload is asked for, so a writer the parent's ACL
+        // denies provokes no draw (a span-delivered remote payload is copied to be shown).
         const creation_hook_t hook = creation_hook_for(parent);
-        const view::rope_t* const value = hook ? payload() : nullptr;
-        if (value == nullptr)  // no hook here, or not a fieldless data write
+        const bool admitted = hook && acl_allows(parent, caller, acl_right_t::CREATE);
+        const view::rope_t* const value = admitted ? payload() : nullptr;
+        if (!hook)  // no hook here: the miss is the answer
+            failed = status_t::NOT_FOUND;
+        else if (!admitted)
+            failed = status_t::PERMISSION_DENIED;
+        else if (value == nullptr)  // not a fieldless data write, which alone may create
             failed = status_t::NOT_FOUND;
         else if (value->total_length() == 0)  // the payload could not be held
             failed = status_t::BACKPRESSURE;
-        else if (!acl_allows(parent, caller, acl_right_t::CREATE))
-            failed = status_t::PERMISSION_DENIED;
         else if (const result_t<void> r = hook(vertex_handle_t{parent}, pk, caller, *value); !r)
             failed = r.error();
         else if ((parent = find_ptr(pk)) == nullptr)  // the hook said yes and made nothing

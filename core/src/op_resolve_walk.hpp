@@ -972,7 +972,9 @@ template <class N, class ReplyError>
  *        create; else the written TLV, held in @p held.
  *
  * Shared from the frame (zero copy) where the frame has an owner; copied from the graph's
- * value source where it is borrowed. An empty rope is a refused copy (`BACKPRESSURE`).
+ * value source where it is borrowed, once per write. The graph asks only after the parent's
+ * `CREATE` gate admitted the writer, so a denied writer provokes no copy. An empty rope is a
+ * refused copy (`BACKPRESSURE`).
  */
 template <class N>
 [[nodiscard]] const view::rope_t* creating_payload(const parsed_fwd_t<N>& req,
@@ -981,7 +983,8 @@ template <class N>
                                                    mem::mem_backend_t& flat,
                                                    std::optional<stored_tlv_t>& held) {
     if (!field.empty() || !req.payload) return nullptr;
-    held = share_or_copy_tlv(*req.payload, frame_view, 0, graph.value_source(), flat);
+    // Built once per write: K hooked levels share one copy.
+    if (!held) held = share_or_copy_tlv(*req.payload, frame_view, 0, graph.value_source(), flat);
     return &held->rope;
 }
 
