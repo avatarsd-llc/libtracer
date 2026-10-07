@@ -1,8 +1,8 @@
 # Authentication is in-graph vertex operations over the existing subject seam; the identity roadmap is per-hop ed25519 raw-key TOFU plus Noise link encryption; X.509 PKI and end-to-end multi-hop identity are rejected
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: ADR-0086 -->
 
-Status: accepted (maintainer-ratified 2026-07-03, migration design grilling for the originating production firmware — an ESP32-C6 smart-agriculture node). Fills the token-provenance slot [ADR-0018](0018-access-control-authorization-pluggable-subject-token.md) deliberately reserved, over the ACE model of [ADR-0020](0020-acl-nfsv4-style-aces-with-inheritance.md); link confidentiality builds on [ADR-0043](0043-quic-webtransport-optional-module-msquic.md) (TLS 1.3 on QUIC/WebTransport) and the catalog's `security_noise` slot. Companion to [ADR-0044](0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md) and [ADR-0046](0046-bulk-transfer-is-ordinary-auth-gated-writes.md).
+Status: accepted (maintainer-ratified 2026-07-03, migration design grilling for the originating production firmware — an ESP32-C6 smart-agriculture node). Fills the token-provenance slot [ADR-0018](0018-access-control-authorization-pluggable-subject-token.md) deliberately reserved, over the ACE model of [ADR-0020](0020-acl-nfsv4-style-aces-with-inheritance.md); link confidentiality builds on [ADR-0043](0043-quic-webtransport-optional-module-msquic.md) (TLS 1.3 on QUIC/WebTransport) and the catalog's `security_noise` slot. Companion to [ADR-0044](0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md) and [ADR-0046](0046-bulk-transfer-is-ordinary-auth-gated-writes.md). **Amended 2026-10-07 by [ADR-0086](0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md):** identity is app level, an optional opaque credential rides beside the key, anchored names are an integration-module verifier policy, and Noise becomes the normative "Tracer over Noise" link binding.
 
 ## Context
 
