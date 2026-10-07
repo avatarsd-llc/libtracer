@@ -69,9 +69,13 @@ publishes per second). It sweeps three axes independently:
 
 Several named *modes* isolate distinct costs on the same axes:
 
-- `inproc` — the full write (store + notify + deliver), **including the producer's own
-  work**: each op allocates a segment and copies the payload into it before the write, so
-  above 1 KiB part of the size slope is the producer's copy, not the library's;
+- `inproc` — the full write (store + notify + deliver). **Below 1 KiB it includes the
+  producer's own work**: each op allocates a segment and copies the payload into it before
+  the write. **From 1 KiB it does not**: the values are built ahead and freed afterwards, off
+  the clock, and the row times the write alone, so above 1 KiB the row is the library's and
+  flat in payload size
+  ([#1905](https://github.com/avatarsd-llc/libtracer/issues/1905)). The Zenoh rows build their
+  payload on the same side of the clock at every size;
 - `inproc-borrow` — the loaned-view path: no payload copy, but **not** allocation-free —
   each write allocates a segment header for the borrow and the block the vertex stores;
 - `inproc-deliver` — deliver-only (`propagate`), value stored once;
@@ -423,10 +427,13 @@ Details that make these trustworthy:
   segment's header and payload in one block made the 64 B heap rows ~30% faster and the
   1 KiB ones ~2x slower, because a 1072 B request misses glibc's 1032 B per-thread cache,
   and with only the 64 B row gated the release went out green. Note the name: `lkv-store-*` measures the **copy-store
-  allocation**, not the last-known-value slot. Each `lkv-*` row times its whole loop as
-  one block, so it carries one metric, its **throughput**; its latency columns read 0
-  ([#1804](https://github.com/avatarsd-llc/libtracer/issues/1804)) instead of repeating
-  that same figure as a p50 and a mean.
+  allocation**, not the last-known-value slot. Each `lkv-*` row's columns are separate
+  measurements of one operation: its **throughput** times the whole loop as one block, and
+  its **p50 and mean** come from a second run of the same operation in window-calibrated
+  batches, in picoseconds ([#1905](https://github.com/avatarsd-llc/libtracer/issues/1905)).
+  Before that the latency columns read 0
+  ([#1804](https://github.com/avatarsd-llc/libtracer/issues/1804)), and before that they
+  repeated the bulk figure as a p50 and a mean.
 
   Beside those rows sits the ADR-0060 **pool check**, and it is not a speed ratio. The
   pool's acceptance has one goal: it never takes an allocation from the system heap

@@ -122,8 +122,10 @@ _ZENOH_MATCHED = (
     "threads included (their CPU share is in the transcript's `NOTE zenoh-runtime` lines); "
     "equal payload bytes (Zenoh puts the bytes of libtracer's VALUE TLV, header included); "
     "resolution against resolution (a by-path write against a `Session::put` on a key, a "
-    "bound handle against a declared `Publisher`). Before #1809 the Zenoh arm ran every "
-    "row in one process and put the bare value, so its line steps at that commit")
+    "bound handle against a declared `Publisher`); the producer's build on the same side of "
+    "the clock (inside it below 1 KiB; from 1 KiB built and freed outside it, #1905). Before #1809 the Zenoh "
+    "arm ran every row in one process and put the bare value, so its line steps at that "
+    "commit; both engines' lines from 1 KiB step again at #1905")
 
 FAMILIES: list[dict] = [
     # -- latency suite ------------------------------------------------------
@@ -134,9 +136,10 @@ FAMILIES: list[dict] = [
          label=lambda m: f"fan {m.group(1)}", key=_num, log=True,
          px=dict(label="fan-out (subscribers)", log=True, fmt="count")),
     dict(id="payload", section="dispatch", title="In-process write — by payload size",
-         cond="inproc · fan-out 1 · 1 topic — one line per payload; each op includes the "
-              "producer's own allocation and S-byte copy of the value, so the size slope is "
-              "partly the producer's",
+         cond="inproc · fan-out 1 · 1 topic — one line per payload; below 1 KiB each op "
+              "includes the producer's own allocation and S-byte copy of the value, from "
+              "1 KiB the value is built and freed off the clock and the op is the write alone (#1905), "
+              "so those lines step at that commit",
          pat=r"^inproc (\d+)B/fan1/1ep",
          label=lambda m: f"{m.group(1)} B", key=_num, log=False,
          px=dict(label="payload size", log=True, fmt="bytes")),

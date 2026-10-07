@@ -39,6 +39,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
+#include <span>
+#include <string>
+#include <vector>
 
 #include "libtracer/mem_source.hpp"
 #include "libtracer/tracer.hpp"
@@ -142,6 +146,100 @@ struct stream_fixture_t {
                                                                        std::memory_order_relaxed);
             },
             &recv);
+    }
+};
+
+/**
+ * @brief The `mixed` row's topology: 128 STORED_VALUE topics whose fan-out cycles 1, 2, 4, 8,
+ *        16, every subscriber counting into @ref recv.
+ *
+ * Here rather than in `bench_libtracer.cpp` for the reason @ref stream_fixture_t is (#1905):
+ * `test_delivery_count` builds the same topology over a source it can make refuse, and checks
+ * that the row's counted rate falls when deliveries are lost. The row writes; the fixture only
+ * holds the graph, the per-topic payloads and the counter.
+ */
+struct mixed_fixture_t {
+    static constexpr std::size_t kTopics = 128;    /**< @brief Topic count, the row's `ep`. */
+    tr::graph::graph_t g;                          /**< @brief The graph. */
+    std::vector<tr::graph::vertex_handle_t> verts; /**< @brief One vertex per topic. */
+    std::vector<std::size_t> fan;                  /**< @brief Each topic's fan-out. */
+    std::vector<std::vector<std::byte>> tlvs;      /**< @brief Each topic's VALUE TLV. */
+    std::atomic<std::uint64_t> recv{0};            /**< @brief Deliveries counted. */
+    std::size_t total_fan = 0;                     /**< @brief Sum of @ref fan. */
+
+    /** @brief Every subscriber's callback; `subscribe` keeps its address, so it is a member. */
+    struct counter_t {
+        std::atomic<std::uint64_t>* n; /**< @brief Where a delivery is counted. */
+        /** @brief Count one delivery. */
+        void operator()(const tr::graph::value_t&) const {
+            n->fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    counter_t cb{&recv}; /**< @brief The one callback all 128 topics' subscribers share. */
+
+    /**
+     * @brief Register the 128 topics and their counting subscribers.
+     * @param make_tlv Builds topic e's VALUE TLV from its payload size, `sizes[e % 5]`.
+     * @param sizes    The five payload sizes the topics cycle through.
+     * @param src      The graph's source; the default is the graph's own default.
+     */
+    template <typename MakeTlv>
+    mixed_fixture_t(MakeTlv&& make_tlv, std::span<const std::size_t, 5> sizes,
+                    tr::mem::block_source_t& src = tr::mem::default_root())
+        : g(src) {
+        for (std::size_t e = 0; e < kTopics; ++e) {
+            tr::graph::path_t path = *tr::graph::path_t::parse("/bench/m" + std::to_string(e));
+            auto v = g.register_vertex(path, tr::graph::role_t::STORED_VALUE);
+            const std::size_t F = std::size_t{1} << (e % 5);  // 1,2,4,8,16
+            for (std::size_t f = 0; f < F; ++f) (void)g.subscribe(path, cb);
+            verts.push_back(v);
+            fan.push_back(F);
+            total_fan += F;
+            tlvs.push_back(make_tlv(sizes[e % 5]));
+        }
+    }
+
+    /** @brief The arithmetic ceiling of @p msgs round-robin writes: their fan-outs summed. */
+    [[nodiscard]] std::uint64_t want(std::size_t msgs) const {
+        std::uint64_t w = 0;
+        for (std::size_t i = 0; i < msgs; ++i) w += fan[i % kTopics];
+        return w;
+    }
+};
+
+/**
+ * @brief One `inproc-mt` worker: its own graph, one STORED_VALUE vertex with one counting
+ *        subscriber, and one borrowed view it writes again and again.
+ *
+ * Here for the same reason as @ref mixed_fixture_t (#1905): `test_delivery_count` builds a
+ * worker over a source it can make refuse and checks that the counted figure falls.
+ */
+struct counting_writer_t {
+    tr::graph::graph_t g;                        /**< @brief The worker's own graph. */
+    std::optional<tr::graph::vertex_handle_t> v; /**< @brief Its one vertex, `/bench/mt`. */
+    std::vector<std::byte> buf;                  /**< @brief The bytes @ref view borrows. */
+    tr::view::view_t view;                       /**< @brief The view every write hands in. */
+    std::atomic<std::uint64_t> recv{0};          /**< @brief Deliveries counted. */
+    std::vector<std::uint64_t> lat;              /**< @brief The latency phase's samples. */
+
+    /** @param src The graph's source; the default is the graph's own default. */
+    explicit counting_writer_t(tr::mem::block_source_t& src = tr::mem::default_root()) : g(src) {}
+
+    /**
+     * @brief Copy @p tlv into the worker, register `/bench/mt` with its counting subscriber and
+     *        borrow the copy, so each worker owns its segment and no refcount is shared.
+     */
+    [[gnu::always_inline]] void wire(const std::vector<std::byte>& tlv) {
+        buf = tlv;
+        v = g.register_vertex(*tr::graph::path_t::parse("/bench/mt"),
+                              tr::graph::role_t::STORED_VALUE);
+        (void)g.subscribe(
+            *tr::graph::path_t::parse("/bench/mt"),
+            [](void* ctx, const tr::graph::value_t&) {
+                static_cast<counting_writer_t*>(ctx)->recv.fetch_add(1, std::memory_order_relaxed);
+            },
+            this);
+        view = tr::view::view_t::over(tr::view::borrow_const(buf));
     }
 };
 
