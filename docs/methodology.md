@@ -567,7 +567,14 @@ Details that make these trustworthy:
   on CPU 3, the bench runner stopped while it measures): a null first measured on a shared
   runner CPU was tighter than the bench CPUs' own spread and false-failed nine rows of a
   real gate run at the 3% floor. It is re-banked there when the CPU layout changes and when
-  a gated row is added.
+  a gated row is added. A bank is fitted on **25 or more rounds** (`aa_null.py bank` refuses
+  fewer), measured in several windows of one runner stop each, and pooled so that no gate
+  window straddles two stops; a further window the fit never sees is replayed into the
+  null's meta, which records each window's date and rounds, the held-out A/A false-fail
+  count and how many rows an injected 10% slowdown fails in every session.
+  [`bench/aa_null_campaign.sh`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/aa_null_campaign.sh)
+  is that procedure on the bench host: it waits until no perf run is queued or running
+  before each stop, and restarts the runner after every window, failures included.
 - **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
   or past the flat threshold, because builds of one source move them by several percent
   (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they keep the

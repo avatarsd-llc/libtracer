@@ -13,11 +13,20 @@ one binary never shows. Building one source with different function alignments
     # 1. measure: every family of every build, ABBA-rotated, R rounds; raw samples to JSON
     python3 bench/aa_null.py measure --build /tmp/a --build /tmp/f32 --build /tmp/f64 \\
         --rounds 10 --out raw-fit.json
-    # 2. bank: per-row spreads from those samples -> bench/aa_null.json (the gate reads it)
-    python3 bench/aa_null.py bank --raw raw-fit.json --out bench/aa_null.json
-    # 3. evaluate on a SECOND measurement (held out): A/A false-fail rate and the detection
-    #    rate of an injected 10% slowdown on each gated row
+    # 2. bank: per-row spreads from those samples -> bench/aa_null.json (the gate reads it),
+    #    with the replay of a SECOND measurement the fit did not use (held out) in its meta
+    python3 bench/aa_null.py bank --raw raw-fit.json --held-out raw-eval.json \\
+        --out bench/aa_null.json
+    # 3. evaluate on any measurement: A/A false-fail rate and the detection rate of an
+    #    injected 10% slowdown on each gated row
     python3 bench/aa_null.py evaluate --raw raw-eval.json --null bench/aa_null.json
+
+The fit is MIN_ROUNDS (25) rounds or more, and `bank` refuses a shorter one. One round of
+three builds takes about 145 s, so the fit is measured in several WINDOWS, one per stop of
+the bench runner (each under about 45 minutes), and `--raw` is repeated once per window:
+`pool` joins them so that no gate window of `PAIRS_DEFAULT` rounds straddles two stops, and
+the null's meta records every window's date and round count. `aa_null_campaign.sh` is the
+bench host's procedure for the whole bank (#1909).
 
 `measure` runs exactly the steps the gate runs (`perf_gate.gate_plan`), pinned the same way
 (`BENCH_CPU`, `BENCH_CPU_SINGLE`) and judged by the same condition check; a round that ran
@@ -45,6 +54,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import perf_gate as pg  # noqa: E402
 
 MAD_SIGMA = 1.4826
+MIN_ROUNDS = 25  # the shortest fit `bank` accepts (#1888: 15 rounds under-estimated spreads)
 INJECT = 1.10  # the synthetic regression evaluate() must catch: 10% slower on every leg
 
 
@@ -79,6 +89,43 @@ def measure(builds: list[pathlib.Path], rounds: int) -> dict:
     return {"builds": [str(b) for b in builds], "rounds": rounds, "samples": samples}
 
 
+def _window_meta(raw: dict) -> list[dict]:
+    """@brief The measuring windows one (pooled or single) measurement came from."""
+    if "windows" in raw:
+        return raw["windows"]
+    return [{"date": raw.get("date", ""), "host": raw.get("host", ""),
+             "rounds": raw["rounds"], "conditions": raw.get("conditions", "")}]
+
+
+def pool(raws: list[dict]) -> dict:
+    """@brief Join several measurements of the SAME builds, one per runner stop, into one.
+
+    Each row's column per build is the windows' columns in order with one dropped round
+    (None) between two windows, so a gate window of consecutive rounds never straddles two
+    stops: `_windows` and @ref evaluate skip any window that holds a None. `rounds` is the
+    measured total; the meta keeps each window's date and round count.
+    @throws ValueError when the windows measured different builds.
+    """
+    if not raws:
+        raise ValueError("no measurement to pool")
+    builds = raws[0]["builds"]
+    for r in raws[1:]:
+        if r["builds"] != builds:
+            raise ValueError(f"windows measured different builds: {builds} vs {r['builds']}")
+    keys = sorted({k for r in raws for k in r["samples"]})
+    samples: dict[str, list[list]] = {}
+    for k in keys:
+        cols: list[list] = [[] for _ in builds]
+        for w, r in enumerate(raws):
+            per_build = r["samples"].get(k) or [[None] * r["rounds"] for _ in builds]
+            for b, col in enumerate(per_build):
+                cols[b] += ([None] if w else []) + list(col)
+        samples[k] = cols
+    windows = [m for r in raws for m in _window_meta(r)]
+    return {"builds": builds, "rounds": sum(r["rounds"] for r in raws), "samples": samples,
+            "windows": windows, "date": windows[-1]["date"], "host": windows[0]["host"]}
+
+
 def _windows(xs: list, ys: list, width: int) -> list[list[tuple[float, float]]]:
     """@brief Every run of @p width consecutive rounds where both builds ran clean."""
     pairs = [(x, y) if x is not None and y is not None else None for x, y in zip(xs, ys)]
@@ -107,10 +154,14 @@ def robust_spread(ratios: list[float]) -> float:
     return math.expm1(MAD_SIGMA * statistics.median(abs(math.log(r)) for r in ratios))
 
 
-def bank(raw: dict, width: int = pg.PAIRS_DEFAULT) -> dict:
-    """@brief The null file's content from one measurement: {"meta": ..., "rows": {key:
-    {leg: spread}}}. A leg with no complete session (or a zero column) is left out, and the
-    gate then gates it on the flat threshold and says so."""
+def bank(raw: dict, width: int = pg.PAIRS_DEFAULT, held_out: dict | None = None) -> dict:
+    """@brief The null file's content from one (or one pooled) measurement: {"meta": ...,
+    "rows": {key: {leg: spread}}}. A leg with no complete session (or a zero column) is left
+    out, and the gate then gates it on the flat threshold and says so.
+
+    The meta records the rounds and the windows they came from, and, given @p held_out (a
+    measurement the fit did not use), its replay: the A/A false-fail sessions and how many
+    rows an injected INJECT slowdown fails in every session."""
     rows: dict[str, dict[str, float]] = {}
     for k, per_build in sorted(raw["samples"].items()):
         for leg in pg.LEGS:
@@ -119,7 +170,14 @@ def bank(raw: dict, width: int = pg.PAIRS_DEFAULT) -> dict:
                 rows.setdefault(k, {})[leg] = round(robust_spread(rs), 5)
     meta = {"builds": raw["builds"], "rounds": raw["rounds"], "window": width,
             "k": pg.NULL_K, "k_cliff": pg.CLIFF_NULL_K, "floor": pg.NULL_FLOOR, "host": raw.get("host", ""),
-            "banked": raw.get("date", "")}
+            "banked": raw.get("date", ""), "windows": _window_meta(raw)}
+    if held_out is not None:
+        ev = evaluate(held_out, rows, width)
+        meta["held_out"] = {
+            "rounds": held_out["rounds"], "windows": _window_meta(held_out),
+            "sessions": ev["sessions"], "false_fail_sessions": ev["false_fail_sessions"],
+            "false_fails": ev["false_fails"], "rows": len(ev["detect"]),
+            "rows_caught_every_session": sum(1 for c, t in ev["detect"].values() if c == t)}
     return {"meta": meta, "rows": rows}
 
 
@@ -155,7 +213,7 @@ def evaluate(raw: dict, null: dict, width: int = pg.PAIRS_DEFAULT) -> dict:
     false_by_key: dict[str, int] = {}
     for k, per_build in samples.items():
         for x, y in itertools.permutations(range(nb), 2):
-            for s in range(0, raw["rounds"] - width + 1):
+            for s in range(0, min(len(per_build[x]), len(per_build[y])) - width + 1):
                 cs, bs = per_build[x][s:s + width], per_build[y][s:s + width]
                 if any(v is None for v in cs + bs):
                     continue
@@ -183,10 +241,27 @@ def _cmd_measure(a: argparse.Namespace) -> int:
     return 0
 
 
+def _load(paths: list[str]) -> dict:
+    """@brief One measuring window per path, pooled (@ref pool) when there are several."""
+    raws = [json.loads(pathlib.Path(p).read_text()) for p in paths]
+    return raws[0] if len(raws) == 1 else pool(raws)
+
+
 def _cmd_bank(a: argparse.Namespace) -> int:
-    out = bank(json.loads(pathlib.Path(a.raw).read_text()), a.window)
+    raw = _load(a.raw)
+    if raw["rounds"] < a.min_rounds:
+        print(f"aa_null: {raw['rounds']} rounds is under the {a.min_rounds}-round fit; "
+              f"measure more windows (repeat --raw) — {a.out} left as it was", file=sys.stderr)
+        return 2
+    out = bank(raw, a.window, _load(a.held_out) if a.held_out else None)
     pathlib.Path(a.out).write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
-    print(f"aa_null: {len(out['rows'])} rows banked -> {a.out}")
+    print(f"aa_null: {len(out['rows'])} rows banked from {raw['rounds']} rounds in "
+          f"{len(out['meta']['windows'])} window(s) -> {a.out}")
+    h = out["meta"].get("held_out")
+    if h:
+        print(f"held out ({h['rounds']} rounds): A/A FAIL in {h['false_fail_sessions']} of "
+              f"{h['sessions']} sessions; injected x{INJECT:.2f} fails "
+              f"{h['rows_caught_every_session']} of {h['rows']} rows in every session")
     for k, legs in out["rows"].items():
         if k.split("/")[0] in pg.CLIFF_MODES:
             continue
@@ -197,7 +272,7 @@ def _cmd_bank(a: argparse.Namespace) -> int:
 
 
 def _cmd_evaluate(a: argparse.Namespace) -> int:
-    raw = json.loads(pathlib.Path(a.raw).read_text())
+    raw = _load(a.raw)
     null = json.loads(pathlib.Path(a.null).read_text()).get("rows", {})
     ev = evaluate(raw, null, a.window)
     n, bad = ev["sessions"], ev["false_fail_sessions"]
@@ -226,12 +301,16 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--out", required=True)
     m.set_defaults(fn=_cmd_measure)
     b = sub.add_parser("bank", help="per-row spreads from a measurement -> the null file")
-    b.add_argument("--raw", required=True)
+    b.add_argument("--raw", action="append", required=True,
+                   help="a measurement (repeat: one per measuring window, pooled)")
+    b.add_argument("--held-out", action="append", default=[],
+                   help="a measurement the fit does not use, replayed into the meta (repeat)")
+    b.add_argument("--min-rounds", type=int, default=MIN_ROUNDS)
     b.add_argument("--out", default=str(pg.NULL_FILE))
     b.add_argument("--window", type=int, default=pg.PAIRS_DEFAULT)
     b.set_defaults(fn=_cmd_bank)
     e = sub.add_parser("evaluate", help="replay the gate over a (held-out) measurement")
-    e.add_argument("--raw", required=True)
+    e.add_argument("--raw", action="append", required=True)
     e.add_argument("--null", default=str(pg.NULL_FILE))
     e.add_argument("--window", type=int, default=pg.PAIRS_DEFAULT)
     e.set_defaults(fn=_cmd_evaluate)
