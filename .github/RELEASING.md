@@ -176,7 +176,7 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
      contributes that instead, so a binding that missed the consolidation PR is
      still published. Needs `ANTHROPIC_API_KEY`; without it, the CHANGELOG sections
      alone are the body.
-   - **npm** — the four `@avatarsd-llc/*` packages at `X.Y.Z`. Needs `NPM_TOKEN`.
+   - **npm** — the four `@avatarsd-llc/*` packages at `X.Y.Z`. No secret: each package names `release.yml` as its npm Trusted Publisher (OIDC). After a registry-side failure, dispatch `release.yml` with the tag and `only: npm`.
    - **crates.io** — `libtracer` at `X.Y.Z`. Needs `CARGO_REGISTRY_TOKEN`.
    - **PlatformIO** — `pio package publish`. Needs `PLATFORMIO_AUTH_TOKEN`.
    - **ESP Component Registry** — `compote component upload`. Needs

@@ -10,12 +10,18 @@
 # section, per #607) and publishes
 # every packaged artifact at X.Y.Z in lockstep: npm, crates.io, PlatformIO, ESP.
 #
-# Each publish is an INDEPENDENT job that no-ops with a warning when its secret is
-# absent, so tokens can be added incrementally and one missing registry never
-# fails the release. Nothing here runs until a `v*` tag is pushed.
+# Each publish is an INDEPENDENT job. A token-based one no-ops with a warning when
+# its secret is absent, so one missing registry never fails the release. Nothing
+# here runs until a `v*` tag is pushed or the workflow is dispatched.
 #
 # Required secrets (add per registry as you go): ANTHROPIC_API_KEY (release notes),
-# NPM_TOKEN, CARGO_REGISTRY_TOKEN, PLATFORMIO_AUTH_TOKEN, IDF_COMPONENT_API_TOKEN.
+# CARGO_REGISTRY_TOKEN, PLATFORMIO_AUTH_TOKEN, IDF_COMPONENT_API_TOKEN.
+# npm takes no secret: it publishes through npm Trusted Publishing (OIDC), and each
+# `@avatarsd-llc/*` package names THIS file as its trusted publisher.
+#
+# Re-publishing after a registry-side failure: dispatch this workflow with the
+# existing tag and `only` set to that one job. Every job checks out the TAG, not the
+# dispatch ref, so a dispatch from main still ships exactly the tagged tree.
 name: release
 
 on:
@@ -27,6 +33,11 @@ on:
       tag:
         description: "Existing vX.Y.Z tag to (re)run the release for"
         required: true
+      only:
+        description: "Run one publish job only (re-publish after a registry failure)"
+        type: choice
+        default: all
+        options: [all, github-release, npm, crates, platformio, esp-component]
 
 concurrency:
   group: release-${{ github.ref }}
@@ -34,7 +45,7 @@ concurrency:
 
 permissions:
   contents: write # create the GitHub Release
-  id-token: write # npm provenance (OIDC)
+  id-token: write # npm Trusted Publishing and provenance (OIDC)
 
 jobs:
   verify:
@@ -90,6 +101,8 @@ jobs:
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -121,6 +134,7 @@ jobs:
 
   github-release:
     needs: [verify, preflight]
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'github-release' }}
     runs-on: ubuntu-24.04
     # Measured max 0.92 min. 20 = the release-job ceiling (see `preflight`).
     timeout-minutes: 20
@@ -130,6 +144,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.verify.outputs.tag }}
           fetch-depth: 0 # full history so we can list commits since the previous tag
       - uses: actions/setup-python@v5
         with:
@@ -163,47 +178,46 @@ jobs:
 
   npm:
     needs: [verify, preflight]
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'npm' }}
     runs-on: ubuntu-24.04
     # Measured max 0.72 min. 20 = the release-job ceiling (see `preflight`).
     timeout-minutes: 20
     defaults:
       run:
         working-directory: bindings/typescript
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
           cache: npm
           cache-dependency-path: bindings/typescript/package-lock.json
-      - name: Skip note (no NPM_TOKEN)
-        if: ${{ env.NPM_TOKEN == '' }}
-        run: echo "::warning::NPM_TOKEN not set — skipping npm publish"
+      # Trusted Publishing needs npm >= 11.5.1; Node 24's bundled npm may be older.
+      - name: npm with Trusted Publishing support
+        timeout-minutes: 8
+        run: npm install -g npm@^11.5.1
       # npm ci runs BEFORE stamping: the lockfile matches the committed
       # manifests, and npm publish never consults it.
       - name: Install (pristine lockfile)
-        if: ${{ env.NPM_TOKEN != '' }}
         # Registry round-trip. 8 = the install-step floor.
         timeout-minutes: 8
         run: npm ci
       - name: Stamp package versions from the tag
-        if: ${{ env.NPM_TOKEN != '' }}
         working-directory: ${{ github.workspace }}
         run: python3 tools/sync-version.py "${{ needs.verify.outputs.version }}"
       - name: Build
-        if: ${{ env.NPM_TOKEN != '' }}
         run: npm run build
       - name: Publish to npm
-        if: ${{ env.NPM_TOKEN != '' }}
+        # No token: npm exchanges this job's OIDC identity for a short-lived publish
+        # credential, and the registry accepts it only from this workflow file.
         run: npm publish --workspaces --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   crates:
     needs: [verify, preflight]
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'crates' }}
     runs-on: ubuntu-24.04
     # Measured max 0.33 min. 20 = the release-job ceiling (see `preflight`).
     timeout-minutes: 20
@@ -211,6 +225,8 @@ jobs:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Skip note (no CARGO_REGISTRY_TOKEN)
         if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
@@ -225,6 +241,7 @@ jobs:
 
   platformio:
     needs: [verify, preflight]
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'platformio' }}
     runs-on: ubuntu-24.04
     # Measured max 0.38 min. 20 = the release-job ceiling (see `preflight`).
     timeout-minutes: 20
@@ -232,6 +249,8 @@ jobs:
       PLATFORMIO_AUTH_TOKEN: ${{ secrets.PLATFORMIO_AUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -253,6 +272,7 @@ jobs:
 
   esp-component:
     needs: [verify, preflight]
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'esp-component' }}
     runs-on: ubuntu-24.04
     # Measured max 0.55 min. 20 = the release-job ceiling (see `preflight`).
     timeout-minutes: 20
@@ -263,6 +283,8 @@ jobs:
       NAMESPACE: ${{ vars.ESP_COMPONENT_NAMESPACE || 'avatarsd-llc' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
