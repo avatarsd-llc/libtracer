@@ -406,6 +406,31 @@ class MemChargedSteps(unittest.TestCase):
             self.assertIn("RFC-", why, f"{key}: a charge must name the clause that prices it")
 
 
+class MemGrowthFromZeroBase(unittest.TestCase):
+    """@brief Growth from a 0 B baseline is a named FAIL, never a crash.
+
+    `reg_escape`'s baseline is ZERO by design, so the first byte a candidate escapes is
+    exactly the growth the gate exists to catch — and a percentage of zero is undefined.
+    It used to raise ZeroDivisionError and take the whole gate down with a traceback."""
+
+    def gate(self, cur, base):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fails = pg.mem_gate({"mem:reg_escape": cur}, {"mem:reg_escape": base})
+        return fails, buf.getvalue()
+
+    def test_growth_from_zero_fails_by_name(self):
+        fails, out = self.gate({"bytes": 24, "allocs": 1}, {"bytes": 0, "allocs": 0})
+        self.assertTrue(any("mem:reg_escape memory pullback" in f and "from 0 B" in f
+                            and "%" not in f for f in fails), fails)
+        self.assertIn("(base 0B, 0 blocks)", out)
+
+    def test_zero_stays_zero_passes(self):
+        fails, out = self.gate({"bytes": 0, "allocs": 0}, {"bytes": 0, "allocs": 0})
+        self.assertEqual(fails, [])
+        self.assertIn("(base 0B", out)  # a 0 B base is still a base, not "no baseline"
+
+
 class MemPointsAreDocumented(unittest.TestCase):
     """@brief docs/methodology.md states the memory-probe COUNT in prose and is not
     generated, so it can only rot silently (#792 found it stale at three). This pins the

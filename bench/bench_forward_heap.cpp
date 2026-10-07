@@ -113,9 +113,18 @@ namespace {
  * `exact_fit_usable(request)`: glibc's own request-to-chunk rounding (8 B header, 16 B
  * alignment, 32 B minimum chunk), which IS `malloc_usable_size` whenever the block is an
  * exact fit. The charge is recorded per block so its free subtracts the same figure.
- * Requests at or above `kExactFitMax` (where glibc may mmap) and blocks allocated before the
- * window keep `malloc_usable_size`, as before; so does the over-aligned path below, whose
- * rounding is the measured cost (see `counted_aligned_alloc`).
+ * Requests at or above `kExactFitMax` (where glibc may mmap) are charged `malloc_usable_size`,
+ * as before; so is the over-aligned path below, whose rounding is the measured cost (see
+ * `counted_aligned_alloc`). Both are recorded too.
+ *
+ * A FREE SUBTRACTS ONLY WHAT THIS WINDOW CHARGED. A block allocated before the window (or in
+ * an earlier one) added nothing to this window's balance, so freeing it inside the window
+ * takes nothing off. Subtracting its usable size, as this file did until canary (C), let a
+ * caller-owned buffer that the measured code frees cancel bytes the code really kept:
+ * `reg_escape` read 0 B while a 24 B block per registration escaped the seam, because the
+ * probe's moved-in key vector was freed inside the window. If the charge table cannot hold a
+ * block, its later free subtracts nothing either, so the window over-reports (a loud gate
+ * failure), never under-reports.
  */
 constexpr std::size_t kExactFitMax = 128 * 1024;
 
@@ -143,11 +152,14 @@ std::size_t charge_slot(const void* p) {
     return (reinterpret_cast<std::uintptr_t>(p) >> 4) * 0x9E3779B97F4A7C15ull >> 48;
 }
 
-/** @brief What a window block @p p of @p size requested bytes adds to the live balance. */
-std::size_t charge(void* p, std::size_t size) {
+/**
+ * @brief What a window block @p p of @p size requested bytes adds to the live balance, recorded
+ *        so its free subtracts the same figure. @p exact_fit false charges the usable size.
+ */
+std::size_t charge(void* p, std::size_t size, bool exact_fit) {
     const std::size_t usable = malloc_usable_size(p);
     const std::size_t fit = exact_fit_usable(size);
-    if (size >= kExactFitMax || fit > usable) return usable;
+    const std::size_t bytes = exact_fit && size < kExactFitMax && fit <= usable ? fit : usable;
     const unsigned w = probe::g_window.load(std::memory_order_relaxed);
     while (g_charges_lock.test_and_set(std::memory_order_acquire)) {
     }
@@ -157,16 +169,15 @@ std::size_t charge(void* p, std::size_t size) {
         i = (i + 1) & (kCharges - 1);
         ++n;
     }
-    const bool kept = n < kProbeCap;
-    if (kept) g_charges[i] = {p, w, fit};
+    if (n < kProbeCap) g_charges[i] = {p, w, bytes};
     g_charges_lock.clear(std::memory_order_release);
-    return kept ? fit : usable;
+    return bytes;
 }
 
-/** @brief What freeing @p p takes off the live balance: its window charge, if it has one. */
+/** @brief What freeing @p p takes off the live balance: its window charge, or 0 if it has none. */
 std::size_t discharge(void* p) {
     const unsigned w = probe::g_window.load(std::memory_order_relaxed);
-    std::size_t out = malloc_usable_size(p);
+    std::size_t out = 0;
     while (g_charges_lock.test_and_set(std::memory_order_acquire)) {
     }
     std::size_t i = charge_slot(p);
@@ -194,7 +205,7 @@ void* counted_alloc(std::size_t size) {
     void* p = std::malloc(size ? size : 1);
 #ifdef BENCH_HAS_USABLE_SIZE
     if (armed && p != nullptr)
-        probe::g_live_bytes.fetch_add(static_cast<long long>(charge(p, size ? size : 1)),
+        probe::g_live_bytes.fetch_add(static_cast<long long>(charge(p, size ? size : 1, true)),
                                       std::memory_order_relaxed);
 #endif
     return p;
@@ -234,7 +245,7 @@ void* counted_aligned_alloc(std::size_t size, std::size_t align) {
     void* p = std::aligned_alloc(align, rounded);
 #ifdef BENCH_HAS_USABLE_SIZE
     if (armed && p != nullptr)
-        probe::g_live_bytes.fetch_add(static_cast<long long>(malloc_usable_size(p)),
+        probe::g_live_bytes.fetch_add(static_cast<long long>(charge(p, rounded, false)),
                                       std::memory_order_relaxed);
 #endif
     return p;
@@ -479,11 +490,11 @@ bool print_canary(const char* op, std::size_t mr_served, std::size_t escaped, co
 }
 
 /**
- * @brief The two non-vacuity canaries that underwrite every row this bench prints (#1420).
+ * @brief The three canaries that underwrite every row this bench prints (#1420).
  *
  * Emitted FIRST, before any claim they defend, and they are HARD — a miss aborts the run.
  *
- * @return 0 when both canaries passed, 2 otherwise (an instrument fault, not a heap result).
+ * @return 0 when every canary passed, 2 otherwise (an instrument fault, not a heap result).
  */
 int run_canaries() {
     counting_resource_t seam;
@@ -525,10 +536,32 @@ int run_canaries() {
             ++failures;
     }
 
+    // (C) A block allocated BEFORE the window and freed INSIDE it costs the window nothing.
+    //     It was never charged to this window's live balance, so its free must not be
+    //     subtracted from it either: a caller-owned buffer the measured code happens to free
+    //     would otherwise cancel bytes the code really kept. That is how `reg_escape` read
+    //     0 B on main while one 24 B block per registration escaped the seam — the probe's
+    //     moved-in key vector was freed inside the window and netted it out.
+    {
+        void* const early = ::operator new(64);
+        probe::reset();
+        probe::arm();
+        ::operator delete(early);
+        probe::disarm();
+        const probe::counts_t c = probe::snapshot();
+        const bool ok = c.live_bytes == 0;
+        std::printf(
+            "RESULT zeroheap canary_prewindow_free frees=%zu live_bytes=%lld "
+            "note=a_block_from_BEFORE_the_window_freed_inside_it_costs_it_nothing verdict=%s\n",
+            c.frees, c.live_bytes, ok ? "PASS" : "FAIL");
+        if (!ok) ++failures;
+    }
+
     if (failures != 0) {
         std::printf(
-            "CANARY: FAIL (%d of 2) — the two counters this bench prints are NOT disjoint, or "
-            "the operator-new override is blind. Every number below is worthless; fix the "
+            "CANARY: FAIL (%d of 3) — the two counters this bench prints are NOT disjoint, the "
+            "operator-new override is blind, or a pre-window free is charged to the window. Every "
+            "number below is worthless; fix the "
             "instrument before reading any of them (#1420).\n",
             failures);
         return 2;

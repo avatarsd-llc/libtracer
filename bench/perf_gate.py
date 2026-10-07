@@ -1485,15 +1485,20 @@ def mem_gate(cur: dict, base: dict | None) -> list[str]:
         line = f"  {k:<22} live={v['bytes']:>6} B/vertex  blocks={v['allocs']:>2}"
         b = base.get(k) if base else None
         charge, why = MEM_CHARGED.get(k, (0, ""))
-        if b and "bytes" in b:
+        # A 0 B base is a real base (reg_escape's target IS zero), so test for the key,
+        # not for truthiness.
+        if b is not None and "bytes" in b:
             grew = v["bytes"] - b["bytes"]
             # The charge is subtracted from the GROWTH, never from the measurement: the
             # printed live figure stays the real one, and only the amount a ratified
             # clause paid for is excused.
             over = grew - charge
             if v["bytes"] - charge > b["bytes"] * MEM_REGRESS and over > MEM_TICK_B:
+                # Growth from zero has no percentage; name it instead of dividing by 0.
+                pct = (f"+{(v['bytes'] / b['bytes'] - 1) * 100:.1f}%" if b["bytes"]
+                       else "from 0 B")
                 fails.append(f"{k} memory pullback: {v['bytes']}B vs base {b['bytes']}B "
-                             f"(+{(v['bytes'] / b['bytes'] - 1) * 100:.1f}%)"
+                             f"({pct})"
                              + (f"; {charge}B of that is charged to {why}, "
                                 f"the other {over}B is not" if charge else ""))
             if charge:
