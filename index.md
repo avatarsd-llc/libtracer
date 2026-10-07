@@ -110,6 +110,14 @@ The specification <docs/spec/index>
 ```
 
 ```{toctree}
+:caption: RFCs and decisions
+:hidden:
+:maxdepth: 1
+
+ADR and RFC index <docs/adr-rfc-index>
+```
+
+```{toctree}
 :caption: Reference
 :hidden:
 :maxdepth: 2

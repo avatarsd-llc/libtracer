@@ -85,7 +85,7 @@ precedent RFC-0020 and this RFC's own 2026-08-01 ruling). The normative content,
   and `graph_t::subscribe`) still reaches purely-local vertices with a local re-dispatch target.
   The node's own trusted code keeps the full frame of reference; what is excluded is the peer's
   ability to spell that same target over the wire. This is the same *local-or-governed-channel*
-  asymmetry [RFC-0005](0005-subtree-subscriptions-bubbling-decomposition-write-creates.md)
+  asymmetry [RFC-0005](0005-subtree-subscriptions.md)
   amendment 1 drew for write-create, and it is drawn here for the same reason: the two callers
   differ in exactly the property that matters — one is the owner, the other is a peer.
 - **Permitting would have broken every existing sender.** §5's compatibility claim was already

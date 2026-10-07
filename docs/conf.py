@@ -89,9 +89,11 @@ root_doc = "index"
 
 # Publish only the public protocol material (allowlist, relative to the source
 # root): the descriptive reference suite, the module guide, the normative v1 spec,
-# and the glossary. Dev/process docs — ADRs (docs/adr), RFCs (docs/spec/rfcs), and
-# the governance pages — are intentionally NOT published here; they live in the
-# repository for contributors.
+# the glossary, and the RFCs with their ADR/RFC index. The RFCs are published as change
+# proposals and history, never as the standard (maintainer ruling 2026-10-07): each RFC
+# page gets a status banner saying so (_rfc_banner below). ADRs (docs/adr) and the
+# governance pages stay unpublished; links into them, and into any other repository
+# file outside this set, become github.com links (_link_unpublished below).
 include_patterns = [
     "index.md",
     "docs/getting-started.md",
@@ -120,13 +122,15 @@ include_patterns = [
     # getting-started.md so a parallel doc car adding its own entry conflicts on one
     # line at most.
     "docs/start-here.md",
+    "docs/spec/rfcs/**",
+    "docs/adr-rfc-index.md",
 ]
 exclude_patterns = [
     "_build",
     "**/_build/**",
     "docs/_doxygen/**",  # Breathe consumes this XML; it is not a Sphinx source doc
     "docs/adr/**",
-    "docs/spec/rfcs/**",
+    "docs/spec/rfcs/0000-template.md",  # a blank form for authors, not a proposal
     # A design program whose measurements are of ONE downstream consumer's firmware —
     # its buffer budget, its release baselines — is that consumer's document, not this
     # project's, and publishing it here disclosed their release-to-release figures. The
@@ -146,8 +150,9 @@ myst_heading_anchors = 3
 # handful of deliberate links into the unpublished trees (ADRs, RFCs, code) — but
 # suppressing the category hid every genuinely broken cross-reference behind them,
 # including several inside the normative spec. Those deliberate links are now
-# absolute github.com URLs (which MyST leaves alone), so the category is a real
-# signal again and the docs job runs with -n -W --keep-going.
+# github.com URLs, written absolute or rewritten from a relative path by
+# _link_unpublished below, so the category is a real signal again and the docs job
+# runs with -n -W --keep-going.
 #
 # Nitpicky mode (-n) is on in CI. One class of nitpick is not actionable: Breathe
 # renders each C++ declaration with a cross-reference for every type token in it,
@@ -218,6 +223,111 @@ def _undefinable_doxygen_ref(app, env, node, contnode):
     return None
 
 
+# --- Links to repository files the site does not publish --------------------------
+# Pages here, the RFCs above all, link to files that are not part of the site: ADRs,
+# GOVERNANCE.md, source files, directories. MyST would warn on each (or, for a source
+# file, publish a stray download copy). Rewrite every such relative link to the file
+# on github.com, keeping its #anchor, so the source keeps relative links that work
+# when browsing the repository, and the site gets links that work too. A link to a
+# published page still resolves internally; a link to a path that does not exist in
+# the repository is left alone and still fails the build.
+from sphinx import addnodes as _addnodes
+
+_GITHUB = "https://github.com/avatarsd-llc/libtracer"
+
+
+def _link_unpublished(app, doctree):
+    """Turn each relative link to an unpublished repository path into a github.com URL."""
+    env = app.env
+    here = os.path.dirname(env.doc2path(env.docname))
+    xrefs = (_addnodes.pending_xref, _addnodes.download_reference)
+    for node in list(doctree.findall(lambda n: isinstance(n, xrefs))):
+        if node.get("reftype") != "myst":
+            continue
+        if isinstance(node, _addnodes.pending_xref) and node.get("refdomain") == "doc":
+            if node["reftarget"] in env.found_docs:
+                continue  # a published page: let MyST resolve it
+            target, anchor = node["reftarget"] + ".md", node.get("reftargetid")
+            path = os.path.join(app.srcdir, target)
+        else:
+            target, _, anchor = node["reftarget"].partition("#")
+            path = os.path.normpath(os.path.join(here, target))
+        rel = os.path.relpath(path, app.srcdir)
+        if rel.startswith("..") or not os.path.exists(path):
+            continue
+        kind = "tree" if os.path.isdir(path) else "blob"
+        url = f"{_GITHUB}/{kind}/main/{rel}" + (f"#{anchor}" if anchor else "")
+        ref = _nodes.reference("", "", *node.children, refuri=url, internal=False)
+        node.replace_self(ref)
+
+
+# --- The "not the standard" banner on every RFC page ------------------------------
+# Inserted under each RFC's title at read time, from the same status key that
+# tools/gen_record_index.py turns into docs/adr-rfc-index.md, so the RFC files carry
+# no site-only text and a status change shows on the site with no extra edit. The
+# index page also gets the hidden toctree that files the RFC pages under it in the
+# navigation; it is appended here so the generated Markdown stays plain for GitHub.
+_RFC_DIR = "docs/spec/rfcs/"
+_RFC_STATE = {
+    "accepted": "an accepted change proposal, kept as the record of why the "
+    "specification reads as it does",
+    "superseded": "a superseded change proposal, kept as history; it is not in force",
+    "rejected": "a rejected change proposal, kept as history; it was never in force",
+    "withdrawn": "a withdrawn change proposal, kept as history; it was never in force",
+}
+_rfc_records = None
+
+
+def _rfc_banner(app, docname, source):
+    """Prepend the status banner to an RFC page; append the RFC toctree to the index."""
+    global _rfc_records
+    if docname == "docs/adr-rfc-index":
+        source[0] += "\n```{toctree}\n:hidden:\n:glob:\n\nspec/rfcs/[0-9]*\n```\n"
+        return
+    if not docname.startswith(_RFC_DIR):
+        return
+    if _rfc_records is None:
+        import sys
+
+        sys.path.insert(0, os.path.join(_repo_root, "tools"))
+        import gen_record_index
+
+        _rfc_records = gen_record_index.collect()[1]
+    by_id = _rfc_records
+    rec = by_id[f"RFC-{os.path.basename(docname)[:4]}"]
+
+    def link(ref):
+        rel = os.path.relpath(os.path.join("docs", by_id[ref]["path"]), _RFC_DIR)
+        return f"[{ref}]({rel})"
+
+    status = rec["status"]
+    state = _RFC_STATE.get(status, f"a change proposal in `{status}` status, not yet "
+                           "accepted; nothing in it is in force")
+    lines = [f"**Status: {status}.** This page is {state}."]
+    if rec["superseded-by"]:
+        lines.append("Superseded by " + ", ".join(map(link, rec["superseded-by"])) + ".")
+    if rec["superseded-in-part-by"]:
+        lines.append("Superseded in part by "
+                     + ", ".join(map(link, rec["superseded-in-part-by"])) + ".")
+    lines.append(
+        "RFCs are proposals and history, not the standard. The normative specification "
+        "is [Protocol v1](../v1.md) and the annexes its [§3](../v1.md#3-wire-format) "
+        "incorporates; where an RFC and the specification differ, the specification "
+        "wins. All RFCs, with their status, are listed in the "
+        "[ADR and RFC index](../../adr-rfc-index.md)."
+    )
+    kind = "note" if status == "accepted" else "warning"
+    banner = f"\n```{{{kind}}}\n" + " ".join(lines) + "\n```\n"
+    head, sep, rest = source[0].partition("\n# ")
+    if not sep:  # the title is the very first line
+        head, sep, rest = "", "# ", source[0].removeprefix("# ")
+    title, _, body = rest.partition("\n")
+    source[0] = head + sep + title + "\n" + banner + body
+
+
 def setup(app):
     app.connect("missing-reference", _undefinable_doxygen_ref)
+    app.connect("source-read", _rfc_banner)
+    # Before the environment collectors (priority 500) see a download_reference.
+    app.connect("doctree-read", _link_unpublished, priority=100)
     return {"parallel_read_safe": True, "parallel_write_safe": True}

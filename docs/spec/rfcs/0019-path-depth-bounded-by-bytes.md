@@ -64,7 +64,7 @@ RFC-0006's answer does not transfer, and why the honest replacement is not a *di
 
 > - **Depth is capped by the route.** A `FWD` frame's `dst` names every hop and is consumed
 >   monotonically, so a delivery travels exactly as far as its explicit source route — segment
->   count ≤ the PATH segment cap of 32 ([03 — Addressing](../reference/03-addressing.md);
+>   count ≤ the PATH segment cap of 32 ([03 — Addressing](../../reference/03-addressing.md);
 >   `kMaxSegments`, `core/include/libtracer/path.hpp:35`).
 
 Per ADR-0061's erratum, `src`/`dst` grow by the **full** mount run per hop — `net` / `<module>` /
@@ -420,7 +420,7 @@ had to narrow.
 RFC-0006 did **not** replace an encoder-side limit with a receiver-side one. Commit `4547d74` shows
 the clause it deleted was
 
-> `- **Maximum nesting depth**: 32. Deeper TLVs MUST be rejected with `ERROR{tr::tlv::nesting_too_deep}`.`
+> ``- **Maximum nesting depth**: 32. Deeper TLVs MUST be rejected with `ERROR{tr::tlv::nesting_too_deep}`.``
 
 — a **receiver**-side MUST-reject — and its replacement is also a receiver-side MUST-reject carrying
 the same code `0x0010`. RFC-0006 changed the **threshold**, not the **side**. It never faced the
@@ -480,8 +480,8 @@ rewrite of that bullet:
 > - **Depth is capped by the route, and by the frame.** A `FWD` frame's `dst` names every hop and is
 >   consumed monotonically — `dst` strictly shrinks by at least one segment per hop, so a delivery
 >   terminates in at most `len(dst)` hops with no counter, no state and no cap
->   ([ADR-0038 §erratum](../adr/0038-…)). `len(dst)` is bounded by the `PATH` `length` field and by
->   the link's frame budget, not by a segment constant ([RFC-0019](../spec/rfcs/0019-path-depth-bounded-by-bytes.md)).
+>   ([ADR-0038 §erratum](../../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)). `len(dst)` is bounded by the `PATH` `length` field and by
+>   the link's frame budget, not by a segment constant ([RFC-0019](0019-path-depth-bounded-by-bytes.md)).
 
 Its sibling bullet at `:289` (loop-freedom) stands on `dst`-monotonicity alone and is unaffected.
 
