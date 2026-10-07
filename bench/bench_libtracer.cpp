@@ -1618,6 +1618,10 @@ void family_inproc_pool_batch() {
     for (std::size_t S : kSizes)
         run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc-pool",
                         kDeliveryBudget, kLatencyDeliveryBudget, rows_t::BATCH);
+    for (std::size_t S : bench::ladder_extra())  // the payload ladder (#1907)
+        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc-pool",
+                        bench::ladder_budget(S, kDeliveryBudget),
+                        bench::ladder_budget(S, kLatencyDeliveryBudget), rows_t::BATCH);
 }
 
 /**
@@ -1985,6 +1989,15 @@ void family_inproc_pool() {
         run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc-pool");
     for (std::size_t S : kSizes)
         run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-pool-borrow");
+    // The payload ladder (#1907), after every existing row of both arms.
+    for (std::size_t S : bench::ladder_extra())
+        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc-pool",
+                        bench::ladder_budget(S, kDeliveryBudget),
+                        bench::ladder_budget(S, kLatencyDeliveryBudget));
+    for (std::size_t S : bench::ladder_extra())
+        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-pool-borrow",
+                        bench::ladder_budget(S, kDeliveryBudget),
+                        bench::ladder_budget(S, kLatencyDeliveryBudget));
 }
 
 /**
