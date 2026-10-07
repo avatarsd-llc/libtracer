@@ -26,8 +26,9 @@ Normative status is not a property of a directory. It is declared by
 - **Everything else is informative** — the rest of the [reference
   suite](../reference/README.md), the [design notes](../design/README.md), the
   [C++ API reference](../modules/index.md), and the rationale record (ADRs) and
-  change proposals (RFCs) that live in the repository. When an informative
-  document and the specification disagree, the specification wins.
+  change proposals (RFCs, listed in the [ADR and RFC
+  index](../adr-rfc-index.md)). When an informative document and the
+  specification disagree, the specification wins.
 
 ## How the specification is layered
 
@@ -42,7 +43,9 @@ Three tiers, read in this order:
    — architecture decisions and their errata: the rationale behind the reference
    implementation and the protocol shape.
 
-RFCs and ADRs are contributor instruments and are not published on this site.
+The RFCs are published on this site as change proposals and history, not as the
+standard; the [ADR and RFC index](../adr-rfc-index.md) lists every RFC and ADR with
+its status and supersession links. ADRs stay in the repository.
 
 ## Versioning
 

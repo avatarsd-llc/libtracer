@@ -4,6 +4,8 @@
 
 Every architecture decision record ([`docs/adr/`](adr/)) and spec-change proposal ([`docs/spec/rfcs/`](spec/rfcs/)) with its status and supersession links. The page is generated from the status key under each record's title, and CI fails when it drifts. To change a row, edit the record's key and run `python3 tools/gen_record_index.py`.
 
+RFCs are change proposals and history, not the standard. The normative specification is [Protocol v1](spec/v1.md) and the annexes its [§3](spec/v1.md#3-wire-format) incorporates; an accepted RFC records why a clause reads as it does, and the clause itself lives in the specification. Where the two differ, the specification wins. ADRs carry the rationale behind the reference implementation and are not normative either.
+
 Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected`, `withdrawn`. A record marked *(part)* still stands except for the section the other record replaced; read both.
 
 ## Architecture decision records

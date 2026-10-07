@@ -276,32 +276,32 @@ degenerate between incorporated documents — RFC-0019 §4.4's finding, unchange
 
 ### 5.1 `docs/spec/v1.md:57-59` — the §3 incorporation bullet
 
-> - **[docs/reference/03-addressing.md](../reference/03-addressing.md)** §path
+> - **[docs/reference/03-addressing.md](../../reference/03-addressing.md)** §path
 >   syntax — canonical PATH constraints (segment limit **255**
->   ([RFC-0023](rfcs/0023-path-segment-cap-repriced-32-to-255.md)), NAME limit 64 bytes,
+>   ([RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)), NAME limit 64 bytes,
 >   PATH `length` ≤ 1024 bytes, reserved characters, UTF-8).
 
 ### 5.2 `docs/spec/v1.md:96` — the encode-time MUST (§3.1.2)
 
-> - Path constraints from [docs/reference/03-addressing.md](../reference/03-addressing.md) §path
+> - Path constraints from [docs/reference/03-addressing.md](../../reference/03-addressing.md) §path
 >   syntax (segment limit **255**, name limit 64 bytes, total ≤ 1024 bytes measured as the PATH
 >   TLV's `length` field) MUST be checked at encode time. A pre-encoded PATH TLV that violates
 >   these limits is non-conforming. *(Informative: under the current NAME-TLV body encoding the
 >   1024-byte budget admits at most 204 segments, so the byte limit binds first; the segment limit
->   is the encoding-independent ceiling — [RFC-0023](rfcs/0023-path-segment-cap-repriced-32-to-255.md) §4.)*
+>   is the encoding-independent ceiling — [RFC-0023](0023-path-segment-cap-repriced-32-to-255.md) §4.)*
 
 ### 5.3 `docs/reference/03-addressing.md:35`
 
-> - Maximum **segment depth**: **255** ([RFC-0023](../spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md)
+> - Maximum **segment depth**: **255** ([RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)
 >   — chosen from the wire's own widths, superseding the inherited 32; the total-path byte cap
 >   above binds tighter whenever mean encoded segment cost exceeds 4 bytes, which under the
 >   current encoding is always). (An addressing limit on PATH construction; the TLV parser itself
 >   has no depth cap — nesting is receiver-resource-bounded per
->   [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md).)
+>   [RFC-0006](0006-resource-bounded-nesting-depth.md).)
 
 ### 5.4 `docs/reference/05-protocol-tlvs.md:280` and `:358`
 
-> - Segment count ≤ **255** ([RFC-0023](../spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md)).
+> - Segment count ≤ **255** ([RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)).
 
 > A path that resolves to more than **255** segments, has a single segment longer than 64 bytes,
 > or whose **encoded `PATH` body** exceeds the addressing-level cap MUST fail to encode.
@@ -314,7 +314,7 @@ enforce; resolver enforces child-type; count/length bound where constructed or a
 
 > - **Depth is capped by the route, and the route by its bytes.** A `FWD` frame's `dst` names
 >   every hop and is consumed monotonically, so a delivery travels exactly as far as its explicit
->   source route — segment count ≤ **255** ([RFC-0023](../spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md);
+>   source route — segment count ≤ **255** ([RFC-0023](0023-path-segment-cap-repriced-32-to-255.md);
 >   `kMaxSegments`, `core/include/libtracer/path.hpp:35`), and for realistically named mounts the
 >   1024-byte PATH budget binds first (≈ 30–50 hops at 3-segment mount runs).
 
