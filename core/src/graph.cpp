@@ -1489,13 +1489,27 @@ result_t<std::uint64_t> graph_t::stream_gaps(vertex_handle_t v) const {
     return vx->ring_gap_count();
 }
 
+namespace {
+/** @brief How many times the ACL gate re-reads a subject hook slot whose publish is in flight
+ *         before it refuses the caller (@ref tr::sink_slot_t::get_settled, which yields every
+ *         64 reads). A publish is a handful of stores, so this is only ever approached by a
+ *         publisher preempted inside one. */
+constexpr std::uint32_t kHookSettleReads = 1U << 16;
+}  // namespace
+
 bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const {
     // ONE coherent read of the {fn, ctx} pair for the whole gate (#1049) — never a
     // re-read at the call below, which is what let a concurrent install free the
     // std::function predecessor's captures under a gate that was already inside it.
     // Unset, this is the same single relaxed load the old `if (!subject_resolver_)` was.
-    const auto resolver = subject_resolver_.get();
-    if (resolver.fn == nullptr) return true;  // enforcement disabled — the one hot-path check
+    if (!subject_resolver_.installed()) return true;  // enforcement disabled — the hot-path check
+    // Installed, the gate reads a SETTLED slot: a reader that overlaps a `set_hooks` republish
+    // waits the publish out rather than reading the slot as unset. A slot that does not settle
+    // within the bound refuses the caller.
+    const auto settled = subject_resolver_.get_settled(kHookSettleReads);
+    if (!settled) return false;
+    const auto resolver = *settled;
+    if (resolver.fn == nullptr) return true;  // cleared by the republish it waited out
     // The trusted channel is the EMPTY caller context — a local API call — settled HERE,
     // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
     // whose natural reading ("I cannot name this caller") meant "grant everything", WRITE_ACL

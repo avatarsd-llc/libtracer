@@ -14,6 +14,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An ACL check that overlaps a `graph_t::set_hooks` republish now reads the settled hooks.**
+  A gated operation that runs while the hooks are being republished waits the publish out
+  (`sink_slot_t::get_settled`: a bounded re-read of the slot's generation, yielding every 64
+  reads, with no clock and no sleep) and resolves with the settled hooks. A slot that does not
+  settle within the bound refuses the caller.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added

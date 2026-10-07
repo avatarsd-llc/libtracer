@@ -95,6 +95,7 @@
 #include <vector>
 
 #include "libtracer/graph.hpp"
+#include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -884,6 +885,74 @@ void identity_flip_race() {
     check(absent.load() > 0, "the clear WAS observed during the rotation storm");
 }
 
+/** @brief Resolves a caller to its own bytes — the subject the ACEs below name. */
+std::expected<tr::graph::subject_token_t, tr::wire::err_t> resolver_identity(
+    void*, std::string_view caller) {
+    return tr::graph::subject_token_t(
+        reinterpret_cast<const std::byte*>(caller.data()),
+        reinterpret_cast<const std::byte*>(caller.data()) + caller.size());
+}
+
+/**
+ * @brief The ACL gate reads a settled hook slot during a republish storm.
+ *
+ * An ordered list — `DENY "peer-x"`, then `ALLOW EVERYONE@` — and a flipper republishing the
+ * hooks without pause. Every verdict must be the one the settled hooks give: `peer-x` is
+ * refused on every read, `peer-y` allowed on every read. Needs the full ACL policy (DENY).
+ */
+void settled_hook_slot_storm() {
+    std::printf("settled hook slot, verdicts under a republish storm:\n");
+    if constexpr (!tr::graph::acl_policy_t::kAcceptsDeny) {
+        std::printf("  (skipped: the compiled ACL policy has no DENY)\n");
+        return;
+    } else {
+        graph_t g;
+        const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
+        (void)g.write(v, make_value({0x42}));
+        {
+            auto hooks = g.hooks();
+            hooks.subject_resolver = {&resolver_identity, nullptr};
+            g.set_hooks(hooks);
+        }
+        const auto as_bytes = [](std::string_view t) {
+            return std::vector<std::byte>(reinterpret_cast<const std::byte*>(t.data()),
+                                          reinterpret_cast<const std::byte*>(t.data()) + t.size());
+        };
+        const std::uint32_t read_bit = static_cast<std::uint32_t>(tr::graph::acl_right_t::READ);
+        const std::vector<tr::graph::ace_t> aces{{.type = tr::graph::ace_type_t::DENY,
+                                                  .subject = as_bytes("peer-x"),
+                                                  .access_mask = read_bit},
+                                                 {.type = tr::graph::ace_type_t::ALLOW,
+                                                  .subject = as_bytes("EVERYONE@"),
+                                                  .access_mask = read_bit}};
+        check(g.write(path_t("/v:acl"), make_value(tr::graph::encode_acl(aces))).has_value(),
+              "installed DENY peer-x, then ALLOW EVERYONE@");
+
+        std::atomic<bool> stop{false};
+        std::atomic<long> publishes{0};
+        std::thread flipper([&] {
+            while (!stop.load(std::memory_order_relaxed)) {
+                auto h = g.hooks();
+                h.subject_resolver = {&resolver_identity, nullptr};
+                g.set_hooks(h);
+                publishes.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+        long x_mismatch = 0;
+        long y_mismatch = 0;
+        for (int i = 0; i < kWrites; ++i) {
+            if (g.read(v, "peer-x").has_value()) ++x_mismatch;
+            if (!g.read(v, "peer-y").has_value()) ++y_mismatch;
+        }
+        stop.store(true, std::memory_order_relaxed);
+        flipper.join();
+        std::printf("    (%d reads per caller; %ld publishes)\n", kWrites, publishes.load());
+        check(publishes.load() >= kPublishFloor, "the flipper published inside the storm");
+        check(x_mismatch == 0, "peer-x: verdict matches the installed hooks");
+        check(y_mismatch == 0, "peer-y: verdict matches the installed hooks");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -893,5 +962,6 @@ int main() {
     subscription_observer_flip_race();
     child_catalog_flip_race();
     identity_flip_race();
+    settled_hook_slot_storm();
     return tr::testing::summary("graph_config_race");
 }
