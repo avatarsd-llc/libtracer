@@ -502,13 +502,13 @@ struct branch_node_t {
 }
 
 /**
- * @brief The sub-pool @p sub when @p src is the default root on a `kSlabPool` build (the graph
- *        DERIVES its sub-pools, #1777), else @p src itself: an injected root serves every
- *        purpose.
+ * @brief The sub-pool @p sub when @p src is the build's default root (the graph DERIVES its
+ *        sub-pools from the host root, #1777, or the MCU arena, #1783), else @p src itself: an
+ *        injected root serves every purpose.
  */
 [[nodiscard]] mem::block_source_t* sub_pool(mem::block_source_t& src,
                                             mem::block_source_t& sub) noexcept {
-    return mem::kSlabPool && is_default_source(&src) ? &sub : &src;
+    return is_default_source(&src) ? &sub : &src;
 }
 
 /** @brief The retention a role holds when its policy names none (RFC-0028 §5.4). */
@@ -552,27 +552,35 @@ template <class Set>
 }  // namespace
 
 graph_t::own_pool_t::own_pool_t(mem::block_source_t& src) noexcept {
-    // Over the platform heap; none when @p src is injected or the build has no slab pool. A
-    // refused pool is a sizing bug, as for every other construction-time draw.
-    if (!mem::kSlabPool || !is_default_source(&src)) return;
-    // Page-sized base slabs, not the shared pools' 64 KiB: every default graph opens a slab
-    // per class it touches, so the base slab IS the per-graph floor (64 KiB: 640 KiB for a
-    // graph with one subscribed leaf; 4 KiB: 48 KiB). Tables are control-plane state, so the
-    // extra carves a small slab costs never reach a write.
-    constexpr std::size_t kSlabBytes = 4096;
-    pool = mem::make_in<mem::host_pool_t>(
-        mem::heap_source(), "tables",
-        std::span<const std::size_t, mem::host_pool_t::classes()>(config_t::kSizeClasses),
-        mem::heap_source(), kSlabBytes);
-    if (pool == nullptr) mem::exhausted_at_init(mem::heap_source(), "graph_t");
+    // Over the platform heap; none when @p src is injected. A refused pool is a sizing bug, as
+    // for every other construction-time draw. On the MCU arena (#1783) the graph draws its
+    // tables from the arena's table sub-pool, which it shares and does not own.
+    if (!is_default_source(&src)) return;
+    if constexpr (!mem::kSlabPool) {
+        pool = &mem::table_source();
+    } else {
+        // Page-sized base slabs, not the shared pools' 64 KiB: every default graph opens a slab
+        // per class it touches, so the base slab IS the per-graph floor (64 KiB: 640 KiB for a
+        // graph with one subscribed leaf; 4 KiB: 48 KiB). Tables are control-plane state, so
+        // the extra carves a small slab costs never reach a write.
+        constexpr std::size_t kSlabBytes = 4096;
+        pool = mem::make_in<mem::host_pool_t>(
+            mem::heap_source(), "tables",
+            std::span<const std::size_t, mem::host_pool_t::classes()>(config_t::kSizeClasses),
+            mem::heap_source(), kSlabBytes);
+        if (pool == nullptr) mem::exhausted_at_init(mem::heap_source(), "graph_t");
+    }
 }
 
 graph_t::own_pool_t::~own_pool_t() {
-    mem::drop_in(mem::heap_source(), static_cast<mem::host_pool_t*>(pool));
+    if constexpr (mem::kSlabPool)
+        mem::drop_in(mem::heap_source(), static_cast<mem::host_pool_t*>(pool));
 }
 
 void graph_t::trim_tables() noexcept {
-    if (own_tables_.pool != nullptr) static_cast<mem::host_pool_t*>(own_tables_.pool)->trim();
+    if constexpr (mem::kSlabPool) {
+        if (own_tables_.pool != nullptr) static_cast<mem::host_pool_t*>(own_tables_.pool)->trim();
+    }
 }
 
 graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)

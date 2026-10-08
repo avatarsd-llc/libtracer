@@ -27,6 +27,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Breaking
 
+- **The default root is a static arena, not the heap
+  ([#1783](https://github.com/avatarsd-llc/libtracer/issues/1783), ADR-0083).** The component's
+  `kSlabPool = false` now selects core's MCU default root: one `.bss` array of the new
+  `CONFIG_LIBTRACER_ARENA_BYTES` (default 32,768; 262,144 on the `linux` target), from which
+  everything a graph built without a source draws: values, registration tables, and the
+  router and link defaults, so the link `memory` defaults (`twai_link_config_t::memory` and
+  the WebSocket links') are the arena's net sub-pool, not the process heap. Measured on
+  `full_node` for esp32c6: libtracer static RAM 469 B → 34,405 B (the arena, its free-list
+  heads and the root), flash code 183,566 B → 183,442 B.
+  The RAM was heap before, taken at run time.
+  - **Migration.** Size `CONFIG_LIBTRACER_ARENA_BYTES` against the `:stats.mem.values`,
+    `.tables` and `.net` peaks, or inject your own block source. A UDP link on the default
+    sources needs 64 KiB for its receive scratch and 64 KiB per receive segment unless its SPEC
+    sets `max_frame`. To keep the heap, construct the graph with `tr::mem::heap_source()`.
 - **The ESP-IDF links allocate through the one allocation seam
   ([#1880](https://github.com/avatarsd-llc/libtracer/issues/1880), ADR-0083).**
   `httpd_ws_link_t`, `esp_ws_client_link_t` and `twai_link_t` no longer hold a `std::vector`,

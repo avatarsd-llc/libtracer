@@ -793,8 +793,9 @@ class graph_t {
      * DERIVES its sub-pools from it: values (published values, ring admissions and every
      * segment @ref value_backend mints, through @ref mem::heap_backend) from the value
      * sub-pool, and registration and container blocks from the table sub-pool. The platform
-     * allocator then sees whole slabs only. Where it is `false` the default is the platform
-     * heap, as before #1777. A bounded node injects a @ref mem::pool_source_t (or a
+     * allocator then sees whole slabs only. Where it is `false` the default is the MCU
+     * static arena (`%mem_arena.hpp`, #1783), with the same three sub-pools and no heap. A bounded
+     * node injects a @ref mem::pool_source_t (or a
      * @ref mem::bump_source_t over `null_source()`) and the slab's size IS the bound
      * (ADR-0079): an injected root serves every purpose itself, and no sub-pool is derived
      * from it (@ref derives_sub_pools). No `default_config_t` option expresses the bound and
@@ -870,8 +871,8 @@ class graph_t {
      *        control-plane containers and the failable scratch of a composed read or a branch
      *        write (`:stats.mem.tables`). On a default graph of a `kSlabPool` build, a table
      *        sub-pool of the graph's OWN, derived from the host root's platform heap (#1778):
-     *        independent graphs share no class lock and no cache line. The injected root
-     *        otherwise, as @ref value_source.
+     *        independent graphs share no class lock and no cache line. On the MCU arena, the
+     *        arena's table sub-pool (#1783). The injected root otherwise, as @ref value_source.
      */
     [[nodiscard]] mem::block_source_t& table_source() const noexcept { return *tables_; }
 
@@ -896,8 +897,9 @@ class graph_t {
     }
 
     /**
-     * @brief Whether this graph derived its sub-pools from the host default root (#1777):
-     *        `true` for a graph built without a source on a `kSlabPool` build.
+     * @brief Whether this graph derived its sub-pools from the build's default root (#1777,
+     *        #1783): `true` for a graph built without a source, on the host slab pool and on the
+     *        MCU arena alike.
      *
      * An injected root serves every purpose itself, so its census is `:stats.mem.control`
      * alone, and `:stats.mem.values`, `.tables` and `.net` answer `SCHEMA_NOT_FOUND`

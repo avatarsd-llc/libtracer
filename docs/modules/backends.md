@@ -219,7 +219,20 @@ pool (ADR-0083 Decision 6, #1777). It asks the platform heap only for whole slab
 into the classes of `default_config_t::kSizeClasses`, keeps up to `kSlabClassCap` fully free
 slabs per class and returns the rest, and derives three sub-pools: values (with a per-thread
 cache), tables and net. A graph built with no source draws from them; a graph given a source
-draws from that source alone. A build that binds `kSlabPool = false` keeps the platform heap.
+draws from that source alone. A build that binds `kSlabPool = false` (the MCU default, #1783) gets a static arena of
+`kArenaBytes` instead, with the same three sub-pools and no heap behind it:
+
+```{doxygenclass} tr::mem::arena_root_t
+:members:
+```
+
+```{doxygenclass} tr::mem::arena_pool_t
+:members:
+```
+
+```{doxygenclass} tr::mem::arena_t
+:members:
+```
 
 ```{doxygenclass} tr::mem::slab_pool_t
 :project: libtracer

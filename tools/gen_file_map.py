@@ -38,6 +38,7 @@ PAGES = {
         "mem_source_alloc.hpp",
         "mem_source_backend.hpp", "mem_source_pmr.hpp", "mem_source_sync.hpp", "mem_cuda.hpp",
         "mem_slab_pool.hpp",
+        "mem_arena.hpp",
     ],
     "views.md": ["view.hpp", "rope.hpp"],
     "frame-codec.md": [

@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "libtracer/frame.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
 // The packed PATH grammar (RFC-0018). Header-only and included DIRECTLY: the three
 // headers that pull it in transitively — `key_view.hpp`, `child_registry.hpp`,
@@ -111,6 +112,14 @@ int main() {
         const view::view_t flat = rope.flatten(pool);
         acc = fold(acc, flat.bytes());
         acc += static_cast<std::uint32_t>(rope.link_count());
+    }
+
+    // The MCU default root (#1783): a segment from the process-default backend, which on this
+    // build draws from the static arena's value sub-pool (`kArenaBytes` in the config
+    // fragment), never from a heap.
+    if (view::segment_ptr_t seg = view::heap_alloc(bytes.size()); seg) {
+        std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
+        acc = fold(acc, seg->bytes);
     }
 
     // Addressing: validate a canonical path (the init-time registration path,

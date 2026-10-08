@@ -14,14 +14,23 @@
  *
  * A node with a second task, or an ISR that touches libtracer, binds an interrupt-masked
  * section here instead.
+ *
+ * The default root is the MCU one (`kSlabPool = false`): a static arena of `kArenaBytes`, which
+ * the sentinel's RAM figure therefore includes. 2 KiB is what the fixture needs, not a
+ * recommendation.
  */
 #pragma once
 
+#include <cstddef>
+
 namespace tr::graph {
 
-/** @brief The defaults, for a single-threaded MCU node. */
+/** @brief The defaults, for a single-threaded MCU node with the MCU default root: a static
+ *         arena, no heap (#1783). */
 struct footprint_config_t : default_config_t {
     using guard_t = ::tr::no_guard_t;
+    static constexpr bool kSlabPool = false;
+    static constexpr std::size_t kArenaBytes = 2048;
 };
 
 using config_t = footprint_config_t;

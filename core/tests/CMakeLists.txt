@@ -1494,6 +1494,13 @@ target_link_libraries(slab_pool_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(slab_pool_test)
 add_test(NAME slab_pool COMMAND slab_pool_test)
 
+# The MCU default root (#1783): the static arena and its size-classed sub-pools, over a local
+# region (a host build's default root is the slab pool, so the arena is tested directly).
+add_executable(mem_arena_test mem_arena_test.cpp)
+target_link_libraries(mem_arena_test PRIVATE libtracer)
+libtracer_test_warnings(mem_arena_test)
+add_test(NAME mem_arena COMMAND mem_arena_test)
+
 # vertex_t verb interface — a BARE vertex (no graph_t): store/LKV, STREAM ring trim +
 # drain cursor, await wake, edge snapshot under concurrent add, ACL verbs.
 add_executable(vertex_test vertex_test.cpp)

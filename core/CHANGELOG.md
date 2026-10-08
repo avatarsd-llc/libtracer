@@ -166,6 +166,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **The MCU default root is a static arena, with no heap behind it
+  ([#1783](https://github.com/avatarsd-llc/libtracer/issues/1783), ADR-0083 Decision 4).** On a
+  build whose `config_t::kSlabPool` is `false` (the ESP-IDF component binds it), the root a
+  `graph_t` takes when it is handed no source used to be the platform heap. It is now
+  `tr::mem::mcu_root()`: one static array of the new trait `kArenaBytes` (default 32,768) in
+  `.bss`, carved into the classes of `kSizeClasses`, with value, table and net sub-pools derived
+  from it as on the host. `tr::mem::default_root()`, `value_source()`, `table_source()`,
+  `net_source()`, `net_backend()` and the per-value `heap_backend()` all draw from it there.
+  - **What changes for an MCU application.** The default RAM is reserved at link time and fixed:
+    the arena never shrinks, and a block a class returns is reused by that class only. An
+    exhausted arena refuses: a write answers `BACKPRESSURE`, and a registration at init aborts
+    naming the sub-pool and the bytes it needed. A request larger than the last class is carved
+    at its own size and reused only at that size. The `:stats.mem.values`, `.tables` and `.net`
+    seams, which answered `SCHEMA_NOT_FOUND` there before, now report the sub-pools. The host
+    default (`kSlabPool` `true`) is unchanged.
+  - **Migration.** Size the arena: `static constexpr std::size_t kArenaBytes = …;` in the
+    override fragment (on ESP-IDF, `CONFIG_LIBTRACER_ARENA_BYTES`), against the peak the
+    `:stats.mem.*` seams report. A UDP link left on the default sources draws its receive
+    scratch and each receive segment at the datagram cap, 64 KiB apiece unless its SPEC sets
+    `max_frame`; give it its own receive backend or a `max_frame`, or size the arena for it. An
+    application that wants the old heap default injects it: `graph_t g(tr::mem::heap_source());`.
+  - New: `tr::mem::arena_t`, `arena_pool_t`, `arena_root_t`, `mcu_root_t` and `mcu_root()`
+    (`libtracer/mem_arena.hpp`), and `default_config_t::kArenaBytes` /
+    `tr::mem::kArenaBytes`.
 - **A write to a missing vertex is refused by default, and a parent opts in with a creation
   hook ([#1945](https://github.com/avatarsd-llc/libtracer/issues/1945), RFC-0030 §7).** A data
   write whose target, or an intermediate level, does not exist answers `NOT_FOUND` and creates

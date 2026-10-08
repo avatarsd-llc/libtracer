@@ -360,12 +360,6 @@ void test_sub_pool_seams() {
         const auto n = g.register_vertex(path_t("/n"), role_t::STORED_VALUE);
         (void)g.write(n, make_value({0x01, 0x02, 0x03}));
         for (const char* name : kNames) {
-            const auto r = read_as(g, name, {});
-            if (!tr::mem::kSlabPool) {
-                check(!r && r.error() == status_t::SCHEMA_NOT_FOUND,
-                      "without the host slab pool no sub-pool is derived: SCHEMA_NOT_FOUND");
-                continue;
-            }
             const auto bytes = read_bytes(g, name, {});
             const auto dec = tr::wire::decode(bytes);
             std::printf("    %s: in_use %llu, peak %llu, refused %llu\n", name,
@@ -378,7 +372,7 @@ void test_sub_pool_seams() {
                       counter(*dec, "peak") >= counter(*dec, "in_use"),
                   "capacity 0 (the pool caps retention, not demand); peak never below in_use");
         }
-        if (tr::mem::kSlabPool) {
+        {
             const auto bytes = read_bytes(g, "/n:stats.mem.values", {});
             const auto dec = tr::wire::decode(bytes);
             check(dec && counter(*dec, "in_use") > 0,

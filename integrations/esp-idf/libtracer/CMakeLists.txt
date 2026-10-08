@@ -283,6 +283,14 @@ if(CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES)
 else()
     set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 endif()
+# The default root's static arena (#1783, ADR-0083 Decision 4): `kSlabPool = false` below makes
+# the default root a static arena of this many bytes, so nothing the library draws by default
+# comes from the heap. Same two-pass fallback as the stripe count above.
+if(CONFIG_LIBTRACER_ARENA_BYTES)
+    set(LIBTRACER_ARENA_BYTES ${CONFIG_LIBTRACER_ARENA_BYTES})
+else()
+    set(LIBTRACER_ARENA_BYTES 32768)
+endif()
 # Edge-pin announcements (#635) — one index per task that may PUBLISH concurrently. Unlike the
 # hazard domain this one is ALWAYS emitted, so it is real static RAM: N * max(padding,
 # sizeof(cell_t)) bytes. A cell is the announced pointer PLUS its claimed flag, so it is 8 B on
@@ -434,6 +442,7 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kRxDrainBytes = ${LIBTRACER_RX_DRAIN_BYTES};
     static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};
     static constexpr bool kSlabPool = false;
+    static constexpr std::size_t kArenaBytes = ${LIBTRACER_ARENA_BYTES};
 ${LIBTRACER_SLOT_BINDING}};
 
 using config_t = esp_config_t;

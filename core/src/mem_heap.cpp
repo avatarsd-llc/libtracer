@@ -6,7 +6,8 @@
 /**
  * @file
  * @brief The process-default per-value backend, the host default root (#1777) with the value
- *        sub-pool's per-thread cache, and the L1 allocation helpers over them.
+ *        sub-pool's per-thread cache, the MCU static-arena root (#1783), and the L1 allocation
+ *        helpers over them.
  */
 
 #include "libtracer/mem_heap.hpp"
@@ -20,6 +21,7 @@
 #include <span>
 #include <type_traits>
 
+#include "libtracer/mem_arena.hpp"
 #include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_source_backend.hpp"
 
@@ -62,12 +64,60 @@ struct host_storage_t<true> {
     host_root_t& root() noexcept { return root_; }
 };
 
+/** @brief No MCU arena: a build whose `kSlabPool` is `true` (nothing calls @ref root). */
+template <bool kOn>
+struct mcu_storage_t {
+    /** @brief Unreachable on this build. */
+    [[noreturn]] mcu_root_t& root() noexcept { std::abort(); }
+};
+
+namespace {
+
+/** @brief Bytes of the MCU arena on this build: none where the host root serves. */
+constexpr std::size_t kMcuArenaBytes = kSlabPool ? 0 : kArenaBytes;
+
+/** @brief The MCU arena's region (#1783): zero-initialized, so it sits in `.bss` and the
+ *         linker map shows it whole. */
+alignas(64) constinit std::array<std::byte, kMcuArenaBytes> g_mcu_region{};
+
+/** @brief The MCU arena sub-pools' free-list heads, in `.bss` beside the region. */
+constinit std::array<void*, kSlabPool ? 0 : mcu_root_t::kHeads> g_mcu_heads{};
+
+}  // namespace
+
+/**
+ * @brief Storage for the MCU default root (#1783): constant-initialized over
+ *        @ref g_mcu_region and @ref g_mcu_heads, and never destroyed, for the reason the host
+ *        root is not.
+ */
+template <>
+struct mcu_storage_t<true> {
+    union {
+        mcu_root_t root_; /**< @brief The root. */
+    };
+    /** @brief Constant-initializes the root. */
+    constexpr mcu_storage_t() noexcept
+        : root_(std::span<std::byte>(g_mcu_region),
+                std::span<const std::size_t, std::size(graph::config_t::kSizeClasses)>(
+                    graph::config_t::kSizeClasses),
+                std::span<void*, mcu_root_t::kHeads>(g_mcu_heads.data(), mcu_root_t::kHeads)) {}
+    /** @brief Deliberately does not destroy the root. */
+    ~mcu_storage_t() {}
+    mcu_storage_t(const mcu_storage_t&) = delete;
+    mcu_storage_t& operator=(const mcu_storage_t&) = delete;
+    /** @brief The root. */
+    mcu_root_t& root() noexcept { return root_; }
+};
+
 }  // namespace detail
 
 namespace {
 
 /** @brief The host root, where the build has one. */
 constinit detail::host_storage_t<kSlabPool> g_host{};
+
+/** @brief The MCU arena root, where the build has one (#1783). */
+constinit detail::mcu_storage_t<!kSlabPool> g_mcu{};
 
 /** @brief Rows of the host size-class table. */
 constexpr std::size_t kClasses = host_pool_t::classes();
@@ -209,8 +259,16 @@ void* host_value_alloc(std::size_t bytes, std::size_t align) noexcept {
         if (c.head[i] != nullptr) return cache_pop(c, i);
         return cache_refill(c, i, bytes);
     } else {
-        return heap_source_t::acquire(bytes, align);
+        return mcu_value_alloc(bytes, align);  // never called here: the MCU arena's draw
     }
+}
+
+void* mcu_value_alloc(std::size_t bytes, std::size_t align) noexcept {
+    return g_mcu.root().values().try_alloc(bytes, align);
+}
+
+void mcu_value_release(void* p, std::size_t bytes, std::size_t align) noexcept {
+    g_mcu.root().values().release(p, bytes, align);
 }
 
 void host_value_release(void* p, std::size_t bytes, std::size_t align) noexcept {
@@ -228,7 +286,7 @@ void host_value_release(void* p, std::size_t bytes, std::size_t align) noexcept 
         }
         cache_push(c, i, p);
     } else {
-        heap_source_t::reclaim(p, bytes, align);
+        mcu_value_release(p, bytes, align);  // never called here: the MCU arena's return
     }
 }
 
@@ -271,7 +329,7 @@ block_source_t& default_root() noexcept {
     if constexpr (kSlabPool) {
         return g_host.root();
     } else {
-        return heap_source();
+        return g_mcu.root();
     }
 }
 
@@ -279,7 +337,7 @@ block_source_t& value_source() noexcept {
     if constexpr (kSlabPool) {
         return g_host.root().values();
     } else {
-        return heap_source();
+        return g_mcu.root().values();
     }
 }
 
@@ -287,7 +345,7 @@ block_source_t& table_source() noexcept {
     if constexpr (kSlabPool) {
         return g_host.root().tables();
     } else {
-        return heap_source();
+        return g_mcu.root().tables();
     }
 }
 
@@ -295,22 +353,19 @@ block_source_t& net_source() noexcept {
     if constexpr (kSlabPool) {
         return g_host.root().net();
     } else {
-        return heap_source();
+        return g_mcu.root().net();
     }
 }
 
 mem_backend_t& net_backend() noexcept {
-    if constexpr (kSlabPool) {
-        // Never destroyed, for the reason the root is not: a segment can be released after
-        // every static destructor has run.
-        alignas(source_backend_t) static std::byte storage[sizeof(source_backend_t)];
-        static source_backend_t* const backend =
-            new (storage) source_backend_t(g_host.root().net());
-        return *backend;
-    } else {
-        return heap_backend();
-    }
+    // Never destroyed, for the reason the root is not: a segment can be released after every
+    // static destructor has run.
+    alignas(source_backend_t) static std::byte storage[sizeof(source_backend_t)];
+    static source_backend_t* const backend = new (storage) source_backend_t(net_source());
+    return *backend;
 }
+
+mcu_root_t& mcu_root() noexcept { return g_mcu.root(); }
 
 }  // namespace tr::mem
 

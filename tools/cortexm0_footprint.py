@@ -82,7 +82,9 @@ import tempfile
 # tr::mem::heap_source(). Without it the link fails with an undefined reference —
 # which used to be SILENT, because warn mode also answered for the instrument. It
 # no longer does (#982): an unlinkable sentinel reds the job in either mode.
-REQUIRED_MODULES = ("frame", "tlv_arena", "backend_set", "mem_pool", "mem_source", "rope", "path")
+REQUIRED_MODULES = (
+    "frame", "tlv_arena", "backend_set", "mem_pool", "mem_source", "mem_heap", "rope", "path"
+)
 FIXTURE = "core/tests/footprint/sentinel_node.cpp"
 DEFAULT_BUDGET = 16 * 1024  # 16 KiB — the ADR-0016 §3 / ADR-0047 §5 Cortex-M0 bound.
 

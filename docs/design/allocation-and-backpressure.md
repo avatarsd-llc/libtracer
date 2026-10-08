@@ -226,7 +226,7 @@ Four implementations ship:
 
 | Source | Construction | Behaviour |
 | --- | --- | --- |
-| `heap_source()` (`mem_source.hpp:heap_source`) | free function, process-wide | wraps the platform allocator; the root of the host slab pool (#1777), and the default itself where a build binds `kSlabPool = false` |
+| `heap_source()` (`mem_source.hpp:heap_source`) | free function, process-wide | wraps the platform allocator; the root of the host slab pool (#1777); since #1783 never a default on a `kSlabPool = false` build, whose default root is the static arena — an application that wants the platform heap there injects it |
 | `null_source()` (`mem_source.hpp:null_source`) | free function, process-wide | serves nothing; makes a `bump_source_t`'s buffer a hard bound |
 | `bump_source_t` (`mem_source.hpp:bump_source_t`) | `bump_source_t(std::span<std::byte> buffer, block_source_t& upstream = heap_source())` | carves from `buffer`, falls back to `upstream` once it cannot fit |
 | `pool_source_t` (`mem_source.hpp:pool_source_t`) | caller-supplied slab plus a caller-supplied span of size classes | segregated exact-size free lists; recycles, so it suits a long-lived seam |
