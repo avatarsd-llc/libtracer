@@ -9,11 +9,6 @@
 # core/include/libtracer/ that carries the @brief discipline of core/STYLE.md.
 # WARN_AS_ERROR makes an undocumented public symbol a hard failure — the CI gate
 # (docs.yml). Add headers to INPUT as they gain Doxygen coverage.
-#
-# One header is deliberately absent: byteorder.hpp is entirely `tr::detail`, and
-# EXCLUDE_SYMBOLS drops that namespace, so listing it would add an empty file
-# entry and nothing else. Its entities still carry @brief comments (core/STYLE.md
-# applies to internals too); they are simply not part of the rendered surface.
 
 PROJECT_NAME           = libtracer
 PROJECT_BRIEF          = "Decentralized graph-of-endpoints protocol — reference implementation"
@@ -72,6 +67,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/tlv.hpp \
                          core/include/libtracer/tlv_view.hpp \
                          core/include/libtracer/tlv_arena.hpp \
+                         core/include/libtracer/byteorder.hpp \
                          core/include/libtracer/tlv_emit.hpp \
                          core/include/libtracer/batch.hpp \
                          core/include/libtracer/playout.hpp \

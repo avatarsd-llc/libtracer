@@ -12,9 +12,8 @@
  * full `tlv_t` value (payload/children/trailers), use `%frame.hpp`'s encode/decode.
  *
  * Lives in `tr::wire` (L2/L3): it produces wire bytes from wire types (`type_t`,
- * `opt_t`), so it is a codec concern, not a layer-free `tr::detail` primitive —
- * the low-level LE byte helper it builds on (`detail::append_le`, byteorder.hpp)
- * stays in `tr::detail`.
+ * `opt_t`), so it is a codec concern. The low-level LE byte codec it builds on is
+ * `%wire::append_le` / `%wire::store_le` (byteorder.hpp, public since #2025).
  */
 #pragma once
 
@@ -157,11 +156,10 @@ inline void emit_name(std::vector<std::byte>& out, std::span<const std::byte> na
  * way to write one: a consumer building a connection SPEC had to size its own buffer and
  * call `detail::store_le` — an internal primitive — or hand-roll a shift loop. This is the
  * encode counterpart of those accessors, in `tr::wire` because it produces wire bytes from a
- * wire type; the layer-free LE byte helper it builds on (`detail::append_le`,
- * byteorder.hpp) stays in `tr::detail`.
+ * wire type; it builds on the LE byte codec (`%wire::append_le`, byteorder.hpp).
  *
  * The width is explicit and defaults to `sizeof(T)`, so the emitted payload length is the
- * caller's decision — the reader is tolerant of a narrower payload (`detail::load_le` zero-
+ * caller's decision — the reader is tolerant of a narrower payload (`%wire::load_le` zero-
  * fills), but the SPEC keys documented as u16/u32 are pinned by their emitted width here.
  *
  * Precondition: `width <= sizeof(T)`.
