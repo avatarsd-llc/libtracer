@@ -19,8 +19,10 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <new>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -382,23 +384,93 @@ class remote_ptr_t {
 };
 
 /**
- * @brief A subscription edge's canonical PATH key — **immutable and refcount-shared**.
+ * @brief A subscription edge's canonical PATH key — **immutable and refcount-shared**, held
+ *        in one block of the graph's table source (#1912).
  *
  * Shared rather than owned because the dispatch snapshot must outlive a concurrent
  * unsubscribe: @ref vertex_t::snapshot_edges copies each active slot out under an edge pin
  * so the graph can dispatch after releasing it, and the slot may be cleared in between. A
- * deep copy satisfied that and cost a **malloc + free per edge per delivery** — a
- * `std::vector` has no small-buffer optimisation, so every non-null key allocated, which is
- * the ordinary local-binding case (`/sensor/temp:subscribers[] -> /dev/ctrl0/in/temp`).
- * Refcounting satisfies it for an atomic increment instead, exactly as
- * @ref edge_view_t::remote does one field over for the same hazard (#1448 — the whole cold
- * half went the same way, so the snapshot now takes two refcounts and copies no bytes).
+ * deep copy satisfied that and cost a **malloc + free per edge per delivery**. Refcounting
+ * satisfies it for one count update instead, exactly as @ref edge_view_t::remote does one
+ * field over for the same hazard (#1448).
+ *
+ * The `%remote_ptr_t` shape with the key's length carried in the handle: the count and the
+ * owning source head the block and the key bytes follow them, so admission is ONE draw from
+ * the source the edge's other state uses, and a refused draw is a value (null), never an
+ * abort. Until #1912 this was a `std::shared_ptr` around a `std::vector`: two platform-heap
+ * draws per admission, outside the seam. The handle is 16 B on a 64-bit host and 8 B on rv32,
+ * the `std::shared_ptr`'s width, so @ref subscriber_t, @ref edge_view_t and @ref pub_edge_t
+ * keep their pinned sizes. The count is `%tr::view::detail::ref_count_t`, which skips the
+ * locked RMW while the process is single-threaded, as `std::shared_ptr` does.
  *
  * Null ⇒ no local re-dispatch target (the callback-only or remote-only edge). The key is
  * built once at admission and never mutated, so sharing it needs no synchronization beyond
- * the control block's own refcount.
+ * the count.
  */
-using target_key_t = std::shared_ptr<const std::vector<std::byte>>;
+class target_key_t {
+   public:
+    /** @brief An empty handle — no local target. */
+    target_key_t() noexcept = default;
+    /** @brief An empty handle, spelled as the null it tests equal to. */
+    target_key_t(std::nullptr_t) noexcept {}  // NOLINT(google-explicit-constructor)
+
+    /** @brief The one way to make a key: @ref try_make_target_key. */
+    friend target_key_t try_make_target_key(mem::block_source_t& src,
+                                            std::span<const std::byte> key) noexcept;
+
+    /** @brief Clone — one more reference to the same immutable key. */
+    target_key_t(const target_key_t& other) noexcept : p_(other.p_), size_(other.size_) {
+        if (p_ != nullptr) p_->refs.inc_relaxed();
+    }
+    /** @brief Transfer @p other's reference, leaving it empty. */
+    target_key_t(target_key_t&& other) noexcept
+        : p_(std::exchange(other.p_, nullptr)), size_(std::exchange(other.size_, 0)) {}
+    /** @brief Copy-and-swap assignment — one operator covers copy- and move-assign. */
+    target_key_t& operator=(target_key_t other) noexcept {
+        std::swap(p_, other.p_);
+        std::swap(size_, other.size_);
+        return *this;
+    }
+    /** @brief Release this reference; the last one out returns the block. */
+    ~target_key_t() { reset(); }
+
+    /** @brief Drop this reference and empty the handle. Always inlined for the reason
+     *         `%remote_ptr_t::reset` gives: the fan-out runs it once per edge per delivery. */
+    [[gnu::always_inline]] void reset() noexcept {
+        if (p_ != nullptr && p_->refs.dec_acq_rel() == 1) free_block(p_, size_);
+        p_ = nullptr;
+        size_ = 0;
+    }
+
+    /** @brief The key bytes; empty for a null handle. */
+    [[nodiscard]] std::span<const std::byte> operator*() const noexcept {
+        if (p_ == nullptr) return {};
+        return {reinterpret_cast<const std::byte*>(p_ + 1), size_};
+    }
+    /** @brief True iff this handle names a key. */
+    [[nodiscard]] explicit operator bool() const noexcept { return p_ != nullptr; }
+    /** @brief Null test. */
+    [[nodiscard]] friend bool operator==(const target_key_t& h, std::nullptr_t) noexcept {
+        return h.p_ == nullptr;
+    }
+
+   private:
+    /** @brief The block's head: the count and the source the block returns to. */
+    struct head_t {
+        view::detail::ref_count_t refs; /**< @brief Holders of this key. */
+        mem::block_source_t* source;    /**< @brief Where the block came from. */
+    };
+
+    /** @brief The last holder's release, out of line and cold (once per key lifetime). */
+    [[gnu::noinline, gnu::cold]] static void free_block(head_t* p, std::uint32_t size) noexcept {
+        mem::block_source_t* const src = p->source;
+        p->~head_t();
+        src->release(p, sizeof(head_t) + size, alignof(head_t));
+    }
+
+    head_t* p_ = nullptr;    /**< @brief The shared block, or null. */
+    std::uint32_t size_ = 0; /**< @brief The key's length in bytes. */
+};
 
 /**
  * @brief The sentinel slot index meaning "this edge carries no binding" (#830).
@@ -434,28 +506,25 @@ struct target_binding_t {
 };
 
 /**
- * @brief Wrap @p key as a shared `target_key_t`, NOTHROW — null on OOM or empty input.
+ * @brief Copy @p key into one block of @p src as a shared `target_key_t`, NOTHROW — null on
+ *        refusal or empty input (#1912).
  *
- * The `%mem_heap.hpp` probe-then-commit discipline (#477): under the MCU
- * profile a `bad_alloc` is an `abort()`, and admission is reachable from a peer's bytes
- * (RFC-0014 made registration wire-driven), so this soft-fails by value instead.
+ * Admission is reachable from a peer's bytes (RFC-0014 made registration wire-driven), so a
+ * refused draw answers by value and the caller refuses the admission as BACKPRESSURE.
+ * @param src The graph's table source; the block returns to it when the last holder drops.
  * @param key The canonical PATH key bytes; an empty span yields null (no target).
  */
-[[nodiscard]] inline target_key_t try_make_target_key(std::vector<std::byte>&& key) noexcept {
-    if (key.empty()) return nullptr;
-#if defined(__cpp_exceptions)
-    try {
-        return std::make_shared<const std::vector<std::byte>>(std::move(key));
-    } catch (...) {
-        return nullptr;  // only the control-block allocation can throw (the move is noexcept)
-    }
-#else
-    // Declared inside the branch that uses it: at -Wextra an unconditional definition is an
-    // unused variable on every exception-enabled build, which is most of CI.
-    static constexpr std::size_t kCtrlSlack = 4 * sizeof(void*);  // >= both mainstream ABIs
-    if (!tr::detail::probe_bytes(sizeof(std::vector<std::byte>) + kCtrlSlack)) return nullptr;
-    return std::make_shared<const std::vector<std::byte>>(std::move(key));
-#endif
+[[nodiscard]] inline target_key_t try_make_target_key(mem::block_source_t& src,
+                                                      std::span<const std::byte> key) noexcept {
+    target_key_t h;
+    if (key.empty()) return h;
+    void* const raw =
+        src.try_alloc(sizeof(target_key_t::head_t) + key.size(), alignof(target_key_t::head_t));
+    if (raw == nullptr) return h;
+    h.p_ = ::new (raw) target_key_t::head_t{view::detail::ref_count_t{1}, &src};
+    std::memcpy(reinterpret_cast<std::byte*>(h.p_ + 1), key.data(), key.size());
+    h.size_ = static_cast<std::uint32_t>(key.size());
+    return h;
 }
 
 /**

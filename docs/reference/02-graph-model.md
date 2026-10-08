@@ -307,7 +307,7 @@ Rationale is expanded in [08-views-and-ownership.md](08-views-and-ownership.md) 
 
 ### Single-threaded mode
 
-For Cortex-M0/M0+ (no LDREX/STREX) and bare-metal single-threaded contexts, an implementation MAY substitute a plain (non-atomic) integer refcount, provided the application guarantees no cross-thread sharing of segments. This is a build-time substitution, not a runtime mode: the two refcount flavours are never mixed within one image.
+For Cortex-M0/M0+ (no LDREX/STREX) and bare-metal single-threaded contexts, an implementation MAY substitute a plain (non-atomic) integer refcount, provided the application guarantees no cross-thread sharing of segments. That substitution is made at build time, not a runtime mode: the two refcount flavours are never mixed within one image. Separately, a host build MAY skip the atomic read-modify-write while the process has never started a second thread, the test `std::shared_ptr` makes. The reference implementation's native binding reads glibc's `__libc_single_threaded` before each count update (#1912). This is not a mixed image: starting a thread clears the flag before the new thread runs, and every later update is atomic. Where the C library publishes no such flag, the count is always atomic.
 
 ### Ownership transfer at endpoint delivery
 

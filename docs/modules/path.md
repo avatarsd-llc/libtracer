@@ -123,8 +123,9 @@ builds.
 :members:
 ```
 
-```{doxygentypedef} tr::graph::target_key_t
+```{doxygenclass} tr::graph::target_key_t
 :project: libtracer
+:members:
 ```
 
 ```{doxygenfunction} tr::graph::try_make_target_key

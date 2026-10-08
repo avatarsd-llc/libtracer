@@ -222,9 +222,11 @@ struct default_config_t {
      * eight times that (#1885): 3,072 B on a 64-bit host, 448 B on rv32 at 2. The
      * host default keeps the allocation-free fast path for the widths the benches gate; a
      * NARROW node whose vertices carry one or two subscribers spends that stack on every task
-     * that publishes. Measured on rv32 before #1885 (`-Os`, GCC 15.2, real
-     * `core/src/graph.cpp`, `-fstack-usage`): `graph_t::fan_out`'s frame was 304 B at 8 and
-     * 128 B at 2 — the 168 B of six views plus 8 B of 16-byte frame rounding. Override
+     * that publishes. Measured on rv32 after #1885 (`-Os`, GCC 15.2, real
+     * `core/src/graph.cpp`, `-fstack-usage`, #1912): `graph_t::fan_out`'s frame (its outlined
+     * body, `fan_out.part.0`) is 2,128 B at 8 and 608 B at 2. The difference, 1,520 B, is the
+     * six inline views (168 B) plus the 48 views the wide frame loses (1,344 B) and 8 B of
+     * frame rounding. Before #1885 it was 304 B at 8 and 128 B at 2. Override
      * fragment: `static constexpr std::size_t kInlineFanout = 2;` — the ESP-IDF component
      * sets 2 on a chip target. At least 1.
      */

@@ -387,8 +387,7 @@ namespace {
             // that cannot be held refuses the admission as BACKPRESSURE (#1885): it was
             // admitted without its target and then refused as a TYPE_MISMATCH.
             const auto k = wire::path_key(child);
-            if (k && !(s.target_key = try_make_target_key({k->begin(), k->end()})) && !k->empty())
-                return false;
+            if (k && !(s.target_key = try_make_target_key(src, *k)) && !k->empty()) return false;
         } else if (child.type() == type_t::SETTINGS) {
             const wire::config_reader_t qos(&child);
             if (qos.flag("delivery_compact").value_or(false)) {

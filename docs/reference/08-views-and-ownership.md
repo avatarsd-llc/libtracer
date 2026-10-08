@@ -104,6 +104,8 @@ The decrement returns the value *before* it, so a return of `1` is the "this cal
 
 On a target with no load-linked/store-conditional pair (Cortex-M0/M0+) and in bare-metal single-threaded contexts, the refcount may be a plain unsigned integer with the same three operations. The application then carries the obligation the atomics discharged: no segment is shared across threads or between an ISR and thread context.
 
+On a host whose C library reports that the process has never started a second thread (glibc's `__libc_single_threaded`), the reference implementation updates the count with a plain load and store until the first thread starts, as `std::shared_ptr` does, and atomically from then on (#1912); [02-graph-model.md](02-graph-model.md) §single-threaded mode states the rule.
+
 When a segment's refcount drops to zero, the owning handle invokes `backend->destroy(seg)`. Destruction returns the bytes to whichever L0 backend owns them.
 
 ---
