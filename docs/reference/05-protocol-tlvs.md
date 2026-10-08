@@ -931,6 +931,16 @@ ACL (PL=1) {                                ; outer = ACE collection
 
 **The OUTER container's shape is checked too, and a read serves a re-encode.** The collection must be *structured*: a **primitive** ACL (`opt.PL=0`) is rejected with `TYPE_MISMATCH`, because its bytes are opaque payload rather than children, so it would parse as **no ACEs at all** — clearing enforcement, the most permissive outcome the field has, on a write that looks like it installs a policy. An **empty container** (`opt.PL=1`, zero children) is the sanctioned way to clear: it stores an ACL that grants nothing, which under the open-by-default rule restricts nothing. A read of `:acl` is answered by **re-encoding the stored ACEs**, not by echoing the bytes that were written, so what an auditor reads back is a projection of the very list the gates evaluate and the two cannot drift apart; the canonical spelling above is therefore what comes back, whichever accepted spelling went in. `NOT_FOUND` means no `:acl` was ever written, which stays distinct from an empty container. ([#907](https://github.com/avatarsd-llc/libtracer/issues/907).)
 
+**There is no graph-root `:acl`.** *Informative.* The graph keeps no `:acl` for the root `/`: a write to `/:acl` answers `NOT_FOUND` and installs nothing. An application that means to set a graph-wide default writes an inheritable ACE on each top-level vertex it wants covered (`/net` for the network plane) and checks each write's result.
+
+**Upgrading to 0.18.1: the connection-vertex layout.** *Informative.* Since 0.18.1 every hop through a mount is authorized at that mount's connection vertex for the operation's own right: the dial's `/net/<module>/<name>`, or the listener's for a delivery into an accepted session ([core/CHANGELOG.md](https://github.com/avatarsd-llc/libtracer/blob/main/core/CHANGELOG.md) 0.18.1). The `:subscribers[]` append is a WRITE, and a delivery into a session is a WRITE, so both need **WRITE** at the connection vertex they cross, on top of `SUBSCRIBE` at the producer. A layout that grants only READ and SUBSCRIBE through an inheritable ACE on `/net` or `/net/<module>` admitted both on 0.18.0 and refuses both on 0.18.1: the refused subscribe answers `NOT_FOUND`, and the refused delivery into a session is dropped without an answer. The layout that works:
+
+- an inheritable READ and SUBSCRIBE grant on `/net`;
+- READ, WRITE and SUBSCRIBE on each connection vertex, written once the connection exists;
+- no CREATE on `/net/<module>/conn`. The creator endpoint demands CREATE for a `SPEC` (create) and WRITE for a `NAME` (remove), so withholding CREATE is what stops a remote peer from opening connections. Under the default ALLOW-only policy (the core subset above) an ACE on the endpoint cannot take back a right inherited from an ancestor, so WRITE stays off `/net` and `/net/<module>`; a host that binds the full policy (`full_acl_policy_t`) can use a DENY ACE instead.
+
+`core/tests/mount_hop_acl_test.cpp` pins this layout end to end: a session's subscribe through a dial and the deliveries back into its session pass, and the same session's attempt to create a connection is refused.
+
 ### Header settings
 
 - `opt.PL = 1`.

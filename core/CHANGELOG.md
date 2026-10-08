@@ -475,6 +475,32 @@ The four fixes below close three published advisories:
   register its connection vertex.** A NAME-spelled hop through such a mount is refused, as the
   bound delivery through it already is.
 
+### Upgrading to 0.18.1
+
+This applies to a graph that enforces an ACL (a subject resolver is installed). From 0.18.1,
+every hop through a mount asks that mount's connection vertex for the operation's own right: the
+dial's vertex (`/net/<module>/<name>`) or, for an accepted session, the listener's. A subscribe
+is a WRITE (an append to `:subscribers[]`), and a delivery into a session is a WRITE, so both
+need **WRITE** at the connection vertex they cross. A deployment that granted only READ and
+SUBSCRIBE through an inheritable entry on `/net` or `/net/<module>` worked on 0.18.0, and on
+0.18.1 loses those subscriptions and deliveries: a refused subscribe answers `NOT_FOUND`, and a
+refused delivery into a session is dropped without an answer.
+
+The recommended layout:
+
+- an inheritable READ and SUBSCRIBE grant on `/net`;
+- READ, WRITE and SUBSCRIBE on each connection vertex, written after the connection is created;
+- no CREATE on `/net/<module>/conn`. Creating a connection through the creator endpoint needs
+  CREATE, and removing one needs WRITE, so withholding CREATE there is what stops a remote peer
+  from opening connections. Under the default ALLOW-only policy, an entry on the endpoint
+  cannot take back a right inherited from an ancestor, so keep WRITE off `/net` and
+  `/net/<module>`. A host that binds the full policy (`full_acl_policy_t`) can use a DENY
+  entry instead.
+
+There is no graph-root `:acl`. A write to `/:acl` answers `NOT_FOUND` and installs nothing, so
+a graph-wide default has to be written on `/net` (or on each top-level vertex) and its result
+checked.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added
