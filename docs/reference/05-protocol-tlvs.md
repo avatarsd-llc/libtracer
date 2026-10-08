@@ -837,10 +837,10 @@ outcome, not a frame-parse result. The namespace is prefix-filterable
 
 - Inside STATUS TLVs (zero or more ERRORs per STATUS). A `kind=ERROR` reply's payload is always
   `STATUS{ERROR}` ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §B). A bare `ERROR` as that payload is not an error
-  spelling: a reader MUST NOT surface it as the reply's error (vector `fwd/reply-error-bare-ignored`;
-  RFC-0004 erratum 2026-10-08).
-- Bare, outside a reply: protocol-stack reporting where there is no request to answer
-  ([RFC-0002](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0002-protocol-error-model.md) §C).
+  spelling: a reader MUST NOT read an error identity (code or `tr::` path) from it, and the reply
+  stays `kind=ERROR` (vector `fwd/reply-error-bare-ignored`; RFC-0004 erratum 2026-10-08).
+- Bare, anywhere other than a `kind=ERROR` `FWD{REPLY}` payload: for example protocol-stack
+  reporting where there is no request to answer ([RFC-0002](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0002-protocol-error-model.md) §C).
 
 ---
 

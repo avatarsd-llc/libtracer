@@ -14,12 +14,13 @@ wrapper". No emitter ever wrote that form, and no reader ever read it. The RFC-0
 
 This vector pins what a reader does with the bare form:
 
-> A reader MUST NOT surface a bare `ERROR` payload as the reply's error. It reads no registered
+> A reader MUST NOT read an error identity from a bare `ERROR` payload. It reads no registered
 > code and no `tr::` path from it, the same answer it gives for a `STATUS` that carries no `ERROR`.
+> The reply stays `kind=ERROR`: it is still a failure, only without an identity.
 
-A bare `ERROR` stays a well-formed TLV, and RFC-0002 §C still admits one outside a reply, for
-protocol-stack reporting where there is no request to answer. Only the reply-payload spelling is
-gone.
+A bare `ERROR` stays a well-formed TLV, admitted anywhere other than a `kind=ERROR` `FWD{REPLY}`
+payload, for example protocol-stack reporting where there is no request to answer (RFC-0002 §C).
+Only the `FWD{REPLY}` payload spelling is gone.
 
 ## Byte breakdown
 

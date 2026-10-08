@@ -549,8 +549,9 @@ does. No emitter writes the bare form, and no reader surfaces it, so no byte on 
 no peer loses an answer it was getting. One error-reply spelling is what has always shipped.
 
 **The correction.** reference/05 §`0x08` now says a `kind=ERROR` reply's payload is always
-`STATUS{ERROR}`, and a reader MUST NOT surface a bare `ERROR` payload as the reply's error. A bare
-`ERROR` outside a reply, for protocol-stack reporting where there is no request to answer
+`STATUS{ERROR}`, and a reader MUST NOT read an error identity (code or `tr::` path) from a bare
+`ERROR` payload; the reply stays `kind=ERROR`. A bare `ERROR` anywhere other than a `kind=ERROR`
+`FWD{REPLY}` payload, for example protocol-stack reporting where there is no request to answer
 ([RFC-0002](0002-protocol-error-model.md) §C), is untouched.
 
 **Conformance vector.** `fwd/reply-error-bare-ignored` (new) is `fwd/fwd-reply-error` with the
