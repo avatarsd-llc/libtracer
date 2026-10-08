@@ -1664,8 +1664,9 @@ and the allocator's size-class rounding. At 10⁶ vertices the graph holds **132
 
 The published topic-count comparison compared **two different operations**. libtracer's
 `inproc-path` row writes *by address* — a registry resolution inside every timed iteration —
-while `bench_zenoh`'s row of the same name publishes through a **declared `Publisher`**, which
-is the bound form and resolves nothing per put. A resolution term therefore sat inside one arm
+while `bench_zenoh`'s row of the same name published through a **declared `Publisher`**
+(until #1809 in the default sweep and #1910 in the grid), which is the bound form and resolves
+nothing per put. A resolution term therefore sat inside one arm
 and nowhere in the other, and the narrowing of the margin across the ladder could not be
 attributed to either engine's topic scaling.
 
