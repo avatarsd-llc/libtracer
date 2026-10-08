@@ -12,6 +12,10 @@
  * that session's peer name, so every case below is a pair: `p1` is refused, and the identical
  * frame from `p0` is admitted — the control that makes each refusal the ACL's.
  *
+ * Every case runs twice (#1958): once with only the returning `subject_resolver` installed,
+ * which reaches the gate through its adapter, and once with only the caller-storage
+ * `subject_lookup` (#1781), which the gate and `acl_enforced()` read directly.
+ *
  * - the NAME spelling through the BUS mount (`net/tcp-server/srv/<peer>`);
  * - the NAME spelling through the POINT-TO-POINT mount (`net/tcp/x/...`);
  * - the BOUND spelling of a session delivery: a one-element `PATH_REF` naming the peer's
@@ -100,6 +104,40 @@ bool wait_until(Fn f, std::chrono::milliseconds timeout = 3000ms) {
 std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
     return subject_token_t(p, p + caller.size());
+}
+
+/** @brief The same resolver in the caller-storage form (#1781): the token goes into @p out. */
+std::expected<void, tr::wire::err_t> caller_is_subject_into(void*, std::string_view caller,
+                                                            tr::mem::bytes_t& out) {
+    if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))
+        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+    return {};
+}
+
+/** @brief Which one subject hook an enforcing graph installs (#1958). */
+enum class hook_arm_t : std::uint8_t {
+    RESOLVER, /**< @brief Only `subject_resolver`, reached through the adapter. */
+    LOOKUP,   /**< @brief Only `subject_lookup`, read by the gate directly. */
+};
+
+/** @brief The arm the cases run under; `main` runs every case once per arm. */
+hook_arm_t g_arm = hook_arm_t::RESOLVER;
+
+/** @brief Install the current arm's subject hook, and only that one, on @p g. */
+void enforce(graph_t& g) {
+    auto hooks = g.hooks();
+    if (g_arm == hook_arm_t::LOOKUP) {
+        hooks.subject_lookup = {caller_is_subject_into, nullptr};
+    } else {
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+    }
+    g.set_hooks(hooks);
+    const auto back = g.hooks();
+    tr::testing::check_quiet(
+        g_arm == hook_arm_t::LOOKUP
+            ? back.subject_lookup.fn != nullptr && back.subject_resolver.fn == nullptr
+            : back.subject_resolver.fn != nullptr && back.subject_lookup.fn == nullptr,
+        "exactly the arm's one subject hook is installed");
 }
 
 /** @brief One inheritable ALLOW ACE for @p subject over @p mask. */
@@ -197,11 +235,7 @@ struct node_t {
     std::unique_ptr<client_t> p1;
 
     node_t() {
-        {
-            auto hooks = g.hooks();
-            hooks.subject_resolver = {caller_is_subject, nullptr};
-            g.set_hooks(hooks);
-        }
+        enforce(g);
         check(server.ok(), "listener bound");
         (void)g.register_vertex(path_t("/net/tcp-server/srv"), role_t::STORED_VALUE);
         (void)g.register_vertex(path_t("/net/tcp/x"), role_t::STORED_VALUE);
@@ -275,13 +309,9 @@ void bound_session_delivery() {
 
 void vertexless_mount() {
     std::printf("a mount with no connection vertex refuses a NAME hop under enforcement:\n");
-    const auto forwards = [](bool enforce) {
+    const auto forwards = [](bool enforcing) {
         graph_t g;
-        if (enforce) {
-            auto hooks = g.hooks();
-            hooks.subject_resolver = {caller_is_subject, nullptr};
-            g.set_hooks(hooks);
-        }
+        if (enforcing) enforce(g);
         fwd_router_t router{g};
         recorder_t bare;
         check(router.add_child("net/tcp/bare", bare), "vertex-less child mounted");
@@ -400,11 +430,21 @@ void upgrade_layout() {
 
 }  // namespace
 
-int main() {
+/** @brief Every case, under the arm in @ref g_arm. */
+static int run_cases() {
     vertexless_mount();
     if constexpr (!tr::net::kBusLinks) return tr::testing::summary("mount_hop_acl");
     name_spelling();
     bound_session_delivery();
     upgrade_layout();
     return tr::testing::summary("mount_hop_acl");
+}
+
+int main() {
+    std::printf("== arm 1: only subject_resolver installed ==\n");
+    g_arm = hook_arm_t::RESOLVER;
+    (void)run_cases();
+    std::printf("\n== arm 2: only subject_lookup installed ==\n");
+    g_arm = hook_arm_t::LOOKUP;
+    return run_cases();
 }
