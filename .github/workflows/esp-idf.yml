@@ -271,10 +271,11 @@ jobs:
 
       # The MCU no-heap link check (#1783, ADR-0083 Decision 1), on the component archive the
       # example linked. One target: the pins are per toolchain, and esp32c6 is the required one.
-      # Every heap entry point libtracer.a references (malloc/free/calloc/realloc, heap_caps_*,
-      # any operator new or delete) must be pinned in tools/no_heap_baseline.json, and the
-      # pins only ever shrink: a new heap call reds the job, and so does a pin that is gone
-      # until `--repin` lowers it.
+      # Every call site in libtracer.a that references the heap (malloc/free/calloc/realloc,
+      # heap_caps_*, any operator new or delete), per object and function, must be pinned in
+      # tools/no_heap_baseline.json, and the pins only ever shrink: a new call site or an extra
+      # call at a pinned one reds the job, and so does a pin that is gone until `--repin`
+      # lowers it.
       - name: No-heap link check (libtracer.a references no heap)
         if: matrix.target == 'esp32c6'
         shell: bash
@@ -283,7 +284,7 @@ jobs:
           . "${IDF_PATH}/export.sh"
           python3 "${GITHUB_WORKSPACE}/tools/check_no_heap.py" --target esp32c6 \
             --archive build/esp-idf/libtracer/libtracer.a \
-            --nm riscv32-esp-elf-nm --objdump riscv32-esp-elf-objdump
+            --objdump riscv32-esp-elf-objdump
 
       # Footprint report (docs/reference/00-overview.md §"build-size profiles";
       # numbers described by integrations/esp-idf/README.md §Memory budget).

@@ -126,13 +126,14 @@ jobs:
 
       # The MCU no-heap link check (#1783, ADR-0083 Decision 1). The required modules, archived
       # without the fixture, must reference no heap entry point (malloc/free/calloc/realloc,
-      # any operator new or delete) beyond the pins in tools/no_heap_baseline.json, which only
-      # ever shrink. A new heap call reds this job; a pin that is gone does too, until
-      # `--repin` lowers it. Unlike the budget above this is a hard gate from day one.
+      # any operator new or delete) beyond the call sites pinned, per object and function, in
+      # tools/no_heap_baseline.json, which only ever shrink. A new call site, or an extra call
+      # at a pinned one, reds this job; a pin that is gone does too, until `--repin` lowers it.
+      # Unlike the budget above this is a hard gate from day one.
       - name: No-heap link check (libtracer.a references no heap)
         run: |
           python3 tools/check_no_heap.py --target cortex-m0 --archive libtracer.a \
-            --nm arm-none-eabi-nm --objdump arm-none-eabi-objdump
+            --objdump arm-none-eabi-objdump
 
       - name: Upload footprint artifact
         if: always()
