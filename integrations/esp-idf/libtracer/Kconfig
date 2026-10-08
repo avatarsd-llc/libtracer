@@ -307,6 +307,21 @@ menu "libtracer"
             Size it deliberately on a board with tens of KB of free heap. A value
             below the platform floor is ignored and the default stack is used.
 
+    config LIBTRACER_CREATION_HOOKS
+        bool "Let a vertex carry a creation hook (opt-in write-creates)"
+        default n
+        help
+            Bind tr::graph::config_t::kCreationHooks = true (RFC-0030 §7.2, #2000):
+            a parent vertex can then carry a creation hook, installed with
+            graph_t::set_creation_hook, that decides whether a data write to a
+            missing child creates it. Use it for an opt-in creation flow, such as
+            an OTA-style write that names the image it brings.
+
+            OFF by default, the lean choice (RFC-0030 §18 Q5). Off, no vertex has
+            a hook slot, graph_t::set_creation_hook answers SCHEMA_NOT_FOUND, and
+            a data write to a missing child is refused with not_found and creates
+            nothing. This is a per-image choice.
+
     config LIBTRACER_VERTEX_LOCK_STRIPES
         int "Vertex lock-stripe count"
         range 1 256

@@ -365,6 +365,13 @@ if(CONFIG_LIBTRACER_BUS_LINKS)
 else()
     set(LIBTRACER_BUS_LINKS false)
 endif()
+# Creation hooks (RFC-0030 §7.2, #2000): off by default (§18 Q5), and the early pass falls
+# back to that default like the two link modules above.
+if(CONFIG_LIBTRACER_CREATION_HOOKS)
+    set(LIBTRACER_CREATION_HOOKS true)
+else()
+    set(LIBTRACER_CREATION_HOOKS false)
+endif()
 # Worker stack bytes; 0 = the IDF pthread default. Same early-pass fallback reasoning.
 if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)
     set(LIBTRACER_SELF_HEAL_WORKER_STACK ${CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK})
@@ -421,6 +428,7 @@ struct esp_config_t : default_config_t {
     static constexpr bool kSpinWaitSafe = ${LIBTRACER_SPIN_WAIT_SAFE};
     static constexpr bool kBusLinks = ${LIBTRACER_BUS_LINKS};
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
+    static constexpr bool kCreationHooks = ${LIBTRACER_CREATION_HOOKS};
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
     static constexpr std::size_t kRxDrainFrames = ${LIBTRACER_RX_DRAIN_FRAMES};
     static constexpr std::size_t kRxDrainBytes = ${LIBTRACER_RX_DRAIN_BYTES};

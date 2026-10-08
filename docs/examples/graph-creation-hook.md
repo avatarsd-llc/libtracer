@@ -17,7 +17,7 @@ application decides, or refuses.
   profile, so a lean build has no hook slot: `set_creation_hook` answers `SCHEMA_NOT_FOUND`
   and every miss stays refused. The example checks that and stops there in such a build. Set
   `static constexpr bool kCreationHooks = true;` in your `libtracer/config_override.hpp` to
-  opt in.
+  opt in; on ESP-IDF, set `CONFIG_LIBTRACER_CREATION_HOOKS=y` instead.
 - **The parent's `CREATE` right is checked before the hook runs.** A writer the parent's ACL
   denies gets `PermissionDenied`, and the hook never sees the write.
 - **One level per hook.** The hook on `/zone` creates `/zone/a`, which carries no hook of its

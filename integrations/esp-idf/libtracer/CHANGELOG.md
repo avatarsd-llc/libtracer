@@ -12,6 +12,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`CONFIG_LIBTRACER_CREATION_HOOKS` — a Kconfig switch for `config_t::kCreationHooks`
+  ([#2000](https://github.com/avatarsd-llc/libtracer/issues/2000)).** On, the component's
+  generated override fragment binds `kCreationHooks = true`, so a parent vertex can carry a
+  creation hook (RFC-0030 §7.2). Default `n` (RFC-0030 §18 Q5): an image that leaves it off
+  builds as before, and `graph_t::set_creation_hook` answers `SCHEMA_NOT_FOUND`.
+
 - **`twai_link_config_t::memory` — the CAN link takes `link_memory_t`
   ([#1880](https://github.com/avatarsd-llc/libtracer/issues/1880)).** The shape the two
   WebSocket links take. Only `io` is read: the in-flight TX pool (`tx_queue_depth + 1` slots
