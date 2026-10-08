@@ -1582,6 +1582,28 @@ fn subscriber_target_as_value_names_no_target() {
 }
 
 /**
+ * @brief `subscriber/no-target` — a routed `:subscribers[]` append needs no target (#2016).
+ *
+ * The record has no children, so the target reader finds none. That is a complete subscribe
+ * on the routed append, whose delivery rides the return route (RFC-0021 §4.D, erratum
+ * 2026-10-08). The admission is a graph behaviour this crate has no graph to show; the C++
+ * core binds it.
+ */
+#[test]
+fn subscriber_no_target_is_a_complete_routed_subscribe() {
+    let bin = assert_vector_consistent("subscriber/no-target");
+    let t = decode(&bin).unwrap();
+    assert_eq!(t.type_code, libtracer::type_code::SUBSCRIBER);
+    assert!(structured::subscriber_target(&t).unwrap().is_none());
+    assert_eq!(structured::subscriber_target_path(&t).unwrap(), None);
+    assert_eq!(
+        structured::subscriber_policy(&t).unwrap().bits,
+        0,
+        "no SETTINGS: no policy"
+    );
+}
+
+/**
  * @brief `subscriber/policy-durability` — bit 5 set, and nothing else.
  *
  * Both directions against the SAME bytes: the builder must produce the vector, and the

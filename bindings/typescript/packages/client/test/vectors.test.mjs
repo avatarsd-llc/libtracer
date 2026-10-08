@@ -142,6 +142,20 @@ test('the no-target SUBSCRIBER vector carries no PATH and is not the sentinel', 
   assert.ok(!sameBytes(bytes, sentinel), 'not the empty-STATUS sentinel');
 });
 
+/**
+ * @brief `subscriber/no-target`: a routed `:subscribers[]` append needs no target (#2016).
+ * The record has no children, so it names no target PATH; on the routed append its delivery
+ * rides the return route (RFC-0021 §4.D, erratum 2026-10-08). The graph-side admission is
+ * pinned by the C++ core.
+ */
+test('the no-target SUBSCRIBER vector is a SUBSCRIBER with no children', () => {
+  const bytes = vector('subscriber/no-target');
+  const tlv = decode(bytes);
+  assert.equal(tlv.type, TYPE.SUBSCRIBER);
+  assert.equal(tlv.children.length, 0, 'no children: no target PATH');
+  assert.ok(sameBytes(encode(tlv), bytes), 'round-trips');
+});
+
 /** @brief The decode half: the policy word is read back out of the vectors' own bytes. */
 test('the delivery-policy word decodes out of the policy vectors', () => {
   /** @brief The u16 under `delivery_policy`, or null when the record names none. */

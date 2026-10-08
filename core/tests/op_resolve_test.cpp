@@ -1356,6 +1356,65 @@ void test_subscription_observer() {
 }
 
 /**
+ * @brief `subscriber/no-target`: on a routed `:subscribers[]` append the return route is the
+ *        target, so `target_path` is optional there (RFC-0021 §4.D, erratum 2026-10-08, #2016).
+ *
+ * The vector's targetless `SUBSCRIBER{}` rides a `FWD{WRITE}` in over a link. It is admitted,
+ * and the producer's next write reaches the remote sink on that link with the subscribe's `src`
+ * as its return route. The ablation writes the same bytes through the local field door, which
+ * delivers to a local target and so refuses a record naming none with TYPE_MISMATCH. Without
+ * it, the admission would also pass against a door that ignored the record entirely.
+ */
+void test_routed_append_needs_no_target() {
+    std::printf("#2016 subscriber/no-target — a routed append needs no target_path:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const tr::graph::vertex_handle_t v =
+        g.register_vertex(*path_t::parse("/nt/src"), role_t::STORED_VALUE);
+    std::size_t deliveries = 0;
+    std::string seen_link;
+    std::vector<std::byte> seen_route;
+    const tr::testing::remote_sink_guard_t sink(
+        g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
+            ++deliveries;
+            seen_link.assign(d.link);
+            seen_route.assign(d.return_route.bytes().begin(), d.return_route.bytes().end());
+        });
+    const std::filesystem::path vroot{LIBTRACER_VECTORS_DIR};
+    const auto record = read_file(vroot / "subscriber" / "no-target" / "input.bin");
+    const auto dec = tr::wire::decode(record);
+    check(dec.has_value() && dec->type == type_t::SUBSCRIBER && dec->children.empty(),
+          "the vector is a SUBSCRIBER with no children: it names no target_path");
+
+    const auto return_route = b_path({"reply-ep"});
+    const auto fwd =
+        b_fwd(fwd_op_t::WRITE, b_path({"nt", "src"}), return_route, b_field_subs_append(), record);
+    const auto reply = resolve_bytes(resolver, fwd, "link-a");
+    check(reply.has_value(), "the routed append produced a reply");
+    if (!reply) return;
+    const auto d = decode_reply(*reply);
+    check(d.tlv.children.size() > 3 &&
+              value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+          "... RESULT: the targetless record is admitted");
+    check(g.own_subs(v) == 1, "... into one slot");
+
+    check(g.write(v, make_value({0x01, 0x00, 0x01, 0x00, 0x42})).has_value(),
+          "the producer writes");
+    check(deliveries == 1, "... and the write is delivered once, to the remote sink");
+    check(seen_link == "link-a", "... over the link the subscribe arrived on");
+    check(seen_route == return_route, "... along the subscribe's src: the return route");
+
+    // The ablation: the local field door delivers to a local target, and the record names none.
+    tr::graph::field_path_t append;
+    append.steps.push_back(
+        tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
+    const auto local = g.write(v, append, make_value(record));
+    check(!local && local.error() == status_t::TYPE_MISMATCH,
+          "ablation: the local `:subscribers[]` door refuses the same bytes TYPE_MISMATCH");
+    check(g.own_subs(v) == 1, "... and admits no second slot");
+}
+
+/**
  * @brief #1109: the reply ECHOES a stamped request's TF=0 trailer timestamp — the ICMP-echo
  *        construction that makes RTT measurable with no request id and no clock sync — and
  *        stays trailer-less for everyone else (absence indistinguishable from ordinary
@@ -1542,6 +1601,7 @@ int main() {
     test_write_creates_through_the_parent_hook();
     test_denied_creator_draws_nothing();
     test_subscription_observer();
+    test_routed_append_needs_no_target();
     test_ts_echo();
     test_tf1_reserved_root();
     return tr::testing::summary("op_resolve");

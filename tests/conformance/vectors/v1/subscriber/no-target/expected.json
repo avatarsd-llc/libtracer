@@ -1,0 +1,12 @@
+{
+  "name": "no-target",
+  "category": "subscriber",
+  "hex": "04400000",
+  "total_bytes": 4,
+  "decoded": {
+    "type": "0x04 SUBSCRIBER",
+    "structured": true,
+    "meaning": "SUBSCRIBER{} with no children: no target_path. As the payload of a routed :subscribers[] append (FWD{WRITE}) it is ADMITTED, and the producer's later writes are delivered over the frame's return route (RFC-0021 §4.D; reference/05 §0x04, RFC-0021 erratum 2026-10-08)",
+    "note": "a well-formed TLV, so every codec round-trips it; the admission is behavioural and is bound in core/tests/op_resolve_test.cpp (test_routed_append_needs_no_target). The same bytes written through the local :subscribers[] field door are refused tr::schema::type_mismatch, because that door delivers to a local target and the record names none"
+  }
+}

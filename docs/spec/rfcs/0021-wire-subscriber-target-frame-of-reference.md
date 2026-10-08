@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0021 |
 | **Title** | The frame of reference of a wire SUBSCRIBER's PATH target |
-| **Status** | **accepted** — maintainer ruling 2026-08-01: §3's fork is resolved in favour of **(b), the producer's frame**, and §E is answered **1 — `SUBSCRIBE` is sufficient authority**. Comment window waived for a sole maintainer (precedent: RFC-0020). **Implemented (#491)**: §4.B.1 (mount-routed target) and the mount-involving refusals of §4.B.3 are live at the wire door. **Amendment 1** (§4.B.2, 2026-08-15, [#491](https://github.com/avatarsd-llc/libtracer/issues/491)) closes §7 open question 3 by **RESTRICT**: the wire door is **mount-routed-only**, §4.B.2's purely-local arm is **rejected**, and a `PATH` matching no mount keeps the arrival-session (sender's-frame) meaning **permanently** — which is what the implementation already does and what every existing sender sends. |
+| **Status** | **accepted** — maintainer ruling 2026-08-01: §3's fork is resolved in favour of **(b), the producer's frame**, and §E is answered **1 — `SUBSCRIBE` is sufficient authority**. Comment window waived for a sole maintainer (precedent: RFC-0020). **Implemented (#491)**: §4.B.1 (mount-routed target) and the mount-involving refusals of §4.B.3 are live at the wire door. **Amendment 1** (§4.B.2, 2026-08-15, [#491](https://github.com/avatarsd-llc/libtracer/issues/491)) closes §7 open question 3 by **RESTRICT**: the wire door is **mount-routed-only**, §4.B.2's purely-local arm is **rejected**, and a `PATH` matching no mount keeps the arrival-session (sender's-frame) meaning **permanently** — which is what the implementation already does and what every existing sender sends. **Erratum** (2026-10-08, [#2016](https://github.com/avatarsd-llc/libtracer/issues/2016)): reference/05 now says `target_path` is optional on the routed append, as §4.D already did. |
 | **Author** | filed from the #491 refutation, 2026-08-01 |
 | **Amends** | [RFC-0004](0004-remote-operation-addressing.md) §D (operation semantics), §E (delivery/fanout) |
 | **Tracking** | [#491](https://github.com/avatarsd-llc/libtracer/issues/491) |
@@ -131,7 +131,7 @@ A `PATH` child that fails §B.3 answers `tr::path::invalid` (`0x0021`), the code
 1. `subscriber/target-mount-routed` — a `SUBSCRIBER{PATH …}` naming a path through a mount; the producer's subsequent write emits a `FWD{WRITE}` on the *mount* link with `dst` = the residual.
 2. ~~`subscriber/target-local` — a `PATH` naming a local vertex; delivery is a local re-dispatch.~~ **Withdrawn by amendment 1 (2026-08-15)** with the §4.B.2 arm it tested; the non-mount `PATH` is covered by vector 4's arrival-session binding.
 3. `subscriber/target-unroutable` — rejected with `0x0021`, and **no edge appended**.
-4. `subscriber/no-target` — the absent-`PATH` case still binds to the arrival session (the regression guard for §D).
+4. `subscriber/no-target` — the absent-`PATH` case still binds to the arrival session (the regression guard for §D). **Banked** by the erratum of 2026-10-08 below.
 5. An end-to-end vector for the departure property: after the writer's link is torn down, the producer still delivers to the target (the #491 recipe).
 
 ## 5. Compatibility
@@ -152,3 +152,36 @@ A `PATH` child that fails §B.3 answers `tr::path::invalid` (`0x0021`), the code
 2. ~~§E: is `SUBSCRIBE` sufficient authority?~~ **Ruled 2026-08-01: yes** — see §4.E.
 3. ~~Should outcome B.2 (a local target through the wire door) be permitted at all, or is the wire door restricted to mount-routed targets?~~ **Ruled 2026-08-15: RESTRICT** — the wire door is mount-routed-only, §4.B.2 is rejected, and a `PATH` matching no mount keeps the arrival-session (sender's-frame) meaning permanently. See **amendment 1** in §4.B. Three grounds: (a) the wire door is peer-triggered, and B.2 would let a remote peer provoke edge allocations on **arbitrary local vertices** — the ADR-0079/ADR-0080-fenced class — whereas mount-routed-only bounds the reachable set to links the producer registered; (b) **no capability is lost**, because the in-process door still reaches purely-local vertices and only the *remote spelling* is excluded; (c) §5's compat claim was already recorded FALSE, so permitting would break **every** existing sender (the TS client, `core/tests/acl_test.cpp`), while RESTRICT is what the shipped implementation (#491) already does and costs no code. The senders are therefore **not** corrected: the sender's-frame `PATH` keeps a defined meaning.
 4. Does the delivery-compaction opt-in (RFC-0004 §E.1) interact with a mount-routed target? The route handle is per `(link, route)`, and both are now the mount's — expected to work unchanged, but it wants a vector.
+
+## Erratum (2026-10-08) — `target_path` is optional on the routed append ([#2016](https://github.com/avatarsd-llc/libtracer/issues/2016))
+
+**What the text said.** [`reference/05`](../../reference/05-protocol-tlvs.md) §`0x04`, the
+SUBSCRIBER payload layout: `PATH target_path ; required — where to dispatch matched writes`,
+with no exception for any door.
+
+**What the behaviour is.** §4.D: a `SUBSCRIBER` with no `PATH` child, written to
+`:subscribers[]` by a routed append (an inbound `FWD{WRITE}`, RFC-0004 §D), binds to the arrival
+session and delivers along the accumulated `src`. RFC-0004's summary says the same from the other
+side: the consumer-stored target *is* the `src` route its subscribe accumulated. The reference
+core has admitted that record since the routed subscribe shipped: `graph_t::subscribe_wire`
+parses the record, binds the return route and the arrival link, and reads a `PATH` child only
+when it routes through a mount (§4.B.1). The local field door (`:subscribers[]` and
+`:subscribers[N]` written by a field write) is different: it delivers to a local target, so it
+refuses a record that names none `tr::schema::type_mismatch` (#598).
+
+**Which change made them diverge.** None. The "required" label came with the first reference
+draft (`aa21a483`), before the routed subscribe existed, and was never revised when RFC-0004
+§D (2026-06-28) and this RFC's §4.D made the return route the target on that door.
+
+**The correction.** The reference/05 layout now labels `target_path` required by a local target
+and optional on a routed append, and a paragraph under the layout states both doors: the field
+write MUST refuse a record without a target, and the routed append MUST admit it and deliver
+along the return route. Reference/05's note on the string form vs the PATH-TLV form stops
+pointing at an open question for the routed door. The conformance vector `subscriber/no-target`,
+which §G.4 proposed, is banked: the empty `SUBSCRIBER{}` (`04 40 00 00`), admitted on the
+routed append and refused by the local field door, bound by
+`core/tests/op_resolve_test.cpp` `test_routed_append_needs_no_target`.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves**: no codepoint, error code or frame shape changes, and a receiver that
+implements §4.D already admits this record exactly as the corrected text says.

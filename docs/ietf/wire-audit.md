@@ -109,7 +109,7 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 
 | Element | Codepoint | Status | Shipped use | Stage | Verdict | F |
 | --- | --- | --- | --- | --- | --- | --- |
-| `target_path` | PATH child | required | `parse_subscriber_tlv`; `tlv-types/subscriber-path` | — | **keep** | |
+| `target_path` | PATH child | required by a local target; optional on a routed append | `parse_subscriber_tlv`; `tlv-types/subscriber-path`; `subscriber/no-target` | — | **keep**. The routed append's target is its return route: RFC-0021 erratum 2026-10-08, [#2016](https://github.com/avatarsd-llc/libtracer/issues/2016). | |
 | `qos_settings` | SETTINGS child | optional | `parse_subscriber_tlv`; `subscriber/*` | — | **keep** | |
 | `capability` | ACL child | optional | none found: no reader | — | **delete**: subscribe is gated by the producer's `:acl`, not a carried token. | F1 |
 | `subscriber_id` | NAME child | optional | none found: no reader | — | **delete** | F1 |
