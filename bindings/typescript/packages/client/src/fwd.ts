@@ -412,6 +412,10 @@ export function decodeFwd(bytes: Uint8Array): ParsedFwd {
  * Vector-pinned by `fwd/fwd-reply-error-after-description` (the DESCRIPTION
  * written first), which the Rust binding pins against the same bytes so the
  * two cores cannot drift apart on it again (#878).
+ *
+ * A bare ERROR payload, with no STATUS wrapper, answers `null`: `STATUS{ ERROR }`
+ * is the one error-reply spelling (RFC-0004 erratum 2026-10-08, vector
+ * `fwd/reply-error-bare-ignored`).
  */
 function replyErrorTlv(reply: ParsedFwd): Tlv | null {
   const status = reply.payload;

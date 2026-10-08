@@ -1420,6 +1420,45 @@ fn fwd_reply_error_after_description() {
     assert_eq!(libtracer::fwd::reply_error_path(&f).unwrap(), None);
 }
 
+/**
+ * @brief One error-reply spelling (RFC-0004 erratum 2026-10-08, #1983): a `kind=ERROR` reply
+ * whose payload is a bare ERROR, with no STATUS wrapper, is not surfaced as an error. Same
+ * frame as `fwd_reply_error` minus the STATUS header.
+ *
+ * The C++ core (`path_label_origin_test.cpp`) and the TypeScript binding (`vectors.test.mjs`)
+ * pin the same bytes.
+ */
+#[test]
+fn reply_error_bare_ignored() {
+    let bin = assert_vector_consistent("fwd/reply-error-bare-ignored");
+    let mut req = FwdRequest::new(
+        fwd_op::REPLY,
+        &["net", "downlink", "a", "net", "downlink", "cli", "reply-ep"],
+        &["sensor", "temp"],
+    );
+    req.kind = Some(fwd_kind::ERROR);
+    req.payload = Some(error_code(ErrCode::PathNotFound, None));
+    assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
+
+    let f = decode_fwd(&bin).unwrap();
+    assert_eq!(f.kind, Some(fwd_kind::ERROR));
+    // Assert the shape first, so a re-blessing that wraps it cannot leave this test passing
+    // on the canonical case.
+    let payload = f.payload.as_ref().expect("the reply carries a payload");
+    assert_eq!(
+        payload.type_code,
+        libtracer::type_code::ERROR,
+        "the payload is a bare ERROR"
+    );
+
+    assert_eq!(
+        reply_error_code(&f),
+        0,
+        "a bare ERROR payload reads no code"
+    );
+    assert_eq!(libtracer::fwd::reply_error_path(&f).unwrap(), None);
+}
+
 #[test]
 fn fwd_routed_mount_residual() {
     let bin = assert_vector_consistent("fwd/fwd-routed-mount-residual");
@@ -1592,7 +1631,11 @@ fn subscriber_policy_reserved_bits() {
     assert_eq!(got.reliability(), 1);
     assert_eq!(got.priority(), 0);
     assert!(!got.durability_request());
-    assert_eq!(got.delivery_class(), 3, "0xFFC1 carries delivery_class = 3 (stream)");
+    assert_eq!(
+        got.delivery_class(),
+        3,
+        "0xFFC1 carries delivery_class = 3 (stream)"
+    );
     assert_eq!(got.reserved(), 0x00FF);
     // Verbatim: re-emitting keeps 6-15, so a future sender's bits survive the hop.
     let built = structured::subscriber_with_policy(&["client"], got).unwrap();

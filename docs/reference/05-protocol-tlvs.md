@@ -772,7 +772,7 @@ sequenceDiagram
 
 ## `0x08` — ERROR
 
-A single error condition. Used inside STATUS TLVs (which may carry zero or more ERRORs) and as the response payload for failed `read`/`write`/`await` calls.
+A single error condition. Used inside STATUS TLVs (which may carry zero or more ERRORs); a failed `read`/`write`/`await` answers with a `STATUS` carrying it (§Where it appears).
 
 ### Payload layout
 
@@ -835,8 +835,12 @@ outcome, not a frame-parse result. The namespace is prefix-filterable
 
 ### Where it appears
 
-- Inside STATUS TLVs (zero or more ERRORs per STATUS).
-- As inline reply payload in implementations that opt to skip the STATUS wrapper.
+- Inside STATUS TLVs (zero or more ERRORs per STATUS). A `kind=ERROR` reply's payload is always
+  `STATUS{ERROR}` ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §B). A bare `ERROR` as that payload is not an error
+  spelling: a reader MUST NOT read an error identity (code or `tr::` path) from it, and the reply
+  stays `kind=ERROR` (vector `fwd/reply-error-bare-ignored`; RFC-0004 erratum 2026-10-08).
+- Bare, anywhere other than a `kind=ERROR` `FWD{REPLY}` payload: for example protocol-stack
+  reporting where there is no request to answer ([RFC-0002](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0002-protocol-error-model.md) §C).
 
 ---
 

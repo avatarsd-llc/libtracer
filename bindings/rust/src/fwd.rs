@@ -381,6 +381,9 @@ pub fn fwd_src_path(fwd: &ParsedFwd) -> Result<String, BuildError> {
  * Vector-pinned by `fwd/fwd-reply-error-after-description` (the DESCRIPTION written
  * first), which the TypeScript binding pins against the same bytes so the two cores
  * cannot drift apart on it again (#878).
+ *
+ * A bare ERROR payload, with no STATUS wrapper, answers `None`: `STATUS{ ERROR }` is the one
+ * error-reply spelling (RFC-0004 erratum 2026-10-08, vector `fwd/reply-error-bare-ignored`).
  */
 fn reply_error_tlv(reply: &ParsedFwd) -> Option<&Tlv> {
     let status = reply.payload.as_ref()?;

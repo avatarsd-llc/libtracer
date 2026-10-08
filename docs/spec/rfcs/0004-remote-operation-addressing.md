@@ -513,3 +513,52 @@ context of the link the request arrived on, so every later frame on that link wa
 `fwd-await-timeout` keeps its bytes. Its description now reads the `await_timeout` child as the
 requester's deadline hint, not as a terminus-enforced timeout.
 
+
+---
+
+## Erratum (2026-10-08): reference/05 admitted a second error-reply spelling, a bare `ERROR`
+
+Follows [#1983](https://github.com/avatarsd-llc/libtracer/issues/1983), finding F6 of the wire
+audit ([`docs/ietf/wire-audit.md`](../../ietf/wire-audit.md) §5). This RFC is right. The
+contradiction was in its normative annex, [reference/05](../../reference/05-protocol-tlvs.md)
+§`0x08`, which is corrected in the same change.
+
+**What the text said.** reference/05 §`0x08` "Where it appears" listed a second place for an
+`ERROR`, after "inside STATUS TLVs":
+
+> As inline reply payload in implementations that opt to skip the STATUS wrapper.
+
+Its introduction also called `ERROR` "the response payload for failed `read`/`write`/`await`
+calls". Together they made a bare `ERROR` a permitted (MAY) payload of a `kind=ERROR` reply, beside
+§B's `STATUS{ERROR}`.
+
+**What the behaviour is.** §B says a `kind=ERROR` reply's payload is a `STATUS` carrying one
+`ERROR`, and every core does exactly that. The one C++ emitter (`assemble_error_reply`,
+`core/src/fwd_reply.cpp`) always writes the `STATUS` wrapper. Every reader looks for the `ERROR`
+inside a `STATUS` and finds nothing in a bare one: C++ `reply_error_identity` and the refused-route
+peek (`core/src/fwd_router.cpp`), Rust `reply_error_tlv` (`bindings/rust/src/fwd.rs`) and
+TypeScript `replyErrorTlv` (`bindings/typescript/packages/client/src/fwd.ts`). A peer that took
+the MAY was never understood: its error read as "no error identity".
+
+**Which change made them diverge.** The reference/05 bullet predates this RFC (it is in the
+2026-05-03 reference suite). This RFC pinned the payload as `STATUS{ERROR}` on 2026-06-28 and did
+not sweep reference/05, so the stale MAY survived beside it.
+
+**Why this is an erratum and not an amendment.** No conforming implementation changes what it
+does. No emitter writes the bare form, and no reader surfaces it, so no byte on any wire moves and
+no peer loses an answer it was getting. One error-reply spelling is what has always shipped.
+
+**The correction.** reference/05 §`0x08` now says a `kind=ERROR` reply's payload is always
+`STATUS{ERROR}`, and a reader MUST NOT read an error identity (code or `tr::` path) from a bare
+`ERROR` payload; the reply stays `kind=ERROR`. A bare `ERROR` anywhere other than a `kind=ERROR`
+`FWD{REPLY}` payload, for example protocol-stack reporting where there is no request to answer
+([RFC-0002](0002-protocol-error-model.md) §C), is untouched.
+
+**Conformance vector.** `fwd/reply-error-bare-ignored` (new) is `fwd/fwd-reply-error` with the
+`STATUS` header removed. The C++, Rust and TypeScript suites each assert that their reader reports
+no error identity from it.
+
+**Scope.** This erratum governs the `FWD{REPLY}` frame. [RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md)
+(stage 4, [#1942](https://github.com/avatarsd-llc/libtracer/issues/1942)) retires `REPLY` and gives
+its reply write a top-level `ERROR` payload (§8.6). That is a separate, later amendment, and this
+erratum neither anticipates nor changes it.
