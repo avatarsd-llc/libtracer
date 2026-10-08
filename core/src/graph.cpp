@@ -718,9 +718,12 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
             // linked in, so a refused creation (#1778) leaves the tree and the index as they
             // were. Placeholders made by EARLIER levels of this descent stay: they are
             // invisible, and the next registration down this path reuses them.
+            // The name is drawn from the same injected source (#1991): a record past the key's
+            // inline bytes would otherwise be the one global-heap block a registration took.
+            result_t<path_key_t> name = path_key_t::try_make(record, *tables_);
             vertex_t* const fresh =
-                vertex_slots_.reserve_next()
-                    ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE, path_key_t{record},
+                name && vertex_slots_.reserve_next()
+                    ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE, std::move(*name),
                                              handlers_t{}, *tables_)
                     : nullptr;
             if (fresh == nullptr) return std::unexpected(status_t::BACKPRESSURE);
@@ -984,10 +987,11 @@ result_t<vertex_handle_t> graph_t::register_session_anchor(std::string_view id) 
         // for `max_peers` distinct ids, so anchors are bounded by the accept policy and not
         // by how often clients reconnect (ADR-0044 §Amendment's measurement).
         // Failable steps first, as in the registration descent (#1778).
+        result_t<path_key_t> name = path_key_t::try_make(mem::as_span(rec), *tables_);
         vertex_t* const fresh =
-            vertex_slots_.reserve_next()
-                ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE,
-                                         path_key_t{mem::as_span(rec)}, handlers_t{}, *tables_)
+            name && vertex_slots_.reserve_next()
+                ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE, std::move(*name),
+                                         handlers_t{}, *tables_)
                 : nullptr;
         node = fresh != nullptr ? anchor_root()->add_child(fresh, *tables_) : nullptr;
         if (node == nullptr) {

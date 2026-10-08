@@ -648,7 +648,9 @@ Details that make these trustworthy:
   adds; `vertex_app5` — a leaf carrying a *copied* five-field app-field table, drawn per
   object; `vertex_app5_static` — the *borrowed* twin of that table (ADR-0058), likewise; and `reg_escape` —
   the global-heap blocks a runtime registration takes that the graph's injected
-  `memory_resource` never sees (ADR-0039 / RFC-0014), whose target is zero. Each ratchets
+  `memory_resource` never sees (ADR-0039 / RFC-0014), whose target is zero, reached with
+  [#1991](https://github.com/avatarsd-llc/libtracer/issues/1991) and pinned there outright
+  (`MEM_ZERO_POINTS`: any block or byte fails, whatever the baseline). Each ratchets
   on two quantities: **live bytes** per vertex, tolerant at **+2%** because it is
   host-allocator-dependent, and the **number of heap blocks**, which is host-independent
   and therefore ratchets *exactly* — one extra block is a regression, full stop. All come

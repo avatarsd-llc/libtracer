@@ -77,10 +77,13 @@ the window and freed inside it must leave the window's balance at 0. The window 
 it, so its free takes nothing off. Until this canary, a free subtracted the block's usable size
 whatever window it came from, so a caller-owned buffer the measured code freed could cancel
 bytes the code really kept. That is why `reg_escape` read **0 B** on main while one 24 B block
-per registration (the `path_key_t` spill tracked in
-[#551](https://github.com/avatarsd-llc/libtracer/issues/551)) escaped the seam: the probe's
-moved-in key vector was freed inside the window. With the fix it reads 24 B. Its row carries
-no `allocs=` field, so it is not charted or ratcheted either.
+per registration (the `path_key_t` spill of a name record longer than 16 B) escaped the seam:
+the probe's moved-in key vector was freed inside the window. With the fix it read 24 B, a known
+debt tracked in [#1991](https://github.com/avatarsd-llc/libtracer/issues/1991), which paid it:
+the spill is now drawn from the graph's injected source (`path_key_t::try_make`), and
+`reg_escape` reads **0 blocks / 0 B**. `perf_gate.py` pins that row at zero outright
+(`MEM_ZERO_POINTS`), on top of the paired ratchet. The canary's row carries no `allocs=` field,
+so it is not charted or ratcheted either.
 
 **Current: 0 allocs / 0 B per forward hop — the gate PASSES and is enforced in CI**
 (`perf.yml`, `ZEROHEAP_MAX=0`). What that buys, precisely: on a **contiguous (single-link)**

@@ -1162,17 +1162,14 @@ int main() {
     // fires.
     //
     // `allocs=` is the number that matters and it is exact, host-independent and
-    // ratcheted (perf_gate.py): today it counts the blocks that ESCAPE to the global
-    // heap. Each #551 slice drives it down; the ratchet is what stops it climbing back.
+    // ratcheted (perf_gate.py): it counts the blocks that ESCAPE to the global heap.
     //
-    // It reads FOUR, while #551's ledger names SIX allocation SITES, and both are right.
-    // A site is not a per-vertex cost: `children_t` is allocated once for a parent's
-    // FIRST child, and the child vector's growth is geometric, so across kRegN siblings
-    // the two together contribute well under one block per vertex and the per-vertex
-    // integer division drops them. What remains, once per registration, is the
-    // `path_key_t` spill, the `vertex_t` block, the extension block and the value seam.
-    // Do not read a drop from 4 to 2 as "two sites fixed" — read the sites off the ledger
-    // and this row off the tree shape it was measured on.
+    // It reads ZERO, blocks and bytes. The `vertex_t` block, the extension block and the
+    // value seam moved onto the graph's source with #1778/#1885, and the last escape, the
+    // 24 B `path_key_t` spill of the 24-byte NAME record, with #1991 (the spill block is
+    // drawn through `path_key_t::try_make` from the graph's table source). `mr_served=`
+    // is where those blocks went. perf_gate.py pins this row at zero outright, on top of
+    // the paired ratchet, so a new escape fails even against a baseline that has one.
     {
         counting_source_t reg_mr;
         graph_t reg_graph{reg_mr};

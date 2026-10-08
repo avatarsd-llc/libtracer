@@ -7,6 +7,7 @@
 
 #include <charconv>
 
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/path_element.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -168,6 +169,13 @@ bool path_t::cache_path_label(std::span<const std::byte> body) {
     labels_.body.assign(body.begin(), body.end());
     labels_.cached = true;
     return true;
+}
+
+path_key_t::path_key_t(std::span<const std::byte> b) { assign_or_stop(b, nullptr); }
+
+void path_key_t::assign_or_stop(std::span<const std::byte> b, tr::mem::block_source_t* src) {
+    tr::mem::block_source_t& from = src != nullptr ? *src : tr::mem::table_source();
+    if (!assign(b, from)) tr::mem::exhausted_at_init(from, "path_key_t");
 }
 
 std::size_t path_key_hash_t::operator()(const path_key_t& k) const noexcept {

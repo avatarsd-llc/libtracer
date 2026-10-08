@@ -27,6 +27,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   1 allocation / 89 B to **0 / 0 B**, and `ingress-copy` (16 B) from 2 / 189 B to 1 / 100 B, its
   value block (counted with `kSlabPool = false`, where every block is an `operator new`). The
   reply bytes do not change. Callers that pass nothing are unchanged.
+- **`graph::path_key_t::try_make`: a name longer than the key's 16 inline bytes is drawn from
+  an injected source ([#1991](https://github.com/avatarsd-llc/libtracer/issues/1991)).**
+  `try_make(bytes, src)` copies the bytes into a key and draws the spill block from `src`,
+  answering `BACKPRESSURE` when `src` refuses it. Registration names its vertices through it
+  from the graph's table source, so a registration takes nothing from the global heap: the
+  `reg_escape` probe reads 0 blocks and 0 B per registration (it read one 24 B block), and
+  `perf_gate.py` pins it at zero. The spill block keeps its source's address in an 8 B prefix,
+  so `sizeof(path_key_t)` stays 24 and `vertex_t` is unchanged. The span constructor and the
+  copy now draw from `mem::table_source()` and from the original key's source, in place of
+  `new[]`; a refusal there stops the node (`mem::exhausted_at_init`), as for `vertex_t`'s
+  constructor.
 
 - **`mem::chunked_map_t`: a failable sorted map in fixed-size leaves
   ([#1886](https://github.com/avatarsd-llc/libtracer/issues/1886)).** `mem_chunked_map.hpp`. The

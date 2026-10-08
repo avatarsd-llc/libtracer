@@ -586,8 +586,8 @@ PROBES: tuple[probe_t, ...] = (
     probe_t("fanout_wide", "one publish at a large subscriber count", "report-only"),
     probe_t("reg_escape",
             "a wire-driven `/net/<module>/<name>` registration on a graph with a memory resource "
-            "injected — what the resource never saw. Target: zero (ADR-0065)",
-            "report-only"),
+            "injected — what the resource never saw. Target: zero (ADR-0065), reached (#1991)",
+            "**zero** — any block or byte fails (`MEM_ZERO_POINTS`)"),
 )
 
 

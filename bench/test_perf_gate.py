@@ -446,6 +446,35 @@ class MemGrowthFromZeroBase(unittest.TestCase):
         self.assertIn("(base 0B", out)  # a 0 B base is still a base, not "no baseline"
 
 
+class MemZeroPointsArePinned(unittest.TestCase):
+    """@brief A point whose zero target is reached fails on any escape, even against a
+    baseline that escapes the same (#1991): the paired ratchet alone would excuse it."""
+
+    def gate(self, cur, base):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return pg.mem_gate({"mem:reg_escape": cur}, {"mem:reg_escape": base})
+
+    def test_escape_fails_against_an_escaping_base(self):
+        fails = self.gate({"bytes": 24, "allocs": 1}, {"bytes": 24, "allocs": 1})
+        self.assertTrue(any("mem:reg_escape must read zero" in f for f in fails), fails)
+
+    def test_escape_fails_with_no_base(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails = pg.mem_gate({"mem:reg_escape": {"bytes": 0, "allocs": 1}}, None)
+        self.assertTrue(any("must read zero" in f for f in fails), fails)
+
+    def test_zero_passes_and_other_points_are_not_pinned(self):
+        self.assertEqual(self.gate({"bytes": 0, "allocs": 0}, {"bytes": 0, "allocs": 0}), [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails = pg.mem_gate({"mem:vertex": {"bytes": 96, "allocs": 1}},
+                                {"mem:vertex": {"bytes": 96, "allocs": 1}})
+        self.assertEqual(fails, [])
+
+    def test_every_zero_point_is_probed(self):
+        for key in pg.MEM_ZERO_POINTS:
+            self.assertIn(key.removeprefix("mem:"), pg.MEM_POINTS)
+
+
 class MemPointsAreDocumented(unittest.TestCase):
     """@brief docs/methodology.md states the memory-probe COUNT in prose and is not
     generated, so it can only rot silently (#792 found it stale at three). This pins the
