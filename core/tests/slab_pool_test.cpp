@@ -414,6 +414,53 @@ void test_default_graph_sees_only_slabs() {
           "and the last value reads back whole");
 }
 
+/**
+ * @brief #1990: a 64 KiB payload is a classed block on the host default table, header and all.
+ *
+ * The ladder's last doubling ends at 64 KiB of PAYLOAD, and the one-block segment that carries
+ * such a payload is a header past it, so it fell to the root as an oversize block. The table
+ * has a class for it. An oversize block passes the census uncounted, so a run of live 64 KiB
+ * values moves `in_use` by their slabs only when a class serves them.
+ */
+void test_64k_payload_is_classed() {
+    std::printf("host default root: a 64 KiB payload is a classed block (#1990):\n");
+    if constexpr (!tr::mem::kSlabPool) {
+        std::printf("  (the build has no host slab pool: nothing to check)\n");
+        return;
+    }
+    constexpr std::size_t kPayload = 65536;
+    constexpr std::size_t kSegment =
+        tr::mem::segment_block_bytes(kPayload, tr::mem::heap_backend_t::kBlockAlign);
+    tr::mem::host_root_t& root = tr::mem::host_root();
+    const tr::mem::host_pool_t& pool = root.values().shared();
+    check(pool.class_of(kSegment, tr::mem::heap_backend_t::kBlockAlign) !=
+              tr::mem::host_pool_t::kNoClass,
+          "the 64 KiB payload's one-block segment has a class on the default table");
+
+    // More live values than the class's cap of free slabs could hold, so the slabs they take
+    // are drawn inside the window whatever earlier cases left behind.
+    constexpr std::size_t kVerts = 64;
+    graph_t g;
+    std::vector<tr::graph::vertex_handle_t> verts;
+    for (std::size_t i = 0; i < kVerts; ++i)
+        verts.push_back(
+            g.register_vertex(path_t(("/big/" + std::to_string(i)).c_str()), role_t::STORED_VALUE));
+    const std::vector<std::byte> bytes(kPayload, std::byte{0x6b});
+    const std::size_t before = root.values().stats().in_use;
+    bool wrote = true;
+    for (const auto v : verts)
+        wrote = g.write(v, tr::testing::make_value(bytes)).has_value() && wrote;
+    const std::size_t grew = root.values().stats().in_use - before;
+    std::printf("    %zu live 64 KiB values: the value sub-pool's slabs grew by %zu B\n", kVerts,
+                grew);
+    check(wrote, "every 64 KiB write is accepted");
+    check(grew >= kVerts / 2 * kSegment,
+          "and the value sub-pool holds them in its slabs, not as oversize blocks of the root");
+    const auto read = g.read(verts.back());
+    check(read.has_value() && (*read)->flatten().bytes().size() == kPayload,
+          "and the last value reads back whole");
+}
+
 /** @brief Concurrent writers and cross-thread frees through the thread caches. */
 void test_concurrent_writers() {
     std::printf("host default root: concurrent writers and cross-thread frees:\n");
@@ -621,6 +668,7 @@ int main() {
     test_no_thrash_at_a_slab_boundary();
     test_refusal_census();
     test_default_graph_sees_only_slabs();
+    test_64k_payload_is_classed();
     test_concurrent_writers();
     test_ladder_over_a_bounded_root();
     return tr::testing::summary("slab_pool");

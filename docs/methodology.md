@@ -105,8 +105,9 @@ Several named *modes* isolate distinct costs on the same axes:
 - `seam-values` / `seam-tables` — the shipped host slab pool
   ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)): one `try_alloc` +
   `release` on the value sub-pool (through the thread's cache) and on the table sub-pool
-  (one class lock per request), at every payload-ladder size and at 65552 B, the first
-  request past the last class, which falls back to the root. Each row refuses to print if
+  (one class lock per request), at every payload-ladder size, at 65552 B and at 65600 B,
+  the first request past the last class (64 KiB plus a segment header, #1990), which falls
+  back to the root. Each row refuses to print if
   its size's class decision is not the one its label names, or if a timed request was
   refused. Charted, not gated.
 - `inproc-pool-batch` — the window-calibrated twin of the heap-view `inproc-pool` rows.
@@ -670,8 +671,8 @@ Details that make these trustworthy:
   The `seamclass` rows
   ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)) ratchet the size classes
   each write selects on the host slab pool's table: blocks, requested bytes, class bytes and
-  oversize blocks per write may not grow at all, and below the last class (64 KiB) a write
-  may draw no oversize block.
+  oversize blocks per write may not grow at all, and a write of up to a 64 KiB payload may
+  draw no oversize block: the last class holds that payload's segment, header and all (#1990).
 - A per-vertex cost a **ratified clause already prices** is not a pullback, and the memory
   ratchet has one narrow way to say so: a **charged step** (`perf_gate.py`'s
   `MEM_CHARGED`), declared per probe, in bytes, naming the clause that charges it. A

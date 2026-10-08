@@ -1608,7 +1608,7 @@ RESULT streamlock w2 sections_x1000=1000 delivered_x1000=1000 n=4000
 RESULT seamclass S=64 blocks_x1000=2000 req_bytes_x1000=152000 class_bytes_x1000=160000 oversize_x1000=0 n=64
 RESULT seamclass S=1024 blocks_x1000=2000 req_bytes_x1000=1112000 class_bytes_x1000=1200000 oversize_x1000=0 n=64
 RESULT seamclass S=16384 blocks_x1000=2000 req_bytes_x1000=16472000 class_bytes_x1000=18480000 oversize_x1000=0 n=64
-RESULT seamclass S=65536 blocks_x1000=2000 req_bytes_x1000=65624000 class_bytes_x1000=65632000 oversize_x1000=1000 n=64
+RESULT seamclass S=65536 blocks_x1000=2000 req_bytes_x1000=65624000 class_bytes_x1000=65632000 oversize_x1000=0 n=64
 """
 
     def gate(self, cur: str, base: str | None) -> list[str]:
@@ -1619,7 +1619,8 @@ RESULT seamclass S=65536 blocks_x1000=2000 req_bytes_x1000=65624000 class_bytes_
     def test_seamclass_rows_are_parsed_by_size(self):
         got = pg.exact_parse(self.MAIN)
         self.assertEqual(got["seamclass:S=1024"]["class_bytes_x1000"], 1200000)
-        self.assertEqual(got["seamclass:S=65536"]["oversize_x1000"], 1000)
+        self.assertEqual(got["seamclass:S=65536"]["req_bytes_x1000"], 65624000)
+        self.assertEqual(got["seamclass:S=65536"]["oversize_x1000"], 0)
         self.assertEqual(got["streamlock:w2"]["sections_x1000"], 1000)
 
     def test_main_against_itself_passes(self):
@@ -1638,13 +1639,14 @@ RESULT seamclass S=65536 blocks_x1000=2000 req_bytes_x1000=65624000 class_bytes_
         self.assertTrue(any("seamclass:S=64: req_bytes_x1000" in f
                             for f in self.gate(cur, self.MAIN)))
 
-    def test_a_second_oversize_block_fails_exactly(self):
-        cur = self.MAIN.replace("oversize_x1000=1000", "oversize_x1000=2000")
+    def test_an_oversize_block_fails_exactly(self):
+        cur = self.MAIN.replace("class_bytes_x1000=65632000 oversize_x1000=0",
+                                "class_bytes_x1000=65632000 oversize_x1000=1000")
         self.assertTrue(any("seamclass:S=65536: oversize_x1000" in f
                             for f in self.gate(cur, self.MAIN)))
 
     def test_a_classed_size_falling_back_fails_without_a_baseline(self):
-        """Below the last class every ladder write is served by classes (#1777)."""
+        """Every ladder write below 64 KiB is served by classes (#1777)."""
         cur = self.MAIN.replace("S=16384 blocks_x1000=2000 req_bytes_x1000=16472000 "
                                 "class_bytes_x1000=18480000 oversize_x1000=0",
                                 "S=16384 blocks_x1000=2000 req_bytes_x1000=16472000 "
@@ -1652,9 +1654,12 @@ RESULT seamclass S=65536 blocks_x1000=2000 req_bytes_x1000=65624000 class_bytes_
         fails = self.gate(cur, None)
         self.assertTrue(any(f.startswith("seamclass S=16384: 1 oversize") for f in fails), fails)
 
-    def test_the_64k_payload_may_fall_back(self):
-        """Its segment is one header past the last 64 KiB class: the root serves it."""
-        self.assertEqual(self.gate(self.MAIN, None), [])
+    def test_the_64k_payload_falling_back_fails_without_a_baseline(self):
+        """The table has a class for the 64 KiB payload's segment, header and all (#1990)."""
+        cur = self.MAIN.replace("class_bytes_x1000=65632000 oversize_x1000=0",
+                                "class_bytes_x1000=65632000 oversize_x1000=1000")
+        fails = self.gate(cur, None)
+        self.assertTrue(any(f.startswith("seamclass S=65536: 1 oversize") for f in fails), fails)
 
     def test_two_writers_need_exactly_one_section(self):
         cur = self.MAIN.replace("w2 sections_x1000=1000", "w2 sections_x1000=1500")

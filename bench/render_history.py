@@ -554,7 +554,8 @@ FAMILIES: list[dict] = [
          title="Host slab pool — value and table sub-pools by request size",
          cond="try_alloc+release on tr::mem::host_root() · seam-values: the value sub-pool, "
               "through this thread's cache · seam-tables: the table sub-pool, one class lock "
-              "per request · 65552 B is past the last class and falls back to the root (#1908)",
+              "per request · 65600 B is past the last class and falls back to the root "
+              "(#1908, #1990)",
          pat=r"^(seam-values|seam-tables) (\d+)B/fan1/1ep",
          label=lambda m: f"{m.group(1)} {m.group(2)} B",
          key=lambda m: f"{m.group(1)} {int(m.group(2)):06d}", log=False,),

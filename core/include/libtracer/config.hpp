@@ -57,16 +57,21 @@ namespace tr::graph {
 
 /**
  * @brief A size-class ladder: @p PerDoubling classes of @p Step bytes from @p Step, then
- *        @p PerDoubling evenly spaced classes in every doubling up to @p Top.
+ *        @p PerDoubling evenly spaced classes in every doubling up to @p Top, then, when
+ *        @p Header is not 0, one more class of `Top + Header` bytes.
  *
  * The generator behind @ref default_config_t::kSizeClasses (#1777), so the default table is
- * spelled by its three parameters rather than as 80 literals.
+ * spelled by its parameters rather than as 81 literals. @p Header is for a table whose largest
+ * PAYLOAD is @p Top: the one-block segment carrying it is a segment header past @p Top, and
+ * without the extra row it would fall past the last class (#1990). It must be a multiple of
+ * @p Step, like every other row.
  */
-template <std::size_t Step, std::size_t PerDoubling, std::size_t Top>
+template <std::size_t Step, std::size_t PerDoubling, std::size_t Top, std::size_t Header = 0>
 struct size_class_ladder_t {
+    static_assert(Header % Step == 0, "the header row keeps the ladder's step");
     /** @brief Rows in the ladder. */
     static constexpr std::size_t kRows = [] {
-        std::size_t n = PerDoubling;
+        std::size_t n = PerDoubling + (Header != 0 ? 1 : 0);
         for (std::size_t lo = Step * PerDoubling; lo < Top; lo *= 2) n += PerDoubling;
         return n;
     }();
@@ -77,6 +82,7 @@ struct size_class_ladder_t {
         for (std::size_t k = 1; k <= PerDoubling; ++k) t[i++] = k * Step;
         for (std::size_t lo = Step * PerDoubling; lo < Top; lo *= 2)
             for (std::size_t k = 1; k <= PerDoubling; ++k) t[i++] = lo + k * (lo / PerDoubling);
+        if (Header != 0) t[i] = Top + Header;
         return t;
     }();
 };
@@ -356,11 +362,15 @@ struct default_config_t {
      * here, from the same per-thread cache a 1000 B one comes from, where glibc served it on a
      * slower path than a 1032 B request.
      *
-     * **Default: 16 B to 64 KiB, 8 classes per doubling.** Eight classes of 16 B up to 128 B,
-     * then eight evenly spaced classes in every doubling above it (144 ... 256, 288 ... 512,
-     * ... 61440, 65536): 80 rows, so no block wastes more than one eighth of its size. A
-     * request above the last row, or one aligned past 64 B, is drawn from the root as whole
-     * slabs of its own (@ref kSlabBytes multiples) and returned there when freed.
+     * **Default: 16 B to 64 KiB, 8 classes per doubling, plus one for a 64 KiB payload's
+     * segment.** Eight classes of 16 B up to 128 B, then eight evenly spaced classes in every
+     * doubling above it (144 ... 256, 288 ... 512, ... 61440, 65536), so no block wastes more
+     * than one eighth of its size; then 65584, a 64 KiB payload with the 48 B header of its
+     * one-block segment on a 64-bit host (#1990), where it would otherwise have fallen to the
+     * root at about twice the cost of a classed draw. 81 rows. A class takes no memory until its
+     * first request, so the extra row costs a node that never holds a 64 KiB value only its
+     * table entry. A request above the last row, or one aligned past 64 B, is drawn from the
+     * root as whole slabs of its own (@ref kSlabBytes multiples) and returned there when freed.
      *
      * Every row must be a multiple of 16 (`alignof(std::max_align_t)` on the reference hosts),
      * so every block keeps the platform allocator's alignment, and the table must be non-empty
@@ -373,7 +383,7 @@ struct default_config_t {
      *
      * Override fragment: `static constexpr std::size_t kSizeClasses[] = {64, 256, 1024, 4096};`.
      */
-    static constexpr auto kSizeClasses = size_class_ladder_t<16, 8, 65536>::kTable;
+    static constexpr auto kSizeClasses = size_class_ladder_t<16, 8, 65536, 48>::kTable;
 
     /**
      * @brief Whether this build's default root is the host slab pool (ADR-0083 Decision 4,

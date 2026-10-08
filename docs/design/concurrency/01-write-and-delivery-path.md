@@ -125,7 +125,7 @@ when the delivery ends. No thread keeps a buffer between publishes (#1885 delete
 
 **A wide fan-out sizes its own source (#1912).** That block is `F * sizeof(edge_view_t)`
 bytes for `F` live subscribers: 48 B a view on a 64-bit host, so 384 KiB at fan-out 8192. The
-host default root serves classes up to 64 KiB (`config.hpp:default_config_t::kSizeClasses`),
+host default root serves classes up to a 64 KiB payload's segment (`config.hpp:default_config_t::kSizeClasses`),
 and a request past the last class is its own block from the root, drawn and returned on
 every publish. Under glibc that is an `mmap` / `munmap` pair per publish once the block
 passes the mmap threshold. A node that publishes at that width supplies a source sized for it:
