@@ -16,9 +16,9 @@ is computed from the data's own endpoints at render time.
 
 Two series on shared axes is the default, not a rule: a sweep whose two arms are not the
 SAME OPERATION gets one arm, because a shared axis is itself a claim of comparability.
-The topic-count pair is the standing case (see the ruling comment in ``build``) — its
-libtracer arm resolves an address per publish and its Zenoh arm publishes through a
-declared handle, so it charts libtracer alone.
+The topic-count pair was that case until #1910: its Zenoh grid arm published through a
+declared handle while libtracer's resolves an address per publish. Both now resolve per
+operation (see the comment in ``build``), so it charts both engines again.
 
 The charts are emitted in the SAME payload shape as bench/render_history.py and drawn
 by the SAME renderer (``docs/_static/perf_history.js``) — one chart idiom for the whole
@@ -172,8 +172,9 @@ def tail_ready(rows: list[dict], mode: str) -> tuple[bool, str]:
 # live chart draws, and a line's two engines come from the SAME pass on the same pinned
 # CPU, which is what lets a picked point be read as one comparison. "Bytes-scaled" turns
 # deliveries/s into MB/s exactly as the bench does (`deliv_s * size / 1e6`), since the
-# store banks the rate and not the bandwidth. The topic pair carries libtracer alone for
-# the reason the live chart does (see the ruling comment in `build`). The network charts
+# store banks the rate and not the bandwidth. The topic pair carries both engines: the
+# store's `zenoh inproc-path` rows put by key, resolved per put, since #1809 (older points
+# used a declared publisher, which is why that series steps there). The network charts
 # have no entry: the store banks no `net-*` rows, so they stay single-pass.
 _FAN = r"64B/fan(\d+)/1ep"
 _PAY = r"(\d+)B/fan1/1ep"
@@ -190,8 +191,10 @@ HIST_SPECS: dict[str, list[tuple]] = {
                     ("zenoh", f"zenoh inproc {_PAY}", "throughput", True)],
     "ltz-lat-size": [("libtracer", f"inproc {_PAY}", "p50 latency", False),
                      ("zenoh", f"zenoh inproc {_PAY}", "p50 latency", False)],
-    "ltz-tp-ep": [("libtracer", r"inproc-path 64B/fan1/(\d+)ep", "throughput", False)],
-    "ltz-lat-ep": [("libtracer", r"inproc-path 64B/fan1/(\d+)ep", "p50 latency", False)],
+    "ltz-tp-ep": [("libtracer", r"inproc-path 64B/fan1/(\d+)ep", "throughput", False),
+                  ("zenoh", r"zenoh inproc-path 64B/fan1/(\d+)ep", "throughput", False)],
+    "ltz-lat-ep": [("libtracer", r"inproc-path 64B/fan1/(\d+)ep", "p50 latency", False),
+                   ("zenoh", r"zenoh inproc-path 64B/fan1/(\d+)ep", "p50 latency", False)],
 }
 
 
@@ -316,8 +319,9 @@ def build(rows: list[dict], hist: dict | None = None) -> dict:
 
         `labels` overrides a line's legend text for one chart. A single global label per
         series key was fine while every chart drew the same operation; the topic-count
-        pair does not (see `lt_only` below), and a curve whose legend understates what it
-        measures is the exact failure the spelled-out labels exist to prevent.
+        pair draws a different one (a resolution inside every operation), and a curve whose
+        legend understates what it measures is the exact failure the spelled-out labels
+        exist to prevent.
         """
         out = []
         for key, label, ci in LINES:
@@ -381,41 +385,24 @@ def build(rows: list[dict], hist: dict | None = None) -> dict:
     s = two(**{**pay, "col": "p50"})
     add("ltz-lat-size", "p50 latency vs payload", "1 subscriber · 1 topic · in-process",
         s, X_SIZE, "ns", "p50 latency", True, reading(s, f_ns, label_x=f_bytes))
-    # --- topic count: libtracer only, by ruling ------------------------------------
-    # The Zenoh series is NOT drawn on the topic-count pair, and dropping it is a
-    # correctness fix rather than a scope cut. The two rows are not the same operation:
-    # libtracer's `inproc-path` re-resolves the destination address inside every timed
-    # iteration, while `bench_zenoh` publishes through a declared `Publisher` and resolves
-    # nothing per put. A resolution term sits inside one arm and nowhere in the other, so
-    # the charted "libtracer +36 % vs Zenoh +5 %" narrowing could not be attributed to
-    # either engine's topic scaling — it was our resolve-per-operation arm plotted against
-    # their bound one. The completed `topics-bound` / `topics-addr` decomposition
-    # (#1485, `bench/run_topics.sh`, tabulated in docs/methodology.md) measured BOTH
-    # spellings on BOTH engines and retired this comparison: bound-against-bound the
-    # margin widens (1.84x -> 1.97x), resolve-against-resolve Zenoh degrades by ~680x.
-    # Publishing the retired asymmetric pair on the public page while the methodology
-    # chapter says it is retired is the defect being fixed here.
-    #
-    # The decomposition itself is NOT charted in its place: one ladder costs ~9 minutes
-    # (almost all of it the Zenoh `topics-addr` rung at 10 000 keys), so wiring it here
-    # would add ~20 minutes to every docs build to re-derive a structural result that is
-    # run by hand. What remains is libtracer's own resolve-per-publish curve, relabelled
-    # to say so, which is a true statement of what this pass measured.
-    def lt_only(series):
-        """Drop the Zenoh arm — for sweeps where the two arms are different operations."""
-        return {"libtracer": series.get("libtracer", [])}
-
-    TOP_LABEL = {"libtracer": "libtracer — write by path (address re-resolved per publish)"}
-    TOP_COND = (f"{REF} · 1 subscriber · write-by-path · resolve per publish · "
-                "<b>libtracer only:</b> Zenoh is not drawn because its arm publishes through "
-                "a declared handle and resolves nothing per put, so the two are not the "
-                "same operation; both spellings on both engines are compared in the "
+    # --- topic count: resolution against resolution (#1910) -------------------------
+    # Both arms resolve the destination inside every timed operation: libtracer's
+    # `inproc-path` writes by a pre-parsed address, and Zenoh's grid `inproc-path` puts by a
+    # pre-built `KeyExpr`. Until #1910 the Zenoh grid arm published through a declared
+    # `Publisher` and resolved nothing per put, so a resolution term sat inside one arm only
+    # and this pair was charted for libtracer alone (#1485 measured both spellings on both
+    # engines and retired the asymmetric pair). The bound spelling is `topics-bound`, charted
+    # from the bench-local store by render_history.py.
+    TOP_LABEL = {"libtracer": "libtracer — write by path (address resolved per write)",
+                 "zenoh": "Zenoh — put by key (key expression resolved per put)"}
+    TOP_COND = (f"{REF} · 1 subscriber · destination resolved inside every operation, on "
+                "both engines · the bound spelling is the "
                 '<a href="https://github.com/avatarsd-llc/libtracer/issues/1485">#1485 '
                 "decomposition</a>")
-    s = lt_only(two(**{**top, "col": "pub"}))
+    s = two(**{**top, "col": "pub"})
     add("ltz-tp-ep", "Throughput vs topic count", TOP_COND,
         s, X_EP, "rate", "publishes / second", False, reading(s, f_rate), labels=TOP_LABEL)
-    s = lt_only(two(**{**top, "col": "p50"}))
+    s = two(**{**top, "col": "p50"})
     add("ltz-lat-ep", "p50 latency vs topic count", TOP_COND,
         s, X_EP, "ns", "p50 latency", False, reading(s, f_ns), labels=TOP_LABEL)
 
@@ -513,14 +500,13 @@ def raw_table(rows: list[dict]) -> list[dict]:
     pay = {"mode": "inproc", "fixed": {"fan": 1, "ep": 1}, "axis": "size"}
     top = {"mode": "inproc-path", "fixed": {"size": REF_SIZE, "fan": 1}, "axis": "ep"}
     table = []
-    # The per-sweep engine list is explicit because the topic-count sweep carries ONE
-    # engine: its two arms are different operations (resolve-per-publish against a
-    # declared publisher — see the ruling comment in `build`), so the table must not
-    # print side by side what the chart refuses to draw side by side.
+    # The per-sweep engine list stays explicit: a sweep whose two arms are different
+    # operations must not be printed side by side when the chart refuses to draw them so.
+    # The topic sweep is resolution against resolution on both engines since #1910.
     both = ("libtracer", "zenoh")
     sweeps = [("fan-out", fan, f_count, "deliv", None, both),
               ("payload", pay, f_bytes, "deliv", "mbps", both),
-              ("topics (libtracer only)", top, f_count, "pub", None, ("libtracer",))]
+              ("topics (resolved per op)", top, f_count, "pub", None, both)]
     for si, (label, spec, xf, rate_col, bw_col, systems) in enumerate(sweeps):
         for sys in systems:
             cols = [rate_col, "p50"] + ([bw_col] if bw_col else [])

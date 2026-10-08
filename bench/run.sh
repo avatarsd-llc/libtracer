@@ -13,9 +13,9 @@ cmake --build build -j >/dev/null
 
 echo "================================================================"
 echo " libtracer vs Zenoh — IN-PROCESS sweep (fan-out / payload / topics / mixed)"
-echo " inproc = zero-copy graph dispatch; inproc-borrow = zero-alloc loaned path;"
-echo " inproc-path = write-by-path (registry lookup); loopback = encode+ROUTER+"
-echo " decode over an in-memory queue; zenoh/inproc = peer mode."
+echo " inproc = write (store+notify+deliver); inproc-borrow = loaned path, no payload"
+echo " copy but two allocations per write; inproc-path = write-by-path (registry"
+echo " lookup per write; Zenoh's row puts by key, resolved per put); zenoh = peer mode."
 echo " Network: ./run_net.sh (UDP, 2 proc).  Response surfaces: ./grid.sh."
 echo "================================================================"
 

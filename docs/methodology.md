@@ -115,6 +115,11 @@ Several named *modes* isolate distinct costs on the same axes:
 Every mode above except the `inproc-target-*` pair subscribes with an in-process
 callback, so a fan-out curve reads the **callback** leg unless its mode says otherwise.
 
+Not every row has a `-batch` twin. The `inproc` fan-out and payload sweeps, `inproc-borrow`
+and the `inproc-path` topic sweep publish one beside each per-op row; `inproc-pool` has its
+own family for it (`inproc-pool-batch`); the comparison grid, `topics-*`, `inproc-deliver`,
+`inproc-target-*`, `eptype-*`, `mixed` and `inproc-mt*` publish the per-op row alone.
+
 This is the surface that carries the microsecond thesis — the zero-copy substrate
 ([ADR-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md))
 delivering values as loaned `view_t`s — and the one the per-PR gate watches most
@@ -751,8 +756,9 @@ of work per operation*.
 - **The topic-count rows must agree on how the destination is spelled** — and the
   pre-existing `inproc-path` pair did **not**. libtracer's `inproc-path` row writes *by
   address*, so a registry resolution sits inside every timed iteration; the Zenoh row of the
-  same name publishes through a **declared `Publisher`**, which is the bound form and resolves
-  nothing per put. A resolution term therefore sat inside one arm and nowhere in the other, and
+  same name published through a **declared `Publisher`**, which is the bound form and resolves
+  nothing per put (until #1809 in the default sweep, and until
+  [#1910](https://github.com/avatarsd-llc/libtracer/issues/1910) in the published grid). A resolution term therefore sat inside one arm and nowhere in the other, and
   any narrowing of the margin along that ladder could not be attributed to either engine's topic
   scaling. The `topics-bound` / `topics-addr` pair (`bench/run_topics.sh`,
   [#1485](https://github.com/avatarsd-llc/libtracer/issues/1485)) fixes
@@ -782,6 +788,15 @@ of work per operation*.
     every put, as libtracer's writes by path; the bound pair is `topics-bound`, which both
     default sweeps now emit, so the topic-count charts below pair each spelling with its own.
     The Zenoh `inproc-path` series changes meaning at that commit and steps with it.
+  - **The published grid too** ([#1910](https://github.com/avatarsd-llc/libtracer/issues/1910)).
+    The charts in chapter 4 come from each engine's `grid` mode, not from the families.
+    Each engine runs its grid in one process under the same allocator tunables, so the
+    shapes match. Both binaries narrow `grid`, `topics` and `topics-rev` to one logical
+    CPU, as a single-threaded family does, and Zenoh's session starts after the pin, so
+    its runtime threads inherit it. Zenoh's grid `inproc-path` rows put by key, resolved on
+    every put, so the topic-count charts draw both engines again, resolution against
+    resolution. Before #1910 the grid ran unpinned and Zenoh's grid rows used the declared
+    publisher, so those charts carried libtracer alone.
 - **ACL is disabled in the comparison rows.** No subject resolver is installed, so
   the access gate is a single null check. The *cost of enforcement* is measured
   separately (the `acl-inherit` rows), never hidden inside the comparison.

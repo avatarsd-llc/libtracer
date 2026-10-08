@@ -1943,6 +1943,14 @@ which the Performance page shows in each point's tooltip.
     the `topics-bound` / `topics-addr` charts need no separate run.
   - Every row of the compared families has its match, the payload ladder above 1 KiB
     (984 / 985 / 4096 / 16 384 / 65 536 B) and the mid fan-outs (16 to 512) included.
+  - **The `grid` mode matches the same way (#1910)**, and it is the one the docs build
+    publishes. Each engine runs its grid in ONE process, under the pinned allocator
+    tunables, so the two shapes are the same. Both binaries narrow `grid`, `topics` and
+    `topics-rev` to one logical CPU, as a single-threaded family does; `bench_zenoh` does it
+    before its session starts, so the runtime threads inherit the pin. Zenoh's grid
+    `inproc-path` rows put by key, resolved on every put, like its family rows; until
+    #1910 they used a declared `Publisher`, so the published topic-count pair compared
+    libtracer's per-write resolution with Zenoh's bound handle.
 - **Where the remaining asymmetries point.** Two are worth naming because they run
   *against* libtracer, not for it. The charted `inproc` row does strictly more work than
   the Zenoh row beside it — it persists the value as the last-known-value and bumps the
