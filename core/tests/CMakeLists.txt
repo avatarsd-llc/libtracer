@@ -2851,3 +2851,8 @@ add_executable(target_key_seam_test target_key_seam_test.cpp)
 target_link_libraries(target_key_seam_test PRIVATE libtracer)
 libtracer_test_warnings(target_key_seam_test)
 add_test(NAME target_key_seam COMMAND target_key_seam_test)
+# #1640: what a value-less HANDLER vertex draws from the injected source at registration.
+add_executable(handler_vertex_heap_test handler_vertex_heap_test.cpp)
+target_link_libraries(handler_vertex_heap_test PRIVATE libtracer)
+libtracer_test_warnings(handler_vertex_heap_test)
+add_test(NAME handler_vertex_heap COMMAND handler_vertex_heap_test)

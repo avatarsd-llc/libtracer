@@ -655,6 +655,15 @@ struct ring_state_t {
      *         2, §4.6.1): the party that funds the ring's bytes declares what its overflow
      *         means. */
     bool reliable = false;
+    /** @brief STREAM drain cursor (RFC-0008 §E): ring APPENDS not yet flushed, so a
+     *         propagate drains only what was appended; guarded by the vertex mutex. NOT a
+     *         `write_seq_` delta (#925) — that bumps on a SHED append, fabricating a tail.
+     *
+     *         Lives here, not on `%vertex_ext_t`, because it counts entries of THIS ring: it
+     *         dies with the ring and @ref release_all zeroes it, so "a non-zero cursor implies
+     *         a ring" holds by construction and a vertex that never receives pays nothing for
+     *         it (#1640). */
+    std::uint64_t appended_since_flush = 0;
 
     /** @brief Link @p n in as the newest entry. */
     void push_back(ring_entry_t* n) noexcept {
@@ -675,12 +684,14 @@ struct ring_state_t {
         return n;
     }
 
-    /** @brief Release every held reservation and empty the ring — the ONE place the
-     *         charge/release pairing is closed, shared by the destructor, the placeholder
-     *         revert and `graph_t::set_ring_source`'s rebind. Idempotent. A non-empty ring
-     *         always has a bound source: an entry exists only once a source served it. */
+    /** @brief Release every held reservation, empty the ring and reset the drain cursor —
+     *         the ONE place the charge/release pairing is closed, shared by the destructor, a
+     *         `retention_t::NONE` declaration and `graph_t::set_ring_source`'s rebind.
+     *         Idempotent. A non-empty ring always has a bound source: an entry exists only
+     *         once a source served it. */
     void release_all() noexcept {
         while (head != nullptr) release_reservation(*source, pop_front());
+        appended_since_flush = 0;
     }
 
     /** @brief Hand every reservation back before the block dies. Dropping the list without
@@ -701,45 +712,17 @@ struct ring_state_t {
 }
 
 /**
- * @brief The lazily-allocated COLD half of a vertex (issue #361 §1): every member a plain
- *        STORED_VALUE leaf with default storage policy, no handlers, and no `:acl` never touches.
+ * @brief A vertex's `:acl` state — its parsed ACEs, the cached effective merge and the cache
+ *        word — LAZILY allocated on the first `:acl` write (#1640).
  *
- * ADR-0021 rule 2 ("the machinery is pay-for-what-you-use") applied to RAM: the common
- * MCU leaf keeps `vertex_t::ext_` null and pays nothing here. Allocated at most once —
- * at registration when the identity needs it (STREAM role or user handlers), or later
- * under the vertex mutex on the first `:acl` write or owner-side storage declaration —
- * and never freed before the vertex (the insert-only ADR-0057 lifetime), so a published
- * pointer stays valid for every reader.
+ * Split off `%vertex_ext_t` so the extension block holds only what an ext-bearing vertex of
+ * any kind can need: a HANDLER that installs a value seam, or a vertex carrying an app-field
+ * table, allocated these 56 B (host) without ever being given an `:acl`. Drawn from the
+ * extension block's own source, published once with a release CAS, and never freed before the
+ * vertex — so the lock-free invalidator (@ref vertex_t::mark_acl_cache_dirty) can load it
+ * without a pin. The ADR-0078 protocol is unchanged; only the word's home moved.
  */
-struct vertex_ext_t {
-    /** @brief The VALUE seam (on_read/on_write/on_children), LAZILY allocated (ADR-0058
-     *         Step 2) iff one of the three was installed at registration — handler
-     *         PRESENCE, not role — so a plain leaf / app-field vertex keeps this null
-     *         and never pays the ~96 B.
-     *
-     *         **Read lock-free** (@ref vertex_t::handlers loads it with no stripe lock,
-     *         on the hot path). It is therefore an ATOMIC pointer, not a `unique_ptr`:
-     *         registration publishes with `store(release)` and retirement
-     *         (`vertex_t::revert_to_placeholder`) swaps it to `nullptr` with
-     *         `exchange(acq_rel)`. A swapped-out
-     *         block is **never freed under a concurrent reader** — the graph parks it, and
-     *         the embedder frees the park through `graph_t::collect()` (#576; ADR-0057's
-     *         insert-only discipline extended to the seam: emptied, never dangled). Keeping
-     *         the park OFF the per-vertex block costs an app-field / leaf vertex zero extra
-     *         bytes. The live block here is freed by this ext's destructor. */
-    std::atomic<value_handlers_t*> handlers{nullptr};
-    /** @brief The RECEIVER's STREAM ring state (docs/reference/11 role 2), LAZILY allocated on
-     *         the first append or the first `graph_t::set_ring_source` (#388): when the
-     *         entries were a `std::deque`, its ~512 B map node was allocated at CONSTRUCTION,
-     *         which every ext-bearing vertex (handlers, app fields, `:acl`, an owner-declared
-     *         storage magnitude) paid even though only the STREAM role ever appends. Null ⇒
-     *         no ring. Guarded by the vertex mutex.
-     *
-     *         ONE pointer for the whole of @ref ring_state_t — the entries, the injected
-     *         source, the pressure arm and the gap census — so RFC-0025 §4.6.1's byte bound
-     *         moves `sizeof(vertex_ext_t)` by NOTHING and a non-receiving ext-bearing vertex
-     *         pays nothing for it. */
-    ring_state_t* ring = nullptr;
+struct acl_state_t {
     /** @brief The `:acl` parsed into core-subset ACEs at write time (#81) — the ONLY stored
      *         ACL state (#907); guarded by the vertex mutex. `graph_t::acl_allows` evaluates
      *         this list and `graph_t::read_acl` RE-ENCODES it, so read-back is canonical by
@@ -772,6 +755,58 @@ struct vertex_ext_t {
      *         never given one — a distinction the retired byte copy drew implicitly, by being
      *         non-empty. Lands in the padding beside `%acl_gen`: zero extra bytes. */
     bool acl_present = false;
+};
+
+/**
+ * @brief The lazily-allocated COLD half of a vertex (issue #361 §1): every member a plain
+ *        STORED_VALUE leaf with default storage policy, no handlers, and no `:acl` never touches.
+ *
+ * ADR-0021 rule 2 ("the machinery is pay-for-what-you-use") applied to RAM: the common
+ * MCU leaf keeps `vertex_t::ext_` null and pays nothing here. Allocated at most once —
+ * at registration when the identity needs it (STREAM role or user handlers), or later
+ * under the vertex mutex on the first `:acl` write or owner-side storage declaration —
+ * and never freed before the vertex (the insert-only ADR-0057 lifetime), so a published
+ * pointer stays valid for every reader.
+ */
+struct vertex_ext_t {
+    /** @brief The VALUE seam (on_read/on_write/on_children), LAZILY allocated (ADR-0058
+     *         Step 2) iff one of the three was installed at registration — handler
+     *         PRESENCE, not role — so a plain leaf / app-field vertex keeps this null
+     *         and never pays its 48 B (host).
+     *
+     *         **Read lock-free** (@ref vertex_t::handlers loads it with no stripe lock,
+     *         on the hot path). It is therefore an ATOMIC pointer, not a `unique_ptr`:
+     *         registration publishes with `store(release)` and retirement
+     *         (`vertex_t::revert_to_placeholder`) swaps it to `nullptr` with
+     *         `exchange(acq_rel)`. A swapped-out
+     *         block is **never freed under a concurrent reader** — the graph parks it, and
+     *         the embedder frees the park through `graph_t::collect()` (#576; ADR-0057's
+     *         insert-only discipline extended to the seam: emptied, never dangled). Keeping
+     *         the park OFF the per-vertex block costs an app-field / leaf vertex zero extra
+     *         bytes. The live block here is freed by this ext's destructor. */
+    std::atomic<value_handlers_t*> handlers{nullptr};
+    /** @brief The RECEIVER's STREAM ring state (docs/reference/11 role 2), LAZILY allocated on
+     *         the first append or the first `graph_t::set_ring_source` (#388): when the
+     *         entries were a `std::deque`, its ~512 B map node was allocated at CONSTRUCTION,
+     *         which every ext-bearing vertex (handlers, app fields, `:acl`, an owner-declared
+     *         storage magnitude) paid even though only the STREAM role ever appends. Null ⇒
+     *         no ring. Guarded by the vertex mutex.
+     *
+     *         ONE pointer for the whole of @ref ring_state_t — the entries, the injected
+     *         source, the pressure arm and the gap census — so RFC-0025 §4.6.1's byte bound
+     *         moves `sizeof(vertex_ext_t)` by NOTHING and a non-receiving ext-bearing vertex
+     *         pays nothing for it. */
+    ring_state_t* ring = nullptr;
+    /** @brief The vertex's `:acl` state (@ref acl_state_t), LAZILY allocated on the first
+     *         `:acl` write and never freed before the vertex (insert-only, like this block).
+     *         Null ⇒ no `:acl` was ever written, so there is no list to enforce and no cached
+     *         merge to invalidate. ATOMIC because @ref vertex_t::mark_acl_cache_dirty loads it
+     *         with no lock; every other reader holds the stripe lock.
+     *
+     *         Behind a pointer since #1640: the two ACE lists and the cache word were 56 B of
+     *         every ext-bearing vertex, and most of those (a HANDLER, an app-field vertex)
+     *         never carry an `:acl`. */
+    std::atomic<acl_state_t*> acl{nullptr};
     /**
      * @brief STREAM ring depth — how many entries the receiver's @ref ring retains under
      *        `retention_t::N` (RFC-0028 §5.4; RFC-0022 §3.C).
@@ -808,11 +843,6 @@ struct vertex_ext_t {
      *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
      *         insert-only. Null ⇒ the closed `ENOTTY` default (pre-RFC `:schema` shape). */
     app_field_group_t* app = nullptr;
-    /** @brief STREAM drain cursor (RFC-0008 §E): ring APPENDS not yet flushed, so a
-     *         propagate drains only what was appended; guarded by the vertex mutex. NOT a
-     *         `write_seq_` delta (#925) — that bumps on a SHED append, fabricating a tail. */
-    std::uint64_t appended_since_flush = 0;
-
     /** @brief The source this block was drawn from, and the one every block hung off it (the
      *         value seam, @ref ring, @ref app and the app table) is drawn from and returned to
      *         (#1778): the graph's table source. */
@@ -827,6 +857,7 @@ struct vertex_ext_t {
     ~vertex_ext_t() {
         tr::mem::drop_in(*src, handlers.load(std::memory_order_acquire));
         tr::mem::drop_in(*src, ring);
+        tr::mem::drop_in(*src, acl.load(std::memory_order_acquire));
         tr::mem::drop_in(*src, app);
     }
     vertex_ext_t(const vertex_ext_t&) = delete;
@@ -1683,7 +1714,7 @@ class vertex_t {
         r.push_back(new (token) ring_entry_t{.value = sp,  // refcount bump — caller keeps `sp`
                                              .bytes = bytes,
                                              .gap_before = shed != 0});
-        ++e->appended_since_flush;  // the drain counts APPENDS, not seq (#925)
+        ++r.appended_since_flush;  // the drain counts APPENDS, not seq (#925)
         return true;
     }
 
@@ -1699,12 +1730,12 @@ class vertex_t {
      * @return The number of entries taken.
      */
     static std::size_t take_locked(vertex_ext_t& e, ring_take_t& out) {
-        if (e.appended_since_flush == 0 || !e.ring) return 0;
-        const ring_state_t& r = *e.ring;
+        if (!e.ring || e.ring->appended_since_flush == 0) return 0;
+        ring_state_t& r = *e.ring;
         const auto take =
-            static_cast<std::size_t>(std::min<std::uint64_t>(e.appended_since_flush, r.count));
+            static_cast<std::size_t>(std::min<std::uint64_t>(r.appended_since_flush, r.count));
         if (!out.reserve(take)) return 0;  // deferred, never lost — the cursor stays
-        e.appended_since_flush = 0;
+        r.appended_since_flush = 0;
         if (take == 0) return 0;
         // The newest `take` entries: step back from the tail, then walk forward in order.
         const ring_entry_t* it = r.tail;
@@ -1837,7 +1868,8 @@ class vertex_t {
      */
     void mark_flushed() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire)) e->appended_since_flush = 0;
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (e != nullptr && e->ring != nullptr) e->ring->appended_since_flush = 0;
     }
 
     /**
@@ -1907,16 +1939,14 @@ class vertex_t {
             *gap_before = e->ring ? e->ring->gaps - e->ring->gaps_drained : 0;
             if (e->ring) e->ring->gaps_drained = e->ring->gaps;
         }
-        // A non-zero count implies a ring: the counter is bumped only where the append
-        // lands (which creates it), and `retire` clears the two together.
-        if (e->appended_since_flush == 0 || !e->ring) return 0;
-        const ring_state_t& r = *e->ring;
+        if (!e->ring || e->ring->appended_since_flush == 0) return 0;
+        ring_state_t& r = *e->ring;
         const auto take =
-            static_cast<std::size_t>(std::min<std::uint64_t>(e->appended_since_flush, r.count));
+            static_cast<std::size_t>(std::min<std::uint64_t>(r.appended_since_flush, r.count));
         // Nothrow-reserve BEFORE the cursor reset: a failed snapshot leaves the appends
         // marked un-flushed (deferred delivery), instead of a throwing assign (#477).
         if (!reserve_drain(out, take)) return 0;
-        e->appended_since_flush = 0;
+        r.appended_since_flush = 0;
         out.clear();
         if (take == 0) return 0;
         // The newest `take` entries: step back from the tail, then walk forward in order.
@@ -2475,7 +2505,6 @@ class vertex_t {
         // dropping the block here cannot leak the ring's byte budget.
         tr::mem::drop_in(*e->src, e->ring);
         e->ring = nullptr;
-        e->appended_since_flush = 0;  // cleared WITH `ring` — the drain's invariant
         e->retention_depth = 1;
         e->share_threshold_bytes = saturate_threshold(config_t::kShareThresholdBytes);
         tr::mem::drop_in(*e->src, e->app);
@@ -2564,11 +2593,13 @@ class vertex_t {
             // block back to the caller to PARK (never free it under a possible concurrent
             // reader). The remaining ext fields are mutated under the stripe lock.
             detached = e->handlers.exchange(nullptr, std::memory_order_acq_rel);
-            const std::lock_guard lock(vertex_stripe_of(this).m);
-            e->acl_present = false;
-            e->aces.clear();
-            e->eff_aces.clear();
-            invalidate_acl_cache(*e);  // ADR-0078: nothing here a rebuilder can clobber
+            if (acl_state_t* a = e->acl.load(std::memory_order_acquire); a != nullptr) {
+                const std::lock_guard lock(vertex_stripe_of(this).m);
+                a->acl_present = false;
+                a->aces.clear();
+                a->eff_aces.clear();
+                invalidate_acl_cache(*a);  // ADR-0078: nothing here a rebuilder can clobber
+            }
         }
         // The edge block is stripe-guarded; clear it in its own critical section (both it and
         // the ext block may be absent). The graph has already adjusted descendant
@@ -2603,7 +2634,9 @@ class vertex_t {
     [[nodiscard]] bool set_acl(std::vector<ace_t> aces, tr::mem::block_source_t& tables) {
         vertex_ext_t* const ext = ensure_ext(tables);
         if (ext == nullptr) return false;
-        vertex_ext_t& e = *ext;
+        acl_state_t* const state = ensure_acl(*ext);
+        if (state == nullptr) return false;
+        acl_state_t& e = *state;
         const std::lock_guard lock(vertex_stripe_of(this).m);
         e.aces = std::move(aces);
         e.acl_present = true;
@@ -2638,9 +2671,9 @@ class vertex_t {
     auto with_acl(F&& f) -> decltype(f(false, std::declval<const std::vector<ace_t>&>())) {
         static const std::vector<ace_t> kNoAces{};
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e == nullptr) return f(false, kNoAces);
-        return f(e->acl_present, e->aces);
+        const acl_state_t* a = acl_state();
+        if (a == nullptr) return f(false, kNoAces);
+        return f(a->acl_present, a->aces);
     }
 
     /**
@@ -2656,8 +2689,8 @@ class vertex_t {
     auto with_aces(F&& f) -> decltype(f(std::declval<const std::vector<ace_t>&>())) {
         static const std::vector<ace_t> kNoAces{};
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return f(e != nullptr ? e->aces : kNoAces);
+        const acl_state_t* a = acl_state();
+        return f(a != nullptr ? a->aces : kNoAces);
     }
 
     /**
@@ -2671,14 +2704,14 @@ class vertex_t {
      *       during the subtree walk without touching any vertex mutex.
      */
     void mark_acl_cache_dirty() noexcept {
-        // No extension block ⇒ no cached merge exists to invalidate; a block created
+        // No `:acl` state ⇒ no cached merge exists to invalidate; a state created
         // later starts stale, so a concurrent first-gated-op cannot miss this mark
         // (its rebuild reads ancestor ACEs already published before this walk).
-        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire)) {
+        if (acl_state_t* a = acl_state()) {
             // ADR-0078: advancing the counter is the ENTIRE mark. The
             // `acl_cache_dirty.store(true)` that used to follow it could be clobbered by a
             // rebuilder clearing that same flag, pinning a stale merge as clean FOREVER (#880).
-            invalidate_acl_cache(*e);
+            invalidate_acl_cache(*a);
         }
     }
 
@@ -2689,7 +2722,7 @@ class vertex_t {
      * @note Lock-free and callable with NO vertex mutex held; that is the point, since the
      *       subtree fan-out from an ancestor `:acl` write runs under only the graph's map lock.
      */
-    static void invalidate_acl_cache(vertex_ext_t& e) noexcept {
+    static void invalidate_acl_cache(acl_state_t& e) noexcept {
         // ALWAYS advance, even when the counter is already odd (already stale): a rebuilder
         // that snapshotted the current odd value would otherwise still win its publish CAS and
         // stamp a merge assembled BEFORE this mark as current. +1 from even, +2 from odd.
@@ -2698,6 +2731,30 @@ class vertex_t {
                                                 std::memory_order_relaxed))
                 break;
         }
+    }
+
+    /** @brief This vertex's `:acl` state, or null when no `:acl` was ever written here. */
+    [[nodiscard]] acl_state_t* acl_state() const noexcept {
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return e != nullptr ? e->acl.load(std::memory_order_acquire) : nullptr;
+    }
+
+    /**
+     * @brief @p e's `:acl` state, creating it on first need — drawn from @p e's own source and
+     *        published by CAS exactly as `ensure_ext` publishes the block itself, so it is
+     *        never allocated under the stripe lock.
+     * @return The state, or null when the source refused it — nothing changed.
+     */
+    [[nodiscard]] static acl_state_t* ensure_acl(vertex_ext_t& e) noexcept {
+        acl_state_t* a = e.acl.load(std::memory_order_acquire);
+        if (a != nullptr) return a;
+        acl_state_t* const fresh = tr::mem::make_in<acl_state_t>(*e.src);
+        if (fresh == nullptr) return nullptr;
+        if (e.acl.compare_exchange_strong(a, fresh, std::memory_order_acq_rel,
+                                          std::memory_order_acquire))
+            return fresh;
+        tr::mem::drop_in(*e.src, fresh);  // another thread won the publish
+        return a;
     }
 
    public:
@@ -2738,16 +2795,16 @@ class vertex_t {
     template <typename Rebuild, typename Eval>
     auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
         -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
-        // The merge is cached in the extension block. A BEARER — the only vertex the graph
+        // The merge is cached in the `:acl` state. A BEARER — the only vertex the graph
         // evaluates here — always has one (its own ACEs live there), so this never allocates
         // (#1778); a vertex without one evaluates a fresh merge over no own ACEs, uncached.
-        vertex_ext_t* const ext = ext_.load(std::memory_order_acquire);
-        if (ext == nullptr) {
+        acl_state_t* const state = acl_state();
+        if (state == nullptr) {
             static const std::vector<ace_t> kNoAces{};
             const std::vector<ace_t> merged = rebuild(kNoAces);
             return eval(merged);
         }
-        vertex_ext_t& e = *ext;
+        acl_state_t& e = *state;
         std::unique_lock lock(vertex_stripe_of(this).m);
         while (true) {
             // The fast path is ONE acquire load and a parity test — what the retired dirty
@@ -2939,8 +2996,7 @@ class vertex_t {
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own reference
         if (vertex_ext_t* e = ext_.load(std::memory_order_acquire); e != nullptr) {
             const std::lock_guard lock(vertex_stripe_of(this).m);
-            if (e->ring) e->ring->release_all();
-            e->appended_since_flush = 0;  // cleared WITH the ring — the drain's invariant
+            if (e->ring) e->ring->release_all();  // the drain cursor goes with the entries
         }
         return true;
     }
@@ -3003,8 +3059,7 @@ class vertex_t {
             e.ring = tr::mem::make_in<ring_state_t>(*e.src);
             if (e.ring == nullptr) return false;
         }
-        e.ring->release_all();  // reservations go back to the source that served them
-        e.appended_since_flush = 0;
+        e.ring->release_all();  // reservations go back to the source; the cursor resets
         e.ring->source = src;
         e.ring->reliable = reliable;
         return true;
@@ -3153,7 +3208,8 @@ class vertex_t {
    private:
     /** @brief Bits packed into `flags_` — see its declaration for why they share a byte. */
     enum class flag_t : std::uint8_t {
-        OWN_ACES = 1U << 0,         /**< @brief `ext_` holds a non-empty own-ACE list (#361 §3). */
+        OWN_ACES =
+            1U << 0, /**< @brief The `:acl` state holds a non-empty own-ACE list (#361 §3). */
         REGISTERED_CHILD = 1U << 1, /**< @brief At least one DIRECT child is registered (#652). */
         ENUM_HIDDEN = 1U << 2,      /**< @brief Registered, addressable, but NOT a `:children[]`
                                      *          member (RFC-0014 §3, S4). */
