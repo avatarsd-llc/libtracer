@@ -190,6 +190,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - New: `tr::mem::arena_t`, `arena_pool_t`, `arena_root_t`, `mcu_root_t` and `mcu_root()`
     (`libtracer/mem_arena.hpp`), and `default_config_t::kArenaBytes` /
     `tr::mem::kArenaBytes`.
+- **`tr::mem::source_allocator_t` and `libtracer/mem_source_alloc.hpp` are removed
+  ([#1783](https://github.com/avatarsd-llc/libtracer/issues/1783)).** The std-`Allocator`
+  adapter over a block source threw on exhaustion, and nothing in core used it once the core
+  containers replaced its sites (#1776, #1778). Migration: hold the elements in a
+  `tr::mem::block_array_t` over the same source (failable growth, by value), or, in host-only
+  code that keeps a std container, `std::pmr` over `tr::mem::source_resource_t`
+  (`libtracer/mem_source_pmr.hpp`), which stays as host interop.
 - **A write to a missing vertex is refused by default, and a parent opts in with a creation
   hook ([#1945](https://github.com/avatarsd-llc/libtracer/issues/1945), RFC-0030 §7).** A data
   write whose target, or an intermediate level, does not exist answers `NOT_FOUND` and creates

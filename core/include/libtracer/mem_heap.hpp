@@ -84,15 +84,14 @@ namespace tr::detail {
  * to that seam; it does not get a `try_reserve` overload.
  *
  * @note **What IS generalized, and why the objection above does not reach it (#873 phase 1).**
- *       The helpers now take any allocator, and `tr::mem::source_allocator_t`
- *       (`%mem_source_alloc.hpp`) is the one the graph's migrated growth sites use. Every
- *       sentence above turns on the probe testing a DIFFERENT allocator from the one the
- *       growth uses; a source allocator publishes the store it draws from
- *       (`source_allocator_t::source()`), so @ref try_grow probes THAT store with
- *       `try_alloc`/`release` instead of the global heap. The `-fno-exceptions` probe is still
- *       probe-then-commit and still carries the #850 race window — what it stops being is
- *       an answer about the wrong memory. `probe_fail_hook` is honoured on both arms, so the
- *       OOM-injection seam still reaches these paths.
+ *       The helpers take any allocator, and @ref try_grow_from probes the block source a
+ *       growth actually draws from with `try_alloc`/`release` instead of the global heap. Every
+ *       sentence above turns on the probe testing a DIFFERENT allocator from the one the growth
+ *       uses. The `-fno-exceptions` probe is still probe-then-commit and still carries the #850
+ *       race window — what it stops being is an answer about the wrong memory.
+ *       `probe_fail_hook` is honoured on both arms, so the OOM-injection seam still reaches
+ *       these paths. (The std-`Allocator` adapter the graph's growth sites used for this,
+ *       `source_allocator_t`, was retired in #1783 once core containers replaced them.)
  */
 
 /**

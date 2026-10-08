@@ -62,12 +62,6 @@
       "vector": 3
     }
   },
-  "core/include/libtracer/mem_source_alloc.hpp": {
-    "owner": "#1783: the throwing source_allocator_t retires",
-    "counts": {
-      "vector": 1
-    }
-  },
   "core/include/libtracer/packed_path.hpp": {
     "owner": "#1781 step 3 (contract): removed once callers use the core-array form added in step 1",
     "counts": {

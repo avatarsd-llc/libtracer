@@ -28,7 +28,6 @@
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_slab_pool.hpp"
-#include "libtracer/mem_source_alloc.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv.hpp"
