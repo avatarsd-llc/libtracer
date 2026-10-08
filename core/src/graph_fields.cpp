@@ -234,6 +234,10 @@ static_assert(std::to_underlying(stats_seam_t::MEM_CONTROL) + std::size(kMemSeam
     return wire::emit_name(out, noun) && wire::emit_value_le(out, value, 8);
 }
 
+/** @brief The cold introspection encoders' scratch (#1778, #1781): a stack frame first,
+ *         spilling to the graph's table source, so a short record allocates nothing. */
+constexpr std::size_t kScratchBytes = 256;
+
 /**
  * @brief Serve one `:stats` seam as ONE `SETTINGS` TLV (RFC-0010 Amendment 1 §D.3).
  *
@@ -1277,11 +1281,17 @@ result_t<view::view_t> graph_t::read_acl(vertex_t* v) const {
     // RE-ENCODE the stored ACEs (#907): read-back is a projection of the list acl_allows
     // walks, never a copy that could disagree with it. An encoded ACL is never empty, so
     // empty ⇒ no :acl was ever written — NOT_FOUND, distinct from an EMPTY container.
-    const auto acl = v->with_acl([](bool set, const std::vector<ace_t>& aces) {
-        return set ? encode_acl(aces) : std::vector<std::byte>{};
+    std::array<std::byte, kScratchBytes> scratch;  // stack first, then the table source (#1781)
+    mem::bump_source_t frame(scratch, *tables_);
+    mem::bytes_t acl(frame);
+    bool ok = true;
+    v->with_acl([&acl, &ok](bool set, const std::vector<ace_t>& aces) {
+        if (set) ok = encode_acl(aces, acl);
+        return set;
     });
+    if (!ok) return std::unexpected(status_t::BACKPRESSURE);
     if (acl.empty()) return std::unexpected(status_t::NOT_FOUND);
-    const auto out = view::over_bytes(acl, *value_backend_);
+    const auto out = view::over_bytes(mem::as_span(acl), *value_backend_);
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
 }

@@ -26,10 +26,6 @@ std::uint64_t read_le(std::span<const std::byte> b, std::size_t off, std::size_t
     return detail::load_le(b.subspan(off, n));
 }
 
-void write_le(std::vector<std::byte>& out, std::uint64_t v, std::size_t n) {
-    detail::append_le(out, v, n);
-}
-
 /**
  * @brief Read a validated TLV's trailer values (timestamp, CRC) out of its bytes: the one
  *        reader, behind `tlv_node_t::trailer`.
@@ -126,83 +122,11 @@ std::optional<trailer_t> tlv_node_t::trailer() const noexcept {
 }
 
 std::vector<std::byte> encode(const tlv_t& tlv) {
-    // Symmetry with the reader (#886). `path_ref_body_valid` is the ONE home of the grammar's only
-    // per-type structural rule (RFC-0024 §4.2/§4.3) and `grammar::parse_header` has always
-    // consulted it; this door did not, so a caller-built PATH_REF with `opt.pl`, `opt.ll`, or a
-    // body that is not a whole number of 8-byte elements serialized to bytes this very library
-    // answers with `tr::frame::invalid`. The guarded emitters (`emit_path_ref`) satisfy the rule
-    // by construction — they take a typed element array — which left `encode` as the door a
-    // CALLER-BUILT tlv_t reaches. It is not the last unguarded write of the 0x14 type byte:
-    // `wire::emit_tlv` is public and generic, so `emit_tlv(out, type_t::PATH_REF, opt_t{.pl=true},
-    // body)` still mints a self-rejected frame. No in-tree caller does, and `emit_header`'s own
-    // doc makes shape the caller's problem, so that is a documented raw seam rather than a hole
-    // — but it is a seam, not an absence. A PATH_REF body is never structured, so `payload`
-    // IS the body length here: an `opt.pl` PATH_REF fails the PL clause before the children
-    // branch below ever runs. Refusing costs one predicted-not-taken compare per TLV. The gate
-    // is `is_path_ref_type` rather than one code: the reverse list (0x15) carries the identical
-    // body grammar (RFC-0024 §7.1 amendment 2), so it is refused by the identical rule.
-    if (is_path_ref_type(tlv.type) &&
-        !path_ref_body_valid(tlv.opt.pl, tlv.opt.ll, tlv.payload.size())) {
-        return {};
-    }
-
-    std::vector<std::byte> body;
-    if (tlv.opt.pl) {
-        for (const tlv_t& child : tlv.children) {
-            const std::vector<std::byte> cb = encode(child);
-            // A refused child refuses the parent. Dropping it instead would emit a frame that
-            // DOES decode, one component short — a silent truncation, worse than emitting
-            // nothing. An accepted TLV is never empty (`emit_tlv` always writes its 4-byte
-            // header), so an empty result is an unambiguous refusal, never a legal encoding.
-            if (cb.empty()) return {};
-            body.insert(body.end(), cb.begin(), cb.end());
-        }
-    } else {
-        body.assign(tlv.payload.begin(), tlv.payload.end());
-    }
-
-    // The trailer timestamp is LOUD (#1109): `opt.ts` with no trailer value used to emit a
-    // silently-ZERO stamp — a frame that decodes, sorts and plots as 1970-01-01, which is
-    // strictly worse than no frame. A missing value, and equally a trailer value whose
-    // `relative` flag contradicts `opt.tf` (the bytes would be read in the wrong width),
-    // now refuse the encode through the same unambiguous empty-vector channel the PATH_REF
-    // rule uses. `stamp_ts` (frame.hpp) sets bit and value together and cannot land here.
-    if (tlv.opt.ts &&
-        (!tlv.trailer || !tlv.trailer->ts || tlv.trailer->ts->relative != tlv.opt.tf)) {
-        return {};
-    }
-
-    std::vector<std::byte> out;
-    // The header byte layout has one home (ADR-0048 §3) and now so does the LENGTH-WIDTH
-    // POLICY (#924): widen to the u32 LL form when the body exceeds 0xFFFF, so a tlv_t built
-    // programmatically with a default opt (ll = false) over an oversize body can no longer
-    // serialize a length silently truncated to `size & 0xFFFF`. A body at or under 0xFFFF —
-    // and a tlv_t that already carries opt.ll — emits byte-identical bytes; the widen costs
-    // one predicted-not-taken compare per TLV and allocates nothing. Emitted via emit_header
-    // rather than emit_tlv since #1109: emit_tlv now CLEARS trailer bits by construction
-    // (it writes nothing after the body), while this encoder appends the trailer itself.
-    opt_t opt = tlv.opt;
-    if (body.size() > 0xFFFFu) opt.ll = true;
-    wire::emit_header(out, tlv.type, opt, body.size());
-    out.insert(out.end(), body.begin(), body.end());
-
-    std::vector<std::byte> ts_bytes;
-    if (tlv.opt.ts) {
-        // Value presence + form coherence were checked above; the byte layout has ONE home
-        // (wire::emit_trailer_ts, both forms — #1109's builder plumbing).
-        wire::emit_trailer_ts(ts_bytes, tlv.opt.tf, tlv.trailer->ts->value);
-        out.insert(out.end(), ts_bytes.begin(), ts_bytes.end());
-    }
-    if (tlv.opt.cr) {
-        // CRC over body ++ ts_bytes via the two-span overloads — no `covered`
-        // concatenation buffer (byte-identical: CRC is associative over the feed).
-        if (tlv.opt.cw) {
-            write_le(out, crc::crc16_ccitt(body, ts_bytes), 2);
-        } else {
-            write_le(out, crc::crc32c(body, ts_bytes), 4);
-        }
-    }
-    return out;
+    // The vector door is the core-array door plus one copy (#1781): ONE encoder, so the two
+    // cannot disagree on a refusal, and an empty vector is the refusal, as it always was.
+    mem::bytes_t out(mem::heap_source());
+    if (!encode(tlv, out)) return {};
+    return std::vector<std::byte>(out.begin(), out.end());
 }
 
 std::optional<std::span<const std::byte>> path_key(const tlv_node_t& path) {
@@ -237,8 +161,18 @@ namespace {
 [[nodiscard]] std::optional<std::size_t> tlv_bytes(const tlv_t& tlv) noexcept;
 
 /**
- * @brief @p tlv's body length, or `nullopt` for every refusal the vector `encode` makes: an
- *        ill-formed `PATH_REF`, a timestamp bit with no coherent value, or a refused child.
+ * @brief @p tlv's body length, or `nullopt` for every refusal `encode` makes: an ill-formed
+ *        `PATH_REF`, a timestamp bit with no coherent value, or a refused child.
+ *
+ * - `PATH_REF` (and the reverse list, 0x15) is symmetric with the reader (#886):
+ *   `path_ref_body_valid` is the one home of the grammar's only per-type structural rule
+ *   (RFC-0024 §4.2/§4.3), so a caller-built `tlv_t` with `opt.pl`, `opt.ll` or a body that is
+ *   not whole 8-byte elements never serializes to bytes this library would answer with
+ *   `tr::frame::invalid`. `wire::emit_tlv` stays a documented raw seam that can still mint one.
+ * - The trailer timestamp is LOUD (#1109): `opt.ts` with no value, or with a `relative` flag
+ *   that contradicts `opt.tf`, refuses rather than emitting a silently-zero 1970 stamp.
+ * - A refused child refuses the parent: dropping it would emit a frame that decodes one
+ *   component short, a silent truncation worse than emitting nothing.
  */
 [[nodiscard]] std::optional<std::size_t> body_bytes(const tlv_t& tlv) noexcept {
     if (is_path_ref_type(tlv.type) &&

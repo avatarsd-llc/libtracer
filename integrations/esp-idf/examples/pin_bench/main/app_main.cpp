@@ -51,8 +51,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <span>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "esp_heap_caps.h"
@@ -83,47 +86,57 @@ constexpr std::size_t kSlots = 24;
 /** @brief Stores timed per (arm, vertex-count) cell. */
 constexpr std::size_t kIters = 2000;
 
-/** @brief A PATH TLV over `segs`. */
-std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
-    std::vector<std::byte> body;
-    for (std::string_view s : segs) {
-        (void)tr::wire::emit_path_segment(body, s);
-    }
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
+// The builders write into core byte arrays (`tr::mem::bytes_t`, #1781) drawn from the heap
+// source. Each emit folds into one flag; a refused one hands back an EMPTY frame, which the
+// resolver's decode refuses and the cell then skips.
+using bytes_t = tr::mem::bytes_t;
+
+bytes_t finish(bytes_t out, bool ok) {
+    if (!ok) out.clear();
     return out;
+}
+
+/** @brief A PATH TLV over `segs`. */
+bytes_t b_path(std::initializer_list<std::string_view> segs) {
+    bytes_t body(tr::mem::heap_source());
+    bool ok = true;
+    for (std::string_view s : segs) ok &= tr::wire::emit_path_segment(body, s);
+    bytes_t out(tr::mem::heap_source());
+    ok &= tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, tr::mem::as_span(body));
+    return finish(std::move(out), ok);
 }
 
 /** @brief A one-byte VALUE TLV. */
-std::vector<std::byte> b_u8_value(std::uint8_t v) {
+bytes_t b_u8_value(std::uint8_t v) {
     const std::byte b{v};
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
-    return out;
+    bytes_t out(tr::mem::heap_source());
+    const bool ok =
+        tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
+    return finish(std::move(out), ok);
 }
 
 /** @brief A VALUE TLV of `n` bytes; `crc` sets the trailer bit that blocks pinning. */
-std::vector<std::byte> b_value(std::size_t n, bool crc) {
-    std::vector<std::byte> p(n, std::byte{0xA5});
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{.cr = crc}, p);
-    return out;
+bytes_t b_value(std::size_t n, bool crc) {
+    bytes_t p(tr::mem::heap_source());
+    bool ok = p.resize_for_overwrite(n);
+    if (ok) std::memset(p.data(), 0xA5, n);
+    bytes_t out(tr::mem::heap_source());
+    ok &= tr::wire::emit_tlv(out, type_t::VALUE, opt_t{.cr = crc}, tr::mem::as_span(p));
+    return finish(std::move(out), ok);
 }
 
 /** @brief A FWD{WRITE} frame addressed at `/s/b<idx>`. */
-std::vector<std::byte> b_fwd_write(std::size_t payload, std::size_t idx, bool crc) {
+bytes_t b_fwd_write(std::size_t payload, std::size_t idx, bool crc) {
     const std::string leaf = "b" + std::to_string(idx);
-    std::vector<std::byte> body;
-    const auto app = [&body](const std::vector<std::byte>& s) {
-        body.insert(body.end(), s.begin(), s.end());
-    };
-    app(b_u8_value(static_cast<std::uint8_t>(fwd_op_t::WRITE)));
-    app(b_path({"s", leaf}));
-    app(b_path({"c"}));
-    app(b_value(payload, crc));
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
+    bytes_t body(tr::mem::heap_source());
+    const auto app = [&body](const bytes_t& s) { return body.append(s.data(), s.size()); };
+    bool ok = app(b_u8_value(static_cast<std::uint8_t>(fwd_op_t::WRITE)));
+    ok &= app(b_path({"s", leaf}));
+    ok &= app(b_path({"c"}));
+    ok &= app(b_value(payload, crc));
+    bytes_t out(tr::mem::heap_source());
+    ok &= tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, tr::mem::as_span(body));
+    return finish(std::move(out), ok);
 }
 
 /**
@@ -231,7 +244,7 @@ cell_t run_cell(rx_pool_t& pool, std::size_t threshold, std::size_t vertices, st
                            {.share_threshold_bytes = threshold});  // the arm's threshold
     }
 
-    std::vector<std::vector<std::byte>> frames;
+    std::vector<bytes_t> frames;
     for (std::size_t i = 0; i < vertices; ++i) frames.push_back(b_fwd_write(payload, i, crc));
 
     cell_t out;
@@ -242,7 +255,7 @@ cell_t run_cell(rx_pool_t& pool, std::size_t threshold, std::size_t vertices, st
     std::uint64_t sum = 0;
 
     for (std::size_t i = 0; i < kIters; ++i) {
-        const std::vector<std::byte>& fr = frames[i % vertices];
+        const bytes_t& fr = frames[i % vertices];
         tr::view::segment_t* raw = pool.alloc(kSlotBytes, tr::mem::alloc_hint_t::NONE);
         if (raw == nullptr) continue;  // pool exhausted: the drop a transport would take
         tr::view::segment_ptr_t seg = tr::view::segment_ptr_t::adopt(raw);

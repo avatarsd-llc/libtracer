@@ -172,14 +172,10 @@ class conn_spec_t {
      * builder yields `SPEC{name}`, the config-less spelling a staged link takes.
      */
     [[nodiscard]] std::vector<std::byte> bytes() const {
-        std::vector<std::byte> body = body_;
-        if (!cfg_.empty()) {
-            wire::emit_name(body, "config");
-            wire::emit_tlv(body, wire::type_t::SETTINGS, wire::opt_t{.pl = true}, cfg_);
-        }
-        std::vector<std::byte> out;
-        wire::emit_tlv(out, wire::type_t::SPEC, wire::opt_t{.pl = true}, body);
-        return out;
+        // The core-array form plus one copy (#1781); empty when the heap refused.
+        mem::bytes_t out(mem::heap_source());
+        if (!bytes(out)) return {};
+        return std::vector<std::byte>(out.begin(), out.end());
     }
 
     /**
@@ -212,11 +208,13 @@ class conn_spec_t {
      *         degrade-don't-throw contract the rest of the control plane keeps
      *         (`view::over_bytes` is the seam). Writing an empty view fails the create; it
      *         never silently mounts a half-built connection. A caller that wants the
-     *         allocation to come from an injected backend uses `view::over_bytes(spec.bytes(),
-     *         backend)` instead (#793).
+     *         allocation to come from an injected backend writes @ref bytes into its own array
+     *         and calls `view::over_bytes(mem::as_span(out), backend)` instead (#793).
      */
     [[nodiscard]] view::view_t view() const {
-        return view::over_bytes(bytes()).value_or(view::view_t{});
+        mem::bytes_t out(mem::heap_source());
+        if (!bytes(out)) return view::view_t{};
+        return view::over_bytes(mem::as_span(out)).value_or(view::view_t{});
     }
 
    private:
@@ -267,9 +265,9 @@ class conn_spec_t {
  *         @ref conn_spec_t::view).
  */
 [[nodiscard]] inline view::view_t conn_remove(std::string_view name) {
-    std::vector<std::byte> out;
-    wire::emit_name(out, name);
-    return view::over_bytes(out).value_or(view::view_t{});
+    mem::bytes_t out(mem::heap_source());
+    if (!wire::emit_name(out, name)) return view::view_t{};
+    return view::over_bytes(mem::as_span(out)).value_or(view::view_t{});
 }
 
 }  // namespace tr::net

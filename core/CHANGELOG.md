@@ -312,6 +312,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `operator new` now does it through the fault-injection probe (`tr::detail::probe_fail_hook`,
   refusing `sizeof(detail_hp::node_t)`).
 
+- **The remaining record builders stage on core arrays
+  ([#1781](https://github.com/avatarsd-llc/libtracer/issues/1781)).** The graph's other
+  builders moved with #1885; this finishes the set. The wire `:subscribers[]` read lists into a
+  `mem::block_array_t` and the `:acl` read encodes into a `mem::bytes_t`, each over a stack frame
+  that spills to the graph's table source, so a short record allocates nothing and a refused
+  spill answers `BACKPRESSURE`. The bytes are unchanged.
+  - The vector `wire::encode`, `graph::encode_acl(aces)` and `net::conn_spec_t::bytes()` are
+    now the core-array form plus one copy, so each encoding has one body.
+    `conn_spec_t::view()` and `net::conn_remove` build on a core array.
+  - The ESP `full_node` and `pin_bench` examples build their frames on core arrays.
+
 - **Two graph inputs take views
   ([#1781](https://github.com/avatarsd-llc/libtracer/issues/1781)).** Both are
   source-compatible: an argument that compiled before still does.
