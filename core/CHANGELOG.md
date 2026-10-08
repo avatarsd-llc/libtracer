@@ -16,6 +16,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **A public little-endian codec: `wire::load_le`, `wire::store_le` and `wire::append_le`
+  ([#2025](https://github.com/avatarsd-llc/libtracer/issues/2025)).** The helpers the library
+  encodes every LE wire field with (`byteorder.hpp`) were only in `tr::detail`, so an embedder
+  encoding its own composite payload or wire field had to copy them or reach into `detail`. They
+  are now documented in `tr::wire`: `load_le<T>` and `store_le` over a `std::span<std::byte>`
+  (`constexpr`, `noexcept`), and `append_le` onto a `mem::bytes_t`, which returns `false` and
+  leaves the array unchanged when its source refuses the grow. The wire widths are `u16`, `u32`
+  and `u64`; an optional `width` writes only the low bytes, and `load_le` zero-extends a short
+  span. The `tr::detail` names are the same functions (using-declarations), so no caller and no
+  generated code changes.
 - **`op_resolver_t::resolve` takes a `reply_store`: an acknowledgement is built in caller
   storage ([#1658](https://github.com/avatarsd-llc/libtracer/issues/1658)).** A trailing
   `std::span<std::byte> reply_store = {}` on both overloads. The reply to a WRITE or a subscribe

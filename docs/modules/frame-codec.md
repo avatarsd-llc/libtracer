@@ -211,9 +211,9 @@ PATH's own header carries `opt_t{}`: a packed body is not a child run, so `PL` s
 clear. Building an FWD request is `emit_tlv` for the outer frame over a body built the
 same way. Pass `opt_t{.pl = true}` for a structured payload.
 
-These live in `tr::wire` (L2/L3) because they produce wire bytes from wire types;
-the layer-free little-endian byte helper they build on stays in `tr::detail`
-(`byteorder.hpp`). For reading, `frame.hpp`'s `tlv_node_t::over` is the entry point; for emitting a
+These live in `tr::wire` (L2/L3) because they produce wire bytes from wire types.
+The little-endian byte codec they build on, `load_le` / `store_le` / `append_le`
+(`byteorder.hpp`), is public in `tr::wire` too, for an embedder encoding its own fields. For reading, `frame.hpp`'s `tlv_node_t::over` is the entry point; for emitting a
 full `tlv_t` value with payload, children and trailers, `encode` is.
 
 ## The BATCH record — folding a flush into one written value
