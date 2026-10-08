@@ -102,8 +102,9 @@ Generated from `core/include/libtracer/path.hpp` by Doxygen.
 A path is looked up by an owned copy of its canonical bytes rather than by a
 string. `path_key_t` is that copy, with a small-buffer optimization sized so that
 a packed segment record — a 1-byte length prefix plus the segment text — fits inline
-for names up to fifteen characters, which is the overwhelming norm; longer records spill to
-one heap block. It is immutable after construction, matching its use: a vertex's
+for names up to fifteen characters, which is the overwhelming norm; a longer record spills to
+one block drawn from a block source (`try_make` takes it; a graph passes its injected table
+source, so a registration takes nothing from the global heap, #1991). It is immutable after construction, matching its use: a vertex's
 name never changes. `path_key_hash_t` and `path_key_eq_t` are the hash-map
 bindings over it, and `target_key_t` is the delivery-target key `try_make_target_key`
 builds.

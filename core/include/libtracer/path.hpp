@@ -385,9 +385,9 @@ class path_key_t {
     }
 
     /** @brief Copy @p b into the key (inline when it fits, else one block from the process
-     *         table source, `tr::mem::table_source()`). Any contiguous byte range binds here,
+     *         table source, `%tr::mem::table_source()`). Any contiguous byte range binds here,
      *         so a `std::vector` or a core array needs no overload. A refused spill stops the
-     *         node (`tr::mem::exhausted_at_init`): a constructor has no other answer, so code
+     *         node (`%tr::mem::exhausted_at_init`): a constructor has no other answer, so code
      *         that can meet exhaustion at runtime uses @ref try_make. */
     explicit path_key_t(std::span<const std::byte> b);
 
