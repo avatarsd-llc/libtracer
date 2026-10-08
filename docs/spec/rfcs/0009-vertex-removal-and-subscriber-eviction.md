@@ -800,10 +800,13 @@ slot-clear spellings, and §D.1 names only one.
 
 **What the behaviour is.** §D.1 decides it: an indexed `:subscribers[N]` write of an empty
 `STATUS` clears slot N, a `SUBSCRIBER` replaces slot N's edge through the append door, and any
-other payload is rejected `tr::schema::type_mismatch`. The append door has always refused a
-`SUBSCRIBER` that names no target with `tr::schema::type_mismatch` (it has nowhere to deliver),
-and the replace arm admits through that door, so a targetless `SUBSCRIBER` written to
-`:subscribers[N]` is refused and slot N keeps its edge.
+other payload is rejected `tr::schema::type_mismatch`. The replace arm admits through the
+field-write `:subscribers[]` append door, and since #598 that door refuses a `SUBSCRIBER` that
+names no target with `tr::schema::type_mismatch`: it delivers to a local target, and the record
+names none. So a targetless `SUBSCRIBER` written to `:subscribers[N]` is refused and slot N keeps
+its edge. The routed wire append (`subscribe_wire`) is a different door: it admits such a record
+and delivers over the return route. This erratum leaves it unchanged; whether it should require a
+target is [#2016](https://github.com/avatarsd-llc/libtracer/issues/2016).
 
 **Which change made them diverge.** The §D.1 fix
 ([#598](https://github.com/avatarsd-llc/libtracer/issues/598)). Before it, every indexed write
