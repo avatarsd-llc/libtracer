@@ -2111,19 +2111,22 @@ class fwd_router_t {
      */
     child_rx_ctx_t* ctl_ctx_by_name(std::string_view name);
     /**
-     * @brief A bus mount admitted a session named @p peer — give it an identity anchor
-     *        (#1223 step 2, ADR-0044 §Amendment 2026-08-13).
+     * @brief A bus mount admitted a session named @p peer — reclaim what the name's previous
+     *        holder left, then give the session an identity anchor (#1223 step 2, #1609).
      *
-     * Registers (or REVIVES, at the same slot) the anchor vertex for `:<mount>/<peer>`. A
-     * `PATH_IN_USE` answer means the anchor is already live — a duplicated arrival for a
-     * session that never left — and is dropped: the existing anchor stays, generation
-     * untouched, which is the only outcome that keeps the stamp honest.
+     * An arrival is the RE-TENANT edge: the name has just changed hands and the new session
+     * has sent nothing, so every edge, label binding and await still filed under @p peer is a
+     * predecessor's whose departure never reached this router. The arrival runs that
+     * departure (`bus_peer_down`) first, which makes "edges under a peer name belong to
+     * its current holder" true by construction rather than by a sweeper's care; when the
+     * departure already ran, it finds nothing. Then it registers (or REVIVES, at the same
+     * slot, one generation up) the anchor vertex for `:<mount>/<peer>`.
      *
      * Fired ONLY by an accepting listener (`slot_server_t` and the ESP httpd link), never by
      * an announce-census bus, so CAN peers keep ADR-0044 §Decision 1 in full force and grow
      * no vertices at all. Runs on the transport's poll thread with no transport lock held.
      */
-    void bus_peer_up(const child_rx_ctx_t& ctx, std::string_view peer);
+    void bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle, std::string_view peer);
     /**
      * @brief A bus mount's session @p peer departed — retire its anchor, THEN evict.
      *
