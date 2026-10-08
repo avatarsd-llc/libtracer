@@ -42,6 +42,7 @@
 #include "inproc_staged.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
+#include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/route_handle.hpp"
@@ -1544,6 +1545,66 @@ void run_route_handle_mt(std::size_t T) {
     emit("libtracer", mode.c_str(), kRouteBytes, 1, 1, ops, ops, 0.0, Latency::Summary{});
 }
 
+/** @brief The request sizes the host slab-pool seam rows time: the payload ladder, then the
+ *         first request past the last class (the oversize fallback to the root). */
+constexpr std::size_t kSlabSeamSizes[] = {64, 984, 985, 1024, 4096, 16384, 65536, 65552};
+
+/**
+ * @brief The shipped host slab pool behind the allocation seam, timed (#1908): size-class
+ *        selection on `config_t::kSizeClasses` and the fallback past its last class.
+ *
+ *  - `seam-values`: one `try_alloc` + `release` on `tr::mem::host_root().values()`, the value
+ *    sub-pool a default graph draws its values from, through this thread's cache.
+ *  - `seam-tables`: the same on the table sub-pool, which has no cache: every request takes
+ *    its class's lock.
+ *
+ * Each at the request sizes of @ref kSlabSeamSizes. Up to 64 KiB a request is served by the
+ * smallest class that holds it (one table load up to 4 KiB, a search above); 65552 B is past
+ * the last class and falls back to the root, a block of its own from the platform heap per
+ * request. The gap between the 65536 and 65552 B rows is that fallback.
+ *
+ * Self-checks, each a refusal (exit 2, no further row): the class decision the label names
+ * holds for the size (classed up to the last class, oversize past it), and no timed request
+ * was refused. A refused request returns `nullptr` fast, and a row that timed refusals would
+ * be faster than the pool and measure nothing.
+ */
+void run_host_slab_seam() {
+    constexpr std::uint64_t kBudgetNs = 50'000'000;
+    constexpr std::size_t kAlign = alignof(std::max_align_t);
+    tr::mem::host_root_t& root = tr::mem::host_root();
+    const tr::mem::host_pool_t& table = root.tables();
+    const std::size_t last = table.class_bytes(tr::mem::host_pool_t::classes() - 1);
+    const auto arm = [&](const char* mode, tr::mem::block_source_t& src) {
+        for (const std::size_t S : kSlabSeamSizes) {
+            const bool classed = table.class_of(S, kAlign) != tr::mem::host_pool_t::kNoClass;
+            if (classed != (S <= last)) {
+                std::fprintf(stderr, "SEAM FAIL %s S=%zu: %s, but the last class is %zu B\n", mode,
+                             S, classed ? "classed" : "oversize", last);
+                std::exit(2);
+            }
+            std::size_t refused = 0;
+            const bench::batch_timing_t t = bench::time_batches(
+                [&] {
+                    void* const p = src.try_alloc(S, kAlign);
+                    if (p == nullptr) {
+                        ++refused;
+                        return;
+                    }
+                    src.release(p, S, kAlign);
+                },
+                kBudgetNs);
+            if (refused != 0) {
+                std::fprintf(stderr, "SEAM FAIL %s S=%zu: %zu requests refused while timed\n", mode,
+                             S, refused);
+                std::exit(2);
+            }
+            bench::emit_batch("libtracer", mode, S, 1, 1, t.ops_per_s, t.ops_per_s, 0.0, t);
+        }
+    };
+    arm("seam-values", root.values());
+    arm("seam-tables", root.tables());
+}
+
 /**
  * @brief The allocation seam's two decisions, timed (#1808): size-class selection and the
  *        fallback to an upstream source.
@@ -1556,7 +1617,8 @@ void run_route_handle_mt(std::size_t T) {
  *    released back there. `seam-direct` is the same block from the upstream alone, so the
  *    pair's difference is what the fallback costs.
  *
- * Batch rows at 64 B; the size-classed host pool (#1777) will be judged on the same rows.
+ * Batch rows at 64 B. After them, the shipped host slab pool (#1777), timed by
+ * @ref run_host_slab_seam.
  */
 void run_alloc_seam() {
     constexpr std::uint64_t kBudgetNs = 100'000'000;
@@ -1598,6 +1660,7 @@ void run_alloc_seam() {
     if (upstream.refused() != 0)
         std::fprintf(stderr, "WARN seam rows: the upstream refused %zu requests\n",
                      upstream.refused());
+    run_host_slab_seam();
 }
 
 /** @brief `stream-mt` family (#1808): `stream-w1`, `-w2`, `-w4`, capped by the affinity mask. */

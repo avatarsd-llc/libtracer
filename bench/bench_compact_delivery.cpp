@@ -267,6 +267,7 @@ int main(int /*argc*/, char** argv) {
     bench::pin_allocator_state(argv);  // fixed allocator state (#1803)
     bench::emit_clock_floor();         // the run's clock floor, ahead of its rows (#1804)
     bench::emit_alloc_state();         // and the allocator settings they run under (#1903)
+    const std::size_t start_kb = bench::peak_rss_kb();  // no heap op, no file, ahead of a row
     std::printf("# Steady-state compacted delivery on a WARM binding (RFC-0004 §E.1 / ADR-0062)\n");
     for (const std::size_t p : kPayloadSizes) {
         run_point(p, /*terminus=*/true, budget_seconds());
@@ -283,5 +284,6 @@ int main(int /*argc*/, char** argv) {
         run_point(p, /*terminus=*/true, budget_seconds() / 4);
         run_point(p, /*terminus=*/false, budget_seconds() / 4);
     }
+    bench::emit_family_rss("compact-delivery", start_kb);  // after the last row (#1908)
     return 0;
 }

@@ -238,6 +238,28 @@ inline std::size_t rss_kb() {
 }
 
 /**
+ * @brief This process's resident high-water mark so far, in KiB (`getrusage`); 0 where it
+ *        cannot be read (#1908).
+ *
+ * The start figure of a binary whose rows start right after it: `bench_compact_delivery`,
+ * `bench_forward_demux` and `bench_store_sweep latency` read it ahead of the first row and
+ * print @ref emit_family_rss after the last one, so their delta is what the rows raised the
+ * high-water mark by. One `getrusage` call: no heap operation, no file. A `fopen` read there
+ * moved `inproc/64/1024/1` by +4.7% (#1914), and even an `open(2)` / `read(2)` of
+ * `/proc/self/statm` moved the `store-lat` net-fwd rows by +5-8% on the bench CPU, where
+ * this read left them at main's figure. `bench_libtracer` keeps @ref rss_kb, so its rows meet
+ * what they always met.
+ */
+inline std::size_t peak_rss_kb() {
+#if defined(__linux__)
+    rusage ru{};
+    return getrusage(RUSAGE_SELF, &ru) == 0 ? static_cast<std::size_t>(ru.ru_maxrss) : 0;
+#else
+    return 0;
+#endif
+}
+
+/**
  * @brief Print one family's RSS delta (#1808): `RSS family=<name> start_kb= peak_kb= delta_kb=`.
  *
  * It replaces the whole-run "max RSS" that `/usr/bin/time -v` reported, which since #1803 was
@@ -248,7 +270,7 @@ inline std::size_t rss_kb() {
  * lands in the transcript beside the family's rows; every RESULT parser skips it on its tag.
  *
  * @param family   The family that just ran.
- * @param start_kb @ref rss_kb taken before the family's first row.
+ * @param start_kb @ref rss_kb (or @ref peak_rss_kb) taken before the family's first row.
  */
 inline void emit_family_rss(std::string_view family, std::size_t start_kb) {
 #if defined(__linux__)
