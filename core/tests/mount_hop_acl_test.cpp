@@ -21,6 +21,16 @@
  * A last case needs no bus and no listener: a point-to-point child mounted with NO connection
  * vertex in the graph. Enforcing, it has nothing to grant a right, so a NAME-spelled hop
  * through it is refused; the same graph without a subject resolver forwards it (the control).
+ *
+ * The upgrade layout (#2003) pins the ACL layout the 0.18.1 upgrade note recommends, end to
+ * end: an inheritable READ and SUBSCRIBE grant on `/net`, READ, WRITE and SUBSCRIBE on each
+ * connection vertex once it exists, and no CREATE on `<module>/conn`. A listener session `p0`
+ * subscribes, through the node's dial `net/up/b`, to a producer on a second node, and the
+ * deliveries come back into its session. The `/net` grant alone (the 0.18.0-era layout) is the
+ * control: the subscribe is refused at the dial. The same session's dial attempt through
+ * `net/up/conn` is refused, and the identical attempt is admitted once the endpoint grants
+ * CREATE. The case also pins that a graph has no root `:acl`: a write to `/:acl` answers
+ * `NOT_FOUND`.
  */
 
 #include <atomic>
@@ -38,16 +48,20 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "libtracer/conn_spec.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/loopback.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_tcp.hpp"
+#include "libtracer/transport_vertex.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -109,6 +123,13 @@ bytes_t mount_acl() {
     return tr::graph::encode_acl(std::span<const tr::graph::ace_t>(aces, 2));
 }
 
+/** @brief An `:acl` of one ALLOW ACE for `EVERYONE@` over @p mask, @p flags as given. */
+bytes_t everyone_acl(std::uint32_t mask, std::uint8_t flags) {
+    tr::graph::ace_t ace = allow(tr::graph::kEveryoneSubject, mask);
+    ace.flags = flags;
+    return tr::graph::encode_acl(std::span<const tr::graph::ace_t>(&ace, 1));
+}
+
 /** @brief A `VALUE` TLV carrying one byte. */
 bytes_t b_value_u8(std::uint8_t v) {
     const std::byte b{v};
@@ -142,14 +163,26 @@ struct client_t {
     struct sink_t {
         std::mutex m;
         std::size_t frames = 0;
-        void operator()(std::span<const std::byte>) {
+        std::size_t writes = 0; /**< @brief Of @ref frames, the `FWD{WRITE}`s: deliveries. */
+        void operator()(std::span<const std::byte> f) {
+            const auto d = tr::wire::decode(f);
+            const bool write = d && d->type == type_t::FWD && !d->children.empty() &&
+                               d->children[0].type == type_t::VALUE &&
+                               !d->children[0].payload.empty() &&
+                               d->children[0].payload[0] == static_cast<std::byte>(fwd_op_t::WRITE);
             const std::lock_guard lk(m);
             ++frames;
+            if (write) ++writes;
         }
     } sink;
     std::size_t count() {
         const std::lock_guard lk(sink.m);
         return sink.frames;
+    }
+    /** @brief The `FWD{WRITE}` frames this session received. */
+    std::size_t writes() {
+        const std::lock_guard lk(sink.m);
+        return sink.writes;
     }
     std::unique_ptr<tr::net::tcp_transport_t> link;
 };
@@ -266,6 +299,105 @@ void vertexless_mount() {
     check(forwards(false), "not enforcing: the same WRITE is forwarded (the control)");
 }
 
+/** @brief FIELD{ NAME "subscribers", VALUE u8 ELEMENT }: the `:subscribers[]` append. */
+bytes_t b_field_subscribers_append() {
+    bytes_t body;
+    tr::wire::emit_tlv(body, type_t::NAME, opt_t{},
+                       std::as_bytes(std::span<const char>("subscribers", 11)));
+    const bytes_t mode = b_value_u8(1);
+    body.insert(body.end(), mode.begin(), mode.end());
+    bytes_t out;
+    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief SUBSCRIBER{ PATH @p target }: a plain full-route subscriber. */
+bytes_t b_subscriber(std::span<const std::byte> target) {
+    bytes_t out;
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, target);
+    return out;
+}
+
+void upgrade_layout() {
+    std::printf("the 0.18.1 upgrade layout admits subscribe and delivery, refuses a dial:\n");
+    // The second node: the producer, reached over N's dial. It enforces nothing.
+    graph_t g_b;
+    fwd_router_t r_b{g_b};
+    const vertex_handle_t temp = g_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+
+    node_t n;
+    tr::net::transport_vertex_t net{n.g, n.router};
+    tr::net::loopback_channel_t ch;
+    recorder_t b2;
+    check(net.register_module("up", "up", tr::net::conn_role_t::DIAL).has_value(),
+          "the dial module is declared");
+    net.provide_link("up", "b", ch.a());
+    net.provide_link("up", "b2", b2);
+    check(r_b.add_child("net/down/a", ch.b()), "the producer node mounts its link to N");
+    check(n.g.write(path_t("/net/up/conn"), tr::net::conn_spec_t("b").view()).has_value(),
+          "the application creates the dial net/up/b");
+
+    // The layout's first entry: an inheritable READ and SUBSCRIBE grant on `/net`.
+    const auto rs = static_cast<std::uint32_t>(acl_right_t::READ) |
+                    static_cast<std::uint32_t>(acl_right_t::SUBSCRIBE);
+    check(n.g.write(path_t("/net:acl"), make_value(everyone_acl(rs, tr::graph::kAceInherit)))
+              .has_value(),
+          "/net carries an inheritable READ and SUBSCRIBE grant");
+
+    const bytes_t sub_dst = tr::testing::b_path({"net", "up", "b", "sensor", "temp"});
+    const bytes_t reply_ep = tr::testing::b_path({"reply-ep"});
+    // Waits for the answer, an admission's or a refusal's, so no sample races the subscribe.
+    const auto subscribe = [&] {
+        const std::size_t before = n.p0->count();
+        n.p0->link->send(tr::testing::b_fwd(fwd_op_t::WRITE, sub_dst, reply_ep,
+                                            b_field_subscribers_append(), b_subscriber(reply_ep)));
+        return wait_until([&] { return n.p0->count() > before; });
+    };
+    std::uint8_t sample = 0x10;
+    const auto delivered = [&] {
+        const std::size_t before = n.p0->writes();
+        (void)g_b.write(temp, make_value(b_value_u8(++sample)));
+        return wait_until([&] { return n.p0->writes() > before; }, kDropBudget);
+    };
+
+    // The control: with only the `/net` grant, the subscribe needs WRITE at the dial.
+    check(subscribe(), "/net grant alone: the subscribe is answered");
+    check(!delivered(), "/net grant alone: the subscribe through the dial is refused");
+
+    // The layout's second entry: READ, WRITE and SUBSCRIBE on each connection vertex.
+    const auto rws = rs | static_cast<std::uint32_t>(acl_right_t::WRITE);
+    check(n.g.write(path_t("/net/up/b:acl"), make_value(everyone_acl(rws, 0))).has_value() &&
+              n.g.write(path_t("/net/tcp-server/srv:acl"), make_value(everyone_acl(rws, 0)))
+                  .has_value(),
+          "the dial and the listener carry READ, WRITE and SUBSCRIBE");
+    check(subscribe(), "the subscribe is answered");
+    check(delivered(), "the subscribe passes the dial and the delivery enters p0's session");
+    check(delivered(), "... and every later delivery does too");
+
+    // The layout's third entry: no CREATE on `<module>/conn`, so a session cannot dial.
+    const bytes_t conn_dst = tr::testing::b_path({"net", "up", "conn"});
+    const bytes_t spec = tr::net::conn_spec_t("b2").bytes();
+    const auto dial_from_p0 = [&] {
+        n.p0->link->send(tr::testing::b_fwd(fwd_op_t::WRITE, conn_dst, reply_ep, {}, spec));
+        return wait_until([&] { return n.g.find(path_t("/net/up/b2").key()).has_value(); },
+                          kDropBudget);
+    };
+    check(!dial_from_p0(), "no CREATE on net/up/conn: p0's dial attempt is refused");
+    check(n.g.write(path_t("/net/up/conn:acl"),
+                    make_value(everyone_acl(static_cast<std::uint32_t>(acl_right_t::CREATE), 0)))
+              .has_value(),
+          "(control) the endpoint is granted CREATE");
+    check(dial_from_p0(), "(control) the identical dial attempt is admitted");
+
+    // There is no graph-root `:acl`: the write answers NOT_FOUND and installs nothing.
+    const auto root = n.g.write(path_t("/:acl"), make_value(everyone_acl(rws, 0)));
+    check(!root.has_value() && root.error() == tr::graph::status_t::NOT_FOUND,
+          "a write to /:acl answers NOT_FOUND");
+
+    ch.shutdown();
+    (void)r_b.remove_child("net/down/a");
+}
+
 }  // namespace
 
 int main() {
@@ -273,5 +405,6 @@ int main() {
     if constexpr (!tr::net::kBusLinks) return tr::testing::summary("mount_hop_acl");
     name_spelling();
     bound_session_delivery();
+    upgrade_layout();
     return tr::testing::summary("mount_hop_acl");
 }
