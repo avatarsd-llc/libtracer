@@ -1642,6 +1642,25 @@ fn subscriber_policy_reserved_bits() {
     assert_eq!(encode(&built), bin);
 }
 
+/**
+ * @brief `subscriber/no-target-refused` — a SUBSCRIBER without `target_path` is not an
+ * unsubscribe (RFC-0009 erratum 2026-10-08).
+ *
+ * The refusal itself is a graph behaviour this crate has no graph to show; what the codec
+ * owes is that the record decodes, round-trips, and reports NO target, so a client cannot
+ * mistake it for the slot-clear sentinel (that is the empty STATUS).
+ */
+#[test]
+fn subscriber_no_target_refused() {
+    let bin = assert_vector_consistent("subscriber/no-target-refused");
+    let t = decode(&bin).unwrap();
+    assert_eq!(t.type_code, libtracer::type_code::SUBSCRIBER);
+    assert_eq!(structured::subscriber_target_path(&t).unwrap(), None);
+    // The record still asks for durability: it is refused for want of a target, not for its
+    // policy, and the policy-durability vector is this record plus a PATH child.
+    assert_eq!(structured::subscriber_policy(&t).unwrap().bits, 0x0020);
+}
+
 /** @brief The packed layout is RFC-0022 §3.A's table, and it is the C++ core's. */
 #[test]
 fn delivery_policy_bit_layout() {

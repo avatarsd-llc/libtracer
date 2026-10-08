@@ -126,6 +126,22 @@ test('a SUBSCRIBER whose target is a VALUE string carries no target PATH', () =>
   assert.equal(built.children[0].type, TYPE.PATH, 'the encoder emits the PATH form');
 });
 
+/**
+ * @brief `subscriber/no-target-refused`: a SUBSCRIBER without a target PATH is not an
+ * unsubscribe (RFC-0009 erratum 2026-10-08). The client never emits one, since
+ * `encodeSubscriber` always writes the target, and the bytes are not the slot-clear
+ * sentinel, which is the empty STATUS. The graph-side refusal is pinned by the C++ core.
+ */
+test('the no-target SUBSCRIBER vector carries no PATH and is not the sentinel', () => {
+  const bytes = vector('subscriber/no-target-refused');
+  const tlv = decode(bytes);
+  assert.equal(tlv.type, TYPE.SUBSCRIBER);
+  assert.equal(tlv.children.filter((c) => c.type === TYPE.PATH).length, 0, 'no target PATH');
+  assert.ok(sameBytes(encode(tlv), bytes), 'round-trips');
+  const sentinel = vector('framing/empty-status-ok');
+  assert.ok(!sameBytes(bytes, sentinel), 'not the empty-STATUS sentinel');
+});
+
 /** @brief The decode half: the policy word is read back out of the vectors' own bytes. */
 test('the delivery-policy word decodes out of the policy vectors', () => {
   /** @brief The u16 under `delivery_policy`, or null when the record names none. */

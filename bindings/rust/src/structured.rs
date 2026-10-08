@@ -228,7 +228,9 @@ pub fn subscriber_target(tlv: &Tlv) -> Result<Option<&Tlv>, BuildError> {
 
 /**
  * @brief The target path of a SUBSCRIBER in string form (`"/sensor/temp"`), or `None`
- * when the subscriber has no target PATH (the unsubscribe sentinel).
+ * when the subscriber has no target PATH. Such a record is not an unsubscribe: written to
+ * `:subscribers[N]` it is refused `tr::schema::type_mismatch` (`subscriber/no-target-refused`);
+ * the slot-clear sentinel is the empty STATUS.
  *
  * # Errors
  * [`BuildError::TypeMismatch`] if the TLV is not a SUBSCRIBER, or a PATH-decode

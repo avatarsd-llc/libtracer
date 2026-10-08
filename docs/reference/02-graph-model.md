@@ -512,8 +512,8 @@ An indexed write is resolved by **what it carries** ([RFC-0009 §D.1](https://gi
 | Payload written to `:subscribers[N]` | Effect |
 | --- | --- |
 | empty `STATUS` (`09 00 00 00`) — the sentinel ([05 §`0x09`](05-protocol-tlvs.md)) | **clears** slot `N` (unsubscribe) |
-| a `SUBSCRIBER` | **replaces** slot `N`'s edge, admitted through the same door as an append — so it passes the `SUBSCRIBE` gate, not merely `WRITE` |
-| anything else | `TYPE_MISMATCH`; the slot is untouched |
+| a `SUBSCRIBER` with a `target_path` | **replaces** slot `N`'s edge, admitted through the same door as an append — so it passes the `SUBSCRIBE` gate, not merely `WRITE` |
+| anything else, a `SUBSCRIBER` without a `target_path` included | `TYPE_MISMATCH`; the slot is untouched |
 | an `N` no slot answers to | `INVALID_PATH` — the slot vector is never grown to reach a wire-supplied index |
 
 A `[*]` selector is **not a write selector**: `:subscribers[*]` on a write answers `INVALID_PATH`, because the `WRITE` grammar has no wildcard axis.
