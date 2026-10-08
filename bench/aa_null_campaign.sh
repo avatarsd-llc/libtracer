@@ -25,6 +25,8 @@
 #   bench/aa_null_campaign.sh                       # 3 fit windows x 9 rounds + 10 held out
 #   WINDOWS=2 ROUNDS=13 bench/aa_null_campaign.sh   # 26 rounds in two longer stops
 #   BENCH_LOCK=~/scratch/bench.lock bench/aa_null_campaign.sh   # share the CPUs by a lock
+#   DRAIN=1 bench/aa_null_campaign.sh   # drain the bench runner rather than wait for an
+#                                       # empty perf queue (a merge train never empties it)
 #
 # Then read the printed held-out line (A/A false-fail sessions, rows an injected 10% fails
 # in every session), update the capped-row list in docs/methodology.md from
@@ -44,6 +46,13 @@ POLL_S="${POLL_S:-60}"
 # window holds it from before the runner stops until the runner is started again, so a
 # window never shares the bench CPUs with another bench, and one window is one lock stretch.
 BENCH_LOCK="${BENCH_LOCK:-}"
+# Optional: drain the bench runner instead of waiting for an empty perf queue, which never
+# comes while a merge train runs. With DRAIN=1 each window takes the lock, removes the
+# runner's job label (no new job is assigned to it), waits for its current job to finish,
+# and puts the label back once the runner is started again (and on any exit).
+DRAIN="${DRAIN:-0}"
+RUNNER_NAME="${RUNNER_NAME:-studio-bench}"
+RUNNER_LABEL="${RUNNER_LABEL:-bench-local}"
 JOBS="${JOBS:-8}"
 ROOT="$(git rev-parse --show-toplevel)"
 REV="$(git -C "$ROOT" rev-parse --short HEAD)"
@@ -57,13 +66,27 @@ if (( WINDOWS * ROUNDS < 25 )); then
 fi
 sudo -n true  # fail now, not after the builds, when sudo would prompt
 
+runner_id=
+label_off=0
+restore_label() {
+  if (( label_off )); then
+    gh api -X POST "repos/$REPO/actions/runners/$runner_id/labels" \
+      -f "labels[]=$RUNNER_LABEL" >/dev/null &&
+      label_off=0 && echo "aa_null_campaign: $RUNNER_NAME label $RUNNER_LABEL restored"
+  fi
+}
 runner_stopped=0
 restart_runner() {
   if (( runner_stopped )); then
     sudo -n systemctl start "$UNIT" && runner_stopped=0 && echo "aa_null_campaign: $UNIT started"
   fi
+  restore_label
 }
-trap restart_runner EXIT INT TERM
+trap restart_runner EXIT
+# A signal must END the script: a bare handler on INT/TERM returns, and the script would go
+# on to stop the runner for the next window. Exiting runs the EXIT trap, which restarts it.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- 1. three layouts of one source, built off the bench CPUs ---------------------------
 mkdir -p "$WORK"
@@ -96,9 +119,28 @@ perf_busy() {
   return 1
 }
 
+runner_busy() {
+  local b
+  b="$(gh api "repos/$REPO/actions/runners" \
+       --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | \"\\(.id) \\(.busy)\"")" || b=
+  runner_id="${b% *}"
+  [[ ${b#* } == false ]] && return 1
+  echo "$RUNNER_NAME is running a job"
+  return 0
+}
+
+drain_runner() {  # with the lock held: no new job for the runner, then its job finishes
+  runner_busy >/dev/null || true
+  [[ -n $runner_id ]] || { echo "aa_null_campaign: no runner $RUNNER_NAME" >&2; return 1; }
+  gh api -X DELETE "repos/$REPO/actions/runners/$runner_id/labels/$RUNNER_LABEL" >/dev/null
+  label_off=1
+  echo "aa_null_campaign: $RUNNER_NAME label $RUNNER_LABEL removed; draining its job"
+  while runner_busy >/dev/null; do sleep "$POLL_S"; done
+}
+
 measure_window() {  # $1 = output file, $2 = rounds
   local why lock_fd=
-  while :; do
+  while (( ! DRAIN )); do
     while why="$(perf_busy)"; do
       echo "aa_null_campaign: waiting, $why"
       sleep "$POLL_S"
@@ -112,6 +154,14 @@ measure_window() {  # $1 = output file, $2 = rounds
     exec {lock_fd}>&-
     lock_fd=
   done
+  if (( DRAIN )); then
+    if [[ -n $BENCH_LOCK ]]; then
+      exec {lock_fd}>>"$BENCH_LOCK"
+      echo "aa_null_campaign: waiting for $BENCH_LOCK"
+      flock "$lock_fd"
+    fi
+    drain_runner
+  fi
   sudo -n systemctl stop "$UNIT"
   runner_stopped=1
   echo "aa_null_campaign: $UNIT stopped; measuring $2 rounds -> $1"

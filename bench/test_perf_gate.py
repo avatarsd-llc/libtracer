@@ -1815,6 +1815,22 @@ class AaNullCampaignScript(unittest.TestCase):
         self.assertRegex(text, r"trap\s+\S*restart\S*\s+EXIT")
         self.assertIn("systemctl start", text)
 
+    def test_a_signal_ends_the_script_instead_of_resuming_it(self):
+        """A bare handler on TERM returns and the script runs on to the next window."""
+        text = self.SCRIPT.read_text()
+        self.assertNotRegex(text, r"trap\s+restart_runner\s+.*(INT|TERM)")
+        for sig in ("INT", "TERM"):
+            self.assertRegex(text, r"trap\s+'exit \d+'\s+" + sig)
+
+    def test_a_drained_runner_gets_its_job_label_back_on_every_exit(self):
+        text = self.SCRIPT.read_text()
+        restart = text[text.index("restart_runner() {"):]
+        restart = restart[:restart.index("\n}\n")]
+        self.assertIn("restore_label", restart)  # the EXIT trap runs restart_runner
+        drain = text[text.index("drain_runner() {"):]
+        drain = drain[:drain.index("\n}\n")]
+        self.assertLess(drain.index("labels/"), drain.index("runner_busy >/dev/null; do"))
+
     def test_it_waits_for_both_perf_workflows_before_stopping_the_runner(self):
         text = self.SCRIPT.read_text()
         for wf in ("perf.yml", "perf-local.yml"):
