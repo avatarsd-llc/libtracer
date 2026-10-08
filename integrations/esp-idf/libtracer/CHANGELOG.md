@@ -35,7 +35,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   router and link defaults, so the link `memory` defaults (`twai_link_config_t::memory` and
   the WebSocket links') are the arena's net sub-pool, not the process heap. Measured on
   `full_node` for esp32c6: libtracer static RAM 469 B → 34,405 B (the arena, its free-list
-  heads and the root), flash code 183,566 B → 183,442 B.
+  heads and the root), flash code 183,566 B → 183,464 B.
   The RAM was heap before, taken at run time.
   - **Migration.** Size `CONFIG_LIBTRACER_ARENA_BYTES` against the `:stats.mem.values`,
     `.tables` and `.net` peaks, or inject your own block source. A UDP link on the default
