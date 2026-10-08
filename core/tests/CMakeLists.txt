@@ -233,6 +233,22 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(path_label_terminus_test)
     add_test(NAME path_label_terminus COMMAND path_label_terminus_test)
 
+    # The shared PAIR header (#1700): sentinels that the vertex slot, the path-ref element and
+    # the PAIR element are one type, and that the peer handle stays a distinct one over it.
+    add_executable(pair_test pair_test.cpp)
+    target_link_libraries(pair_test PRIVATE libtracer)
+    libtracer_test_warnings(pair_test)
+    add_test(NAME pair COMMAND pair_test)
+
+    # RFC-0029 slice S1 — the PAIR element and the per-hop arm that consumes it, bound against
+    # the production `fwd_router_t` + `op_resolver_t` wiring (the harness routes nothing).
+    add_executable(path_pair_test path_pair_test.cpp)
+    target_link_libraries(path_pair_test PRIVATE libtracer)
+    target_compile_definitions(path_pair_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    libtracer_test_warnings(path_pair_test)
+    add_test(NAME path_pair COMMAND path_pair_test)
+
     # RFC-0027 origin car — the ORIGIN: adopt the minted `src`, spend it as `dst`, fall back on
     # `NOT_FOUND`. The two above pin the hop's EMISSION; this one closes the round trip, and it
     # is where `fwd/fwd-label-stale`'s "the bytes an origin sends" stops being hand-built.
@@ -2377,6 +2393,12 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
     target_link_libraries(mount_hop_acl_test PRIVATE libtracer)
     libtracer_test_warnings(mount_hop_acl_test)
     add_test(NAME mount_hop_acl COMMAND mount_hop_acl_test)
+    # RFC-0029 S1: a PAIR-spelled hop or session delivery is authorized at the mount it
+    # crosses, as the NAME spelling is — in-memory links, one call stack.
+    add_executable(pair_hop_acl_test pair_hop_acl_test.cpp)
+    target_link_libraries(pair_hop_acl_test PRIVATE libtracer)
+    libtracer_test_warnings(pair_hop_acl_test)
+    add_test(NAME pair_hop_acl COMMAND pair_hop_acl_test)
 endif()
 
 # The #830 ablation: target_canonical_resolves() proves WHICH of dispatch_edge_target's two
@@ -2441,6 +2463,7 @@ set(LIBTRACER_BUS_TESTS
     mount_routing
     mount_shape_flip
     orchestrate_depart
+    pair_hop_acl
     peer_handle_seam
     send_stall
     session_anchor
@@ -2534,7 +2557,7 @@ endif()
 # which is an acceptable answer for a test whose subject was compiled out, and converting all of
 # them would be a much larger diff for no additional safety.
 set(LIBTRACER_BUS_SKIPPABLE_TESTS edge_eviction send_stall session_anchor tcp ws_transport
-    mount_hop_acl)
+    mount_hop_acl pair_hop_acl)
 foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_SKIPPABLE_TESTS)
     if(TEST ${_libtracer_bus_test})
         set_property(TEST ${_libtracer_bus_test} PROPERTY SKIP_RETURN_CODE 77)

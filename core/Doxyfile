@@ -48,6 +48,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/packed_path.hpp \
                          core/include/libtracer/key_view.hpp \
                          core/include/libtracer/path.hpp \
+                         core/include/libtracer/pair.hpp \
                          core/include/libtracer/peer_handle.hpp \
                          core/include/libtracer/link_kind.hpp \
                          core/include/libtracer/link_id.hpp \
@@ -76,6 +77,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/playout.hpp \
                          core/include/libtracer/path_ref.hpp \
                          core/include/libtracer/path_label.hpp \
+                         core/include/libtracer/path_pair.hpp \
                          core/include/libtracer/path_element.hpp \
                          core/include/libtracer/tracer.hpp \
                          core/include/libtracer/child_registry.hpp \

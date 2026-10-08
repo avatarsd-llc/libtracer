@@ -208,13 +208,11 @@ struct fwd_pre_t {
      * @brief The `dst` header's type — and the type the rebuilt frame's shrunk `dst` is
      *        headed with: `PATH`, or `PATH_REF` for a BOUND address (RFC-0024 §4).
      *
-     * The peek records the inbound type, so the outgoing one is the same by default: a bound
-     * `dst` stays bound across a forwarder hop (`opt = 0` — the body is a fixed-stride record
-     * array, not child TLVs), and a canonical one stays canonical. The ONE caller that changes
-     * it is the router's session-delivery arm, the reverse-list delivery's LAST hop (RFC-0024
-     * §7.1 amendment 1): the consumed element was the final one and the egress is the accepted
-     * session, whose peer is an ORIGIN that never speaks the bound form, so it re-heads the
-     * emptied `dst` as a canonical `PATH` — byte-for-byte the canonical delivery shape.
+     * The peek records the inbound type, so the outgoing one is the same: a canonical `dst`
+     * stays canonical. Since RFC-0029 S1 the router forwards no `PATH_REF` `dst` at all — it
+     * refuses that spelling as an address (§5.3), and a PAIR-spelled `dst` is a `PATH` whose
+     * consumed head leaves a `PATH` — so every frame it rebuilds is headed `PATH`. The
+     * `PATH_REF` arm of the peek survives for the codec-only vectors until S2 retires it.
      *
      * Value-initialised to `type_t{}` (no type), so a default `fwd_pre_t` stays all-zero and
      * resetting one per frame is a plain clear; the peek writes it whenever it reads a `dst`.

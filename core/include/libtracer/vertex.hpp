@@ -66,7 +66,7 @@
 #include "libtracer/lkv_slot.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
-#include "libtracer/path_ref.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/subscriber.hpp"
@@ -2283,9 +2283,9 @@ class vertex_t {
      * @param link  This node's NAME for the link the refusal arrived on (== the edge's
      *              delivery link).
      * @param route The refused route — the whole TLV bytes echoed by the rejecting hop: a
-     *              canonical PATH, or (RFC-0024 §7.1 amendment 1) the bound `PATH_REF` a
-     *              reverse-list delivery was refused as.
-     * @param bound_echo True ⇔ @p route is the `PATH_REF` form — the caller classified the
+     *              canonical PATH, or (RFC-0024 §7.1 amendment 1) the PAIR-spelled `PATH` a
+     *              reverse-list delivery was refused as (RFC-0029 §4.2).
+     * @param bound_echo True ⇔ @p route is the element-spelled form — the caller classified the
      *              echo's type byte (this header stays wire-type-agnostic), and the match
      *              runs against the stored reverse list's emitted suffix instead of the
      *              canonical return route.
@@ -2316,20 +2316,19 @@ class vertex_t {
                           std::equal(stored.begin(), stored.end(), route.begin());
                 } else if (!s.remote->reverse_route.empty()) {
                     // The BOUND twin (RFC-0024 §7.1 amendment 1): a delivery that rode the
-                    // reverse list is refused as a `PATH_REF` echo — the emitted `dst`,
-                    // which is the stored list MINUS the element this node consumed
-                    // locally. Matched ELEMENT-WISE against the stored suffix rather than
-                    // whole-TLV byte-equal, because the refusing hop re-encodes the echo
-                    // and only the 8-byte element array is canonical by grammar
-                    // (`opt.PL`/`LL` MUST be 0 — RFC-0024 §4.2); comparing re-encoded
-                    // header bytes would couple eviction to an encoder detail. Both bodies
-                    // sit behind fixed 4-byte headers for the same grammar reason.
+                    // reverse chain is refused as a PAIR-spelled `PATH` echo — the emitted
+                    // `dst`, which is the stored chain MINUS the element this node consumed
+                    // locally. Matched on the BODY against the stored suffix rather than
+                    // whole-TLV byte-equal, because the refusing hop re-encodes the echo and
+                    // only the element records are canonical; comparing re-encoded header
+                    // bytes would couple eviction to an encoder detail. Both bodies sit
+                    // behind fixed 4-byte headers for the same grammar reason.
                     const std::span<const std::byte> rev = s.remote->reverse_route.bytes();
                     const std::span<const std::byte> echo_body =
                         route.size() > 4 ? route.subspan(4) : std::span<const std::byte>{};
                     const std::span<const std::byte> rev_tail =
-                        rev.size() > 4 + wire::kPathRefElementBytes
-                            ? rev.subspan(4 + wire::kPathRefElementBytes)
+                        rev.size() > 4 + wire::kPathPairRecordBytes
+                            ? rev.subspan(4 + wire::kPathPairRecordBytes)
                             : std::span<const std::byte>{};
                     hit = !rev_tail.empty() && echo_body.size() == rev_tail.size() &&
                           std::equal(rev_tail.begin(), rev_tail.end(), echo_body.begin());

@@ -8,9 +8,9 @@ FIELD{ NAME "subscribers", index_mode=WILDCARD } — :subscribers[*]
 
 The `[*]` spelling of RFC-0004 §C, and the third of the three index_mode values
 (`SCALAR=0`, `ELEMENT=1`, `WILDCARD=2` — `enum class index_mode_t` at
-`core/src/op_resolve_walk.hpp:p.mint_request = (op_byte & kFwdOpFlagMintRequest) != 0;`). Three values, four wire spellings: `[N]` and
+`core/src/op_resolve_walk.hpp:enum class index_mode_t`). Three values, four wire spellings: `[N]` and
 `[]` share `ELEMENT=1` and differ by whether the index VALUE is present
-(RFC-0004 §C grammar; `op_resolve_walk.hpp:if (dst->type() == type_t::PATH_REF) {`).
+(RFC-0004 §C grammar; `op_resolve_walk.hpp:switch (static_cast<index_mode_t>(static_cast<std::uint8_t>(vals[1]))) {`).
 
 It differs from `field-append` in **exactly one byte** — the trailing index_mode
 VALUE, `0x01` → `0x02` — while meaning something entirely different: append one

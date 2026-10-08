@@ -35,9 +35,11 @@
 #include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "pair_body.hpp"
 #include "route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "test_support.hpp"
 #include "test_values.hpp"
@@ -73,12 +75,20 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
-/** @brief A one-element `PATH_REF` dst — the BOUND spelling of an address (RFC-0024 §4). */
-std::vector<std::byte> b_path_ref_one(std::uint32_t index, std::uint32_t generation) {
-    const tr::wire::path_ref_element_t e{.index = index, .generation = generation};
+/**
+ * @brief A bound `dst` over @p elements: a `PATH` of PAIR elements, head first (RFC-0029 §4).
+ */
+std::vector<std::byte> b_path_pairs(std::span<const tr::wire::path_pair_t> elements) {
+    std::vector<std::byte> body;
+    for (const tr::wire::path_pair_t& e : elements) tr::testing::emit_path_pair(body, e);
     std::vector<std::byte> out;
-    (void)tr::wire::emit_path_ref(out, std::span<const tr::wire::path_ref_element_t>(&e, 1));
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
+}
+/** @brief A one-element bound `dst` — the spelling a terminus sees (RFC-0029 §4). */
+std::vector<std::byte> b_path_ref_one(std::uint32_t index, std::uint32_t generation) {
+    const tr::wire::path_pair_t e{.index = index, .generation = generation};
+    return b_path_pairs(std::span<const tr::wire::path_pair_t>(&e, 1));
 }
 std::vector<std::byte> b_value_u32(std::uint32_t v) {
     std::vector<std::byte> p(4);
@@ -427,12 +437,12 @@ int main() {
     //
     // The rope arm's routing gate is `peek_fwd_dst`, which answers "does this frame carry an
     // address this node can DESCEND" — it requires a canonical PATH whose first child is a
-    // NAME. A bound dst is a `PATH_REF`, so the gate says no, and before the fix the frame
-    // fell through to the control arm, where `peek_control` refuses a FWD: the operation
-    // vanished with no reply and no drop anyone could name. It was NOT the §5.3 validation
-    // drop — the element was never even validated — and it happened to every bound operation
-    // on every transport that scatter-delivers (ADR-0053 ④b), while the canonical spelling
-    // of the same operation, split the same way, answered normally.
+    // NAME. A bound dst was then a `PATH_REF` (now a `PATH` of PAIRs), so the gate said no, and
+    // before the fix the frame fell through to the control arm, where `peek_control` refuses a FWD:
+    // the operation vanished with no reply and no drop anyone could name. It was NOT the §5.3
+    // validation drop — the element was never even validated — and it happened to every bound
+    // operation on every transport that scatter-delivers (ADR-0053 ④b), while the canonical
+    // spelling of the same operation, split the same way, answered normally.
     //
     // The check is the router's own invariant, stated as an equality over splits: FRAGMENTING
     // A FRAME MUST NOT CHANGE WHETHER IT IS APPLIED. So the same bound frame is injected
@@ -483,7 +493,7 @@ int main() {
         check(canon_silent == 0, "control: the canonical spelling answers at every split");
         check(bound_silent == 0, "a bound READ answers at EVERY split, exactly as contiguous");
 
-        // A 3-link split whose cuts straddle the PATH_REF header and land mid-ELEMENT — the
+        // A 3-link split whose cuts straddle the PAIR's escape header and land mid-ELEMENT — the
         // shape a reassembling transport actually produces, and the one a header-stitching
         // bug would survive the 2-link sweep to break.
         const std::array<std::size_t, 2> mid{6, 12};
@@ -584,8 +594,7 @@ int main() {
         const tr::wire::path_ref_element_t els[2] = {
             {.index = hop->index, .generation = hop->generation},
             {.index = 0x0000BEEFu, .generation = 7u}};
-        std::vector<std::byte> ref;
-        (void)tr::wire::emit_path_ref(ref, std::span<const tr::wire::path_ref_element_t>(els));
+        const std::vector<std::byte> ref = b_path_pairs(els);
         const std::vector<std::byte> bfwd =
             b_fwd(fwd_op_t::READ, ref, b_path({"reply-ep"}), {}, b_value_u32(9));
 
@@ -593,12 +602,12 @@ int main() {
         check(boracle.size() == 1, "contiguous: the bound forward hop egresses exactly once");
         if (boracle.size() == 1) {
             const auto dec = tr::wire::decode(boracle[0]);
-            check(dec && dec->children.size() >= 3 && dec->children[1].type == type_t::PATH_REF &&
-                      tr::wire::path_ref_element_count(dec->children[1].payload.size()) == 1,
-                  "the egress dst is a PATH_REF with ONE element — this hop consumed its own");
-            if (dec && dec->children.size() >= 3 && dec->children[1].type == type_t::PATH_REF &&
-                tr::wire::path_ref_element_count(dec->children[1].payload.size()) == 1) {
-                check(tr::wire::path_ref_element_at(dec->children[1].payload, 0) == els[1],
+            const bool one_pair = dec && dec->children.size() >= 3 &&
+                                  dec->children[1].type == type_t::PATH &&
+                                  dec->children[1].payload.size() == tr::wire::kPathPairRecordBytes;
+            check(one_pair, "the egress dst is a PATH with ONE PAIR — this hop consumed its own");
+            if (one_pair) {
+                check(tr::wire::path_pair_at(dec->children[1].payload, 0) == els[1],
                       "and it is the NEXT host's element, untouched");
                 check(tr::wire::equal(dec->children[2],
                                       *tr::wire::decode(b_path({"cli", "reply-ep"}))),

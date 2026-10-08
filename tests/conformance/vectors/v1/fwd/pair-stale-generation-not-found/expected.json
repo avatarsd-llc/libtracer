@@ -1,0 +1,12 @@
+{
+  "name": "pair-stale-generation-not-found",
+  "category": "fwd",
+  "hex": "0F403400010001000306000900087265706C792D657006000B000016080300000001000000010001000109400A0008400600010002002000",
+  "total_bytes": 56,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/reply-ep, src=<pair 3:1>, kind=ERROR, STATUS{ ERROR{ VALUE u16=0x0020 } } } - the answer a node gives a PAIR it cannot validate (RFC-0029 6 step 2, 6.3): tr::path::not_found, nothing forwarded, nothing applied, nothing repaired.",
+    "note": "One answer for every way the deref fails: out of range, generation moved (the vertex was retired or its slot re-tenanted), saturated, or a placeholder. The refused element is echoed in src because the reply's src IS the request's dst. The origin's recovery is the canonical string it still holds; one failed operation is the whole cost."
+  }
+}

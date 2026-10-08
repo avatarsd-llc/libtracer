@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <type_traits>
 
+#include "libtracer/pair.hpp"
+
 namespace tr::graph {
 
 class graph_t;   // fwd-decl: vertex_handle_t names it as its sole constructing friend.
@@ -60,14 +62,11 @@ static_assert(sizeof(vertex_handle_t) == sizeof(vertex_t*));
  * reference to whatever the slot holds later. Retirement moves the generation and takes the
  * graph's map lock uniquely, so reading both under one hold is what makes the pair name a
  * single tenancy of the slot.
+ *
+ * The shared PAIR (`pair.hpp`): the same value RFC-0029 carries as a path element and
+ * RFC-0024 as a path-ref element, so a mint hands its slot to the wire without a conversion.
  */
-struct vertex_slot_t {
-    std::uint32_t index = 0;      /**< @brief Position in the node-scoped vertex index. */
-    std::uint32_t generation = 0; /**< @brief The slot's retirement generation at that moment. */
-
-    /** @brief Value equality — both fields, since either alone is not a reference. */
-    [[nodiscard]] friend constexpr bool operator==(vertex_slot_t, vertex_slot_t) = default;
-};
+using vertex_slot_t = wire::pair_t;
 
 /**
  * @brief The terminal value of a vertex's retirement generation (RFC-0024 §4.4 rule 3).

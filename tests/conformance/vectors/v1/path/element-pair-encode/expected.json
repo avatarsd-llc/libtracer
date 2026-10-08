@@ -1,0 +1,28 @@
+{
+  "name": "element-pair-encode",
+  "category": "path",
+  "hex": "06001400036E657400160803000000010000000474656D70",
+  "total_bytes": 24,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 20,
+    "payload_hex": "036E657400160803000000010000000474656D70",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "A packed PATH body mixing NAME and PAIR elements (RFC-0029 4.1-4.2): NAME 'net', the PAIR (index=3, generation=1) spelled as the RFC-0018 escape record 00 16 08 <u32 LE index> <u32 LE generation> (11 bytes), then NAME 'temp'. Each element self-describes by its kind and declared length and is read by exactly one node.",
+    "note": "Not a key: a chain is a frame path and never a canonical key (RFC-0029 5.1; v1.md 3.1), so path_lookup_key refuses these bytes while every codec carries them."
+  }
+}

@@ -20,7 +20,7 @@
 #include <cstdint>
 #include <span>
 
-#include "libtracer/byteorder.hpp"
+#include "libtracer/pair.hpp"
 
 /**
  * @file
@@ -35,7 +35,7 @@ namespace tr::wire {
  * Fixed-stride by construction: element *i* is `body[8i .. 8i+8)`, computed rather than
  * parsed, which is why the format carries no per-element TLV header (RFC-0024 §4.2).
  */
-inline constexpr std::size_t kPathRefElementBytes = 8;
+inline constexpr std::size_t kPathRefElementBytes = kPairBytes;
 
 /**
  * @brief Max elements in a `PATH_REF` — 255 (RFC-0024 §4.3, normative bound).
@@ -63,16 +63,9 @@ inline constexpr std::size_t kMaxPathRefBodyBytes = kMaxPathRefElements * kPathR
  * *i* is forwarder *i*'s reference to its connection vertex for hop *i+1*; the last element
  * is the terminus host's reference to the target vertex itself. Nothing in an element means
  * anything anywhere but on the host that minted it — it is an address, never a capability
- * (RFC-0024 §4.1, §6).
+ * (RFC-0024 §4.1, §6). The shared PAIR (`pair.hpp`), whose wire form this array repeats.
  */
-struct path_ref_element_t {
-    /** @brief The minting host's vertex-map index (u32 LE — unreachable on both targets). */
-    std::uint32_t index = 0;
-    /** @brief That vertex's retirement generation at mint time (u32 LE; saturates, never wraps). */
-    std::uint32_t generation = 0;
-    /** @brief Value equality over both fields. */
-    constexpr bool operator==(const path_ref_element_t&) const noexcept = default;
-};
+using path_ref_element_t = pair_t;
 
 /**
  * @brief The element count a `PATH_REF` body of @p body_len bytes carries (RFC-0024 §4.3).
@@ -121,10 +114,7 @@ struct path_ref_element_t {
     assert((i + 1) * kPathRefElementBytes <= body.size());
     const std::span<const std::byte> e =
         body.subspan(i * kPathRefElementBytes, kPathRefElementBytes);
-    return path_ref_element_t{
-        .index = detail::load_le<std::uint32_t>(e.subspan(0, 4)),
-        .generation = detail::load_le<std::uint32_t>(e.subspan(4, 4)),
-    };
+    return pair_load_le(e);
 }
 
 /**
@@ -138,8 +128,7 @@ struct path_ref_element_t {
 constexpr void path_ref_store_element(std::span<std::byte> out,
                                       const path_ref_element_t& e) noexcept {
     assert(out.size() >= kPathRefElementBytes);
-    detail::store_le<std::uint32_t>(out.subspan(0, 4), e.index);
-    detail::store_le<std::uint32_t>(out.subspan(4, 4), e.generation);
+    pair_store_le(out, e);
 }
 
 }  // namespace tr::wire

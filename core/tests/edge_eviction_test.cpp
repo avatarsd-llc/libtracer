@@ -53,6 +53,7 @@
 #include "fwd_frame_builder.hpp"
 #include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
@@ -1277,16 +1278,18 @@ void test_reverse_mint_closes_the_disclosure() {
     const std::size_t wire_before = b_to_a.log().size();
     check(gb.write(sensor, make_value(b_value_u8(0x11))).has_value(), "publish 1");
     check(bus.peer("p0").count() == p0_seen + 1, "positive control: S1 receives publish 1");
-    // The wire between B and A carries the BOUND form (dst = a one-element PATH_REF): the
-    // proof the positive control rode the reverse list, not the canonical fallback.
+    // The wire between B and A carries the BOUND form (dst = a `PATH` of one PAIR element,
+    // RFC-0029 §4): the proof the positive control rode the reverse list, not the canonical
+    // fallback.
     {
         const auto& lg = b_to_a.log();
         check(lg.size() == wire_before + 1, "exactly one B->A delivery frame");
         const auto dec = tr::wire::decode(lg.back());
         check(dec.has_value() && dec->children.size() >= 2 &&
-                  dec->children[1].type == tr::wire::type_t::PATH_REF &&
-                  dec->children[1].payload.size() == 8,
-              "the B->A delivery dst is a one-element PATH_REF (the bound leg engaged)");
+                  dec->children[1].type == tr::wire::type_t::PATH &&
+                  dec->children[1].payload.size() == tr::wire::kPathPairRecordBytes &&
+                  tr::wire::path_pair_at(dec->children[1].payload, 0).has_value(),
+              "the B->A delivery dst is a one-PAIR PATH (the bound leg engaged)");
     }
     {
         const std::vector<std::vector<std::byte>> got = bus.peer("p0").drain();

@@ -5,11 +5,13 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The behavioural half of RFC-0024: what a `PATH_REF` MEANS, as opposed to what its bytes
- * are (`path_ref_test.cpp` owns the codec). Everything here is arranged around one property
- * — **a bound path never mis-routes**. Each way validation can fail gets a case that
- * actually reaches it and a case that proves the same frame WOULD have been delivered with a
- * sound element, so no guard here can be satisfied vacuously:
+ * The behavioural half of RFC-0024: what a bound address MEANS, as opposed to what its bytes
+ * are (`path_ref_test.cpp` owns the codec). RFC-0029 S1 re-spells the bound `dst`: the
+ * element now rides INSIDE a `PATH` as a PAIR (`00 16 08 <idx><gen>`), and a `PATH_REF`
+ * (`0x14`) is no longer an address — the terminus refuses it `INVALID_PATH`. Everything here is
+ * arranged around one property — **a bound path never mis-routes**. Each way validation can fail
+ * gets a case that actually reaches it and a case that proves the same frame WOULD have been
+ * delivered with a sound element, so no guard here can be satisfied vacuously:
  *
  * - a stale generation drops, and the retired-then-revived address proves it drops rather
  *   than delivering into the new tenant;
@@ -37,9 +39,11 @@
 #include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_frame_view.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "pair_body.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
@@ -75,17 +79,24 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     return out;
 }
 
-/** @brief A `PATH_REF` over @p elements — the bound spelling of an address. */
+/** @brief A `PATH_REF` over @p elements — the RETIRED bound spelling, refused as a `dst`. */
 std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) {
     std::vector<std::byte> out;
     (void)tr::wire::emit_path_ref(out, elements);
     return out;
 }
 
-/** @brief The one-element bound spelling a terminus sees after every hop has consumed its own. */
+/**
+ * @brief The one-element bound spelling a terminus sees after every hop has consumed its own:
+ *        a `PATH` holding one PAIR element (RFC-0029 §4).
+ */
 std::vector<std::byte> b_path_ref_one(std::uint32_t index, std::uint32_t generation) {
-    const path_ref_element_t e{.index = index, .generation = generation};
-    return b_path_ref(std::span<const path_ref_element_t>(&e, 1));
+    std::vector<std::byte> body;
+    tr::testing::emit_path_pair(body,
+                                tr::wire::path_pair_t{.index = index, .generation = generation});
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
+    return out;
 }
 
 std::vector<std::byte> b_value(std::initializer_list<std::uint8_t> bytes) {
@@ -98,13 +109,25 @@ std::vector<std::byte> b_value(std::initializer_list<std::uint8_t> bytes) {
 
 using tr::testing::b_fwd_raw_op;
 
-/** @brief Arena-decode + resolve — the terminus wiring `fwd_router_t` uses. */
+/**
+ * @brief Arena-decode + resolve — the terminus wiring `fwd_router_t` uses.
+ *
+ * A `dst` that is exactly one PAIR element is handed to the resolver as its deref target,
+ * which is what `fwd_router_t::route_pair_forward` does when the element is the last one
+ * (RFC-0029 §6 step 3, TERMINUS). Every other `dst` resolves on its own bytes.
+ */
 tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
                                                     std::span<const std::byte> fwd,
                                                     std::string_view inbound_link = {}) {
     const auto arena = tr::wire::decode_into(fwd, tr::mem::heap_source());
     if (!arena) return std::unexpected(tr::graph::status_t::INVALID_PATH);
-    return resolver.resolve(*arena, inbound_link);
+    std::optional<tr::wire::path_pair_t> target;
+    if (const auto dec = tr::wire::decode(fwd); dec && dec->children.size() > 1) {
+        const tlv_t& dst = dec->children[1];
+        if (dst.type == type_t::PATH && dst.payload.size() == tr::wire::kPathPairRecordBytes)
+            target = tr::wire::path_pair_at(dst.payload, 0);
+    }
+    return resolver.resolve(*arena, inbound_link, nullptr, target ? &*target : nullptr);
 }
 
 /** @brief The flattened reply bytes (the consumer's one allowed copy). */
@@ -482,7 +505,7 @@ void test_out_of_range_index_drops() {
 }
 
 void test_residual_length_drops() {
-    std::printf("a residual that is not exactly one element DROPS (§4.1, §5.3):\n");
+    std::printf("a PATH_REF dst is refused INVALID_PATH, whatever its length (RFC-0029 S1):\n");
     graph_t g;
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
@@ -490,21 +513,21 @@ void test_residual_length_drops() {
     const path_ref_element_t good{.index = g.vertex_slot(v)->index,
                                   .generation = g.retire_generation(v)};
 
-    const auto one = resolve_bytes(
-        resolver, b_fwd_raw_op(kRead, b_path_ref(std::span<const path_ref_element_t>(&good, 1)),
-                               b_path({"back"})));
-    check(one.has_value(), "exactly one element is delivered (the ablation)");
-
-    const auto empty =
-        resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path_ref({}), b_path({"back"})));
-    check(!empty.has_value(),
-          "a zero-element bound path DROPS — the codec admits it, the router refuses it");
+    const auto pair = resolve_bytes(
+        resolver,
+        b_fwd_raw_op(kRead, b_path_ref_one(good.index, good.generation), b_path({"back"})));
+    check(pair.has_value() && reply_facts(*pair).kind == reply_kind_t::RESULT,
+          "the same element spelled as a PAIR is delivered (the ablation)");
 
     const path_ref_element_t two[2] = {good, good};
-    const auto pair =
-        resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path_ref(two), b_path({"back"})));
-    check(!pair.has_value(),
-          "a two-element residual DROPS — this node does not forward a bound path");
+    const std::span<const path_ref_element_t> lengths[] = {
+        {}, std::span<const path_ref_element_t>(&good, 1), two};
+    for (const std::span<const path_ref_element_t> els : lengths) {
+        const auto r =
+            resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path_ref(els), b_path({"back"})));
+        check(!r.has_value() && r.error() == tr::graph::status_t::INVALID_PATH,
+              "a 0x14 dst is refused INVALID_PATH — it is no longer an address");
+    }
 }
 
 void test_mint_denied_by_acl() {
@@ -611,7 +634,7 @@ void test_reverse_list_is_typed_not_positional() {
     std::printf("the reverse list is identified by TYPE, not by position (§7.1 amendment 2):\n");
     graph_t g;
     op_resolver_t resolver(g);
-    const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
     const auto ends_with = [](const std::vector<std::byte>& frame,
                               const std::vector<std::byte>& tail) {
@@ -723,47 +746,22 @@ void test_conformance_vectors() {
     check(minted.has_value() && same(reply_bytes(*minted), vector_bytes("fwd/fwd-mint-reply")),
           "fwd-mint-reply is byte-exact what the resolver emits for fwd-mint-request");
 
-    // The §6.3 pair, allow half: the bound spelling serves what the canonical one serves.
-    const auto bound = resolve_bytes(resolver, vector_bytes("acl/bound-vs-canonical-allow"));
+    // The §6.3 pair was spelled with a PATH_REF dst. RFC-0029 S1 retires that spelling as an
+    // address: the vector stays a codec vector, and the terminus refuses it INVALID_PATH. The
+    // allow/deny equivalence it carried is re-bound on the PAIR spelling in path_pair_test.
+    const auto retired = resolve_bytes(resolver, vector_bytes("acl/bound-vs-canonical-allow"));
+    check(!retired.has_value() && retired.error() == tr::graph::status_t::INVALID_PATH,
+          "acl/bound-vs-canonical-allow (a 0x14 dst) is refused INVALID_PATH");
+    const auto bound =
+        resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path_ref_one(2u, 0u), b_path({"reply-ep"})));
     const auto canonical = resolve_bytes(resolver, plain_req);
-    check(bound.has_value() && canonical.has_value(), "both spellings of the pair answer");
-    const std::vector<std::byte> bb = reply_bytes(*bound);
-    const std::vector<std::byte> cb = reply_bytes(*canonical);
     const std::vector<std::byte> val = b_value({0xD2, 0x04, 0x00, 0x00});
     const auto tail = [&](const std::vector<std::byte>& f) {
         return std::vector<std::byte>(f.end() - static_cast<long>(val.size()), f.end());
     };
-    check(tail(bb) == val && tail(cb) == val,
-          "allow half: the two spellings serve byte-identical RESULT bytes");
-
-    // The §6.3 pair, deny half: the same request, denied, IS the vector's frame.
-    graph_t gd;
-    {
-        auto hooks = gd.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        gd.set_hooks(hooks);
-    }
-    op_resolver_t rd(gd);
-    const vertex_handle_t vd = gd.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    (void)vd;
-    (void)gd.write(path_t("/sensor/temp:acl"),
-                   make_value(allow_acl("link-ok", bit(acl_right_t::READ))));
-    const auto denied = resolve_bytes(rd, vector_bytes("acl/bound-vs-canonical-allow"), "link-bad");
-    check(denied.has_value() &&
-              same(reply_bytes(*denied), vector_bytes("acl/bound-vs-canonical-deny")),
-          "deny half: bound-vs-canonical-deny is byte-exact what the denied bound READ emits");
-
-    // ...and the canonical spelling's denial agrees on the OUTCOME, which is the claim.
-    const auto denied_canonical = resolve_bytes(rd, plain_req, "link-bad");
-    const std::vector<std::byte> dv = reply_bytes(*denied);
-    const std::vector<std::byte> dc = reply_bytes(*denied_canonical);
-    constexpr std::size_t kOutcome = 19;  // kind VALUE (5) + STATUS{ERROR{VALUE u16}} (14)
-    check(denied_canonical.has_value() && dv.size() > kOutcome && dc.size() > kOutcome &&
-              std::equal(dv.end() - kOutcome, dv.end(), dc.end() - kOutcome),
-          "deny half: the two spellings' outcome tails are byte-identical");
-    check(dv.size() != dc.size(),
-          "and they differ ONLY in the reply src, which echoes the request dst");
-    check(!reply_facts(*denied).has_mint, "a denied reply carries no minted binding");
+    check(bound.has_value() && canonical.has_value() && tail(reply_bytes(*bound)) == val &&
+              tail(reply_bytes(*canonical)) == val,
+          "the PAIR spelling of the same READ serves the canonical RESULT bytes");
 }
 
 }  // namespace
