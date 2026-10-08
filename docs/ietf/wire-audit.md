@@ -141,7 +141,7 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | ERROR registered identity | first child VALUE u16 | assigned | `core/src/fwd_reply.cpp:error_code`; `errors/error-registered-code` | — | **keep** | |
 | ERROR string identity | first child NAME | assigned | `errors/error-string-form` | — | **keep**: third-party codes without an RFC. | |
 | ERROR detail children | DESCRIPTION / VALUE | optional | `errors/error-registered-detail` | — | **keep** | |
-| bare ERROR as reply payload | ERROR without STATUS | MAY (05 §Where it appears) | none: the core always wraps, and its reader skips a bare ERROR | — | **merge** into `STATUS{ERROR}`: two spellings of one answer. | F6 |
+| bare ERROR as reply payload | ERROR without STATUS | removed by the RFC-0004 erratum 2026-10-08 (was MAY, 05 §Where it appears) | none: the core always wraps, and its reader skips a bare ERROR; `fwd/reply-error-bare-ignored` | — | **merge** into `STATUS{ERROR}`: two spellings of one answer. | F6: done, #1983 (one error-reply spelling), PR #2017 |
 | STATUS empty (OK) | `09 00 00 00` | assigned | `framing/empty-status-ok` | — | **keep** | |
 | STATUS non-empty | `PL=1`, ERROR + DESCRIPTION | assigned | every error reply | — | **keep** | |
 
