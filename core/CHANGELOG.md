@@ -422,6 +422,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   BORROWED (`vertex_policy_t::app_fields` from a `static` array) still adds only its 64 B group
   block and no declaration bytes. `sizeof(vertex_t)` and `sizeof(edge_view_t)` are unchanged.
   `vertex_ext_t`'s members are not API; no signature or wire byte changes.
+- **A `STREAM` declared `retention_t::NONE` draws no extension block
+  ([#2001](https://github.com/avatarsd-llc/libtracer/issues/2001)).** Registration drew
+  `vertex_ext_t` for every `STREAM` by role, even one whose policy keeps no ring. The block now
+  comes from the retention policy: `retention_t::N` (the `STREAM` default) draws it, as
+  `set_policy` already did, and a `STREAM` registered with `{.retention = retention_t::NONE}`
+  and no fields, ring source or threshold costs what a plain leaf costs: 48 B and one block
+  less per vertex on a 64-bit host, 28 B (plus the allocator's header) on rv32. A
+  `STORED_VALUE` declared `NONE`, at registration or through `set_policy`, already drew
+  nothing, and `retention_only_vertex_heap_test` now pins both. A field table declared later
+  draws the block then. A default `STREAM` is unchanged. `sizeof(vertex_t)` and
+  `sizeof(vertex_ext_t)` are unchanged; no signature or wire byte changes.
 
 - **The TCP and WS servers clear their delivering session after each frame
   ([#1915](https://github.com/avatarsd-llc/libtracer/issues/1915)).** `inbound_peer()` on a
