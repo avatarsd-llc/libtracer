@@ -494,3 +494,71 @@ jobs:
         run: |
           ls -la build/*.elf 2>/dev/null || true
 
+
+  # One-concept examples (#1786, the esp-idf row of #1383): five minimal apps under
+  # examples/concepts/, each with its docs page under docs/examples/esp-idf-*.md, all on the
+  # MCU static-arena default (#1783). One chip target: these are compile gates on the
+  # component's public surface, not a second portability check (esp-build and full-node carry
+  # that across all four targets). Board-only steps (flash, monitor, a peer on the network) are
+  # named on each page and not run.
+  concepts:
+    needs: srcs-drift
+    runs-on: ubuntu-24.04
+    container: espressif/idf:release-v6.0
+    # One -Os component build per leg, like esp-build's esp32c6 leg (measured 6.07 min max).
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [minimal, arena_sizing, single_threaded, one_link, stats_subpools]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build concepts/${{ matrix.example }} for esp32c6
+        shell: bash
+        working-directory: integrations/esp-idf/examples/concepts/${{ matrix.example }}
+        run: |
+          . "${IDF_PATH}/export.sh"
+          idf.py set-target esp32c6
+          idf.py build
+          idf.py size
+
+  # The same five on the ESP-IDF `linux` target, built AND run: each example checks what it
+  # prints and exits non-zero on a failed check there (on a chip it only prints its verdict,
+  # since an exit is a reset). release-v5.5 and g++-12 for the reason host-build gives.
+  # arena_sizing runs with its init-exhaustion step off; that step aborts by design.
+  concepts-host:
+    needs: srcs-drift
+    runs-on: ubuntu-24.04
+    container: espressif/idf:release-v5.5
+    # Five host component builds in one job, ~2.4 min each as in host-build, plus the g++-12
+    # install. 30 = ~2.3x.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install g++-12 (C++23 <expected> for the host/linux toolchain)
+        shell: bash
+        timeout-minutes: 8
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends g++-12 gcc-12
+
+      - name: Build and run the five concepts on the linux target
+        shell: bash
+        working-directory: integrations/esp-idf/examples/concepts
+        env:
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          . "${IDF_PATH}/export.sh"
+          for example in minimal arena_sizing single_threaded one_link stats_subpools; do
+            echo "::group::${example}"
+            (cd "${example}" &&
+              idf.py -D CMAKE_C_COMPILER=gcc-12 -D CMAKE_CXX_COMPILER=g++-12 \
+                --preview set-target linux build &&
+              timeout 60 "./build/${example}.elf")
+            echo "::endgroup::"
+          done

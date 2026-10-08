@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+
+menu "arena_sizing example"
+
+    config EXAMPLE_SHOW_INIT_EXHAUSTION
+        bool "End with an init-time registration the arena cannot hold"
+        default n
+        help
+            After the run-time refusal, call register_vertex once more. It is
+            infallible (ADR-0056), so libtracer prints the sizing message naming
+            the sub-pool and the bytes it needed, then aborts. On a board that
+            abort is a reset, so this is off by default.
+
+endmenu

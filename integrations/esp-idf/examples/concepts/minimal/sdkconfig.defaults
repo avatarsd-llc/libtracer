@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# An in-process node: no transport is compiled into libtracer.a.
+CONFIG_LIBTRACER_TRANSPORT_UDP=n
+CONFIG_LIBTRACER_TRANSPORT_TCP=n
+CONFIG_LIBTRACER_TRANSPORT_WS=n

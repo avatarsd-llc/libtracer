@@ -1,10 +1,12 @@
 # Examples
 
-Worked, **compile-tested** examples of the C++ reference implementation and of the Rust and
-TypeScript bindings. Every example on these pages is a real source file — under
+Worked, **compile-tested** examples of the C++ reference implementation, of the Rust and
+TypeScript bindings, and of the ESP-IDF component. Every example on these pages is a real source
+file — under
 [`core/examples/`](https://github.com/avatarsd-llc/libtracer/tree/main/core/examples),
-[`bindings/rust/examples/`](https://github.com/avatarsd-llc/libtracer/tree/main/bindings/rust/examples)
-or [`bindings/typescript/examples/`](https://github.com/avatarsd-llc/libtracer/tree/main/bindings/typescript/examples)
+[`bindings/rust/examples/`](https://github.com/avatarsd-llc/libtracer/tree/main/bindings/rust/examples),
+[`bindings/typescript/examples/`](https://github.com/avatarsd-llc/libtracer/tree/main/bindings/typescript/examples)
+or [`integrations/esp-idf/examples/concepts/`](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/esp-idf/examples/concepts)
 — that CI **builds and runs as a smoke test** on every change. The code shown is included
 verbatim from that file, so it cannot drift from what actually compiles.
 
@@ -90,6 +92,11 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [Subscribe to a remote producer](ts-subscribe.md) | TypeScript binding | `subscribe(path, handler)`; deliveries in write order; `unsubscribe()` is local |
 | [A remote failure is a typed error](ts-remote-error.md) | TypeScript binding | `FWD{REPLY, kind=ERROR}` surfaces as `FwdError` with the wire code |
 | [Dial a WebSocket link](ts-ws-dial.md) | TypeScript binding, `ws` | `TransportWs` dials a loopback listener; one frame per BINARY message |
+| [The component, and nothing else](esp-idf-minimal.md) | ESP-IDF component | `REQUIRES libtracer`, a `graph_t` with no argument, every byte from the static arena |
+| [Sizing the arena](esp-idf-arena-sizing.md) | ESP-IDF component | `CONFIG_LIBTRACER_ARENA_BYTES`; a refusal by value at run time, a sizing message at init |
+| [One task, no pool locks](esp-idf-single-threaded.md) | ESP-IDF component | an app-owned `arena_root_t<tr::no_guard_t, N>` injected into the graph |
+| [One link, and its `max_frame`](esp-idf-one-link.md) | ESP-IDF component, `udp` | a SPEC-created link draws its receive blocks from the net sub-pool |
+| [Reading the sub-pools' `:stats`](esp-idf-stats-subpools.md) | ESP-IDF component | `:stats.mem.values`, `.tables`, `.net`, walked in place with `tlv_node_t` |
 
 The toctree below is the order of record; this table adds the layer and the summary.
 Each example's layer column names the module that owns the types it uses — the
@@ -244,6 +251,21 @@ and the count above is what to check it against. The ros2 binding has no example
 translation unit is the `rmw_tracer` identity, which has nothing to demonstrate on its own.
 The ranking reads unchanged for the C++ rows, and adds one rung for a binding: **built and run
 by its own toolchain job, with the list explicit and the count recorded here**.
+`esp-idf` is the sixth case, and the first row that needs a **second toolchain and a board**.
+Its five examples are ESP-IDF projects under `integrations/esp-idf/examples/concepts/`, absent
+from every ctest run above, so the count is **70** C++ examples under ctest, **5** Rust, **5**
+TypeScript and **5** ESP-IDF, **85** in all. `esp-idf.yml` carries them twice. The `concepts`
+job builds each one for `esp32c6`, one matrix leg per example, which is the compile gate on the
+chip toolchain. The `concepts-host` job builds and **runs** all five on the ESP-IDF `linux`
+target, where each one exits non-zero on a failed check; on a chip an example only prints its
+verdict, because an exit there is a reset. Both lists are explicit (the matrix and the loop), so
+a sixth project nobody adds to them is not built. What neither job can do is put the image on
+silicon: flashing and monitoring, and anything that needs a network peer, are **board-only steps,
+named on each page** rather than skipped silently. One example has a step the `linux` run
+leaves off on purpose: `arena_sizing`'s init-exhaustion step aborts by design, so it sits behind
+its own Kconfig option, off by default, and its page shows the line it prints. The ranking gains
+one rung for a target that needs hardware: **built for the chip and run on the host target by
+its own job, with the board-only steps named on the page**.
 :::
 
 ```{toctree}
@@ -331,4 +353,9 @@ TypeScript: write a remote vertex, then read it <ts-write-read>
 TypeScript: subscribe to a remote producer <ts-subscribe>
 TypeScript: a remote failure is a typed error <ts-remote-error>
 TypeScript: dial a WebSocket link <ts-ws-dial>
+ESP-IDF: the component, and nothing else <esp-idf-minimal>
+ESP-IDF: sizing the arena <esp-idf-arena-sizing>
+ESP-IDF: one task, no pool locks <esp-idf-single-threaded>
+ESP-IDF: one link, and its max_frame <esp-idf-one-link>
+ESP-IDF: reading the sub-pools' :stats <esp-idf-stats-subpools>
 ```
