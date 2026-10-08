@@ -718,11 +718,7 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
             // linked in, so a refused creation (#1778) leaves the tree and the index as they
             // were. Placeholders made by EARLIER levels of this descent stay: they are
             // invisible, and the next registration down this path reuses them.
-            vertex_t* const fresh =
-                vertex_slots_.reserve_next()
-                    ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE, path_key_t{record},
-                                             handlers_t{}, *tables_)
-                    : nullptr;
+            vertex_t* const fresh = make_placeholder(record);
             if (fresh == nullptr) return std::unexpected(status_t::BACKPRESSURE);
             // Subtree-subscription init (RFC-0005): a vertex born under a subscribed
             // ancestor starts with the ancestor-listener count already summed — O(1) from
@@ -984,11 +980,7 @@ result_t<vertex_handle_t> graph_t::register_session_anchor(std::string_view id) 
         // for `max_peers` distinct ids, so anchors are bounded by the accept policy and not
         // by how often clients reconnect (ADR-0044 §Amendment's measurement).
         // Failable steps first, as in the registration descent (#1778).
-        vertex_t* const fresh =
-            vertex_slots_.reserve_next()
-                ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE,
-                                         path_key_t{mem::as_span(rec)}, handlers_t{}, *tables_)
-                : nullptr;
+        vertex_t* const fresh = make_placeholder(mem::as_span(rec));
         node = fresh != nullptr ? anchor_root()->add_child(fresh, *tables_) : nullptr;
         if (node == nullptr) {
             mem::drop_in(*tables_, fresh);
@@ -1045,6 +1037,17 @@ std::size_t graph_t::session_anchor_slots() const noexcept {
     std::size_t n = 0;
     anchor_root()->for_each_child([&n](const vertex_t&) { ++n; });
     return n;
+}
+
+vertex_t* graph_t::make_placeholder(std::span<const std::byte> record) noexcept {
+    // The name first, from the same injected source (#1991): a record past the key's inline
+    // bytes was the one global-heap block a registration took. A placeholder has no handlers,
+    // so `adopt_identity` allocates no extension block.
+    result_t<path_key_t> name = path_key_t::try_make(record, *tables_);
+    return name && vertex_slots_.reserve_next()
+               ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE, std::move(*name),
+                                        handlers_t{}, *tables_)
+               : nullptr;
 }
 
 void graph_t::note_owner_slot(vertex_t& v) noexcept {

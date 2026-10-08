@@ -2856,3 +2856,8 @@ add_executable(handler_vertex_heap_test handler_vertex_heap_test.cpp)
 target_link_libraries(handler_vertex_heap_test PRIVATE libtracer)
 libtracer_test_warnings(handler_vertex_heap_test)
 add_test(NAME handler_vertex_heap COMMAND handler_vertex_heap_test)
+# #1991 — a long vertex name is drawn from the graph's injected source, not the global heap.
+add_executable(path_key_seam_test path_key_seam_test.cpp)
+target_link_libraries(path_key_seam_test PRIVATE libtracer)
+libtracer_test_warnings(path_key_seam_test)
+add_test(NAME path_key_seam COMMAND path_key_seam_test)

@@ -3249,6 +3249,17 @@ class graph_t {
      */
     void note_owner_slot(vertex_t& v) noexcept;
 
+    /**
+     * @brief A fresh handler-less placeholder named @p record, with its index slot reserved;
+     *        null when the table source refuses the name, the slot or the vertex.
+     *
+     * The one construction both creating doors (the registration descent and
+     * @ref register_session_anchor) share. Every draw comes from the injected table source,
+     * the name's spill block included (#1991), and nothing is linked in, so the caller's
+     * refusal leaves the tree as it was. Callers hold the unique `map_mutex_`.
+     */
+    [[nodiscard]] vertex_t* make_placeholder(std::span<const std::byte> record) noexcept;
+
     // ---- DECLARED FIRST so it is DESTROYED LAST (#873 phase 1) -----------------------
     //
     // The graph's internal face of the one injected source for VALUE segments, and its

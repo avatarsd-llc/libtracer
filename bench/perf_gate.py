@@ -556,6 +556,10 @@ def tput_contradicted(cur: dict, base: dict) -> bool:
 # on its own — it already went stale once at three points (#792). Adding to or removing
 # from MEM_POINTS means editing docs/methodology.md in the same commit.
 MEM_POINTS = ["vertex", "vertex_value", "vertex_app5", "vertex_app5_static", "reg_escape"]
+# Points whose TARGET is reached and is zero: any block or byte they read fails outright,
+# whatever the paired baseline says (a baseline that escapes too would otherwise excuse it).
+# `reg_escape` reached zero with #1991 (the `path_key_t` spill moved onto the graph's source).
+MEM_ZERO_POINTS = frozenset({"mem:reg_escape"})
 MEM_REGRESS = 1.02   # fail if live bytes/vertex > baseline * 1.02 ...
 MEM_TICK_B = 1       # ... AND grew by more than one byte (ignore a lone bucket flip)
 _MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=(\d+) frees=\d+ bytes=(\d+)")
@@ -1522,6 +1526,9 @@ def mem_gate(cur: dict, base: dict | None) -> list[str]:
         if not k.startswith("mem:") or "bytes" not in v:
             continue
         line = f"  {k:<22} live={v['bytes']:>6} B/vertex  blocks={v['allocs']:>2}"
+        if k in MEM_ZERO_POINTS and (v["bytes"] or v["allocs"]):
+            fails.append(f"{k} must read zero: {v['allocs']} heap blocks, {v['bytes']}B per "
+                         f"vertex escape the injected source (#1991)")
         b = base.get(k) if base else None
         charge, why = MEM_CHARGED.get(k, (0, ""))
         # A 0 B base is a real base (reg_escape's target IS zero), so test for the key,

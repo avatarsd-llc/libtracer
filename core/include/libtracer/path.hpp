@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/mem_source.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/status.hpp"
 
@@ -349,30 +350,52 @@ inline path_t::path_t(std::string_view text) {
  *
  * Small-buffer type (#380 §2): records up to @ref kInlineBytes live inline — a packed
  * record is ONE length byte plus the segment text (RFC-0018), so virtually every vertex
- * name fits and costs NO heap block (a `std::vector` here allocated ~32 B per named
- * vertex). Longer records spill to one owned heap allocation. Immutable after
- * construction/assignment (matches its use: a vertex's name never changes,
- * ADR-0057). Move leaves the source empty.
+ * name fits and costs NO block at all (a `std::vector` here allocated ~32 B per named
+ * vertex). A longer record spills to one block drawn from a `tr::mem::block_source_t`
+ * (#1991): the graph passes its injected table source through @ref try_make, so a
+ * registration takes nothing from the global heap. The spill block records the source that
+ * served it in a pointer-sized prefix, so the key frees and copies without any member of
+ * its own naming a source, and `sizeof(path_key_t)` stays 24. Immutable after
+ * construction/assignment (matches its use: a vertex's name never changes, ADR-0057). Move
+ * leaves the source empty.
  */
 class path_key_t {
    public:
-    /** @brief Records at or under this many bytes are stored inline (no heap): a packed
+    /** @brief Records at or under this many bytes are stored inline (no block): a packed
      *         record is one length byte + the segment text, so names up to 15
      *         characters — the overwhelming norm — never allocate. */
     static constexpr std::size_t kInlineBytes = 16;
 
     path_key_t() noexcept = default;
-    /** @brief Copy @p b into the key (inline when it fits, else one heap block). Any contiguous
-     *         byte range binds here, so a `std::vector` or a core array needs no overload. */
-    explicit path_key_t(std::span<const std::byte> b) { assign(b); }
 
-    /** @brief Deep-copy @p o's bytes (inline or one spill block, as the length needs). */
-    path_key_t(const path_key_t& o) { assign(o.bytes()); }
-    /** @brief Replace this key with a deep copy of @p o's bytes. */
+    /**
+     * @brief Copy @p b into a key, spilling to a block from @p src when it exceeds
+     *        @ref kInlineBytes — the failable door the graph registers names through.
+     *
+     * A spilled key, and every copy of it, must not outlive @p src: the copy draws from the
+     * same source, and the destructor gives the block back to it.
+     *
+     * @retval status_t::BACKPRESSURE @p src refused the spill block; nothing is held.
+     */
+    [[nodiscard]] static result_t<path_key_t> try_make(std::span<const std::byte> b,
+                                                       tr::mem::block_source_t& src) noexcept;
+
+    /** @brief Copy @p b into the key (inline when it fits, else one block from the process
+     *         table source, `%tr::mem::table_source()`). Any contiguous byte range binds here,
+     *         so a `std::vector` or a core array needs no overload. A refused spill stops the
+     *         node (`%tr::mem::exhausted_at_init`): a constructor has no other answer, so code
+     *         that can meet exhaustion at runtime uses @ref try_make. */
+    explicit path_key_t(std::span<const std::byte> b);
+
+    /** @brief Deep-copy @p o's bytes; a spilled key's copy draws from the source that served
+     *         @p o. A refused draw stops the node, as for the span constructor. */
+    path_key_t(const path_key_t& o) { assign_or_stop(o.bytes(), o.source()); }
+    /** @brief Replace this key with a deep copy of @p o's bytes (drawn as for the copy
+     *         constructor). */
     path_key_t& operator=(const path_key_t& o) {
         if (this != &o) {
             release();
-            assign(o.bytes());
+            assign_or_stop(o.bytes(), o.source());
         }
         return *this;
     }
@@ -386,12 +409,12 @@ class path_key_t {
         }
         return *this;
     }
-    /** @brief Free the spill block, if this key owns one. */
+    /** @brief Return the spill block to its source, if this key owns one. */
     ~path_key_t() { release(); }
 
-    /** @brief The key's canonical bytes (inline or heap — one uniform window). */
+    /** @brief The key's canonical bytes (inline or spilled — one uniform window). */
     [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
-        return {len_ > kInlineBytes ? heap_ : inline_, len_};
+        return {len_ > kInlineBytes ? spill_ : inline_, len_};
     }
     /** @brief The key's byte length. */
     [[nodiscard]] std::size_t size() const noexcept { return len_; }
@@ -416,17 +439,39 @@ class path_key_t {
      */
     static constexpr std::uint32_t kNoOwnerSlot = 0xFFFFFFFFU;
 
-    /** @brief Store @p b (callers guarantee the key currently owns nothing). */
-    void assign(std::span<const std::byte> b) {
+    /** @brief Bytes ahead of a spilled record: the serving source's address (#1991). */
+    static constexpr std::size_t kSpillPrefix = sizeof(tr::mem::block_source_t*);
+
+    /** @brief Store @p b, spilling to a block from @p src (callers guarantee the key owns
+     *         nothing). False, with the length unchanged, when @p src refuses the block. */
+    [[nodiscard]] bool assign(std::span<const std::byte> b, tr::mem::block_source_t& src) noexcept {
         owner_slot_ = kNoOwnerSlot;  // a fresh set of bytes has no owner (#1486)
-        len_ = static_cast<std::uint32_t>(b.size());
         std::byte* dst = inline_;
-        if (b.size() > kInlineBytes) dst = heap_ = new std::byte[b.size()];
+        if (b.size() > kInlineBytes) {
+            void* const blk = src.try_alloc(kSpillPrefix + b.size(), alignof(void*));
+            if (blk == nullptr) return false;
+            tr::mem::block_source_t* const from = &src;
+            std::memcpy(blk, &from, kSpillPrefix);  // the prefix names who frees the block
+            dst = spill_ = static_cast<std::byte*>(blk) + kSpillPrefix;
+        }
+        len_ = static_cast<std::uint32_t>(b.size());
         if (!b.empty()) std::memcpy(dst, b.data(), b.size());
+        return true;
     }
-    /** @brief Free the spill block if this key owns one. */
+    /** @brief `%assign` from @p src, or from the process table source when null (an inline
+     *         key has no source); a refusal stops the node. Defined in `path.cpp`. */
+    void assign_or_stop(std::span<const std::byte> b, tr::mem::block_source_t* src);
+    /** @brief The source a spilled key's block came from; null for an inline key. */
+    [[nodiscard]] tr::mem::block_source_t* source() const noexcept {
+        if (len_ <= kInlineBytes) return nullptr;
+        tr::mem::block_source_t* src = nullptr;
+        std::memcpy(&src, spill_ - kSpillPrefix, kSpillPrefix);
+        return src;
+    }
+    /** @brief Return the spill block to its source if this key owns one (sized reclaim). */
     void release() noexcept {
-        if (len_ > kInlineBytes) delete[] heap_;
+        if (tr::mem::block_source_t* const src = source())
+            src->release(spill_ - kSpillPrefix, kSpillPrefix + len_, alignof(void*));
     }
     /** @brief Move @p o's storage into this key (which must own nothing); member-wise —
      *         a whole-object memcpy trips -Werror=class-memaccess on the ESP-IDF gcc. */
@@ -434,7 +479,7 @@ class path_key_t {
         owner_slot_ = kNoOwnerSlot;  // the memo names an OWNER, and bytes moving have none
         len_ = o.len_;
         if (len_ > kInlineBytes)
-            heap_ = o.heap_;
+            spill_ = o.spill_;
         else if (len_ != 0)
             std::memcpy(inline_, o.inline_, len_);  // a trivial byte array — memcpy is fine
         o.len_ = 0;                                 // the moved-from key reads empty, owns nothing
@@ -442,9 +487,10 @@ class path_key_t {
 
     union {
         std::byte inline_[kInlineBytes]; /**< @brief In-place record storage (the norm). */
-        std::byte* heap_;                /**< @brief The spill block when `len_ > kInlineBytes`. */
+        std::byte* spill_; /**< @brief The spilled record when `len_ > kInlineBytes`, just past
+                            *         its block's source prefix. */
     };
-    std::uint32_t len_ = 0; /**< @brief Record length; doubles as the inline/heap tag. */
+    std::uint32_t len_ = 0; /**< @brief Record length; doubles as the inline/spill tag. */
     /**
      * @brief **These bytes are `vertex_t`'s, not `path_key_t`'s**: the memoized index of the
      *        `graph_t::vertex_slots_` entry that names the vertex this key is the name of
