@@ -165,12 +165,14 @@ Always structured (`opt.PL=1`). Children, in order:
 
 ```
 SUBSCRIBER (PL=1) {
-  PATH        target_path     ; required — where to dispatch matched writes
+  PATH        target_path     ; where to dispatch matched writes — required by a local target, optional on a routed append
   SETTINGS    qos_settings    ; optional — QoS overrides for this subscription
   ACL         capability      ; optional — capability token if enforced
   NAME        subscriber_id   ; optional — opaque ID for self-identification
 }
 ```
+
+**Where `target_path` is required.** A field write to `:subscribers[]` or `:subscribers[N]` delivers to a local target, so it MUST refuse a record with no `target_path` `tr::schema::type_mismatch`. A **routed** `:subscribers[]` append (an inbound `FWD{WRITE}`, RFC-0004 §D) needs none: the return route the subscribe accumulated is the target, and a receiver MUST admit the record without one and deliver along that route (vector `subscriber/no-target`). A `PATH` child on the routed append is read only when it routes through a mount ([RFC-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0021-wire-subscriber-target-frame-of-reference.md) §4.B.1); with no `PATH` the edge binds to the arrival link (§4.D). Erratum ([#2016](https://github.com/avatarsd-llc/libtracer/issues/2016)): the layout used to label `target_path` required everywhere.
 
 The `qos_settings` SETTINGS carries **per-subscriber encoding hints and this subscription's delivery policy** (byte-agnostic; numeric filtering such as deadband is an application *filter vertex*, never a field — the sibling decision of [ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)). It carries **no value-based delivery filter and no throttle**: there is no `delivery_mode == ON_CHANGE` byte-diff, no `min_interval_ns` and no `keepalive_ns` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)) — the runtime inspects neither values nor times to decide delivery. Delivery selection is **structural and per-vertex**; see `delivery_mode` below.
 
@@ -596,7 +598,7 @@ A path has **one wire form**, the PATH TLV. The string form is an API spelling o
 - **String form**: `"/sensor/temp"` — a UTF-8 byte string with `/` separators. Used at the API surface for ergonomics, and converted to the PATH-TLV form before it reaches the wire. Application data that happens to spell a path travels as an ordinary VALUE TLV, and it is never read as an address.
 - **PATH-TLV form**: a PATH TLV (opaque body, packed records — one per path element). Every wire position that expects a path (a SUBSCRIBER's `target_path`, a FWD's `dst` and `src`, an ADVERTISE `route`) carries this form.
 
-Both spellings canonicalize to the same internal representation. A receiver MUST NOT read a VALUE TLV as a path where a path is expected: a SUBSCRIBER whose target is a VALUE string names no `target_path`. A `:subscribers[]` or `:subscribers[N]` field write that needs a local target refuses it `tr::schema::type_mismatch` (vector `subscriber/target-as-value-refused`). A routed `:subscribers[]` append (a `FWD{WRITE}`) skips the VALUE child like any unknown child, and its delivery rides the frame's return route; it needs none ([RFC-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0021-wire-subscriber-target-frame-of-reference.md) erratum 2026-10-08, [#2016](https://github.com/avatarsd-llc/libtracer/issues/2016)). Erratum ([#1987](https://github.com/avatarsd-llc/libtracer/issues/1987)): this note used to say "Implementations MUST accept either form where a path is expected", but no shipped reader ever accepted a VALUE there.
+Both spellings canonicalize to the same internal representation. A receiver MUST NOT read a VALUE TLV as a path where a path is expected: a SUBSCRIBER whose target is a VALUE string names no `target_path`. A `:subscribers[]` or `:subscribers[N]` field write that needs a local target refuses it `tr::schema::type_mismatch` (vector `subscriber/target-as-value-refused`). A routed `:subscribers[]` append (a `FWD{WRITE}`) skips the VALUE child like any unknown child, and its delivery rides the frame's return route; that door needs no target (§`0x04` "Where `target_path` is required", RFC-0021 erratum of 2026-10-08). Erratum ([#1987](https://github.com/avatarsd-llc/libtracer/issues/1987)): this note used to say "Implementations MUST accept either form where a path is expected", but no shipped reader ever accepted a VALUE there.
 
 ### Static / pre-encoded PATH TLV (init-time form)
 
