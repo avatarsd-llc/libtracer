@@ -186,8 +186,11 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "allocation and copy of the value; from 1 KiB the value is built and freed off the "
         "clock and the op is the write alone. `inproc-borrow` copies no payload but still "
         "allocates per write. "
-        "The fan-out, payload and topic sweeps also publish a `<mode>-batch` twin timed over a "
-        "calibrated batch; the grid, `eptype-*`, `mixed` and `inproc-mt*` rows have none. "
+        "The `inproc` fan-out and payload sweeps, `inproc-borrow` and the `inproc-path` "
+        "topic sweep also publish a `<mode>-batch` twin timed over a calibrated batch, and "
+        "`inproc-pool` has its own in the `inproc-pool-batch` family; the grid, `topics-*`, "
+        "`inproc-deliver`, `inproc-target-*`, `eptype-*`, `mixed` and `inproc-mt*` rows have "
+        "none. "
         "Delivery rates are counted at the subscriber, and a `dce-canary` row fails the run "
         "if timed work is optimized away. Its `fold-*`, `lkv-*` and "
         "`*alloc-mt*` rows are what the routing and memory chapters chart. The data-path "
@@ -923,13 +926,12 @@ identical hardware: two **in-process** comparison axes — subscriber fan-out an
 one paced value per transport in two processes. The charts plot **absolute** throughput,
 latency and bandwidth as series on shared axes; there are no speed-up ratios.
 
-The **topic-count** pair is charted for libtracer alone, and that is a fairness decision,
-not a gap in the run. The two arms are different operations — libtracer's row re-resolves
-the destination address inside every timed iteration, Zenoh's publishes through a declared
-handle and resolves nothing per put — so putting them on a shared axis would attribute a
-resolution term to topic scaling. The matched decomposition that replaced it (both
-spellings on both engines) is tabulated in the methodology below rather than charted here:
-one ladder costs about nine minutes and its content is structural.
+The **topic-count** pair compares resolution with resolution: libtracer's row resolves the
+destination address inside every timed write, and Zenoh's puts by key, resolving the key
+expression inside every put. Both engines run their grid in one process, pinned to one
+logical CPU, Zenoh's runtime threads included, with equal payload bytes. The bound spelling
+of the same ladder (`topics-bound`) and the decomposition that set this pairing are in the
+methodology below.
 
 libtracer is compiled from source at `-O3`; Zenoh is the upstream prebuilt `zenoh-c 1.10.0`
 release binary that `bench/fetch_zenoh.sh` downloads, so its optimization profile is

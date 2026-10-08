@@ -1938,10 +1938,17 @@ void run_mode_topics_rev() {
     }
 }
 
-/** @brief One selectable isolated sweep: its `argv[1]` spelling and the runner behind it. */
+/** @brief Which set a family or a mode belongs to — see @ref kFamilies and @ref kModes. */
+enum class family_set_t {
+    SINGLE, /**< One thread does the timed work: no row waits on another of the bench's own. */
+    MULTI,  /**< Starts worker threads (plus a coordinating main thread that spins). */
+};
+
+/** @brief One selectable isolated sweep: its `argv[1]` spelling, its runner and its set. */
 struct bench_mode_t {
     std::string_view name; /**< What `argv[1]` must equal to select this sweep. */
     void (*run)();         /**< The sweep this mode runs, and nothing else. */
+    family_set_t set;      /**< SINGLE narrows to one logical CPU, as a family does (#1910). */
 };
 
 /**
@@ -1960,15 +1967,15 @@ struct bench_mode_t {
  * its sweep, with no second list to keep in step.
  */
 constexpr bench_mode_t kModes[] = {
-    {"grid", run_grid},
-    {"acl", run_mode_acl},
-    {"deliver", run_mode_deliver},
-    {"target", run_mode_target},
-    {"fan", run_mode_fan},
-    {"lkv", run_lkv_store_rows},
-    {"fan-remote", run_mode_fan_remote},
-    {"topics", run_mode_topics},
-    {"topics-rev", run_mode_topics_rev},
+    {"grid", run_grid, family_set_t::SINGLE},
+    {"acl", run_mode_acl, family_set_t::MULTI},
+    {"deliver", run_mode_deliver, family_set_t::SINGLE},
+    {"target", run_mode_target, family_set_t::SINGLE},
+    {"fan", run_mode_fan, family_set_t::SINGLE},
+    {"lkv", run_lkv_store_rows, family_set_t::SINGLE},
+    {"fan-remote", run_mode_fan_remote, family_set_t::SINGLE},
+    {"topics", run_mode_topics, family_set_t::SINGLE},
+    {"topics-rev", run_mode_topics_rev, family_set_t::SINGLE},
 };
 
 /*
@@ -2078,12 +2085,6 @@ void family_inproc_fan_mid() {
     for (std::size_t F : kFanoutsMid)
         run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
 }
-
-/** @brief Which family set a family belongs to — see @ref kFamilies. */
-enum class family_set_t {
-    SINGLE, /**< One thread does the timed work: no row waits on another of the bench's own. */
-    MULTI,  /**< Starts worker threads (plus a coordinating main thread that spins). */
-};
 
 /** @brief One family of the default sweep: its `--family` spelling, its runner, its set. */
 struct bench_family_t {
@@ -2290,6 +2291,9 @@ int main(int argc, char** argv) {
         const std::string_view want{argv[1]};
         for (const bench_mode_t& m : kModes) {
             if (m.name != want) continue;
+            // One logical CPU for a single-threaded mode, as for a family (#1906): `grid` and
+            // `topics` are the Zenoh comparison's arms, and bench_zenoh's are pinned alike (#1910).
+            if (m.set == family_set_t::SINGLE) bench::pin_to_one_cpu();
             // The marker goes to STDERR, ahead of the first row: stdout is the RESULT
             // stream perf_gate.py, perf_emit_benchmark.py and collate.py parse, and the
             // acceptance rule for this fix is that every run's stdout keeps the row set,

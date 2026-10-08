@@ -7,9 +7,10 @@
 #
 # What it fixes. The published topic-count comparison put libtracer's `inproc-path` row (write BY
 # ADDRESS — a registry resolution inside every timed iteration) against bench_zenoh's row of the
-# same name, which publishes through a DECLARED Publisher and resolves nothing per put. So one
-# arm carried a resolution term the other did not, and the reported narrowing of the margin
-# across the ladder could not be attributed to either engine's topic scaling. Both engines now
+# same name, which published through a DECLARED Publisher (until #1809/#1910) and resolved
+# nothing per put. So one arm carried a resolution term the other did not, and the reported
+# narrowing of the margin across the ladder could not be attributed to either engine's topic
+# scaling. Both engines now
 # emit BOTH spellings — `topics-bound` (pre-bound handle / declared publisher) and `topics-addr`
 # (destination resolved inside the operation) — over the same kTopicLadder.
 #
