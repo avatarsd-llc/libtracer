@@ -78,6 +78,7 @@ The transports compile against lwIP's BSD-socket layer **unmodified — no shim 
 | [`examples/inprocess_mirror/`](examples/inprocess_mirror/) | chips | P0 in-process profile: register / write / read / await on FreeRTOS |
 | [`examples/host_smoke/`](examples/host_smoke/) | `linux` | the component as a host_test dependency (no FreeRTOS tasks, no esp_log) |
 | [`examples/full_node/`](examples/full_node/) | chips + `linux` | **the origin-firmware shape**: one-slab recipe, sensor vertex, config-created UDP listener via the `/net/udp-server/conn` creator endpoint, remote subscriber fan-out |
+| [`examples/concepts/`](examples/concepts/) | chips + `linux` | five one-concept apps on the static-arena default: minimal setup, arena sizing, a `tr::no_guard_t` root, one link, the `:stats.mem.*` sub-pools; each has a page under `docs/examples/esp-idf-*.md` |
 
 ### full_node (the #183 readiness example)
 

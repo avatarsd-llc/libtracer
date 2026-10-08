@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# An in-process node with a deliberately small arena, so the example reaches its end.
+CONFIG_LIBTRACER_TRANSPORT_UDP=n
+CONFIG_LIBTRACER_TRANSPORT_TCP=n
+CONFIG_LIBTRACER_TRANSPORT_WS=n
+CONFIG_LIBTRACER_ARENA_BYTES=8192

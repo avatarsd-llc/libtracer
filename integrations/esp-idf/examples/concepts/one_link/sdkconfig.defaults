@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# One UDP link: the UDP transport stays in, the other two are left out.
+CONFIG_LIBTRACER_TRANSPORT_TCP=n
+CONFIG_LIBTRACER_TRANSPORT_WS=n
