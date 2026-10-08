@@ -1391,6 +1391,29 @@ class AllocatorCliffFamily(unittest.TestCase):
         self.assertEqual(fails, [])
         self.assertTrue(any("cliff at 985 B" in w for w in warns), warns)
 
+    # #1973's shape, measured on the reference host: a cheaper fast path takes ~4.6 ns off the
+    # cache-hit row left of the 4096 B step and ~2.8 ns off the row right of it.
+    FAST_LEFT_MAIN = {2048: [7.77] * 8, 4048: [7.77] * 8, 4096: [10.69] * 8}
+    FAST_LEFT_CAND = {2048: [3.28] * 8, 4048: [3.19] * 8, 4096: [7.86] * 8}
+
+    def test_a_step_grown_by_a_faster_left_row_is_info(self):
+        """The step grows x1.38 -> x2.46, but 4096 B is faster than main: info, not FAIL."""
+        for right in (7.86, 10.69):  # the right row faster than main, then flat
+            cand = {**self.FAST_LEFT_CAND, 4096: [right] * 8}
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                fails, warns = pg.gate_cliff(self._samples({"cand": cand,
+                                                            "base": self.FAST_LEFT_MAIN}))
+            self.assertEqual(fails, [], right)
+            self.assertTrue(any("cliff at 4096 B" in w and "info" in w for w in warns), warns)
+            self.assertIn("  i cliff-alloc-heap cliff at 4096 B", out.getvalue())
+
+    def test_a_faster_left_row_does_not_hide_a_slower_right_row(self):
+        cand = {**self.FAST_LEFT_CAND, 4096: [14.0] * 8}
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_cliff(self._samples({"cand": cand, "base": self.FAST_LEFT_MAIN}))
+        self.assertTrue(any("cliff at 4096 B" in f for f in fails), fails)
+
     def test_one_noisy_pair_is_not_a_cliff(self):
         cand = {**self.HEALTHY, 985: [18.3, 40.0, 18.4, 18.2]}
         with contextlib.redirect_stdout(io.StringIO()):

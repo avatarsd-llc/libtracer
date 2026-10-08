@@ -1145,7 +1145,8 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
     # worth believing at all, which is what a 2.8x baseline swing needed and never got.
     print(f"  run drift (worst baseline-arm spread across pairs): {worst_drift:.2f}x")
     # The allocator-cliff family (#1806) rides the same interleaved session. A cliff main
-    # already has is printed (`~`) and does not fail; see gate_cliff.
+    # already has (`~`), or a step that grew only because its left row got faster (`i`), is
+    # printed and does not fail; see gate_cliff.
     cliff_fails, _cliff_warns = gate_cliff(samples, null)
     return fails + cliff_fails, list(samples.get("inconclusive", []))
 
@@ -1163,9 +1164,13 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
 #   neighbours   — each size's p50 against the next smaller size's, pair by pair. A step of
 #                  more than CLIFF_STEP that holds in the median and in a strict majority of
 #                  pairs is a cliff. It FAILS only when it is new: main's own step at that
-#                  size, times LAT_REGRESS, must be smaller. A cliff main already has is
-#                  printed as a warning, since it is the allocator's or an older change's,
-#                  not this PR's.
+#                  size, times LAT_REGRESS, must be smaller, AND the step's right-hand row
+#                  must itself regress against main (its p50 leg's effect, by the same
+#                  per-row threshold as above). A cliff main already has is printed as a
+#                  warning, since it is the allocator's or an older change's, not this PR's.
+#                  A step that grew only because its left row got faster (the right row
+#                  flat or faster than main) is printed as info and does not fail: a
+#                  cheaper fast path is not a new cliff (#1973's refcount path).
 #
 # CLIFF_STEP is set from the steps healthy code has. On the reference host the heap row
 # steps ~1.5x at 985 B (the #1768 split draws two blocks instead of one) and ~1.35x at 1040 B
@@ -1203,14 +1208,18 @@ def _cliff_series(samples: dict[str, list[dict]], mode: str) -> list[tuple[int, 
 
 
 def cliff_steps(cand: list[tuple[int, list[float]]],
-                base: list[tuple[int, list[float]]] | None) -> list[dict]:
+                base: list[tuple[int, list[float]]] | None,
+                regressed: set[int] | None = None) -> list[dict]:
     """@brief Every neighbour step of one cliff mode, judged (see the section comment).
 
     @param cand The candidate's series from @ref _cliff_series.
     @param base Main's series from the same interleaved session, or None.
+    @param regressed The sizes whose own p50 regresses against main (@ref gate_cliff's
+           per-row verdicts); None = every size, the rule before the right-row check.
     @return One dict per size that has a smaller neighbour: `size`, `left`, the candidate's
-            median step and pairs over CLIFF_STEP, main's median step (or None), and
-            `cliff` (the candidate steps) and `new` (main does not).
+            median step and pairs over CLIFF_STEP, main's median step (or None), `cliff`
+            (the candidate steps), `new` (main does not, and the right-hand row regresses)
+            and `grown` (a step past main's that the right-hand row does not explain: info).
     """
     base_by_size = dict(base or [])
     out = []
@@ -1228,16 +1237,20 @@ def cliff_steps(cand: list[tuple[int, list[float]]],
         if bl and bv:
             bsteps = [bv[i] / bl[i] for i in range(min(len(bl), len(bv))) if bl[i] > 0]
             base_med = statistics.median(bsteps) if bsteps else None
-        new = cliff and (base_med is None or med > base_med * LAT_REGRESS)
+        past_main = cliff and (base_med is None or med > base_med * LAT_REGRESS)
+        right_slower = base_med is None or regressed is None or size in regressed
+        new = past_main and right_slower
         out.append({"size": size, "left": lsize, "step": med, "over": over, "n": len(steps),
-                    "base_step": base_med, "cliff": cliff, "new": new})
+                    "base_step": base_med, "cliff": cliff, "new": new,
+                    "grown": past_main and not right_slower})
     return out
 
 
 def gate_cliff(samples: dict, null: dict | None = None) -> tuple[list[str], list[str]]:
     """@brief The allocator-cliff checks over a paired session's cliff rows.
     @param null The banked A/A null's rows (@ref load_null); {} = flat thresholds.
-    @return (fails, warns): a warn is a cliff main has too, printed and not failed."""
+    @return (fails, warns): a warn is a cliff main has too, or a step that grew only because
+            its left row got faster (info); both are printed and not failed."""
     null = {} if null is None else null
     fails: list[str] = []
     warns: list[str] = []
@@ -1249,12 +1262,15 @@ def gate_cliff(samples: dict, null: dict | None = None) -> tuple[list[str], list
     print(f"Allocator-cliff family ({len(cand_keys)} rows; fail: p50 past its null "
           f"threshold (flat +{(LAT_REGRESS - 1) * 100:.0f}% without one) vs main, or a new "
           f"neighbour step over {CLIFF_STEP:.2f}x):")
+    regressed: dict[str, set[int]] = {mode: set() for mode in CLIFF_MODES}
     for k in sorted(cand_keys, key=lambda x: (x.split("/")[0], int(x.split("/")[1]))):
         cs, bs = samples["cand"][k], samples["base"].get(k)
         if not bs:
             continue  # a size main does not emit: the neighbour check still covers it
         v, factor, source = leg_verdict(k, "p50_ns", [float(x["p50_ns"]) for x in cs],
                                         [float(x["p50_ns"]) for x in bs], null, False)
+        if v["effect"]:
+            regressed[k.split("/")[0]].add(int(k.split("/")[1]))
         if v["effect"]:
             print(f"  {k}")
             print(paired_report(v, "p50", "ns", "9,.3f", source))
@@ -1268,14 +1284,16 @@ def gate_cliff(samples: dict, null: dict | None = None) -> tuple[list[str], list
     for mode in CLIFF_MODES:
         cand = _cliff_series(samples["cand"], mode)
         base = _cliff_series(samples["base"], mode) or None
-        for st in cliff_steps(cand, base):
+        for st in cliff_steps(cand, base, regressed[mode]):
             if not st["cliff"]:
                 continue
             main_says = (f"main x{st['base_step']:.2f}" if st["base_step"] is not None
                          else "main has no such row")
             line = (f"{mode} cliff at {st['size']} B: p50 x{st['step']:.2f} over "
                     f"{st['left']} B in {st['over']}/{st['n']} pairs ({main_says})")
-            print(f"  {'!' if st['new'] else '~'} {line}")
+            if st["grown"]:
+                line += f"; info: {st['size']} B is not slower than main, the left row got faster"
+            print(f"  {'!' if st['new'] else 'i' if st['grown'] else '~'} {line}")
             (fails if st["new"] else warns).append(line)
     if not fails:
         print("  no new cliff, no size slower than main")
