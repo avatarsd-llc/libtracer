@@ -1622,7 +1622,8 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
     const bool ring_moves = std::pair(vx->ring_source(), vx->ring_reliable()) !=
                             std::pair(policy.ring_source, policy.ring_reliable);
     // A HANDLER is NONE by role and carries no bit for it. Only `N` touches the extension
-    // block, which a STREAM always has, and a `NONE` vertex keeps neither slot nor ring.
+    // block, so `N` is what draws a STREAM's (#2001), and a `NONE` vertex keeps neither slot
+    // nor ring — nor, with no other member declared, any extension block at all.
     const retention_t retention = policy.retention.value_or(default_retention(role));
     // Compared as stored, so a threshold that saturates the same way moves nothing.
     const bool threshold_moves = saturate_threshold(vx->share_threshold_bytes()) !=

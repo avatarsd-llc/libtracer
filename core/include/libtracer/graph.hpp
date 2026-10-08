@@ -654,7 +654,9 @@ struct vertex_policy_t {
      * - `N` sets the ring depth (@ref depth); `NONE` on a `STREAM` empties and stops the ring.
      *
      * Switching to `NONE` drops what is already held. Costs zero bytes: `NONE` is a bit in the
-     * vertex's flag byte, and the depth lives in the extension block a STREAM already has.
+     * vertex's flag byte, so a vertex declaring only `NONE` (no fields, no ring source, the
+     * default threshold) draws no extension block — a STREAM included, at registration
+     * (#2001). `N` draws the block, which holds the depth.
      */
     std::optional<retention_t> retention{};
 

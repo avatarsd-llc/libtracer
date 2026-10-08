@@ -2879,6 +2879,11 @@ add_executable(handler_vertex_heap_test handler_vertex_heap_test.cpp)
 target_link_libraries(handler_vertex_heap_test PRIVATE libtracer)
 libtracer_test_warnings(handler_vertex_heap_test)
 add_test(NAME handler_vertex_heap COMMAND handler_vertex_heap_test)
+# #2001: a retention-only vertex (NONE, no fields) draws nothing beyond a plain leaf.
+add_executable(retention_only_vertex_heap_test retention_only_vertex_heap_test.cpp)
+target_link_libraries(retention_only_vertex_heap_test PRIVATE libtracer)
+libtracer_test_warnings(retention_only_vertex_heap_test)
+add_test(NAME retention_only_vertex_heap COMMAND retention_only_vertex_heap_test)
 # #1991 — a long vertex name is drawn from the graph's injected source, not the global heap.
 add_executable(path_key_seam_test path_key_seam_test.cpp)
 target_link_libraries(path_key_seam_test PRIVATE libtracer)

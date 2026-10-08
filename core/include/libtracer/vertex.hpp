@@ -819,8 +819,8 @@ struct vertex_ext_t {
      * host-side through `graph_t::set_retention`, exactly like the delivery mode; it has
      * **no wire surface at all** — neither readable nor writable remotely. Guarded by the
      * vertex mutex, which already guards the ring it bounds, and re-read on every append
-     * (the `%store` verb) under that same hold. Costs a STREAM vertex zero extra bytes:
-     * a STREAM identity always allocates this block anyway.
+     * (the `%store` verb) under that same hold. Costs a retaining STREAM zero extra bytes:
+     * `retention_t::N` is what draws this block, and a STREAM declared `NONE` keeps none.
      */
     std::uint32_t retention_depth = 1;
     /**
@@ -976,7 +976,7 @@ class vertex_t {
     vertex_t(role_t role, path_key_t name, handlers_t handlers,
              tr::mem::block_source_t& src = tr::mem::table_source())
         : name_(std::move(name)), role_(role) {
-        if (!adopt_identity(role, handlers, src)) tr::mem::exhausted_at_init(src, "vertex_t");
+        if (!adopt_identity(handlers, src)) tr::mem::exhausted_at_init(src, "vertex_t");
     }
 
     vertex_t(const vertex_t&) = delete;
@@ -1132,7 +1132,7 @@ class vertex_t {
      *         the node is still an unregistered placeholder.
      */
     [[nodiscard]] bool fill(role_t role, const handlers_t& handlers, tr::mem::block_source_t& src) {
-        if (!adopt_identity(role, handlers, src)) return false;
+        if (!adopt_identity(handlers, src)) return false;
         role_.store(role, std::memory_order_relaxed);  // atomic since #1477 — see @ref role
         registered_ = true;
         // Maintain the parent's lock-free fork bit (#652). Setting is unconditional and
@@ -2972,7 +2972,7 @@ class vertex_t {
      *   from the call on. Zero bytes: the bit lives in the flag byte `%vertex_t` already has.
      * - @ref retention_t::LAST clears the bit.
      * - @ref retention_t::N clears the bit and records @p depth, allocating the extension block
-     *   if this vertex has none (a STREAM vertex always has one already), under the vertex
+     *   if this vertex has none (a retaining STREAM has one already), under the vertex
      *   mutex the ring append re-reads it under — so a depth change and a concurrent append
      *   cannot interleave halfway. The next append trims to it.
      *
@@ -3027,7 +3027,7 @@ class vertex_t {
      *        RFC-0025 §4.6.1 clause 3, owner-side and with no wire surface.
      *
      * Sited on `%vertex_ext_t`'s lazily-allocated ring block, never on `%vertex_t` itself: a
-     * STREAM identity already allocates the extension block, and the whole of the ring's state
+     * retaining STREAM already has the extension block, and the whole of the ring's state
      * hangs off the one lazy pointer that block already held — so `sizeof(%vertex_t)` does not
      * move, `sizeof(%vertex_ext_t)` does not move either, and a vertex that never receives
      * pays nothing. The #1285 ratchet and the RAM census are both untouched.
@@ -3582,21 +3582,22 @@ class vertex_t {
     }
 
     /**
-     * @brief Install a registration's identity (constructor + `fill`): allocate the
-     *        extension block iff this identity needs one — STREAM role (history ring) or
-     *        any user handler — and store the cold members there. A plain leaf allocates
-     *        nothing (#361 §1).
+     * @brief Install a registration's handlers (constructor + `fill`): allocate the extension
+     *        block iff a user handler needs one, and store the cold members there. A plain
+     *        leaf allocates nothing (#361 §1).
      *
-     * RFC-0022 §3.B dropped the third condition, "a non-default storage policy", along with
-     * the parameter that carried it, so STRICTLY MORE vertices stay extension-less than
-     * before: registration can no longer force the cold block onto a vertex, and the two
-     * owner-side magnitudes materialise it only if an owner actually declares one.
+     * RFC-0022 §3.B dropped the condition "a non-default storage policy", along with the
+     * parameter that carried it, and #2001 dropped "a STREAM role": a STREAM's ring depth is
+     * its retention policy's, so `graph_t::register_vertex` draws the block when it applies
+     * `retention_t::N` (the role default), and a STREAM declared `NONE` keeps none. The role
+     * is never consulted here, so registration can no longer force the cold block onto a
+     * vertex; only a handler or an owner declaration materialises it.
      */
-    [[nodiscard]] bool adopt_identity(role_t role, const handlers_t& handlers,
+    [[nodiscard]] bool adopt_identity(const handlers_t& handlers,
                                       tr::mem::block_source_t& src) noexcept {
         const bool has_seam = handlers.on_read || handlers.on_write || handlers.on_children;
         // Nothing to install, so nothing to draw (an existing extension block needs nothing).
-        if (role != role_t::STREAM && !has_seam && !handlers.on_app_field_write) return true;
+        if (!has_seam && !handlers.on_app_field_write) return true;
         // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
         // seam only when one of its three is set; the app-field group's apply seam only
         // when given. Registration is single-threaded for this vertex, so no lock here.
