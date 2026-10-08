@@ -1758,6 +1758,26 @@ class AaNullPoolsRunnerStops(unittest.TestCase):
                          [("2026-10-08", 13), ("2026-10-09", 12)])
         self.assertEqual(meta["banked"], "2026-10-09")
 
+    def test_a_pooled_fit_banks_its_noisiest_window(self):
+        """Layout offsets move with host state: one window can show none and the next 10%.
+        Measured on the bench host, pooling dilutes that window to a threshold the next
+        window false-fails; the row banks the worst window's spread instead."""
+        import aa_null
+        quiet = [self.window(9, d) for d in ("d1", "d2")]
+        loud = self.window(9, "d3", offsets=(0, 0.08, 0))
+        one = aa_null.bank(loud)["rows"]["inproc/64/1/1"]["p50_ns"]
+        pooled = aa_null.bank(aa_null.pool(quiet + [loud]))["rows"]["inproc/64/1/1"]["p50_ns"]
+        self.assertAlmostEqual(pooled, one, places=5)
+        self.assertGreater(pg.leg_factor("inproc/64/1/1", "p50_ns",
+                                         {"inproc/64/1/1": {"p50_ns": pooled}})[0], 1.08)
+
+    def test_window_columns_split_back_out_of_a_pool(self):
+        import aa_null
+        a, b = self.window(8, "d1"), self.window(9, "d2")
+        parts = aa_null.split_windows(aa_null.pool([a, b]))
+        self.assertEqual([p["rounds"] for p in parts], [8, 9])
+        self.assertEqual(parts[1]["samples"]["inproc/64/1/1"], b["samples"]["inproc/64/1/1"])
+
     def test_one_measurement_still_banks_as_one_window(self):
         import aa_null
         meta = aa_null.bank(self.window(10, "2026-10-08"))["meta"]

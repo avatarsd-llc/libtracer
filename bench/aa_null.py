@@ -37,7 +37,7 @@ The statistic, per row and leg: for each ordered pair of distinct builds (x, y) 
 window of `perf_gate.PAIRS_DEFAULT` consecutive clean rounds, the median of the per-round
 ratios x/y — what one gate run comparing x to y would compute. Its robust spread is
 1.4826 x the median |log ratio| (a sigma estimate centred on the A/A truth, 1.0), stored as
-a relative figure. Stdlib only.
+a relative figure. A pooled fit keeps the largest spread of its windows. Stdlib only.
 """
 from __future__ import annotations
 
@@ -126,6 +126,23 @@ def pool(raws: list[dict]) -> dict:
             "windows": windows, "date": windows[-1]["date"], "host": windows[0]["host"]}
 
 
+def split_windows(raw: dict) -> list[dict]:
+    """@brief The measuring windows of a pooled measurement (@ref pool), each as its own
+    measurement; a single window comes back as itself."""
+    metas = _window_meta(raw)
+    if len(metas) < 2:
+        return [raw]
+    out, start = [], 0
+    for m in metas:
+        n = m["rounds"]
+        samples = {k: [col[start:start + n] for col in per_build]
+                   for k, per_build in raw["samples"].items()}
+        out.append({"builds": raw["builds"], "rounds": n, "samples": samples,
+                    "date": m.get("date", ""), "host": m.get("host", "")})
+        start += n + 1  # the dropped round pool() puts between two windows
+    return out
+
+
 def _windows(xs: list, ys: list, width: int) -> list[list[tuple[float, float]]]:
     """@brief Every run of @p width consecutive rounds where both builds ran clean."""
     pairs = [(x, y) if x is not None and y is not None else None for x, y in zip(xs, ys)]
@@ -159,15 +176,26 @@ def bank(raw: dict, width: int = pg.PAIRS_DEFAULT, held_out: dict | None = None)
     "rows": {key: {leg: spread}}}. A leg with no complete session (or a zero column) is left
     out, and the gate then gates it on the flat threshold and says so.
 
+    A pooled fit banks each leg's NOISIEST window: the robust spread is taken per measuring
+    window and the largest is kept. Layout offsets between builds move with host state
+    (#1909's 2026-10-08 bank: `fwd-demux-scan`'s align-64 build ran level in one window and
+    9-12% slow in two others), and a spread pooled over all windows dilutes the loud one
+    to a threshold a later window false-fails.
+
     The meta records the rounds and the windows they came from, and, given @p held_out (a
     measurement the fit did not use), its replay: the A/A false-fail sessions and how many
     rows an injected INJECT slowdown fails in every session."""
     rows: dict[str, dict[str, float]] = {}
-    for k, per_build in sorted(raw["samples"].items()):
+    windows = split_windows(raw)
+    for k in sorted(raw["samples"]):
         for leg in pg.LEGS:
-            rs = session_ratios(per_build, leg, width)
-            if rs:
-                rows.setdefault(k, {})[leg] = round(robust_spread(rs), 5)
+            spreads = []
+            for w in windows:
+                rs = session_ratios(w["samples"].get(k) or [], leg, width)
+                if rs:
+                    spreads.append(robust_spread(rs))
+            if spreads:
+                rows.setdefault(k, {})[leg] = round(max(spreads), 5)
     meta = {"builds": raw["builds"], "rounds": raw["rounds"], "window": width,
             "k": pg.NULL_K, "k_cliff": pg.CLIFF_NULL_K, "floor": pg.NULL_FLOOR, "host": raw.get("host", ""),
             "banked": raw.get("date", ""), "windows": _window_meta(raw)}
