@@ -26,6 +26,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   and `u64`; an optional `width` writes only the low bytes, and `load_le` zero-extends a short
   span. The `tr::detail` names are the same functions (using-declarations), so no caller and no
   generated code changes.
+- **The MCU link check: CI fails when `libtracer.a` gains a heap call
+  ([#1783](https://github.com/avatarsd-llc/libtracer/issues/1783), ADR-0083 Decision 1).**
+  `tools/check_no_heap.py` reads the archive with `nm` and fails on any undefined reference to
+  `malloc`, `calloc`, `realloc`, `free`, `heap_caps_*`, or any `operator new` or
+  `operator delete`, beyond the pins in `tools/no_heap_baseline.json`. It runs on the Cortex-M0
+  required-module archive (`footprint-cortexm0.yml`) and on the ESP32-C6 component archive
+  (`esp-idf.yml`). The pins are what core still references today, mostly deleting destructors
+  and std containers not yet on the seam; they can only be removed, and an empty baseline is
+  the plain no-heap gate.
 - **`op_resolver_t::resolve` takes a `reply_store`: an acknowledgement is built in caller
   storage ([#1658](https://github.com/avatarsd-llc/libtracer/issues/1658)).** A trailing
   `std::span<std::byte> reply_store = {}` on both overloads. The reply to a WRITE or a subscribe

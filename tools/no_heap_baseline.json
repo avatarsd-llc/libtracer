@@ -1,0 +1,169 @@
+{
+  "_comment": [
+    "The MCU no-heap link check's ratchet (tools/check_no_heap.py, #1783, ADR-0083 Decision 1).",
+    "Per target: the heap entry points each libtracer.a object still references. A pin may only",
+    "be removed (--repin); a reference not pinned here fails CI. Empty targets are the goal.",
+    "Most pins are deleting destructors (a virtual destructor references operator delete from",
+    "every object that emits the vtable) and std containers not yet on the seam; the PR for",
+    "#1783 lists them by function."
+  ],
+  "targets": {
+    "cortex-m0": {
+      "source": "tools/cortexm0_footprint.py --archive-out (arm-none-eabi-g++ 13.2, core/tests/footprint/config)",
+      "objects": {
+        "frame.o": [
+          "operator new"
+        ],
+        "mem_heap.o": [
+          "operator delete"
+        ],
+        "mem_pool.o": [
+          "operator delete"
+        ],
+        "mem_source.o": [
+          "operator delete",
+          "operator new"
+        ],
+        "path.o": [
+          "operator delete",
+          "operator new"
+        ]
+      }
+    },
+    "esp32c6": {
+      "source": "integrations/esp-idf/examples/full_node, idf.py set-target esp32c6 (espressif/idf:release-v6.0)",
+      "objects": {
+        "backend_set.cpp.obj": [
+          "operator delete"
+        ],
+        "builtin_transport_tcp.cpp.obj": [
+          "operator delete"
+        ],
+        "builtin_transport_udp.cpp.obj": [
+          "operator delete"
+        ],
+        "builtin_transports.cpp.obj": [
+          "operator delete"
+        ],
+        "critical_pool.cpp.obj": [
+          "operator delete"
+        ],
+        "device_backend.cpp.obj": [
+          "operator delete"
+        ],
+        "esp_ws_client_link.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "frame.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "fwd_originate.cpp.obj": [
+          "operator delete"
+        ],
+        "fwd_reply.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "fwd_router.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "graph.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "graph_fields.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "httpd_ws_link.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "lkv_node_pool.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "loopback.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "mem_heap.cpp.obj": [
+          "operator delete"
+        ],
+        "mem_pool.cpp.obj": [
+          "operator delete"
+        ],
+        "mem_source.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "mem_source_backend.cpp.obj": [
+          "operator delete"
+        ],
+        "op_resolve.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "op_resolve_view.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "path.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "path_label_table.cpp.obj": [
+          "operator delete"
+        ],
+        "posix_endpoint.cpp.obj": [
+          "operator delete"
+        ],
+        "rope.cpp.obj": [
+          "operator delete"
+        ],
+        "rope_decode.cpp.obj": [
+          "operator delete"
+        ],
+        "route_handle.cpp.obj": [
+          "operator delete"
+        ],
+        "self_heal_link.cpp.obj": [
+          "operator delete"
+        ],
+        "socketcan_link_stub.cpp.obj": [
+          "operator delete"
+        ],
+        "tlv_arena.cpp.obj": [
+          "operator delete"
+        ],
+        "tlv_view.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "transport_can.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "transport_tcp.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "transport_udp.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "transport_vertex.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ],
+        "twai_link.cpp.obj": [
+          "operator delete",
+          "operator new"
+        ]
+      }
+    }
+  }
+}

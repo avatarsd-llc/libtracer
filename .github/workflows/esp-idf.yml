@@ -46,6 +46,8 @@ on:
       - "integrations/platformio/pio_esp32_can.py"
       - "tools/check_esp_ws_plane.py"
       - "tools/check_esp_thread_id.py"
+      - "tools/check_no_heap.py"
+      - "tools/no_heap_baseline.json"
       - ".github/workflows/esp-idf.yml"
   pull_request:
     paths:
@@ -58,6 +60,8 @@ on:
       - "tools/check_esp_ws_plane.py"
       - "tools/check_esp_thread_id.py"
       - "tools/rv32_footprint.py"
+      - "tools/check_no_heap.py"
+      - "tools/no_heap_baseline.json"
       - "core/tests/footprint/**"
       - ".github/workflows/esp-idf.yml"
   workflow_dispatch:
@@ -264,6 +268,22 @@ jobs:
         run: |
           . "${IDF_PATH}/export.sh"
           python3 "${GITHUB_WORKSPACE}/tools/check_esp_thread_id.py" --build-dir build
+
+      # The MCU no-heap link check (#1783, ADR-0083 Decision 1), on the component archive the
+      # example linked. One target: the pins are per toolchain, and esp32c6 is the required one.
+      # Every heap entry point libtracer.a references (malloc/free/calloc/realloc, heap_caps_*,
+      # any operator new or delete) must be pinned in tools/no_heap_baseline.json, and the
+      # pins only ever shrink: a new heap call reds the job, and so does a pin that is gone
+      # until `--repin` lowers it.
+      - name: No-heap link check (libtracer.a references no heap)
+        if: matrix.target == 'esp32c6'
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          . "${IDF_PATH}/export.sh"
+          python3 "${GITHUB_WORKSPACE}/tools/check_no_heap.py" --target esp32c6 \
+            --archive build/esp-idf/libtracer/libtracer.a \
+            --nm riscv32-esp-elf-nm --objdump riscv32-esp-elf-objdump
 
       # Footprint report (docs/reference/00-overview.md §"build-size profiles";
       # numbers described by integrations/esp-idf/README.md §Memory budget).
