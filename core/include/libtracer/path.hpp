@@ -462,7 +462,7 @@ class path_key_t {
         if (!b.empty()) std::memcpy(dst, b.data(), b.size());
         return true;
     }
-    /** @brief @ref assign from @p src, or from the process table source when null (an inline
+    /** @brief `%assign` from @p src, or from the process table source when null (an inline
      *         key has no source); a refusal stops the node. Defined in `path.cpp`. */
     void assign_or_stop(std::span<const std::byte> b, tr::mem::block_source_t* src);
     /** @brief The source a spilled key's block came from; null for an inline key. */

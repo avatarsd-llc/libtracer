@@ -1213,8 +1213,8 @@ int main() {
         };
         std::printf(
             "RESULT zeroheap reg_escape allocs=%zu frees=%zu bytes=%zu n=%zu mr_served=%zu "
-            "ok=%d (report-only — GLOBAL-heap blocks per RUNTIME registration that bypass "
-            "the injected block_source_t; ADR-0039 / RFC-0014, #551, #873)\n",
+            "ok=%d (pinned at zero — GLOBAL-heap blocks per RUNTIME registration that "
+            "bypass the injected block_source_t; ADR-0039 / RFC-0014, #1991)\n",
             reg.allocs / kRegN, reg.frees / kRegN, per_reg(reg.live_bytes), kRegN,
             mr_served / kRegN, reg_ok ? 1 : 0);
         if (!reg_ok) {
