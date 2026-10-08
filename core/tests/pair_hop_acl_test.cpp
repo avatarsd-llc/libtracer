@@ -47,6 +47,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport.hpp"
+#include "pair_body.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -111,7 +112,7 @@ bytes_t b_value_u8(std::uint8_t v) {
 /** @brief A `PATH` TLV whose body is the PAIR @p head followed by the NAMEs @p tail. */
 bytes_t b_pair_path(path_pair_t head, std::initializer_list<std::string_view> tail = {}) {
     bytes_t body;
-    tr::wire::emit_path_pair(body, head);
+    tr::testing::emit_path_pair(body, head);
     for (const std::string_view s : tail) (void)tr::wire::emit_path_segment(body, s);
     bytes_t out;
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);

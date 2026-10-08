@@ -39,6 +39,7 @@
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "pair_body.hpp"
 #include "route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "test_support.hpp"
 #include "test_values.hpp"
@@ -79,7 +80,7 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
  */
 std::vector<std::byte> b_path_pairs(std::span<const tr::wire::path_pair_t> elements) {
     std::vector<std::byte> body;
-    for (const tr::wire::path_pair_t& e : elements) tr::wire::emit_path_pair(body, e);
+    for (const tr::wire::path_pair_t& e : elements) tr::testing::emit_path_pair(body, e);
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;

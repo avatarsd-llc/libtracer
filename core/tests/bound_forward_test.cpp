@@ -54,6 +54,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "pair_body.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
@@ -112,7 +113,7 @@ using tr::testing::b_fwd_raw_op;
  */
 std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) {
     std::vector<std::byte> body;
-    for (const path_ref_element_t& e : elements) tr::wire::emit_path_pair(body, e);
+    for (const path_ref_element_t& e : elements) tr::testing::emit_path_pair(body, e);
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;

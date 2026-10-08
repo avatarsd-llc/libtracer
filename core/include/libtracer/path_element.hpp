@@ -47,6 +47,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -330,9 +331,12 @@ struct path_element_census_t {
             return emit_path_segment(out, element.payload);
         case path_element_kind_t::LABEL:
             return emit_path_label(out, element.label);
-        case path_element_kind_t::PAIR:
-            emit_path_pair(out, element.pair);
+        case path_element_kind_t::PAIR: {
+            std::array<std::byte, kPathPairRecordBytes> rec{};
+            path_pair_store(rec, element.pair);
+            out.insert(out.end(), rec.begin(), rec.end());
             return true;
+        }
         case path_element_kind_t::FOREIGN:
             return emit_path_escape(out, element.escape_kind, element.payload);
         case path_element_kind_t::MALFORMED:

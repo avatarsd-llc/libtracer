@@ -43,6 +43,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "pair_body.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
@@ -91,7 +92,8 @@ std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) 
  */
 std::vector<std::byte> b_path_ref_one(std::uint32_t index, std::uint32_t generation) {
     std::vector<std::byte> body;
-    tr::wire::emit_path_pair(body, tr::wire::path_pair_t{.index = index, .generation = generation});
+    tr::testing::emit_path_pair(body,
+                                tr::wire::path_pair_t{.index = index, .generation = generation});
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;

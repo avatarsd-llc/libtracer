@@ -48,6 +48,7 @@
 #include "libtracer/path_ref.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "pair_body.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
@@ -104,7 +105,7 @@ bytes_t b_chain(std::initializer_list<el_t> els) {
     bytes_t body;
     for (const el_t& e : els) {
         if (e.is_pair)
-            tr::wire::emit_path_pair(body, e.pair);
+            tr::testing::emit_path_pair(body, e.pair);
         else
             (void)tr::wire::emit_path_segment(body, e.name);
     }
@@ -266,7 +267,7 @@ void codec() {
     std::printf("\n1) the PAIR element codec (§4.1, §5.1)\n");
     const path_pair_t p{.index = 0x01020304, .generation = 0x0A0B0C0D};
     bytes_t body;
-    tr::wire::emit_path_pair(body, p);
+    tr::testing::emit_path_pair(body, p);
     const bytes_t want{std::byte{0x00}, std::byte{0x16}, std::byte{0x08}, std::byte{0x04},
                        std::byte{0x03}, std::byte{0x02}, std::byte{0x01}, std::byte{0x0D},
                        std::byte{0x0C}, std::byte{0x0B}, std::byte{0x0A}};
@@ -280,7 +281,7 @@ void codec() {
 
     // Every value is structurally a pair: validity is the owner's deref, never the codec's.
     bytes_t zero;
-    tr::wire::emit_path_pair(zero, path_pair_t{});
+    tr::testing::emit_path_pair(zero, path_pair_t{});
     check(path_element_at(zero, 0).kind == path_element_kind_t::PAIR,
           "(0, 0) is a PAIR too — the deref refuses it, the codec does not (§6 step 2)");
 
@@ -305,7 +306,7 @@ void codec() {
     // Mixed chains: walk, census, re-emit.
     bytes_t mixed;
     (void)tr::wire::emit_path_segment(mixed, "net");
-    tr::wire::emit_path_pair(mixed, p);
+    tr::testing::emit_path_pair(mixed, p);
     (void)tr::wire::emit_path_segment(mixed, "temp");
     const tr::wire::path_element_census_t c = tr::wire::path_element_census(mixed);
     check(c.well_formed && c.elements == 3 && c.segments == 2 && c.pairs == 1 && c.labels == 0,
@@ -358,13 +359,13 @@ void vectors() {
           "a stale pair is answered tr::path::not_found");
     // The vector's pair is 3:1; rebuild the node's answer with that spelling for the compare.
     bytes_t expect_body;
-    tr::wire::emit_path_pair(expect_body, stale);
+    tr::testing::emit_path_pair(expect_body, stale);
     bytes_t vec = vector_bytes("fwd/pair-stale-generation-not-found");
     // Patch the vector's echoed pair to this node's stale pair: the SHAPE is what is pinned,
     // and the pair's value is a fact about whichever owner answered.
     const bytes_t vec_pair = [] {
         bytes_t b;
-        tr::wire::emit_path_pair(b, path_pair_t{.index = 3, .generation = 1});
+        tr::testing::emit_path_pair(b, path_pair_t{.index = 3, .generation = 1});
         return b;
     }();
     const auto at = std::search(vec.begin(), vec.end(), vec_pair.begin(), vec_pair.end());
@@ -432,7 +433,7 @@ void hop() {
         for (const tr::wire::tlv_t& c : dec->children)
             if (c.type == tr::wire::type_t::PATH) {
                 bytes_t want;
-                tr::wire::emit_path_pair(want, far);
+                tr::testing::emit_path_pair(want, far);
                 tail_ok = bytes_t(c.payload.begin(), c.payload.end()) == want;
                 break;
             }

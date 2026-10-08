@@ -53,7 +53,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`libtracer/path_pair.hpp` — the RFC-0029 PAIR element codec.** `path_pair_t` (the
   `(index, generation)` pair), `kPathPairRecordBytes` (11), `path_pair_record_valid`,
   `path_pair_store` / `emit_path_pair` (writer), `path_pair_load` / `path_pair_at` (reader).
-  Constexpr and allocation-free; the emitter appends to a caller's vector.
+  Constexpr and allocation-free; the emitter appends to a caller's core byte array (`mem::bytes_t`).
 - **`libtracer/pair.hpp` — one shared PAIR type
   ([#1700](https://github.com/avatarsd-llc/libtracer/issues/1700)).** `tr::wire::pair_t` (the
   owner-issued `(u32 index, u32 generation)`), `kPairBytes` (8) and its little-endian

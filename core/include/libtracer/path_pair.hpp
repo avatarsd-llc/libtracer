@@ -87,17 +87,11 @@ constexpr void path_pair_store(std::span<std::byte, kPathPairRecordBytes> out,
  * @brief Append one PAIR element — `00 16 08 <u32 LE index> <u32 LE generation>` — to @p out.
  *
  * Every `(index, generation)` has a spelling: validity is a property of the OWNER's index at
- * dereference time (§6 step 2), never of the bytes, so there is no value this refuses.
+ * dereference time (§6 step 2), never of the bytes, so this refuses only when the source does.
+ * A core byte array: no owning std type crosses the public API (#1781).
+ *
+ * @retval false The source refused (nothing appended).
  */
-inline void emit_path_pair(std::vector<std::byte>& out, const path_pair_t& pair) {
-    std::array<std::byte, kPathPairRecordBytes> rec{};
-    path_pair_store(rec, pair);
-    out.insert(out.end(), rec.begin(), rec.end());
-}
-
-/** @brief One PAIR element appended to a core byte array (#1781) — same bytes as the
- *         `std::vector` form above.
- *  @retval false The source refused. */
 [[nodiscard]] inline bool emit_path_pair(mem::bytes_t& out, const path_pair_t& pair) noexcept {
     std::array<std::byte, kPathPairRecordBytes> rec{};
     path_pair_store(rec, pair);
