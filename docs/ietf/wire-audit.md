@@ -103,7 +103,7 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | segment count cap | 255 | assigned | `path/path-deep-255-packed` | — | **keep** | |
 | reserved characters | `/ : . [ ] * ?` | assigned | `path/path-reserved-brackets` | — | **keep** | |
 | address-segment index | `segment = name [index]` | grammar only, no wire carrier | none found | — | **delete**: an ABNF production with no encoding. | F9 |
-| path as a VALUE string "where a path is expected" | VALUE `0x01` | MUST accept (05 §string form) | none: `parse_subscriber_tlv` reads only a PATH child | — | **merge** into the PATH form: the text contradicts what ships. | F10 |
+| path as a VALUE string "where a path is expected" | VALUE `0x01` | MUST accept (05 §string form) | none: `parse_subscriber_tlv` reads only a PATH child | — | **merge** into the PATH form: the text contradicts what ships. | F10, done ([#2014](https://github.com/avatarsd-llc/libtracer/pull/2014)) |
 
 ## 4. `SUBSCRIBER` and its `qos_settings` (05 §`0x04`)
 
