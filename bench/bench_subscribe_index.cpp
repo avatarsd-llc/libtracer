@@ -106,16 +106,17 @@
  * `(bytes@65 − bytes@4) / 61` is the index's PER-LINK footprint — the figure the 2026-08-14
  * ruling quoted as *"~832 B → roughly ~500 B (est.)"* and never checked.
  *
- * The live `graph_t` is measured through the same counter, and it turns out to be a SHARPER
- * instrument than expected rather than a contaminated one. A `graph_t` draws nothing at all
- * from its injected `std::pmr::memory_resource` during construction or vertex registration —
- * measured: 0 bytes and 0 allocations after a ctor plus eight `register_vertex` calls, because
- * vertex storage comes from the `ctl` block source and the global heap. In this workload the
- * counted arena therefore sees exactly one structure: `link_index_` itself. The live arm's
- * bytes ARE the shipped index's bytes, no subtraction required, and `calibrate` asserts that
- * `idx-string` reproduces them byte-for-byte and allocation-for-allocation before any number
- * is reported. That check is what makes the transcription's faithfulness a machine-verified
- * property instead of an authorial claim.
+ * The faithfulness of the transcription is checked against the SHIPPED `link_index_t` itself:
+ * `calibrate` builds one over the same counter, feeds it the pass `subscribe_wire` feeds it,
+ * and refuses to report unless `idx-token-carry` reproduces its bytes and allocations exactly.
+ * That check is what makes the transcription's faithfulness a machine-verified property
+ * instead of an authorial claim.
+ *
+ * The live `graph_t` is measured through the same counter, but since the one allocation seam
+ * (#1777, #1885) it draws its tables, vertex slots, edges and values from that source too, so
+ * its bytes are no longer the index's alone (#1902). Its `RESULT_SIDX_RAM` row is reported net
+ * of the built graph: what ONE subscribe pass draws — index entries, edges and remote-subscriber
+ * records together — which is the subscribe path's RAM, not the index's.
  *
  * @section reading How to read the output
  *
@@ -270,6 +271,11 @@ bool candidates_contain(const std::pmr::vector<cand_t>& vs, std::size_t sorted, 
  */
 void insert_candidate(link_entry_t& e, const cand_t v) {
     if (candidates_contain(e.vs, e.compacted, v)) return;
+    // The shipped list is regrown only when full, to `2n + 1` (#1778: a link's first
+    // candidate takes a one-pointer block). Transcribed with it (#1902): a bare `push_back`
+    // doubles 1, 2, 4, 8 and held 56 B per link fewer than the shipped 1, 3, 7, 15 at eight
+    // vertices, which is what the faithfulness oracle caught.
+    if (e.vs.size() == e.vs.capacity()) e.vs.reserve(e.vs.size() * 2 + 1);
     e.vs.push_back(v);
     if (e.vs.size() - e.compacted >= kLinkIndexCompactFloor) {
         compact_candidates(e.vs);
@@ -890,8 +896,21 @@ class driver_t {
         // which is also where their idempotency is exercised; the live arm gets exactly ONE,
         // for the reason @ref live_pass records.
         const std::size_t passes = arm_ == arm_t::SUB_WIRE ? 1 : 2;
+        // The live graph draws its OWN tables, vertex slots and values from the counted
+        // source (#1777, #1885), so the bytes it holds before its first subscribe are the
+        // built graph's, not the subscribe path's. Recorded here, between the build and the
+        // warm-up, so @ref run_ram can report what the pass alone drew (#1902).
+        if (arm_ == arm_t::SUB_WIRE) {
+            base_live_ = mr.live();
+            base_allocs_ = mr.allocs();
+        }
         for (std::size_t i = 0; i < links * verts * passes; ++i) step();
     }
+
+    /** @brief Bytes the arm held before its warm-up: the built graph on `sub-wire`, else 0. */
+    [[nodiscard]] std::size_t base_live() const noexcept { return base_live_; }
+    /** @brief Allocations the arm made before its warm-up; see @ref base_live. */
+    [[nodiscard]] std::uint64_t base_allocs() const noexcept { return base_allocs_; }
 
     /**
      * @anchor live_pass
@@ -1099,6 +1118,8 @@ class driver_t {
     std::vector<std::vector<std::byte>> subs_;   /**< @brief Per-(link, vertex) SUBSCRIBER bytes. */
     std::vector<std::vector<std::byte>> routes_; /**< @brief Per-link return-route PATH bytes. */
     std::uint64_t live_ok_ = 0;                  /**< @brief Successful subscribes — kept live. */
+    std::size_t base_live_ = 0;                  /**< @brief Bytes held before the warm-up. */
+    std::uint64_t base_allocs_ = 0;              /**< @brief Allocations made before it. */
 };
 
 /** @brief One arm's figures at one grid cell in one round. */
@@ -1165,13 +1186,48 @@ struct ram_result_t {
     std::size_t entries = 0;  /**< @brief Distinct candidates the arm recorded for link 0. */
 };
 
-/** @brief Steady-state footprint of one arm at one grid cell. */
+/**
+ * @brief Steady-state footprint of one arm at one grid cell.
+ *
+ * Net of what the arm held before its warm-up (@ref driver_t::base_live). That is zero on every
+ * index arm; on `sub-wire` it is the built graph, so its row is what ONE subscribe pass draws
+ * from the graph's source — the index entries, the edges and the remote-subscriber records —
+ * and `peak` is the pass's high-water mark above the built graph (#1902).
+ */
 [[nodiscard]] ram_result_t run_ram(arm_t arm, std::size_t links, std::size_t verts) {
     counting_resource_t mr;
     ram_result_t out;
     {
         driver_t d(arm, links, verts, mr);
         out.entries = d.candidates(0);
+        out.live = mr.live() - d.base_live();
+        out.peak = mr.peak() - d.base_live();
+        out.allocs = mr.allocs() - d.base_allocs();
+    }
+    return out;
+}
+
+/**
+ * @brief The SHIPPED `link_index_t`'s footprint after the pass `subscribe_wire` drives into it.
+ *
+ * The faithfulness oracle's other side (#1902). One pass, one `index_vertex` per
+ * `(link, vertex)` in the driver's rotation, with the empty token the live arm's
+ * `subscribe_wire` carries (so every insert takes the name fallback, as it does there). The
+ * index only compares and stores its `vertex_t*`, so the driver's stand-in pointers serve.
+ */
+[[nodiscard]] ram_result_t run_ram_shipped(std::size_t links, std::size_t verts) {
+    counting_resource_t mr;
+    ram_result_t out;
+    {
+        tr::graph::link_index_t idx(mr.as_source());
+        const std::vector<std::string> names = make_link_names(links);
+        std::vector<std::uintptr_t> pool;
+        const std::vector<cand_t> cands = make_candidates(pool, verts);
+        for (std::size_t k = 0; k < links * verts; ++k)
+            if (!idx.index_vertex(names[(k / verts) % links], tr::graph::link_id_t{},
+                                  static_cast<tr::graph::vertex_t*>(cands[k % verts])))
+                return {};
+        out.entries = idx.candidate_count(names[0]);
         out.live = mr.live();
         out.peak = mr.peak();
         out.allocs = mr.allocs();
@@ -1348,34 +1404,39 @@ int calibrate() {
 
     // 6 — THE FAITHFULNESS ORACLE, and it is the strongest check in this file.
     //
-    // A `graph_t` built over an injected `std::pmr::memory_resource` draws NOTHING from it
-    // during construction or vertex registration — measured: 0 bytes, 0 allocations after a
-    // ctor and 8 `register_vertex` calls. Vertex storage comes from the `ctl` block source and
-    // the global heap. So in THIS workload the counted arena sees exactly one structure:
-    // `link_index_` itself.
+    // The arm that claims to be today's shape must reproduce the SHIPPED `link_index_t`
+    // byte-for-byte AND allocation-for-allocation. If it ever stops, the transcription has
+    // drifted from the code it claims to transcribe, and every figure in this bench is
+    // measuring something other than what it says. That is a refusal to report, not a
+    // footnote.
     //
-    // Which means the live arm's byte count is the SHIPPED index's byte count, and the
-    // transcription arm can be checked against it directly rather than taken on trust. If the
-    // arm that claims to be today's shape ever stops reproducing `link_index_` byte-for-byte
-    // AND allocation-for-allocation, the transcription has drifted from the code it claims to
-    // transcribe, and every figure in this bench is measuring something other than what it
-    // says. That is a refusal to report, not a footnote.
+    // WHAT THE SHIPPED SIDE IS MOVED (#1902). Until the one allocation seam, a `graph_t` drew
+    // nothing from its injected source but `link_index_`, so the live `sub-wire` arm's bytes
+    // WERE the index's and this check compared against them. Since #1777 / #1885 the graph
+    // draws its tables, vertex slots, edges and values from that same source, so the live
+    // arm counts the whole subscribe path (and this check failed, 14589 B against 512 B at 4
+    // links, with the index itself unchanged). The shipped side is now `link_index_t` itself,
+    // built over the counter and fed the pass `subscribe_wire` feeds it (@ref
+    // run_ram_shipped); check 4 above still shows the live path reaches that index.
     //
     // WHICH ARM IS CHECKED MOVED WITH THE SHIPPED INDEX (#1417). Until the carry landed, the
     // shipped shape was `idx-string` and it reproduced 746 / 23 @ 4 links, 1388 / 45 @ 8 and
     // 11467 / 361 @ 65. The carry replaced the map with the dense slot vector this file's
     // `carry_index_t` transcribes, so `idx-token-carry` is now the arm under oath and the
-    // numbers moved with it — 512 / 20, 1024 / 40, 8320 / 325. `idx-string` is retained
-    // deliberately and is now the HISTORICAL BASELINE: it is what `origin/main` shipped
-    // before this change, it is the column every saving in #1416's curve is quoted against,
-    // and keeping it in-binary is what lets the two shapes be compared under one layout.
+    // numbers moved with it — 512 / 20, 1024 / 40, 8320 / 325, and to 736 / 20, 1472 / 40,
+    // 11960 / 325 when #1778's `2n + 1` list growth was transcribed (#1902). `idx-string` is
+    // retained deliberately and is now the HISTORICAL BASELINE: it is what `origin/main`
+    // shipped before #1417, it is the column every saving in #1416's curve is quoted against,
+    // and keeping it in-binary is what lets the two shapes be compared under one layout. It
+    // shares the transcribed list growth, so it differs from the carry ONLY in its keying.
     for (const std::size_t l : {std::size_t{4}, std::size_t{8}, std::size_t{65}}) {
         const ram_result_t r_carry = run_ram(arm_t::IDX_CARRY, l, kV);
-        const ram_result_t r_live = run_ram(arm_t::SUB_WIRE, l, kV);
-        expect("idx-token-carry reproduces the shipped link_index_ BYTE for byte", r_carry.live,
-               r_live.live);
+        const ram_result_t r_shipped = run_ram_shipped(l, kV);
+        expect("the shipped link_index_t records every vertex exactly once", r_shipped.entries, kV);
+        expect("idx-token-carry reproduces the shipped link_index_t BYTE for byte", r_carry.live,
+               r_shipped.live);
         expect("idx-token-carry reproduces it ALLOCATION for allocation", r_carry.allocs,
-               r_live.allocs);
+               r_shipped.allocs);
     }
     return bad;
 }
