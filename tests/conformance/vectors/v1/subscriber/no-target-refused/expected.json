@@ -1,0 +1,12 @@
+{
+  "name": "no-target-refused",
+  "category": "subscriber",
+  "hex": "04401D000B40190002000F0064656C69766572795F706F6C696379010002002000",
+  "total_bytes": 33,
+  "decoded": {
+    "type": "0x04 SUBSCRIBER",
+    "structured": true,
+    "meaning": "SUBSCRIBER{ SETTINGS{ NAME \"delivery_policy\" VALUE u16=0x0020 } } — no target_path child. Written to `:subscribers[N]` it is NOT an unsubscribe: it answers tr::schema::type_mismatch (0x0030) and slot N keeps its edge (RFC-0009 erratum 2026-10-08)",
+    "note": "an implementation that clears slot N on this record fails the vector, and so does one that replaces the edge with a targetless one. The one slot-clear sentinel is the empty STATUS (framing/empty-status-ok)"
+  }
+}

@@ -790,3 +790,36 @@ says, and it stays off the wire so §C.4's collapse is preserved. Read the justi
 wire surface moves** — the sequence is not wire-observable, and no behaviour changes: the state
 that survives and the state that resets are exactly §B.6.1/§B.6.2's lists. The wording is
 width-agnostic, so it holds before and after [#1682](https://github.com/avatarsd-llc/libtracer/pull/1682).
+
+## Erratum (2026-10-08) — a SUBSCRIBER without `target_path` is not an unsubscribe ([#1979](https://github.com/avatarsd-llc/libtracer/issues/1979))
+
+**What the text said.** [`reference/05`](../../reference/05-protocol-tlvs.md) §`0x04`
+Validation, which §D.1 left in place beside the sentinel it confirmed: *"A SUBSCRIBER with no
+`target_path` is treated as "clear this slot" (unsubscribe sentinel)."* That made two
+slot-clear spellings, and §D.1 names only one.
+
+**What the behaviour is.** §D.1 decides it: an indexed `:subscribers[N]` write of an empty
+`STATUS` clears slot N, a `SUBSCRIBER` replaces slot N's edge through the append door, and any
+other payload is rejected `tr::schema::type_mismatch`. The replace arm admits through the
+field-write `:subscribers[]` append door, and since #598 that door refuses a `SUBSCRIBER` that
+names no target with `tr::schema::type_mismatch`: it delivers to a local target, and the record
+names none. So a targetless `SUBSCRIBER` written to `:subscribers[N]` is refused and slot N keeps
+its edge. The routed wire append (`subscribe_wire`) is a different door: it admits such a record
+and delivers over the return route. This erratum leaves it unchanged; it needs none
+([RFC-0021](0021-wire-subscriber-target-frame-of-reference.md) erratum 2026-10-08,
+[#2016](https://github.com/avatarsd-llc/libtracer/issues/2016)).
+
+**Which change made them diverge.** The §D.1 fix
+([#598](https://github.com/avatarsd-llc/libtracer/issues/598)). Before it, every indexed write
+cleared slot N whatever it carried, a targetless `SUBSCRIBER` included, so the sentence was
+true by accident. Since then no door has treated that record as an unsubscribe.
+
+**The correction.** The reference/05 sentence now reads: a `SUBSCRIBER` with no `target_path`
+is not an unsubscribe; written to `:subscribers[N]` it MUST be rejected
+`tr::schema::type_mismatch` and slot N keeps its edge; the one slot-clear sentinel is the empty
+`STATUS`. [`reference/02`](../../reference/02-graph-model.md)'s table of the indexed write says
+the same. The conformance vector `subscriber/no-target-refused` pins it.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves**: no codepoint, error code or frame shape changes, and a conforming
+implementation of §D.1 already answers this record exactly as the corrected text says.

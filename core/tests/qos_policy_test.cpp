@@ -884,6 +884,44 @@ void test_value_target_is_refused() {
 }
 
 /**
+ * @brief `subscriber/no-target-refused`: a SUBSCRIBER without `target_path` is not an
+ *        unsubscribe (RFC-0009 erratum 2026-10-08, #1979).
+ *
+ * Written to an ACTIVE `:subscribers[0]`, the record answers TYPE_MISMATCH (the wire's
+ * `tr::schema::type_mismatch`) and slot 0 keeps its edge. Each way to fail it is measured:
+ * clearing the slot (the edge would stop delivering), replacing it (the read-back would change)
+ * and admitting it (its durability request would latch on join).
+ */
+void test_no_target_is_not_an_unsubscribe() {
+    std::printf("RFC-0009 erratum — a SUBSCRIBER with no target is not an unsubscribe:\n");
+    graph_t g;
+    const vertex_handle_t src = g.register_vertex(path_t("/nt/src"), role_t::STORED_VALUE);
+    (void)g.write(src, byte_value(0x5A));  // held, so an admitted durability request would latch
+    register_client(g);
+    check(append_vector(g, path_t("/nt/src"), "subscriber/policy-absent"),
+          "slot 0 holds a policy-less edge to /client");
+
+    tr::graph::field_path_t slot0;
+    slot0.steps.push_back(tr::graph::field_step_t{.name = "subscribers", .indexed = true});
+    check(fails_with(g.write(src, slot0, make_value(vector_bytes("subscriber/no-target-refused"))),
+                     status_t::TYPE_MISMATCH),
+          "`:subscribers[0]` refuses the targetless record with TYPE_MISMATCH");
+    check(g_client_writes == 0, "... it was not admitted: its durability request latched nothing");
+    const std::optional<decoded_t> back = decode_read(g.read(path_t("/nt/src:subscribers[0]")));
+    check(back.has_value() && back->bytes == vector_bytes("subscriber/policy-absent"),
+          "... and slot 0 still holds the record it held before (not replaced)");
+    (void)g.write(src, byte_value(0x77));
+    check(g_client_writes == 1 && g_client_last == 0x77,
+          "... and its edge still delivers (not cleared)");
+
+    // The ablation: the empty STATUS on the SAME slot is the sentinel, and it does clear.
+    check(g.write(src, slot0, make_value({0x09, 0x00, 0x00, 0x00})).has_value(),
+          "the empty STATUS on `:subscribers[0]` is accepted");
+    (void)g.write(src, byte_value(0x11));
+    check(g_client_writes == 1, "... and THAT clears the edge: the next write is not delivered");
+}
+
+/**
  * @brief `SUBSCRIBER{ PATH(/client), SETTINGS{ NAME "hint" NAME "delivery_policy",
  *        VALUE u16 @p word, NAME "pad" } }` — the #927 vector on the QoS SETTINGS.
  *
@@ -1159,6 +1197,7 @@ int main() {
     test_conformance_vectors();
     test_replace_door_latches();
     test_value_target_is_refused();
+    test_no_target_is_not_an_unsubscribe();
     test_qos_settings_pair_scan_cannot_be_hijacked();
     test_qos_settings_repeat_semantics_are_the_shared_walk();
     test_stream_depth_is_carried_and_ignored();
