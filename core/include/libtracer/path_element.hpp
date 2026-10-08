@@ -464,6 +464,8 @@ namespace detail_label {
             return emit_path_segment(out, element.payload);
         case path_element_kind_t::LABEL:
             return emit_path_label(out, element.label);
+        case path_element_kind_t::PAIR:
+            return emit_path_pair(out, element.pair);
         case path_element_kind_t::FOREIGN:
             return emit_path_escape(out, element.escape_kind, element.payload);
         case path_element_kind_t::MALFORMED:

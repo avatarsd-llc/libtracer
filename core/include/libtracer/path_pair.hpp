@@ -95,6 +95,15 @@ inline void emit_path_pair(std::vector<std::byte>& out, const path_pair_t& pair)
     out.insert(out.end(), rec.begin(), rec.end());
 }
 
+/** @brief One PAIR element appended to a core byte array (#1781) — same bytes as the
+ *         `std::vector` form above.
+ *  @retval false The source refused. */
+[[nodiscard]] inline bool emit_path_pair(mem::bytes_t& out, const path_pair_t& pair) noexcept {
+    std::array<std::byte, kPathPairRecordBytes> rec{};
+    path_pair_store(rec, pair);
+    return out.append(rec.data(), rec.size());
+}
+
 /**
  * @brief Decode the 8-byte payload of a PAIR record (the inverse of @ref path_pair_store's
  *        value half).
