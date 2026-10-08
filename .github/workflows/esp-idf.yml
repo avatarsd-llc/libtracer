@@ -271,11 +271,11 @@ jobs:
 
       # The MCU no-heap link check (#1783, ADR-0083 Decision 1), on the component archive the
       # example linked. One target: the pins are per toolchain, and esp32c6 is the required one.
-      # Every call site in libtracer.a that references the heap (malloc/free/calloc/realloc,
-      # heap_caps_*, any operator new or delete), per object and function, must be pinned in
-      # tools/no_heap_baseline.json, and the pins only ever shrink: a new call site or an extra
-      # call at a pinned one reds the job, and so does a pin that is gone until `--repin`
-      # lowers it.
+      # Every function in libtracer.a that reaches the heap (malloc/free/calloc/realloc,
+      # heap_caps_*, any operator new or delete), by naming it or by calling a function in the
+      # archive that does, must be pinned in tools/no_heap_baseline.json, and the pins only
+      # ever shrink: a new such function or an extra path in a pinned one reds the job, and so
+      # does a pin that is gone until `--repin` lowers it.
       - name: No-heap link check (libtracer.a references no heap)
         if: matrix.target == 'esp32c6'
         shell: bash

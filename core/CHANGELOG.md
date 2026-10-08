@@ -28,11 +28,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   generated code changes.
 - **The MCU link check: CI fails when `libtracer.a` gains a heap call
   ([#1783](https://github.com/avatarsd-llc/libtracer/issues/1783), ADR-0083 Decision 1).**
-  `tools/check_no_heap.py` reads the archive's relocations with `objdump -r` and finds every
-  call site, per object and function, that references `malloc`, `calloc`, `realloc`, `free`
-  (newlib's `_r` forms too), `heap_caps_*`, or any `operator new` or `operator delete`. It
-  fails on any site, or any extra call at a site, beyond the pins in
-  `tools/no_heap_baseline.json`. It runs on the Cortex-M0 required-module archive
+  `tools/check_no_heap.py` reads the archive's symbols and relocations with `objdump -r -t` and
+  finds every function that reaches `malloc`, `calloc`, `realloc`, `free` (newlib's `_r` forms
+  too), `heap_caps_*`, any `operator new` or `operator delete`, or a thread or RTOS-object
+  creation: by naming one, or by calling, within the archive, a function that does, to a
+  fixpoint. It fails on any such function, or any extra path or call in one, beyond the pins
+  in `tools/no_heap_baseline.json`. It runs on the Cortex-M0 required-module archive
   (`footprint-cortexm0.yml`) and on the ESP32-C6 component archive (`esp-idf.yml`). The pins
   are what core still references today, mostly deleting destructors and std containers not
   yet on the seam; they can only be lowered, and an empty baseline is the plain no-heap gate.

@@ -4,10 +4,13 @@
 """The MCU link check: what in ``libtracer.a`` still calls the heap (ADR-0083, #1783).
 
 ADR-0083 Decision 1: every core allocation goes through the one injected seam, and the MCU
-``libtracer.a`` references no heap at all. This reads the archive's relocations with
-``objdump -r`` and lists every reference to a heap entry point, by CALL SITE: the object, the
-section the reference sits in (with ``-ffunction-sections``, one function) and the entry point,
-with how many times that section names it. The entry points:
+``libtracer.a`` reaches no heap at all. This reads the archive's symbols and relocations with
+``objdump -r -t`` and lists every function that REACHES a heap entry point, by call site: the
+object, the section (with ``-ffunction-sections``, one function) and what it reaches the heap
+through, with a count. A function reaches the heap when it names an entry point, or when it
+calls, within the archive, a function that does; that is iterated to a fixpoint, so a new
+function that only calls an allocating helper (``vector::push_back`` into an already-pinned
+``_M_realloc_insert``) is a site of its own and fails. The entry points:
 
 * the C allocator: ``malloc``, ``calloc``, ``realloc``, ``free``, ``aligned_alloc``,
   ``posix_memalign``, ``memalign``, ``valloc``, ``pvalloc``, ``reallocarray``, ``strdup``,
@@ -16,16 +19,24 @@ with how many times that section names it. The entry points:
 * C++: every ``operator new``, ``operator new[]``, ``operator delete`` and
   ``operator delete[]``, in every variant (sized, aligned, nothrow);
 * the ESP-IDF and FreeRTOS heaps: ``heap_caps_*alloc*`` / ``heap_caps_free``,
-  ``pvPortMalloc``, ``vPortFree``.
+  ``pvPortMalloc``, ``vPortFree``;
+* calls out of the archive that allocate without naming any of those: starting a
+  ``std::thread``, ``pthread_create``, the FreeRTOS creators that are not ``...Static``
+  (``xTaskCreate``, ``xQueueGenericCreate``, ...), and ``std::pmr::new_delete_resource``.
+
+The limit: a call out of the archive into other code that allocates, and is not in that
+list (newlib stdio, a libstdc++ member defined out of line), is not seen. The closure stops at
+the archive's edge.
 
 A deleting destructor counts: a class with a virtual destructor references
 ``operator delete`` from every object that emits its vtable, whether or not anything ever
 deletes one, and the linker cannot tell the difference either.
 
-* RATCHET. ``tools/no_heap_baseline.json`` pins, per target, every call site that references
-  the heap today: ``{object: {section: {entry point: count}}}``. A site the baseline does not
-  list fails, and so does a pinned site whose count grew: a heap call in a new function, or a
-  second one in a function that already had one. A pinned site that is gone or shrank also
+* RATCHET. ``tools/no_heap_baseline.json`` pins, per target, every function that reaches the
+  heap today: ``{object: {section: {entry point or "via <callee>": count}}}``, one line per
+  function. A function the baseline does not list fails, and so does a pinned one that gained
+  a path or a count: a heap call or an allocating helper called from a new function, or one
+  more call to either from a function that already had one. A pinned site that is gone or shrank also
   fails until ``--repin`` lowers it, so the baseline never claims more than the truth.
   ``--repin`` only lowers pins; it never adds one.
 * ZERO is the end state: an empty target in the baseline, and then this check is the plain
@@ -64,6 +75,10 @@ C_HEAP = (
     "_malloc_r", "_calloc_r", "_realloc_r", "_free_r", "_memalign_r",
 )
 RTOS_HEAP = ("pvPortMalloc", "vPortFree")
+# Out-of-archive calls that allocate without naming an entry point above.
+EXTERNAL = re.compile(r"^(?:_ZNSt6thread15_M_start_thread\w*|pthread_create|xTaskCreate|"
+                      r"xTaskCreatePinnedToCore|xQueueGenericCreate|xEventGroupCreate|"
+                      r"xTimerCreate|xStreamBufferGenericCreate|_ZNSt3pmr20new_delete_resourceEv)$")
 HEAP_CAPS = re.compile(r"^heap_caps_\w*(?:alloc\w*|free)$")
 # Itanium mangling: _Znw = operator new, _Zna = new[], _Zdl = delete, _Zda = delete[].
 CXX_HEAP = {"_Znw": "operator new", "_Zna": "operator new[]",
@@ -77,7 +92,7 @@ def family(symbol: str) -> str | None:
     """@brief The heap entry point @p symbol names, or None when it names none."""
     if symbol in C_HEAP or symbol in RTOS_HEAP:
         return symbol
-    if HEAP_CAPS.match(symbol):
+    if HEAP_CAPS.match(symbol) or EXTERNAL.match(symbol):
         return symbol
     for prefix, name in CXX_HEAP.items():
         if symbol.startswith(prefix):
@@ -90,34 +105,107 @@ def short_section(section: str) -> str:
     return section[len(".text."):] if section.startswith(".text.") else section
 
 
-def parse_relocs(text: str) -> Sites:
-    """@brief ``objdump -r`` output -> {object: {section: {entry point: count}}}.
+SYMBOL = re.compile(r"^[0-9a-fA-F]+ (.{7}) (\S+)\t[0-9a-fA-F]+ (.+)$")
+METADATA = (".debug", ".eh_frame", ".ARM.ex", ".ARM.extab", ".rela", ".rel.")
 
-    An archive's member starts at ``<member>:     file format <fmt>``; each section's
-    relocations at ``RELOCATION RECORDS FOR [<section>]:``; each record is
-    ``<offset> <type> <symbol>[+<addend>]``. Relocation sections that are themselves
-    metadata (debug info, unwind tables) are skipped: they name a function, not a call.
+
+class Archive:
+    """@brief What ``objdump -r -t`` says about an archive: who defines what, who references what.
+
+    * ``refs[(member, section)]``: {referenced symbol: count}, one count per relocation;
+    * ``local[(member, name)]`` / ``exported[name]``: the section a symbol is defined in, a
+      local one within its own member and a global or weak one in any member (an inline
+      function emitted in several members is the same code, so any definition stands for it);
+    * ``sections[member]``: the member's section names, so a relocation against a section
+      symbol resolves to that section.
     """
-    sites: Sites = {}
-    member, section = None, None
-    for line in text.splitlines():
-        if "file format" in line:
-            member = Path(line.split(":", 1)[0].strip()).name
-            section = None
-        elif line.startswith("RELOCATION RECORDS FOR ["):
-            section = line[len("RELOCATION RECORDS FOR ["):].rstrip(":").rstrip("]")
-            if section.startswith((".debug", ".eh_frame", ".ARM.ex", ".ARM.extab")):
+
+    def __init__(self, text: str):
+        self.refs: dict[tuple[str, str], dict[str, int]] = {}
+        self.local: dict[tuple[str, str], str] = {}
+        self.exported: dict[str, list[tuple[str, str]]] = {}
+        self.sections: dict[str, set[str]] = {}
+        member, section = None, None
+        for line in text.splitlines():
+            if "file format" in line:
+                member = Path(line.split(":", 1)[0].strip()).name
+                self.sections.setdefault(member, set())
                 section = None
-        elif member and section:
-            parts = line.split()
-            if len(parts) < 3:
+            elif member is None:
                 continue
-            fam = family(parts[2].split("+")[0])
-            if fam is None:
+            elif line.startswith("RELOCATION RECORDS FOR ["):
+                section = line[len("RELOCATION RECORDS FOR ["):].rstrip(":").rstrip("]")
+                if section.startswith(METADATA):
+                    section = None
+            elif m := SYMBOL.match(line):
+                flags, sec, name = m.group(1), m.group(2), m.group(3).strip()
+                if sec in ("*UND*", "*ABS*", "*COM*"):
+                    continue
+                self.sections[member].add(sec)
+                if "d" in flags:          # the section symbol itself
+                    continue
+                if flags[0] == "l":
+                    self.local[(member, name)] = sec
+                else:
+                    self.exported.setdefault(name, []).append((member, sec))
+            elif section is not None:
+                parts = line.split()
+                if len(parts) >= 3 and re.fullmatch(r"[0-9a-fA-F]+", parts[0]):
+                    sym = parts[2].split("+")[0]
+                    per = self.refs.setdefault((member, section), {})
+                    per[sym] = per.get(sym, 0) + 1
+
+    def resolve(self, member: str, sym: str) -> list[tuple[str, str]]:
+        """@brief The (member, section)s a reference from @p member to @p sym can land in."""
+        if sym in self.sections.get(member, ()):
+            return [(member, sym)]
+        if (member, sym) in self.local:
+            return [(member, self.local[(member, sym)])]
+        return self.exported.get(sym, [])
+
+
+def is_code(section: str) -> bool:
+    """@brief Whether @p section holds code, the only kind a call can reach the heap through."""
+    return section == ".text" or section.startswith(".text.")
+
+
+def heap_sites(arc: Archive) -> Sites:
+    """@brief Every section that reaches the heap, with what it reaches it through.
+
+    A section is a heap site when it names a heap entry point, or when it is code that calls,
+    within the archive, code that is one: iterated to a fixpoint, so a new function that only
+    calls an allocating helper (``vector::push_back`` into an already-pinned
+    ``_M_realloc_insert``) is a site of its own. A site's keys are the heap entry points it
+    names and ``via <symbol>`` for each heap-reaching callee, each with its count.
+    """
+    reach = {k for k, syms in arc.refs.items() if any(family(s) for s in syms)}
+    changed = True
+    while changed:
+        changed = False
+        for key, syms in arc.refs.items():
+            if key in reach or not is_code(key[1]):
                 continue
-            per = sites.setdefault(member, {}).setdefault(short_section(section), {})
-            per[fam] = per.get(fam, 0) + 1
+            if any(t in reach and is_code(t[1]) for s in syms for t in arc.resolve(key[0], s)):
+                reach.add(key)
+                changed = True
+    sites: Sites = {}
+    for member, section in reach:
+        out: dict[str, int] = {}
+        for sym, n in arc.refs[(member, section)].items():
+            fam = family(sym)
+            if fam is not None:
+                out[fam] = out.get(fam, 0) + n
+            elif is_code(section) and any(t in reach and is_code(t[1])
+                                          for t in arc.resolve(member, sym)):
+                k = "via " + short_section(sym)
+                out[k] = out.get(k, 0) + n
+        sites.setdefault(member, {})[short_section(section)] = out
     return sites
+
+
+def parse_relocs(text: str) -> Sites:
+    """@brief ``objdump -r -t`` output -> {object: {section: {entry point or via: count}}}."""
+    return heap_sites(Archive(text))
 
 
 def flatten(sites: Sites) -> dict[tuple[str, str, str], int]:
@@ -148,6 +236,32 @@ def lower(pinned: Sites, found: Sites) -> Sites:
     return out
 
 
+def dump(data: dict) -> str:
+    """@brief The baseline as JSON, one line per pinned function so a diff names the function."""
+    comment = data.get("_comment", [])
+    out = ["{", '  "_comment": [']
+    out += [f"    {json.dumps(c)}" + ("," if i + 1 < len(comment) else "")
+            for i, c in enumerate(comment)]
+    out += ["  ],", '  "targets": {']
+    targets = data.get("targets", {})
+    for ti, (name, entry) in enumerate(sorted(targets.items())):
+        out.append(f"    {json.dumps(name)}: {{")
+        out.append(f'      "source": {json.dumps(entry.get("source", ""))},')
+        out.append('      "sites": {')
+        objs = sorted(entry.get("sites", {}).items())
+        for oi, (obj, secs) in enumerate(objs):
+            out.append(f"        {json.dumps(obj)}: {{")
+            rows = sorted(secs.items())
+            for si, (sec, fams) in enumerate(rows):
+                comma = "," if si + 1 < len(rows) else ""
+                out.append(f"          {json.dumps(sec)}: {json.dumps(fams, sort_keys=True)}{comma}")
+            out.append("        }" + ("," if oi + 1 < len(objs) else ""))
+        out.append("      }")
+        out.append("    }" + ("," if ti + 1 < len(targets) else ""))
+    out += ["  }", "}"]
+    return "\n".join(out) + "\n"
+
+
 def demangle(names: list[str]) -> dict[str, str]:
     """@brief Best-effort ``c++filt`` over @p names; a name it cannot read maps to itself."""
     try:
@@ -174,7 +288,7 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        res = subprocess.run([args.objdump, "-r", args.archive], capture_output=True, text=True)
+        res = subprocess.run([args.objdump, "-r", "-t", args.archive], capture_output=True, text=True)
     except OSError as exc:
         print(f"::error::cannot run {args.objdump}: {exc}")
         return 1
@@ -193,8 +307,9 @@ def main() -> int:
                   f"starts a new one")
             return 1
         targets[args.target] = {"source": args.seed, "sites": found}
-        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(f"seeded {args.target}: {sum(flatten(found).values())} reference(s)")
+        path.write_text(dump(data), encoding="utf-8")
+        print(f"seeded {args.target}: {sum(flatten(found).values())} reference(s) from "
+              f"{sum(len(v) for v in found.values())} function(s)")
         return 0
     if entry is None and not args.strict:
         print(f"::error::no-heap: target {args.target!r} has no entry in {args.baseline}")
@@ -203,25 +318,30 @@ def main() -> int:
     new, gone = compare(found, pinned)
 
     flat = flatten(found)
-    print(f"no-heap [{args.target}]: {sum(flat.values())} heap reference(s) at {len(flat)} "
-          f"site(s) in {len(found)} object(s) of {args.archive}; "
+    print(f"no-heap [{args.target}]: {sum(flat.values())} heap reference(s) from "
+          f"{sum(len(v) for v in found.values())} function(s) in {len(found)} object(s) of "
+          f"{args.archive}; "
           f"{sum(flatten(pinned).values())} pinned.")
 
     if args.repin and not new:
         if gone:
             entry["sites"] = lower(pinned, found)
-            path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            path.write_text(dump(data), encoding="utf-8")
             print(f"repinned: lowered {len(gone)} site(s)")
         return 0
 
-    names = demangle(sorted({s for (_, s, _) in list(new) + list(gone)}))
+    names = demangle(sorted({s for (_, s, _) in list(new) + list(gone)} |
+                            {f[4:] for (_, _, f) in list(new) + list(gone) if f.startswith("via ")}))
     for (obj, sec, fam), (was, now) in sorted(new.items()):
-        print(f"::error::no-heap [{args.target}]: {obj} calls {fam} from {names.get(sec, sec)} "
-              f"({now} reference(s), {was} pinned), which libtracer.a must not (ADR-0083). "
-              f"Draw from the injected block source.")
+        what = f"calls {names.get(fam[4:], fam[4:])}, which reaches the heap" \
+            if fam.startswith("via ") else f"calls {fam}"
+        print(f"::error::no-heap [{args.target}]: {obj} {names.get(sec, sec)} {what} "
+              f"({now} reference(s), {was} pinned); libtracer.a must not reach the heap "
+              f"(ADR-0083). Draw from the injected block source.")
     for (obj, sec, fam), (was, now) in sorted(gone.items()):
-        print(f"::error::no-heap [{args.target}]: {obj} {names.get(sec, sec)} references {fam} "
-              f"{now} time(s), {was} pinned. Lower the pin: rerun with --repin.")
+        print(f"::error::no-heap [{args.target}]: {obj} {names.get(sec, sec)} references "
+              f"{names.get(fam[4:], fam) if fam.startswith('via ') else fam} {now} time(s), "
+              f"{was} pinned. Lower the pin: rerun with --repin.")
     if new or gone:
         return 1
     print("no-heap: OK — nothing beyond the pinned baseline.")
