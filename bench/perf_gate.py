@@ -1397,8 +1397,9 @@ def segdraw_gate(cur: dict[int, dict[str, int]],
 #               spilling write (`spill`) and two or four concurrent writers (`w2`, `w4`) take
 #               exactly ONE stripe-lock section per write; `w1` takes nothing from the global
 #               heap; and a write whose spill is refused (`defer`) delivers nothing until the
-#               next one. And #1777's: every ladder write below the last class's size
-#               (SEAMCLASS_LAST) is served by classes, with no oversize block.
+#               next one. And #1777's, widened by #1990: every ladder write up to and
+#               including the 64 KiB payload (SEAMCLASS_LAST) is served by classes, with no
+#               oversize block.
 #
 # EDITORS: RAM_POINTS is the list docs/methodology.md names as the gated RAM probes.
 RAM_POINTS = ["edge_callback", "edge_wire", "link", "vertex_value_1k"]
@@ -1421,8 +1422,8 @@ _EXACT_RES = (
 _EXACT_RATCHET = ("blocks_x1000", "seam_x1000", "seam_bytes_x1000", "heap_x1000",
                   "sections_x1000", "req_bytes_x1000", "class_bytes_x1000", "oversize_x1000")
 ONE_SECTION_CASES = ("w1", "spill", "w2", "w4")
-# The host table's last class (`config_t::kSizeClasses`, 64 KiB): a ladder payload below it
-# fits a class with its segment header; the 64 KiB payload's segment is one header past it.
+# The largest ladder payload the host table (`config_t::kSizeClasses`) classes, segment header
+# and all: its last row is 64 KiB plus that header (#1990), so no ladder write falls back.
 SEAMCLASS_LAST = 65536
 
 
@@ -1470,9 +1471,10 @@ def exact_invariants(cur: dict[str, dict[str, int]]) -> list[str]:
         if not key.startswith("seamclass:S="):
             continue
         size = int(key.removeprefix("seamclass:S="))
-        if size < SEAMCLASS_LAST and row["oversize_x1000"] != 0:
+        if size <= SEAMCLASS_LAST and row["oversize_x1000"] != 0:
             fails.append(f"seamclass S={size}: {row['oversize_x1000'] / 1000:g} oversize blocks "
-                         f"per write; below the last class every block is classed (#1777)")
+                         f"per write; up to a 64 KiB payload every block is classed "
+                         f"(#1777, #1990)")
     return fails
 
 

@@ -1545,9 +1545,10 @@ void run_route_handle_mt(std::size_t T) {
     emit("libtracer", mode.c_str(), kRouteBytes, 1, 1, ops, ops, 0.0, Latency::Summary{});
 }
 
-/** @brief The request sizes the host slab-pool seam rows time: the payload ladder, then the
- *         first request past the last class (the oversize fallback to the root). */
-constexpr std::size_t kSlabSeamSizes[] = {64, 984, 985, 1024, 4096, 16384, 65536, 65552};
+/** @brief The request sizes the host slab-pool seam rows time: the payload ladder, 65552 B
+ *         (within the 64 KiB payload's segment class since #1990, past the last class before
+ *         it), then the first request past the last class (the oversize fallback to the root). */
+constexpr std::size_t kSlabSeamSizes[] = {64, 984, 985, 1024, 4096, 16384, 65536, 65552, 65600};
 
 /**
  * @brief The shipped host slab pool behind the allocation seam, timed (#1908): size-class
@@ -1558,10 +1559,11 @@ constexpr std::size_t kSlabSeamSizes[] = {64, 984, 985, 1024, 4096, 16384, 65536
  *  - `seam-tables`: the same on the table sub-pool, which has no cache: every request takes
  *    its class's lock.
  *
- * Each at the request sizes of @ref kSlabSeamSizes. Up to 64 KiB a request is served by the
- * smallest class that holds it (one table load up to 4 KiB, a search above); 65552 B is past
- * the last class and falls back to the root, a block of its own from the platform heap per
- * request. The gap between the 65536 and 65552 B rows is that fallback.
+ * Each at the request sizes of @ref kSlabSeamSizes. Up to the last class, 64 KiB plus a
+ * segment header (65584 B, #1990), a request is served by the smallest class that holds it
+ * (one table load up to 4 KiB, a search above); 65600 B is past it and falls back to the root,
+ * a block of its own from the platform heap per request. The gap between the 65552 and
+ * 65600 B rows is that fallback.
  *
  * Self-checks, each a refusal (exit 2, no further row): the class decision the label names
  * holds for the size (classed up to the last class, oversize past it), and no timed request

@@ -327,6 +327,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **The host size-class ladder has a class for a 64 KiB payload's segment
+  ([#1990](https://github.com/avatarsd-llc/libtracer/issues/1990)).** The default
+  `kSizeClasses` topped out at 65536 B, the largest payload, so a 64 KiB value's one-block
+  segment (payload plus its 48 B header) fell past the last class to the root at about twice
+  the cost of a classed draw. `size_class_ladder_t` takes an optional fourth parameter,
+  `Header`, which appends one row of `Top + Header` bytes (default 0, no row: existing
+  spellings are unchanged), and the default table is now `size_class_ladder_t<16, 8, 65536,
+  48>`: 81 rows, the last 65584 B. Measured on bench-local (best of 5 interleaved rounds):
+  `seam-values` 65552 B 17.8 -> 7.2 ns, `seam-tables` 65552 B 17.4 -> 16.0 ns, and a 64 KiB
+  `lkv-alloc-heap` segment 18.7 -> 8.4 ns; 16 KiB and 64 KiB requests unchanged within noise.
+  The host root's static storage grows by 192 B (one class row in each of the three
+  sub-pools) and a thread's value cache by 8 B; startup RSS is unchanged, because a class
+  draws its first slab on its first request. The ESP-IDF component binds `kSlabPool = false`
+  and never reads the table, and the Cortex-M0 sentinel's footprint is byte-identical.
+
 - **The intrusive refcount skips its locked RMW while the process is single-threaded
   ([#1912](https://github.com/avatarsd-llc/libtracer/issues/1912)).**
   `view::detail::ref_count_t`'s native binding tests glibc's `__libc_single_threaded` first,

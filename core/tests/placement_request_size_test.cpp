@@ -290,12 +290,16 @@ int main() {
           "both backends draw at max_align_t's alignment (or the header's, if stricter)");
     check(tr::mem::segment_header_bytes(kAlign) == kHeader,
           "the one-block header is sizeof(segment_t) padded to the block alignment");
-    check(std::size(tr::graph::default_config_t::kSizeClasses) == 80 &&
+    check(std::size(tr::graph::default_config_t::kSizeClasses) == 81 &&
               tr::graph::default_config_t::kSizeClasses[0] == 16 &&
               tr::graph::default_config_t::kSizeClasses[7] == 128 &&
               tr::graph::default_config_t::kSizeClasses[8] == 144 &&
-              tr::graph::default_config_t::kSizeClasses[79] == 65536,
-          "the default table is 16..128 B by 16, then 8 classes per doubling to 64 KiB");
+              tr::graph::default_config_t::kSizeClasses[79] == 65536 &&
+              tr::graph::default_config_t::kSizeClasses[80] == 65536 + 48,
+          "the default table is 16..128 B by 16, then 8 classes per doubling to 64 KiB, then "
+          "64 KiB plus a 48 B segment header (#1990)");
+    check(tr::graph::default_config_t::kSizeClasses[80] >= kHeader + 65536,
+          "its last class holds a 64 KiB payload's one-block segment on this host (#1990)");
     std::size_t row_1k = 0;
     for (const std::size_t row : kClasses)
         if (row_1k == 0 && row >= kHeader + 1024) row_1k = row;

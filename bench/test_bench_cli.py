@@ -199,7 +199,7 @@ class FamiliesAreSelectableAndRefused(unittest.TestCase):
         modes = [r[2] for r in rows]
         self.assertEqual(modes[:5], ["seam-class-c1", "seam-class-c8", "seam-class-c32",
                                      "seam-direct", "seam-fallback"])
-        sizes = ["64", "984", "985", "1024", "4096", "16384", "65536", "65552"]
+        sizes = ["64", "984", "985", "1024", "4096", "16384", "65536", "65552", "65600"]
         for arm in ("seam-values", "seam-tables"):
             self.assertEqual([r[3] for r in rows if r[2] == arm], sizes, arm)
         self.assertNotIn("SEAM FAIL", out.stderr)
