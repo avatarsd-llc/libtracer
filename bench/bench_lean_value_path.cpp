@@ -63,7 +63,9 @@
  *                  One arm, two rows: the size alone picks the row (RFC-0028 §6.5's gate).
  *                  Each frame arrives in its own receive block, minted outside the window the
  *                  way the transport mints it (`view::alloc_rx`, with the ingress-loan reserve
- *                  since slice 9), so the value header is placed IN the block.
+ *                  since slice 9), so the value header is placed IN the block. The resolve is
+ *                  lent a stack reply store, as the router lends it, so the acknowledgement's
+ *                  head is placed there instead of allocated (#1658).
  *   ingress-*-noack  the same two rows for a DELIVERY-shaped frame: empty src, no reply
  *                  (RFC-0028 §6.9's claim — the stored value's only record is the loan).
  *   proto-fanout   the RFC-0028 prototype: ONE block holding {refcount, length, bytes},
@@ -397,10 +399,13 @@ void run_ingress(std::size_t size, bool acked) {
     const char* const stage = acked ? (share ? "ingress-pin" : "ingress-copy")
                                     : (share ? "ingress-pin-noack" : "ingress-copy-noack");
     measure(stage, size, 1, share ? 0 : 1, [&] {
+        // The reply store a terminus lends the resolver (#1658): the acknowledgement's head is
+        // placed in it, as the router places it on its receive stack, and dropped with it.
+        alignas(tr::view::segment_t) std::array<std::byte, 256> store;
         rope_t one;
         one.append(std::move(frames[next++]));
         const auto fv = tr::wire::tlv_view_t::over(std::move(one));
-        if (fv) (void)r.resolve(*fv, "cli");
+        if (fv) (void)r.resolve(*fv, "cli", nullptr, nullptr, nullptr, store);
     });
 }
 

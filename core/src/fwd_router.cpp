@@ -734,6 +734,17 @@ constexpr std::size_t kRefusalReplyInlineBytes = 256;
 constexpr std::size_t kRefusalReplySpans = 12;
 
 /**
+ * @brief The stack storage a terminus lends the resolver for an acknowledgement reply (#1658):
+ *        the head segment of an acked WRITE or subscribe is placed here instead of drawn from
+ *        `egress`, so acking a remote write allocates nothing.
+ *
+ * Sized like @ref kRefusalReplyInlineBytes: one segment header plus a head over two ordinary
+ * routes, with room left for a mint and an echo. A strategy selector, not a limit: a head that
+ * does not fit draws from `egress` as every reply did before.
+ */
+constexpr std::size_t kReplyStoreBytes = 256;
+
+/**
  * @brief Answer a request this terminus could not serve for want of MEMORY with an addressed
  *        `FWD{REPLY, kind=ERROR, STATUS{ERROR{tr::flow::backpressure}}}` — built on the
  *        stack, from the request's own bytes, through no allocator at all (#1612).
@@ -3088,7 +3099,13 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     // context of `inbound_name`, and holding it for the await's deadline stalled every frame
     // behind it. A deferred resolve answers later, from the writer's thread.
     bool deferred = false;
-    auto reply = resolver_.resolve(*arena, inbound, frame_view, dst_label_target, &deferred);
+    // The acknowledgement's storage (#1658), declared before `reply` so the rope that may hold
+    // views into it is released first. Not lent to a request this node originated: that reply
+    // goes to the record below, which may keep it past this frame.
+    alignas(view::segment_t) std::array<std::byte, kReplyStoreBytes> store;
+    auto reply =
+        resolver_.resolve(*arena, inbound, frame_view, dst_label_target, &deferred,
+                          inbound_name.empty() ? std::span<std::byte>{} : std::span(store));
     if (deferred) return;
     if (!reply) {  // structurally non-request / malformed ⇒ drop
         count_drop(malformed_rx_);
@@ -3160,7 +3177,10 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     const graph::inbound_ref_t inbound{inbound_name, terminus_peer(inbound_ctx, peer), inbound_ctx,
                                        terminus_kind(inbound_ctx)};
     bool deferred = false;  // ADR-0084, as at the arena terminus
-    auto reply = resolver_.resolve(*view, inbound, nullptr, dst_label_target, &deferred);
+    // The acknowledgement's storage (#1658), as at the arena terminus: this reply is only ever
+    // sent from this frame, so the store is always lent.
+    alignas(view::segment_t) std::array<std::byte, kReplyStoreBytes> store;
+    auto reply = resolver_.resolve(*view, inbound, nullptr, dst_label_target, &deferred, store);
     if (deferred) return;
     if (!reply) {  // structurally non-request / malformed ⇒ drop
         count_drop(malformed_rx_);

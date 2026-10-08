@@ -7,6 +7,8 @@
 
 #include <array>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
@@ -78,7 +80,32 @@ namespace {
 
 constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 
+/** @brief The reclaimer of a segment placed in caller storage (see @ref caller_store_backend). */
+class caller_store_backend_t final : public mem::mem_backend_t {
+   public:
+    caller_store_backend_t() noexcept : mem_backend_t("caller_store") {}
+    /** @brief Ends the segment's lifetime; the storage is the caller's and is not freed. */
+    void destroy(view::segment_t* seg) noexcept override { seg->~segment_t(); }
+};
+
 }  // namespace
+
+mem::mem_backend_t& caller_store_backend() noexcept {
+    static caller_store_backend_t backend;
+    return backend;
+}
+
+view::segment_t* reply_store_t::alloc(std::size_t size, mem::alloc_hint_t hint) {
+    void* at = free_.data();
+    std::size_t room = free_.size();
+    const std::size_t need = sizeof(view::segment_t) + size;
+    if (at == nullptr || std::align(alignof(view::segment_t), need, at, room) == nullptr)
+        return overflow_.alloc(size, hint);
+    std::byte* const base = static_cast<std::byte*>(at);
+    free_ = std::span<std::byte>(base + need, room - need);
+    return new (base) view::segment_t(&caller_store_backend(),
+                                      std::span<std::byte>(base + sizeof(view::segment_t), size));
+}
 
 rope_t assemble_reply(const reply_route_t& route, reply_kind_t kind,
                       std::span<const std::byte> inline_tail, std::span<const view_t> shared,

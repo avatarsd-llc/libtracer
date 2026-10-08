@@ -279,7 +279,7 @@ result_t<view::rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd,
                                               const inbound_ref_t& inbound,
                                               const view::view_t* frame_view,
                                               const wire::path_ref_element_t* dst_label_target,
-                                              bool* deferred) {
+                                              bool* deferred, std::span<std::byte> reply_store) {
     // The terminus subject derivation, identical to the arena tier's — one helper, so the
     // two tiers cannot answer one logical request under two different principals.
     std::array<char, net::kPeerNameChars> subject_scratch{};
@@ -299,9 +299,12 @@ result_t<view::rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd,
     // builders draw from it, never a node's `wire()`/`body()`. Default heap when un-injected.
     // …and `retained` (#1610) falls back to the SAME backend this tier flattens from —
     // the root segment's own — so an un-injected view-tier resolve is byte-unchanged too.
-    return resolve_node(graph_, root, inbound.link, subject, frame_view, root.backend(),
-                        egress_ != nullptr ? *egress_ : mem::heap_backend(),
-                        retained_backend(root.backend()), reverse_ref_fn_, reverse_ref_ctx_,
+    // The acknowledgement's egress (#1658): the caller's storage first, `egress` past it. An
+    // empty store places nothing, so a caller that passes none is byte-unchanged.
+    mem::mem_backend_t& egress = egress_ != nullptr ? *egress_ : mem::heap_backend();
+    reply_store_t ack(reply_store, egress);
+    return resolve_node(graph_, root, inbound.link, subject, frame_view, root.backend(), egress,
+                        ack, retained_backend(root.backend()), reverse_ref_fn_, reverse_ref_ctx_,
                         path_label_fn_, path_label_ctx_, dst_label_target, link_token_seam(inbound),
                         await_defer_seam(deferred));
 }

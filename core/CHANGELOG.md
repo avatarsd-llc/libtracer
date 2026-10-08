@@ -16,6 +16,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`op_resolver_t::resolve` takes a `reply_store`: an acknowledgement is built in caller
+  storage ([#1658](https://github.com/avatarsd-llc/libtracer/issues/1658)).** A trailing
+  `std::span<std::byte> reply_store = {}` on both overloads. The reply to a WRITE or a subscribe
+  that succeeded (`kind=RESULT`, no payload) places its head segment, and a mint or echo segment
+  beside it, in that storage while they fit, and draws the rest from `egress` as before; every
+  other reply ignores it. A rope built there holds views into the storage, so the caller drops it
+  first. `fwd_router_t` lends both of its termini 256 B of stack, so an acked remote write no
+  longer allocates its reply head: the `ingress-pin` row (acked, 4 KiB and 64 KiB) goes from
+  1 allocation / 89 B to **0 / 0 B**, and `ingress-copy` (16 B) from 2 / 189 B to 1 / 100 B, its
+  value block (counted with `kSlabPool = false`, where every block is an `operator new`). The
+  reply bytes do not change. Callers that pass nothing are unchanged.
+
 - **`mem::chunked_map_t`: a failable sorted map in fixed-size leaves
   ([#1886](https://github.com/avatarsd-llc/libtracer/issues/1886)).** `mem_chunked_map.hpp`. The
   entries of `sorted_map_t`, kept in key order across leaves of at most `LeafEntries` (default 64)

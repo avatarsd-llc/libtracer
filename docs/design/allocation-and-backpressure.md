@@ -189,6 +189,17 @@ a silent drop. The *bound* is closed by a **dedicated** `egress` injection on `f
 `fwd_router.cpp`'s bus-NAME-hop rejection reply, which now builds its head through the same
 assembler rather than through a throwing `std::vector` of its own.
 
+An **acknowledgement** does not reach `egress` at all when it fits
+([#1658](https://github.com/avatarsd-llc/libtracer/issues/1658)). The reply to a WRITE or a
+subscribe that succeeded is a head and nothing else, and both termini send it before their frame
+returns, so they lend the resolver 256 B of their own stack (`op_resolver_t::resolve`'s
+`reply_store`). The head, and a mint or echo segment beside it, are placed there through
+`core/src/fwd_reply.hpp:reply_store_t`, and an acked remote write allocates no reply head. A head that
+does not fit (a long return route) draws from `egress` exactly as above, so the store is a fast
+path and the bound is unchanged. Every other reply — a READ's, an error's — still draws its head
+from `egress`. A request this node originated is not lent the store, because its reply goes to
+the reply sink, which may keep it.
+
 It is deliberately **not** `flat`, for a reason that is about the seam's contract, not about
 effort. `flat` is documented — in a public `@param` on `fwd_router_t` and `op_resolver_t` — as the
 backend **every rope flatten** draws from, and a deployment sizes its slab against that sentence.
