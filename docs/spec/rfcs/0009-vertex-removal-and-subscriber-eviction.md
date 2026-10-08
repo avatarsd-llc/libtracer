@@ -805,8 +805,9 @@ field-write `:subscribers[]` append door, and since #598 that door refuses a `SU
 names no target with `tr::schema::type_mismatch`: it delivers to a local target, and the record
 names none. So a targetless `SUBSCRIBER` written to `:subscribers[N]` is refused and slot N keeps
 its edge. The routed wire append (`subscribe_wire`) is a different door: it admits such a record
-and delivers over the return route. This erratum leaves it unchanged; whether it should require a
-target is [#2016](https://github.com/avatarsd-llc/libtracer/issues/2016).
+and delivers over the return route. This erratum leaves it unchanged; it needs none
+([RFC-0021](0021-wire-subscriber-target-frame-of-reference.md) erratum 2026-10-08,
+[#2016](https://github.com/avatarsd-llc/libtracer/issues/2016)).
 
 **Which change made them diverge.** The §D.1 fix
 ([#598](https://github.com/avatarsd-llc/libtracer/issues/598)). Before it, every indexed write
