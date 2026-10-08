@@ -175,7 +175,14 @@ void udp_transport_t::run() {
     // and no datagram can reach 65,536 bytes, so the refusal is unreachable.
     const std::size_t frame_cap = max_frame_;
     const std::size_t alloc_cap = std::min(rx_cap, frame_cap + 1);
-    const std::size_t scratch_cap = std::min(kMaxDatagram, frame_cap + 1);
+    // The borrowed-span path holds no segment, so nothing bounds its scratch but this: one
+    // byte past the smaller of the configured cap and the backend's segment, so an injected
+    // bounded backend bounds the scratch too (a 1,536 B pool slot draws a 1,537 B scratch, not
+    // 64 KiB from `memory.state`, which an MCU's static arena cannot serve) and a datagram
+    // too long for either is refused whole, never truncated (#1783). With the unbounded
+    // default backend this is `frame_cap + 1`, as before.
+    const std::size_t span_cap = std::min(frame_cap, rx_cap);
+    const std::size_t scratch_cap = std::min(kMaxDatagram, span_cap + 1);
     // The borrowed-span path (and the exhaustion drain) needs that scratch buffer; it is
     // allocated LAZILY on first use, so a steady-state owning-delivery node (view receiver
     // installed, backend healthy) never pays for it — and the recv thread never carries a
@@ -254,8 +261,9 @@ void udp_transport_t::run() {
             continue;
         }
         // The configured cap applies to the borrowed path too — the sink shape is the
-        // node's business, the admitted datagram size is the peer's.
-        if (static_cast<std::size_t>(n) > frame_cap) {
+        // node's business, the admitted datagram size is the peer's — and so does the
+        // backend's bound, which sized the scratch.
+        if (static_cast<std::size_t>(n) > span_cap) {
             malformed_rx_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }

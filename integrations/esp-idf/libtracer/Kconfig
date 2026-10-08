@@ -342,10 +342,14 @@ menu "libtracer"
             application that injects its own block source into every graph_t
             can lower it.
 
-            A UDP link left on the default sources draws its receive scratch and
-            each receive segment at the datagram cap: 64 KiB apiece unless its
-            SPEC sets max_frame (or the link is given its own rx backend, as the
-            full_node example's listener is). The linux target, which runs the
+            A UDP link's receive buffers are one byte past the smaller of its
+            SPEC's max_frame and its rx backend's slot. A link given a bounded rx
+            backend (a pool, as the full_node example's listener is) therefore
+            draws a slot-sized scratch from this arena. A link left on the
+            default rx backend has no slot bound, so it draws a 64 KiB scratch
+            and 64 KiB receive segments here unless its SPEC sets max_frame; on
+            a 32 KiB arena those draws are refused and every datagram is dropped,
+            counted in the link's dropped_rx. The linux target, which runs the
             examples' host peers on those defaults, defaults to 256 KiB.
 
             Binds tr::graph::config_t::kArenaBytes.

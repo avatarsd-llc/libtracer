@@ -440,6 +440,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   session that never left now re-tenants it (bumps its anchor and drops its edges) instead of
   keeping the anchor; no in-tree transport fires one. No signature changes, and `edge_view_t`
   is unchanged.
+- **A UDP link's borrowed-path receive scratch is bounded by its rx backend (#1783).** The
+  scratch drawn from `memory.state` for a span receiver was sized from `max_frame` alone, so a
+  link with a 1,536 B pool as its rx backend still drew 64 KiB there, which a static arena of
+  32 KiB refuses, dropping every datagram. It is now one byte past the smaller of `max_frame`
+  and the backend's `max_segment_size()`, and a datagram longer than either is refused whole
+  (`malformed_rx`), never truncated. The default rx backend reports no bound, so a link on it
+  is unchanged.
 
 - **The host size-class ladder has a class for a 64 KiB payload's segment
   ([#1990](https://github.com/avatarsd-llc/libtracer/issues/1990)).** The default

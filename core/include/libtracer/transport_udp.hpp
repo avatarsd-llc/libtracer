@@ -79,7 +79,10 @@ struct udp_config_t {
  * the cap rather than at @ref kMaxDatagram. That refusal is unconditional on the
  * borrowed-span path; on the owning path it holds while the injected backend can furnish
  * `max_frame + 1` bytes — a backend bounded tighter than the cap truncates the datagram
- * before the cap is ever consulted (#1074).
+ * before the cap is ever consulted (#1074). The borrowed path's scratch, drawn from
+ * `memory.state`, is bounded by the backend as well: one byte past the smaller of the cap and
+ * the backend's `max_segment_size()`, and a datagram longer than either is refused whole
+ * (#1783). An injected bounded backend thereby keeps every receive buffer at its slot size.
  */
 class udp_transport_t : public transport_t, private posix_endpoint_t {
    public:

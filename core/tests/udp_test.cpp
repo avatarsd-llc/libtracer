@@ -527,6 +527,50 @@ void test_tx_drop_counted() {
 
 }  // namespace
 
+/**
+ * @brief #1783 — a bounded RX backend bounds the borrowed path's scratch too.
+ *
+ * The span path receives into a scratch drawn from `memory.state`. It used to be sized from
+ * `max_frame` alone, so a link left at the default cap drew 64 KiB there even with a
+ * 256-byte-slot pool as its backend, and a state store that cannot hold 64 KiB (an MCU's
+ * static arena) refused it and dropped every datagram. It is now one byte past the backend's
+ * slot: a 1 KiB state store serves it, a datagram that fits lands whole, and one longer than
+ * the slot is refused (`malformed_rx`), never truncated.
+ */
+void test_span_scratch_bounded_by_backend() {
+    std::printf("UDP transport — a bounded backend bounds the span scratch (#1783):\n");
+    constexpr std::size_t kSlot = 256;
+    alignas(std::max_align_t) static std::array<std::byte, 4096> slab;
+    tr::mem::pool_t pool(slab, kSlot);
+    // A state store that can never serve 64 KiB: a 1 KiB bump buffer over a refusing upstream.
+    alignas(std::max_align_t) static std::array<std::byte, 1024> state_buf;
+    tr::mem::bump_source_t state(state_buf, tr::mem::null_source());
+
+    std::atomic<int> spans{0};
+    std::atomic<std::size_t> last_len{0};
+    auto span_rx = [&](std::span<const std::byte> f) {
+        last_len.store(f.size(), std::memory_order_relaxed);
+        spans.fetch_add(1);
+    };
+    tr::net::udp_transport_t b(0, "", 0, {.memory = {.rx = &pool, .state = &state}});
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
+    check(a.ok() && b.ok(), "both UDP sockets bound");
+    b.set_receiver(span_rx);
+
+    const std::vector<std::byte> fits(kSlot, std::byte{0x5A});
+    a.send(std::span<const std::byte>(fits));
+    check(wait_until([&] { return spans.load() > 0; }, 3s),
+          "a slot-sized datagram reaches the span receiver from a 1 KiB state store");
+    check(last_len.load(std::memory_order_relaxed) == kSlot, "and arrives whole");
+    check(b.dropped_rx() == 0, "the scratch was not refused: no backpressure drop");
+
+    const std::vector<std::byte> over(kSlot + 1, std::byte{0xA5});
+    a.send(std::span<const std::byte>(over));
+    check(wait_until([&] { return b.malformed_rx() > 0; }, 3s),
+          "one byte past the slot is refused, counted in malformed_rx");
+    check(spans.load() == 1, "and nothing truncated was handed to the span receiver");
+}
+
 int main() {
     test_raw_frame();
     test_two_nodes_over_udp();
@@ -534,6 +578,7 @@ int main() {
     test_view_delivery();
     test_view_pool_exhaustion();
     test_settings_max_frame();
+    test_span_scratch_bounded_by_backend();
     test_two_nodes_zero_copy_store();
     test_tx_drop_counted();
     return tr::testing::summary("udp");
