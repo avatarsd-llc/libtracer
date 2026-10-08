@@ -378,11 +378,7 @@ class path_key_t {
      * @retval status_t::BACKPRESSURE @p src refused the spill block; nothing is held.
      */
     [[nodiscard]] static result_t<path_key_t> try_make(std::span<const std::byte> b,
-                                                       tr::mem::block_source_t& src) noexcept {
-        result_t<path_key_t> k{std::in_place};  // built in place: no move of a half-made key
-        if (!k->assign(b, src)) return std::unexpected(status_t::BACKPRESSURE);
-        return k;
-    }
+                                                       tr::mem::block_source_t& src) noexcept;
 
     /** @brief Copy @p b into the key (inline when it fits, else one block from the process
      *         table source, `%tr::mem::table_source()`). Any contiguous byte range binds here,

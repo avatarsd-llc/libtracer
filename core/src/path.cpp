@@ -171,6 +171,13 @@ bool path_t::cache_path_label(std::span<const std::byte> body) {
     return true;
 }
 
+result_t<path_key_t> path_key_t::try_make(std::span<const std::byte> b,
+                                          tr::mem::block_source_t& src) noexcept {
+    result_t<path_key_t> k{std::in_place};  // built in place: no move of a half-made key
+    if (!k->assign(b, src)) return std::unexpected(status_t::BACKPRESSURE);
+    return k;
+}
+
 path_key_t::path_key_t(std::span<const std::byte> b) { assign_or_stop(b, nullptr); }
 
 void path_key_t::assign_or_stop(std::span<const std::byte> b, tr::mem::block_source_t* src) {
