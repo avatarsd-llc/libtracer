@@ -322,6 +322,38 @@ menu "libtracer"
             a data write to a missing child is refused with not_found and creates
             nothing. This is a per-image choice.
 
+    config LIBTRACER_ARENA_BYTES
+        int "Default root: static arena size (bytes)"
+        range 1024 4194304
+        default 262144 if IDF_TARGET_LINUX
+        default 32768
+        help
+            Size of the static arena behind libtracer's default root (ADR-0083,
+            libtracer #1783). A graph_t built without a source draws its values,
+            tables and the net defaults from it, and nothing in libtracer draws
+            from the heap for it. It is one .bss array, so the linker map shows
+            exactly what libtracer holds by default; it is reserved whether or
+            not it is used, and it never shrinks.
+
+            An exhausted arena refuses: a write answers BACKPRESSURE, a
+            registration at init stops with a message naming the sub-pool and
+            the bytes it needed. Size it against the node's peak, which the
+            :stats.mem.values, .tables and .net seams report per sub-pool. An
+            application that injects its own block source into every graph_t
+            can lower it.
+
+            A UDP link's receive buffers are one byte past the smaller of its
+            SPEC's max_frame and its rx backend's slot. A link given a bounded rx
+            backend (a pool, as the full_node example's listener is) therefore
+            draws a slot-sized scratch from this arena. A link left on the
+            default rx backend has no slot bound, so it draws a 64 KiB scratch
+            and 64 KiB receive segments here unless its SPEC sets max_frame; on
+            a 32 KiB arena those draws are refused and every datagram is dropped,
+            counted in the link's dropped_rx. The linux target, which runs the
+            examples' host peers on those defaults, defaults to 256 KiB.
+
+            Binds tr::graph::config_t::kArenaBytes.
+
     config LIBTRACER_VERTEX_LOCK_STRIPES
         int "Vertex lock-stripe count"
         range 1 256

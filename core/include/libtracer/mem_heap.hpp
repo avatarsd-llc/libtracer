@@ -84,15 +84,14 @@ namespace tr::detail {
  * to that seam; it does not get a `try_reserve` overload.
  *
  * @note **What IS generalized, and why the objection above does not reach it (#873 phase 1).**
- *       The helpers now take any allocator, and `tr::mem::source_allocator_t`
- *       (`%mem_source_alloc.hpp`) is the one the graph's migrated growth sites use. Every
- *       sentence above turns on the probe testing a DIFFERENT allocator from the one the
- *       growth uses; a source allocator publishes the store it draws from
- *       (`source_allocator_t::source()`), so @ref try_grow probes THAT store with
- *       `try_alloc`/`release` instead of the global heap. The `-fno-exceptions` probe is still
- *       probe-then-commit and still carries the #850 race window — what it stops being is
- *       an answer about the wrong memory. `probe_fail_hook` is honoured on both arms, so the
- *       OOM-injection seam still reaches these paths.
+ *       The helpers take any allocator, and @ref try_grow_from probes the block source a
+ *       growth actually draws from with `try_alloc`/`release` instead of the global heap. Every
+ *       sentence above turns on the probe testing a DIFFERENT allocator from the one the growth
+ *       uses. The `-fno-exceptions` probe is still probe-then-commit and still carries the #850
+ *       race window — what it stops being is an answer about the wrong memory.
+ *       `probe_fail_hook` is honoured on both arms, so the OOM-injection seam still reaches
+ *       these paths. (The std-`Allocator` adapter the graph's growth sites used for this,
+ *       `source_allocator_t`, was retired in #1783 once core containers replaced them.)
  */
 
 /**
@@ -309,14 +308,23 @@ namespace detail {
 void host_value_release(void* p, std::size_t bytes, std::size_t align) noexcept;
 
 /**
+ * @brief One block of the VALUE sub-pool of the MCU static arena (`%mem_arena.hpp`, #1783);
+ *        `nullptr` when the arena is spent. Called only where `tr::mem::kSlabPool` is `false`.
+ */
+[[nodiscard]] void* mcu_value_alloc(std::size_t bytes, std::size_t align) noexcept;
+
+/** @brief Return a block @ref mcu_value_alloc handed out, sized as asked. */
+void mcu_value_release(void* p, std::size_t bytes, std::size_t align) noexcept;
+
+/**
  * @brief The per-value draw of this build: the host root's value sub-pool where
- *        `tr::mem::kSlabPool` is `true`, the platform heap otherwise.
+ *        `tr::mem::kSlabPool` is `true`, the MCU arena's otherwise. Never the platform heap.
  */
 [[nodiscard]] inline void* value_block_alloc(std::size_t bytes, std::size_t align) noexcept {
     if constexpr (kSlabPool) {
         return host_value_alloc(bytes, align);
     } else {
-        return heap_source_t::acquire(bytes, align);
+        return mcu_value_alloc(bytes, align);
     }
 }
 
@@ -325,7 +333,7 @@ inline void value_block_release(void* p, std::size_t bytes, std::size_t align) n
     if constexpr (kSlabPool) {
         host_value_release(p, bytes, align);
     } else {
-        heap_source_t::reclaim(p, bytes, align);
+        mcu_value_release(p, bytes, align);
     }
 }
 
@@ -342,10 +350,10 @@ inline void value_block_release(void* p, std::size_t bytes, std::size_t align) n
  * @par Where the bytes come from (#1777)
  * Every block is drawn by `detail::value_block_alloc`: on a host build (`kSlabPool`), the value
  * sub-pool of the host root (`%mem_slab_pool.hpp`), from this thread's cache, so the platform
- * allocator is asked for whole slabs and never for a segment; elsewhere the platform heap,
- * through @ref heap_source_t::acquire. Both are direct calls, not the virtual draw #873 phase 2
- * measured at +22.7 % on the hazard domain: this backend is the process default on the hottest
- * allocation path in the library.
+ * allocator is asked for whole slabs and never for a segment; elsewhere the value sub-pool of
+ * the MCU static arena (`%mem_arena.hpp`), with no heap at all. Both are direct calls, not the
+ * virtual draw #873 phase 2 measured at +22.7 % on the hazard domain: this backend is the process
+ * default on the hottest allocation path in the library.
  *
  * @par How many draws a segment costs (RFC-0028 §4.9, #1777)
  * ONE: the padded header and the payload share a block (RFC-0028 slice 10), at every size. The
@@ -410,14 +418,14 @@ class heap_backend_t final : public mem_backend_t {
 
 /**
  * @brief The default root a `graph_t` takes when it is handed no source (ADR-0083 Decision 4,
- *        #1777): the host root (`%mem_slab_pool.hpp`) where `kSlabPool` is `true`, the platform
- *        heap (@ref heap_source) otherwise.
+ *        #1777, #1783): the host root (`%mem_slab_pool.hpp`) where `kSlabPool` is `true`, the
+ *        MCU static arena (`%mem_arena.hpp`) otherwise.
  */
 [[nodiscard]] block_source_t& default_root() noexcept;
 
 /**
  * @brief The default VALUE sub-pool (`:stats.mem.values`): the host root's, from a per-thread
- *        cache, where `kSlabPool` is `true`; the platform heap otherwise.
+ *        cache, where `kSlabPool` is `true`; the MCU arena's otherwise.
  *
  * The source a value made outside any graph draws from (`tr::graph::value_ref_t::make`), and
  * the one @ref heap_backend draws its segments from.
@@ -439,7 +447,8 @@ class heap_backend_t final : public mem_backend_t {
  * @brief The segment backend over @ref net_source, the default receive, flatten and egress
  *        backend of the router and the links when the application injects none (Q21).
  *
- * @ref heap_backend itself where `kSlabPool` is `false`.
+ * On the MCU arena (`kSlabPool` `false`) it is the same adapter over the arena's net
+ * sub-pool.
  */
 [[nodiscard]] mem_backend_t& net_backend() noexcept;
 

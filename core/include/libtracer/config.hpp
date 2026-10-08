@@ -378,8 +378,9 @@ struct default_config_t {
      * payloads cluster (mostly 4 KiB frames) states its own table, and pays no slab for a class
      * it never draws: a class takes its first slab on its first request.
      *
-     * Read only where @ref kSlabPool is `true`. The ESP-IDF component binds that `false`, so
-     * the table is not read on that target.
+     * Where @ref kSlabPool is `false` the same table sizes the static arena's classes instead
+     * (@ref kArenaBytes): a block takes the smallest row that holds it there too, from that
+     * row's free list.
      *
      * Override fragment: `static constexpr std::size_t kSizeClasses[] = {64, 256, 1024, 4096};`.
      */
@@ -395,15 +396,36 @@ struct default_config_t {
      * The host allocator then serves whole slabs only (@ref kSlabBytes), never a request per
      * value.
      *
-     * `false`: those defaults are the platform heap directly, one request per block, which is
-     * what every build did before #1777. A target with no small-block fast path and a few
-     * hundred KiB of RAM gains nothing from 64 KiB slabs, so the ESP-IDF component binds
-     * `false`; its static-arena default is ADR-0083 Decision 12's step 6. No sub-pool is derived
-     * there, and the `:stats.mem.values`, `.tables` and `.net` seams answer `SCHEMA_NOT_FOUND`.
+     * `false` (the MCU default, ADR-0083 Decision 4, #1783): the default root is a STATIC
+     * ARENA of @ref kArenaBytes (`%mem_arena.hpp`, `tr::mem::arena_root_t`), carved into the
+     * classes of @ref kSizeClasses, and the same five defaults draw from its value, table and
+     * net sub-pools. No byte of the default root comes from a heap; the arena never trims, and
+     * an exhausted arena refuses (BACKPRESSURE at run time, a sizing abort at init). A target
+     * with a few hundred KiB of RAM gains nothing from 64 KiB slabs, so the ESP-IDF component
+     * binds `false`. Until v0.19.0 this setting meant the platform heap; an application that
+     * still wants that injects `tr::mem::heap_source()` into its `graph_t`.
      *
      * Override fragment: `static constexpr bool kSlabPool = false;`.
      */
     static constexpr bool kSlabPool = true;
+
+    /**
+     * @brief The static arena's size in bytes, where @ref kSlabPool is `false` (ADR-0083
+     *        Decision 4, #1783).
+     *
+     * The MCU default root is one array of this many bytes in `.bss`, so the linker map shows
+     * exactly what the library holds by default. Every sub-pool carves from it, and nothing
+     * it carves goes back to it: a block returned to a class is reused by that class only.
+     * Size it against the node's peak per class (`:stats.mem.values`, `.tables` and `.net`
+     * report each sub-pool's high-water mark, and the root's census the bytes carved). An
+     * application that injects its own root into every `graph_t` can bind a small value; the
+     * defaults that take no graph (`tr::mem::value_source()` and its siblings) still draw here.
+     *
+     * Not read where @ref kSlabPool is `true`: no arena is compiled there.
+     *
+     * Override fragment: `static constexpr std::size_t kArenaBytes = 65536;`.
+     */
+    static constexpr std::size_t kArenaBytes = 32768;
 
     /**
      * @brief The slab the host slab pool draws for a class, in bytes: the smallest unit it asks
@@ -1155,6 +1177,8 @@ inline constexpr bool kSlabPool = tr::graph::config_t::kSlabPool;
 inline constexpr std::size_t kSlabBytes = tr::graph::config_t::kSlabBytes;
 /** @brief @ref tr::graph::default_config_t::kSlabClassCap for this build (#1777). */
 inline constexpr std::size_t kSlabClassCap = tr::graph::config_t::kSlabClassCap;
+/** @brief @ref tr::graph::default_config_t::kArenaBytes for this build (#1783). */
+inline constexpr std::size_t kArenaBytes = tr::graph::config_t::kArenaBytes;
 
 }  // namespace tr::mem
 

@@ -49,7 +49,9 @@ import tempfile
 # Keep in sync with tools/cortexm0_footprint.py's REQUIRED_MODULES and with
 # sentinel_node.cpp's includes: the L0/L1 substrate, the L2/L3 wire codec and
 # L4 addressing — the surface v1.md §3.1 guarantees an MCU can carry.
-REQUIRED_MODULES = ("frame", "tlv_arena", "backend_set", "mem_pool", "mem_source", "rope", "path")
+REQUIRED_MODULES = (
+    "frame", "tlv_arena", "backend_set", "mem_pool", "mem_source", "mem_heap", "rope", "path"
+)
 FIXTURE = "core/tests/footprint/sentinel_node.cpp"
 
 # ESP32-C6 (rv32imac) is the reference core of ADR-0001's originating firmware;

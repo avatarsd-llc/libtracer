@@ -230,8 +230,9 @@ is a knob the fragment does not state at all (#1244).
 | `kEdgePinSlots` (`config.hpp:default_config_t::kEdgePinSlots`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_EDGE_PIN_SLOTS 8)`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`config.hpp:default_config_t::kMaxVertexBytes64` / `config.hpp:default_config_t::kMaxVertexBytes32`) | RAM ratchet | 88 / 64 | the preset — deliberately not overridable |
 | `kShareThresholdBytes` (`config.hpp:default_config_t::kShareThresholdBytes`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0}`) |
-| `kSizeClasses` (`config.hpp:default_config_t::kSizeClasses`) | size-class table | 81 rows: 16–128 B by 16, then eight per doubling to 64 KiB, then 64 KiB plus a 48 B segment header — the host slab pool's classes (#1777, #1990) | inherited — unused on a chip, which has no slab pool |
-| `kSlabPool` (`config.hpp:default_config_t::kSlabPool`) | allocator choice | `true` — the host default root is a slab pool with value, table and net sub-pools (#1777) | `false`, the platform heap as before (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr bool kSlabPool = false`) |
+| `kSizeClasses` (`config.hpp:default_config_t::kSizeClasses`) | size-class table | 81 rows: 16–128 B by 16, then eight per doubling to 64 KiB, then 64 KiB plus a 48 B segment header — the host slab pool's classes (#1777, #1990), and the static arena's where there is no slab pool (#1783) | inherited — the static arena's classes |
+| `kSlabPool` (`config.hpp:default_config_t::kSlabPool`) | allocator choice | `true` — the host default root is a slab pool with value, table and net sub-pools (#1777); `false` makes it a static arena of `kArenaBytes`, with no heap (#1783) | `false`, the static arena (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr bool kSlabPool = false`) |
+| `kArenaBytes` (`config.hpp:default_config_t::kArenaBytes`) | size | 32,768 — the static arena behind the MCU default root, read only where `kSlabPool` is `false` (#1783) | menuconfig `CONFIG_LIBTRACER_ARENA_BYTES`, 32,768 on a chip and 262,144 on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_ARENA_BYTES ${CONFIG_LIBTRACER_ARENA_BYTES})`) |
 | `kSlabBytes` (`config.hpp:default_config_t::kSlabBytes`) | size | 65,536 — the base slab | inherited — unused on a chip |
 | `kSlabClassCap` (`config.hpp:default_config_t::kSlabClassCap`) | count | 2 — fully free slabs a class keeps | inherited — unused on a chip |
 | `acl_policy_t` (`config.hpp:default_config_t::acl_policy_t`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
@@ -254,13 +255,14 @@ target and `guard_t`) and `LIBTRACER_PIN_INSTRUMENT` (folded into `kInstrumentCo
 list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **twenty knobs, all named, all
+the reference, not this table. What matters here is the shape: **twenty-one knobs, all named, all
 finite.** Four are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`,
-`kSlabClassCap`), one is a padding width, one is a per-target RAM ceiling, four are sizes
+`kSlabClassCap`), one is a padding width, one is a per-target RAM ceiling, five are sizes
 (`kShareThresholdBytes`, the slab pool's size-class table `kSizeClasses`, its base slab
-`kSlabBytes`, and the thread stack size `kSelfHealWorkerStackBytes`), two are an ingress budget
+`kSlabBytes`, the MCU static arena `kArenaBytes`, and the thread stack size
+`kSelfHealWorkerStackBytes`), two are an ingress budget
 (`kRxDrainFrames` and `kRxDrainBytes`, the frames and bytes a receive context reads before it
-waits for its core to idle), one chooses the host allocator (`kSlabPool`), two are type
+waits for its core to idle), one chooses the default root (`kSlabPool`: the host slab pool or the MCU static arena), two are type
 bindings, one is a
 target fact rather than a preference, and two — `kBusLinks`, below, and `kSelfHealLinks` (the
 RFC-0014 S5 link-liveness engine, #1470) — state whether a *module* is present at all. `kSpinWaitSafe` says whether a task on this target may spin
@@ -279,7 +281,7 @@ supplies (#1664). `kFaultInjection` is its twin for the test-only fault-injectio
 (`probe_fail_hook` and three transport seams): closed out, the default allocation path carries
 no hook branch and no hook variable reaches the archive (#1719).
 
-Several of the twenty carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`,
+Several of the twenty-one carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`,
 `kShareThresholdBytes`, `kSizeClasses`, `kSlabPool`, `kSlabBytes` and `kSlabClassCap` are preset members: an application moves them by declaring its own
 traits type, not by passing `-D`. `kShareThresholdBytes` is the copy-or-share threshold of
 [RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md)

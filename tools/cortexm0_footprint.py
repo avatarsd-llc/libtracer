@@ -82,7 +82,9 @@ import tempfile
 # tr::mem::heap_source(). Without it the link fails with an undefined reference —
 # which used to be SILENT, because warn mode also answered for the instrument. It
 # no longer does (#982): an unlinkable sentinel reds the job in either mode.
-REQUIRED_MODULES = ("frame", "tlv_arena", "backend_set", "mem_pool", "mem_source", "rope", "path")
+REQUIRED_MODULES = (
+    "frame", "tlv_arena", "backend_set", "mem_pool", "mem_source", "mem_heap", "rope", "path"
+)
 FIXTURE = "core/tests/footprint/sentinel_node.cpp"
 DEFAULT_BUDGET = 16 * 1024  # 16 KiB — the ADR-0016 §3 / ADR-0047 §5 Cortex-M0 bound.
 
@@ -196,6 +198,19 @@ def _compile_and_link(
     return elf
 
 
+def _archive(ar: str, workdir: pathlib.Path, out: pathlib.Path, root: pathlib.Path) -> None:
+    """Write the required modules' objects, without the fixture, as the static archive @p out.
+
+    This is the MCU `libtracer.a` the no-heap link check reads (#1783): the library's own
+    objects, compiled with the sentinel's flags, and not the fixture, which may use the heap.
+    """
+    objects = [str(workdir / f"{m}.o") for m in REQUIRED_MODULES]
+    out.unlink(missing_ok=True)
+    res = _run([ar, "rcs", str(out), *objects], cwd=root)
+    if res.returncode != 0:
+        raise RuntimeError(f"archive failed:\n{res.stderr.strip()}")
+
+
 def _measure(size_tool: str, elf: pathlib.Path, root: pathlib.Path) -> tuple[int, int, int]:
     """Return (text, data, bss) from `<size> <elf>` (Berkeley format).
 
@@ -236,6 +251,11 @@ def main() -> int:
                     help="run-over-run flash growth tolerated before --drift-mode trips "
                          "(default: 0 — same toolchain, same fixture; growth is real)")
     ap.add_argument("--out-json", default=None, help="write the numbers as a JSON artifact")
+    ap.add_argument("--archive-out", default=None,
+                    help="also write the required modules (not the fixture) as this static "
+                         "archive, for tools/check_no_heap.py (#1783)")
+    ap.add_argument("--ar", default=os.environ.get("LIBTRACER_ARM_AR", "arm-none-eabi-ar"),
+                    help="the archiver for --archive-out (default: arm-none-eabi-ar)")
     args = ap.parse_args()
 
     root = _repo_root()
@@ -266,6 +286,8 @@ def main() -> int:
             workdir = pathlib.Path(tmp)
             elf = _compile_and_link(cxx, args.mcpu, root, workdir)
             text, data, bss = _measure(size_tool, elf, root)
+            if args.archive_out:
+                _archive(args.ar, workdir, pathlib.Path(args.archive_out).resolve(), root)
     except RuntimeError as exc:
         return _broken(f"Cortex-M0 sentinel could not build/measure the required modules: {exc}")
 
