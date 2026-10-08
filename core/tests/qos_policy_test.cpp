@@ -28,6 +28,10 @@
  *   6. `settings/schema-enumerates-nothing`   — `:schema` carries no protocol-knob entries.
  *   7. `stream/history-depth-host-only`       — `vertex_policy_t::retention` (`retention_t::N`)
  * changes the retained ring depth, and no wire operation reaches it.
+ *   8. `settings/delivery-mode-not-found`     — the per-vertex `delivery_mode` (RFC-0008 §C, as
+ *                                               corrected by the #1981 erratum) is host state
+ *                                               with no wire spelling: a `:settings.delivery_mode`
+ *                                               write or read answers SCHEMA_NOT_FOUND.
  *
  * §5.8 `store/pin-ratio` is covered at the decision site (`op_resolve_test`, `udp_test`), not
  * here; RFC-0028 D3 replaced the ratio with an absolute copy-or-share threshold. What this file
@@ -408,6 +412,40 @@ void test_history_depth_is_host_only() {
     const std::optional<decoded_t> settings = decode_read(g.read(path_t("/h/s:settings")));
     check(settings.has_value() && settings->tlv.children.empty(),
           "... nor does a bare `:settings` read carry the value");
+}
+
+/**
+ * @brief The per-vertex `delivery_mode` is host state with no wire spelling (#1981 erratum).
+ *
+ * RFC-0008 §C called a `delivery_mode` NAME/VALUE under the vertex `SETTINGS` a deferred wire
+ * spelling; RFC-0022 §3.B emptied that namespace, so the name resolves to nothing. This is
+ * what conformance vector `settings/delivery-mode-not-found` asserts. The ablation is the host
+ * half: `set_policy` does change the mode, so the wire refusal is not a dead vertex.
+ */
+void test_delivery_mode_has_no_wire_spelling() {
+    std::printf("#1981 delivery-mode-not-found — host state, no wire spelling:\n");
+    using tr::graph::delivery_mode_t;
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/dm/v"), role_t::STORED_VALUE);
+    const auto mode = [&] { return std::bit_cast<tr::graph::vertex_t*>(v)->delivery_mode(); };
+    check(mode() == delivery_mode_t::IF_NEWER, "the default mode is IF_NEWER");
+
+    // THE ABLATION: the owner's host call does set the mode.
+    check(g.set_policy(v, {.delivery_mode = delivery_mode_t::EXPLICIT}).has_value() &&
+              mode() == delivery_mode_t::EXPLICIT,
+          "ablation: `vertex_policy_t::delivery_mode` sets the mode host-side");
+
+    // No wire operation reaches it: the write is refused and changes nothing, and the read
+    // answers the same code.
+    check(fails_with(g.write(path_t("/dm/v:settings.delivery_mode"), value_le(1, 1)),
+                     status_t::SCHEMA_NOT_FOUND),
+          "a `:settings.delivery_mode` write answers SCHEMA_NOT_FOUND");
+    check(mode() == delivery_mode_t::EXPLICIT, "... and did not change the mode");
+    check(fails_with(g.read(path_t("/dm/v:settings.delivery_mode")), status_t::SCHEMA_NOT_FOUND),
+          "a `:settings.delivery_mode` read answers SCHEMA_NOT_FOUND");
+    const std::optional<decoded_t> settings = decode_read(g.read(path_t("/dm/v:settings")));
+    check(settings.has_value() && settings->tlv.children.empty(),
+          "... nor does a bare `:settings` read carry the mode");
 }
 
 /** @brief NOTHING is inherited (§3.F), and a registration can no longer force the cold block. */
@@ -997,7 +1035,8 @@ void test_stream_depth_is_carried_and_ignored() {
 }
 
 /**
- * @brief The `settings/removed-knob` and `stream/history-depth-host-only` vectors are the
+ * @brief The `settings/removed-knob`, `stream/history-depth-host-only` and
+ *        `settings/delivery-mode-not-found` vectors are the
  *        bytes the RESOLVER builds — not a shape a document declared.
  *
  * Both vectors used to be hand-written `ERROR{VALUE, DESCRIPTION}` frames, and no code path
@@ -1041,6 +1080,18 @@ void test_removed_knob_reply_bytes() {
           "... and the READ reply's ERROR child is the SAME bytes (the §3.B read/write "
           "agreement, over the wire)");
 
+    // #1981: the per-vertex delivery mode, on both halves too.
+    const std::vector<std::byte> mode_w = error_child_bytes(
+        resolver, b_fwd_to_reply_ep(fwd_op_t::WRITE, b_path({"rk"}),
+                                    b_field({"settings", "delivery_mode"}), payload));
+    check(mode_w == vector_bytes("settings/delivery-mode-not-found"),
+          "settings/delivery-mode-not-found == the WRITE reply's ERROR child, exactly");
+    const std::vector<std::byte> mode_r =
+        error_child_bytes(resolver, b_fwd_to_reply_ep(fwd_op_t::READ, b_path({"rk"}),
+                                                      b_field({"settings", "delivery_mode"}), {}));
+    check(mode_r == vector_bytes("settings/delivery-mode-not-found"),
+          "... and the READ reply's ERROR child is the SAME bytes");
+
     // THE ABLATION. A test that only ever compared against one constant would pass against a
     // resolver that answered every request with that constant. A name that IS served must
     // come back as a RESULT, not as this error.
@@ -1062,6 +1113,7 @@ int main() {
     test_settings_container_keeps_its_shape();
     test_schema_enumerates_nothing();
     test_history_depth_is_host_only();
+    test_delivery_mode_has_no_wire_spelling();
     test_nothing_is_inherited();
     test_conformance_vectors();
     test_replace_door_latches();

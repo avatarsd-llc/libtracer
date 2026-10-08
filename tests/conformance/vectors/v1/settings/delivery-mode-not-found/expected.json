@@ -1,0 +1,12 @@
+{
+  "name": "delivery-mode-not-found",
+  "category": "settings",
+  "hex": "08400600010002003100",
+  "total_bytes": 10,
+  "decoded": {
+    "type": "0x08 ERROR",
+    "structured": true,
+    "meaning": "ERROR{ VALUE u16=0x0031 (tr::schema::not_found) } — the reply the golden core builds for a write or a read of `:settings.delivery_mode`, a name with no wire spelling",
+    "note": "the per-vertex delivery_mode (RFC-0008 §C) is owner-side state set by vertex_policy_t::delivery_mode; the vertex :settings core namespace is empty (RFC-0022 §3.B), so the name resolves to nothing. Byte-identical to settings/removed-knob: the ERROR identity carries no name detail."
+  }
+}

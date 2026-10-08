@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0008 |
 | **Title** | Vertex operations: `assign` and `propagate`; structural selective propagation; value-agnostic per-vertex `delivery_mode` |
-| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b, and 2026-08-22 — Amendment 2, below; §B corrected 2026-09-30 by erratum, below) |
+| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b, and 2026-08-22 — Amendment 2, below; §B corrected 2026-09-30 by erratum, below; §C corrected 2026-10-08 by erratum, below) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-06 |
 | **Comment window** | waived by the maintainer (solo-maintainer project, GOVERNANCE.md window dead ceremony) |
@@ -28,8 +28,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 > `EXPLICIT`. The default `IF_NEWER` *is* the structural dirty-flush described in §B; the
 > other two are per-vertex overrides. The wire change is unchanged from the first draft (a
 > pure removal from `SUBSCRIBER.qos_settings`); the new policy is a **per-vertex host
-> attribute**, and configuring it over the wire reuses the vertex `:settings` mechanism
-> (deferred, §C). §§Summary, B, C, F, Files, and Alternatives are revised accordingly.
+> attribute** with no wire spelling (§C, as corrected by the 2026-10-08 erratum). §§Summary, B, C, F, Files, and Alternatives are revised accordingly.
 
 ## Summary
 
@@ -65,7 +64,7 @@ This resolves [#235](https://github.com/avatarsd-llc/libtracer/issues/235). It
 [RFC-0005](0005-subtree-subscriptions.md) §A and reference/05 — a reversal the
 maintainer has authorized. No new wire verbs, no new type codes; the one wire change
 is a **removal** (the `delivery_mode` / `min_interval_ns` / `keepalive_ns` QoS keys),
-with the new per-vertex policy carried as host state (wire config deferred, §C).
+with the new per-vertex policy carried as host state with no wire spelling (§C).
 
 ## Motivation
 
@@ -217,11 +216,12 @@ Two invariants make the modes coherent with §A:
 
 `delivery_mode` is therefore held as **host state on the vertex**, defaulting to
 `IF_NEWER`. On the wire it **leaves `SUBSCRIBER.qos_settings`** (a subscription no
-longer carries it — the source vertex owns the policy, not the observer). Configuring a
-vertex's mode from a remote peer reuses the ordinary vertex-`:settings` write path (a
-`delivery_mode` NAME/VALUE under the vertex's own `SETTINGS`, mirroring how
-`:subscribers` / `:acl` hang off a vertex); this wire configuration is **deferred** and
-optional — the core semantics need only the host attribute and its `IF_NEWER` default.
+longer carries it — the source vertex owns the policy, not the observer). It has **no wire
+spelling**: the owner sets it host-side (`vertex_policy_t::delivery_mode`), and a
+`:settings.delivery_mode` write or read answers `tr::schema::not_found`, as every name in
+the empty `:settings` core namespace does
+([RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B;
+corrected 2026-10-08 by erratum, below).
 The value-based `ON_CHANGE` and the `min_interval_ns` / `keepalive_ns` throttles are
 gone for good; the sole "re-send even when unchanged" need is served by `UNCONDITIONAL`
 plus the producer's own `propagate` cadence. `delivery_compact`
@@ -300,8 +300,7 @@ migration. The wire break is a pure removal of the value-based/throttle
 `qos_settings` keys; a stale peer's leftover `delivery_mode` under `qos_settings` is
 ignored under the unknown-key rule, so there is no framing incompatibility — only the
 (correct) loss of the value-based suppression it requested. The new per-vertex
-`delivery_mode` adds no required wire field (host default `IF_NEWER`; wire config
-deferred).
+`delivery_mode` adds no wire field at all (host default `IF_NEWER`; no wire spelling, §C).
 
 ## Alternatives considered
 
@@ -520,3 +519,31 @@ wire surface moves.** The write sequence was never wire-observable — it feeds 
 wording is width-agnostic on purpose, so it holds for the 64-bit counter shipped at the time of
 this erratum and for the 32-bit one [#1682](https://github.com/avatarsd-llc/libtracer/pull/1682)
 proposes.
+
+## Erratum (2026-10-08) — §C: the per-vertex `delivery_mode` has no wire spelling ([#1981](https://github.com/avatarsd-llc/libtracer/issues/1981))
+
+**What the text said.** §C (and the 2026-07-06b amendment note, §Summary and §Compatibility,
+which restated it) said a remote peer configures a vertex's mode through the vertex `:settings`
+write path — a `delivery_mode` NAME/VALUE under the vertex's own `SETTINGS` — and that this
+wire configuration was **deferred**.
+
+**What the behaviour is.** No implementation ever shipped that spelling. The mode is set only
+host-side, by `vertex_policy_t::delivery_mode` at registration or through `graph_t::set_policy`.
+A `:settings.delivery_mode` write or read answers `tr::schema::not_found` and leaves the mode
+unchanged, because the vertex's `:settings` core namespace is empty.
+
+**Which change made them diverge.**
+[RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B deleted the
+vertex QoS state and the whole `:settings.<knob>` write surface, and ruled that owner
+declarations are made host-side and never over the wire. That left the deferred spelling with
+no namespace to land in; §C was not updated with it. The wire audit
+([wire audit](https://github.com/avatarsd-llc/libtracer/blob/main/docs/ietf/wire-audit.md), finding F4) found the contradiction.
+
+**The correction.** §C now says the mode has no wire spelling, and the other sites were
+rewritten inline to match. RFC-0010's Alternatives cite the deferred spelling as a reason for
+the reserved `app` subkey; that is rationale as it stood when RFC-0010 was accepted, and it is
+left as written. Conformance vector `settings/delivery-mode-not-found` pins the behaviour.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** The spelling was never emitted or honoured; the vector's bytes are the
+`tr::schema::not_found` reply the core already builds, identical to `settings/removed-knob`.

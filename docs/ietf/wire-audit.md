@@ -125,7 +125,7 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | `durability_request` | policy bit 5 | honoured | the latch; `subscriber/policy-durability` | — | **keep** | |
 | `delivery_class` | policy bits 6–7 | decoded, not yet honoured | all three cores decode it; `subscriber/policy-reserved-bits` | — | **keep**: phase 3 of #1204 (delivery classes) honours it. | |
 | reserved policy bits | bits 8–15 | MUST write 0, MUST ignore | `subscriber/policy-reserved-bits` | — | **keep** | |
-| per-vertex `delivery_mode` | `:settings` key | "deferred" wire spelling | none: the core namespace is empty | — | **delete**: host-only state; the text contradicts RFC-0022. | F4 |
+| per-vertex `delivery_mode` | `:settings` key | "deferred" wire spelling | none: the core namespace is empty | — | **delete**: host-only state; the text contradicts RFC-0022. Done: erratum, PR [#2013](https://github.com/avatarsd-llc/libtracer/pull/2013). | F4 |
 
 ## 5. `POINT`, `ERROR`, `STATUS` (05 §`0x07`–`0x09`)
 
@@ -289,7 +289,7 @@ issue number. Each delete names the vector that will show the element is refused
 | F1 | SUBSCRIBER: drop the unread `capability` and `subscriber_id` children | amendment | 2 delete | `subscriber/unread-children-ignored` (new): a SUBSCRIBER with both children subscribes exactly as one without them. |
 | F2 | SUBSCRIBER: a record without `target_path` is not an unsubscribe | erratum | 1 delete | `subscriber/no-target-refused` (new): written to `:subscribers[N]`, it answers `tr::schema::type_mismatch` and the slot stays. |
 | F3 | `qos_settings`: drop `delivery_scope`, `batch_count`, `batch_window_ns` and the `reliability` bits | amendment | 4 delete | `subscriber/retired-qos-ignored` (new): the three keys and bits 0–1 set change nothing about delivery. |
-| F4 | Per-vertex `delivery_mode` has no wire spelling | erratum | 1 delete | `settings/delivery-mode-not-found` (new): a `:settings.delivery_mode` write answers `tr::schema::not_found`. |
+| F4 | Per-vertex `delivery_mode` has no wire spelling | erratum | 1 delete | `settings/delivery-mode-not-found` (new): a `:settings.delivery_mode` write answers `tr::schema::not_found`. **Done** in PR [#2013](https://github.com/avatarsd-llc/libtracer/pull/2013). |
 | F5 | POINT: drop the `description` child | amendment | 1 delete | `point/branch-write-description-refused` (new): a branch write carrying it answers `tr::schema::type_mismatch`. |
 | F6 | One error-reply spelling: `STATUS{ERROR}` | erratum | 1 merge | `fwd/reply-error-bare-ignored` (new): a `kind=ERROR` reply with a bare ERROR payload is not surfaced as an error. |
 | F7 | Error registry: retire `0x0041` and `0x0070`, rename `0x0042` to `tr::flow::gap` | amendment, folded into the stage-4 RFC (#1942) for `0x0041` | 2 delete, 1 rename | `errors/retired-code` (new): an ERROR carrying a retired code decodes and is reported as an unknown code. `errors/error-registered-detail` is re-spelled with a live code. |
