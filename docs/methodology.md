@@ -626,7 +626,10 @@ Details that make these trustworthy:
   every window at least 20 µs). The gate reads every size twice: against main at the same
   size (the paired rule above, at the p50 threshold), and against the next smaller size,
   where a step of more than **1.75×** in the median and in a majority of pairs is a cliff.
-  A cliff fails only when main does not have it; one main has too is printed as a warning.
+  A cliff fails only when main does not have it and the row to the right of the step is
+  itself slower than main by the same-size rule. One main has too is printed as a warning.
+  A step that grew only because the row to its left got faster, with the right-hand row flat
+  or faster than main, is printed as info and does not fail.
   The exact half is the **segment-draw ratchet**: `bench_forward_heap` counts what one heap
   segment asks the allocator for at every ladder size (draws, total bytes, largest block),
   which is `mem_heap_request_size_test` promoted to a gate. No draw may pass the 1032 B
