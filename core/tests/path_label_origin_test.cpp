@@ -487,6 +487,15 @@ int main() {
         check(odec.has_value() && !o.r.fall_back_on_label_refusal(target, *odec),
               "a RESULT whose payload happens to be two bytes is not a NOT_FOUND refusal");
         check(target.path_label().cached, "…and the spelling is still there");
+
+        // One error-reply spelling (RFC-0004 erratum 2026-10-08, #1983): a kind=ERROR reply
+        // whose payload is a bare ERROR{NOT_FOUND}, with no STATUS wrapper, is not an error
+        // reply. The vector is fwd/fwd-reply-error minus its STATUS header.
+        const bytes_t bare = vector_bytes("fwd/reply-error-bare-ignored");
+        const auto bdec = tr::wire::tlv_node_t::over(bare);
+        check(bdec.has_value() && !o.r.fall_back_on_label_refusal(target, *bdec),
+              "a bare ERROR payload is not surfaced as a NOT_FOUND refusal");
+        check(target.path_label().cached, "…and the spelling survived it");
     }
 
     // ===== 5) the origin's scratch is on the seam (#1779): a refusal stays canonical =========

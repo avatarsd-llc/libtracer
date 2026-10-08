@@ -373,6 +373,29 @@ test('replyErrorCode reads the ERROR at any STATUS child position (fwd-reply-err
   assert.ok(sameBytes(built, bin), hex(built));
 });
 
+/**
+ * @brief One error-reply spelling (RFC-0004 erratum 2026-10-08, #1983): a `kind=ERROR` reply
+ * whose payload is a bare ERROR, with no STATUS wrapper, is not surfaced as an error. Same
+ * frame as `fwd/fwd-reply-error` minus the STATUS header.
+ *
+ * The C++ core (`path_label_origin_test.cpp`) and the Rust binding
+ * (`reply_error_bare_ignored`) pin the same bytes.
+ */
+test('a bare ERROR reply payload is not surfaced as an error (reply-error-bare-ignored)', () => {
+  const bin = vector('fwd/reply-error-bare-ignored');
+  const parsed = decodeFwd(bin);
+  assert.equal(parsed.op, FWD_OP.REPLY);
+  assert.equal(parsed.kind, FWD_KIND.ERROR);
+  assert.deepEqual(pathSegs(parsed.dst), REPLY_DST);
+  assert.deepEqual(pathSegs(parsed.src), REPLY_SRC);
+  // Assert the shape first, so a re-blessing that wraps it cannot leave this test passing on
+  // the canonical case.
+  assert.equal(parsed.payload.type, TYPE.ERROR, 'the payload is a bare ERROR');
+
+  assert.equal(replyErrorCode(parsed), 0, 'a bare ERROR payload reads no code');
+  assert.equal(replyErrorPath(parsed), null);
+});
+
 /* ----------------------------------------------- RFC-0024 §4 PATH_REF (0x14) --- */
 
 /** @brief Read a NEGATIVE vector's `reject.bin` bytes (HARNESS.md §negative cases). */

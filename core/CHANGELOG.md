@@ -369,6 +369,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **One error-reply spelling: a `kind=ERROR` reply's payload is `STATUS{ERROR}`
+  ([#1983](https://github.com/avatarsd-llc/libtracer/issues/1983)).** Spec erratum, no API or
+  byte change. reference/05 §`0x08` also admitted a bare `ERROR` as that payload, which no core
+  ever emitted or read; the RFC-0004 erratum of 2026-10-08 removes it, and a reader MUST NOT
+  surface a bare `ERROR` payload as the reply's error. The new conformance vector
+  `fwd/reply-error-bare-ignored` pins that in the C++, Rust and TypeScript suites.
 - **The host size-class ladder has a class for a 64 KiB payload's segment
   ([#1990](https://github.com/avatarsd-llc/libtracer/issues/1990)).** The default
   `kSizeClasses` topped out at 65536 B, the largest payload, so a 64 KiB value's one-block
