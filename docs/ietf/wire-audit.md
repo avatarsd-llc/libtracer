@@ -113,7 +113,7 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | `qos_settings` | SETTINGS child | optional | `parse_subscriber_tlv`; `subscriber/*` | — | **keep** | |
 | `capability` | ACL child | optional | none found: no reader | — | **delete**: subscribe is gated by the producer's `:acl`, not a carried token. | F1 |
 | `subscriber_id` | NAME child | optional | none found: no reader | — | **delete** | F1 |
-| no-`target_path` "clear this slot" | SUBSCRIBER without PATH | MUST (05 §Validation) | the field door refuses it (`TYPE_MISMATCH`); the wire door subscribes | — | **delete**: the empty STATUS is the shipped sentinel. | F2 |
+| no-`target_path` "clear this slot" | SUBSCRIBER without PATH | MUST (05 §Validation) | the field door refuses it (`TYPE_MISMATCH`); the wire door subscribes | — | **delete**: the empty STATUS is the shipped sentinel. Done: RFC-0009 erratum 2026-10-08, [#2015](https://github.com/avatarsd-llc/libtracer/pull/2015). | F2, done |
 | empty STATUS to `:subscribers[N]` | `09 00 00 00` | assigned | `graph_fields.cpp` slot-clear arm | — | **keep** | |
 | `delivery_scope` | key | reserved, read by nothing | none found | — | **delete** | F3 |
 | `delivery_compact` | key, u8 | assigned | `parse_subscriber_tlv`; `subscriber/policy-absent` | 6 (#1950, #1951) | **delete** | covered |
@@ -287,7 +287,7 @@ issue number. Each delete names the vector that will show the element is refused
 | F | Title | Instrument | Verdicts | Vector that shows it |
 | --- | --- | --- | --- | --- |
 | F1 | SUBSCRIBER: drop the unread `capability` and `subscriber_id` children | amendment | 2 delete | `subscriber/unread-children-ignored` (new): a SUBSCRIBER with both children subscribes exactly as one without them. |
-| F2 | SUBSCRIBER: a record without `target_path` is not an unsubscribe | erratum | 1 delete | `subscriber/no-target-refused` (new): written to `:subscribers[N]`, it answers `tr::schema::type_mismatch` and the slot stays. |
+| F2 | SUBSCRIBER: a record without `target_path` is not an unsubscribe | erratum | 1 delete | `subscriber/no-target-refused`: written to `:subscribers[N]`, it answers `tr::schema::type_mismatch` and the slot stays. Done in [#2015](https://github.com/avatarsd-llc/libtracer/pull/2015). |
 | F3 | `qos_settings`: drop `delivery_scope`, `batch_count`, `batch_window_ns` and the `reliability` bits | amendment | 4 delete | `subscriber/retired-qos-ignored` (new): the three keys and bits 0–1 set change nothing about delivery. |
 | F4 | Per-vertex `delivery_mode` has no wire spelling | erratum | 1 delete | `settings/delivery-mode-not-found` (new): a `:settings.delivery_mode` write answers `tr::schema::not_found`. **Done** in PR [#2013](https://github.com/avatarsd-llc/libtracer/pull/2013). |
 | F5 | POINT: drop the `description` child | amendment | 1 delete | `point/branch-write-description-refused` (new): a branch write carrying it answers `tr::schema::type_mismatch`. |
