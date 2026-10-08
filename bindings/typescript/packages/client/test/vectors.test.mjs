@@ -112,6 +112,20 @@ test('encodeSubscriber emits the RFC-0022 delivery-policy vectors byte-for-byte'
   assert.deepEqual(keys, ['delivery_compact'], 'and it names a NEIGHBOURING key, not the policy');
 });
 
+/**
+ * @brief `subscriber/target-as-value-refused`: a VALUE is never a path on the wire (#1987).
+ * The record spells its target as `VALUE "/client"`, so it carries no PATH child and names no
+ * target; `encodeSubscriber` only ever emits the PATH form.
+ */
+test('a SUBSCRIBER whose target is a VALUE string carries no target PATH', () => {
+  const tlv = decode(vector('subscriber/target-as-value-refused'));
+  assert.equal(tlv.type, TYPE.SUBSCRIBER);
+  assert.equal(tlv.children.some((c) => c.type === TYPE.PATH), false, 'no PATH child: no target');
+  assert.equal(tlv.children[0].type, TYPE.VALUE, 'the target is spelled as a VALUE');
+  const built = decode(encodeSubscriber(['client']));
+  assert.equal(built.children[0].type, TYPE.PATH, 'the encoder emits the PATH form');
+});
+
 /** @brief The decode half: the policy word is read back out of the vectors' own bytes. */
 test('the delivery-policy word decodes out of the policy vectors', () => {
   /** @brief The u16 under `delivery_policy`, or null when the record names none. */

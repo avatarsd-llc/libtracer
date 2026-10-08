@@ -843,6 +843,47 @@ void test_replace_door_latches() {
 }
 
 /**
+ * @brief `subscriber/target-as-value-refused`: a VALUE is never a path on the wire (#1987).
+ *
+ * The 05 erratum: the string form is an API spelling, and a SUBSCRIBER whose target is a
+ * `VALUE "/client"` names no `target_path`. Both field-door arms refuse it TYPE_MISMATCH,
+ * and neither admits an edge: a later producer write reaches `/client` only through the
+ * PATH-form subscriber the ablation appends first. Without that positive control, the
+ * refusal would also pass against a door that refused every record.
+ */
+void test_value_target_is_refused() {
+    std::printf("#1987 target-as-value-refused — one wire form for a path:\n");
+    graph_t g;
+    const vertex_handle_t src = g.register_vertex(path_t("/val/src"), role_t::STORED_VALUE);
+    register_client(g);
+    const std::optional<vertex_handle_t> v = g.find(path_t("/val/src").key());
+    check(v.has_value(), "the producer is registered");
+    if (!v) return;
+    const auto value_target = make_value(vector_bytes("subscriber/target-as-value-refused"));
+
+    tr::graph::field_path_t append;
+    append.steps.push_back(
+        tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
+    check(fails_with(g.write(*v, append, value_target), status_t::TYPE_MISMATCH),
+          "`:subscribers[]` refuses a VALUE target TYPE_MISMATCH");
+    (void)g.write(src, byte_value(0x31));
+    check(g_client_writes == 0, "... and admits no edge: a producer write delivers nothing");
+
+    // The ablation: the same /client spelled as a PATH is admitted through the same door.
+    check(append_vector(g, path_t("/val/src"), "subscriber/policy-absent"),
+          "ablation: the PATH form of the same target is admitted into slot 0");
+
+    tr::graph::field_path_t replace;
+    replace.steps.push_back(
+        tr::graph::field_step_t{.name = "subscribers", .indexed = true, .index = 0});
+    check(fails_with(g.write(*v, replace, value_target), status_t::TYPE_MISMATCH),
+          "`:subscribers[0]` refuses a VALUE target TYPE_MISMATCH");
+    (void)g.write(src, byte_value(0x32));
+    check(g_client_writes == 1 && g_client_last == 0x32,
+          "... and slot 0 keeps its PATH-form subscriber, which takes the next write");
+}
+
+/**
  * @brief `SUBSCRIBER{ PATH(/client), SETTINGS{ NAME "hint" NAME "delivery_policy",
  *        VALUE u16 @p word, NAME "pad" } }` — the #927 vector on the QoS SETTINGS.
  *
@@ -1117,6 +1158,7 @@ int main() {
     test_nothing_is_inherited();
     test_conformance_vectors();
     test_replace_door_latches();
+    test_value_target_is_refused();
     test_qos_settings_pair_scan_cannot_be_hijacked();
     test_qos_settings_repeat_semantics_are_the_shared_walk();
     test_stream_depth_is_carried_and_ignored();

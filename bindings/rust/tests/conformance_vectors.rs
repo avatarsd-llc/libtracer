@@ -1523,6 +1523,26 @@ fn subscriber_policy_absent() {
 }
 
 /**
+ * @brief `subscriber/target-as-value-refused` — a VALUE is never a path on the wire (#1987).
+ *
+ * The record spells its target as `VALUE "/client"`. The target reader finds no PATH child,
+ * so the record names no target, which is what a receiver refuses.
+ */
+#[test]
+fn subscriber_target_as_value_names_no_target() {
+    let bin = assert_vector_consistent("subscriber/target-as-value-refused");
+    let t = decode(&bin).unwrap();
+    assert!(structured::subscriber_target(&t).unwrap().is_none());
+    assert_eq!(structured::subscriber_target_path(&t).unwrap(), None);
+    // The positive control: the same target as a PATH is read back.
+    let path_form = decode(&encode(&subscriber(&["client"]).unwrap())).unwrap();
+    assert_eq!(
+        structured::subscriber_target_path(&path_form).unwrap(),
+        Some("/client".to_string())
+    );
+}
+
+/**
  * @brief `subscriber/policy-durability` — bit 5 set, and nothing else.
  *
  * Both directions against the SAME bytes: the builder must produce the vector, and the

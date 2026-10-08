@@ -1,0 +1,12 @@
+{
+  "name": "target-as-value-refused",
+  "category": "subscriber",
+  "hex": "04400B00010007002F636C69656E74",
+  "total_bytes": 15,
+  "decoded": {
+    "type": "0x04 SUBSCRIBER",
+    "structured": true,
+    "meaning": "SUBSCRIBER{ VALUE \"/client\" }: the target spelled as a VALUE string instead of a PATH TLV. A VALUE is never a path on the wire (05 §string form vs PATH-TLV form, erratum #1987), so this record names no target_path; written to :subscribers[] or :subscribers[N] it is refused tr::schema::type_mismatch (0x0030) and no edge is admitted",
+    "note": "a well-formed TLV, so every codec round-trips it; the refusal is behavioural and is bound in core/tests/qos_policy_test.cpp (test_value_target_is_refused). The positive control is subscriber/policy-absent, which names the same /client as a PATH and is admitted"
+  }
+}

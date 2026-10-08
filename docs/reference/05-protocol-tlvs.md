@@ -315,7 +315,7 @@ sequenceDiagram
 ### Validation
 
 - `target_path` MUST be a syntactically valid path (per [03-addressing.md](03-addressing.md)).
-- A SUBSCRIBER with no `target_path` is treated as "clear this slot" (unsubscribe sentinel).
+- A SUBSCRIBER with no `target_path` is treated as "clear this slot" (unsubscribe sentinel). (See [#1979](https://github.com/avatarsd-llc/libtracer/issues/1979).)
 
 ### Future extensions
 
@@ -591,12 +591,12 @@ renders an escape element in place inside the address; its PAIR rendering follow
 
 ### Note on string form vs PATH-TLV form
 
-A path may be expressed two ways:
+A path has **one wire form**, the PATH TLV. The string form is an API spelling only:
 
-- **String form**: `"/sensor/temp"` — a UTF-8 byte string with `/` separators. Used at the API surface for ergonomics. Stored as a single VALUE TLV when transported as data.
-- **PATH-TLV form**: a PATH TLV (opaque body, packed records — one per path element). Used inside structured TLVs (SUBSCRIBER, FWD) where elements must be addressable individually rather than re-split from a byte string.
+- **String form**: `"/sensor/temp"` — a UTF-8 byte string with `/` separators. Used at the API surface for ergonomics, and converted to the PATH-TLV form before it reaches the wire. Application data that happens to spell a path travels as an ordinary VALUE TLV, and it is never read as an address.
+- **PATH-TLV form**: a PATH TLV (opaque body, packed records — one per path element). Every wire position that expects a path (a SUBSCRIBER's `target_path`, a FWD's `dst` and `src`, an ADVERTISE `route`) carries this form.
 
-Both forms canonicalize to the same internal representation. Implementations MUST accept either form where a path is expected.
+Both spellings canonicalize to the same internal representation. A receiver MUST NOT read a VALUE TLV as a path where a path is expected: a SUBSCRIBER whose target is a VALUE string names no `target_path`. A `:subscribers[]` or `:subscribers[N]` field write that needs a local target refuses it `tr::schema::type_mismatch` (vector `subscriber/target-as-value-refused`). A routed `:subscribers[]` append (a `FWD{WRITE}`) skips the VALUE child like any unknown child, and its delivery rides the frame's return route; whether that door should require a target is [#1979](https://github.com/avatarsd-llc/libtracer/issues/1979). Erratum ([#1987](https://github.com/avatarsd-llc/libtracer/issues/1987)): this note used to say "Implementations MUST accept either form where a path is expected", but no shipped reader ever accepted a VALUE there.
 
 ### Static / pre-encoded PATH TLV (init-time form)
 
