@@ -2785,7 +2785,10 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         // anchor is invisible to enumeration, resolution and fan-out (it is not an address),
         // so it grants a pending session nothing the auth narrowing withholds — and a
         // session closed at the auth deadline is torn down through the ordinary departure
-        // seam, which retires it.
+        // seam, which retires it. The arrival is also the slot's RE-TENANT edge (#1609): the
+        // routing plane reclaims whatever a predecessor in this slot left filed under the
+        // name, and this is before the frame below can carry the new session's first
+        // SUBSCRIBE — so a name-keyed eviction never has two generations to tell apart.
         notify_arrived(handle, peer.view());
     }
 

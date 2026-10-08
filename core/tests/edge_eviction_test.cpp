@@ -297,10 +297,12 @@ class fake_bus_t : public transport_t, public bus_link_t {
     void peer_die(std::string_view peer_name) { notify_peer_down(mint(peer_name), peer_name); }
     /** @brief Simulate an ACCEPTING listener admitting @p peer_name — endpoint first (a peer
      *         that arrives is resolvable), then the arrival notifier, the `slot_server_t`
-     *         order (#1254: the notifier is what registers the session's identity anchor). */
-    void peer_arrive(std::string_view peer_name) {
+     *         order (#1254: the notifier is what registers the session's identity anchor).
+     *         @p gen is the claim generation the handle is minted at — a recycled slot's
+     *         successor arrives at a higher one (#1609). */
+    void peer_arrive(std::string_view peer_name, std::uint32_t gen = 1) {
         (void)peer(peer_name);
-        notify_peer_up(mint(peer_name), peer_name);
+        notify_peer_up(peer_handle_t{mint(peer_name).index, gen}, peer_name);
     }
     /** @brief Simulate the session FULLY torn down: the endpoint gone (so `peer_link`
      *         answers null, the RFC-0020 reject precondition), then the notifier. */
@@ -1333,6 +1335,65 @@ void test_reverse_mint_closes_the_disclosure() {
           "the successor's OWN subscription delivers at the revived generation");
 }
 
+/**
+ * @brief #1609: a recycled peer NAME is re-tenanted by its arrival — the predecessor's edges
+ *        are reclaimed before the successor can subscribe, and only the predecessor's.
+ *
+ * The case `link_down` cannot cover: the predecessor's departure never reached the routing
+ * plane (no notifier fired for it), so its edges are still filed under the name when slot 3
+ * is claimed again. Before the fix the arrival was anchor-only, and a name-keyed eviction at
+ * any later point had to choose between leaking gen-7's edges and destroying gen-8's.
+ */
+void test_arrival_retenants_a_recycled_name() {
+    std::printf("#1609 — arrival re-tenants a recycled peer name:\n");
+    graph_t g;
+    fwd_router_t router(g);
+    fake_bus_t bus;
+    (void)router.add_child("srv", bus);
+    const vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    const auto sub = [&](std::string_view peer, std::string_view marker) {
+        bus.inject_peer(peer, b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({peer}),
+                                    b_field_subscribers_append(), b_subscriber(marker)));
+    };
+    /** @brief The SUBSCRIBER bytes `:subscribers[]` lists, in slot order. */
+    const auto listed = [&] {
+        std::vector<std::vector<std::byte>> out;
+        if (const auto subs = g.read_subscribers(s))
+            for (const view_t& e : *subs) out.emplace_back(e.bytes().begin(), e.bytes().end());
+        return out;
+    };
+    const auto anchor_gen = [&]() -> std::uint32_t {
+        const auto a = g.find_session_anchor(fwd_router_t::session_anchor_id("srv", "p3"));
+        const auto slot = a ? g.vertex_slot(*a) : std::nullopt;
+        return slot ? slot->generation : 0;
+    };
+
+    bus.peer_arrive("p1");
+    sub("p1", "bystander");
+    bus.peer_arrive("p3", 7);
+    sub("p3", "gen7");
+    const std::uint32_t gen7_anchor = anchor_gen();
+    check(listed().size() == 2, "p1 and p3 (generation 7) each hold an edge on /s");
+
+    // Generation 7 drops and its departure never reaches the router; slot 3 is claimed again.
+    bus.peer_arrive("p3", 8);
+    check(listed() == std::vector<std::vector<std::byte>>{b_subscriber("bystander")},
+          "the arrival reclaimed exactly gen-7's edge, before gen 8 said anything");
+    check(g.link_edge_candidates("p3") == 0, "and released p3's link-index entry with it");
+    check(anchor_gen() > gen7_anchor, "the anchor moved to a generation gen 7 never held");
+
+    sub("p3", "gen8");
+    const auto subs = listed();
+    check(
+        subs.size() == 2 && subs[0] == b_subscriber("bystander") && subs[1] == b_subscriber("gen8"),
+        ":subscribers[] shows the bystander and gen 8 (in gen 7's freed slot), and no ghost");
+    bus.peer("p1").drain();
+    bus.peer("p3").drain();
+    check(g.write(s, make_value(b_value_u8(0x41))).has_value(), "write /s");
+    check(bus.peer("p3").count() == 1, "gen 8 receives exactly its own one delivery");
+    check(bus.peer("p1").count() == 1, "the bystander is untouched");
+}
+
 int main() {
     // #1438 — see tcp_test's twin of this guard. This suite's crash was NOT a null `bus()`:
     // with no bus module the router never registers a peer anchor, so the forwarding hop
@@ -1361,6 +1422,7 @@ int main() {
     test_departure_notifier_seam();
     test_refused_route_reclaims_the_edge();
     test_reverse_mint_closes_the_disclosure();
+    test_arrival_retenants_a_recycled_name();
     test_concurrent_evict_vs_writes();
     return tr::testing::summary("edge_eviction");
 }

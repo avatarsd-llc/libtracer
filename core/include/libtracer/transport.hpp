@@ -253,6 +253,14 @@ class bus_link_t {
      * `fwd_router_t::add_child` installs a notifier that registers (or REVIVES) the
      * session's identity anchor in the graph's vertex map, so the session gains an index and
      * a saturating generation. Must be set before frames flow, like the receivers.
+     *
+     * **An arrival is also the RE-TENANT edge for the peer's NAME (#1609).** A transport that
+     * recycles names (a slot-positional `p<slot>`) fires it once per new session, at the
+     * claim, and BEFORE delivering any frame of that session. The router's notifier first
+     * reclaims everything still filed under the name — subscriber edges, label state,
+     * pending awaits, the anchor's generation — as the departure notifier would have, so a
+     * predecessor whose departure was never reported leaves nothing for the successor to
+     * inherit and nothing for a later name-keyed eviction to confuse with the successor's.
      * @note REFUSED on a link that is not @ref peer_named, for the reason
      *       @ref set_peer_down_notifier is: a flat link has one routing identity for every
      *       peer it carries, so there is no per-session identity to anchor.

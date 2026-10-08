@@ -1172,9 +1172,9 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         // exists for (#1266's intern slot, #375 Part 2's subject) bind it at these two
         // sites, which is where it is minted and retired.
         bus->set_peer_up_notifier(
-            [](void* c, peer_handle_t, std::string_view peer) {
+            [](void* c, peer_handle_t handle, std::string_view peer) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
-                cc->self->bus_peer_up(*cc, peer);
+                cc->self->bus_peer_up(*cc, handle, peer);
             },
             &bctx);
         bus->set_peer_down_notifier(
@@ -1430,14 +1430,21 @@ session_anchor_id_t fwd_router_t::session_anchor_id(std::string_view mount,
     return id;
 }
 
-void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, std::string_view peer) {
+void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle,
+                               std::string_view peer) {
     // A tombstoned ctx names no live child (#884), so a late arrival from a transport whose
     // mount was already removed anchors nothing — the same skip every name-keyed consumer
     // makes. Read `retired` the way the frame paths do.
     if (ctx.retired.load(std::memory_order_acquire)) return;
-    // PATH_IN_USE (the session is already anchored) is the only error this can answer, and
-    // the right response to it is to keep the anchor that exists. Discarded by value. An id
-    // too long for one key record anchors nothing, as the departure below finds nothing.
+    // An arrival is the moment the NAME changes hands (#1609), and the new session has sent
+    // nothing yet — so whatever is still filed under the name is a predecessor's whose
+    // departure never reached this router. Run that departure now: it retires a still-live
+    // anchor (the generation bump), evicts the name's edges and label state, and drops the
+    // slot's cached token (the cache is keyed by slot index, which the successor shares). In
+    // the ordinary case the departure already ran and every step finds nothing.
+    bus_peer_down(ctx, handle, peer);
+    // The anchor is therefore never live here, so PATH_IN_USE cannot answer; discarded by
+    // value. An id too long for one key record anchors nothing, as the departure finds nothing.
     const session_anchor_id_t id = session_anchor_id(ctx.name, peer);
     if (id.len != 0) (void)graph_.register_session_anchor(id);
 }

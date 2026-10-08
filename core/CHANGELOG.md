@@ -375,6 +375,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   ever emitted or read; the RFC-0004 erratum of 2026-10-08 removes it. A reader MUST NOT read an
   error code or `tr::` path from a bare `ERROR` payload; the reply stays `kind=ERROR`. The new conformance vector
   `fwd/reply-error-bare-ignored` pins that in the C++, Rust and TypeScript suites.
+- **A bus peer's arrival re-tenants its name: the router reclaims what the name's previous
+  holder left before the new session can subscribe
+  ([#1609](https://github.com/avatarsd-llc/libtracer/issues/1609)).** The notifier
+  `fwd_router_t::add_child` installs behind `bus_link_t::set_peer_up_notifier` now runs the
+  departure reclaim for the peer's name (anchor retire, `link_down`'s edge eviction, label and
+  await release, the slot's cached link token) and then registers the anchor. A transport that
+  recycles names (`p<slot>`) fires arrival once per new session and before delivering its first
+  frame, so the edges under a peer name are always the current holder's, even when the
+  predecessor's departure never reached the router. Before, those edges stayed filed under the
+  live name, and an integration sweeping them by name could not tell them from the successor's.
+  When the departure already ran, the extra work finds nothing. A duplicated arrival for a
+  session that never left now re-tenants it (bumps its anchor and drops its edges) instead of
+  keeping the anchor; no in-tree transport fires one. No signature changes, and `edge_view_t`
+  is unchanged.
+
 - **The host size-class ladder has a class for a 64 KiB payload's segment
   ([#1990](https://github.com/avatarsd-llc/libtracer/issues/1990)).** The default
   `kSizeClasses` topped out at 65536 B, the largest payload, so a 64 KiB value's one-block
