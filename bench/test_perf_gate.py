@@ -1825,6 +1825,14 @@ class AaNullCampaignScript(unittest.TestCase):
     def test_it_holds_out_a_window_the_fit_does_not_use(self):
         self.assertIn("--held-out", self.SCRIPT.read_text())
 
+    def test_a_shared_bench_lock_is_held_from_before_the_stop_to_after_the_restart(self):
+        text = self.SCRIPT.read_text()
+        self.assertIn("BENCH_LOCK", text)
+        body = text[text.index("measure_window() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertLess(body.index("flock"), body.index("systemctl stop"))
+        self.assertLess(body.rindex("restart_runner"), body.rindex("{lock_fd}>&-"))
+
 
 class HistoryKeepsOneRunnersTuple(unittest.TestCase):
     """@brief The history emitter records one runner's whole tuple per point (#1807)."""

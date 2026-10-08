@@ -24,6 +24,7 @@
 #
 #   bench/aa_null_campaign.sh                       # 3 fit windows x 9 rounds + 10 held out
 #   WINDOWS=2 ROUNDS=13 bench/aa_null_campaign.sh   # 26 rounds in two longer stops
+#   BENCH_LOCK=~/scratch/bench.lock bench/aa_null_campaign.sh   # share the CPUs by a lock
 #
 # Then read the printed held-out line (A/A false-fail sessions, rows an injected 10% fails
 # in every session), update the capped-row list in docs/methodology.md from
@@ -39,6 +40,10 @@ WINDOWS="${WINDOWS:-3}"          # fit windows (runner stops)
 ROUNDS="${ROUNDS:-9}"            # rounds per fit window: WINDOWS x ROUNDS >= 25
 HELD_OUT_ROUNDS="${HELD_OUT_ROUNDS:-10}"
 POLL_S="${POLL_S:-60}"
+# Optional: a lock file other bench users on this host take too (`flock <file> <cmd>`). Each
+# window holds it from before the runner stops until the runner is started again, so a
+# window never shares the bench CPUs with another bench, and one window is one lock stretch.
+BENCH_LOCK="${BENCH_LOCK:-}"
 JOBS="${JOBS:-8}"
 ROOT="$(git rev-parse --show-toplevel)"
 REV="$(git -C "$ROOT" rev-parse --short HEAD)"
@@ -92,10 +97,20 @@ perf_busy() {
 }
 
 measure_window() {  # $1 = output file, $2 = rounds
-  local why
-  while why="$(perf_busy)"; do
-    echo "aa_null_campaign: waiting, $why"
-    sleep "$POLL_S"
+  local why lock_fd=
+  while :; do
+    while why="$(perf_busy)"; do
+      echo "aa_null_campaign: waiting, $why"
+      sleep "$POLL_S"
+    done
+    [[ -z $BENCH_LOCK ]] && break
+    exec {lock_fd}>>"$BENCH_LOCK"
+    echo "aa_null_campaign: waiting for $BENCH_LOCK"
+    flock "$lock_fd"
+    # A perf run may have been queued while another bench held the lock: look again.
+    why="$(perf_busy)" || break
+    exec {lock_fd}>&-
+    lock_fd=
   done
   sudo -n systemctl stop "$UNIT"
   runner_stopped=1
@@ -107,6 +122,10 @@ measure_window() {  # $1 = output file, $2 = rounds
     --host "bench host, $SLICE CPUs $BENCH_CPU (single-threaded on $BENCH_CPU_SINGLE), runner stopped" \
     --out "$1" || rc=$?
   restart_runner
+  if [[ -n $lock_fd ]]; then
+    exec {lock_fd}>&-
+    sleep "$POLL_S"  # a bench waiting on the lock takes it before the next window does
+  fi
   return "$rc"
 }
 
