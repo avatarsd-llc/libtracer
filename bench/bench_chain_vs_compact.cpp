@@ -44,6 +44,16 @@
  *   tlv8/tlv64      TLV bytes per hop cut into 8/64 B fields (NOT CAN carriage)
  *
  * NOT a wall-clock network number: the chain runs synchronously on this thread.
+ *
+ * `--can-frames` (#2044) replaces the tlv8/tlv64 arithmetic with the REAL CAN carriage: every
+ * inter-node link is a production `can_transport_t` (classic or FD) over an in-process bus, and
+ * the census counts the frames its own segmenter writes through the `can_link_t` seam — the
+ * advertise manifest on the control slot and the lean data slices — per hop, forward and reply
+ * leg, with no timing. The link is bound point-to-point (a flat sink, no bus facet), so the routes
+ * are the ones the wire arms use. The manifest path is one byte ("s"); each further 8 path bytes
+ * adds one classic manifest frame (the manifest is classic-sliced even on an FD bus). A group the
+ * 12-bit endpoint window cannot hold (`kCanMaxGroupSlices`) is refused whole by the transport and
+ * reported as REFUSED.
  */
 
 #include <algorithm>
@@ -53,6 +63,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <new>
 #include <span>
@@ -67,8 +78,10 @@
 #include "bench_process.hpp"
 #include "libtracer/batch.hpp"
 #include "libtracer/can_framing.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/transport_can.hpp"
 #include "libtracer/transport_vertex.hpp"
 
 namespace {
@@ -222,37 +235,32 @@ struct node_t {
     return std::vector<std::byte>(b.begin(), b.end());
 }
 
-/** @brief Nodes 0..hops wired in a line through `transport_vertex_t`, sink at the far end. */
-struct chain_t {
+/** @brief Nodes 0..hops, sink at the far end; the links between them are a subclass's choice. */
+struct chain_base_t {
     std::size_t hops;
     std::vector<std::unique_ptr<node_t>> nodes;
-    std::array<wire_link_t, kMaxNodes> down{};
-    std::array<wire_link_t, kMaxNodes> up{};
     wire_link_t origin;
     std::size_t delivered = 0;
 
     static void count(void* ctx, const tr::graph::value_t&) { ++*static_cast<std::size_t*>(ctx); }
 
-    explicit chain_t(std::size_t h) : hops(h) {
+    explicit chain_base_t(std::size_t h) : hops(h) {
         for (std::size_t i = 0; i <= hops; ++i) nodes.push_back(std::make_unique<node_t>());
-        const auto bind = [&](std::size_t i, const char* mod, const std::string& name,
-                              transport_t& link) {
-            node_t& n = *nodes[i];
-            n.net.provide_link(mod, name, link);
-            (void)n.net.register_module(mod, mod, tr::net::conn_role_t::DIAL);
-            const auto st = n.g.write(path_t(std::string("/net/") + mod + "/conn"),
-                                      tr::net::conn_spec_t(name).view());
-            if (!st.has_value()) fail("wire", "connection creation refused");
-        };
-        for (std::size_t i = 0; i < hops; ++i) {
-            down[i].peer = &up[i + 1];
-            up[i + 1].peer = &down[i];
-            bind(i, "dn", "n" + std::to_string(i + 1), down[i]);
-            bind(i + 1, "up", "n" + std::to_string(i), up[i + 1]);
-        }
+    }
+
+    void bind(std::size_t i, const char* mod, const std::string& name, transport_t& link) {
+        node_t& n = *nodes[i];
+        n.net.provide_link(mod, name, link);
+        (void)n.net.register_module(mod, mod, tr::net::conn_role_t::DIAL);
+        const auto st = n.g.write(path_t(std::string("/net/") + mod + "/conn"),
+                                  tr::net::conn_spec_t(name).view());
+        if (!st.has_value()) fail("wire", "connection creation refused");
+    }
+
+    void bind_ends() {
         bind(0, "app", "o", origin);
         (void)nodes[hops]->g.register_vertex(*path_t::parse("/sink"), role_t::STREAM);
-        (void)nodes[hops]->g.subscribe(*path_t::parse("/sink"), &chain_t::count, &delivered);
+        (void)nodes[hops]->g.subscribe(*path_t::parse("/sink"), &chain_base_t::count, &delivered);
     }
 
     [[nodiscard]] std::vector<std::byte> pair_dst() {
@@ -284,6 +292,22 @@ struct chain_t {
         segs.push_back("sink");
         return path_tlv(segs);
     }
+};
+
+/** @brief The base chain with every link an in-process `wire_link_t` (the timing arms). */
+struct chain_t : chain_base_t {
+    std::array<wire_link_t, kMaxNodes> down{};
+    std::array<wire_link_t, kMaxNodes> up{};
+
+    explicit chain_t(std::size_t h) : chain_base_t(h) {
+        for (std::size_t i = 0; i < hops; ++i) {
+            down[i].peer = &up[i + 1];
+            up[i + 1].peer = &down[i];
+            bind(i, "dn", "n" + std::to_string(i + 1), down[i]);
+            bind(i + 1, "up", "n" + std::to_string(i), up[i + 1]);
+        }
+        bind_ends();
+    }
 
     void clear() {
         for (auto& l : down) l.clear();
@@ -296,6 +320,252 @@ struct chain_t {
         return n;
     }
 };
+
+/** @brief Counters of one direction of a CAN link: control-slot manifests vs lean data frames. */
+struct can_count_t {
+    std::size_t ctrl_frames = 0, ctrl_B = 0, data_frames = 0, data_B = 0;
+    [[nodiscard]] std::size_t frames() const { return ctrl_frames + data_frames; }
+    [[nodiscard]] std::size_t bytes() const { return ctrl_B + data_B; }
+    can_count_t& operator+=(const can_count_t& o) {
+        ctrl_frames += o.ctrl_frames;
+        ctrl_B += o.ctrl_B;
+        data_frames += o.data_frames;
+        data_B += o.data_B;
+        return *this;
+    }
+};
+
+class can_end_t;
+using can_queue_t = std::deque<std::pair<can_end_t*, tr::net::can_frame_data_t>>;
+
+/**
+ * @brief One end of a two-node in-process CAN bus (the `can_link_t` seam).
+ *
+ * `write_raw` is what the production `can_transport_t` calls for EVERY frame it emits, so counting
+ * here counts the real segmenter's output. Frames are queued and delivered by `pump` rather than
+ * re-entered, so a forward and its reply never recurse through a transport's send lock.
+ */
+class can_end_t final : public tr::net::can_link_t {
+   public:
+    explicit can_end_t(can_queue_t& q) : q_(q) {}
+    can_end_t* peer = nullptr;
+    bool mute = false;  // the reply-relay ablation: counted, never delivered
+    can_count_t tx;
+
+    void write_raw(const tr::net::can_frame_data_t& f) override {
+        const auto id = tr::net::can::decode_can_id(f.id);
+        const bool ctrl = id && id->endpoint == 0;  // the control slot carries the manifest
+        (ctrl ? tx.ctrl_frames : tx.data_frames) += 1;
+        (ctrl ? tx.ctrl_B : tx.data_B) += f.len;
+        if (!mute && peer != nullptr) q_.emplace_back(peer, f);
+    }
+    void on_receive(rx_fn_t rx) override { rx_ = std::move(rx); }
+    void start() override {}
+    void deliver(const tr::net::can_frame_data_t& f) {
+        if (rx_) rx_(f);
+    }
+
+   private:
+    can_queue_t& q_;
+    rx_fn_t rx_;
+};
+
+/**
+ * @brief A point-to-point binding of a `can_transport_t` as a plain `transport_t`.
+ *
+ * The CAN transport is a BUS (`bus_link_t`): when the router sees a bus it names the peer in the
+ * route. A two-node chain link has exactly one peer, which the transport's flat-sink path serves
+ * ("a single-peer consumer needs no bus facet"); this shim installs that sink and hides the bus
+ * facet, so the PAIR/COMPACT routes stay identical to the wire arms. The bytes on the CAN bus are
+ * unchanged by it: every frame is still the transport's own `send()` output.
+ */
+struct can_p2p_t final : transport_t {
+    tr::net::can_transport_t* c = nullptr;
+    void attach(tr::net::can_transport_t& t) {
+        c = &t;
+        t.set_receiver(
+            [](void* ctx, std::span<const std::byte> f) {
+                static_cast<can_p2p_t*>(ctx)->rx_.deliver_borrowed(f);
+            },
+            this);
+    }
+    void send(std::span<const std::byte> f) override { c->send(f); }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        scratch_.clear();
+        for (const auto& s : iov) scratch_.insert(scratch_.end(), s.begin(), s.end());
+        c->send(scratch_);
+    }
+
+   private:
+    std::vector<std::byte> scratch_;
+};
+
+/** @brief The chain with every inter-node link a real `can_transport_t` pair on an in-process bus.
+ */
+struct can_chain_t : chain_base_t {
+    can_queue_t q;
+    std::array<can_end_t*, kMaxNodes> dn{};   // node i -> i+1 transmit end (forward leg)
+    std::array<can_end_t*, kMaxNodes> upe{};  // node i+1 -> i transmit end (reply leg), index i+1
+    std::vector<std::unique_ptr<tr::net::can_transport_t>> tp;
+    std::array<can_p2p_t, 2 * kMaxNodes> shim{};
+
+    can_chain_t(std::size_t h, bool fd) : chain_base_t(h) {
+        const auto mk = [&](std::uint16_t node, can_end_t*& out) {
+            auto link = tr::mem::make_poly<can_end_t>(tr::mem::net_source(), q);
+            out = link.get();
+            tr::net::transport_can_config_t cfg;
+            cfg.node = node;
+            cfg.mode =
+                fd ? tr::net::can::can_frame_mode_t::FD : tr::net::can::can_frame_mode_t::CLASSIC;
+            cfg.path = "s";
+            tp.push_back(std::make_unique<tr::net::can_transport_t>(std::move(link), cfg));
+            return tp.back().get();
+        };
+        for (std::size_t i = 0; i < hops; ++i) {
+            tr::net::can_transport_t* a = mk(1, dn[i]);
+            tr::net::can_transport_t* b = mk(2, upe[i + 1]);
+            dn[i]->peer = upe[i + 1];
+            upe[i + 1]->peer = dn[i];
+            shim[2 * i].attach(*a);
+            shim[2 * i + 1].attach(*b);
+            bind(i, "dn", "n" + std::to_string(i + 1), shim[2 * i]);
+            bind(i + 1, "up", "n" + std::to_string(i), shim[2 * i + 1]);
+        }
+        bind_ends();
+        pump();
+    }
+
+    /** @brief Deliver queued frames until the bus is quiet. */
+    void pump() {
+        while (!q.empty()) {
+            auto [to, f] = q.front();
+            q.pop_front();
+            to->deliver(f);
+        }
+    }
+    void clear() {
+        for (std::size_t i = 0; i < hops; ++i) {
+            dn[i]->tx = {};
+            upe[i + 1]->tx = {};
+        }
+    }
+    [[nodiscard]] std::uint64_t dropped_tx() const {
+        std::uint64_t n = 0;
+        for (const auto& t : tp) n += t->dropped_tx();
+        return n;
+    }
+};
+
+struct can_cell_t {
+    std::vector<can_count_t> fwd, rev;  // per hop
+    std::size_t logical_B = 0;          // the frame handed to each hop's send(), from the wire arm
+    std::uint64_t refused = 0;          // group not representable (dropped_tx)
+    std::size_t delivered = 0;
+    can_count_t cold;  // compact: the ADVERTISE walk + first frame, all hops
+};
+
+/** @brief One steady-state delivery on the real CAN carriage; the census is exact, not timed. */
+[[nodiscard]] can_cell_t run_can_cell(const char* arm, bool fd, std::size_t hops,
+                                      std::size_t payload, std::size_t n) {
+    char name[96];
+    std::snprintf(name, sizeof name, "can-%s/%s/h%zu/p%zu/n%zu", fd ? "fd" : "cl", arm, hops,
+                  payload, n);
+    const bool pair = std::strncmp(arm, "pair", 4) == 0;
+    const bool norelay = std::strcmp(arm, "pair-norelay") == 0;
+    can_cell_t c;
+    // The logical frame per hop comes from the production wire-link chain (same builders).
+    {
+        chain_t w(hops);
+        const std::vector<std::byte> body = payload_for(payload, n);
+        std::vector<std::byte> frame;
+        if (pair) {
+            frame = tr::testing::b_fwd_raw_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE),
+                                              w.pair_dst(), path_tlv({}), {}, body);
+        } else {
+            w.origin.inject(tr::net::encode_advertise(0x0042, w.compact_route()));
+            frame = tr::net::encode_compact(0x0042, body);
+        }
+        w.origin.inject(frame);
+        w.clear();
+        w.origin.inject(frame);
+        for (std::size_t i = 0; i < hops; ++i) c.logical_B += w.down[i].bytes;
+    }
+    can_chain_t ch(hops, fd);
+    const std::vector<std::byte> body = payload_for(payload, n);
+    std::vector<std::byte> frame;
+    ch.clear();
+    if (pair) {
+        frame = tr::testing::b_fwd_raw_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE),
+                                          ch.pair_dst(), path_tlv({}), {}, body);
+    } else {
+        ch.origin.inject(tr::net::encode_advertise(0x0042, ch.compact_route()));
+        ch.pump();
+        frame = tr::net::encode_compact(0x0042, body);
+    }
+    for (std::size_t i = 0; i < hops; ++i) {
+        c.cold += ch.dn[i]->tx;
+        c.cold += ch.upe[i + 1]->tx;
+    }
+    // Steady state: one warm-up delivery, clear, then the measured one.
+    ch.origin.inject(frame);
+    ch.pump();
+    ch.clear();
+    if (norelay)
+        for (std::size_t i = 0; i < hops; ++i) ch.upe[i + 1]->mute = true;
+    const std::size_t before = ch.delivered;
+    const std::uint64_t drops = ch.dropped_tx();
+    ch.origin.inject(frame);
+    ch.pump();
+    c.delivered = ch.delivered - before;
+    c.refused = ch.dropped_tx() - drops;
+    for (std::size_t i = 0; i < hops; ++i) {
+        c.fwd.push_back(ch.dn[i]->tx);
+        c.rev.push_back(ch.upe[i + 1]->tx);
+    }
+    // Cross-check against the wire arm: classic CAN data fields carry the logical frame exactly,
+    // so (bytes on the bus - manifest bytes) must equal the bytes `send()` was handed.
+    if (c.refused == 0 && !fd) {
+        std::size_t on_bus = 0;
+        for (const can_count_t& x : c.fwd) on_bus += x.data_B;
+        if (on_bus != c.logical_B) fail(name, "classic data bytes differ from the logical frames");
+    }
+    if (c.refused == 0 && c.delivered != 1) fail(name, "the frame did not reach the sink once");
+    if (c.refused != 0 && c.delivered != 0) fail(name, "refused group still delivered");
+    return c;
+}
+
+void report_can(const char* arm, bool fd, std::size_t hops, std::size_t payload, std::size_t n,
+                const can_cell_t& c) {
+    std::string f, fb, ctl, r, rb;
+    const auto add = [](std::string& s, std::size_t v) {
+        s += (s.empty() ? "" : "/") + std::to_string(v);
+    };
+    for (const can_count_t& x : c.fwd) {
+        add(f, x.frames());
+        add(fb, x.bytes());
+        add(ctl, x.ctrl_frames);
+    }
+    can_count_t rsum;
+    for (const can_count_t& x : c.rev) {
+        add(r, x.frames());
+        add(rb, x.bytes());
+        rsum += x;
+    }
+    std::size_t ftot = 0, fbtot = 0;
+    for (const can_count_t& x : c.fwd) {
+        ftot += x.frames();
+        fbtot += x.bytes();
+    }
+    std::printf(
+        "CANCELL bus=%s arm=%s hops=%zu payload=%zu N=%zu status=%s frames_per_hop=%s "
+        "ctrl_frames_per_hop=%s bytes_on_wire_per_hop=%s total_fwd_frames=%zu total_fwd_B=%zu "
+        "frames_per_sample=%.2f reply_frames_per_hop=%s reply_B_per_hop=%s total_reply_frames=%zu "
+        "total_reply_B=%zu cold_frames=%zu cold_B=%zu\n",
+        fd ? "fd" : "classic", arm, hops, payload, n,
+        c.refused != 0 ? "REFUSED-group-exceeds-kCanMaxGroupSlices" : "ok", f.c_str(), ctl.c_str(),
+        fb.c_str(), ftot, fbtot, static_cast<double>(ftot) / static_cast<double>(hops * n),
+        r.c_str(), rb.c_str(), rsum.frames(), rsum.bytes(), c.cold.frames(), c.cold.bytes());
+}
 
 struct cell_t {
     double p50_ns = 0, ops_s = 0;
@@ -402,7 +672,22 @@ void report(const char* arm, std::size_t hops, std::size_t payload, std::size_t 
 
 }  // namespace
 
-int main(int /*argc*/, char** argv) {
+/** @brief `--can-frames`: the exact frame/byte census on the real CAN carriage. No timing. */
+void can_census() {
+    std::printf("# CAN frames per hop: PAIR chain vs COMPACT on can_transport_t (#2044)\n");
+    for (const bool fd : {false, true})
+        for (const std::size_t h : kHops)
+            for (const std::size_t p : kPayloads)
+                for (const std::size_t n : kBatches)
+                    for (const char* arm : {"pair", "pair-norelay", "compact"})
+                        report_can(arm, fd, h, p, n, run_can_cell(arm, fd, h, p, n));
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "--can-frames") == 0) {
+        can_census();
+        return 0;
+    }
     bench::pin_allocator_state(argv);
     bench::emit_clock_floor();
     bench::emit_alloc_state();
