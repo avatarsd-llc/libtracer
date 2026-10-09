@@ -38,12 +38,22 @@
  * the registered mount, so no mount matches. Run it once and read the instrument — `hits`
  * must drop to zero and `miss` must take every frame. A build where the "broken" run still
  * reports hits is measuring something other than what it says.
+ *
+ * @section walk The tree walk against the registry (RFC-0029 §13.2 S6, §15 clause 4)
+ *
+ * A second table times the two LOOKUPS alone, in one binary, over the same N mounts of width
+ * W: the registry's `longest_prefix` over the address, and the graph's own tree descent
+ * (`graph_t::find`) to the target's connection vertex, which every mount here has. `find` of
+ * the exact mount key is the FLOOR of any walk to the deepest connection vertex: a real walk
+ * descends at least those W levels and must also decide at each one whether it stands on a
+ * door. S6 keeps the registry index as an accelerator if the walk loses at realistic widths.
  */
 
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <span>
 #include <string>
 #include <string_view>
@@ -194,6 +204,55 @@ void emit_path(std::vector<std::byte>& out, const std::vector<std::string>& segs
     return c;
 }
 
+/** @brief One lookup cell: p50 of the registry pass and of the tree descent, in ns. */
+struct lookup_t {
+    std::uint64_t registry = 0; /**< @brief `child_registry_t::longest_prefix`, p50 ns. */
+    std::uint64_t walk = 0;     /**< @brief `graph_t::find` of the mount key, p50 ns. */
+    bool agree = false;         /**< @brief Both lookups found the target. */
+};
+
+/** @brief p50 ns of @p op over @p seconds, batched by 128. */
+template <class Op>
+[[nodiscard]] std::uint64_t time_p50(Op&& op, double seconds) {
+    for (int i = 0; i < 2000; ++i) op();  // warm
+    bench::Latency lat;
+    const auto deadline = static_cast<std::uint64_t>(seconds * 1e9);
+    const std::uint64_t t0 = bench::now_ns();
+    constexpr std::size_t kBatch = 128;
+    while (bench::now_ns() - t0 < deadline) {
+        const std::uint64_t a = bench::now_ns();
+        for (std::size_t i = 0; i < kBatch; ++i) op();
+        lat.add((bench::now_ns() - a) / kBatch);
+    }
+    return lat.summarize().p50;
+}
+
+/** @brief Time the two lookups of the (@p w, @p n) cell's last-registered mount. */
+[[nodiscard]] lookup_t measure_lookup(std::size_t w, std::size_t n, double seconds) {
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    std::vector<counting_link_t> links(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::string name = join(mount_segments(w, i));
+        (void)graph.register_vertex(tr::graph::path_t("/" + name), tr::graph::role_t::STORED_VALUE);
+        router.add_child(name, links[i]);
+    }
+    std::vector<std::string> owned = mount_segments(w, n - 1);
+    const tr::graph::path_t mount_path("/" + join(owned));
+    owned.emplace_back("leaf");
+    std::vector<std::string_view> segs(owned.begin(), owned.end());
+    const std::span<const std::string_view> dst(segs);
+    const std::span<const std::byte> key = mount_path.key();
+    std::size_t found = 0;
+    lookup_t out;
+    out.agree = router.registry().longest_prefix(dst) != nullptr && graph.find(key).has_value();
+    out.registry =
+        time_p50([&] { found += router.registry().longest_prefix(dst) != nullptr; }, seconds);
+    out.walk = time_p50([&] { found += graph.find(key).has_value(); }, seconds);
+    if (found == 0) std::printf("WARN W%zu N%zu found nothing\n", w, n);
+    return out;
+}
+
 }  // namespace
 
 int main() {
@@ -224,6 +283,28 @@ int main() {
                 "llu\n",
                 c.w, c.n, static_cast<unsigned long long>(c.p50),
                 static_cast<unsigned long long>(c.p50), static_cast<unsigned long long>(c.p99));
+        }
+    }
+    std::printf("\nLookup alone: registry longest_prefix vs graph tree descent (find)\n");
+    std::printf("%-4s %-4s %-14s %-14s %s\n", "W", "N", "registry_ns", "walk_ns", "agree");
+    for (const std::size_t w : kWidths) {
+        for (const std::size_t n : std::initializer_list<std::size_t>{1, 8, 64}) {
+            if (w > 3 && n != 64) continue;
+            const lookup_t l = measure_lookup(w, n, s);
+            std::printf("%-4zu %-4zu %-14llu %-14llu %s\n", w, n,
+                        static_cast<unsigned long long>(l.registry),
+                        static_cast<unsigned long long>(l.walk), l.agree ? "yes" : "NO");
+            std::printf(
+                "RESULT\tlibtracer\tmount-lookup-registry-W%zu-N%zu\t0\t1\t1\t0\t0\t0.0\t%llu"
+                "\t%llu\t%llu\n",
+                w, n, static_cast<unsigned long long>(l.registry),
+                static_cast<unsigned long long>(l.registry),
+                static_cast<unsigned long long>(l.registry));
+            std::printf(
+                "RESULT\tlibtracer\tmount-lookup-walk-W%zu-N%zu\t0\t1\t1\t0\t0\t0.0\t%llu\t%"
+                "llu\t%llu\n",
+                w, n, static_cast<unsigned long long>(l.walk),
+                static_cast<unsigned long long>(l.walk), static_cast<unsigned long long>(l.walk));
         }
     }
     std::printf(

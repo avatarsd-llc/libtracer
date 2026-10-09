@@ -946,8 +946,7 @@ std::uint32_t graph_t::retire_generation(vertex_handle_t vh) const noexcept {
 }
 
 std::size_t graph_t::vertex_slot_count() const noexcept {
-    const std::shared_lock lock(map_mutex_);
-    return vertex_slots_.size();
+    return vertex_slots_.size();  // lock-free: the index publishes its size (#1939)
 }
 
 void graph_t::set_vertex_ceiling(std::size_t max_vertices) noexcept {
@@ -1111,11 +1110,11 @@ std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noex
 }
 
 std::optional<vertex_slot_t> graph_t::vertex_slot_at(std::uint32_t index) const noexcept {
-    const std::shared_lock lock(map_mutex_);
+    // LOCK-FREE (#1939): the index is append-only and publishes its size, so an in-range slot
+    // is a written one. What the shared hold used to buy — a generation read that cannot
+    // straddle a retire — is bought by reading the generation on BOTH sides of the
+    // registration test, which is `deref_vertex_slot`'s rule and is argued there.
     if (index >= vertex_slots_.size()) return std::nullopt;
-    // Read under the same hold the index bound was tested under, for the reason
-    // `vertex_slot` states: a generation read outside it can straddle a retire and stamp
-    // the SUCCESSOR tenant's number onto an element the operation never reached.
     const vertex_t* const v = vertex_slots_[index];
     const std::uint32_t gen = v->retire_gen();
     if (gen == kGenerationSaturated) return std::nullopt;  // permanently unbindable (§4.4 r3)
@@ -1128,6 +1127,8 @@ std::optional<vertex_slot_t> graph_t::vertex_slot_at(std::uint32_t index) const 
     // side that honours one — the same symmetry rule 3 needed. A hop that cannot mint STRIPS
     // the mint answer (§7.1 erratum 1) and the origin stays canonical.
     if (!v->registered()) return std::nullopt;
+    std::atomic_thread_fence(std::memory_order_acquire);  // pairs with `fill`'s release store
+    if (v->retire_gen() != gen) return std::nullopt;
     return vertex_slot_t{.index = index, .generation = gen};
 }
 
@@ -1137,7 +1138,10 @@ bool graph_t::allows(vertex_handle_t v, std::string_view caller, acl_right_t rig
 
 std::optional<vertex_handle_t> graph_t::deref_vertex_slot(std::uint32_t index,
                                                           std::uint32_t generation) const noexcept {
-    const std::shared_lock lock(map_mutex_);
+    // LOCK-FREE (#1939): the PAIR arm of a hop takes no graph lock. The index is append-only
+    // with an atomically published size (ADR-0063's pattern), so a lookup is a bounds check,
+    // a slot load and a generation compare.
+    //
     // Bounds check (RFC-0024 §5.1 step 1). Out of range is the only way the deref itself
     // could fault, and it cannot get past here.
     if (index >= vertex_slots_.size()) return std::nullopt;
@@ -1158,12 +1162,22 @@ std::optional<vertex_handle_t> graph_t::deref_vertex_slot(std::uint32_t index,
     // Generation compare (§5.1 step 2). A mismatch means the vertex was retired (and
     // possibly re-created for a DIFFERENT owner) since the mint, so the answer is discarded
     // rather than delivered into whatever now occupies the address.
-    if (!bound_generation_matches(v->retire_gen(), generation)) return std::nullopt;
+    const std::uint32_t v_gen = v->retire_gen();
+    if (!bound_generation_matches(v_gen, generation)) return std::nullopt;
     // A retired-but-not-yet-revived vertex is a PLACEHOLDER: invisible to find/read, so the
-    // bound form must not be the one spelling that reaches it. This is the map-lock state
-    // the shared hold above is really for — it also covers the never-registered
-    // intermediates, which hold slots (they are vertex_t allocations) but are no address.
+    // bound form must not be the one spelling that reaches it. That covers the
+    // never-registered intermediates too, which hold slots (they are vertex_t allocations) but
+    // are no address.
+    //
+    // The generation is read AGAIN after the registration test, and that second read is what
+    // the shared hold used to provide. A retire bumps the generation and then clears the
+    // registration; a revival sets it again. A reader that saw the old generation and then
+    // the REVIVED registration has its second read ordered after the bump (the revival's
+    // release store is what it acquired), so it refuses, instead of honouring a stale element
+    // against the successor tenancy (#603).
     if (!v->registered()) return std::nullopt;
+    std::atomic_thread_fence(std::memory_order_acquire);  // pairs with `fill`'s release store
+    if (v->retire_gen() != v_gen) return std::nullopt;
     // Authorization is NOT settled here (§6.2): the caller's op re-evaluates acl_allows at
     // this vertex, for its own right, exactly as the canonical spelling does.
     return vertex_handle_t{v};

@@ -760,11 +760,22 @@ int main() {
     // initialized READ is a GUESS, not an answer. Guessing READ is how a future write-like
     // opcode crosses a READ-only gate. The two arms below are the same frame with one byte
     // changed, so the refusal is the opcode's and nothing else's.
+    //
+    // On a READ-only gate, because that is where the guess would matter: since #1939 a bound
+    // hop runs the ONE gate the NAME hop runs (RFC-0029 §6.4), and a graph that enforces no
+    // ACL lets every op through in every spelling.
     std::printf("An opcode this build cannot price is dropped at a bound hop (§6.2):\n");
     {
         const auto forward_op = [&](std::uint8_t op_byte) {
             graph_t g;
+            {
+                auto hooks = g.hooks();
+                hooks.subject_resolver = {caller_is_subject, nullptr};
+                g.set_hooks(hooks);
+            }
             (void)g.register_vertex(path_t("/up"), role_t::STORED_VALUE);
+            (void)g.write(path_t("/up:acl"),
+                          owned(allow_acl("cli", static_cast<std::uint32_t>(acl_right_t::READ))));
             fwd_router_t r(g);
             span_sink_t cli;
             span_sink_t up;

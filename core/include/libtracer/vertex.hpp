@@ -1080,8 +1080,8 @@ class vertex_t {
      *         structural intermediate level that `find` / `read_children` must not surface
      *         (matching the flat-map behavior where missing intermediates did not exist).
      *  @note Written under the graph's map lock. Read under it, or lock-free by the access
-     *        check's recheck (`graph_t::acl_allows`), which follows this relaxed load with
-     *        an acquire fence. */
+     *        check's recheck (`graph_t::acl_allows`) and the slot deref (#1939), each of
+     *        which follows this relaxed load with an acquire fence. */
     [[nodiscard]] bool registered() const noexcept {
         return registered_.load(std::memory_order_relaxed);
     }
@@ -3907,7 +3907,8 @@ class vertex_t {
     // writes are RMWs and compose.
     std::atomic<std::uint8_t> flags_{0};
     // false => placeholder intermediate (invisible to find). Written under the unique map lock,
-    // read with NONE by the access check's recheck, hence atomic; one byte either way.
+    // read with NONE by the access check's recheck and the lock-free slot deref (#1939), hence
+    // atomic; one byte either way.
     std::atomic<bool> registered_{false};
     /**
      * @brief Bumped every time this vertex is re-virginized by retirement (ADR-0062).

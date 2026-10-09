@@ -21,9 +21,21 @@
  * every refusal from `p1` is paired with the identical frame from `p0` landing — the control
  * that makes each refusal the ACL's, and the proof that an allowed PAIR forwards.
  *
- * A last case mounts the bus with NO connection vertex. Enforcing, it has nothing to grant a
+ * A case mounts the bus with NO connection vertex. Enforcing, it has nothing to grant a
  * right, so the PAIR naming one of its sessions' anchors is refused; the same graph without a
  * subject resolver forwards it (the control).
+ *
+ * Two cases pin ONE GATE rather than one `:acl` (#1939, RFC-0029 §6.4: the verdict is a
+ * function of the vertex, the subject and the right alone). Two gates that read the same
+ * `:acl` agree on every ACE, and still disagree where their own rules differ:
+ *
+ * - an opcode this build names no right for. The NAME hop forwarded it on a graph that
+ *   enforces no ACL and the PAIR hop refused it; one gate gives both spellings one answer,
+ *   forward when nothing is enforced and refuse when something is;
+ * - a mount registered BEFORE its connection vertex exists. The NAME hop found the vertex
+ *   by a keyed find at frame time and admitted the allowed caller, while the PAIR hop, which
+ *   reaches the door through the slot recorded at registration, had none to reach. Both now
+ *   reach the door the same way, so neither crosses a door recorded as missing.
  */
 
 #include <cstddef>
@@ -184,17 +196,19 @@ struct node_t {
     recorder_t p2p;
 
     /** @brief @p enforce installs the subject resolver; @p bus_vertex registers the bus
-     *         mount's connection vertex before it is mounted. */
-    explicit node_t(bool enforce = true, bool bus_vertex = true) {
+     *         mount's connection vertex before it is mounted; @p p2p_late registers the
+     *         point-to-point one only AFTER its child is mounted. */
+    explicit node_t(bool enforce = true, bool bus_vertex = true, bool p2p_late = false) {
         if (enforce) {
             auto hooks = g.hooks();
             hooks.subject_resolver = {caller_is_subject, nullptr};
             g.set_hooks(hooks);
         }
         if (bus_vertex) (void)g.register_vertex(path_t("/net/srv/bus"), role_t::STORED_VALUE);
-        (void)g.register_vertex(path_t("/net/tcp/x"), role_t::STORED_VALUE);
+        if (!p2p_late) (void)g.register_vertex(path_t("/net/tcp/x"), role_t::STORED_VALUE);
         check(router.add_child(std::string(kBus), bus), "bus mounted");
         check(router.add_child(std::string(kP2p), p2p), "point-to-point child mounted");
+        if (p2p_late) (void)g.register_vertex(path_t("/net/tcp/x"), role_t::STORED_VALUE);
         const bytes_t acl = mount_acl();
         check(g.write(path_t("/net/tcp/x:acl"), make_value(acl)).has_value(),
               ":acl written on the point-to-point connection vertex");
@@ -227,8 +241,13 @@ struct node_t {
     /** @brief Does session @p from's WRITE at @p dst add one frame to @p seen()? */
     template <class Seen>
     bool lands(std::string_view from, std::span<const std::byte> dst, Seen&& seen) {
+        return lands_frame(from, b_write(dst), seen);
+    }
+    /** @brief Does session @p from's @p frame add one frame to @p seen()? */
+    template <class Seen>
+    bool lands_frame(std::string_view from, std::span<const std::byte> frame, Seen&& seen) {
         const std::size_t before = seen();
-        bus.inject(from, b_write(dst));
+        bus.inject(from, frame);
         return seen() > before;
     }
 };
@@ -275,6 +294,42 @@ void vertexless_mount() {
     check(forwards(false), "not enforcing: the same PAIR forwards (the control)");
 }
 
+/** @brief An opcode with no nameable right: both spellings of one hop get ONE answer. */
+void rightless_op_one_answer() {
+    std::printf("an opcode with no nameable right gets one answer from both spellings:\n");
+    // Masked opcode 62: defined by no build, so `fwd_op_right` names no right for it.
+    constexpr std::uint8_t kUnnamedOp = 62;
+    const auto crosses = [kUnnamedOp](bool enforce, bool pair) {
+        node_t n(enforce);
+        const bytes_t dst = pair ? b_pair_path(n.p2p_vertex(), {"foo"})
+                                 : tr::testing::b_path({"net", "tcp", "x", "foo"});
+        const bytes_t frame =
+            tr::testing::b_fwd_raw_op(kUnnamedOp, dst, tr::testing::b_path({}), {}, b_value_u8(1));
+        return n.lands_frame("p0", frame, [&] { return n.p2p.n; });
+    };
+    check(crosses(false, false), "not enforcing: the NAME hop forwards it");
+    check(crosses(false, true), "not enforcing: the PAIR hop forwards it too");
+    check(!crosses(true, false), "enforcing: the NAME hop refuses it");
+    check(!crosses(true, true), "enforcing: the PAIR hop refuses it too");
+}
+
+/** @brief A door is the slot recorded at registration, for both spellings. */
+void late_vertex_one_door() {
+    std::printf("a vertex registered after its child is mounted is no door for either spelling:\n");
+    node_t n(true, true, true);
+    check(n.g.find(path_t("/net/tcp/x").key()).has_value(), "the vertex exists now");
+    const auto at_p2p = [&] { return n.p2p.n; };
+    check(!n.lands("p0", tr::testing::b_path({"net", "tcp", "x", "foo"}), at_p2p),
+          "enforcing: the NAME hop does not cross a door recorded as missing");
+    check(!n.lands("p0", b_pair_path(n.p2p_vertex(), {"foo"}), at_p2p),
+          "enforcing: nor does the PAIR hop");
+    check(n.router.add_child(std::string(kP2p), n.p2p), "re-mounted with its vertex in place");
+    check(n.lands("p0", tr::testing::b_path({"net", "tcp", "x", "foo"}), at_p2p),
+          "re-registered: the NAME hop crosses the door (the control)");
+    check(n.lands("p0", b_pair_path(n.p2p_vertex(), {"foo"}), at_p2p),
+          "re-registered: and so does the PAIR hop");
+}
+
 }  // namespace
 
 int main() {
@@ -284,5 +339,7 @@ int main() {
                                     "(kBusLinks = false); no session anchor exists to name");
     one_acl_every_spelling();
     vertexless_mount();
+    rightless_op_one_answer();
+    late_vertex_one_door();
     return tr::testing::summary("pair_hop_acl");
 }

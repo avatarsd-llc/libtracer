@@ -467,8 +467,9 @@ Inside the process a link is addressed by its connection vertex's handle (the ro
   because a receive thread may be walking it, but it answers no lookup — and `add_child` of that
   same NAME revives it rather than appending a second. Two consequences callers rely on: a
   re-added child resolves to its *current* tenancy on the bound path (`connection_ref` /
-  `hop_mint` re-resolve `conn_slot` per registration, so a child that gained a connection vertex
-  between registrations becomes bindable, and one re-added as a bus mount stops being), and
+  `hop_mint` read the registry slot's `conn_slot`, which `add_child` re-resolves per
+  registration, so a child that gained a connection vertex between registrations becomes
+  bindable, and one re-added as a bus mount stops being), and
   create/remove churn on a stable name set neither leaks a context nor lengthens the chain the
   bound hop walks. `receiver_ctx_count()` is the assertable form of the second, the twin of
   `child_registry_t::size()` — which has had this rule since #494/#521.

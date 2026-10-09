@@ -26,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <set>
 #include <shared_mutex>
@@ -3237,46 +3238,91 @@ class graph_t {
     // Its chunks and directory draw from the table source (#1778), and growth is split from
     // the append: `reserve_next` is the one failable step, taken BEFORE the vertex is
     // allocated, so `push_back` cannot fail and a refused creation leaves nothing behind.
+    //
+    // LOCK-FREE TO READ (#1939, the ADR-0063 pattern): appends stay under the unique
+    // `map_mutex_` hold that links the vertex in, and a reader takes nothing. The size is
+    // published with a release store AFTER the slot it covers is written, so a reader that
+    // acquires `size()` and indexes below it reads a written slot. Nothing it can reach is
+    // ever freed while the graph lives: chunks never move, and a directory that grows is
+    // copied into a larger one and the old one is KEPT (chained, released by the destructor)
+    // rather than freed, so a reader still standing on it reads the same chunk pointers.
+    // Vertices are insert-only, so this needs no reclamation scheme; the retired directories
+    // cost at most the size of the live one, which is one pointer per 64 vertices.
     class vertex_index_t {
        public:
         /** @brief Slots per chunk — 512 B of pointers on a 64-bit host. */
         static constexpr std::size_t kChunk = 64;
         /** @brief An empty index drawing from @p src. */
-        explicit vertex_index_t(mem::block_source_t& src) noexcept : dir_(src) {}
+        explicit vertex_index_t(mem::block_source_t& src) noexcept : src_(&src) {}
         vertex_index_t(const vertex_index_t&) = delete;
         vertex_index_t& operator=(const vertex_index_t&) = delete;
-        /** @brief Returns every chunk. */
+        /** @brief Returns every chunk, then every directory, live and retired. */
         ~vertex_index_t() {
-            for (vertex_t** c : dir_)
-                dir_.source().release(c, kChunk * sizeof(vertex_t*), alignof(vertex_t*));
+            dir_t* d = dir_.load(std::memory_order_relaxed);
+            for (std::size_t i = 0; i < chunks_; ++i)
+                src_->release(d->chunks()[i], kChunk * sizeof(vertex_t*), alignof(vertex_t*));
+            while (d != nullptr) {
+                dir_t* const prev = d->prev;
+                src_->release(d, dir_t::bytes(d->cap), alignof(dir_t));
+                d = prev;
+            }
         }
-        /** @brief Slots appended so far. */
-        [[nodiscard]] std::size_t size() const noexcept { return n_; }
-        /** @brief Slot @p i (`i < size()`). */
+        /** @brief Slots appended so far; an acquire, so every slot below it is readable. */
+        [[nodiscard]] std::size_t size() const noexcept {
+            return n_.load(std::memory_order_acquire);
+        }
+        /** @brief Slot @p i (`i < size()`, read before this). */
         [[nodiscard]] vertex_t* operator[](std::size_t i) const noexcept {
-            return dir_[i / kChunk][i % kChunk];
+            return dir_.load(std::memory_order_acquire)->chunks()[i / kChunk][i % kChunk];
         }
         /** @brief Make room for one more slot. @retval false The source refused. */
         [[nodiscard]] bool reserve_next() noexcept {
-            if (n_ < dir_.size() * kChunk) return true;
-            // The chunk first, then the directory entry, which grows by doubling (an exact
-            // `reserve(size() + 1)` regrew the directory on every chunk); a refused entry gives
-            // the chunk back.
-            void* const c = dir_.source().try_alloc(kChunk * sizeof(vertex_t*), alignof(vertex_t*));
+            if (n_.load(std::memory_order_relaxed) < chunks_ * kChunk) return true;
+            // The chunk first, then the directory, which grows by doubling into a fresh block
+            // (an exact `chunks_ + 1` regrew it on every chunk); a refused directory gives the
+            // chunk back.
+            void* const c = src_->try_alloc(kChunk * sizeof(vertex_t*), alignof(vertex_t*));
             if (c == nullptr) return false;
-            if (dir_.push_back(static_cast<vertex_t**>(c))) return true;
-            dir_.source().release(c, kChunk * sizeof(vertex_t*), alignof(vertex_t*));
-            return false;
+            dir_t* d = dir_.load(std::memory_order_relaxed);
+            if (d == nullptr || chunks_ == d->cap) {
+                const std::size_t cap = d == nullptr ? 4 : 2 * d->cap;
+                void* const raw = src_->try_alloc(dir_t::bytes(cap), alignof(dir_t));
+                if (raw == nullptr) {
+                    src_->release(c, kChunk * sizeof(vertex_t*), alignof(vertex_t*));
+                    return false;
+                }
+                dir_t* const grown = ::new (raw) dir_t{.prev = d, .cap = cap};
+                for (std::size_t i = 0; i < chunks_; ++i) grown->chunks()[i] = d->chunks()[i];
+                dir_.store(grown, std::memory_order_release);
+                d = grown;
+            }
+            d->chunks()[chunks_++] = static_cast<vertex_t**>(c);
+            return true;
         }
-        /** @brief Append @p v into the room `reserve_next` made. */
+        /** @brief Append @p v into the room `reserve_next` made, then publish it. */
         void push_back(vertex_t* v) noexcept {
-            dir_[n_ / kChunk][n_ % kChunk] = v;
-            ++n_;
+            const std::size_t n = n_.load(std::memory_order_relaxed);
+            dir_.load(std::memory_order_relaxed)->chunks()[n / kChunk][n % kChunk] = v;
+            n_.store(n + 1, std::memory_order_release);
         }
 
        private:
-        mem::block_array_t<vertex_t**> dir_; /**< @brief The chunk directory. */
-        std::size_t n_ = 0;                  /**< @brief Slots appended. */
+        /** @brief A directory block: its header, then `cap` chunk pointers. */
+        struct dir_t {
+            dir_t* prev = nullptr; /**< @brief The directory this one replaced, kept alive. */
+            std::size_t cap = 0;   /**< @brief Chunk pointers this block holds. */
+            /** @brief Bytes of a block holding @p cap chunk pointers. */
+            static constexpr std::size_t bytes(std::size_t cap) noexcept {
+                return sizeof(dir_t) + cap * sizeof(vertex_t**);
+            }
+            /** @brief The chunk pointers, right after the header. */
+            vertex_t*** chunks() noexcept { return reinterpret_cast<vertex_t***>(this + 1); }
+        };
+        static_assert(sizeof(dir_t) % alignof(vertex_t**) == 0);
+        mem::block_source_t* src_;         /**< @brief Chunks and directories draw here. */
+        std::atomic<dir_t*> dir_{nullptr}; /**< @brief The live directory. */
+        std::size_t chunks_ = 0;           /**< @brief Chunks allocated (writer-only). */
+        std::atomic<std::size_t> n_{0};    /**< @brief Slots published. */
     };
     vertex_index_t vertex_slots_;
 

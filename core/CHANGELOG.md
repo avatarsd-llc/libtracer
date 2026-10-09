@@ -81,6 +81,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `kSlabPool = false` they draw from the static arena, not the platform heap. No behaviour
   change and no rename; the declaration, the allocation reference and the transport comments
   now say so, and show `source_backend_t` over `heap_source()` as the way to reach the real heap.
+- **One walk, one gate: every address spelling reaches its link through the connection vertex
+  ([#1939](https://github.com/avatarsd-llc/libtracer/issues/1939), RFC-0029 §13.2 S6).** The
+  NAME descent, a PAIR hop and a PAIR naming a session anchor now end on the same door, the
+  registry slot's new `child_registry_t::child_t::conn_slot` (the mount's connection vertex,
+  recorded by `fwd_router_t::add_child` for point-to-point *and* bus mounts, `kNoConnSlot` when
+  there is none), and are gated by one router function, `door_allows`, which is the router's
+  only `graph_t::allows` call. A PAIR finds its door with the new
+  `child_registry_t::by_conn_slot`. The registry's `longest_prefix` stays as the NAME
+  spelling's accelerator, per RFC-0029 §15 clause 4: in `bench_mount_resolve`'s new lookup
+  table even the floor of a tree walk (one keyed `graph_t::find` of the mount) loses to it at
+  the S6 gate cell (W = 12, N = 64: 82 ns against 68 ns) and by 4–5× at N ≤ 8, and beats it
+  only at W ≤ 3, N = 64.
+  What callers can observe:
+  - `fwd_router_t::bound_egress` takes `std::optional<graph::acl_right_t>`; existing calls
+    with a right compile unchanged.
+  - On a graph that enforces **no** ACL, a PAIR hop now forwards an opcode this build names no
+    right for, as the NAME hop always did. On one that does, both spellings refuse it, and that
+    now includes a NAME hop carrying an empty op value, which used to cross and be refused by
+    the far terminus.
+  - A mount whose connection vertex is registered *after* `add_child` has no door until it is
+    re-added. Enforcing, neither spelling crosses it (the NAME hop used to find the vertex by
+    a keyed lookup per frame and admit it). The shipped wiring
+    (`transport_vertex_t::make_connection`) registers the vertex first.
+  - A PAIR naming a session anchor is gated at its mount's door only; the anchor, which sits
+    outside the path tree and has no `:acl` ancestry, is no longer asked separately.
+- **The PAIR arm takes no graph lock
+  ([#1939](https://github.com/avatarsd-llc/libtracer/issues/1939)).** The vertex index is
+  append-only with an atomically published size (the ADR-0063 pattern): chunks never move and a
+  grown directory is kept, not freed, so `graph_t::deref_vertex_slot`, `vertex_slot_at` and
+  `vertex_slot_count` are a bounds check, a slot load and a generation compare, with no
+  `map_mutex_` hold. The generation is read on both sides of the registration test, so a
+  retire and revival that straddle a lookup still refuse a stale element.
 
 ### Fixed
 

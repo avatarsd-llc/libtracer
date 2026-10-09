@@ -701,16 +701,18 @@ class fwd_router_t {
      * @param e      The element to consume.
      * @param caller The subject context — the inbound link's name at a forwarder, empty for
      *               this node's own local caller at an origin.
-     * @param right  The right the operation carries.
+     * @param right  The right the operation carries; `nullopt` for an opcode this build names
+     *               no right for, which the gate refuses on a graph that enforces an ACL.
      * @retval nullptr Any part of the check failed, or the vertex is not a connection vertex
-     *         of a live point-to-point child of this node. The caller MUST then drop —
+     *         of a live point-to-point child of this node. The gate is `door_allows`, the
+     *         one every spelling runs. The caller MUST then drop —
      *         never repair, never fall through to a different route (§5.3). A bus PEER is
      *         among the refusals and not by omission: a peer has no vertex, so no element
      *         can name one, and egressing over the bus link itself would BROADCAST a
      *         directed operation (ADR-0073 §3 / RFC-0020).
      */
     [[nodiscard]] transport_t* bound_egress(wire::path_ref_element_t e, std::string_view caller,
-                                            graph::acl_right_t right) const;
+                                            std::optional<graph::acl_right_t> right) const;
 
     /**
      * @brief Install the bound form on @p path from the mint answer on a reply (RFC-0024 §7.4).
@@ -1216,11 +1218,6 @@ class fwd_router_t {
     }
 
    private:
-    /** @brief "This child has no connection vertex" — the unbindable child (RFC-0024 §5.1).
-     *         A sentinel rather than an `optional` because it lives in the per-frame ctx and
-     *         a `u32` compare is the whole test the bound hop performs against it. */
-    static constexpr std::uint32_t kNoConnSlot = 0xFFFFFFFFu;
-
     /**
      * @brief Reclaim the subscriber edge a refused delivery route names (#1223 step 5).
      *
@@ -1454,30 +1451,6 @@ class fwd_router_t {
         /** @brief `peer_tokens_own` as the frame path reads it; null ⇒ the FLAT tier. */
         std::atomic<bus_token_cache_t*> peer_tokens{nullptr};
         /**
-         * @brief This child's CONNECTION vertex slot index, resolved once at registration
-         *        (RFC-0024 §5.1) — `kNoConnSlot` when the child has none.
-         *
-         * A bound element names a vertex; an egress needs a link; this integer is the whole
-         * of the join, and it is recorded here rather than looked up per frame because the
-         * lookup runs the other way (vertex → name → child) and there is no reverse index.
-         * The child's mount run IS its connection vertex's canonical key — `add_child` is
-         * given `net/<module>/<name>` and the vertex is registered at `/net/<module>/<name>`
-         * — so the resolution is one `graph_t::find` of bytes the registry already holds.
-         *
-         * It is NOT a route table: one entry per LINK, sized by the graph and never by the
-         * traffic, which is the property RFC-0024 §2.1 credits the design with keeping. A
-         * child registered before its connection vertex exists simply has none, and every
-         * bound route through it fails validation and falls back to canonical — the shipped
-         * wiring registers the vertex first (`transport_vertex_t::make_connection`).
-         *
-         * "Once at registration" now means once per REGISTRATION, not once per ctx (#884): a
-         * re-add of the same name re-resolves it into this same node, because the answer is a
-         * property of the current tenancy and not of the name. Atomic for that store, and read
-         * relaxed — `retired` carries the ordering, and on the bound hop the compare is the
-         * same single instruction a plain load was.
-         */
-        std::atomic<std::uint32_t> conn_slot{kNoConnSlot};
-        /**
          * @brief The registry slot this child was registered into — resolved once, here.
          *
          * A bound hop needs the LINK an element names, and the link lives in the registry
@@ -1502,12 +1475,12 @@ class fwd_router_t {
          * The ctx cannot simply be unlinked on `remove_child` — a lock-free reader may be
          * standing on it — and it must not be left resolving either: `ctx_by_name` answers
          * with the FIRST match, so a re-add that appended a second ctx handed every
-         * name-keyed consumer the DEAD one, whose `conn_slot` indexes the retired tenancy.
+         * name-keyed consumer the DEAD one, whose state is the retired tenancy.
          * The registry solved the identical problem the identical way, so this is its scheme
          * one layer out: retire in place, skip on read, revive on re-add.
          *
          * **This is the publication edge for a REVIVED node**, the role `next`'s release-store
-         * plays for a fresh one: `acquire_ctx` hides the node, rewrites `rx`/`conn_slot`, and
+         * plays for a fresh one: `acquire_ctx` hides the node, rewrites `rx`, and
          * `publish_ctx` release-stores `false`; a reader acquire-loads it before reading either
          * field, so it sees a whole tenancy or skips the node. The narrow window in between is
          * the same one `child_registry_t::add`'s rebind has, and lands in the same place: a
@@ -1550,7 +1523,7 @@ class fwd_router_t {
          * departed VERTEX, this one catches a departed TENANCY.
          *
          * Control-plane written (under `ctl_m_`), frame-path read; relaxed, because `retired`
-         * carries the ordering edge for a rebind as a whole exactly as it does for `conn_slot`.
+         * carries the ordering edge for a rebind as a whole exactly as it does for `rx`.
          */
         std::atomic<std::uint64_t> label_peer{0};
         /**
@@ -1935,13 +1908,15 @@ class fwd_router_t {
      * (§6.3) and nothing is repaired: no re-resolution, no fall-through to the canonical walk,
      * because the pair replaced the name bytes. Zero heap, nothing held across frames.
      *
+     * @param op_byte    The frame's op byte as the ingress read it (63 for an empty op).
      * @param out_target Written only on `head_dst_t::TERMINUS`: the pair, for the resolver.
      */
     template <class Cursor, class Reject>
     [[nodiscard]] head_dst_t route_pair_forward(std::string_view inbound_name,
                                                 const child_rx_ctx_t* inbound_ctx, bool from_peer,
                                                 const Cursor& cur, const fwd_pre_t& pre,
-                                                Reject&& reject, wire::path_pair_t& out_target);
+                                                std::uint8_t op_byte, Reject&& reject,
+                                                wire::path_pair_t& out_target);
     /**
      * @brief The right a `FWD` op byte carries at a hop's gate — READ for READ/AWAIT, WRITE
      *        for WRITE, `nullopt` for a REPLY or an opcode this build cannot name (masked,
@@ -1949,11 +1924,6 @@ class fwd_router_t {
      */
     [[nodiscard]] static std::optional<graph::acl_right_t> fwd_op_right(
         std::uint8_t op_byte) noexcept;
-    /**
-     * @brief True iff @p v is the connection vertex of a live BUS (shared) mount — the COLD
-     *        test that picks RFC-0029 §10's `NOT_FOUND` for a PAIR that tries to hop through one.
-     */
-    [[nodiscard]] bool is_bus_mount_vertex(graph::vertex_handle_t v) const;
     /**
      * @brief The LABELLED forward hop (RFC-0027 §7.2) — try to route @p cur by a path label
      *        standing in the first element of its canonical `dst`.
@@ -2003,23 +1973,24 @@ class fwd_router_t {
                                                  Reject&& reject,
                                                  wire::path_ref_element_t& terminus_target);
     /**
-     * @brief May @p caller carry this frame's op through the connection vertex of the mount
-     *        @p entry — the one the NAME descent matched, or the one a PAIR-named session
-     *        anchor hangs off?
+     * @brief The ONE gate (RFC-0029 §6.4, §13.2 S6): may @p caller carry an operation needing
+     *        @p right through the connection vertex of @p door?
      *
-     * The vertex is found by the entry's own mount key — one keyed find — and asked
-     * `graph_t::allows(vertex, caller, right)`: the check @ref bound_egress runs for the PAIR
-     * hop and label spellings, so the verdict cannot depend on how the hop was spelled. A REPLY
-     * passes (nothing to authorize), and so does every hop on a graph that enforces no ACL (one
-     * relaxed load) or a hop with no matched mount
-     * (@p entry null). On a graph that enforces an ACL, a child with no connection vertex has
-     * nothing to grant the right and is refused, as is an op byte this build names no right
-     * for.
+     * Every spelling enters here at the door it reached: the NAME descent's matched mount,
+     * the mount a PAIR hop dereferenced to, the mount a PAIR-named session anchor hangs off,
+     * and the origin's and a remote delivery's first element. The vertex is the door's own
+     * `child_registry_t::child_t::conn_slot`, read lock-free, and it is asked
+     * `graph_t::allows(vertex, caller, right)` here and nowhere else in the router, so a hop's
+     * verdict cannot depend on how it was spelled.
+     *
+     * A graph that enforces no ACL passes everything (one relaxed load), and so does a null
+     * @p door: no mount was matched, so there is no door to cross and the caller's own
+     * refusal (no egress) stands. On a graph that enforces an ACL, a door with no connection
+     * vertex and a @p right of `nullopt` (an opcode this build names no right for, an empty op
+     * included) are refused: there is nothing to grant the right.
      */
-    template <class Cursor>
-    [[nodiscard]] bool name_hop_allows(const child_registry_t::child_t* entry,
-                                       std::string_view caller, const Cursor& cur,
-                                       const fwd_pre_t& pre) const;
+    [[nodiscard]] bool door_allows(const child_registry_t::child_t* door, std::string_view caller,
+                                   std::optional<graph::acl_right_t> right) const;
     /**
      * @brief RFC-0027 §6.1's reply-leg rewrite: the span this hop prepends to `src`, either its
      *        mount run (the default, and today's behaviour) or the label that replaces it.
@@ -2151,7 +2122,7 @@ class fwd_router_t {
      * The one-ctx-per-NAME rule, enforced where it can be: an existing ctx for @p name (live
      * or tombstoned) is HIDDEN and rebound; only a name this router has never seen appends,
      * linked onto the chain already retired. The returned ctx is not visible to a reader
-     * until `publish_ctx`, so the caller may finish filling it (`conn_slot`) first.
+     * until `publish_ctx`, so the caller may finish filling it (`rx`) first.
      *
      * Control plane, under `ctl_m_`, after `registry_.add(name)` succeeded: a fresh ctx
      * views that slot's name and mount run.
@@ -2181,9 +2152,6 @@ class fwd_router_t {
      *         direction. Tombstoned nodes are skipped: a removed child resolves to nothing,
      *         and a re-added one resolves to its CURRENT tenancy (#884). */
     [[nodiscard]] const child_rx_ctx_t* ctx_by_name(std::string_view link_name) const;
-    /** @brief The registered LIVE child whose CONNECTION vertex sits at slot @p index, or
-     *         nullptr — tombstoned nodes are skipped, as in `ctx_by_name`. */
-    [[nodiscard]] const child_rx_ctx_t* ctx_by_conn_slot(std::uint32_t index) const;
     /** @brief This node's element for the link a REPLY arrived on — the forwarder's mint
      *         contribution (RFC-0024 §7.1 step 2); nullopt when it has none to give. */
     [[nodiscard]] std::optional<wire::path_ref_element_t> hop_mint(

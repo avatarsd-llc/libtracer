@@ -176,7 +176,7 @@ caller and the right, never of how the element was spelled** (§6.4).
 
 The PAIR's two fields are RFC-0024 §4.4's, unchanged and with its derivation standing: the index is
 a slot in the owner's dense, append-only, pointer-stable vertex index (RFC-0024 §6.4; the
-`std::deque` `graph_t::vertex_slots_`, `core/include/libtracer/graph.hpp`), bounds-checkable and unreachable on both targets
+chunked, lock-free-to-read `graph_t::vertex_slots_`, `core/include/libtracer/graph.hpp`), bounds-checkable and unreachable on both targets
 at `u32`; the generation is the vertex's retirement stamp, **saturating and never wrapping**
 (`kGenerationSaturated`, `core/include/libtracer/vertex.hpp`), refused at the ceiling on both the
 issuing side (`graph_t::vertex_slot_at`, `core/src/graph.cpp`) and the honouring side
@@ -290,7 +290,7 @@ strip rule with it. **Kept, unchanged:** RFC-0004 §E.1's `ADVERTISE`/`COMPACT`/
    §7.2's `NOT_FOUND` are one rule here.
 3. **What the vertex is decides what happens next**, and nothing else does:
    - it is a **connection vertex of a point-to-point child** (its slot is some live child's
-     `conn_slot`, `ctx_by_conn_slot`) — this hop **egresses** over that child's link with `dst`
+     `conn_slot`, `child_registry_t::by_conn_slot`) — this hop **egresses** over that child's link with `dst`
      shrunk by exactly the consumed element and `src` grown canonically by the inbound mount run
      (RFC-0004 §B). The residual tail MUST be non-empty; a PAIR that dereferences to a connection
      vertex as the *last* element addresses the connection vertex's own `:`-facets and is a local
@@ -347,7 +347,7 @@ exactly the provenance §B's "the responder's own endpoint" was reaching for and
 any other vantage.
 
 **Why no request flag.** RFC-0024 spent `op` bit 7 so that a hop only pays for a mint when asked.
-A PAIR costs the issuing hop one `vertex_slot_at` — a shared lock, a bounds test and two loads —
+A PAIR costs the issuing hop one `vertex_slot_at` — a bounds test and two loads, with no lock —
 and no allocation, so there is nothing to protect with a flag; and a mint that *reads* a slot is
 post-auth by construction, because the reply it rides exists only after the terminus's gates passed
 (RFC-0027 §8.1's intent, satisfied without a lambda — ruling 9's third divergence).
@@ -462,7 +462,7 @@ saturated vertex is permanently unbindable and every mint for it falls back to t
 invalidation axis: no owner check (there is no table to own a label), no per-peer stamp
 (`label_peer` is deleted), no TTL. "Peer departure" is caught by three guards the inventory's §3
 lists, all already shipped for the pair: the connection vertex's generation, the child tombstone
-(`conn_slot = kNoConnSlot` on `remove_child`; `ctx_by_conn_slot` then answers null and the egress
+(`conn_slot = kNoConnSlot` on `remove_child`; `child_registry_t::by_conn_slot` then answers null and the egress
 drops), and the session anchor's retire for bus sessions (`fwd_router_t::bus_peer_down`, `core/src/fwd_router.cpp`).
 
 ### 8.2 The open fact, verified: a same-named re-add does NOT bump today, and MUST
@@ -714,7 +714,7 @@ their number.
 | **S3** | delete the table | every §11 row for RFC-0027; `label_peer` and `next_label_peer_bits`; **not** `on_stale_label`, the delivery-compaction observer §9.2 keeps; supersedes #1668, #1669, #1647 (§13.3) | ratchet shows the §11 deltas; `bench_path_label` retired |
 | **S4** | the bump (§8.2) | `graph_t::restamp`; `remove_child` and point-to-point `link_down` call it; rule 4's per-boot epoch on UDP/CAN links (once per session or advertise); tests: remove + same-name re-add refuses the old pair; link loss + re-up refuses the old pair; the RFC-0014 teardown still works with the double bump | `bound_forward_test` extended; no hot-path change |
 | **S5** | subscriptions (§7) | `PATH_REF_REVERSE` unconditional (no flag) and spelled as a `PATH`; first-fire learn for mount-routed (`graph_t::subscribe_wire`) and `subscribe_toward` edges; the node's one learn endpoint, edge named in the tail; lands after #1533; `deliver_remote` unconditional chain-first | `fwd_two_mount_test`, `bound_forward_test` delivery arms; `bench_compact_delivery` level |
-| **S6** | one lookup, one gate (ruling 9) | a NAME-spelled prefix resolves by the tree walk to the connection vertex and `ctx_by_conn_slot` yields the egress; the registry keeps egress state only; **one `allows` site** for both arms of §6 step 3 | `bench_mount_resolve` A/B: the tree walk must not lose to `longest_prefix`'s 25 ns/pass at W = 12, N = 64, or S6 keeps the registry index as an *accelerator* of the same lookup |
+| **S6** | one lookup, one gate (ruling 9) | a NAME-spelled prefix resolves by the tree walk to the connection vertex and `child_registry_t::by_conn_slot` yields the egress; the registry keeps egress state only; **one `allows` site** for both arms of §6 step 3 | `bench_mount_resolve` A/B: the tree walk must not lose to `longest_prefix`'s 25 ns/pass at W = 12, N = 64, or S6 keeps the registry index as an *accelerator* of the same lookup |
 | **S7** | host API (ruling 2) | `vertex_handle_t` = `(u32, u32)` by value; `target_binding_t` folds into it; `graph_t` entries take the pair; the bench decides the ISR pointer fast door (compile-time option if kept) | local read/write/await A/B against the pointer handle — the 11 ns/op is the priced cost; a regression beyond it re-opens ruling 2 (§15 clause 3) |
 | **S8** | shared mounts (§10, ruling 8) | egress **through** a session anchor: a directed per-peer send keyed on the anchor's slot; `bound_egress` admits an anchor; `reverse_hop_ref`'s anchor becomes bidirectional | ws-server multi-peer test; `bench_forward_demux` level |
 
@@ -876,3 +876,39 @@ wire surface moves.** No frame, TLV type, escape kind, flag bit, grammar, error 
 conformance vector changes, and no normative statement of §§4–10 changes. The citations are
 informative pointers into the reference implementation. Removing `on_stale_label` from §11 makes
 the deletion list agree with §9.2's normative text, which already kept the mechanism.
+
+## Erratum (2026-10-09) — S6 landed: the door lookup is `child_registry_t::by_conn_slot`, the PAIR arm takes no lock, and the registry stays as the accelerator ([#1939](https://github.com/avatarsd-llc/libtracer/issues/1939))
+
+**What the text said.**
+
+- §6 step 3, §8.1 and §13.2's S6 row named `ctx_by_conn_slot` as the lookup from a slot to the
+  child whose connection vertex it is.
+- §6.2 priced a PAIR mint as "a shared lock, a bounds test and two loads", and §4.1 called the
+  vertex index a `std::deque`.
+- §13.2's S6 row and §15 clause 4 left open whether the tree walk or the registry's
+  `longest_prefix` resolves a NAME-spelled mount.
+
+**What was wrong.** S6 changed the reference implementation underneath the text.
+`fwd_router_t::ctx_by_conn_slot` is deleted. The slot now sits on the registry entry
+(`child_registry_t::child_t::conn_slot`, recorded for point-to-point and bus mounts alike), and
+`child_registry_t::by_conn_slot` finds the door from it. The vertex index is now an append-only
+chunked array whose size is published atomically (ADR-0063's pattern). So `vertex_slot_at` and
+`deref_vertex_slot` take no lock: they read the generation on both sides of the registration
+test instead.
+
+**The correction.**
+
+| | corrected reading |
+| --- | --- |
+| **§4.1** | the index is the chunked, lock-free-to-read `graph_t::vertex_slots_`. |
+| **§6 step 3, §8.1, §13.2 S6** | the door lookup is `child_registry_t::by_conn_slot`. |
+| **§6.2** | a PAIR mint is "a bounds test and two loads, with no lock". |
+| **S6 outcome** | **§15 clause 4 fired.** In `bench_mount_resolve`'s lookup table, even the floor of a tree walk (one keyed `graph_t::find` of the exact mount) loses to `longest_prefix` at S6's gate cell: at W = 12, N = 64 it takes 82 ns against 68 ns. At N ≤ 8 it loses by 4–5× at every width. It wins only at W ≤ 3, N = 64. So the registry index stays as the NAME spelling's accelerator, and ruling 9's first item reads "one lookup semantics, two indexes". What is ONE, as §6.4 requires, is the door and the gate: the NAME descent, a PAIR hop and a PAIR naming a session anchor all end on the registry entry whose `conn_slot` is the connection vertex, and all are decided by `fwd_router_t::door_allows`, the router's only `graph_t::allows` call. |
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** No frame, TLV type, escape kind, flag bit, grammar, error identity or
+conformance vector changes. The symbol names and the lock note are informative pointers into the
+reference implementation. The S6 outcome is the branch §15 clause 4 already wrote down, recorded
+as taken. §6.4's normative rule, that the verdict is spelling-independent, is now what the code
+does, including for an opcode the build names no right for, which both spellings refuse
+identically when enforcing.
