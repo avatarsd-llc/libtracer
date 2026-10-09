@@ -36,8 +36,8 @@ namespace tr::mem {
 
 /**
  * @brief The sole owner of one @p T (or of an object of a class derived from @p T) in a block
- *        from a @ref block_source_t; destroys it through `~T` and returns the block it was
- *        made in, at the size and alignment it was made with.
+ *        from a @ref block_source_t; destroys it as the class @ref make_poly built and returns
+ *        the block it was made in, at the size and alignment it was made with.
  *
  * Made by @ref make_poly. Movable, non-copyable. Converts from `poly_ptr_t<U>` when `U*`
  * converts to `T*`. The object is destroyed through the destructor of the class `make_poly`

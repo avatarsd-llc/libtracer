@@ -1227,6 +1227,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
 class flat_slot_server_t : public slot_server_t {
    protected:
     using slot_server_t::slot_server_t;
+    /** @brief Destroyed only as the concrete server it is, never through this base (#2022):
+     *         the derived destructor's `stop_and_join` must run first. */
+    ~flat_slot_server_t() = default;
 
     /**
      * @name The per-frame peer-delivery seam, inert (see @ref bus_slot_server_t for the live
@@ -1319,6 +1322,9 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
 
    protected:
     using slot_server_t::slot_server_t;
+    /** @brief Destroyed only as the concrete server it is, never through this base (#2022):
+     *         the derived destructor's `stop_and_join` must run first. */
+    ~bus_slot_server_t() = default;
 
     /** @brief Arrival: fire the facet's peer-up notifier (#1223 step 2). */
     void announce_peer_up(peer_handle_t handle, std::string_view peer) override {

@@ -23,6 +23,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "libtracer/backend.hpp"
 #include "libtracer/function_ref.hpp"
 #include "libtracer/mem_chunked_map.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
@@ -389,6 +390,12 @@ class poly_base_t {
 };
 static_assert(!std::has_virtual_destructor_v<poly_base_t>);
 
+// #2022: the allocation seam's bases are destroyed only as the class they are.
+static_assert(!std::is_destructible_v<tr::mem::block_source_t>);
+static_assert(!std::is_destructible_v<tr::mem::mem_backend_t>);
+static_assert(std::is_destructible_v<tr::mem::heap_source_t>);
+static_assert(std::is_destructible_v<tr::mem::bump_source_t>);
+
 /** @brief A first base that puts `poly_base_t` at a non-zero offset in `poly_derived_t`. */
 struct poly_pad_t {
     long pad[3] = {}; /**< @brief Room before the second base. */
@@ -423,6 +430,22 @@ void test_poly_ptr() {
     }
     check(g_live == 0, "poly: the derived destructor ran through the base owner");
     check(src.blocks_out_ == 0 && src.bytes_out_ == 0, "poly: the exact block came back");
+    {
+        tr::mem::poly_ptr_t<poly_base_t> a = tr::mem::make_poly<poly_derived_t>(src, 1);
+        tr::mem::poly_ptr_t<poly_base_t> b = tr::mem::make_poly<poly_derived_t>(src, 2);
+        check(g_live == 2 && src.blocks_out_ == 2, "poly: two live owners");
+        a = std::move(b);
+        check(!b && a->id() == 2 && g_live == 1 && src.blocks_out_ == 1,
+              "poly: move-assign over a live owner destroys and returns the old object");
+        a.reset();
+        check(!a && g_live == 0 && src.blocks_out_ == 0 && src.bytes_out_ == 0,
+              "poly: reset destroys and returns the block");
+        a.reset();
+        check(!a && g_live == 0, "poly: reset on an empty owner is a no-op");
+        a = tr::mem::make_poly<poly_derived_t>(src, 3);
+        a = nullptr;
+        check(!a && g_live == 0 && src.blocks_out_ == 0, "poly: = nullptr frees the object");
+    }
     refuse_nth_source_t refusing(1);
     tr::mem::poly_ptr_t<poly_base_t> r = tr::mem::make_poly<poly_derived_t>(refusing, 1);
     check(!r && g_live == 0, "poly: a refusal is an empty owner and builds nothing");
