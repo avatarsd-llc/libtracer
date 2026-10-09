@@ -656,10 +656,28 @@ Details that make these trustworthy:
   passes (the test fixture for a slower right-hand row moved from x1.31 to x1.59 of main for that
   reason; the pool family keeps the x1.31 fixture). The exact segment-draw ratchet is unaffected.
   The same holds for the three copy-store rows: a slowdown that adds no user-mode instruction (cache or
-  page behaviour in the copy, a slower kernel path, an atomic in place of a plain store) passes up to x1.5
-  on `lkv-store-heap/64`, `lkv-store-heap/1024` and `lkv-store-pool/64`, where before it was held at the flat 15%
+  page behaviour in the copy, a slower kernel path, an atomic in place of a plain store) passes up to its backstop
+  on `lkv-store-heap/64`, `lkv-store-heap/1024` and `lkv-store-pool/64` (table below), where before it was held at the flat 15%
   or the null. The payload copy is `memcpy`, whose instruction count does not follow its time at 1 KiB, so a
   copy that gets slower per byte is seen only by the backstop.
+  **Backstop per row** ([#2055](https://github.com/avatarsd-llc/libtracer/issues/2055)). The x1.5 was inherited from the
+  allocation-step spread; the same nine-layout campaign (10 rounds, 216 sessions per row) gives each
+  `lkv` row its own. "Spread" is the largest, over the p50, mean and throughput legs, of the worst-to-best
+  per-layout median. The "smallest clean bound" is the lowest backstop, found by a sweep in steps of 0.01
+  (not 0.05) from x1.35 down, at which none of the 216 replayed sessions false-fails. The bound is 1.1 x the
+  larger of the two, rounded up to 0.05, so it clears both the layout spread and the lowest replay-clean point.
+
+  | row | worst spread (p50 / mean / throughput) | smallest clean bound | bound |
+  | --- | --- | --- | --- |
+  | `lkv-alloc-heap/1024` | x1.18 / x1.20 / x1.20 | x1.20 | x1.35 (was x1.5) |
+  | `lkv-store-heap/64` | x1.08 / x1.09 / x1.10 | x1.11 | x1.25 (was x1.5) |
+  | `lkv-store-heap/1024` | x1.16 / x1.19 / x1.35 | below x1.05 | x1.5 (unchanged) |
+  | `lkv-store-pool/64` | x1.18 / x1.19 / x1.15 | x1.29 | x1.45 (was x1.5) |
+
+  `lkv-store-heap/1024` is not tightened: its p50 spread is only x1.16, but its throughput leg spreads x1.35 across
+  layouts, which x1.1 rounds back to x1.5, and one bound serves all three legs. The replay alone would allow a tighter
+  bound (it never false-failed down to x1.05) because the verdict also needs the arms' ranges to separate; that is
+  one campaign on one source, so the rule above is kept. `cliff-alloc-heap` rows keep x1.5 (not re-measured here).
   **Stated blind spot:** at 65584 B (past the last size class) there is no instruction row and the
   time backstop is x3, so #2030's criterion 2 (a real extra-instructions regression must fail) is
   not met at that size.
