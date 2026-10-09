@@ -16,15 +16,24 @@
  *      surface. A read of either field answers the selector's state (RFC-0034 shapes).
  *   3. A refused switch under memory pressure answers BACKPRESSURE, leaves no target served
  *      twice and nothing double-delivered, and a retry completes it once the source has room.
- *   4. A dangling ref is listed INERT, a switch skips it, and nothing removes it.
+ *   4. A dangling ref is listed INERT, a switch skips it, and nothing removes it on its own.
  *   5. Teardown: destroying the selector retires its vertex and leaves every subscription in the
  *      state it held; retiring a producer makes its refs inert.
  *   6. The creator door: a creation hook makes an instance from a write to a missing child.
- *   7. `add` refuses a bad name, a gone subscription, a duplicate and a full table by value.
+ *   7. `add` refuses a bad name, a gone subscription and a full table by value; adding a listed
+ *      ref again re-reads it.
+ *   8. A target-form subscription is a ref through `subscription_at`.
+ *   9. A subscribe that reuses an inert ref's slot comes back under the selector once the owner
+ *      lists it again, and switches like any ref (the review's slot-reuse case).
+ *  10. `remove` drops a ref from every option, leaves its subscription as it is, and frees its
+ *      place.
+ *  11. One operation at a time: a peer's switches and reads that meet answer BACKPRESSURE and
+ *      change nothing, and a retry completes them.
  */
 
 #include "libtracer/subscription_selector.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -33,6 +42,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -397,7 +407,7 @@ void test_creator_door() {
 
 /** @brief (7) `add` refuses by value. */
 void test_add_refusals() {
-    std::printf("add refuses a bad name, a gone subscription, a duplicate and a full table:\n");
+    std::printf("add refuses a bad name, a gone subscription and a full table:\n");
     graph_t g;
     (void)g.register_vertex(path_t("/in"), role_t::STORED_VALUE);
     counter_t c;
@@ -409,8 +419,7 @@ void test_add_refusals() {
     const auto none = sel.add("a", subscription_t{});
     check(!none && none.error() == status_t::NOT_FOUND, "a handle naming no subscription");
     check(sel.add("a", subs[0]).has_value(), "a first ref");
-    const auto dup = sel.add("a", subs[0]);
-    check(!dup && dup.error() == status_t::PATH_IN_USE, "the same ref twice in one option");
+    check(sel.add("a", subs[0]).has_value(), "the same ref again is a re-read, not a refusal");
     for (std::size_t i = 1; i < 8; ++i) (void)sel.add("a", subs[i]);
     const auto full = sel.add("a", subs[8]);
     check(!full && full.error() == status_t::BACKPRESSURE, "a ninth distinct ref");
@@ -430,18 +439,136 @@ void test_target_form() {
     check(g.subscribe(path_t("/in"), path_t("/out/a")) &&
               g.subscribe(path_t("/in"), path_t("/out/b")),
           "two target-form subscriptions, in slots 0 and 1");
-    const auto sa = g.subscription_at(in, 0);
-    const auto sb = g.subscription_at(in, 1);
-    check(sa && sb && !(*sa == *sb), "subscription_at hands back a handle for each slot");
-    const auto none = g.subscription_at(in, 2);
-    check(!none && none.error() == status_t::NOT_FOUND, "and NOT_FOUND for an inactive slot");
+    const subscription_t sa = g.subscription_at(in, 0);
+    const subscription_t sb = g.subscription_at(in, 1);
+    check(!(sa == sb) && g.is_suspended(sa) && g.is_suspended(sb),
+          "subscription_at names each slot, and each names a live edge");
+    const auto none = g.is_suspended(g.subscription_at(in, 2));
+    check(!none && none.error() == status_t::NOT_FOUND, "an empty slot's handle is NOT_FOUND");
+    const auto at = g.subscription_address(sb);
+    check(at && at->producer == in && at->slot == 1, "subscription_address reads it back");
     selector_t sel(g);
-    check(sel.add("a", *sa) && sel.add("b", *sb) && sel.select("b"), "select b");
+    check(sel.add("a", sa) && sel.add("b", sb) && sel.select("b"), "select b");
     (void)g.write(in, byte_value(7));
     check(!g.read(ta) && g.read(tb).has_value(), "only /out/b received the write");
-    check(g.unsubscribe(*sa).has_value(), "the handle unsubscribes the target-form edge");
-    const auto gone = g.subscription_at(in, 0);
+    check(g.unsubscribe(sa).has_value(), "the handle unsubscribes the target-form edge");
+    const auto gone = g.is_suspended(g.subscription_at(in, 0));
     check(!gone && gone.error() == status_t::NOT_FOUND, "after which its slot is not found");
+}
+
+/** @brief (9) A slot reused by a later subscribe comes back once the owner lists it again. */
+void test_slot_reuse() {
+    std::printf("a resubscribe that reuses an inert ref's slot is listed again and switches:\n");
+    graph_t g;
+    const vertex_handle_t in = g.register_vertex(path_t("/in"), role_t::STORED_VALUE);
+    counter_t a, b, b_again;
+    const auto sa = g.subscribe(path_t("/in"), count, &a);
+    const auto sb = g.subscribe(path_t("/in"), count, &b);
+    (void)g.set_suspended(*sb, true);
+    selector_t sel(g);
+    check(sel.add("a", *sa) && sel.add("b", *sb) && sel.select("a"), "options a and b, a active");
+    check(g.unsubscribe(*sb).has_value() && sel.select("b") && sel.select("a"),
+          "b's edge goes; a switch through b marks it inert");
+    check(sel.state(*sb).value_or(selector_ref_state_t::LIVE) == selector_ref_state_t::INERT,
+          "the ref reads INERT");
+
+    // The peer comes back: its subscribe takes the first free slot, b's old one.
+    const auto again = g.subscribe(path_t("/in"), count, &b_again);
+    check(again && *again == *sb, "the resubscribe reuses the slot, so its handle equals the ref");
+    (void)g.write(in, byte_value(1));
+    check(a.seen == 1 && b_again.seen == 1,
+          "admitted live, it delivers until the owner lists it (the selector owns only its bits)");
+
+    check(sel.add("b", *again).has_value(), "the owner lists it again");
+    check(sel.state(*again).value_or(selector_ref_state_t::INERT) == selector_ref_state_t::LIVE,
+          "which re-reads it: no longer inert, and live");
+    check(sel.select("a").has_value(), "re-selecting a brings it in line");
+    (void)g.write(in, byte_value(2));
+    check(a.seen == 2 && b_again.seen == 1, "a delivers and the reused ref is silent");
+    check(sel.select("b").has_value() && sel.settled(), "and a switch to b");
+    (void)g.write(in, byte_value(3));
+    check(a.seen == 2 && b_again.seen == 2, "moves delivery to it");
+}
+
+/** @brief (10) `remove` drops a ref everywhere and frees its place. */
+void test_remove() {
+    std::printf("remove drops a ref from every option and leaves its subscription alone:\n");
+    graph_t g;
+    const vertex_handle_t in = g.register_vertex(path_t("/in"), role_t::STORED_VALUE);
+    counter_t x, y, z;
+    const auto sx = g.subscribe(path_t("/in"), count, &x);
+    const auto sy = g.subscribe(path_t("/in"), count, &y);
+    const auto sz = g.subscribe(path_t("/in"), count, &z);
+    (void)g.set_suspended(*sy, true);
+    (void)g.set_suspended(*sz, true);
+    tr::graph::subscription_selector_t<3, 2> sel(g);
+    const auto vh = sel.attach(path_t("/sel"));
+    check(vh && sel.add("a", *sx) && sel.add("b", *sy) && sel.add("b", *sz) && sel.add("a", *sz),
+          "a = {x, z}, b = {y, z}");
+    check(sel.select("b").has_value(), "select b: y and z deliver");
+
+    check(sel.remove(*sy).has_value(), "remove y");
+    const auto twice = sel.remove(*sy);
+    check(!twice && twice.error() == status_t::NOT_FOUND, "a second remove is NOT_FOUND");
+    const auto st = sel.state(*sy);
+    check(!st && st.error() == status_t::NOT_FOUND, "y is listed nowhere");
+    check(g.is_suspended(*sy).has_value() && !*g.is_suspended(*sy),
+          "and its subscription keeps the state it held: live");
+
+    const auto opts = parse_options(read_field(g, *vh, "options"));
+    check(opts.size() == 3 && opts[0].option == "a" && opts[0].slot == 0 && opts[1].slot == 2 &&
+              opts[2].option == "b" && opts[2].slot == 2 && opts[2].state == "live",
+          "options lists a = {x, z} and b = {z}: the refs after y moved up");
+    check(sel.select("a").has_value(), "select a");
+    (void)g.write(in, byte_value(1));
+    check(x.seen == 1 && z.seen == 1 && y.seen == 1,
+          "x and z deliver; y, no longer listed, is the owner's and still delivers");
+
+    const auto extra = g.subscribe(path_t("/in"), count, &y);
+    check(extra && sel.add("b", *extra).has_value(), "the freed place takes a new ref");
+    const auto full = sel.add("b", *sy);
+    check(!full && full.error() == status_t::BACKPRESSURE, "and the table is full again");
+}
+
+/** @brief (11) Operations that meet answer BACKPRESSURE and change nothing; a retry completes. */
+void test_one_at_a_time() {
+    std::printf("a peer's switches and reads that meet never wait and never half-run:\n");
+    graph_t g;
+    const vertex_handle_t in = g.register_vertex(path_t("/in"), role_t::STORED_VALUE);
+    counter_t a, b;
+    const auto sa = g.subscribe(path_t("/in"), count, &a);
+    const auto sb = g.subscribe(path_t("/in"), count, &b);
+    (void)g.set_suspended(*sb, true);
+    selector_t sel(g);
+    const auto vh = sel.attach(path_t("/sel"));
+    check(vh && sel.add("a", *sa) && sel.add("b", *sb) && sel.select("a"), "options a and b");
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> odd{0};
+    std::thread reader([&] {
+        while (!stop.load()) {
+            const auto r = g.read(*vh, path_t("/x:settings.app.options").field());
+            if (!r && r.error() != status_t::BACKPRESSURE) ++odd;
+        }
+    });
+    int refused = 0;
+    for (int i = 0; i < 2000; ++i) {
+        const auto r = write_active(g, *vh, tlv_value(type_t::NAME, (i & 1) ? "b" : "a"), "peer");
+        if (!r) (r.error() == status_t::BACKPRESSURE ? ++refused : ++odd);
+    }
+    stop = true;
+    reader.join();
+    check(odd.load() == 0, "every answer was success or BACKPRESSURE");
+    std::printf("    (%d of 2000 switches met a read and were refused)\n", refused);
+
+    result_t<void> done = sel.select("b");
+    while (!done) done = sel.select("b");
+    (void)g.write(in, byte_value(1));
+    const int a_seen = a.seen;
+    check(sel.settled() && b.seen >= 1 && g.is_suspended(*sa).value_or(false),
+          "a retried switch to b completes: a is suspended, b delivers");
+    (void)g.write(in, byte_value(2));
+    check(a.seen == a_seen, "and a stays silent");
 }
 
 }  // namespace
@@ -455,5 +582,8 @@ int main() {
     test_creator_door();
     test_add_refusals();
     test_target_form();
+    test_slot_reuse();
+    test_remove();
+    test_one_at_a_time();
     return tr::testing::summary("subscription_selector");
 }
