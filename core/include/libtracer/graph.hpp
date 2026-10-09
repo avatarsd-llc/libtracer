@@ -3095,9 +3095,9 @@ class graph_t {
     // retaining arm of either door keeps its `read_stored()` fast path unencumbered.
     [[nodiscard]] result_t<value_ref_t> read_handler_gated(vertex_t* v) const;
     // A COMPOSED read's value (a folded listing, a folded subtree, a field TLV) given a
-    // published value's shape: one heap block, whose refusal is BACKPRESSURE by value (#477),
-    // never a throw.
-    [[nodiscard]] static result_t<value_ref_t> composed_or_backpressure(view::rope_t&& r) noexcept;
+    // published value's shape: one block from the graph's value source (#2052), whose refusal
+    // is BACKPRESSURE by value (#477), never a throw.
+    [[nodiscard]] result_t<value_ref_t> composed_or_backpressure(view::rope_t&& r) const noexcept;
     // The field read's composing arms — every `:field` shape but the empty one — each
     // answering the one read type (RFC-0028 D11); the public field `read` forwards to it.
     [[nodiscard]] result_t<value_ref_t> read_field_composed(vertex_handle_t v,

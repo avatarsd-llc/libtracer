@@ -872,10 +872,12 @@ result_t<view_t> bus_children(void* c) {
               put_tlv(members, type_t::POINT, wire::opt_t{.pl = true}, mem::as_span(body));
     });
     mem::bytes_t out(members.source());
-    ok &= put_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, mem::as_span(members));
+    if (!ok || !put_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, mem::as_span(members)))
+        return std::unexpected(status_t::BACKPRESSURE);
+    // `out` is non-empty by construction; `nullopt` is exactly an alloc failure.
     const std::span<const std::byte> bytes = mem::as_span(out);
     view::segment_t* const seg =
-        ok ? listing.graph->value_backend().alloc(bytes.size(), mem::alloc_hint_t::NONE) : nullptr;
+        listing.graph->value_backend().alloc(bytes.size(), mem::alloc_hint_t::NONE);
     if (seg == nullptr) return std::unexpected(status_t::BACKPRESSURE);
     std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return view_t{view::segment_ptr_t::adopt(seg), 0, bytes.size()};
@@ -915,13 +917,12 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
 
     // Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the
     // graph's `:children[]` machinery used to hand the retired door (the endpoint never had one).
-    // The `/net/<module>` structural vertex, created lazily on first use. graph_.find IS the
-    // dedupe — a separate seen-set would be a second source of truth (and another container
-    // instantiation) for something the graph already knows. Its key is the mount key's first
-    // two records, so it is read off that key's prefix rather than built twice.
-    const std::span<const std::byte> module_key = parent_key(mount_key, name);
-    if (!graph_.find(module_key))
-        (void)graph_.register_vertex_key(module_key, graph::role_t::STORED_VALUE, {});
+    // The `/net/<module>` structural vertex, created lazily on first use. The registration IS
+    // the dedupe: a second one answers PATH_IN_USE and changes nothing, so its result is
+    // dropped — a separate seen-set, or a `find` first, would be a second source of truth for
+    // something the graph already knows. Its key is the mount key's first two records, so it
+    // is read off that key's prefix rather than built twice.
+    (void)graph_.register_vertex_key(parent_key(mount_key, name), graph::role_t::STORED_VALUE, {});
 
     // Resolve the connection's link. Precedence, WITHIN the module resolved above: a
     // provide_link-staged transport wins (the test/manual seam); otherwise the config `kind`

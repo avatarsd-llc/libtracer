@@ -665,15 +665,17 @@ class value_ref_t {
      * @brief Take ownership of a freshly COMPOSED value, giving it a published value's shape.
      *
      * The composed branch read builds a rope no vertex published; this is what lets it answer
-     * the same signature. It draws one block from the host value sub-pool (`mem::value_source()`,
-     * #1777) — the composed value has no vertex, so no injected source — which the published
-     * path does not pay; measured neutral
-     * (1.00x over 30 paired samples), because a subtree walk dominates it.
+     * the same signature. It draws one block from @p source, which the published path does not
+     * pay; measured neutral (1.00x over 30 paired samples), because a subtree walk dominates it.
+     * The graph passes its own value source (#2052), so a graph given its own source takes
+     * nothing from the default root for a composed read; the default is the host value
+     * sub-pool (`mem::value_source()`, #1777).
      *
-     * @return The reference, or an EMPTY one when the heap refused the block (#477).
+     * @return The reference, or an EMPTY one when @p source refused the block (#477).
      */
-    [[nodiscard]] static value_ref_t composed(view::rope_t&& r) noexcept {
-        return value_ref_t{value_t::make(std::move(r), mem::value_source())};
+    [[nodiscard]] static value_ref_t composed(
+        view::rope_t&& r, mem::block_source_t& source = mem::value_source()) noexcept {
+        return value_ref_t{value_t::make(std::move(r), source)};
     }
 
     /**

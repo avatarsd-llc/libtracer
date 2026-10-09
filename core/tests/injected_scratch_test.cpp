@@ -19,11 +19,11 @@
  *       #2052 the liveness value came from `tr::mem::heap_backend()`. A read of the connection
  *       vertex's `:children[]` then stages its listing on, and answers it from, the owning
  *       graph's sources; before #2052 the staging came from `tr::mem::net_source()` and the
- *       answer from `tr::mem::heap_backend()`. The read's composed wrapper
- *       (`value_ref_t::composed`, one block from the default value sub-pool on every composed
- *       field read) is another path, so (b) asserts the listing's own segment came from the
- *       graph's backend and the tables and net peaks stayed zero, and pins that wrapper as the
- *       one default-root draw left.
+ *       answer from `tr::mem::heap_backend()`, and the read's composed wrapper
+ *       (`value_ref_t::composed`, one block on every composed field read) from
+ *       `tr::mem::value_source()`. Every peak is still zero after the read, the listing's
+ *       segment came from the graph's backend and its wrapper from the graph's value source:
+ *       the arena minimum of a fully-injected node is 0 B.
  *
  * Every case also checks that its draw reached the injected root (a count of the blocks it
  * served), so a zero on the default root is not the zero of a path that never ran.
@@ -156,13 +156,10 @@ int main() {
         check(listing.has_value() && (*listing)->link_count() == 1 &&
                   (*listing)->only().owner->backend == &g.value_backend(),
               "the listing's bytes are a segment from the graph's value backend");
+        check(listing.has_value() && (*listing)->source() == &g.value_source(),
+              "the composed read's wrapper block is from the graph's value source");
         report_default_root();
-        check(tr::mem::table_source().stats().peak == 0 && tr::mem::net_source().stats().peak == 0,
-              "the staging took nothing from the default root's tables or net");
-        // The one draw left on the default root is not this path's: every composed field read
-        // wraps its rope in a value block from `mem::value_source()` (`value_ref_t::composed`).
-        check(listing.has_value() && (*listing)->source() == &tr::mem::value_source(),
-              "the composed read's own wrapper block is the only default-root draw");
+        check(default_root_peak() == 0, "and the read took nothing from the default root");
     } else {
         std::printf("(b) skipped: this build closed the bus module (kBusLinks = false)\n");
     }

@@ -1825,8 +1825,8 @@ void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
  * Out of line, and reached only through a taken branch: the retaining arm of either door keeps
  * its `read_stored()` fast path, which pays no handler-dispatch cost at all.
  */
-result_t<value_ref_t> graph_t::composed_or_backpressure(view::rope_t&& r) noexcept {
-    value_ref_t out = value_ref_t::composed(std::move(r));
+result_t<value_ref_t> graph_t::composed_or_backpressure(view::rope_t&& r) const noexcept {
+    value_ref_t out = value_ref_t::composed(std::move(r), *values_);
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return out;
 }
