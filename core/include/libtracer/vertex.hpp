@@ -3445,8 +3445,9 @@ class vertex_t {
      * The array holds one entry per ACTIVE slot, in slot order, each naming its slot index for
      * `set_published_live` (#1533). A cleared slot contributes nothing, so the copy loop never
      * visits it; a suspended slot's entry is built with its bit clear, so a later resume is a
-     * flip. When no slot is active, nothing is allocated and the published array is null. The
-     * outcome is recorded in `edge_block_t::pub_current`.
+     * flip. The block is sized for every slot (one pass, no counting pass), so a cleared slot
+     * still costs one entry of capacity, as it did before #1533; it is just never constructed or
+     * walked. The outcome is recorded in `edge_block_t::pub_current`.
      *
      * **ONE allocation total** (#1442): the array itself. The rebuild is O(slots) and always
      * will be — #635 bought lock-free fan-out with an immutable published array, so appending
@@ -3464,21 +3465,24 @@ class vertex_t {
      *         `BACKPRESSURE`, and a republish reaches no allocator but this one.
      */
     [[nodiscard]] bool try_publish_edges(edge_block_t& b) noexcept {
-        const auto live = static_cast<std::size_t>(std::count_if(
-            b.slots.begin(), b.slots.end(), [](const subscriber_t& s) { return s.active; }));
         b.pub_current = false;  // until the new array is installed below
         edge_pub_t* np = nullptr;
-        if (live != 0) {
-            np = alloc_edge_pub(b.slots.source(), live);
+        if (!b.slots.empty()) {
+            // Sized for every slot, as before #1533, so the rebuild stays ONE pass over the
+            // table (a counting pass first was the top cost of a 1024-edge churn); a cleared
+            // slot simply leaves its tail entry unconstructed.
+            np = alloc_edge_pub(b.slots.source(), b.slots.size());
             if (np == nullptr) return false;
             pub_edge_t* dst = np->entries();
-            for (std::size_t i = 0; i < b.slots.size(); ++i) {
-                const subscriber_t& s = b.slots[i];
+            const subscriber_t* const first = b.slots.data();
+            // Range-for, so the table's base stays hoisted: an indexed `b.slots[i]` reloads it
+            // after every entry store, which a 1024-edge churn profile showed.
+            for (const subscriber_t& s : b.slots) {
                 if (!s.active) continue;
                 pub_edge_t& e = *::new (static_cast<void*>(dst + np->count)) pub_edge_t{};
                 ++np->count;  // constructed ⇒ destroy_edge_pub can always unwind it
-                e.slot = static_cast<pub_edge_t::slot_index_t>(i);
-                if (s.suspended) e.active.store(false, std::memory_order_relaxed);
+                e.slot = static_cast<pub_edge_t::slot_index_t>(&s - first);
+                e.active.store(!s.suspended, std::memory_order_relaxed);
                 e.callback = s.callback;
                 e.callback_ctx = s.callback_ctx;
                 e.target_key = s.target_key;  // refcount clone — nothrow
