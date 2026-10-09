@@ -63,17 +63,16 @@ namespace tr::mem {
  * @note The tag stays @ref backend_tag::UNKNOWN, and phase 3 is where that stops being a
  *       deferral and becomes a decision. Phase 1 left the module-set `SOURCE` enumerator to
  *       "the phase that decides whether this type is the only backend left"; it is not. The
- *       fast set keeps @ref heap_backend_t (the process default, whose bytes now come from
- *       the substrate's own @ref heap_source_t arm), @ref pool_t (a caller-owned slab with
- *       no acquisition to re-layer — its slab IS the bound) and the two borrowed backends
- *       (which acquire nothing at all). An enumerator would devirtualize reclaim only for
- *       the injected-source composition, at the cost of a fifth switch arm and this type's
- *       `destroy` body in `backend_set.cpp` for every target that links the multi-member
- *       set — i.e. every host target, none of which is the one that benefits. Recorded here
- *       as DECIDED, not deferred again. The virtual `destroy` fallback is the same path every
- *       out-of-core backend already takes, and it costs the DEFAULT composition nothing:
- *       `graph_t` folds a process-default source back onto @ref heap_backend (tagged `HEAP`)
- *       and never constructs this type at all.
+ *       fast set keeps @ref heap_backend_t (the process default, whose bytes come from
+ *       the value sub-pool: the host slab pool, or the static arena on an MCU build), @ref pool_t
+ * (a caller-owned slab with no acquisition to re-layer — its slab IS the bound) and the two
+ * borrowed backends (which acquire nothing at all). An enumerator would devirtualize reclaim only
+ * for the injected-source composition, at the cost of a fifth switch arm and this type's `destroy`
+ * body in `backend_set.cpp` for every target that links the multi-member set — i.e. every host
+ * target, none of which is the one that benefits. Recorded here as DECIDED, not deferred again. The
+ * virtual `destroy` fallback is the same path every out-of-core backend already takes, and it costs
+ * the DEFAULT composition nothing: `graph_t` folds a process-default source back onto @ref
+ * heap_backend (tagged `HEAP`) and never constructs this type at all.
  *
  * @note @ref alloc and @ref destroy are defined OUT OF LINE (`core/src/mem_source_backend.cpp`),
  *       unlike @ref heap_backend_t's, and that is deliberate rather than stylistic. This type is

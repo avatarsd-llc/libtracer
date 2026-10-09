@@ -141,9 +141,10 @@ struct router_planes_t {
      * @brief The nothrow source the `route_handle` LABEL TABLES draw from (#603 defect 1 / #873
      * family 3, ADR-0065 / ADR-0079 §Decision 4) — the library holds no buffer of its own. A
      * bounded node injects a @ref mem::pool_source_t over its static slab (one slab, whole stack —
-     * ADR-0039 §2); the default is the process-wide nothrow platform heap. Must outlive the router,
-     * and must be thread-safe: the label tables are written from `on_advertise`, which runs on a
-     * transport RECEIVE thread and is driven entirely by a remote peer.
+     * ADR-0039 §2); the default is the process net sub-pool (`mem::net_source()`; the static arena
+     * on an MCU build). Must outlive the router, and must be thread-safe: the label tables are
+     * written from `on_advertise`, which runs on a transport RECEIVE thread and is driven entirely
+     * by a remote peer.
      *
      * This plane used to be a `%std::pmr::memory_resource*`. It could not stay one: a pmr
      * resource cannot report exhaustion by value, so on the shipping `-fno-exceptions` profile a

@@ -425,7 +425,8 @@ class heap_backend_t final : public mem_backend_t {
  *          therefore fills the arena, not the heap. To send values to the platform heap on
  *          either build, wrap `heap_source()`:
  *          `static tr::mem::source_backend_t heap_values{tr::mem::heap_source()};`
- *          (@ref source_backend_t, one block per segment) and pass that.
+ *          (@ref source_backend_t, one block per segment) and pass that. It must outlive every
+ * segment it served, and needs `libtracer/mem_source_backend.hpp`.
  */
 [[nodiscard]] mem_backend_t& heap_backend() noexcept;
 

@@ -918,7 +918,7 @@ transport_factory_t can_transport_factory(mem::block_source_t* reasm_src,
         // injected at factory-registration time instead (null = the net sub-pool).
         cfg.reasm_src = reasm_src;
         // Same reasoning one seam over (#911): the slice-byte backend is a pointer, so
-        // it rides the factory registration, not the config TLV. nullptr = process heap.
+        // it rides the factory registration, not the config TLV. nullptr = process net sub-pool.
         cfg.rx_backend = rx_backend;
         if (const auto v = reader.u32("max_groups")) cfg.max_groups = static_cast<std::size_t>(*v);
         if (const auto v = reader.u32("max_pending"))

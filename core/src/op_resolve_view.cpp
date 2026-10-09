@@ -223,7 +223,7 @@ class view_node {
     }
 
     /**
-     * @brief The walk's injected byte backend, or the global heap when none was injected —
+     * @brief The walk's injected byte backend, or `heap_backend()` when none was injected —
      *        public because `op_resolver_t::resolve` hands the SAME backend to `resolve_node`
      *        as its `flat` argument (#801), so the two tiers' walks take one shape.
      */

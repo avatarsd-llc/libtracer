@@ -303,8 +303,11 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
                                  host, port, config.ws_path, config.handshake_headers)),
       rx_backend_(config.memory.rx),
       // The send side's store (#1661): the scratch below, the queue's slots and the base
-      // class's gather temporary all draw from the application's `memory.io`, null meaning
-      // the process heap — the host client's rule (`ws_client_transport_t`).
+      // class's gather temporary draw from the application's `memory.io`, EXCEPT that a null
+      // `io` sends the scratch and the queue slots to the platform heap (`heap_source()`) while
+      // the gather temporary stays on the base class's net sub-pool (the static arena on this
+      // target; `set_egress_source` below runs only for a non-null `io`). The host client
+      // (`ws_client_transport_t`) resolves a null `io` to the net sub-pool throughout.
       tx_buf_(config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
       tx_(kTxQueueDepth, config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
       armed_(!config.defer_recv) {

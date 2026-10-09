@@ -3497,9 +3497,9 @@ class graph_t {
     /** @brief The #551 nothrow failable-block seam — and, since #873 phase 1, THE source:
      *         the one the constructor was handed, from which every other channel is built.
      *
-     *         Defaults to the platform heap, so behaviour is byte-identical until a host
-     *         injects a bounded source — except that exhaustion is a `nullptr` return
-     *         rather than the `-fno-exceptions` abort stub.
+     *         Defaults to `mem::default_root()` (the host slab pool, or the static arena on an MCU
+     * build), so behaviour is byte-identical until a host injects a bounded source — except that
+     * exhaustion is a `nullptr` return rather than the `-fno-exceptions` abort stub.
      *
      *         LAST on purpose: no hot path reads it, so declaring it here keeps
      *         every other member at the byte offset it had before this seam
