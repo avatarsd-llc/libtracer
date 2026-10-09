@@ -579,7 +579,8 @@ run terminates at the connection vertex.
 **What the behaviour is.** §B says the reply self-routes home via `src`, each reverse hop
 stripping its own run, "and so on back to the originator". Amendment 2 §Scope boundary keeps
 §B's accumulation for an empty `src` because "an empty seed `src` is currently the ordinary
-spelling for 'name me by the link I arrive on'". That seed only works if the hop that grew it
+spelling for 'name me by the link I arrive on'" (a spelling RFC-0030 §8.5 retires; see Scope
+below). That seed only works if the hop that grew it
 sends the reply over that link. A `REPLY` carries no operation to apply at a connection vertex,
 so the exact-mount clause can only ever mean the request case it was written for (RFC-0020's bus
 NAMEs). The reference core read it literally, and the RESULT of every write forwarded from an
@@ -597,5 +598,11 @@ request naming a mount exactly still addresses the connection vertex. A bus link
 still no next hop (RFC-0020). Pinned by `core/tests/fwd_reply_home_test.cpp` at 1 and 3 hops,
 for a PAIR-spelled and a NAME-spelled request.
 
-**Not changed.** An origin behind a forwarder still cannot decline the reply: Amendment 2's
-marker stays single-hop, and extending it is the separate proposal that amendment names.
+**Scope: the surface implemented today, until RFC-0030 §8.5 lands.**
+[RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md) §8.5 (accepted 2026-10-07)
+already amends Amendment 2: "a forwarding hop MUST NOT grow an empty `src`", and the "name me by
+the link I arrive on" spelling retires. Its implementation is
+[#1946](https://github.com/avatarsd-llc/libtracer/issues/1946) (the reply is a remote write; `AWAIT`
+and `REPLY` retire). Until #1946 lands, the reference core still grows an empty `src`, so this
+erratum governs the reply that growth produces. Once it lands, an empty `src` reaches the terminus
+empty, no `RESULT` is built, and the exact-mount case this erratum corrects no longer arises.

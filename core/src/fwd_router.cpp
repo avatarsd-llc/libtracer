@@ -191,6 +191,9 @@ struct mount_hit_t {
      * is behind that link: §B's empty seed `src`, grown by the first hop alone (RFC-0004
      * Amendment 2 §Scope boundary). Read as an address, it terminated here and the RESULT was
      * dropped uncounted. A bus mount's own NAME stays no next hop (RFC-0020).
+     *
+     * Holds only until #1946 lands RFC-0030 §8.5: a forwarding hop then never grows an empty
+     * `src`, the terminus builds no RESULT for it, and this case no longer arises.
      */
     void take_reply_egress() noexcept {
         const child_registry_t::egress_t eg = exact->egress();

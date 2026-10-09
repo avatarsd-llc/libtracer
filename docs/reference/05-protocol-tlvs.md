@@ -512,8 +512,11 @@ A `REPLY` is routed by the same steps against its `dst`, with one difference: it
 return route and never addresses a vertex on the hop reading it, so a NAME run naming a
 point-to-point mount exactly is the reply's **last hop**, not a local terminus. The reply egresses
 over that link with `dst` re-headed as the empty `PATH`, because the originator is behind it (an
-empty seed `src`, grown by the first hop; RFC-0004 erratum 2026-10-09). The forwarding hop is zero-heap and holds
-nothing across frames. The hop that consumes the **final** element and still has a frame to put on
+empty seed `src`, grown by the first hop; RFC-0004 erratum 2026-10-09). This holds only until
+[#1946](https://github.com/avatarsd-llc/libtracer/issues/1946) lands
+[RFC-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md)
+§8.5: a forwarding hop then never grows an empty `src`, so this reply is never built. The
+forwarding hop is zero-heap and holds nothing across frames. The hop that consumes the **final** element and still has a frame to put on
 the wire re-heads its egress `dst` as a canonical **empty `PATH`**, so a client that never speaks a
 PAIR is never answered in one (RFC-0024 §7.1 erratum 3, kept).
 

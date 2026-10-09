@@ -878,6 +878,38 @@ void test_advertise_exact_mount_terminates() {
 
 }  // namespace
 
+/**
+ * @brief A REPLY whose `dst` names a BUS mount exactly stays put; a point-to-point one leaves.
+ *
+ * #2042: a REPLY's `dst` is a return route, so a run naming a point-to-point mount exactly is its
+ * last hop and egresses over that link with an empty `dst`. A bus link's own NAME is still no
+ * next hop (RFC-0020): the same REPLY naming a bus mount exactly must not reach the bus endpoint
+ * (a broadcast) or any peer, and is never answered.
+ */
+void test_reply_naming_a_bus_mount_exactly_stays_put() {
+    std::printf("a REPLY naming a bus mount exactly stays put (#2042, RFC-0020)\n");
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    p2p_link_t direct;
+    bus.peers.emplace_back("alice", &alice);
+    recording_link_t in;
+
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    (void)router.add_child("net/ws-server/srv", bus);
+    (void)router.add_child("net/ws-client/c", direct);
+    (void)router.add_child("net/ws-client/in", in);
+
+    const auto reply = static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY);
+    router.on_frame("net/ws-client/in", make_fwd_op(reply, {"net", "ws-server", "srv"}, {"x"}));
+    check(bus.broadcasts == 0 && alice.received == 0, "nothing egresses the bus or a peer");
+    check(in.sent.empty(), "and the REPLY is never answered");
+
+    // The control: the same REPLY naming a point-to-point mount exactly leaves over it.
+    router.on_frame("net/ws-client/in", make_fwd_op(reply, {"net", "ws-client", "c"}, {"x"}));
+    check(direct.received == 1, "a point-to-point mount named exactly is the reply's last hop");
+}
+
 int main() {
     test_module_scoping();
     test_no_prefix_confusion();
@@ -895,6 +927,7 @@ int main() {
     test_bus_name_hop_reply_bytes_are_pinned();
     test_reject_and_terminus_agree_on_trailered_routes();
     test_advertise_exact_mount_terminates();
+    test_reply_naming_a_bus_mount_exactly_stays_put();
 
     return tr::testing::summary("mount_routing");
 }
