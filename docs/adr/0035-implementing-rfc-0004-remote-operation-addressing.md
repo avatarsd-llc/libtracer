@@ -1,6 +1,8 @@
 # Implementing RFC-0004 (remote operation addressing): `FWD`/`FIELD` in `tr::wire`, hop-by-hop forwarding in the router, zero-copy `src` accumulation, the route-handle inside the transport
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: RFC-0032 -->
+
+> **Superseded in part by [RFC-0032](../spec/rfcs/0032-delete-compact-streams-ride-the-chain.md)** (accepted 2026-10-09): slice 4's route-handle mechanism is deleted.
 
 Status: accepted. Records *how* the reference cores (C++/TS/Rust) implement the now-accepted
 [RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) (path-as-route, `FWD` `0x0F` /

@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0002 — Protocol error model: the `tr::` concept namespace
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: RFC-0032 -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0002 |
 | **Title** | Protocol error model: the `tr::` concept namespace |
-| **Status** | **accepted** (2026-07-03) |
+| **Status** | **accepted** (2026-07-03) **Amended by [RFC-0032](0032-delete-compact-streams-ride-the-chain.md)** (accepted 2026-10-09): §C, a receiver MUST NOT answer a bare outer `ERROR`. |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-06-24 |
 | **Comment window** | waived by the maintainer (solo-maintainer project, GOVERNANCE.md window dead ceremony) |

@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0010 — Owner-writable application property fields: the field descriptor table, the reserved `settings.app` namespace, and owner-defined `:schema`
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: RFC-0032 -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0010 |
 | **Title** | Owner-writable application property fields: the field descriptor table, the reserved `settings.app` namespace, and owner-defined `:schema` |
-| **Status** | **accepted** (2026-07-19 — maintainer ruling, window waived; in-comment from 2026-07-17, draft since 2026-07-09) |
+| **Status** | **accepted** (2026-07-19 — maintainer ruling, window waived; in-comment from 2026-07-17, draft since 2026-07-09) **Amended by [RFC-0032](0032-delete-compact-streams-ride-the-chain.md)** (accepted 2026-10-09): Amendment 2's census loses `labels_exhausted`, `refused_bindings` and `labels_used`, and gains `retired_rx`. |
 | **Author(s)** | origin-firmware integration (drafted for maintainer review) |
 | **Created** | 2026-07-09 |
 | **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |
@@ -1142,3 +1142,35 @@ the node class would be a new seam name, and so a future amendment, not part of 
 text described a count the shipped behaviour never made; the seam's name, its nouns and every
 value a node answers are unchanged. No frame shape, type code, grammar rule, error identity or
 seam name moves.
+
+## Erratum (2026-10-09) — reference/05 credited three `COMPACT` handle-store nouns to the RFC-0027 label table ([#1950](https://github.com/avatarsd-llc/libtracer/issues/1950))
+
+Ruled by the maintainer on 2026-10-09 with [RFC-0032](0032-delete-compact-streams-ride-the-chain.md)
+§15 Q6, as a separate instrument from that amendment.
+
+**What the text said.** reference/05's net-plane seam table (§`:stats`, the Amendment 2 rows)
+described `:stats.labels.table` as "the RFC-0027 label plane — mint refusals beside dereference
+tallies", **deleted with the table by RFC-0029 slice S3**, "as is `labels_used` below". That covered
+all four of its nouns and `:stats.link.<child>`'s `labels_used`.
+
+**What the behaviour is.** Three of those nouns are read from the RFC-0004 §E.1 `COMPACT` handle
+store (`tr::net::route_handle_t`), not from the RFC-0027 path-label table. They are
+`labels_exhausted` (`route_handle_t::labels_exhausted`), `refused_bindings`
+(`route_handle_t::refused_bindings`) and `labels_used` (`route_handle_t::labels_used`, published
+per link when the node has path-label switching configured). Only `label_not_found` and
+`label_resolves` are the RFC-0027 plane's: the router counts them as it dereferences a label. RFC-0029
+§11, the list S3 deletes, names none of the three. So S3 never deletes them, and they leave with the
+handle store under RFC-0032 §6.3.
+
+**Which change made them diverge.** Amendment 2's own row already tied the mint refusals to
+`route_handle_t`. The "deleted with the table by RFC-0029 slice S3" note was added to reference/05
+with RFC-0029's S0 text (#1631, one path primitive), which read every noun in the class as the
+RFC-0027 table's.
+
+**The correction.** reference/05's two rows now name the source of each noun, and say which change
+deletes it: S3 for `label_not_found` and `label_resolves`, and RFC-0032 for the other three.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). Every
+seam name and noun is published exactly as before, with the same value. No frame, type code,
+grammar rule, error identity or seam name moves. The deletion itself is RFC-0032's amendment, not
+this erratum.
