@@ -254,6 +254,7 @@ asymmetry, so `can` is ONE module for both roles.)
 | `max_groups` | `VALUE` u32 | both | `0` | Live reassembly-group ceiling. `0` = uncapped by this key; overflow evicts the oldest group and ticks `dropped_groups`. |
 | `max_pending` | `VALUE` u32 | both | `0` | Ceiling on data slices parked awaiting their advertise. `0` = uncapped by this key; overflow evicts the oldest and ticks `dropped_rx`. |
 | `rx_ttl_ms` | `VALUE` u32 | both | `0` | RX staleness window: a parked slice or an incomplete group untouched this long is reclaimed, so a lost advertise cannot pin one forever. `0` means *track `peer_ttl_ms`* — never "disabled". |
+| `compress_ids` | `VALUE` u32 | both | `512` | Link-local compression: how many of the node's stream-window identifiers (endpoints `1`–`512`) it uses for the streams it sends, and how many streams it holds for any one sender. `0` turns compression off, so the node never announces it, every send on its links is a full frame and its groups use every endpoint. Clamped to `512`. |
 
 <!-- config-keys:end -->
 

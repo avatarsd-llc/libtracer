@@ -61,6 +61,17 @@ only; remote-request, 11-bit standard and error frames are not traffic) and
 decodes those flags from its own driver's representation, but does not get to reach
 its own verdict.
 
+**Link-local compression** (#1953) is private to the binding and to one link. Two ends that
+both set the capability bit on their advertises carry a repeated directed stream on CAN
+identifiers from the sender's own stream window (endpoints `1`–`512`, `kCanStreamIds`), without
+the FWD prefix that names it: after one bind and its acknowledgement, a 4-byte value is one
+classic frame. The receiver puts the prefix back, so the frame it delivers is byte-identical. A
+node that announces the bit starts its groups at `kCanFirstGroupEndpoint` (513). `compress_ids`
+(config key and `transport_can_config_t` member) sizes the window, `0` turns it off, and a peer
+without the bit, a broadcast send, a non-FWD frame, a frame seen once and a stream the window
+has no room for all travel as full frames. Allocation, priority, recovery and frame counts are
+in [reference §Link-local compression](../reference/14-can-transport.md#link-local-compression).
+
 The seam is **two-phase** (#1186): constructing a link opens it, and a separate
 `start()` is what begins reading — called after `on_receive`, so a link never reads a
 frame it has no sink for. `transport_can` drives both phases for the link it owns, so
@@ -82,7 +93,9 @@ with its platform's blocking primitive.
 - **An advertise is not a handshake.** Nothing acknowledges it and nothing
   depends on having seen one before sending; a receiver that has not yet learned
   a mapping simply cannot attribute those frames yet, and learns on the next
-  advertise.
+  advertise. The one acknowledged exchange is a link-local compression bind, and
+  it gates only the sender's switch to stream identifiers: until the
+  acknowledgement arrives, the stream keeps travelling whole.
 - **Endpoint `0` is reserved.** Data groups begin at the first data endpoint;
   allocating group traffic to slot 0 collides with the control stream.
 - **CAN-FD lengths are a ladder, not a range.** 8/12/16/20/24/32/48/64 — a
@@ -258,6 +271,21 @@ the value `alloc_base` wraps back to, so `dropped_stale_binding()`'s doc `@ref`s
 explains how the receiver observes a lap.
 
 ```{doxygenvariable} tr::net::kCanFirstDataEndpoint
+:project: libtracer
+```
+
+Link-local compression's stream window, the first endpoint a compressing node's groups use, and
+the most slices one stream send may take:
+
+```{doxygenvariable} tr::net::kCanStreamIds
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kCanFirstGroupEndpoint
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kCanMaxStreamSlices
 :project: libtracer
 ```
 

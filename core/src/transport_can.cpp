@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <cstring>
 #include <optional>
@@ -15,7 +16,9 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/grammar.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/segment.hpp"
 #include "libtracer/view.hpp"
@@ -109,7 +112,93 @@ tr::net::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint
 // (removed) own_copy — the alloc/copy/over triplet now lives in one audited
 // locus, tr::view::over_bytes (mem_heap.hpp). Call sites use it directly.
 
+/** @brief Bind descriptor (#1953): `slot u16 | epoch u8 | off u16 | len u16`, little-endian. */
+constexpr std::size_t kBindDescriptorSize = 7;
+/** @brief Elide descriptor (#1953): `slot u16 | epoch u8`, little-endian. */
+
+/**
+ * @brief An owned copy of `prefix + src[0, off) + insert + src[off + cut, end)` (#1953), in
+ *        one segment from @p alloc — @ref tr::view::over_bytes with an edit on the way in.
+ *
+ * Both ends of link-local compression take their one copy through this: a sender writes a
+ * descriptor in front and leaves the address run out (`insert` empty), a receiver drops the
+ * descriptor (`src` starts past it) and puts the run back (`cut` 0). With every edit empty
+ * it is exactly `over_bytes`. Inlined into its callers, so the copy is theirs, as it was.
+ */
+template <class Alloc>
+[[gnu::always_inline]] inline std::optional<tr::view::view_t> over_spliced(
+    Alloc&& alloc, std::span<const std::byte> prefix, std::span<const std::byte> src,
+    std::size_t off, std::size_t cut, std::span<const std::byte> insert) noexcept {
+    const std::size_t n = prefix.size() + src.size() - cut + insert.size();
+    if (n == 0) return tr::view::view_t{};  // engaged-empty, as over_bytes
+    tr::view::segment_ptr_t seg = alloc(n);
+    if (!seg) return std::nullopt;  // refusal => BACKPRESSURE
+    std::byte* out = seg->bytes.data();
+    for (const std::span<const std::byte> part :
+         {prefix, src.first(off), insert, src.subspan(off + cut)}) {
+        if (!part.empty()) std::memcpy(out, part.data(), part.size());
+        out += part.size();
+    }
+    return tr::view::view_t::over(std::move(seg));
+}
+
+/** @brief Hand @p sink each piece of `rope[pos, pos + len)`, in order, without copying. */
+template <class Sink>
+void walk_range(const tr::view::rope_t& rope, std::size_t pos, std::size_t len, Sink&& sink) {
+    std::size_t at = 0;
+    rope.walk([&](std::span<const std::byte> part) {
+        const std::size_t lo = std::clamp(pos, at, at + part.size());
+        const std::size_t hi = std::clamp(pos + len, at, at + part.size());
+        if (lo < hi) sink(part.subspan(lo - at, hi - lo));
+        at += part.size();
+    });
+}
+
+/** @brief Where a frame's address run sits: `[off, off + len)`. */
+struct address_run_t {
+    std::size_t off = 0; /**< @brief First byte of the run. */
+    std::size_t len = 0; /**< @brief Its length. */
+};
+
+/**
+ * @brief The address run of a FWD frame — its `op`, `dst`, optional `FIELD` and `src`
+ *        children, contiguous after the outer header — or nullopt for anything else (#1953).
+ *
+ * The bytes a stream repeats send after send, so the bytes link-local compression binds
+ * once and then elides. Only the SENDER asks: the receiver splices whatever run it was
+ * bound, at whatever offset, and never parses the frame. A frame this does not recognize is
+ * simply sent whole, so a wrong guess here costs bytes, never correctness. The outer header
+ * stays on the wire because its length field changes with the payload.
+ */
+[[nodiscard]] std::optional<address_run_t> address_run(std::span<const std::byte> frame) {
+    namespace g = tr::wire::grammar;
+    const g::span_cursor_t cur{frame};
+    const auto outer = g::parse_header(cur, g::crc_check_t::DEFER);
+    if (!outer || outer->type != tr::wire::type_t::FWD || !outer->opt.pl) return std::nullopt;
+    const std::size_t end = outer->header + outer->length;
+    std::size_t pos = outer->header;
+    // op, dst, then FIELD-and-src or src alone.
+    for (std::size_t child = 0; child < 4; ++child) {
+        if (pos >= end) return std::nullopt;
+        const auto h = g::parse_header(cur.region(pos, end - pos), g::crc_check_t::DEFER);
+        if (!h) return std::nullopt;
+        pos += h->total;
+        if (child == 2 && h->type != tr::wire::type_t::FIELD) break;
+    }
+    return address_run_t{outer->header, pos - outer->header};
+}
+
 }  // namespace
+
+/** @brief How one send goes on the wire (#1953): what is written in front, what is left out. */
+struct transport_can::link_form_t {
+    std::array<std::byte, kBindDescriptorSize> head{}; /**< @brief A bind's descriptor. */
+    std::size_t head_len = 0; /**< @brief How many of them lead the payload (0 = none). */
+    std::size_t cut = 0;      /**< @brief Leading frame bytes left out: a stream's prefix. */
+    std::size_t total = 0;    /**< @brief The manifest's `group_total_len`. */
+    std::uint16_t base = 0;   /**< @brief A native send's first identifier (0 = a group). */
+    std::uint8_t flags = 0;   /**< @brief The manifest's link flags. */
+};
 
 // socketcan_link_t lives in its OWN translation unit (src/socketcan_link.cpp,
 // Linux-only; src/socketcan_link_stub.cpp elsewhere) — platform selection is a
@@ -131,6 +220,7 @@ can_transport_t::can_transport_t(mem::poly_ptr_t<can_link_t> link,
       reasm_(rx_source(config), cfg_.max_groups),
       learned_(rx_source(config)),
       nodes_(rx_source(config)),
+      tx_peers_(rx_source(config)),
       pending_(rx_source(config)),
       peers_(rx_source(config)) {
     // The advertised path is held here, not borrowed from the caller (a setup call:
@@ -159,6 +249,10 @@ can_transport_t::can_transport_t(mem::poly_ptr_t<can_link_t> link,
     // is what this path used unconditionally before; resolving here rather than
     // branching per slice keeps the RX path at one indirect call either way.
     rx_backend_ = cfg_.rx_backend != nullptr ? cfg_.rx_backend : &tr::mem::net_backend();
+    // Link-local compression (#1953): at most the stream window, and a node that holds no
+    // streams says so on every advertise by leaving the capability bit clear.
+    cfg_.compress_ids = std::min(cfg_.compress_ids, kCanStreamIds);
+    cap_flag_ = cfg_.compress_ids != 0 ? can::kAdvertiseFlagLinkCompress : std::uint8_t{0};
     link_->on_receive([this](const can_frame_data_t& f) { on_rx(f); });
     // ...and only NOW does the link begin reading (#1186). The seam is two-phase
     // precisely so this order is expressible: the receiver is installed first, so
@@ -300,16 +394,21 @@ std::optional<std::uint16_t> transport_can::alloc_base(std::size_t slice_count) 
     // A group occupies CONSECUTIVE slots [base, base+span-1], so one wider than the
     // whole data-endpoint window fits at no base and no wrap rescues it. Refuse it
     // here so the caller never advertises a count it cannot deliver.
-    if (span > kCanMaxGroupSlices) return std::nullopt;
-    if (static_cast<std::size_t>(next_base_) + span - 1u > can::kEndpointMax) {
-        next_base_ = kCanFirstDataEndpoint;  // wrap, leaving the control slot free
+    //
+    // A node that announces compression keeps its stream window out of the cycle (#1953):
+    // its groups start above it, so a frame in the window is always a stream frame.
+    const std::uint16_t first = cap_flag_ != 0 ? kCanFirstGroupEndpoint : kCanFirstDataEndpoint;
+    if (span > can::kEndpointMax + 1u - first) return std::nullopt;
+    if (next_base_ < first ||
+        static_cast<std::size_t>(next_base_) + span - 1u > can::kEndpointMax) {
+        next_base_ = first;  // wrap, leaving the control slot (and any stream window) free
     }
     const std::uint16_t base = next_base_;
     next_base_ = static_cast<std::uint16_t>(static_cast<std::size_t>(base) + span);
     return base;
 }
 
-void transport_can::emit_advertise(const can::advertise_t& adv) {
+void transport_can::emit_advertise(const can::advertise_t& adv, std::string_view path) {
     // The advertise rides the control ID as an in-order byte stream, sliced into
     // CLASSIC (≤8B, exact-length) windows so no CAN-FD DLC padding can perturb the
     // stream decoder on the far side.
@@ -321,7 +420,9 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
     // was a per-send abort() risk under `-fno-exceptions`. Zero allocation, zero drop:
     // 18 bytes of stack and a view of a string this transport already owns for its life.
     std::array<std::byte, can::kAdvertiseHeaderSize> header{};
-    if (!can::encode_advertise_header(header, adv, cfg_.path)) {
+    can::advertise_t stamped = adv;
+    stamped.link_flags |= cap_flag_;  // every advertise says whether this node decompresses
+    if (!can::encode_advertise_header(header, stamped, path)) {
         // Over-long: emit nothing. Without the manifest no peer can bind the group,
         // so the whole send is lost — counted, not silent (#912).
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
@@ -329,7 +430,7 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
     }
     const std::span<const std::byte> parts[2] = {
         std::span<const std::byte>(header),
-        std::as_bytes(std::span<const char>(cfg_.path.data(), cfg_.path.size()))};
+        std::as_bytes(std::span<const char>(path.data(), path.size()))};
 
     const std::uint32_t control_id =
         can::encode_can_id({cfg_.version, cfg_.node, kCanControlEndpoint});
@@ -362,16 +463,24 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
 
 void transport_can::emit_hello() {
     // The presence form (ADR-0044): slice_count == 0 binds nothing and precedes no
-    // data — it only says "this node is on the bus" and carries its identity path.
-    can::advertise_t hello;
-    hello.can_id = can::encode_can_id({cfg_.version, cfg_.node, kCanControlEndpoint});
-    hello.group = false;
-    hello.group_total_len = 0;
-    hello.slice_count = 0;
-    // `hello.path` stays empty on purpose: emit_advertise announces cfg_.path in place, so
+    // data — it only says "this node is on the bus" and carries its identity path. To a
+    // peer that compresses toward us it also says "this end holds none of your streams"
+    // (#1953), which is true at join and is why a refusal re-announces it.
+    emit_link_control(can::kCanBroadcastNode, 0, 0, cfg_.path);
+}
+
+void transport_can::emit_link_control(std::uint16_t target, std::uint8_t flags, std::uint32_t word,
+                                      std::string_view path) {
+    can::advertise_t adv;
+    adv.can_id = can::encode_can_id({cfg_.version, cfg_.node, kCanControlEndpoint});
+    adv.group_total_len = word;
+    adv.slice_count = 0;
+    adv.target = target;
+    adv.link_flags = flags;
+    // `adv.path` stays empty on purpose: emit_advertise announces `path` in place, so
     // filling it here would buy nothing but a per-hello std::string allocation.
     const std::lock_guard lock(tx_m_);
-    emit_advertise(hello);
+    emit_advertise(adv, path);
 }
 
 void transport_can::send(std::span<const std::byte> frame) {
@@ -383,8 +492,12 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
 
     const std::lock_guard lock(tx_m_);
 
-    // Own the bytes so the framing can carve zero-copy subviews out of them.
-    const auto payload = tr::view::over_bytes(frame);
+    // Own the bytes so the framing can carve zero-copy subviews out of them — the frame
+    // itself, or its link-local form toward a peer that decompresses (#1953).
+    const link_form_t form = link_form(frame, target);
+    const auto payload =
+        over_spliced([](std::size_t n) { return tr::view::heap_alloc(n); },
+                     std::span(form.head).first(form.head_len), frame, 0, form.cut, {});
     if (!payload) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // alloc failure => backpressure drop
         return;
@@ -404,7 +517,9 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     // concern (a new control-frame semantic every peer must implement, and one that
     // is itself lossy on the medium that lost the tail slices), where the capacity is
     // a purely local fact the sender already holds.
-    const std::optional<std::uint16_t> base_ep = alloc_base(count);
+    // A native stream send has its identifiers already (#1953); a group reserves its own.
+    const std::optional<std::uint16_t> base_ep =
+        form.base != 0 ? std::optional<std::uint16_t>(form.base) : alloc_base(count);
     if (!base_ep) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // whole group refused, nothing said
         return;
@@ -418,12 +533,14 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     can::advertise_t adv;
     adv.can_id = base_id;
     adv.group = count > 1;
-    adv.group_total_len = static_cast<std::uint32_t>(frame.size());
+    adv.group_total_len = static_cast<std::uint32_t>(form.total);
     adv.slice_count = static_cast<std::uint16_t>(count);
     adv.target = target;
+    adv.link_flags = form.flags;
     // `adv.path` stays empty: emit_advertise walks cfg_.path in place. Copying it here
     // would put a std::string allocation back on EVERY send — the very thing #848 removes.
-    emit_advertise(adv);
+    // A link-local group names no path: its one reader learned this node's from the hello.
+    if (form.base == 0) emit_advertise(adv, form.flags == 0 ? cfg_.path : std::string_view{});
 
     const bool fd = cfg_.mode == tr::net::can::can_frame_mode_t::FD;
     for (std::size_t i = 0; i < count; ++i) {
@@ -525,10 +642,6 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     // only after `is_complete`, so a group a lost advertise or a lost data slice
     // left permanently incomplete is pinned until something ages it out — this.
     reasm_.sweep_stale(static_cast<std::uint64_t>(cfg_.rx_ttl.count()));
-
-    // The hello/presence form (slice_count == 0) binds nothing — its liveness
-    // effect already landed in touch_peer on the frame that carried it.
-    if (adv.slice_count == 0) return;
     // Decoded BEFORE the insert, where it used to sit after it. Two reasons: the
     // endpoint run the invalidation below is computed from lives in these fields,
     // and an id no CAN frame could carry (>29 bits) binds nothing anyway —
@@ -536,6 +649,11 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     // could only ever accumulate in a map that is not otherwise erased per id.
     const auto base = can::decode_can_id(adv.can_id);
     if (!base) return;
+    note_link_control(adv, *base);
+
+    // The hello/presence form (slice_count == 0) binds nothing — its liveness
+    // effect already landed in touch_peer on the frame that carried it.
+    if (adv.slice_count == 0) return;
     // A directed group addressed to another node (ADR-0044) is learned so its
     // data slices are recognized and CONSUMED, but never reassembled/delivered.
     const bool deliver = adv.target == can::kCanBroadcastNode || adv.target == cfg_.node;
@@ -702,8 +820,360 @@ void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
 void transport_can::mark_prior_lap(std::uint16_t node) {
     for (auto& entry : learned_) {
         const auto fields = can::decode_can_id(entry.key);
-        if (fields && fields->node == node) entry.value.prior_lap = true;
+        // A native stream's binding is never in a lap (#1953): the sender's group allocator
+        // never reaches its window.
+        if (fields && fields->node == node) entry.value.prior_lap = !entry.value.native;
     }
+}
+
+/**
+ * @brief How a send toward @p target goes on the wire.
+ *
+ * Whole unless the send is directed to a peer that announced compression AND the frame is
+ * a FWD whose prefix (outer header and address run) names a stream @ref tx_stream binds.
+ * Then it is the bind form — a manifest, the descriptor, the whole frame — until the peer
+ * acknowledges the stream, and the native form after: the frame minus its prefix, on the
+ * stream's own identifiers, with no manifest. Nothing here copies or allocates: the
+ * caller's one copy of the frame writes the form.
+ *
+ * Bind descriptor, little-endian: `base u16 | gen u8 | prefix u16 | k u16` — the block of
+ * identifiers, the bind's generation (echoed by the acknowledgement), the prefix length
+ * and the slices per native send.
+ *
+ * @note Requires `tx_m_` held.
+ */
+transport_can::link_form_t transport_can::link_form(std::span<const std::byte> frame,
+                                                    std::uint16_t target) {
+    link_form_t form;
+    form.total = frame.size();
+    tx_peer_t* const peer = tx_peers_.find(target);  // never holds kCanBroadcastNode
+    // The bind form is 7 bytes longer than the frame, so a frame at the group-size limit
+    // goes whole rather than be refused for the descriptor (the limit is the wire's).
+    const std::optional<address_run_t> run =
+        peer != nullptr && peer->capable &&
+                frame.size() + kBindDescriptorSize <=
+                    can::can_max_data(cfg_.mode) * kCanMaxGroupSlices
+            ? address_run(frame)
+            : std::nullopt;
+    const std::size_t prefix = run ? run->off + run->len : 0;
+    // The descriptor names the prefix length in 16 bits.
+    tx_stream_t* const s =
+        prefix != 0 && prefix <= 0xFFFFu ? tx_stream(*peer, frame, prefix) : nullptr;
+    if (s == nullptr) return form;
+    if (s->acked) {
+        form.cut = prefix;
+        form.base = static_cast<std::uint16_t>(s->base);
+        return form;
+    }
+    form.head_len = kBindDescriptorSize;
+    form.total = frame.size() + kBindDescriptorSize;
+    form.flags = can::kAdvertiseFlagStreamBind;
+    const std::span<std::byte> d(form.head);
+    tr::wire::store_le(d, static_cast<std::uint16_t>(s->base));
+    d[2] = static_cast<std::byte>(s->gen);
+    tr::wire::store_le(d.subspan(3), static_cast<std::uint16_t>(prefix));
+    tr::wire::store_le(d.subspan(5), s->k);
+    return form;
+}
+
+/**
+ * @brief The stream `frame[0, prefix)` names toward @p peer, bound first on its second
+ *        send; null when the frame goes whole.
+ *
+ * One keyed lookup per send: the prefix's hash names the stream, whose own prefix is
+ * compared once, so a send costs a hash of its prefix and a search of the index whatever
+ * the table holds. Two prefixes with one hash cannot both be bound; the second goes whole,
+ * which costs bytes, never correctness.
+ *
+ * A prefix seen for the first time is only remembered: a one-shot frame (a read, an
+ * introspection walk) costs nothing beyond that, and a stream binds on its second send.
+ * Binding takes a block of `k` consecutive identifiers from this node's stream window, the
+ * slices one native send of it needs. When the window has no such block the frame goes
+ * whole, and so does every later send of that stream until a block frees: nothing is ever
+ * evicted to make room. A prefix the peer declined is never bound again until it resets.
+ *
+ * @note Requires `tx_m_` held.
+ */
+transport_can::tx_stream_t* transport_can::tx_stream(tx_peer_t& peer,
+                                                     std::span<const std::byte> frame,
+                                                     std::size_t prefix) {
+    const std::span<const std::byte> pre = frame.first(prefix);
+    const std::size_t key = tr::graph::path_key_hash_t{}(pre);
+    if (const std::uint16_t* const bound = peer.index.find(key)) {
+        tx_stream_t* const s = peer.streams.find(*bound);
+        const bool same = std::ranges::equal(std::span(s->prefix.data(), s->prefix.size()), pre);
+        return same ? s : nullptr;
+    }
+    // Sightings are hints, bounded at twice the window: when they fill they start over, so
+    // a stream binds unless more than that many other prefixes pass between two of its sends.
+    if (peer.seen.size() >= 2 * cfg_.compress_ids) peer.seen.clear();
+    const auto seen = peer.seen.try_emplace(key, std::uint8_t{0});
+    const std::size_t step = can::can_max_data(cfg_.mode);
+    const std::size_t k = (frame.size() - prefix + step - 1) / step;
+    // First sighting, a store refusal, a prefix the peer declined, or a remainder that is
+    // no slices or too many: whole.
+    if (seen.inserted || seen.value == nullptr || *seen.value != 0 || k - 1u >= kCanMaxStreamSlices)
+        return nullptr;
+    const std::uint16_t base = alloc_stream_ids(k);
+    if (base == 0) return nullptr;  // the window is full: whole frames, nothing evicted
+    tx_stream_t* const s = peer.streams.try_emplace(base, rx_source(cfg_)).value;
+    if (s == nullptr || !s->prefix.append(pre.data(), pre.size()) ||
+        peer.index.try_emplace(key, base).value == nullptr) {
+        (void)peer.streams.erase(base);
+        return nullptr;
+    }
+    const std::size_t first = base - kCanFirstDataEndpoint;
+    for (std::size_t i = first; i < first + k; ++i)
+        stream_ids_[i / 64] |= std::uint64_t{1} << (i % 64);
+    (void)peer.seen.erase(key);
+    s->base = base;
+    s->hash = key;
+    s->k = static_cast<std::uint16_t>(k);
+    peer.gen = static_cast<std::uint8_t>(peer.gen % 255u + 1u);  // never 0: a frame refusal's
+    s->gen = peer.gen;
+    return s;
+}
+
+/**
+ * @brief The first identifier of a free block of @p k in the part of this node's stream
+ *        window it uses, first fit; 0 when there is none. The window's allocator, as
+ *        @ref alloc_base is the group cycle's: it only finds, the caller marks the block
+ *        once the stream holding it exists, and @ref tx_unbind returns it.
+ *
+ * @note Requires `tx_m_` held.
+ */
+std::uint16_t transport_can::alloc_stream_ids(std::size_t k) const {
+    std::size_t run = 0;
+    std::size_t at = 0;
+    for (; at < cfg_.compress_ids && run < k; ++at)
+        run = (stream_ids_[at / 64] >> (at % 64)) & 1u ? 0 : run + 1;
+    return run == k ? static_cast<std::uint16_t>(kCanFirstDataEndpoint + at - k) : 0;
+}
+
+/** @brief Unbind @p peer's stream at @p base, returning its identifiers to the window. */
+void transport_can::tx_unbind(tx_peer_t& peer, std::uint16_t base) {
+    const tx_stream_t* const s = peer.streams.find(base);
+    if (s == nullptr) return;
+    const std::size_t first = std::size_t{base} - kCanFirstDataEndpoint;
+    for (std::size_t i = first; i < first + s->k; ++i)
+        stream_ids_[i / 64] &= ~(std::uint64_t{1} << (i % 64));
+    (void)peer.index.erase(s->hash);
+    (void)peer.streams.erase(base);
+}
+
+/**
+ * @brief Unbind every stream toward @p peer and forget what it declined; each stream that
+ *        was bound binds again on its next send, without a first sighting.
+ */
+void transport_can::tx_reset(tx_peer_t& peer) {
+    peer.seen.clear();
+    while (!peer.streams.empty()) {
+        const tx_stream_t& s = peer.streams.begin()->value;
+        (void)peer.seen.try_emplace(s.hash, std::uint8_t{0});
+        tx_unbind(peer, s.base);
+    }
+}
+
+/**
+ * @brief Fold a peer's advertise into this end's tables: its capability bit, its join
+ *        hello, and its acknowledgement or refusal of a stream bound to it.
+ *
+ * Cheap in the common case — a data manifest from a peer whose capability has not changed
+ * returns after one comparison, without `tx_m_`. The link toward the peer RESETS, both
+ * directions, when the peer's life changes: its join hello (broadcast, no stream bit) says
+ * it holds none of our streams, a capability bit that changed on a data manifest says the
+ * same (it restarted with another configuration, its hello lost), and a refusal of a frame
+ * of a stream bound to it (generation 0) says it once more (it restarted, its hello lost).
+ * What it bound to us belongs to the life that is gone, and each stream we had bound to it
+ * binds again on its next send.
+ *
+ * An acknowledgement or a refusal is DIRECTED and acts only when it names a block bound to
+ * the node that sent it, so one for another node, or a bystander's refusal of a frame it
+ * overheard, changes nothing here and never disturbs a third node's streams. A refusal
+ * carrying the bind's own generation is the peer declining that bind: the stream is
+ * unbound and its prefix not offered again until the link resets.
+ *
+ * @note Requires `rx_m_` held; takes `tx_m_` (the documented lock order).
+ */
+void transport_can::note_link_control(const can::advertise_t& adv,
+                                      const can::can_id_fields_t& from) {
+    node_rx_t* const node = node_rx(from.node);
+    // `cap_flag_` is the capability bit or zero, so a node with compression off reads every
+    // peer as incapable and never builds a TX table.
+    const bool compress = (adv.link_flags & cap_flag_) != 0;
+    if (node == nullptr || (adv.slice_count != 0 && compress == node->compress)) return;
+    node->compress = compress;
+
+    const std::lock_guard lock(tx_m_);
+    tx_peer_t* const peer = compress ? tx_peers_.try_emplace(from.node, rx_source(cfg_)).value
+                                     : tx_peers_.find(from.node);
+    if (peer == nullptr) return;  // not capable, or the store refused: full frames
+    peer->capable = compress;
+    // `endpoint | gen << 16`, directed at this node: the stream whose block holds it.
+    const auto ep = static_cast<std::uint16_t>(adv.group_total_len & 0xFFFFu);
+    const auto gen = static_cast<std::uint8_t>(adv.group_total_len >> 16);
+    const std::size_t i = peer->streams.lower_bound(static_cast<std::uint32_t>(ep) + 1u);
+    const bool mine = i != 0 && adv.target == cfg_.node &&
+                      ep < peer->streams.at(i - 1).value.base + peer->streams.at(i - 1).value.k;
+    const bool refused = mine && (adv.link_flags & can::kAdvertiseFlagStreamRefused) != 0;
+    // Reaching here with a data manifest means the capability bit changed.
+    if (adv.slice_count != 0 || adv.target == can::kCanBroadcastNode || (refused && gen == 0)) {
+        drop_bindings(*node, from.node, kCanFirstDataEndpoint, kCanFirstGroupEndpoint);
+        return tx_reset(*peer);
+    }
+    if (!mine) return;
+    tx_stream_t& s = peer->streams.at(i - 1).value;
+    if (refused) {
+        (void)peer->seen.try_emplace(s.hash, gen);
+        return tx_unbind(*peer, s.base);
+    }
+    s.acked |= s.gen == gen;
+}
+
+/**
+ * @brief How slice @p index of the group @p binding describes is restored before it is
+ *        held: what goes in front of it (empty for every slice but one), or nullopt to
+ *        refuse it.
+ *
+ * Only a native stream slice is touched. It carries no manifest and no sequence number, so
+ * it is held strictly in order: slice `i` only when the group already holds slices
+ * `0 .. i-1`. A slice lost on the bus, or one overtaken, leaves a partial group the next
+ * send's first slice refuses (and the refusal discards it), so a native send either
+ * reassembles from its own slices or not at all — never from a neighbour's. The first
+ * slice is held with the stream's prefix in front, so the group reassembles into the full
+ * frame and the one copy every slice already takes is the whole restore.
+ *
+ * @note Requires `rx_m_` held.
+ */
+std::optional<std::span<const std::byte>> transport_can::rx_form(const binding_t& binding,
+                                                                 const reassembly_key_t& key,
+                                                                 std::uint16_t base_ep,
+                                                                 std::uint16_t src_node,
+                                                                 std::uint32_t index) {
+    if (!binding.native) return std::span<const std::byte>{};
+    const node_rx_t* const node = node_rx(src_node);
+    const mem::bytes_t* const prefix = node != nullptr ? node->streams.find(base_ep) : nullptr;
+    if (prefix == nullptr || reasm_.slice_count(key) != index) return std::nullopt;
+    return index == 0 ? std::span(prefix->data(), prefix->size()) : std::span<const std::byte>{};
+}
+
+/**
+ * @brief The owned copy of one received slice, from the RX backend, with whatever
+ *        @ref rx_form puts in front; nullopt when the backend or the form refuses it.
+ *
+ * Inlined into @ref process_data: it is the `over_bytes` call that stood there, with the
+ * restore folded into the same copy.
+ */
+[[gnu::always_inline]] inline std::optional<tr::view::view_t> transport_can::rx_slice(
+    const binding_t& binding, const reassembly_key_t& key, std::uint16_t base_ep,
+    std::uint16_t src_node, std::uint32_t index, std::span<const std::byte> bytes) {
+    const auto front = rx_form(binding, key, base_ep, src_node, index);
+    if (!front) return std::nullopt;
+    return over_spliced([this](std::size_t n) { return tr::view::segment_alloc(*rx_backend_, n); },
+                        *front, bytes, 0, 0, {});
+}
+
+/**
+ * @brief Hold the stream a completed bind group carries and acknowledge it, or refuse it;
+ *        the number of leading bytes of @p frame that are its descriptor.
+ *
+ * The receiver decides what it holds: a block outside the window, a stream beyond this
+ * end's `compress_ids` for the sender, or a prefix the RX store refuses is DECLINED — a
+ * refusal carrying the bind's generation, after which the sender sends that stream whole —
+ * and the frame is still delivered. Holding a stream is a binding this end makes for the
+ * block (never advertised, so the sender's lap sweep leaves it alone) and the prefix,
+ * copied out of the group into the RX store: the receiver pays. Any binding of the sender
+ * the block overlaps is forgotten first, so a lookup never finds two.
+ *
+ * @note Requires `rx_m_` held; takes `tx_m_` to answer. @p binding is read before the new
+ *       binding is made, and not after: the insert may move it.
+ */
+std::size_t transport_can::hold_bind(const binding_t& binding, std::uint16_t src_node,
+                                     const tr::view::rope_t& frame, std::size_t n) {
+    if ((binding.adv.link_flags & can::kAdvertiseFlagStreamBind) == 0 || n < kBindDescriptorSize)
+        return 0;
+    std::array<std::byte, kBindDescriptorSize> d{};
+    std::byte* at = d.data();
+    walk_range(frame, 0, kBindDescriptorSize, [&](std::span<const std::byte> part) {
+        at = std::copy(part.begin(), part.end(), at);
+    });
+    const std::span<const std::byte> ds(d);
+    const auto base = tr::wire::load_le<std::uint16_t>(ds);
+    const auto gen = std::to_integer<std::uint8_t>(d[2]);
+    const auto prefix = tr::wire::load_le<std::uint16_t>(ds.subspan(3));
+    const auto k = tr::wire::load_le<std::uint16_t>(ds.subspan(5));
+    const std::uint32_t word = std::uint32_t{base} | (std::uint32_t{gen} << 16);
+    node_rx_t* const node = node_rx(src_node);
+    const bool fits = node != nullptr && base >= kCanFirstDataEndpoint && k != 0 &&
+                      base + k <= kCanFirstGroupEndpoint && prefix <= n - kBindDescriptorSize &&
+                      node->streams.size() < cfg_.compress_ids;
+    if (fits) drop_bindings(*node, src_node, base, base + k);
+    mem::bytes_t* const held =
+        fits ? node->streams.try_emplace(base, rx_source(cfg_)).value : nullptr;
+    can::advertise_t adv;
+    adv.can_id = can::encode_can_id({cfg_.version, src_node, base});
+    adv.group = k > 1;
+    adv.group_total_len = static_cast<std::uint32_t>(n - kBindDescriptorSize);
+    adv.slice_count = k;
+    adv.target = cfg_.node;
+    binding_t* const bound =
+        held != nullptr
+            ? learned_.try_emplace(adv.can_id, binding_t{adv, mem::string_t(rx_source(cfg_)), true})
+                  .value
+            : nullptr;
+    bool ok = bound != nullptr;
+    walk_range(frame, kBindDescriptorSize, ok ? prefix : 0, [&](std::span<const std::byte> part) {
+        ok = ok && held->append(part.data(), part.size());
+    });
+    if (!ok) {
+        if (held != nullptr) drop_bindings(*node, src_node, base, base + k);
+        emit_link_control(src_node, can::kAdvertiseFlagStreamRefused, word, {});
+        return kBindDescriptorSize;
+    }
+    bound->native = true;
+    node->refused = 0;
+    emit_link_control(src_node, can::kAdvertiseFlagStreamAck, word, {});
+    return kBindDescriptorSize;
+}
+
+void transport_can::drop_bindings(node_rx_t& node, std::uint16_t node_id, std::uint32_t lo,
+                                  std::uint32_t hi) {
+    for (std::size_t i = 0; i < learned_.size();) {
+        const auto f = can::decode_can_id(learned_.at(i).key);
+        const binding_t& b = learned_.at(i).value;
+        if (!f || f->node != node_id || f->endpoint + b.adv.slice_count <= lo ||
+            hi <= f->endpoint) {
+            ++i;
+            continue;
+        }
+        (void)node.streams.erase(f->endpoint);
+        learned_.erase_at(i);
+    }
+}
+
+/**
+ * @brief A data frame no binding claims, inside its sender's stream window (#1953).
+ *
+ * From a sender that announced compression it is a native stream frame this end does not
+ * hold — addressed to another node, or to this one after it lost the stream. Either way it
+ * is not parked (no advertise will ever claim it), and this end refuses it to its sender,
+ * DIRECTED, at the powers of two of its refusal count: the sender unbinds the stream only
+ * if it is bound to this node, so a bystander's refusal changes nothing and the one
+ * receiver that lost a stream gets it rebound after one frame. From a sender whose
+ * capability is not known yet it may equally be an older node's group slice ahead of its
+ * manifest, so it is parked as before; the refusal still goes out, and an older sender
+ * reads it as a hello.
+ *
+ * @return true when the frame is consumed here, false when it is to be parked.
+ * @note Requires `rx_m_` held; takes `tx_m_` to refuse.
+ */
+bool transport_can::refuse_stream_frame(const can::can_id_fields_t& fields) {
+    node_rx_t* const node =
+        fields.endpoint < kCanFirstGroupEndpoint ? node_rx(fields.node) : nullptr;
+    if (node == nullptr) return false;
+    if (cap_flag_ != 0 && std::has_single_bit(++node->refused))
+        emit_link_control(fields.node, can::kAdvertiseFlagStreamRefused, fields.endpoint, {});
+    return node->compress;
 }
 
 void transport_can::process_data(const can_frame_data_t& frame) {
@@ -781,9 +1251,11 @@ void transport_can::process_data(const can_frame_data_t& frame) {
         return;
     }
     // The bytes' backend and the reassembly store may each refuse; either way the group
-    // can never complete truthfully, so it takes the same discard-and-count (#1780).
-    std::optional<tr::view::view_t> slice = tr::view::over_bytes(frame.bytes(), *rx_backend_);
-    if (!slice || !reasm_.add_slice(key, index, *std::move(slice))) {
+    // can never complete truthfully, so it takes the same discard-and-count (#1780). So
+    // does an elided group naming a stream this end does not hold (#1953).
+    std::optional<tr::view::view_t> slice =
+        rx_slice(*binding, key, base_ep, fields->node, index, frame.bytes());
+    if (!slice || !reasm_.add_slice(key, index, *std::move(slice), binding->adv.slice_count)) {
         reasm_.discard(key);
         dropped_rx_.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -804,7 +1276,8 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     // transport padding is shortening the last link"). The trimmed rope IS the
     // delivered frame (ADR-0053 §5); only a span-tier receiver pays a flatten.
     const std::size_t n = std::min<std::size_t>(total, rope->total_length());
-    deliver(fields->node, rope->subrope(0, n));
+    const std::size_t head = hold_bind(*binding, fields->node, *rope, n);
+    deliver(fields->node, rope->subrope(head, n - head));
 }
 
 /**
@@ -817,6 +1290,9 @@ void transport_can::process_data(const can_frame_data_t& frame) {
  * @ref expire_pending.
  */
 void transport_can::park_pending(const can_frame_data_t& frame) {
+    // A stream frame (#1953) is never waiting for an advertise: none will come.
+    if (const auto fields = can::decode_can_id(frame.id); fields && refuse_stream_frame(*fields))
+        return;
     // Evict the OLDEST parked slices to make room — append order is arrival order,
     // so the front is oldest. A newly arrived slice is the one most likely to have
     // its advertise still in flight, so it is the one worth keeping.
@@ -852,6 +1328,8 @@ void transport_can::expire_pending() {
     pending_.erase_front(stale);
     dropped_rx_.fetch_add(stale, std::memory_order_relaxed);
 }
+
+/** @name Link-local compression (#1953) */
 
 void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
     // The sender's bus name becomes the FWD hop's inbound NAME (ADR-0044), so a
@@ -924,6 +1402,8 @@ transport_factory_t can_transport_factory(mem::block_source_t* reasm_src,
         if (const auto v = reader.u32("max_pending"))
             cfg.max_pending = static_cast<std::size_t>(*v);
         if (const auto v = reader.u32("rx_ttl_ms")) cfg.rx_ttl = std::chrono::milliseconds(*v);
+        // Link-local compression's per-peer stream ceiling (#1953); 0 turns it off.
+        cfg.compress_ids = reader.u32("compress_ids").value_or(kCanStreamIds);
         if (ifname.empty() || !node || cfg.node > can::kNodeMax || cfg.version > can::kVersionMax) {
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         }

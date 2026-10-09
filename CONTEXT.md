@@ -9,10 +9,9 @@ The canonical vocabulary of libtracer, tracking the [reference suite](docs/refer
 - **Protocol version**: The integer version of the wire format and its specification — **v1** — frozen on release and learned at the discovery layer, never per frame. [Detail](docs/reference/01-data-format.md#versioning-and-compatibility). _Avoid_: "`VR` bit", "wire format v0.1", per-frame version, `VR` / version bit.; `opt` bit 7 is reserved, never a version bit
 - **Release version**: An implementation's semantic version, **decoupled** from the protocol version; it never signals a wire change. [Detail](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0002-versioning-protocol-vs-release-no-per-frame-version.md). _Avoid_: calling this "the protocol version"; reading wire compatibility out of a release number.
 - **Discovery-layer versioning**: The mechanism that keeps incompatible protocol versions apart — a distinct service name / port / CAN-ID prefix per protocol version — used **instead of** a per-frame version field.
-- **Capability negotiation**: Does not exist: receivers MUST accept every `LL`/`CW`/`TF` variant. [Detail](docs/reference/01-data-format.md#interop-minimal-vs-feature-rich-implementations). _Avoid_: "per-peer capability discovery", "feature negotiation handshake".
+- **Capability negotiation**: Does not exist in the Tracer frame: receivers MUST accept every `LL`/`CW`/`TF` variant. A binding may announce a feature of its own below the frame, which never changes it (CAN link-local compression). [Detail](docs/reference/01-data-format.md#interop-minimal-vs-feature-rich-implementations). _Avoid_: "per-peer capability discovery", "feature negotiation handshake".
 
 ## Wire format
-
 Canonical per reference `01` and `05`.
 - **`opt` byte**: The 1-byte options bitfield of every TLV, bits 7→0 `R│PL│TS│CR│LL│CW│TF│R`. [Detail](docs/reference/01-data-format.md#options-bitfield). _Avoid_: any `VR` (version) or `FP` (finite-pool) bit.
 - **TLV header**: A 4-byte header (`type` u8, `opt` u8, `length` u16 LE), or 6 bytes when `opt.LL=1` (`length` u32 LE). Integrity and wire-time live in the optional **trailer**, never the header. _Avoid_: "8-byte header", "`crc` in the header", "`length: varint`".
@@ -67,6 +66,7 @@ Canonical per reference `01` and `05`.
 - **Wildcard delivery metadata**: How a subtree subscriber learns a delivery's concrete path; no wire tag carries it. [Detail](docs/reference/03-addressing.md#subscriber-identity-across-a-subtree). _Avoid_: "remote delivery carries the matched concrete `PATH`".
 - **Framing modes: full-TLV (full caps) vs header-elided (non-interactive bindings)**: Self-describing full-TLV frames, or frames keyed on the transport's native id with the header elided; they coexist. [Detail](docs/reference/14-can-transport.md#the-in-band-advertise-frame-and-the-dynamic-map). _Avoid_: "an either/or"; "the forwarder maps CAN IDs"; "the TLV header rides the CAN bus".
 - **Advertise + id-match → dynamic rope groups**: An advertised manifest whose id-matched slices chain into one rope. [Detail](docs/reference/14-can-transport.md#the-in-band-advertise-frame-and-the-dynamic-map). _Avoid_: "it obviates the rope delivery seam".
+- **Link-local compression (CAN)**: Two ends of one CAN link that both announce it carry a repeated directed stream on CAN identifiers from the sender's own window, without the FWD prefix that names it; the receiver restores the frame byte-identical. Binding-private and non-normative. [Detail](docs/reference/14-can-transport.md#link-local-compression). _Avoid_: "negotiated compression"; "delivery compaction" (the per-hop `COMPACT` plane); "label table".
 
 ## Errors
 

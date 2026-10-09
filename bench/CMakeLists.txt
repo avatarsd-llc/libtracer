@@ -130,6 +130,12 @@ add_executable(bench_compact_delivery bench_compact_delivery.cpp)
 target_link_libraries(bench_compact_delivery PRIVATE libtracer)
 target_compile_options(bench_compact_delivery PRIVATE -Wall -Wextra)
 
+# CAN link-local compression (#1953): wire bytes, frames and time per directed send, full
+# frames against the compressed stream. Report only.
+add_executable(bench_can_link_compress bench_can_link_compress.cpp)
+target_link_libraries(bench_can_link_compress PRIVATE libtracer)
+target_compile_options(bench_can_link_compress PRIVATE -Wall -Wextra)
+
 add_executable(bench_originate bench_originate.cpp)
 target_link_libraries(bench_originate PRIVATE libtracer)
 target_compile_options(bench_originate PRIVATE -Wall -Wextra)

@@ -113,12 +113,17 @@ class can_reassembly_t {
      * @param key   The `(origin, ts)` group identity.
      * @param index The zero-based slice position.
      * @param slice The slice's bytes (one CAN data field), borrowed zero-copy.
+     * @param expected When non-zero, also the group's slice count, as
+     *                 @ref set_expected_count declares it: for a group no manifest
+     *                 precedes, whose every slice carries its shape (#1953).
      * @retval false The source refused the group or the slice (BACKPRESSURE): the slice was
      *               not taken, and the caller abandons the group (@ref discard).
      */
     [[nodiscard]] bool add_slice(const reassembly_key_t& key, std::uint32_t index,
-                                 tr::view::view_t slice) noexcept {
-        if (touch_group(key) == nullptr) return false;
+                                 tr::view::view_t slice, std::uint32_t expected = 0) noexcept {
+        group_meta_t* const g = touch_group(key);
+        if (g == nullptr) return false;
+        if (expected != 0) g->expected = expected;
         const slice_id_t id{key, index};
         if (tr::view::view_t* const held = slices_.find(id)) {
             *held = std::move(slice);

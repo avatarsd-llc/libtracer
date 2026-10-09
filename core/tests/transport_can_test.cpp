@@ -323,8 +323,8 @@ void test_roundtrip(tr::net::can::can_frame_mode_t mode, std::size_t payload_len
     if (got) check(equal_bytes(sink.last(), payload), "delivered bytes are byte-exact");
 
     // The peer learned the in-band advertise binding for A's first group (base
-    // endpoint 1, node 1, version 0).
-    const std::uint32_t base_id = can::encode_can_id({0, 1, tr::net::kCanFirstDataEndpoint});
+    // endpoint: the first above A's stream window, #1953; node 1, version 0).
+    const std::uint32_t base_id = can::encode_can_id({0, 1, tr::net::kCanFirstGroupEndpoint});
     std::array<char, 64> path_buf{};
     const auto binding = tx_b.learned_binding(base_id, path_buf);
     check(binding.has_value(), "identity↔path map learned the advertise binding");
@@ -710,7 +710,7 @@ void test_oversized_group_is_refused_before_advertising() {
     check(wait_until([&] { return tx_a.dropped_tx() >= 1; }, 2s),
           "the oversized frame was refused whole and counted on dropped_tx()");
 
-    const std::uint32_t base_id = can::encode_can_id({0, 1, tr::net::kCanFirstDataEndpoint});
+    const std::uint32_t base_id = can::encode_can_id({0, 1, tr::net::kCanFirstGroupEndpoint});
     std::this_thread::sleep_for(150ms);  // >> rx_ttl, and past anything the bus could carry
     check(!tx_b.learned_binding(base_id).has_value(),
           "no manifest reached the bus — the receiver bound nothing");
@@ -955,7 +955,7 @@ void test_endpoint_wraparound_does_not_alias_stale_state() {
     // Every slot count below is derived from the CAN-ID field widths, never chosen: widen
     // kEndpointBits and this test follows the wire instead of silently stopping at a
     // boundary that moved.
-    constexpr std::uint16_t kFirst = tr::net::kCanFirstDataEndpoint;
+    constexpr std::uint16_t kFirst = tr::net::kCanFirstGroupEndpoint;
     constexpr std::size_t kLeadSlices = 5;
     constexpr std::uint16_t kTrapBase = static_cast<std::uint16_t>(kFirst + kLeadSlices);
     constexpr std::size_t kTrapSlices = 3;
@@ -1147,7 +1147,7 @@ void test_stale_lap_binding_is_refused_not_welded() {
     constexpr std::size_t kWin = tr::net::can::kCanClassicMaxData;
     // Derived from the CAN-ID field widths, never chosen: widen kEndpointBits and the
     // geometry follows the wire instead of stopping at a boundary that moved.
-    constexpr std::uint16_t kFirst = tr::net::kCanFirstDataEndpoint;
+    constexpr std::uint16_t kFirst = tr::net::kCanFirstGroupEndpoint;
     constexpr std::size_t kLeadSlices = 5;
     constexpr std::uint16_t kTrapBase = static_cast<std::uint16_t>(kFirst + kLeadSlices);
     constexpr std::size_t kTrapSlices = 3;

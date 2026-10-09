@@ -1514,6 +1514,87 @@ against 1.1–3.2 M/s STREAM); T = 1 is the tight arm at **0.54x–0.56x**.
 aggregate rate is a property of the host — the same reason every other `scaling`-surface harness
 here is diagnostic. Quote the ratio, with the stamp, and never a bare absolute.
 
+### `bench_can_link_compress` — CAN link-local compression, before and after (#1953)
+
+Two `can_transport_t` ends over an in-memory pumped bus, sending directed FWD{WRITE} deliveries
+of N streams round-robin (a three-segment dst, a two-segment src: a 40-byte address run),
+classic and FD, payloads 4 B, 64 B, 1, 4 and 16 KiB. The **before** arm runs both ends with
+`compress_ids = 0`, which is exactly the pre-#1953 wire; the **after** arm binds each stream on
+its second send and then sends it on the sender's stream identifiers. N is 1, 64 and `max`, the
+most streams the 512-identifier window holds at that payload's slice count.
+
+```sh
+cmake --build bench/build --target bench_can_link_compress -j
+./bench/build/bench_can_link_compress 7          # rounds; a second argument keeps one payload
+```
+
+Steady state, frames per send (data-field bytes in brackets), identical at every N up to `max`:
+
+| mode | payload | before | after | max streams |
+|---|---:|---:|---:|---:|
+| classic | 4 | 10 (76 B) | 1 (8 B) | 512 |
+| classic | 64 | 17 (136 B) | 9 (68 B) | 56 |
+| classic | 1024 | 137 | 137 (above the 16-slice cap) | — |
+| fd | 4 | 4 (88 B) | 1 (8 B) | 512 |
+| fd | 64 | 5 (136 B) | 2 (68 B) | 256 |
+| fd | 1024 | 20 | 20 (above the 16-slice cap) | — |
+
+FD break-even: there is none to find below the cap. A native send drops the manifest (3 frames) and the prefix, so FD saves 3 frames at every payload up to the 1024-byte remainder cap; past the cap the frame goes whole and saves nothing. At N = 64 on classic 64 B the window holds 56 of the 64 streams: 88 % of sends go native and
+the average is 10 frames. Churn rows, after against before:
+
+| row | classic 4 B | classic 64 B | fd 4 B | fd 64 B |
+|---|---|---|---|---|
+| oneshot (4096 streams, each sent once) | 10 = 10 | 17 = 17 | 4 = 4 | 5 = 5 |
+| beyond (1.5 x max streams) | 4.0 vs 10, 67 % native | 11.7 vs 17, 67 % native | 2.0 vs 4 | 3.0 vs 5 |
+| rehello (restart, hello heard): pass 1 / 2 | 11 / 1 | 18 / 9 | 4 / 1 | 5 / 2 |
+| lost-hello: frames lost, pass 1 / 2 | 1 lost; 10.98 / 1.02 | 1 lost; 17.84 / 9.16 | 1 lost; 3.99 / 1.01 | 1 lost; 4.99 / 2.01 |
+
+A frame seen once costs exactly the old wire; a stream past the window travels whole and
+nothing is evicted; after a restart each stream pays one bind (the frame plus its 7-byte
+descriptor) and a 3-frame acknowledgement, then it is native again; a lost hello costs one
+frame for the whole link, not one per stream. Every delivered frame is byte-identical
+(`delivered_exact=yes`).
+
+Host time per send (bench slice, best of 7, ns, before → after):
+
+| mode | payload | N = 1 | N = 64 | N = max |
+|---|---:|---:|---:|---:|
+| classic | 4 | 5950 → 260 | 5298 → 357 | 5512 → 629 (512) |
+| classic | 64 | 5504 → 1617 | 6796 → 2857 | 6271 → 2088 (56) |
+| classic | 1024 | 39383 → 39372 | 36112 → 36102 | — |
+| fd | 4 | 12334 → 280 | 14799 → 361 | 15155 → 608 (512) |
+| fd | 64 | 6385 → 438 | 7149 → 559 | 10353 → 814 (256) |
+| fd | 1024 | 5412 → 5353 | 5828 → 5410 | — |
+
+The per-send TX lookup grows with the table from about 260 ns at N = 1 to about 630 ns at
+N = 512 (classic 4 B). It stays a keyed search and never a scan, and it is far below the
+before arm's per-advertise binding walks at every N.
+
+Above 1 KiB the remainder exceeds the 16-slice cap, so nothing binds. Frames are identical in
+both arms, and the after arm only adds the prefix hash and a sighting lookup per send. Host time
+per send (bench slice, best of 7, µs, before → after):
+
+| mode | payload | frames | N = 1 | N = 64 |
+|---|---:|---:|---:|---:|
+| classic | 1 KiB | 137 = 137 | 39.4 → 39.4 | 36.1 → 36.1 |
+| classic | 4 KiB | 521 = 521 | 293 → 313 | 305 → 297 |
+| classic | 16 KiB | 2057 = 2057 | 3794 → 3835 | 4080 → 4050 |
+| fd | 1 KiB | 20 = 20 | 5.41 → 5.35 | 5.83 → 5.41 |
+| fd | 4 KiB | 68 = 68 | 14.8 → 14.5 | 14.5 → 14.4 |
+| fd | 16 KiB | 260 = 260 | 93.5 → 95.1 | 91.5 → 91.2 |
+
+Every difference is inside run-to-run noise and changes sign between N = 1 and N = 64; the
+largest is classic 4 KiB at +6.7 % and −2.5 %. The 16 KiB classic cost is the pre-existing
+quadratic reassembly walk (#2049) in both arms.
+
+**The frames are the result; `ns_send` is host CPU, not bus time.** At 500 kbit/s one classic
+frame is ~250 µs on the wire, so a 4-byte send drops from ~2.5 ms of bus to ~0.25 ms. Host time
+per send is reported per N so the per-send TX lookup (one hash of the prefix, one keyed search)
+is priced as the table grows; the before arm is dominated by the pre-existing per-advertise
+binding walks (`invalidate_overlapping`, `learn_advertise`), which a native send skips. Above
+1 KiB both arms are dominated by the reassembly's per-slice completeness walk, quadratic in the
+slice count (pre-existing, reported, not fixed here). Report only; no gate reads it.
+
 ## What is measured
 
 The swept axes (`bench_common.hpp`): payload **1..8192 B**, fan-out

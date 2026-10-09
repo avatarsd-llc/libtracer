@@ -137,7 +137,9 @@ node — `endpoint[0..N]` — so slice *index* simply **shifts the endpoint sub-
 [ADR-0011 — address-shift totality is opt-in](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0011-address-shift-totality-opt-in.md)
 address-shift slicing applied to the CAN ID. A group whose base slot plus its slice
 count would overrun the endpoint field is not representable on that node; the
-allocator wraps back to the first data slot, leaving the control slot free.
+allocator wraps back to the first data slot, leaving the control slot free (on a node that
+announces link-local compression, the first slot past its stream window, §[Link-local
+compression](#link-local-compression)).
 
 ## Framing modes: classic vs CAN-FD
 
@@ -259,7 +261,7 @@ widened the v1 header with the explicit `target_node` field):
 | --- | --- | --- |
 | 0 | 1 | magic = `0xAD` |
 | 1 | 1 | format version = `0x02` |
-| 2 | 1 | flags (`0x01` = group) |
+| 2 | 1 | flags (`0x01` = group; `0x02`, `0x04`, `0x08`, `0x10` = the link-local compression bits, §[Link-local compression](#link-local-compression)) |
 | 3 | 1 | reserved, must be zero |
 | 4 | 4 | `can_id` (u32 LE; a 29-bit value) |
 | 8 | 4 | `group_total_len` (u32 LE; 0 if single-value) |
@@ -621,6 +623,97 @@ implementation note): a peer is "reachable" iff it has been audible within
 window) is the recorded follow-on and is **not implemented**: it needs deferred
 reply completion at the `op_resolver_t` terminus, which resolves synchronously.
 
+### Link-local compression
+
+Two ends of one CAN link may compress the directed traffic between them
+([#1953](https://github.com/avatarsd-llc/libtracer/issues/1953)): a stream the sender repeats
+travels on CAN identifiers allocated to it, without the part of the frame that names it. It is a
+feature of this binding and of one link, not of the protocol. The frame a receiver hands upward
+is byte-identical to the one the sender was given, so the router and the graph never see it, no
+other transport has it, and it adds nothing to `conn_settings_t`.
+
+**Announced, not negotiated.** A node with compression on sets the capability bit (`0x02`) in
+the flags byte of every advertise it emits, its hello included. Nothing is requested or
+chosen: each end states what it does, and a sender compresses only a **directed** send
+(`peer_link`) of a FWD frame to a peer whose latest advertise carried the bit. Every other send
+— broadcast, a non-FWD frame, a peer without the bit — is the full frame on the wire this page
+describes above, byte for byte. The bit says one more thing, which is what a second
+implementation on the same bus must honour: the announcing node keeps its **stream window**,
+endpoints `1`–`512` (`kCanStreamIds`), out of its group allocator, so its groups start at
+endpoint `513` (`kCanFirstGroupEndpoint`). An endpoint in the window from such a node is
+either a stream frame or nothing.
+
+**Streams and allocation.** A stream is a frame's **prefix**: the FWD's outer header and its
+address run (`op`, `dst`, an optional `FIELD`, `src`). The header carries the frame's length,
+so one stream is one destination at one frame length. What follows the prefix — the payload and
+any later children — is the stream's **remainder**, sent in `k` slices of at most 8 bytes
+(classic) or 64 (CAN-FD), and a stream binds only while `k` is at most 16
+(`kCanMaxStreamSlices`): 128 bytes classic, 1024 FD, past which the manifest and prefix are
+under 5 % of a send. The sender allocates a block of `k` consecutive endpoints from its own
+window, first fit. The identifiers carry the sender's node number, which is unique on the bus,
+so two senders never collide and no end coordinates with another: the sender alone allocates,
+and the receiver learns the block from the bind. The window is the sender's, shared by all its
+peers, so a node holds at most `512 / k` streams at a time (512 one-frame streams, 56 nine-slice
+ones). When no block is free the frame travels whole, and so does every later send of that
+stream until one frees: nothing is evicted, silently or otherwise. `compress_ids` may set a
+smaller window, and `0` turns the feature off.
+
+**Priority.** A lower identifier wins arbitration, and the node number sits above the endpoint,
+so priority between nodes is what it was. Within one node the order is control (endpoint `0`),
+then stream frames (`1`–`512`), then groups (`513` and up): a node's advertises still outrank
+its own traffic, and its repeated small streams outrank its bulk groups.
+
+**Bind, acknowledge, send native.** A prefix seen for the first time is only remembered, so a
+frame that is never repeated costs nothing. Its second send is a **bind**: an ordinary directed
+group with flag `0x04`, whose payload is a 7-byte descriptor `base u16 | gen u8 | prefix u16 |
+k u16` followed by the whole frame. The receiver delivers the frame, holds the prefix (copied
+into its RX store: the receiver pays) and a binding for the block, and answers with an
+**acknowledgement**: a hello-form advertise (`slice_count == 0`, flag `0x10`) directed at the
+sender, whose `group_total_len` is `base | gen << 16`. From then on every send of the stream is
+**native**: the remainder only, slice `i` on endpoint `base + i`, with no manifest. Until the
+acknowledgement lands the sender keeps sending binds, so no native frame is sent for a block the
+receiver has not confirmed holding. A native slice carries no sequence number, so the receiver
+holds it strictly in order and puts the prefix in front of the first in the same copy it takes
+anyway; a send that loses a slice is dropped whole (and so is the next one, whose first slice
+finds the partial group), never welded to a neighbour.
+
+**State and bounds.** The state lives only on the two ends of a link. The sender keeps, per
+peer, its bound streams (block, prefix, acknowledged) and its sightings, bounded at twice the
+window. The receiver keeps, per sender, the prefixes it holds, at most `compress_ids` of them,
+and declines a bind past that, or one its store refuses, with a **refusal** (flag `0x08`)
+carrying the bind's generation: the frame is still delivered, and the sender sends that stream
+whole until the link resets. Both ends draw from the transport's RX store and lose everything
+with the transport.
+
+**Reset and recovery, always directed.** A peer's join hello means "I hold none of your
+streams": hearing one resets both directions toward that peer, and each stream bound to it binds
+again on its next send. If the hello is lost, the receiver meets a native frame in the window
+that it holds no binding for, and refuses it to its sender with a refusal of generation `0`,
+directed, at the powers of two of its refusal count. A sender acts on a refusal only when it
+names a block the sender has bound **to the node that sent it**, and then resets that one link:
+one lost frame, after which every stream rebinds at once. A bystander overhearing another
+link's stream frames refuses them too, since it cannot tell them from its own, but its refusal
+names a block bound to someone else and changes nothing, so a third node's table is never
+disturbed and nothing is ever broadcast. A capability bit that changes on a peer's data
+manifest resets the link the same way.
+
+**A mixed bus.** The flags byte's bits beyond `0x01` were always ignored by the advertise
+decoder, so a node on an older release reads a bind as an ordinary directed group addressed
+elsewhere and an acknowledgement or refusal as a liveness refresh. It parks stream frames it
+overhears as slices awaiting a manifest, bounded by `max_pending` and aged out by `rx_ttl_ms`.
+An older sender's groups start at endpoint `1`, but a node that announces compression only reads
+the window as streams from a node that announced it.
+
+**What it costs a group.** A node that announces compression has 3583 endpoints left for groups
+instead of 4095, so its largest group is 3583 slices (28 KiB classic, 224 KiB FD); a larger send
+is refused and counted on `dropped_tx()`, as before at the old bound.
+
+**What it saves.** Per steady send, on a delivery with a 40-byte address run
+(`bench/bench_can_link_compress.cpp`): a 4-byte value goes from 10 classic frames to 1, and from
+4 FD frames to 1; a 64-byte value from 17 classic frames to 9, and from 5 FD frames to 2. Past
+the slice cap nothing changes. A stream's setup is one bind (the frame plus 7 bytes) and a
+3-frame acknowledgement; a stream that never repeats costs exactly the full frame.
+
 ### Test surface
 
 - **Docker-local, no kernel CAN** — `core/tests/transport_can_test.cpp` pairs two
@@ -629,8 +722,14 @@ reply completion at the `op_resolver_t` terminus, which resolves synchronously.
   correct yet trimmed away, and the lifecycle is clean.
   `core/tests/transport_can_peers_test.cpp` covers the peer plane over the same fake
   link: `:children[]` synthesizes exactly the audible peers, no peer vertex is created,
-  and a directed group reaches its target while a bystander delivers nothing. Both run
-  under the sanitizer builds.
+  and a directed group reaches its target while a bystander delivers nothing.
+  `core/tests/transport_can_compress_test.cpp` covers link-local compression over a pumped
+  in-memory bus, so frame counts are exact: frames round-trip byte-identical on stream
+  identifiers (classic and CAN-FD, a 4-byte value in one frame), a peer without the capability
+  gets the legacy wire exactly, a frame seen once costs nothing extra, a full window sends whole
+  frames and evicts nothing, a restarted receiver resets the link, a lost hello costs one frame
+  for all streams, a refusal on a three-node bus leaves the third node's streams native, and a
+  lost slice is never welded to the next send. All three run under the sanitizer builds.
 - **Real `vcan0`** — `core/tests/transport_can_vcan_test.cpp` drives two
   `socketcan_link_t` over a kernel virtual-CAN device and asserts a byte-exact frame
   each way, and carries the seam-rule vectors that need a real socket to exist: a bare

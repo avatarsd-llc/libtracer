@@ -14,6 +14,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **CAN link-local compression: two ends of one CAN link carry a repeated directed stream on
+  the sender's own CAN identifiers ([#1953](https://github.com/avatarsd-llc/libtracer/issues/1953)).**
+  `can_transport_t` announces a capability bit on every advertise it emits. Toward a peer that
+  announced it, a FWD frame's second send binds its prefix (outer header and address run) to a
+  block of identifiers from the sender's stream window, endpoints `1`–`512` (`kCanStreamIds`);
+  once the peer acknowledges holding it, every later send is the rest of the frame only, one
+  slice per identifier, with no manifest. The peer puts the prefix back, so the frame it
+  delivers is byte-identical. A 4-byte value goes from 10 classic frames to 1, a 64-byte one
+  from 17 to 9. A node that announces the bit starts its groups at `kCanFirstGroupEndpoint`
+  (513), so its largest group is 3583 slices. A frame seen once, a remainder of more than
+  `kCanMaxStreamSlices` (16) slices, a full window, a broadcast send, a non-FWD frame and every
+  send to a peer without the bit keep the old wire exactly; nothing is evicted. Recovery is
+  directed: a stream frame a receiver does not hold draws a refusal addressed to its sender,
+  which resets that one link only when the block is bound to the refusing node. New
+  `transport_can_config_t::compress_ids` (default and ceiling `kCanStreamIds`; `0` turns it
+  off; also the `compress_ids` config key). `can::advertise_t` gains `link_flags`, the flags-byte
+  bits beyond the group bit, and `can.hpp` names them (`kAdvertiseFlagLinkCompress`,
+  `kAdvertiseFlagStreamBind`, `kAdvertiseFlagStreamRefused`, `kAdvertiseFlagStreamAck`).
+  `can_reassembly_t::add_slice` takes an optional `expected` slice count, which sets a group's
+  totality without a manifest.
+
 ### Fixed
 
 - **`udp_transport_t`: an ephemeral bind owns its port
