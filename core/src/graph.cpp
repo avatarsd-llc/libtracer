@@ -893,7 +893,13 @@ std::span<const std::byte> graph_t::declared_catalog(const vertex_t* v) const no
 }
 
 void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
-    // Pre-order, under the UNIQUE map lock. Order within a vertex matters:
+    // Pre-order, under the UNIQUE map lock. First the WHOLE subtree is flipped unregistered
+    // (map-lock state — invisible to find from here on), before any vertex's state reverts.
+    // The access check reads ACEs with no lock and then tests the registration of the vertex
+    // it was asked about once more (`acl_allows`). A retire clears this vertex's ACEs, and a
+    // descendant with none of its own is judged by them, so every vertex they gate must
+    // already read as gone by the time any of them is cleared. Then, order within a vertex
+    // matters:
     //  (1) read its active-edge count and unwind exactly that contribution from every
     //      descendant's listeners_above_ BEFORE revert zeroes own_subs_ — the mirror of
     //      note_subscriber_removed, done inline because we already hold the unique lock
@@ -901,16 +907,15 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
     //  (2) [the caller clears the subtree's sweep-set keys as one prefix range];
     //  (3) revert the vertex's own state (fail-closed: clears own ACEs first, so the
     //      bearing-ancestor walk stops seeing this vertex before anything else changes);
-    //  (4) flip it unregistered (map-lock state — invisible to find from here on);
-    //  (5) recurse. Placeholders are walked too (§B.3): reverting one is a harmless no-op,
+    //  (4) recurse. Placeholders are walked too (§B.3): reverting one is a harmless no-op,
     //      but a registered descendant may hang below it.
-    // Step (5) is now ITERATIVE rather than a recursive call per level (#690): the per-vertex
+    // Step (4) is now ITERATIVE rather than a recursive call per level (#690): the per-vertex
     // body is hoisted into one lambda applied to `v` and then, in the same pre-order, to every
-    // descendant. Steps (1)-(4) keep their order within each vertex, which is what the note
+    // descendant. Steps (1)-(3) keep their order within each vertex, which is what the note
     // above is about; only the descent changed.
     //
-    // The lambda mutates vertex STATE (listeners, value seam, registered flag) but never the
-    // tree's SHAPE, so it honours for_each_descendant's no-structural-mutation contract -- the
+    // The lambdas mutate vertex STATE (registered flag, listeners, value seam) but never the
+    // tree's SHAPE, so they honour for_each_descendant's no-structural-mutation contract -- the
     // walk re-reads the sibling list on each ascent and an insert or erase mid-walk would move
     // the position it resumes from.
     const auto retire_one = [this, &gone](vertex_t& x) {
@@ -928,8 +933,9 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
         if (value_handlers_t* seam = x.revert_to_placeholder(table))
             (void)retired_seams_.seams.push_back(seam);              // reserved: cannot fail
         if (!table.empty()) (void)gone.push_back(std::move(table));  // reserved: cannot fail
-        x.mark_unregistered();
     };
+    v->mark_unregistered();
+    v->for_each_descendant([](vertex_t& x) { x.mark_unregistered(); });
     retire_one(*v);
     v->for_each_descendant(retire_one);
 }
@@ -1738,45 +1744,58 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // vertex's effective list (the filter is idempotent and order-preserving over
     // "own + inherited-ancestors"). No cache, no ext block, is ever allocated on the
     // bare descendant; RAM stops scaling as ancestors x descendants.
+    // `v` is never null: every caller hands in a vertex it found or holds, and the walk stops
+    // at the root, so it never steps past one either.
     vertex_t* bearer = v;
-    while (bearer != nullptr && bearer->parent() != nullptr && !bearer->has_own_aces())
-        bearer = bearer->parent();
-    if (bearer == nullptr || bearer->parent() == nullptr)
-        return true;  // no ACL anywhere up the chain (root excluded) — open by default
-    // The ACE-expiry reference clock is read only HERE, once an ACL will actually be
-    // evaluated (#1665): an attributed remote op on an unguarded subtree never pays a
-    // `system_clock::now()` — that open-by-default arm returns above.
-    const std::uint64_t now = now_ns();
-    const bool self = bearer == v;
+    while (bearer->parent() != nullptr && !bearer->has_own_aces()) bearer = bearer->parent();
+    bool allowed = true;  // no ACL anywhere up the chain (root excluded): open by default
+    if (bearer->parent() != nullptr) {
+        // The ACE-expiry reference clock is read only HERE, once an ACL will actually be
+        // evaluated (#1665): an attributed remote op on an unguarded subtree never pays a
+        // `system_clock::now()` — that open-by-default arm skips this block.
+        const std::uint64_t now = now_ns();
+        const bool self = bearer == v;
 
-    // The ADR-0050 cached effective-ACE merge, now held by the BEARER: the data-plane
-    // check evaluates ONE pre-merged list (own ACEs + INHERIT-flagged ancestor ACEs,
-    // evaluation order) — no per-operation ancestor rebuild. The walk runs only inside
-    // the rebuild lambda, on the first check after a :acl write marked the bearer dirty
-    // (subtree-precise via the ADR-0057 child links — see the `:acl` write in graph_fields.cpp).
-    // The rebuild runs UNLOCKED (#361 §2 striped locks), taking each ancestor's stripe
-    // one at a time. Root excluded (the flat-map walk never evaluated the empty key);
-    // placeholder intermediates hold empty ACE lists, so merging them is the no-op
-    // the old walk's skip was.
-    return bearer->with_effective_aces(
-        [&](const std::vector<ace_t>& own) {
-            effective_acl_t eff;
-            eff.append_own(own);
-            for (vertex_t* ancestor = bearer->parent();
-                 ancestor != nullptr && ancestor->parent() != nullptr;
-                 ancestor = ancestor->parent()) {
-                ancestor->with_aces(
-                    [&](const std::vector<ace_t>& aces) { eff.append_ancestor(aces); });
-            }
-            return std::move(eff).release();
-        },
-        [&](const std::vector<ace_t>& merged) {
-            // A bare descendant evaluates the INHERITABLE SUBSEQUENCE of the bearer's merge.
-            // Filtered in place (order-identical) rather than against a second, projected
-            // vector — see effective_acl_t::allows.
-            return effective_acl_t::allows(merged, subject, bit, now,
-                                           self ? std::uint8_t{0} : kAceInherit);
-        });
+        // The ADR-0050 cached effective-ACE merge, now held by the BEARER: the data-plane
+        // check evaluates ONE pre-merged list (own ACEs + INHERIT-flagged ancestor ACEs,
+        // evaluation order) — no per-operation ancestor rebuild. The walk runs only inside
+        // the rebuild lambda, on the first check after a :acl write marked the bearer dirty
+        // (subtree-precise via the ADR-0057 child links — see the `:acl` write in
+        // graph_fields.cpp). The rebuild runs UNLOCKED (#361 §2 striped locks), taking each
+        // ancestor's stripe one at a time. Root excluded (the flat-map walk never evaluated
+        // the empty key); placeholder intermediates hold empty ACE lists, so merging them is
+        // the no-op the old walk's skip was.
+        allowed = bearer->with_effective_aces(
+            [&](const std::vector<ace_t>& own) {
+                effective_acl_t eff;
+                eff.append_own(own);
+                for (vertex_t* ancestor = bearer->parent();
+                     ancestor != nullptr && ancestor->parent() != nullptr;
+                     ancestor = ancestor->parent()) {
+                    ancestor->with_aces(
+                        [&](const std::vector<ace_t>& aces) { eff.append_ancestor(aces); });
+                }
+                return std::move(eff).release();
+            },
+            [&](const std::vector<ace_t>& merged) {
+                // A bare descendant evaluates the INHERITABLE SUBSEQUENCE of the bearer's
+                // merge. Filtered in place (order-identical) rather than against a second,
+                // projected vector — see effective_acl_t::allows.
+                return effective_acl_t::allows(merged, subject, bit, now,
+                                               self ? std::uint8_t{0} : kAceInherit);
+            });
+    }
+    // Recheck the vertex's registration after the gate, on the vertex in hand (vertices are
+    // insert-only, so the pointer is still the caller's). Every operation found `v` registered
+    // before it got here, but holds no lock since, and a retire reverts a vertex's ACEs with
+    // the rest of its state, so the gate may have read the state of a vertex that is gone.
+    // `retire_subtree` flips the whole subtree unregistered BEFORE it clears any ACEs (a
+    // release store, then the release clear of the OWN_ACES bit and the stripe-locked clear of
+    // the list), so a gate that read a cleared ACE sees the flag down here, through this fence,
+    // and refuses. CREATE is the one right asked of an unregistered vertex on purpose: the
+    // root, as the parent of a top-level creation, is never registered.
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return allowed && (right == acl_right_t::CREATE || v->registered());
 }
 
 void graph_t::mark_subtree_acl_dirty(vertex_t* v) {

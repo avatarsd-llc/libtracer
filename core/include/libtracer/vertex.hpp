@@ -833,11 +833,13 @@ struct vertex_ext_t {
      * Declared through `graph_t::set_share_threshold_bytes`; a vertex that never declared one
      * answers `config_t::kShareThresholdBytes`, which is also what this member starts at. Read
      * on every view-delivered write (`%op_resolve_walk.hpp`) with no lock, so it stays ONE
-     * inline load off this block. 32 bits because it shares a word with
+     * inline load off this block, a relaxed atomic one because a retire or a declaration
+     * stores it under that read. 32 bits because it shares a word with
      * @ref retention_depth — a `size_t` here would grow the block by 8 B on the host for a
      * range no frame can reach.
      */
-    std::uint32_t share_threshold_bytes = saturate_threshold(config_t::kShareThresholdBytes);
+    std::atomic<std::uint32_t> share_threshold_bytes{
+        saturate_threshold(config_t::kShareThresholdBytes)};
     /** @brief The RFC-0010 APP-FIELD group (ADR-0058 Step 2) — the descriptor table plus
      *         its `on_app_field_write` apply seam, LAZILY allocated: a vertex with no app
      *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
@@ -1032,7 +1034,8 @@ class vertex_t {
     [[nodiscard]] std::size_t share_threshold_bytes() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) return config_t::kShareThresholdBytes;
-        return e->share_threshold_bytes == UINT32_MAX ? SIZE_MAX : e->share_threshold_bytes;
+        const std::uint32_t t = e->share_threshold_bytes.load(std::memory_order_relaxed);
+        return t == UINT32_MAX ? SIZE_MAX : t;
     }
     /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam);
      *         an all-empty shared constant when no extension block. */
@@ -1076,8 +1079,12 @@ class vertex_t {
     /** @brief True once a registration filled this node; false for a placeholder — a
      *         structural intermediate level that `find` / `read_children` must not surface
      *         (matching the flat-map behavior where missing intermediates did not exist).
-     *  @note Read/written under the graph's map lock. */
-    [[nodiscard]] bool registered() const noexcept { return registered_; }
+     *  @note Written under the graph's map lock. Read under it, or lock-free by the access
+     *        check's recheck (`graph_t::acl_allows`), which follows this relaxed load with
+     *        an acquire fence. */
+    [[nodiscard]] bool registered() const noexcept {
+        return registered_.load(std::memory_order_relaxed);
+    }
 
     /**
      * @brief True iff this vertex is a `:children[]` MEMBER of its parent — registered and
@@ -1099,7 +1106,7 @@ class vertex_t {
      * @note Read/written under the graph's map lock, like @ref registered.
      */
     [[nodiscard]] bool enumerable_member() const noexcept {
-        return registered_ && !test_flag(flag_t::ENUM_HIDDEN, std::memory_order_relaxed);
+        return registered() && !test_flag(flag_t::ENUM_HIDDEN, std::memory_order_relaxed);
     }
 
     /**
@@ -1134,7 +1141,7 @@ class vertex_t {
     [[nodiscard]] bool fill(role_t role, const handlers_t& handlers, tr::mem::block_source_t& src) {
         if (!adopt_identity(handlers, src)) return false;
         role_.store(role, std::memory_order_relaxed);  // atomic since #1477 — see @ref role
-        registered_ = true;
+        registered_.store(true, std::memory_order_release);
         // Maintain the parent's lock-free fork bit (#652). Setting is unconditional and
         // idempotent; the root has no parent, and nothing asks about the root's parent.
         if (parent_ != nullptr) parent_->set_flag(flag_t::REGISTERED_CHILD, true);
@@ -1144,10 +1151,12 @@ class vertex_t {
     /** @brief Flip this vertex back to a placeholder (invisible to `find`) — retirement's
      *         inverse of the `registered_ = true` in `fill`. Map-lock state; the caller
      *         (`graph_t::retire`) MUST hold the graph map lock, same as `fill`'s writer.
-     *         Pairs with @ref revert_to_placeholder, which clears the vertex's own state. */
+     *         Pairs with @ref revert_to_placeholder, which clears the vertex's own state,
+     *         and runs BEFORE it: a release store, so an access check that read the cleared
+     *         ACEs sees the flag down (`graph_t::acl_allows`). */
     void mark_unregistered() noexcept {
-        if (!registered_) return;  // `retire_subtree` walks placeholders too
-        registered_ = false;
+        if (!registered_.load(std::memory_order_relaxed)) return;  // placeholders too
+        registered_.store(false, std::memory_order_release);
         // Clearing needs to know whether any SIBLING is still registered, so it recomputes
         // rather than decrementing. That is a walk of the parent's children — but only at
         // retirement, under the unique map lock the caller already holds, and only for a
@@ -2505,7 +2514,8 @@ class vertex_t {
         tr::mem::drop_in(*e->src, e->ring);
         e->ring = nullptr;
         e->retention_depth = 1;
-        e->share_threshold_bytes = saturate_threshold(config_t::kShareThresholdBytes);
+        e->share_threshold_bytes.store(saturate_threshold(config_t::kShareThresholdBytes),
+                                       std::memory_order_relaxed);
         tr::mem::drop_in(*e->src, e->app);
         e->app = nullptr;
     }
@@ -2526,8 +2536,10 @@ class vertex_t {
      *        the allocation / name / links (ADR-0057 insert-only — emptied, never freed or
      *        detached).
      *
-     * @note `registered_` is NOT touched here — it is map-lock state the graph flips. The
-     *       caller MUST hold the graph map lock. This RETURNS the swapped-out value-seam
+     * @note `registered_` is NOT touched here — it is map-lock state the graph flips, and it
+     *       flips it for the whole subtree BEFORE calling this, so an access check that
+     *       reads the ACEs this clears also sees the vertex gone. The caller MUST hold the
+     *       graph map lock. This RETURNS the swapped-out value-seam
      *       block (or nullptr) rather than freeing it: a lock-free reader may still hold
      *       the old pointer, so the graph parks it and the embedder frees the park through
      *       `graph_t::collect()` (#576). The per-vertex stripe lock is taken internally.
@@ -3101,7 +3113,7 @@ class vertex_t {
         vertex_ext_t* const e = ensure_ext(tables);
         if (e == nullptr) return false;
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e->share_threshold_bytes = saturate_threshold(bytes);
+        e->share_threshold_bytes.store(saturate_threshold(bytes), std::memory_order_relaxed);
         return true;
     }
 
@@ -3785,7 +3797,9 @@ class vertex_t {
     // Written under a lock (a different one per bit), read lock-free off hot paths, so the
     // writes are RMWs and compose.
     std::atomic<std::uint8_t> flags_{0};
-    bool registered_ = false;  // false => placeholder intermediate (invisible to find)
+    // false => placeholder intermediate (invisible to find). Written under the unique map lock,
+    // read with NONE by the access check's recheck, hence atomic; one byte either way.
+    std::atomic<bool> registered_{false};
     /**
      * @brief Bumped every time this vertex is re-virginized by retirement (ADR-0062).
      *

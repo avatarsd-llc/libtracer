@@ -1406,6 +1406,12 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(registry_rebind_race_test PRIVATE libtracer)
     libtracer_test_warnings(registry_rebind_race_test)
     add_test(NAME registry_rebind_race COMMAND registry_rebind_race_test)
+    # A terminus op made inside a retire is refused, by PAIR and by NAME: the access check
+    # tests the vertex's registration again after reading its ACEs (a TSan vehicle too).
+    add_executable(terminus_retire_race_test terminus_retire_race_test.cpp)
+    target_link_libraries(terminus_retire_race_test PRIVATE libtracer)
+    libtracer_test_warnings(terminus_retire_race_test)
+    add_test(NAME terminus_retire_race COMMAND terminus_retire_race_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)
