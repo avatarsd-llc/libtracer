@@ -230,8 +230,9 @@ tr::net::loopback_channel_t channel;               // an in-process dev "wire"
 
 // B owns the target vertex and a subscriber; A knows its link to B as "b".
 (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-router_a.add_child("b", channel.a());   // a dst starting with "b" routes over the wire
-router_b.add_child("a", channel.b());   // B's name for the inbound link (the way back)
+// attach_link registers each link together with its connection vertex (/b, /a).
+(void)router_a.attach_link("b", channel.a());   // a dst starting with "b" routes over the wire
+(void)router_b.attach_link("a", channel.b());   // B's name for the inbound link (the way back)
 
 auto on_temp = [](const tr::view::rope_t& v) { /* … v.only().bytes() … */ };
 (void)node_b.subscribe(path_t("/sensor/temp"), on_temp);   // named lvalue, as in §4

@@ -535,8 +535,8 @@ void test_fwd_read_round_trip() {
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tbyte, 1));
     (void)node_b.write(path_t("/sensor/temp"), owned(tv));
 
-    router_a.add_child("b", ta);
-    router_b.add_child("a", tb);
+    router_a.attach_link("b", ta);
+    router_b.attach_link("a", tb);
 
     router_a.on_reply(
         [](void* ctx, const tr::view::rope_t& reply) {

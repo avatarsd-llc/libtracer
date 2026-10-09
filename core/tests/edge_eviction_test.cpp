@@ -627,8 +627,8 @@ void test_field_write_admitted_edge_is_indexed_under_its_caller() {
     fwd_router_t router(g);
     fake_link_t seed_link;
     fake_link_t cli;
-    (void)router.add_child("seed", seed_link);
-    (void)router.add_child("cli", cli);
+    (void)router.attach_link("seed", seed_link);
+    (void)router.attach_link("cli", cli);
 
     (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/t"), role_t::STORED_VALUE);
@@ -714,8 +714,8 @@ void test_router_link_down() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t cli, other;
-    (void)router.add_child("cli", cli);
-    (void)router.add_child("other", other);
+    (void)router.attach_link("cli", cli);
+    (void)router.attach_link("other", other);
 
     (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     // A compact-flagged subscribe over 'cli' (so label state forms), a plain one over
@@ -764,8 +764,8 @@ void test_departure_notifier_seam() {
     fwd_router_t router(g);
     fake_link_t p2p;
     fake_bus_t bus;
-    (void)router.add_child("p2p", p2p);
-    (void)router.add_child("bus", bus);
+    (void)router.attach_link("p2p", p2p);
+    (void)router.attach_link("bus", bus);
 
     (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     p2p.inject(b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"p2p"}), b_field_subscribers_append(),
@@ -817,7 +817,7 @@ void test_evict_reaches_field_write_admitted_edges() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t cli;
-    (void)router.add_child("cli", cli);
+    (void)router.attach_link("cli", cli);
 
     (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/t"), role_t::STORED_VALUE);
@@ -1147,9 +1147,9 @@ void test_refused_route_reclaims_the_edge() {
     a_to_b.set_peer(b_to_a);
     b_to_a.set_peer(a_to_b);
     fake_bus_t bus;
-    (void)ra.add_child("bus", bus);
-    (void)ra.add_child("b", a_to_b);
-    (void)rb.add_child("a", b_to_a);
+    (void)ra.attach_link("bus", bus);
+    (void)ra.attach_link("b", a_to_b);
+    (void)rb.attach_link("a", b_to_a);
     vertex_handle_t sensor = gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
 
     // Sessions p0 (doomed) and q1 (stays live) subscribe to /b/sensor through A.
@@ -1221,14 +1221,14 @@ void test_reverse_mint_closes_the_disclosure() {
     a_to_b.set_peer(b_to_a);
     b_to_a.set_peer(a_to_b);
     fake_bus_t bus;
-    (void)ra.add_child("srv", bus);
-    (void)ra.add_child("b", a_to_b);
+    (void)ra.attach_link("srv", bus);
+    (void)ra.attach_link("b", a_to_b);
     // B's connection vertex for its link to A MUST exist BEFORE add_child: the bound-path
     // join resolves `conn_slot` at registration, and it is what the responder's reverse
     // completion and the delivery-time element-0 consumption both dereference. Production
     // wiring gets this from the `/net/<module>/conn` SPEC door; the harness registers it bare.
     (void)gb.register_vertex(path_t("/a"), role_t::STORED_VALUE);
-    (void)rb.add_child("a", b_to_a);
+    (void)rb.attach_link("a", b_to_a);
     vertex_handle_t sensor = gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
 
     // S1 arrives as p0 — the accepting listener fires the arrival notifier, so p0 holds a
@@ -1349,7 +1349,7 @@ void test_arrival_retenants_a_recycled_name() {
     graph_t g;
     fwd_router_t router(g);
     fake_bus_t bus;
-    (void)router.add_child("srv", bus);
+    (void)router.attach_link("srv", bus);
     const vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     const auto sub = [&](std::string_view peer, std::string_view marker) {
         bus.inject_peer(peer, b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({peer}),

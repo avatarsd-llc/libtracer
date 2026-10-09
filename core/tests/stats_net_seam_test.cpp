@@ -213,7 +213,7 @@ void test_link_and_label_seams() {
     counting_link_t down;
     up.counters = {.dropped_rx = 3, .malformed_rx = 5, .dropped_tx = 7};
     down.counters = {.dropped_rx = 11, .malformed_rx = 0, .dropped_tx = 0};
-    check(router.add_child("up", up) && router.add_child("down", down), "two links registered");
+    check(router.attach_link("up", up) && router.attach_link("down", down), "two links registered");
 
     const auto up_bytes = read_bytes(g, "/sink:stats.link.up");
     const auto up_block = tr::wire::decode(up_bytes);
@@ -280,7 +280,7 @@ void test_net_seams_are_node_scoped() {
     fwd_router_t router(g);
     counting_link_t up;
     up.counters = {.dropped_rx = 2, .malformed_rx = 0, .dropped_tx = 0};
-    check(router.add_child("up", up), "one link registered");
+    check(router.attach_link("up", up), "one link registered");
 
     const auto a = read_bytes(g, "/sensor/temp:stats.link.up");
     const auto b = read_bytes(g, "/actuator/relay:stats.link.up");
@@ -305,7 +305,7 @@ void test_unserved_net_names_are_caller_independent() {
     (void)g.register_vertex(*path_t::parse("/dev"), role_t::STORED_VALUE);
     fwd_router_t router(g);
     counting_link_t up;
-    check(router.add_child("up", up), "one link registered");
+    check(router.attach_link("up", up), "one link registered");
 
     const std::vector<ace_t> grant{
         ace_t{.type = tr::graph::ace_type_t::ALLOW,

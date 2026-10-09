@@ -1270,8 +1270,8 @@ template <class Cursor, class MintFn>
     const std::optional<wire::path_ref_element_t> mint =
         found->can_contribute ? mint_fn() : std::nullopt;
     // STRIP, and it is a SAFETY rule rather than tidiness (RFC-0024 §7.1, car-3 erratum).
-    // Every cannot-contribute case lands here — no connection vertex, a saturated or retired
-    // generation, and a full list — because the erratum names them together and they have one
+    // Every cannot-contribute case lands here — a saturated or retired generation, and a full
+    // list — because the erratum names them together and they have one
     // safe outcome between them. A list that skips a hop is not a shorter route, it is a WRONG
     // one: the origin would consume its own element, send a list one element short, and the
     // hop that could not contribute would find exactly one element left, believe itself the

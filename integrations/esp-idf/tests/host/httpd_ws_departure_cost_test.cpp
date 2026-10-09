@@ -157,7 +157,7 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     check(link->ok(), "the adopting link registered its URI");
     // add_child installs the bus peer-down notifier, so a session's departure reaches
     // fwd_router_t::link_down under the peer's ROUTABLE name (#994) — `p<slot>`.
-    check(router.add_child("ws", *link), "the link is registered as a routed bus child");
+    check(router.attach_link("ws", *link), "the link is registered as a routed bus child");
 
     // The departing peer subscribes on ONE vertex.
     vertex_handle_t mine = g.register_vertex(path_t("/mine"), role_t::STORED_VALUE);

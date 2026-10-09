@@ -251,8 +251,8 @@ struct hop_t {
         (void)g.register_vertex(path_t("/net/uplink"), role_t::STORED_VALUE);
         (void)g.register_vertex(path_t("/net/uplink/b"), role_t::STORED_VALUE);
         if (mint) r.configure_path_labels(&labels);
-        (void)r.add_child("net/downlink/cli", cli);
-        (void)r.add_child("net/uplink/b", up);
+        (void)r.attach_link("net/downlink/cli", cli);
+        (void)r.attach_link("net/uplink/b", up);
     }
 };
 

@@ -129,8 +129,8 @@ void test_two_nodes_over_udp() {
 
     // B holds the target vertex and a subscriber; A knows the link to B as "b".
     (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    (void)router_a.add_child("b", ta);  // A routes a `dst` starting with "b" out over UDP to B
-    (void)router_b.add_child("a", tb);  // B's name for the inbound link (src accumulation)
+    (void)router_a.attach_link("b", ta);  // A routes a `dst` starting with "b" out over UDP to B
+    (void)router_b.attach_link("a", tb);  // B's name for the inbound link (src accumulation)
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
@@ -512,8 +512,8 @@ void test_two_nodes_zero_copy_store() {
     tr::graph::vertex_handle_t v =
         node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
     (void)node_b.set_policy(v, {.share_threshold_bytes = 64});
-    (void)router_a.add_child("b", ta);
-    (void)router_b.add_child("a", tb);  // tb delivers views => the owning receiver is installed
+    (void)router_a.attach_link("b", ta);
+    (void)router_b.attach_link("a", tb);  // tb delivers views => the owning receiver is installed
 
     std::promise<void> written;
     auto fut = written.get_future();

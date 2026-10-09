@@ -582,8 +582,8 @@ int main() {
         fwd_router_t r(g);
         span_sink_t cli;
         span_sink_t up;
-        (void)r.add_child("cli", cli);
-        (void)r.add_child("up", up);
+        (void)r.attach_link("cli", cli);
+        (void)r.attach_link("up", up);
 
         // The RFC-0024 vector spells its dst as a PATH_REF (0x14): no longer an address, so the
         // hop forwards nothing and answers the refusal down the inbound link.
@@ -638,14 +638,18 @@ int main() {
         std::vector<std::byte> reply;
         tr::wire::emit_tlv(reply, type_t::FWD, opt_t{.pl = true}, reply_body);
 
-        const auto relay = [&](bool with_conn_vertex) {
+        // A link cannot exist without its connection vertex (#1940), so the hop that cannot
+        // mint is the one whose vertex has RETIRED under it: a placeholder issues nothing.
+        const auto relay = [&](bool mintable) {
             graph_t g;
-            if (with_conn_vertex) (void)g.register_vertex(path_t("/up"), role_t::STORED_VALUE);
+            const tr::graph::vertex_handle_t up_v =
+                g.register_vertex(path_t("/up"), role_t::STORED_VALUE);
             fwd_router_t r(g);
             span_sink_t cli;
             span_sink_t up;
-            (void)r.add_child("cli", cli);
-            (void)r.add_child("up", up);
+            (void)r.attach_link("cli", cli);
+            (void)r.attach_link("up", up);
+            if (!mintable) (void)g.retire(up_v);
             r.on_frame("up", reply);  // the reply comes back over the link the request left on
             return std::move(cli.sent);
         };
@@ -724,8 +728,8 @@ int main() {
             fwd_router_t r(g);
             span_sink_t cli;
             span_sink_t up;
-            (void)r.add_child("cli", cli);
-            (void)r.add_child("up", up);
+            (void)r.attach_link("cli", cli);
+            (void)r.attach_link("up", up);
             r.on_frame("up", reply);
             return std::move(cli.sent);
         };
@@ -779,8 +783,8 @@ int main() {
             fwd_router_t r(g);
             span_sink_t cli;
             span_sink_t up;
-            (void)r.add_child("cli", cli);
-            (void)r.add_child("up", up);
+            (void)r.attach_link("cli", cli);
+            (void)r.attach_link("up", up);
             const path_ref_element_t route[2] = {{.index = 1, .generation = 0},
                                                  {.index = 0x0000BEEFu, .generation = 7}};
             r.on_frame("cli", b_fwd_raw_op(op_byte, b_path_ref(route), b_path({"reply-ep"}), {},
@@ -827,8 +831,8 @@ int main() {
             fwd_router_t r(g);
             span_sink_t cli;
             span_sink_t up;
-            (void)r.add_child("cli", cli);
-            (void)r.add_child("up", up);
+            (void)r.attach_link("cli", cli);
+            (void)r.attach_link("up", up);
             if (retire_it) (void)g.retire(up_v);
             r.on_frame("up", reply);
             return std::move(cli.sent);

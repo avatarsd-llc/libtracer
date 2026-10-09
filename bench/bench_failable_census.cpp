@@ -616,7 +616,7 @@ int run_blocks() {
         tr::graph::graph_t g;
         tr::net::fwd_router_t router(g);
         null_link_t link;
-        router.add_child("down", link);
+        router.attach_link("down", link);
         (void)router.advertise("down", route);  // mint + record, outside the window
         g_allocs = g_frees = g_bytes = 0;
         g_armed = true;
@@ -859,7 +859,7 @@ int run_guard() {
     static tr::net::fwd_router_t label_router_obj(label_graph);
     static null_link_t label_link_obj;
     static tr::net::fwd_router_t* const label_router = [] {
-        label_router_obj.add_child("down", label_link_obj);
+        label_router_obj.attach_link("down", label_link_obj);
         (void)label_router_obj.advertise("down", route);
         return &label_router_obj;
     }();

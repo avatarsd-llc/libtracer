@@ -263,8 +263,8 @@ bool run_point(topo_t topo, std::size_t T) {
                 std::make_unique<tr::mem::pool_source_t<tr::no_guard_t>>(lane->slab, lane->classes);
             rx = lane->pool.get();
         }
-        router.add_child(in_name, lane->in, rx);
-        router.add_child(out_name, lane->out);
+        router.attach_link(in_name, lane->in, rx);
+        router.attach_link(out_name, lane->out);
         lanes.push_back(std::move(lane));
     }
 

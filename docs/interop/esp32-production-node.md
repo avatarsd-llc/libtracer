@@ -201,7 +201,7 @@ Pass the source per child instead — the bound then also becomes per-peer, so o
 noisy link cannot starve another's decode:
 
 ```cpp
-router.add_child("up", up_link, /*rx=*/&up_blocks);
+(void)router.attach_link("up", up_link, /*rx=*/&up_blocks);
 ```
 
 A source shared at **wiring** frequency — a graph's `ctl`, or the router's

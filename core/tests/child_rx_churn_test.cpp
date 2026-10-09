@@ -133,7 +133,7 @@ void test_removed_child_stops_referencing() {
     make_conn_vertex(g);
     sink_link_t link;
 
-    check(router.add_child(std::string(kMount), link), "registered the child");
+    check(router.attach_link(std::string(kMount), link), "registered the child");
     check(router.connection_ref(kMount).has_value(), "a LIVE child has a connection ref");
     check(router.remove_child(kMount), "removed it");
     check(!router.connection_ref(kMount).has_value(),
@@ -143,10 +143,10 @@ void test_removed_child_stops_referencing() {
 /**
  * @brief A re-added child resolves to the NEW tenancy, and its element egresses the NEW link.
  *
- * The ordering is the one `add_child`'s own contract calls out — "a child registered before
- * its connection vertex exists simply has none" — so the two tenancies genuinely differ:
- * unbindable first, bindable second. With the stale ctx answering first, the re-created child
- * was permanently unbindable and every bound route through it silently fell back to canonical.
+ * A child with no connection vertex is refused outright (#1940), so the first attempt
+ * registers nothing; the second, over its vertex, and the re-add over a SECOND link are two
+ * real tenancies. With the stale ctx answering first, the re-added child egressed the old
+ * link, or none.
  */
 void test_readd_resolves_the_new_tenancy() {
     std::printf("a re-added child resolves to the CURRENT tenancy\n");
@@ -155,16 +155,17 @@ void test_readd_resolves_the_new_tenancy() {
     sink_link_t first;
     sink_link_t second;
 
-    check(router.add_child(std::string(kMount), first), "registered the child, vertex-less");
-    check(!router.connection_ref(kMount).has_value(),
-          "unbindable while it has no connection vertex");
+    check(!router.add_child(std::string(kMount), first),
+          "refused while it has no connection vertex");
+    check(!router.connection_ref(kMount).has_value(), "so it has no connection ref");
 
-    check(router.remove_child(kMount), "removed it");
     make_conn_vertex(g);
-    check(router.add_child(std::string(kMount), second), "re-added it over a SECOND link");
+    check(router.add_child(std::string(kMount), first), "registered once its vertex exists");
+    check(router.remove_child(kMount), "removed it");
+    check(router.attach_link(std::string(kMount), second), "re-added it over a SECOND link");
 
     const std::optional<path_ref_element_t> e = router.connection_ref(kMount);
-    check(e.has_value(), "the re-added child is bindable now its connection vertex exists");
+    check(e.has_value(), "the re-added child is bindable");
     check(e && router.bound_egress(*e, {}, acl_right_t::READ) == &second,
           "and element 0 egresses over the NEW link");
 }
@@ -185,10 +186,10 @@ void test_readd_as_bus_drops_the_slot() {
     sink_link_t p2p;
     bus_sink_link_t bus;
 
-    check(router.add_child(std::string(kMount), p2p), "registered it point-to-point");
+    check(router.attach_link(std::string(kMount), p2p), "registered it point-to-point");
     check(router.connection_ref(kMount).has_value(), "bindable while point-to-point");
     check(router.remove_child(kMount), "removed it");
-    check(router.add_child(std::string(kMount), bus), "re-added the NAME as a bus mount");
+    check(router.attach_link(std::string(kMount), bus), "re-added the NAME as a bus mount");
     check(!router.connection_ref(kMount).has_value(),
           "a bus mount is unbindable — it does not inherit the p2p slot");
 }
@@ -202,15 +203,15 @@ void test_churn_does_not_grow_the_chain() {
     sink_link_t a;
     sink_link_t b;
 
-    check(router.add_child(std::string(kMount), a), "registered the child");
+    check(router.attach_link(std::string(kMount), a), "registered the child");
     check(router.receiver_ctx_count() == 1, "one ctx for one child");
     bool churned = true;
     for (int i = 0; i < 50; ++i) {
         churned = churned && router.remove_child(kMount);
-        churned = churned && router.add_child(std::string(kMount), (i % 2 == 0) ? b : a);
+        churned = churned && router.attach_link(std::string(kMount), (i % 2 == 0) ? b : a);
     }
     churned = churned && router.remove_child(kMount);
-    churned = churned && router.add_child(std::string(kMount), b);
+    churned = churned && router.attach_link(std::string(kMount), b);
     check(churned, "51 remove/re-add rounds, every one of them accepted");
     // Reported unconditionally: the growth defect is a NUMBER, and a bare FAIL line would not
     // say whether the chain grew by one per cycle or by something else.
@@ -224,7 +225,7 @@ void test_churn_does_not_grow_the_chain() {
           "and resolves to the link the LAST add bound, not the first");
 
     sink_link_t other;
-    check(router.add_child("net/mod/other", other), "registered a second, distinct name");
+    check(router.attach_link("net/mod/other", other), "registered a second, distinct name");
     check(router.receiver_ctx_count() == 2, "a genuinely new NAME appends");
 }
 
@@ -237,8 +238,8 @@ void test_duplicate_add_rebinds() {
     sink_link_t a;
     sink_link_t b;
 
-    check(router.add_child(std::string(kMount), a), "registered the child");
-    check(router.add_child(std::string(kMount), b), "registered the SAME name again");
+    check(router.attach_link(std::string(kMount), a), "registered the child");
+    check(router.attach_link(std::string(kMount), b), "registered the SAME name again");
     check(router.receiver_ctx_count() == 1, "no shadow ctx — the registry's rule, one layer out");
     const std::optional<path_ref_element_t> e = router.connection_ref(kMount);
     check(e && router.bound_egress(*e, {}, acl_right_t::READ) == &b,
@@ -261,10 +262,10 @@ void test_forward_reaches_the_new_link() {
     sink_link_t second;
     sink_link_t upstream;
 
-    check(router.add_child("net/mod/in", upstream), "registered the inbound child");
-    check(router.add_child(std::string(kMount), first), "registered the outbound child");
+    check(router.attach_link("net/mod/in", upstream), "registered the inbound child");
+    check(router.attach_link(std::string(kMount), first), "registered the outbound child");
     check(router.remove_child(kMount), "removed the outbound child");
-    check(router.add_child(std::string(kMount), second), "re-added it over a SECOND link");
+    check(router.attach_link(std::string(kMount), second), "re-added it over a SECOND link");
 
     const std::vector<std::byte> frame =
         b_fwd(fwd_op_t::READ, b_path({"net", "mod", "a", "sensor", "temp"}),

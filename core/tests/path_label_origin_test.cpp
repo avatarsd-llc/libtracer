@@ -204,8 +204,8 @@ struct hop_t {
         (void)g.register_vertex(path_t("/net/uplink"), role_t::STORED_VALUE);
         (void)g.register_vertex(path_t("/net/uplink/b"), role_t::STORED_VALUE);
         if (mint) r.configure_path_labels(&labels);
-        (void)r.add_child(std::string(kInLink), cli);
-        (void)r.add_child(std::string(kOutLink), up);
+        (void)r.attach_link(std::string(kInLink), cli);
+        (void)r.attach_link(std::string(kOutLink), up);
     }
 };
 
@@ -244,7 +244,7 @@ struct origin_t {
         (void)g.register_vertex(path_t("/net"), role_t::STORED_VALUE);
         (void)g.register_vertex(path_t("/net/uplink"), role_t::STORED_VALUE);
         (void)g.register_vertex(path_t("/net/uplink/a"), role_t::STORED_VALUE);
-        (void)r.add_child(std::string(kOriginLink), uplink);
+        (void)r.attach_link(std::string(kOriginLink), uplink);
     }
 };
 
@@ -445,7 +445,7 @@ int main() {
 
         // Re-mint from the next reply. The link comes back, the hop mints again, and the origin
         // adopts the new spelling — the fallback is complete, not a one-way downgrade.
-        (void)h.r.add_child(std::string(kOutLink), h.up);
+        (void)h.r.attach_link(std::string(kOutLink), h.up);
         const std::optional<bytes_t> reminted = hop_round_trip(h);
         const auto rdec = tr::wire::tlv_node_t::over(*reminted);
         check(rdec.has_value() && o.r.adopt_path_label(target, kOriginLink, *rdec),

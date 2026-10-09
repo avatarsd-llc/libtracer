@@ -167,8 +167,8 @@ int main() {
         std::fprintf(stderr, "node B: ws server failed to bind\n");
         return 1;
     }
-    (void)router_b.add_child("down",
-                             srv_b);  // B's name for the link toward A/C (replies + deliveries)
+    (void)router_b.attach_link("down",
+                               srv_b);  // B's name for the link toward A/C (replies + deliveries)
 
     // ----- node A: forwarder. ws server (for C) + ws client (to B). --------------
     graph_t graph_a;
@@ -205,8 +205,9 @@ int main() {
         std::fprintf(stderr, "node A: ws client to B failed\n");
         return 1;
     }
-    (void)router_a.add_child("c", srv_a);  // A's name for the link toward C (the "c" route segment)
-    (void)router_a.add_child("up", a_to_b);  // A's name for the link toward B
+    (void)router_a.attach_link("c",
+                               srv_a);  // A's name for the link toward C (the "c" route segment)
+    (void)router_a.attach_link("up", a_to_b);  // A's name for the link toward B
 
     // ----- node C: consumer. /sink receives deliveries; ws client to A. ----------
     graph_t graph_c;
@@ -245,7 +246,7 @@ int main() {
         std::fprintf(stderr, "node C: ws client to A failed\n");
         return 1;
     }
-    (void)router_c.add_child("a", c_to_a);  // C's name for the link toward A
+    (void)router_c.attach_link("a", c_to_a);  // C's name for the link toward A
 
     // ===== 0) statelessness baseline: a one-shot FWD READ allocates NO labels =====
     std::printf("One-shot FWD READ (non-compact) holds zero label state at A:\n");

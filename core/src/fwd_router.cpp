@@ -1023,33 +1023,6 @@ template <class Cursor>
     return out;
 }
 
-/**
- * @brief Can any address that exists have @p name as its mount prefix?
- *
- * The ONE always-on bound left on a mount name once the width cap is gone (#523), and it is
- * derived, not chosen: a mount is reached by a `dst` that carries at least its own segments,
- * a path carries at most `graph::kMaxSegments` of them (RFC-0023), and no `dst` segment is
- * empty. A name that fails any of those is not "wide" — it is unaddressable, and registering
- * it would report a healthy child that every forward misses, which is exactly the silent
- * misroute #523 was filed about.
- */
-[[nodiscard]] bool routable_mount_name(std::string_view name) noexcept {
-    if (name.empty()) return false;
-    std::size_t segs = 1;
-    std::size_t seg_len = 0;
-    for (const char c : name) {
-        if (c == '/') {
-            if (seg_len == 0) return false;  // an empty segment matches no dst segment
-            ++segs;
-            seg_len = 0;
-        } else {
-            ++seg_len;
-        }
-    }
-    if (seg_len == 0) return false;  // trailing '/'
-    return segs <= graph::kMaxSegments;
-}
-
 }  // namespace
 
 void fwd_router_t::reclaim_refused_route(std::string_view inbound_name,
@@ -1073,11 +1046,12 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     //
     // What survives is the bound the addressing model actually has. A mount can only be
     // ADDRESSED by a `dst` that carries at least its own segments, and a path may carry at
-    // most `graph::kMaxSegments` of them (RFC-0023). A name wider than that — or with no
-    // segments, or with an EMPTY segment, which no `dst` segment may be — can never be the
+    // most `graph::kMaxSegments` of them (RFC-0023). A name wider than that can never be the
     // prefix of any address that exists, so registering it is the same silent misroute #523
-    // was filed about, one step further out. It is refused instead, by value.
-    if (!routable_mount_name(name)) return false;
+    // was filed about, one step further out. It is refused instead, by value. A name with no
+    // segments, or with an empty or over-long one, keys no vertex, so the registry refuses it
+    // below as a mount with no connection vertex.
+    if (child_registry_t::segment_count(name) > graph::kMaxSegments) return false;
     // Populate the registry BEFORE wiring the receiver: an async transport (UDP/ws) may
     // already have a live recv thread, so `set_receiver` is the publish point — once the
     // callback is installed, on_frame can read the registry on that thread. Adding the
@@ -1118,7 +1092,19 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         tokens->~bus_token_cache_t();
         label_src_->release(tokens, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
     };
-    if (!registry_.add(name, link)) {
+    // The door (RFC-0029 §13.2 S6): the child's mount run IS its connection vertex's
+    // canonical key, so its graph slot is one keyed find of bytes the registry already
+    // encoded, made once per REGISTRATION (#884). Every spelling's gate reads it lock-free,
+    // and a PAIR finds its egress by it. A mount whose vertex does not exist is REFUSED here,
+    // with nothing registered (#1940): a link cannot exist without its connection vertex.
+    // A BUS mount records its door too — the NAME `<mount>/<peer>` and a PAIR-named anchor
+    // are gated there — and is refused as an egress by its shape (§10), not by a slot.
+    const auto conn_slot_of = [this](std::span<const std::byte> run) {
+        const std::optional<graph::vertex_handle_t> v = graph_.find(run);
+        const std::optional<graph::vertex_slot_t> slot = v ? graph_.vertex_slot(*v) : std::nullopt;
+        return slot ? std::optional<std::uint32_t>(slot->index) : std::nullopt;
+    };
+    if (!registry_.add(name, link, conn_slot_of)) {
         drop_tokens();
         return false;
     }
@@ -1129,19 +1115,6 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         (void)registry_.erase(name);
         drop_tokens();
         return false;
-    }
-    // The door (RFC-0029 §13.2 S6): the child's mount run IS its connection vertex's
-    // canonical key, so its graph slot is one keyed find of bytes already in hand, made once
-    // per REGISTRATION (#884) on both arms. Every spelling's gate reads it lock-free, and a
-    // PAIR finds its egress by it. A child whose vertex does not exist yet keeps `kNoConnSlot`:
-    // unbindable, and refused on a graph that enforces an ACL. A BUS mount records its door
-    // too — the NAME `<mount>/<peer>` and a PAIR-named anchor are gated there — and is
-    // refused as an egress by its shape (§10), not by a missing slot.
-    {
-        const std::optional<graph::vertex_handle_t> v = graph_.find(ctx_p->mount_tlv);
-        const std::optional<graph::vertex_slot_t> slot = v ? graph_.vertex_slot(*v) : std::nullopt;
-        ctx_p->entry->conn_slot.store(slot ? slot->index : child_registry_t::kNoConnSlot,
-                                      std::memory_order_relaxed);
     }
     // Capability-matched receiver (ADR-0042 §1 / ADR-0044): a BUS link delivers
     // frames tagged with the SENDING peer's name, which becomes the hop's inbound
@@ -1675,9 +1648,7 @@ std::optional<wire::path_ref_element_t> fwd_router_t::hop_mint(
     if (ctx == nullptr || ctx->retired.load(std::memory_order_acquire) ||
         ctx->entry->egress().multi_peer)
         return std::nullopt;
-    // `vertex_slot_at` bounds-checks, so `kNoConnSlot` refuses with no test of its own.
-    const std::optional<graph::vertex_slot_t> slot =
-        graph_.vertex_slot_at(ctx->entry->conn_slot.load(std::memory_order_relaxed));
+    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(ctx->entry->conn_slot);
     if (!slot) return std::nullopt;
     return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
 }
@@ -2024,7 +1995,7 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
         // An anchor lives OUTSIDE the path tree and has no `:acl` ancestry of its own. The
         // delivery crosses the mount exactly as the NAME spelling `<mount>/<peer>` does, so it
         // enters the same step at the same door and is gated by the ONE `door_allows` — failing
-        // closed, enforcing, on a mount with no connection vertex. A denial stays the shipped
+        // closed, enforcing, on a door whose vertex has retired. A denial stays the shipped
         // plain drop (the anti-enumeration rule on the delivery leg); a session gone between
         // the deref and here is `NOT_FOUND`, below.
         const child_registry_t::child_t* const door = registry_.entry_by_name(ar->mount);
@@ -2328,11 +2299,10 @@ bool fwd_router_t::door_allows(const child_registry_t::child_t* door, std::strin
     if (door == nullptr || !graph_.acl_enforced()) return true;
     // The door's connection vertex, by the slot `add_child` recorded: a bounds check, a load
     // and the registration test, lock-free (`registered_vertex_at`, #1939). Enforcing, a door
-    // with none has nothing to grant the right and refuses (fail closed), as does an op this
-    // build names no right for.
+    // whose vertex has retired has nothing to grant the right and refuses (fail closed), as
+    // does an op this build names no right for.
     const std::optional<graph::vertex_handle_t> v =
-        right ? graph_.registered_vertex_at(door->conn_slot.load(std::memory_order_relaxed))
-              : std::nullopt;
+        right ? graph_.registered_vertex_at(door->conn_slot) : std::nullopt;
     // THE `allows` of the router — every spelling's hop is decided here (RFC-0029 §6.4).
     return v && graph_.allows(*v, caller, *right);
 }

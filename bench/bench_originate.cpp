@@ -179,8 +179,8 @@ void emit_value(std::vector<std::byte>& out, std::uint32_t v) {
     capture_transport_t self;
     capture_transport_t out;
     // "self" is the link an originating application injects through; "out" carries the hop.
-    router.add_child("net/ws-server/self", self);
-    router.add_child("net/ws-client/out", out);
+    router.attach_link("net/ws-server/self", self);
+    router.attach_link("net/ws-client/out", out);
 
     // The destination this node keeps writing to, and the return route for its reply.
     const std::vector<std::byte> dst = path_tlv({"net", "ws-client", "out", "sensor", "temp"});

@@ -108,7 +108,7 @@ void test_refused_registration_reports_failure() {
     counting_link_t link;
 
     g_refuse_nothrow_new = true;  // the FIRST chunk the registry asks for is refused
-    const bool added = router.add_child("net/ws/a", link);
+    const bool added = router.attach_link("net/ws/a", link);
     g_refuse_nothrow_new = false;
 
     check(!added, "add_child REPORTS the failure rather than returning true");
@@ -129,7 +129,7 @@ void test_open_allocator_still_registers() {
     tr::graph::graph_t graph{tr::mem::heap_source()};
     tr::net::fwd_router_t router{graph, {.label_src = &tr::mem::heap_source()}};
     counting_link_t link;
-    const bool added = router.add_child("net/ws/a", link);
+    const bool added = router.attach_link("net/ws/a", link);
     check(added, "add_child succeeds");
     check(link.wired(), "the inbound receiver IS installed — so the check above is not vacuous");
     check(router.registry().live_size() == 1, "the child is registered");

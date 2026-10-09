@@ -162,7 +162,7 @@ void test_observer_walk_draws_from_the_link() {
     fwd_router_t router(g);  // the router's default rx stays the heap
     arming_source_t link_rx;
     rec_link_t in;
-    (void)router.add_child("in", in, &link_rx);
+    (void)router.attach_link("in", in, &link_rx);
     int observed = 0;
     router.on_inbound(
         [](void* ctx, std::string_view, const tr::wire::tlv_node_t&) { ++*static_cast<int*>(ctx); },
@@ -198,8 +198,8 @@ void test_reject_walk_draws_from_the_link(bool ropes) {
     bus.peers.emplace_back("alice", &alice);
     arming_source_t link_rx;
     rec_link_t in(ropes);
-    (void)router.add_child("net/ws-server/srv", bus);
-    (void)router.add_child("net/ws-client/in", in, &link_rx);
+    (void)router.attach_link("net/ws-server/srv", bus);
+    (void)router.attach_link("net/ws-client/in", in, &link_rx);
 
     // `srv` is the bus link's own NAME and `sensor` names no peer on it: the ADR-0073 §3
     // rejection, which ANSWERS a well-formed frame.

@@ -229,7 +229,7 @@ int run_sub(int argc, char** argv) {
         (void)node.set_policy(
             v, {.share_threshold_bytes = threshold});  // the arm's threshold, owner-declared
     }
-    router.add_child("a", t);
+    router.attach_link("a", t);
 
     std::atomic<std::uint64_t> delivered{0};
     std::atomic<std::uint64_t> pins{0};

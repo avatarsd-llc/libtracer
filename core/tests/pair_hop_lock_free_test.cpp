@@ -134,8 +134,8 @@ bytes_t pair_write(path_pair_t head) {
 struct node_t {
     explicit node_t(tr::mem::block_source_t& src) : g(src) {
         (void)g.register_vertex(path_t("/net/tcp/out"), role_t::STORED_VALUE);
-        check(router.add_child("net/tcp/out", out), "out mounted");
-        check(router.add_child("net/tcp/in", in), "in mounted");
+        check(router.attach_link("net/tcp/out", out), "out mounted");
+        check(router.attach_link("net/tcp/in", in), "in mounted");
         const auto v = g.find(path_t("/net/tcp/out").key());
         const auto slot = v ? g.vertex_slot(*v) : std::nullopt;
         check(slot.has_value(), "the out connection vertex has a slot");

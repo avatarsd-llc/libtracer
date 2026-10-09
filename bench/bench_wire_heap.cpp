@@ -647,8 +647,8 @@ void arm_router_over_wire(const char* label, bool real_egress) {
         real_egress ? static_cast<tr::net::transport_t*>(&egress_dial) : &stub;
     tap_link_t tap(inner);
 
-    router.add_child("net/ws-client/out", tap);
-    router.add_child("net/ws-server/in", in_link);
+    router.attach_link("net/ws-client/out", tap);
+    router.attach_link("net/ws-server/in", in_link);
 
     tr::net::tcp_transport_t client("127.0.0.1", in_link.local_port());
     std::this_thread::sleep_for(std::chrono::milliseconds(80));

@@ -523,11 +523,19 @@ class fwd_router_t {
     /** @} */
 
     /**
-     * @brief Register a named transport-child vertex (ADR-0027).
+     * @brief Register a named transport-child vertex (ADR-0027) at its EXISTING connection
+     *        vertex.
      *
      * @p name is the mount RUN by which THIS node addresses @p link — both the leading
      * `dst` segments that route onward through @p link, and the run prepended to `src`
      * when a frame arrives on @p link (the way back).
+     *
+     * **A link cannot exist without its connection vertex (#1940).** The vertex keyed by
+     * @p name must already be registered in the router's graph; it is the door every address
+     * spelling reaches the link through and is gated at (RFC-0029 §6, §6.4). A mount with no
+     * vertex is REFUSED, by value, with nothing registered — so "no connection vertex" always
+     * means "no route". `transport_vertex_t::make_connection` registers the vertex first;
+     * @ref attach_link registers both for a link wired by hand.
      * Installs a receiver on @p link that funnels each inbound frame to
      * `on_frame(name, ...)`. Call once per link, during setup (before frames flow).
      *
@@ -545,11 +553,11 @@ class fwd_router_t {
      * spends from, and by nothing else — there is no constant to raise.
      *
      * The one thing still refused, and now refused ALWAYS rather than in debug builds only, is
-     * a name **no address could ever name**: empty, containing an empty segment, or wider than
-     * `graph::kMaxSegments` (a `dst` cannot carry that many segments, so nothing could ever
-     * prefix-match it). Such a name used to append a slot that `size()` and `live_size()`
-     * reported as a healthy child while every forward to it missed and fell through to the
-     * terminus with no error anywhere — the #516 failure shape, one layer up.
+     * a name **no address could ever name**: empty, containing an empty or over-long segment,
+     * or wider than `graph::kMaxSegments` (a `dst` cannot carry that many segments, so nothing
+     * could ever prefix-match it). Such a name used to append a slot that `size()` and
+     * `live_size()` reported as a healthy child while every forward to it missed and fell through
+     * to the terminus with no error anywhere — the #516 failure shape, one layer up.
      *
      * **A NAME owns exactly one receiver ctx, for the router's life (#884).** Registering a
      * name that already has one — a re-add after @ref remove_child, or a duplicate add of a
@@ -570,8 +578,8 @@ class fwd_router_t {
      *             `kind.kind` (the default) registers a link with no catalog identity, whose
      *             writes present a null `link`. `transport_vertex_t` passes its connection's
      *             declared pair.
-     * @return false ⇔ @p name is unaddressable, or the registry could not grow — either way
-     *         NOTHING was registered.
+     * @return false ⇔ @p name is unaddressable, has no connection vertex, or the registry
+     *         could not grow — in every case NOTHING was registered.
      *
      * `[[nodiscard]]` since #892, and the reason it was NOT is worth recording because it was
      * wrong in a way that shipped a bug. The attribute was declined on the ground that "every
@@ -593,6 +601,42 @@ class fwd_router_t {
      */
     [[nodiscard]] bool add_child(std::string_view name, transport_t& link,
                                  mem::block_source_t* rx = nullptr, link_kind_t kind = {});
+
+    /**
+     * @brief Register @p link together with its connection vertex — the one helper for a
+     *        link wired by hand (tests, SDK hosts, examples; #1940).
+     *
+     * Registers a plain `STORED_VALUE` vertex keyed by @p name, unless one is already
+     * registered there (a vertex the caller made first, to carry an `:acl`, is used as it is),
+     * then @ref add_child with the remaining arguments. A refused @ref add_child retires the
+     * vertex this call registered, so a `false` leaves the graph as it found it.
+     *
+     * The production wiring is `transport_vertex_t::make_connection`, which registers its own
+     * vertex (with the bus `:children` seam) before @ref add_child; this helper is for the
+     * code that used to call @ref add_child with no vertex at all.
+     *
+     * Defined here, inline, so it is emitted only where it is called: the MCU archive, whose
+     * wiring is `make_connection`, carries none of it (the no-heap link check, #1783).
+     *
+     * @return @ref add_child's verdict.
+     */
+    [[nodiscard]] bool attach_link(std::string_view name, transport_t& link,
+                                   mem::block_source_t* rx = nullptr, link_kind_t kind = {}) {
+        // The vertex's key is the mount's packed run, the same bytes `add_child` finds it by,
+        // spelled into control-plane scratch from the label plane's source (#1779) and released
+        // before returning. An empty run keys nothing, so `add_child` refuses it below.
+        const std::size_t n = child_registry_t::encode_mount_name(name, nullptr);
+        auto* const key = static_cast<std::byte*>(label_src_->try_alloc(n + 1, 1));
+        if (key == nullptr) return false;
+        (void)child_registry_t::encode_mount_name(name, key);
+        // `PATH_IN_USE` is the caller's own vertex, which is used as it is and never retired here.
+        const graph::result_t<graph::vertex_handle_t> made = graph_.register_vertex_key(
+            std::span<const std::byte>(key, n), graph::role_t::STORED_VALUE);
+        label_src_->release(key, n + 1, 1);
+        if (add_child(name, link, rx, kind)) return true;
+        if (made) (void)graph_.retire(*made);
+        return false;
+    }
 
     /**
      * @brief Un-register child @p name — it stops resolving, and its routing state goes.

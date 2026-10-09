@@ -105,6 +105,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `kSlabPool = false` they draw from the static arena, not the platform heap. No behaviour
   change and no rename; the declaration, the allocation reference and the transport comments
   now say so, and show `source_backend_t` over `heap_source()` as the way to reach the real heap.
+- **Breaking: a link cannot exist without its connection vertex
+  ([#1940](https://github.com/avatarsd-llc/libtracer/issues/1940), stage 2 of spec
+  [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938)).** `fwd_router_t::add_child`
+  now refuses, by value and with nothing registered, a mount whose connection vertex (the vertex
+  keyed by the mount name) is not registered in the router's graph, so "no connection vertex"
+  always means "no route". The new `fwd_router_t::attach_link` registers a plain `STORED_VALUE`
+  vertex at the mount name (or uses the one already there, for example one that carries an
+  `:acl`) and then calls `add_child`; a refused `add_child` retires the vertex it registered.
+  Every test, bench and example that wired a link by hand now uses it.
+  `transport_vertex_t::make_connection` already registered its vertex first and is unchanged.
+  What callers can observe:
+  - A hand-wired `add_child` with no vertex now returns `false`. Call `attach_link`, or register
+    the vertex first.
+  - `child_registry_t::add` takes a third argument, the resolver asked once for the mount's
+    connection-vertex slot (`std::optional<std::uint32_t>(std::span<const std::byte>)`); a
+    `nullopt` refuses the registration. It also refuses a name with no packed spelling (an
+    over-long segment), which keys no vertex; `add_child` used to accept such a name.
+  - `child_registry_t::kNoConnSlot` is deleted, and `child_registry_t::child_t::conn_slot` is a
+    plain `std::uint32_t`, written once before the entry is published. The late-registered
+    vertex case of the #1939 entry below no longer exists.
+  - A mount whose connection vertex has saturated its generation (2^32 retirements) can no
+    longer be registered: it has no slot to record.
 - **One walk, one gate: every address spelling reaches its link through the connection vertex
   ([#1939](https://github.com/avatarsd-llc/libtracer/issues/1939), RFC-0029 §13.2 S6).** The
   NAME descent, a PAIR hop and a PAIR naming a session anchor now end on the same door, the

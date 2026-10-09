@@ -703,8 +703,8 @@ class node_t {
             }
             if (egr != nullptr) l->out.set_egress_source(*egr);
 
-            if (!router_->add_child(in_name, l->in, rx) ||
-                !router_->add_child(out_name, l->out, rx)) {
+            if (!router_->attach_link(in_name, l->in, rx) ||
+                !router_->attach_link(out_name, l->out, rx)) {
                 std::fprintf(stderr, "FAULT %s: add_child failed for lane %zu\n", name_of(arm_), i);
                 std::abort();
             }

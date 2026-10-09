@@ -132,7 +132,7 @@ void test_contextless_door_counts_a_lookup() {
     seed(g);
     fwd_router_t router(g);
     record_link_t client;
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     const auto src = b_path({"client", "back"});
     router.on_frame("client", b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), src));
@@ -149,8 +149,8 @@ void test_flat_span_reply_leaves_on_inbound_link() {
     fwd_router_t router(g);
     record_link_t other;
     record_link_t client;
-    (void)router.add_child("other", other);
-    (void)router.add_child("client", client);
+    (void)router.attach_link("other", other);
+    (void)router.attach_link("client", client);
 
     const auto src = b_path({"client", "back"});
     client.inject(b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), src));
@@ -168,7 +168,7 @@ void test_flat_rope_reply_leaves_on_inbound_link() {
     seed(g);
     fwd_router_t router(g);
     record_link_t client(/*ropes=*/true);
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     const auto src = b_path({"client", "back"});
     client.inject_rope(b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), src));
@@ -193,7 +193,7 @@ void test_refusal_answer_leaves_on_inbound_link() {
     refusing_source_t rx;
     fwd_router_t router(g, {.rx = &rx});
     record_link_t client;
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     const auto src = b_path({"client", "back"});
     client.inject(b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), src));
@@ -210,7 +210,7 @@ void test_bus_reply_keeps_peer_resolution() {
     seed(g);
     fwd_router_t router(g);
     bus_record_link_t bus;
-    (void)router.add_child("bus", bus);
+    (void)router.attach_link("bus", bus);
 
     const auto src = b_path({"n7", "back"});
     bus.inject(b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), src));

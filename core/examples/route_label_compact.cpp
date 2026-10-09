@@ -118,7 +118,7 @@ int main() {
     graph_t graph_p, graph_c;
     tr::net::fwd_router_t producer(graph_p), consumer(graph_c);
     recording_link_t p_to_c, c_to_p;
-    if (!producer.add_child("c", p_to_c) || !consumer.add_child("p", c_to_p)) {
+    if (!producer.attach_link("c", p_to_c) || !consumer.attach_link("p", c_to_p)) {
         std::fprintf(stderr, "route_label_compact: add_child failed — nothing registered\n");
         return 1;
     }

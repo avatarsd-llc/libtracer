@@ -227,7 +227,7 @@ void test_full_route_fanout() {
     graph_t graph;
     fwd_router_t router(graph);
     fake_link_t link;
-    (void)router.add_child("client", link);
+    (void)router.attach_link("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
     auto v = graph.register_vertex(*p, role_t::STORED_VALUE);  // volatile (durability 0)
@@ -274,7 +274,7 @@ void test_full_route_fanout_multilink() {
     graph_t graph;
     fwd_router_t router(graph);
     fake_link_t link;
-    (void)router.add_child("client", link);
+    (void)router.attach_link("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
     auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
@@ -337,7 +337,7 @@ void test_full_route_fanout_zerocopy() {
     graph_t graph;
     fwd_router_t router(graph);
     fake_link_t link;
-    (void)router.add_child("client", link);
+    (void)router.attach_link("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
     auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
@@ -385,7 +385,7 @@ void test_transient_local_latch() {
     graph_t graph;
     fwd_router_t router(graph);
     fake_link_t link;
-    (void)router.add_child("client", link);
+    (void)router.attach_link("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
     auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
@@ -428,7 +428,7 @@ void test_compact_auto_promote() {
     graph_t graph;
     fwd_router_t router(graph);
     fake_link_t link;
-    (void)router.add_child("client", link);
+    (void)router.attach_link("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
     auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
@@ -488,7 +488,7 @@ void test_compact_delivery_is_gathered() {
     graph_t graph;
     fwd_router_t router(graph);
     fake_link_t link;
-    (void)router.add_child("client", link);
+    (void)router.attach_link("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
     auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
@@ -515,7 +515,7 @@ void test_concurrent_writer_vs_clear() {
     graph_t graph;
     fwd_router_t router(graph);
     fake_link_t link;
-    (void)router.add_child("client", link);
+    (void)router.attach_link("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
     auto v = graph.register_vertex(*p, role_t::STORED_VALUE);

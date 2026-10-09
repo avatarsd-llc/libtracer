@@ -120,7 +120,7 @@ int main() {
     // One child, named "b"; one local vertex, at /sensor/temp. Both spellings below are
     // ordinary paths — nothing marks one of them as "remote".
     recording_link_t to_b, to_client;
-    if (!router.add_child("b", to_b) || !router.add_child("cli", to_client)) {
+    if (!router.attach_link("b", to_b) || !router.attach_link("cli", to_client)) {
         std::fprintf(stderr, "route_terminus_or_forward: add_child failed — nothing registered\n");
         return 1;
     }

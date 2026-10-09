@@ -192,8 +192,8 @@ struct census_row_t {
     fwd_router_t router(graph);
     rope_in_t in_link;
     census_transport_t out_link;
-    router.add_child("net/ws-client/out", out_link);
-    router.add_child("net/ws-server/in", in_link);
+    router.attach_link("net/ws-client/out", out_link);
+    router.attach_link("net/ws-server/in", in_link);
 
     const std::vector<std::byte> payload(payload_bytes, std::byte{0x5A});
     const std::vector<std::byte> frame = make_fwd({"net", "ws-client", "out", "sensor", "temp"},
@@ -242,8 +242,8 @@ void arm_a_span_census() {
             fwd_router_t r2(g2);
             rope_in_t in2;
             census_transport_t out2;
-            r2.add_child("net/ws-client/out", out2);
-            r2.add_child("net/ws-server/in", in2);
+            r2.attach_link("net/ws-client/out", out2);
+            r2.attach_link("net/ws-server/in", in2);
             const std::vector<std::byte> pl(payload, std::byte{0x5A});
             const std::vector<std::byte> fr =
                 make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"},
