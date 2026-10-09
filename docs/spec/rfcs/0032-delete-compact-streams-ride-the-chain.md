@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0032 |
 | **Title** | Delete `COMPACT` and the per-link handle tables: every stream rides the chain, and no hop holds state for it |
-| **Status** | **proposed** (2026-10-09). **Every §15 question was ruled by the maintainer on 2026-10-09** ("all rec", with Q3 and Q5 changed and Q6 extended, §15). The §8 figures are filled in from PR #2037 (merged). The CAN question moves to #2044. Acceptance is recorded here when the maintainer gives it. The direction was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (one walk, the connection vertex is the door), §"Addendum: stages 5 and 6", questions 5–8, "all rec". This document turns that ruling into normative text, and §15 lists the choices the ruling left open, each with a recommendation. |
+| **Status** | **proposed** (2026-10-09). **Every §15 question was ruled by the maintainer on 2026-10-09** ("all rec", with Q3 and Q5 changed and Q6 extended, §15). The §8 figures are filled in from PR #2037 (merged). The CAN rows are from #2044 (PR #2046, in review). Acceptance is recorded here when the maintainer gives it. The direction was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (one walk, the connection vertex is the door), §"Addendum: stages 5 and 6", questions 5–8, "all rec". This document turns that ruling into normative text, and §15 lists the choices the ruling left open, each with a recommendation. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -19,8 +19,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#1950](https://github.com/avatarsd-llc/libtracer/issues/1950) (RFC: delete COMPACT and the per-link handle tables); parent spec [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (one walk, the connection vertex is the door) |
 | **Target spec version** | v1 itself. `docs/spec/v1.md` still reads "(DRAFT)". RFC-0018, RFC-0023, RFC-0024, RFC-0027, RFC-0029, RFC-0030 and RFC-0031 took the same route. |
 | **Scope** | Stage 6 of #1938, milestone v0.20.0. The deletion [#1951](https://github.com/avatarsd-llc/libtracer/issues/1951) (delete COMPACT, the handle tables and every remnant) and the documentation sweep [#1952](https://github.com/avatarsd-llc/libtracer/issues/1952) (glossary, reference pages and the perf page describe chain delivery) are blocked on this RFC's approval. #1951 also waits for [#2042](https://github.com/avatarsd-llc/libtracer/issues/2042) (a forwarded PAIR write's RESULT is dropped silently at the originator), and not for #1946 (§15 Q5). Stage 7, [#1953](https://github.com/avatarsd-llc/libtracer/issues/1953) (CAN link-local compression, private to the transport), follows them and is bounded by §5.5. |
-| **Evidence** | The chain-versus-COMPACT report of [#1949](https://github.com/avatarsd-llc/libtracer/issues/1949) (bench: chain delivery against COMPACT, measured before COMPACT is deleted), landing as [PR #2037](https://github.com/avatarsd-llc/libtracer/pull/2037) (the `bench_chain_vs_compact` rows). Merged; §8 cites it. Classic-CAN frame counts are not answered by it and move to [#2044](https://github.com/avatarsd-llc/libtracer/issues/2044) (bench: CAN frames per hop on the real CAN carriage). The bench reports; it does not veto (ruling 4, §3). |
-| **Amends** | [RFC-0004](0004-remote-operation-addressing.md) §E.1 (**removed in full**, with its implementation pins) and §"Resolved during design" (the route-handle bullet); [RFC-0029](0029-one-path-primitive.md) §3 ruling 6 (**withdrawn**), §5.3 (the "kept, unchanged" sentence), §9 (its heading and §9.2, **withdrawn**), the note under §11, §12.4 (the "§E.1 untouched" clause) and the 2026-10-02 erratum's `on_stale_label` row; [RFC-0010](0010-owner-app-fields-and-schema.md) Amendment 2 (three nouns leave the net-plane census and `retired_rx` joins it, §6.1, §6.3); reference/01 §Handling unknown type codes, for these three codes only (answered on the arrival link, counted, never passed through, §6.1). |
+| **Evidence** | The chain-versus-COMPACT report of [#1949](https://github.com/avatarsd-llc/libtracer/issues/1949) (bench: chain delivery against COMPACT, measured before COMPACT is deleted), landing as [PR #2037](https://github.com/avatarsd-llc/libtracer/pull/2037) (the `bench_chain_vs_compact` rows). Merged; §8 cites it. Classic-CAN frame counts come from [#2044](https://github.com/avatarsd-llc/libtracer/issues/2044) (bench: CAN frames per hop on the real CAN carriage), via [PR #2046](https://github.com/avatarsd-llc/libtracer/pull/2046), in review. The bench reports; it does not veto (ruling 4, §3). |
+| **Amends** | [RFC-0004](0004-remote-operation-addressing.md) §E.1 (**removed in full**, with its implementation pins) and §"Resolved during design" (the route-handle bullet); [RFC-0029](0029-one-path-primitive.md) §1 (the summary's "the single named exception" sentence), §3 ruling 6 (**withdrawn**), §5.3 (the "kept, unchanged" sentence), §9 (its heading and §9.2, **withdrawn**), the note under §11, §12.4 (the "§E.1 untouched" clause), §13.2's S3 row ("**not** `on_stale_label`, the delivery-compaction observer §9.2 keeps") and the 2026-10-02 erratum's `on_stale_label` row; [RFC-0010](0010-owner-app-fields-and-schema.md) Amendment 2 (three nouns leave the net-plane census and `retired_rx` joins it, §6.1, §6.3); reference/01 §Handling unknown type codes, for these three codes only (answered on the arrival link, counted, never passed through, §6.1). |
 | **Ships with** | RFC-0010 §Erratum (2026-10-09), which corrects reference/05's credit of the three handle-store nouns to the RFC-0027 table. It is a separate instrument with no wire change (§6.3). |
 | **Supersedes, on acceptance** | [ADR-0062](../../adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md) (resolve-once label bindings) in full; [ADR-0035](../../adr/0035-implementing-rfc-0004-remote-operation-addressing.md) slice 4 (the route-handle mechanism) in part; [ADR-0038](../../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) in part (its label-compacted plane). |
 | **Confirms, not amends** | [ADR-0022](../../adr/0022-transport-framing-modes-elided-full-tlv-advertise.md) (framing modes are chosen by the adapter) and [ADR-0030](../../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) (the CAN transport's in-transport map): both are transport-private, which is exactly where §5.5 puts compression. [RFC-0025](0025-stream-class-values.md) §4.1.3 (Amendment 4, batching is user-orchestrated). [RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md) §3 ("COMPACT and the per-link handle tables are deleted in stage 6") and §8.5 (an empty `src` means no reply, at every hop). |
@@ -250,8 +250,9 @@ frame of one of them is **answered and counted, never dropped in silence** (rule
 
 The answer is one small frame per received frame, sent only toward the peer that sent it, and drawn
 from the receiving link's own source: the receiving link pays, and the cost is bounded by what the
-peer sends. A new node never sends one of these codes, so two new nodes never exchange the answer,
-and a node receiving a bare `ERROR` never answers it, so no answer loops.
+peer sends. A new node never sends one of these codes, so two new nodes never exchange the answer. A
+receiver MUST NOT answer a bare outer `ERROR`: it is a report, not a request (RFC-0002 §C), and it
+is a known code, so reference/01's unknown-code answer never applies to it. So no answer loops.
 
 There is **no fallback for an old peer** (§7): the answer reports the refusal, and nothing
 translates, re-advertises or delivers on the old peer's behalf. A forwarder MUST NOT pass these
@@ -313,8 +314,13 @@ counted error answer (§6.1).
 | subscribes with `delivery_compact = 0`, `1`, or without it | admits it; the retired key is read by nothing (§6.2) | the subscription's deliveries are chain deliveries, the only delivery the protocol has. This is not a fallback: no compact flow exists to fall back from. |
 | forwards between two new nodes | sees no `COMPACT`-family frame, because neither end sends one | **works** |
 
-A new node never sets `delivery_compact` and never advertises, so an old producer serving a new
-consumer, or an old consumer served by a new producer, never starts a compact flow.
+A new node never sets `delivery_compact` and never advertises, so an old consumer served by a new
+producer never meets a compact flow. An old producer serving a new consumer starts one only through
+RFC-0004 §E.1's **adaptive promotion**: a transport MAY promote a hot full-route flow to a label
+without the hint. If an old producer does that, its `ADVERTISE` and every later `COMPACT` meet
+§6.1's counted refusal at the first new node. There is no fallback to full-route, and the promoted
+flow stops reaching the consumer. The same §7.2 remedy applies: the old producer must not promote
+on a path that holds a new node.
 
 ### 7.2 The mixed path is loud
 
@@ -350,9 +356,9 @@ consumers stop setting `delivery_compact` before the first new node joins the pa
 ### 8.1 Measured (#1949, PR #2037)
 
 **Headline, unbatched, forward leg only (`pair-norelay`).** Against `COMPACT`, the chain costs
-**2.5×** at 1 hop and **2.4×** at 3 hops for 64 B to 1 KiB samples, and **1.5–1.6×** at 16 KiB. With
-the discarded reply relay included, reported separately, it costs **3.0×** at 1 hop and **3.6×** at
-3 hops for 64 B to 1 KiB, and **1.8–1.9×** at 16 KiB. The relay is about 20% of the `pair` time at
+**2.4–2.5×** at 1 hop and **2.4×** at 3 hops for 64 B to 1 KiB samples, and **1.5–1.6×** at 16 KiB.
+With the discarded reply relay included, reported separately, it costs **2.9–3.0×** at 1 hop and
+**3.6×** at 3 hops for 64 B to 1 KiB, and **1.8–1.9×** at 16 KiB. The relay is about 20% of the `pair` time at
 1 hop and about 35% at 3 hops.
 
 | cell, unbatched, ns/frame | `COMPACT` | chain, no relay | ratio | chain, with relay (separate) | ratio |
@@ -402,7 +408,8 @@ while `COMPACT` does not. At 1 hop and 64 B the cost per sample is 77 ns (chain,
 27 ns (`COMPACT`) at N = 8, and 27 ns against 8 ns at N = 32.
 
 **Bytes.** As measured, the chain's origin frame is +28 B over `COMPACT` at 1 hop and +50 B on the
-first link of 3. That matches §8.2's 7 + 11·E (29 B and 51 B). In today's core it then shrinks only
+first link of 3. That is within 1 B of §8.2's 7 + 11·E (29 B and 51 B). #2037's own prose gives
+the 1-hop origin frame as 107 B, which matches the layout exactly, against 106 B in its table. In today's core it then shrinks only
 1 B per further hop, because `dst` loses an 11 B element while the forwarder grows `src` by about
 10 B. Under RFC-0030 §8.5 (and #2042) `src` is not grown, so the frame shrinks by the full 11 B per
 hop (§8.2). The overhead is +36% at 64 B, +3% at 1 KiB and +0.2% at 16 KiB.
@@ -415,17 +422,39 @@ break RSS down per arm.
 **Not reported.** The merged run gives no cold first-frame figure (the `COMPACT` arm's `ADVERTISE`
 included), so this RFC cites none.
 
-**Classic CAN: not answered yet.** #2037 draws no CAN conclusion. Its 8 B and 64 B field counts cut
-the WebSocket-style TLV frame into slices. They do not model the real CAN carriage, which is
-header-elided and carries a `FWD` as a directed advertise group with its own 18 B header. The CAN
-frame counts per hop, and with them ruling 4's question of whether the 3 B per element matters on
-CAN, move to [#2044](https://github.com/avatarsd-llc/libtracer/issues/2044) (bench: CAN frames per
-hop for the PAIR chain against COMPACT, on the real CAN carriage). This RFC states no CAN verdict.
+**CAN, on the real carriage (#2044, PR #2046, in review).** #2037's 8 B and 64 B field counts cut
+the WebSocket-style TLV frame into slices, which does not model CAN, so #2037 drew no CAN
+conclusion. [#2044](https://github.com/avatarsd-llc/libtracer/issues/2044) (bench: CAN frames per
+hop for the PAIR chain against COMPACT, on the real CAN carriage) counts frames at the CAN link seam
+with every inter-node link a production `can_transport_t`. Its figures are from
+[PR #2046](https://github.com/avatarsd-llc/libtracer/pull/2046), which is still in review:
+
+| 3 hops, classic CAN | chain frames (forward + reply) | `COMPACT` frames | total |
+| --- | ---: | ---: | ---: |
+| 64 B, N = 1 | 57 + 30 = 87 | 39 | +123% (2.2×) |
+| 64 B, N = 32 | 855 + 30 = 885 | 837 | +5.7% |
+| 1 KiB, N = 1 | 417 + 30 = 447 | 399 | +12% |
+| 16 KiB, N = 1 | 6177 + 30 = 6207 | 6159 | +0.8% |
+
+- **Classic CAN, small samples.** At 64 B and N = 1 the chain's forward leg is 19 frames per hop
+  against `COMPACT`'s 13 (+46%), flat across hops. The reply leg (9, 10 and 11 frames at hops 1 to
+  3, 30 in all) is today's discarded RESULT. Under RFC-0030 §8.5 and #2042 it is not sent, so the
+  forward-leg figure is the one this RFC's headline rule (§8, the note above) admits. `COMPACT`'s
+  cold cost, the `ADVERTISE` walk, is 21 frames over 3 hops.
+- **CAN FD.** The forward legs are within one frame of each other (5 against 5 per hop at 64 B).
+  The totals at 3 hops are +80% at 64 B (27 against 15, all from the 12-frame reply leg), +20% at
+  1 KiB and +1.5% at 16 KiB.
+- **Refused groups.** A group longer than the transport's 4094-slice cap is refused whole, and
+  counted, for both arms alike: on classic CAN 1 KiB at N = 32 and 16 KiB at N ≥ 8, and on FD 16 KiB
+  at N = 32.
+
+This RFC draws no verdict from these figures beyond quoting them. Ruling 4's short-form question
+stays §15 Q4's.
 
 ### 8.2 Analytic, from the frame layouts
 
 These are byte counts from the layouts, with `src` empty and ungrown as RFC-0030 §8.5 requires.
-§8.1's measured bytes agree at the origin frame:
+§8.1's measured bytes agree with them at the origin frame, to within 1 B:
 
 - **Per sample.** `COMPACT` costs **10 B** of framing over the payload TLV: a 4 B header and a 6 B
   label `VALUE`. A chain `FWD{WRITE}` costs **17 B** of fixed framing (the `FWD` header, the `op`
@@ -448,7 +477,8 @@ These are byte counts from the layouts, with `src` empty and ungrown as RFC-0030
 - **NARROW** (an MCU on CAN or a constrained WebSocket link). It loses the handle store's code and
   its per-link tables, which today draw from the link's source and refuse on exhaustion. It pays
   the per-sample bytes of §8.2, which weigh most on small unbatched samples (+36% at 64 B, §8.1).
-  Whether they matter on classic CAN is #2044's question. BATCH (§5.3) and the transport's link-local compression (§5.5, stage 7) are the two
+  On classic CAN the forward leg is 19 against 13 frames per hop at 64 B unbatched, and +5.7% or
+  less with BATCH or at 1 KiB and above (§8.1, PR #2046). BATCH (§5.3) and the transport's link-local compression (§5.5, stage 7) are the two
   remedies. Both are local decisions, and neither puts state in a hop.
 - **MID** (a gateway forwarding a few streams). The forward path becomes the ordinary per-hop
   algorithm: one element consumed and one gate per frame, with no label swap and no table lookup.
@@ -474,6 +504,9 @@ exception" are deleted.
   that states §6.1's receiver rule (the counted `ERROR{tr::schema::type_mismatch}` answer on the
   arrival link). The frame layouts, the clearing rules, the concurrent-refusal
   rule and the `COMPACT` ACL paragraph are removed.
+- **§Structured TLVs** and the structured-types paragraph under **§`0x05` — RESERVED**: both
+  stop listing `0x11`–`0x13` (the route-handle frames `ADVERTISE`, `COMPACT` and `HANDLE_NACK`)
+  among the structured types.
 - **§`0x04` `qos_settings`:** the `delivery_compact` line reads `RETIRED (RFC-0032) — carried
   verbatim, read by nothing`. The `delivery_compact` paragraph is replaced by §6.2's rule.
 - **§Producer fan-out to remote subscribers:** the fan-out paragraph and its sequence diagram
@@ -489,12 +522,21 @@ exception" are deleted.
   `retired_rx` (§6.1). The misattribution of those three nouns to the RFC-0027 table is corrected
   separately by RFC-0010's §Erratum (2026-10-09), in this RFC's pull request (§6.3).
 
-### 9.3 `docs/reference/03-addressing.md`
+### 9.3 `docs/reference/01-data-format.md` (normative annex)
+
+§Handling unknown type codes gains one sentence after its bullets: "A **retired** code with a
+specific rule follows that rule instead: `0x11`–`0x13` are answered on their arrival link, counted,
+and never passed through (05-protocol-tlvs.md §retired route-handle codes,
+RFC-0032 §6.1)." Without it, the bullets "respond … if a return path exists" and "Forwarders MAY
+pass-through unmodified" would contradict §6.1 for those three codes. Every other unknown code is
+unchanged.
+
+### 9.4 `docs/reference/03-addressing.md`
 
 §path syntax, the normative part, does not change. Outside it, the slice-group key table's "Remote,
 compacted" row and the `ADVERTISE`-route mention in §One path form are removed. Both are informative.
 
-### 9.4 Informative pages, records and the glossary (#1952)
+### 9.5 Informative pages, records and the glossary (#1952)
 
 #1952 (glossary, reference pages and the perf page describe chain delivery) rewrites every
 remaining mention, per ruling 6. That covers `CONTEXT.md` (the "Delivery compaction" entry is
@@ -507,7 +549,7 @@ describe them, and the retired `compact` series are explained, not silently drop
 Accepted records are history and are not edited, apart from the status lines of the records this
 RFC amends or supersedes (§Amends, §Supersedes), which are updated at acceptance.
 
-### 9.5 Records this RFC contradicts, said explicitly
+### 9.6 Records this RFC contradicts, said explicitly
 
 - **RFC-0029 §9.2 and ruling 6** called `COMPACT` the admissible exception. This RFC withdraws
   both. The admissibility argument ("recoverable, never wrong") was correct about the frames. It is
@@ -575,7 +617,7 @@ entries in `bindings/typescript/CHANGELOG.md` (B7) and, if any Rust surface move
 | Ticket | Contents | Gate |
 | --- | --- | --- |
 | [#1951](https://github.com/avatarsd-llc/libtracer/issues/1951) (delete COMPACT, the handle tables and every remnant) | §5–§6 in the reference core and bindings: the handle store, the router's advertise, compact and NACK arms, the subscriber slot's opt-in, the `:stats` nouns, the TypeScript `CompactFlowError`; the compact tests; the `bench_compact_delivery` and handle-contention benches, their ratchet pins and perf-gate list entries; the §10 Breaking note. The counted answer and `retired_rx` of §6.1. **Merges only after this RFC is approved**, and after [#2042](https://github.com/avatarsd-llc/libtracer/issues/2042) (a forwarded PAIR write's RESULT is dropped silently at the originator) fixes the current code's empty-`src` handling. It does **not** wait for #1946 (the reply is a remote write) (ruled 2026-10-09, §15 Q5). | full core-ci matrix; symbol ratchet shows the deletion; §12.3 tests |
-| [#1952](https://github.com/avatarsd-llc/libtracer/issues/1952) (glossary, reference pages and the perf page describe chain delivery) | §9 in full, including the normative-annex edits of §9.1–§9.2 if #1951 does not carry them, and the perf page rewrite of ruling 6 | docs build (`sphinx-build -n -W`); citation gate |
+| [#1952](https://github.com/avatarsd-llc/libtracer/issues/1952) (glossary, reference pages and the perf page describe chain delivery) | §9 in full, including the normative-annex edits of §9.1–§9.3 if #1951 does not carry them, and the perf page rewrite of ruling 6 | docs build (`sphinx-build -n -W`); citation gate |
 | [#1953](https://github.com/avatarsd-llc/libtracer/issues/1953) (CAN link-local compression, private to the transport) | stage 7 under §5.5 | its own; an amendment only if it touches a normative annex |
 
 ### 12.2 Conformance vectors
@@ -620,7 +662,9 @@ deleted.
   core code.
 - **A pair-only 8-byte short form of the chain** (4 + 8·H, dropping the escape header). Deferred
   by ruling 4: it is a follow-up only if CAN frame counts show that the 3 B per element matters.
-  #2037 could not answer that, and the question is now #2044's (§8.1, §15 Q4). It would be its own amendment to the PAIR element and is not part of this RFC.
+  #2044's counts (PR #2046, in review, §8.1) put the classic-CAN forward leg at 19 against 13 frames
+  per hop for 64 B unbatched, +5.7% at N = 32 and +12% at 1 KiB. On CAN FD the forward legs are
+  within one frame. The decision is §15 Q4's. It would be its own amendment to the PAIR element and is not part of this RFC.
 - **Library-side batching** (a flush timer or a per-subscriber accumulator). Rejected. It breaks
   the no-timers rule and the no-library-buffers rule, and RFC-0025 Amendment 4 already ruled
   batching user-orchestrated.
@@ -667,8 +711,9 @@ and Q6 extended. The draft's recommendation follows each ruling.
    forward-extension path. Silence is the one forbidden behaviour (RFC-0025 §4.4), and the §7.2
    mixed path must be loud.
 4. **The pair-only short form for classic CAN. RULED 2026-10-09: as recommended, decide on the CAN
-   rows.** #2037 drew no CAN conclusion (§8.1), so the decision waits for #2044 (bench: CAN frames per
-   hop on the real CAN carriage). File a follow-up amendment only if small unbatched classic-CAN
+   rows.** #2037 drew no CAN conclusion. #2044's rows (bench: CAN frames per hop on the real CAN
+   carriage) are in PR #2046, in review, and §8.1 quotes them. The decision is the maintainer's, once
+   #2046 lands; this RFC records none. File a follow-up amendment only if small unbatched classic-CAN
    samples are a real workload and BATCH or stage 7 does not cover it.
 5. **What does #1951's merge wait for? RULED 2026-10-09: #2042, not #1946.** #1951 (delete COMPACT)
    waits for [#2042](https://github.com/avatarsd-llc/libtracer/issues/2042) (a forwarded PAIR
