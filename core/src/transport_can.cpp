@@ -155,8 +155,8 @@ can_transport_t::can_transport_t(mem::poly_ptr_t<can_link_t> link,
     if (cfg_.rx_ttl < std::chrono::milliseconds::zero()) {
         cfg_.rx_ttl = std::chrono::milliseconds::zero();
     }
-    // Resolve the slice-byte seam ONCE (#911). `nullptr` means the process heap, which
-    // is what this path used unconditionally before; resolving here rather than
+    // Resolve the slice-byte seam ONCE (#911). `nullptr` means the process net sub-pool
+    // (the static arena on an MCU build, not the heap); resolving here rather than
     // branching per slice keeps the RX path at one indirect call either way.
     rx_backend_ = cfg_.rx_backend != nullptr ? cfg_.rx_backend : &tr::mem::net_backend();
     link_->on_receive([this](const can_frame_data_t& f) { on_rx(f); });
@@ -918,7 +918,7 @@ transport_factory_t can_transport_factory(mem::block_source_t* reasm_src,
         // injected at factory-registration time instead (null = the net sub-pool).
         cfg.reasm_src = reasm_src;
         // Same reasoning one seam over (#911): the slice-byte backend is a pointer, so
-        // it rides the factory registration, not the config TLV. nullptr = process heap.
+        // it rides the factory registration, not the config TLV. nullptr = process net sub-pool.
         cfg.rx_backend = rx_backend;
         if (const auto v = reader.u32("max_groups")) cfg.max_groups = static_cast<std::size_t>(*v);
         if (const auto v = reader.u32("max_pending"))

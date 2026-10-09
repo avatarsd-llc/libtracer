@@ -413,7 +413,21 @@ class heap_backend_t final : public mem_backend_t {
     static constexpr bool owns_bytes = true; /**< @brief Owns its blocks — durably storable. */
 };
 
-/** @brief The process-wide heap backend (function-local static — no init-order trap). */
+/**
+ * @brief The process-DEFAULT per-value backend (function-local static — no init-order trap).
+ *
+ * @warning The name is historical: this is NOT "the system heap" on every build. It draws
+ *          through `detail::value_block_alloc`, so it is the host root's value sub-pool
+ *          when `config_t::kSlabPool` is `true` (a host build; the platform allocator is
+ *          asked for whole slabs only) and the static ARENA's value sub-pool when it is
+ *          `false` (an MCU build; no heap at all, and an exhausted arena refuses). An app on
+ *          an MCU that injects `heap_source()` and hands `heap_backend()` in as a fallback
+ *          therefore fills the arena, not the heap. To send values to the platform heap on
+ *          either build, wrap `heap_source()`:
+ *          `static tr::mem::source_backend_t heap_values{tr::mem::heap_source()};`
+ *          (@ref source_backend_t, one block per segment) and pass that. It must outlive every
+ * segment it served, and needs `libtracer/mem_source_backend.hpp`.
+ */
 [[nodiscard]] mem_backend_t& heap_backend() noexcept;
 
 /**

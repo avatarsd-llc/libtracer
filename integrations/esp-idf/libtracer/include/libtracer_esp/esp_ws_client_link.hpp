@@ -269,7 +269,9 @@ struct esp_ws_client_config_t {
      *
      * `io` is the send side's store: the writer's masked-frame scratch (`tx_bytes`), the
      * enqueue-then-write queue's slots and the base class's gather temporary all draw from
-     * it. `nullptr` means the process heap (`mem::heap_source()`).
+     * it. With `nullptr` the scratch and the queue slots draw from the platform heap
+     * (`mem::heap_source()`) but the gather temporary draws from the process net sub-pool
+     * (`mem::net_source()`, the static arena on this target). Pass a source to put all three on it.
      *
      * `state` is the connection-state store (#1880): the dial slot (the copies of the host,
      * URI and handshake headers every dial reads) and the read scratch (`rx_bytes`). Both

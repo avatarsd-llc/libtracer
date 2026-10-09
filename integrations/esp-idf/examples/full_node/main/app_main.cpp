@@ -252,11 +252,11 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_node_t& f) {
  * rather than a constant to trust.
  *
  * STILL not slab-bound (#588): the terminus decode ARENA draws from the router's `rx`
- * block source, which this example leaves at the default heap, as are the graph's own
- * three seams (the example default-constructs the graph). Bounding those is a separate
- * follow-on — ADR-0067 §3 wants a PER-CHILD source there rather than one shared across
- * receive threads, which is a different topology from the single shared source the
- * label plane wants. See docs/reference/09 §the second L0 seam and
+ * block source, which this example leaves at its default (the net sub-pool, the static arena on
+ * this target), as are the graph's own three seams (the example default-constructs the graph).
+ * Bounding those is a separate follow-on — ADR-0067 §3 wants a PER-CHILD source there rather than
+ * one shared across receive threads, which is a different topology from the single shared source
+ * the label plane wants. See docs/reference/09 §the second L0 seam and
  * docs/interop/esp32-production-node.md.
  */
 constexpr std::size_t kSlabBytes = 24 * 1024;
@@ -317,9 +317,9 @@ struct device_node_t {
      *
      * The synchronized pool on top recycles freed blocks and makes the resource safe for
      * the recv threads. Two things are NOT among them: the terminus arena (since #588 it
-     * draws from the router's `rx` block source, left at the default heap here) and the
-     * label tables (since #603 defect 1 they draw from `label_src` above — a pmr resource
-     * cannot report exhaustion by value, which is the whole defect).
+     * draws from the router's `rx` block source, left at its default net sub-pool, the static
+     * arena, here) and the label tables (since #603 defect 1 they draw from `label_src` above — a
+     * pmr resource cannot report exhaustion by value, which is the whole defect).
      */
     std::pmr::monotonic_buffer_resource arena{g_slab + kRxRegion + kLabelRegion,
                                               kSlabBytes - kRxRegion - kLabelRegion};

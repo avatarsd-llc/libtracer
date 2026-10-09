@@ -55,8 +55,9 @@ namespace {
  * `wire()`/`body()`, which take no arguments — and it is already a heavyweight node.
  */
 struct flatten_seam_t {
-    mem::mem_backend_t* backend = nullptr; /**< @brief Injected byte backend; null ⇒ heap. */
-    bool refused = false;                  /**< @brief A flatten was refused during this walk. */
+    mem::mem_backend_t* backend =
+        nullptr;          /**< @brief Injected byte backend; null ⇒ `heap_backend()`. */
+    bool refused = false; /**< @brief A flatten was refused during this walk. */
 };
 
 /**
@@ -222,7 +223,7 @@ class view_node {
     }
 
     /**
-     * @brief The walk's injected byte backend, or the global heap when none was injected —
+     * @brief The walk's injected byte backend, or `heap_backend()` when none was injected —
      *        public because `op_resolver_t::resolve` hands the SAME backend to `resolve_node`
      *        as its `flat` argument (#801), so the two tiers' walks take one shape.
      */
@@ -296,8 +297,8 @@ result_t<view::rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd,
     view_node root{fwd, &seam};
     // `egress` is the reply head + mint seam (#795, ADR-0074), separate from the flatten seam
     // the walk's nodes carry: it is passed straight to `resolve_node` because only the reply
-    // builders draw from it, never a node's `wire()`/`body()`. Default heap when un-injected.
-    // …and `retained` (#1610) falls back to the SAME backend this tier flattens from —
+    // builders draw from it, never a node's `wire()`/`body()`. Default `heap_backend()` when
+    // un-injected. …and `retained` (#1610) falls back to the SAME backend this tier flattens from —
     // the root segment's own — so an un-injected view-tier resolve is byte-unchanged too.
     // The acknowledgement's egress (#1658): the caller's storage first, `egress` past it. An
     // empty store places nothing, so a caller that passes none is byte-unchanged.

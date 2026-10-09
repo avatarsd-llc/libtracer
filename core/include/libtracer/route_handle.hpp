@@ -224,7 +224,8 @@ class route_handle_t {
      *        tables at @p max_bindings_per_link entries.
      *
      * A bounded node passes a `mem::pool_source_t` over its slab and the label tables live
-     * entirely in host-chosen memory; the default is the process-wide nothrow platform heap.
+     * entirely in host-chosen memory; the default is the process net sub-pool (`mem::net_source()`;
+     * the static arena on an MCU build).
      * @p src must outlive this object, and must be thread-safe if more than one transport
      * receive thread can reach this store (the RFC-0014 wire-driven paths do).
      *

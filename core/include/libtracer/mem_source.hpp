@@ -267,10 +267,11 @@ class heap_source_t final : public block_source_t {
      * @brief The platform-heap acquisition arm as a FREE, non-virtual entry point (#873 phase 3).
      *
      * The same two arms @ref try_alloc dispatches, callable without an object and therefore
-     * without a virtual call. It exists so that the one in-tree @ref mem_backend_t that still
-     * acquires its bytes from the platform heap — @ref heap_backend_t — can express that
+     * without a virtual call. It exists so that the in-tree @ref mem_backend_t that once
+     * acquired its bytes from the platform heap — @ref heap_backend_t — expressed that
      * acquisition **on the substrate** rather than on a second, independently-spelled
-     * platform-heap pair. Phase 3's re-layering is a layering claim, not a new indirection:
+     * platform-heap pair (it now draws from the value sub-pool; see @ref heap_backend). Phase 3's
+     * re-layering is a layering claim, not a new indirection:
      * @ref heap_backend_t is the process default and sits on the hottest allocation path in the
      * library, so routing it through a `block_source_t&` would have bought no bounding (a
      * deployer who wants bounding injects a source and gets @ref source_backend_t) at the cost

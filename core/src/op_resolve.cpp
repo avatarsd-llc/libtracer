@@ -33,10 +33,10 @@ result_t<view::rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, const inbo
     // this tier: an arena span is borrowed and cannot be shortened by a refusal, so the copy
     // answers by value through the empty view (see `arena_node::spans_intact`).
     // `egress` is the reply head + mint seam (#795, ADR-0074), injected alongside `flat`; the
-    // default is the global heap, so an un-injected span-tier resolve is byte-unchanged.
-    // `retained` is the subscription-scoped seam (#1610): the SUBSCRIBER TLV and the ONE
-    // route copy of a remote subscribe's life. Un-injected it IS `flat`, which is where
-    // both have always been taken, so this resolve stays byte-unchanged.
+    // default is `heap_backend()` (host slab pool or MCU arena), so an un-injected span-tier
+    // resolve is byte-unchanged. `retained` is the subscription-scoped seam (#1610): the SUBSCRIBER
+    // TLV and the ONE route copy of a remote subscribe's life. Un-injected it IS `flat`, which is
+    // where both have always been taken, so this resolve stays byte-unchanged.
     mem::mem_backend_t& flat_be = flat_ != nullptr ? *flat_ : mem::heap_backend();
     // The acknowledgement's egress (#1658): the caller's storage first, `egress` past it. An
     // empty store places nothing, so a caller that passes none is byte-unchanged.

@@ -14,6 +14,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **Docs: `heap_backend()` and a null `memory.io` no longer promise "the heap"
+  ([#2051](https://github.com/avatarsd-llc/libtracer/issues/2051)).** On a build with
+  `kSlabPool = false` they draw from the static arena, not the platform heap. No behaviour
+  change and no rename; the declaration, the allocation reference and the transport comments
+  now say so, and show `source_backend_t` over `heap_source()` as the way to reach the real heap.
+
 ### Fixed
 
 - **`graph_t`: recheck vertex registration after the terminus access check.** An operation

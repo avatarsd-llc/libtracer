@@ -32,8 +32,8 @@ rather than a throw
 [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
 
 The corollary a deployer must internalise: **libtracer will not choose the pressure point for
-you.** Every seam defaults to the process heap (on a host, through the slab pool's value, table
-and net sub-pools, #1777), so an unwired build is all-heap and has no designated point at all —
+you.** Every seam defaults to the process default root (on a host, the slab pool's value, table
+and net sub-pools, #1777; on an MCU build, the static arena, #1783), so an unwired build has no designated point at all —
 the bottleneck is then wherever the platform's allocator happens to give out. Choosing is the deployment's job
 ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md):
 no composition is the default, policy stays with the deployer).
@@ -605,8 +605,8 @@ The standing rulings this guide must not be read as licence to violate.
   configuration — never a hardcoded magic constant ([CONTEXT.md](../../CONTEXT.md) §Resource
   bound). "Cap it at 32" is not a fix; "size the slab it draws from" is.
 - **No library-chosen capacities.** Policy stays with the deployer, and *no composition is the
-  default* — every injection seam defaults to the platform heap so an unwired build is all-heap
-  and behaves identically
+  default* — every injection seam defaults to the process default root (slab pool on a host, static arena on an MCU) so an unwired build
+  behaves identically
   ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)).
   A "sensible default bound" added inside the library is a bottleneck nobody chose.
 - **The producer never queues for a slow consumer; the receiver pays.** Depth belongs to the
