@@ -640,7 +640,12 @@ Details that make these trustworthy:
   to run (their timed legs hold a x3 backstop for the same reason). Replayed over nine layouts of
   one source (default and eight shuffled link orders, ten rounds on the bench CPUs, 216 gate
   sessions), these rows gave no false fail, the instruction count gave none in all 72 ordered
-  layout pairs, and ten injected extra instructions (+9.6%) failed all 48 sizes. A host with no hardware counter emits no rows and the gate says the ratchet did not run, except on the self-hosted bench runner, where `perf.yml` sets `PERF_GATE_REQUIRE_INSTR=1` and a missing counter fails the gate.
+  layout pairs, and ten injected extra instructions (+9.6%) failed all 48 sizes. The copy-store rows `lkv-store-heap/64`, `lkv-store-heap/1024` and `lkv-store-pool/64` take the same mechanism
+  ([#2039](https://github.com/avatarsd-llc/libtracer/issues/2039)): on unchanged source they false-failed 7-24 of
+  216 replay sessions each. `bench_forward_heap` counts the instructions of one two-link `rope_t::materialize`
+  (backend alloc, payload copy, free) as `RESULT instr-store B=<heap|pool> S=<size>`: 256, 292 and 243 instructions,
+  identical on all nine layouts, and the gate fails a row more than 2% and two instructions over main. Their 16 KiB
+  twins are copy-dominated and stay on the null. Replaying the nine layouts of one source (216 gate sessions) with the banked null, the three rows false-failed 20, 24 and 7 sessions; with the instruction gate and the x1.5 timed backstop they false-fail none, and an injected +9-11% of instructions (26 added instructions on the store path) fails all three rows on every layout. A host with no hardware counter emits no rows and the gate says the ratchet did not run, except on the self-hosted bench runner, where `perf.yml` sets `PERF_GATE_REQUIRE_INSTR=1` and a missing counter fails the gate.
 
   **What this gives up.** The count is of user-mode instructions only. A slowdown that adds none
   (kernel work, since kernel mode is excluded, cache misses, an atomic or fence in place of a
@@ -650,6 +655,11 @@ Details that make these trustworthy:
   than main by the same-size rule, which is x1.5 for `cliff-alloc-heap`, so one up to x1.5 slower
   passes (the test fixture for a slower right-hand row moved from x1.31 to x1.59 of main for that
   reason; the pool family keeps the x1.31 fixture). The exact segment-draw ratchet is unaffected.
+  The same holds for the three copy-store rows: a slowdown that adds no user-mode instruction (cache or
+  page behaviour in the copy, a slower kernel path, an atomic in place of a plain store) passes up to x1.5
+  on `lkv-store-heap/64`, `lkv-store-heap/1024` and `lkv-store-pool/64`, where before it was held at the flat 15%
+  or the null. The payload copy is `memcpy`, whose instruction count does not follow its time at 1 KiB, so a
+  copy that gets slower per byte is seen only by the backstop.
   **Stated blind spot:** at 65584 B (past the last size class) there is no instruction row and the
   time backstop is x3, so #2030's criterion 2 (a real extra-instructions regression must fail) is
   not met at that size.

@@ -94,8 +94,10 @@
 #include "instr_count.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/mem_pool.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
+#include "libtracer/rope.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
@@ -779,6 +781,53 @@ void instr_rows() {
     }
 }
 
+/**
+ * @brief Instructions per copy-store (`rope_t::materialize`) at 64 B and 1 KiB on the heap
+ *        backend and 64 B on a pool: `RESULT instr-store B=<heap|pool> S=<size> x100=<n>` (#2039).
+ *
+ * These are the operations the timed `lkv-store-heap/64`, `lkv-store-heap/1024` and
+ * `lkv-store-pool/64` rows run (a two-link borrowed rope forces the flatten: one backend
+ * alloc, one payload copy, one free), at 10-60 ns, where code placement alone false-failed
+ * them in 7-24 of 216 replay sessions. Measured as @ref instr_rows measures a pair: the smallest
+ * of five 4096-op windows after a warm one.
+ */
+void instr_store_rows() {
+    bench::instr_counter_t counter;
+    if (!counter.available()) return;  // instr_rows already said so
+    constexpr std::size_t kSlot = 2048, kSlots = 8, kOps = 4096, kWindows = 5;
+    constexpr std::size_t kSlabBytes = kSlots * (sizeof(tr::view::segment_t) + kSlot + 64);
+    alignas(64) static std::byte slab[kSlabBytes];
+    tr::mem::pool_t pool(std::span<std::byte>(slab, kSlabBytes), kSlot, 64);
+    struct arm_t {
+        const char* name;
+        tr::mem::mem_backend_t* backend;
+        std::size_t size;
+    };
+    const arm_t arms[] = {{"heap", &tr::mem::heap_backend(), 64},
+                          {"heap", &tr::mem::heap_backend(), 1024},
+                          {"pool", &pool, 64}};
+    for (const arm_t& arm : arms) {
+        const std::size_t size = arm.size;
+        std::vector<std::byte> a(size - size / 2, std::byte{0xAB});
+        std::vector<std::byte> b(size / 2, std::byte{0xCD});
+        tr::view::rope_t src{tr::view::view_t::over(tr::view::borrow_const(a))};
+        src.append(tr::view::view_t::over(tr::view::borrow_const(b)));
+        std::uint64_t best = ~std::uint64_t{0};
+        for (std::size_t w = 0; w <= kWindows; ++w) {  // window 0 is the warm-up
+            counter.start();
+            for (std::size_t i = 0; i < kOps; ++i) {
+                const tr::view::view_t flat = src.materialize(*arm.backend);
+                bench::do_not_optimize(flat);
+            }
+            const std::uint64_t n = counter.stop();
+            if (w != 0 && n != 0 && n < best) best = n;
+        }
+        if (best == ~std::uint64_t{0}) continue;
+        std::printf("RESULT instr-store B=%s S=%zu x100=%llu\n", arm.name, size,
+                    static_cast<unsigned long long>(best * 100 / kOps));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1279,6 +1328,7 @@ int main() {
         }
     }
 
+    instr_store_rows();   // the copy-store rows' instruction counts (#2039)
     instr_rows();         // the allocator rows's instruction counts (#2030)
     segment_draw_rows();  // the cliff family's exact counts (#1806); gated by perf_gate.py
     // RAM per edge, per link and per 1 KiB value, blocks per write, and the STREAM write's
