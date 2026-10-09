@@ -285,6 +285,12 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "re-subscribe.",
         "ns per write · deliveries/s · ns per switch"),
     instrument_t(
+        "bench_subscription_selector.cpp", "inproc", (),
+        "Switches a subscription selector between two options at fan-out 1, 32 and 1024, "
+        "through the host API and through the `active` field write, and writes to a producer "
+        "whose delivering edges stand beside a selector's suspended ones, swept over payload size.",
+        "ns per switch · ns per write · deliveries/s"),
+    instrument_t(
         "bench_originate.cpp", "framed", (),
         "Drives the node that *starts* a remote operation: no inbound frame to read an address "
         "out of, so it encodes the `dst` and `src` PATHs from scratch, measured against the "

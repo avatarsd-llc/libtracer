@@ -2923,3 +2923,10 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(injected_scratch_test)
     add_test(NAME injected_scratch COMMAND injected_scratch_test)
 endif()
+
+# #2024 — the subscription selector (an adapter header beside the core): switching, the field
+# surface, refused switches under memory pressure, dangling refs, teardown, the creator door.
+add_executable(subscription_selector_test subscription_selector_test.cpp)
+target_link_libraries(subscription_selector_test PRIVATE libtracer)
+libtracer_test_warnings(subscription_selector_test)
+add_test(NAME subscription_selector COMMAND subscription_selector_test)

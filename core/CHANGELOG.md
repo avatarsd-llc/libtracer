@@ -49,6 +49,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - In-process API only: the `:subscribers[N]` wire spelling is
     [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019). A `subscription_t` carries
     no generation (#1932), so a stale handle whose slot was reused names the new edge.
+- **`subscription_selector_t`: a vertex that switches among named options of subscription refs
+  ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** A header-only adapter
+  beside the core (`libtracer/subscription_selector.hpp`): a build that does not include it
+  carries none of it. The owner lists existing subscriptions under named options with `add`
+  and switches with `select`, or with a write of `NAME <option>` to the instance's
+  `:settings.app.active` field (an empty `STATUS` selects none); `:settings.app.options` reads
+  back every option and ref as RFC-0033 spells it. A switch suspends the refs only the old option
+  lists, then resumes the ones only the new option lists, through `graph_t::set_suspended`:
+  no unsubscribe or re-subscribe, no frame, no draw, and never a double delivery. A resume that
+  answers `BACKPRESSURE` fails the switch with `BACKPRESSURE`, leaves the new option active and
+  `settled()` false, and selecting it again retries. A ref whose subscription is gone is listed
+  `inert` and skipped; nothing removes it. The selector never creates or deletes a subscription
+  and persists nothing. Its tables are fixed arrays sized by the template (`<64, 16>` by default,
+  2416 B on LP64). An instance is created through a creation hook with `attach(child_key)`.
+- **`graph_t::subscription_at` / `graph_t::subscription_address`: a subscription by its wire
+  address ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** `subscription_at`
+  hands back a `subscription_t` for any active `:subscribers[N]` slot, however the edge was
+  admitted (target-form, field write, a peer's subscribe), so `set_suspended` and a selector
+  reach it; `NOT_FOUND` for an inactive slot. `subscription_address` renders the producer's
+  PATH key and the slot a handle stands for, without handing out the vertex. Neither draws
+  from the heap; the slot-reuse caveat of `set_suspended` (#1932) applies to both.
 
 ### Changed
 
