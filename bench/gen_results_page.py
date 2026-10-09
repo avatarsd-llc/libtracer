@@ -298,6 +298,12 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "whose delivering edges stand beside a selector's suspended ones, swept over payload size.",
         "ns per switch · ns per write · deliveries/s"),
     instrument_t(
+        "bench_admission_gate.cpp", "inproc", (),
+        "Times a write through an `on_admit` filter and through a payload-right table, 64 B "
+        "to 16 KiB, with and without re-registration churn at a sibling address: the "
+        "declaration gate's walk stays flat under churn. A diagnostic, not a gate.",
+        "ns/op · ns p50 / p99 · churn bytes"),
+    instrument_t(
         "bench_chain_vs_compact.cpp", "framed", (),
         "Stream delivery over the RFC-0029 PAIR chain at 1 and 3 hops, 64 B to 16 KiB, "
         "unbatched and with BATCH, with the reply leg priced separately. A report, not a gate.",
