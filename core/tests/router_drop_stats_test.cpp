@@ -42,7 +42,6 @@
 
 #include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -227,18 +226,10 @@ std::vector<std::byte> b_field_subscribers_append() {
     return out;
 }
 
-/** @brief `SUBSCRIBER{ PATH target, SETTINGS qos{ NAME "delivery_compact" VALUE u8 } }`. */
-std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool compact) {
-    std::vector<std::byte> body;
-    append(body, target);
-    std::vector<std::byte> qos;
-    append(qos, b_name("delivery_compact"));
-    append(qos, b_value_u8(compact ? 1 : 0));
-    std::vector<std::byte> settings;
-    tr::wire::emit_tlv(settings, type_t::SETTINGS, opt_t{.pl = true}, qos);
-    append(body, settings);
+/** @brief `SUBSCRIBER{ PATH target }`. */
+std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target) {
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, target);
     return out;
 }
 
@@ -497,7 +488,7 @@ void test_delivery_draws_nothing_from_the_source() {
         g.register_vertex(*path_t::parse("/sensor/quiet"), role_t::STORED_VALUE);
     router.on_frame("client",
                     b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
-                          b_field_subscribers_append(), b_subscriber(b_path({"client"}), false)));
+                          b_field_subscribers_append(), b_subscriber(b_path({"client"}))));
     // Warm both vertices so a first-write setup draw cannot skew the comparison below.
     (void)g.write(feed, as_rope(b_value_u32(0x01010101u), 1));
     (void)g.write(quiet, as_rope(b_value_u32(0x01010101u), 1));
@@ -540,54 +531,6 @@ void test_delivery_draws_nothing_from_the_source() {
           "counting nothing for the delivery that succeeded");
 }
 
-// --- the 16-bit label space (finding 3) ------------------------------------------------
-
-/**
- * @brief `labels_used` reports used-polarity occupancy, and exhaustion is counted.
- *
- * The degrade #1491 showed matters: a caller handed `0` falls back to the full-route form,
- * which REPLIES per frame. Before this counter the only evidence was the throughput drop.
- *
- * `refused_bindings` must NOT move here, and that is a ruling and not an accident: the two
- * mean different things to an operator (size the table up vs reconnect the link), so
- * §5's "one event, one counter" cuts BETWEEN them rather than through them.
- */
-void test_label_space_occupancy_and_exhaustion() {
-    std::printf("route_handle_t reports labels_used and counts label-space exhaustion:\n");
-    tr::net::route_handle_t handles(&tr::mem::heap_source());
-
-    check(handles.labels_used("up") == 0, "a link with no state has spent no labels");
-    check(handles.labels_exhausted() == 0, "and nothing is exhausted");
-
-    check(handles.alloc_label("up") == 1, "the first label is 1 (0 is the reserved \"none\")");
-    check(handles.labels_used("up") == 1, "and one label is spent");
-    check(handles.alloc_label("up") == 2, "the allocator is monotonic");
-    check(handles.labels_used("up") == 2, "used-polarity, so it RISES");
-    check(handles.labels_used("down") == 0, "and the space is PER-LINK — another link is at 0");
-
-    // Drain the space. 65535 mints, then the saturation the wire's 16 bits force.
-    while (handles.alloc_label("up") != 0) {
-    }
-    check(handles.labels_used("up") == 0xFFFFu, "a spent space reports the full 65535 used");
-    check(handles.labels_exhausted() == 1, "and the first refusal is counted");
-    check(handles.refused_bindings() == 0,
-          "refused_bindings did NOT move — a spent wire space is not a table at its bound");
-
-    (void)handles.alloc_label("up");
-    check(handles.labels_exhausted() == 2, "every subsequent refusal counts too (it is sticky)");
-
-    // The positive control: the space is per-link and a fresh link is unaffected, so the
-    // counter above cannot be a global that any mint bumps.
-    check(handles.alloc_label("down") == 1, "another link still mints from 1");
-    check(handles.labels_exhausted() == 2, "and a SERVED mint counts nothing");
-
-    // clear_link restores the whole space — the self-heal a reconnect already performs.
-    handles.clear_link("up");
-    check(handles.labels_used("up") == 0, "clear_link restores the link's whole space");
-    check(handles.alloc_label("up") == 1, "and mints from 1 again");
-    check(handles.labels_exhausted() == 2, "the historical count is monotonic, never reset");
-}
-
 }  // namespace
 
 int main() {
@@ -610,7 +553,6 @@ int main() {
     std::printf("\n");
     test_delivery_draws_nothing_from_the_source();
     std::printf("\n");
-    test_label_space_occupancy_and_exhaustion();
 
     return tr::testing::summary("router_drop_stats");
 }

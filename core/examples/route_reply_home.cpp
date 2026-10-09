@@ -19,8 +19,7 @@
  * That is the other half of the statelessness in route_multi_hop. A forwarder with a request
  * table would need an entry per in-flight request, a timeout to reap it, and a policy for what
  * happens when it overflows. Carrying the return route instead costs bytes on the wire and
- * nothing on the hop — and it is exactly the cost the route-handle label plane buys back for
- * flows that repeat (route_label_compact).
+ * nothing on the hop.
  *
  * The reply terminates where `dst` runs out of route segments that name a child: at the origin,
  * whose `on_reply` sink fires (ADR-0055 — rope-native, no decode and no flatten in the router).
@@ -185,10 +184,6 @@ int main() {
     }
     check(ok, is_result, "and it is kind=RESULT, carrying the value the terminus read");
 
-    check(ok, router_o.handles().ingress_count() == 0 && router_b.handles().ingress_count() == 0,
-          "neither node stored anything to make the round trip work");
-
-    std::printf("request src /app -> reply dst /app; %zu correlation entries anywhere\n",
-                router_o.handles().ingress_count() + router_b.handles().ingress_count());
+    std::printf("request src /app -> reply dst /app; no correlation entry anywhere\n");
     return ok ? 0 : 1;
 }

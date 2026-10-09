@@ -79,7 +79,7 @@ BENCH_FWD = HERE / "build" / "bench_forward_heap"
 # into the same shape there (#1869).
 BENCH_BY_KEY = {
     "main": "bench_libtracer",
-    "compact": "bench_compact_delivery",
+    "chain": "bench_chain_delivery",
     "demux": "bench_forward_demux",
     "store": "bench_store_sweep",
 }
@@ -202,7 +202,7 @@ DEFAULT_TIER = "advisory"
 #   inproc-target-{handler,stored} @ fan 8 — the path-target dispatch legs
 #   eptype-stream           — the STREAM role's bounded-history retention leg
 #   the 16 KiB ladder rows  — inproc, inproc-borrow, lkv-store-{heap,pool}, eptype-stream,
-#                             compact-forward and fwd-demux-value at 16384 B (#1806)
+#                             chain-forward and fwd-demux-value at 16384 B (#1806)
 #
 # The 16 KiB rows are there because before #1806 no gated family had a payload above 8 KiB,
 # and the standing rule is that every perf report tracks values above 1 KiB. One size per
@@ -211,8 +211,8 @@ DEFAULT_TIER = "advisory"
 # so a gated row there would sit on a designed step; 16 KiB is clearly past it on every path.
 # Every ladder size, the 16 KiB one included, has a line on a size-axis chart of the
 # Performance page (`render_history.FAMILIES`: payload, borrow-payload, eptype-stream-payload,
-# lkv, compact-forward, demux-value); only the 16 KiB row is gated. Like the other `main`
-# rows these cost no extra process: the default sweep emits them. The compact and demux rows run at a quarter of their
+# lkv, chain-forward, demux-value); only the 16 KiB row is gated. Like the other `main`
+# rows these cost no extra process: the default sweep emits them. The chain and demux rows run at a quarter of their
 # binary's budget, as all their ladder rows do.
 #
 # `eptype-stream` is gated and its two siblings are NOT, and the asymmetry is the whole
@@ -311,8 +311,10 @@ POINTS = [
     ("main", "inproc-target-handler", 64, 8, 1),
     ("main", "inproc-target-stored", 64, 8, 1),
     ("main", "eptype-stream", 64, 1, 1),
-    ("compact", "compact-forward", 64, 1, 1),
-    ("compact", "compact-terminus", 64, 1, 1),
+    # The stream-delivery pair (#1951): the PAIR-chain form every stream delivery takes since
+    # COMPACT was retired, forwarded one hop and resolved at its terminus.
+    ("chain", "chain-forward", 64, 1, 1),
+    ("chain", "chain-terminus", 64, 1, 1),
     # Keyed by the frame the bench EMITS (`frame.size()`): 61 B since RFC-0018's packed
     # PATH records (1fe92124). They were keyed 79 for seven weeks after that and silently
     # matched nothing, which is why a key the candidate does not emit now fails (#1847).
@@ -325,7 +327,7 @@ POINTS = [
     ("main", "lkv-store-heap", 16384, 1, 1),
     ("main", "lkv-store-pool", 16384, 1, 1),
     ("main", "eptype-stream", 16384, 1, 1),
-    ("compact", "compact-forward", 16384, 1, 1),
+    ("chain", "chain-forward", 16384, 1, 1),
     ("demux", "fwd-demux-value", 16384, 1, 1),
     # MULTI-threaded rows (#1803): each family timed on every bench CPU and judged on
     # foreign CPU time only (see HOW THE GATE TIMES THE FAMILIES). T=4 because the gate's
@@ -1952,8 +1954,8 @@ def main() -> int:
     base_bench = _opt(args, "--baseline-bench", None)
     base_fwd = _opt(args, "--baseline-bench-fwd", None)
     # The sibling binaries live beside the one named by --bench, so a caller that points
-    # the gate at a baseline BUILD DIRECTORY gets that build's compact/demux arms too —
-    # rather than silently comparing a candidate's compact binary against the candidate's.
+    # the gate at a baseline BUILD DIRECTORY gets that build's chain/demux arms too —
+    # rather than silently comparing a candidate's chain binary against the candidate's.
     cand_bins = _siblings(bench)
     base_bins = _siblings(base_bench) if base_bench is not None else None
 

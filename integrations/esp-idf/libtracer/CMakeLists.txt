@@ -6,7 +6,7 @@
 # The sources live in the repo's core/; this component pulls them in so an
 # ESP-IDF project can depend on libtracer through the component manager. It
 # packages the FULL NODE (#183): the wire codec, the L0/L1 substrate, the L4
-# graph runtime, AND the net plane — fwd_router / op_resolve / route_handle /
+# graph runtime, AND the net plane — fwd_router / op_resolve /
 # transport_vertex (child_registry is header-only) plus the socket transports
 # (udp / tcp over lwIP BSD sockets), loopback, and transport_can with the
 # ESP TWAI can_link_t (twai_link.cpp, this directory). WebSocket on a chip target

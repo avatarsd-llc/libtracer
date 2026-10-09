@@ -7,6 +7,13 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING — `CompactFlowError` is gone** (#1951, RFC-0032). ADVERTISE (`0x11`), COMPACT
+  (`0x12`) and HANDLE_NACK (`0x13`) are retired codes, so the client no longer raises a special
+  error for them: an inbound frame carrying one is an unknown frame like any other and
+  delivers nothing. **Migration:** drop any `instanceof CompactFlowError` check.
+
 ## [0.19.0] — 2026-10-09
 
 No TypeScript-binding API changes. The `FwdRequest.awaitTimeoutNs` doc comment now says the AWAIT deadline is the requester's own and `awaitTimeoutNs` is a hint (#1873); docs only. Released in lockstep with core.

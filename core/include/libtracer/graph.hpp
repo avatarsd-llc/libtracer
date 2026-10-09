@@ -77,11 +77,9 @@ class graph_t;
  * @brief What the producer fan-out hands a remote subscriber's delivery sink (#136).
  *
  * A pure description of one remote subscription edge: the consumer's accumulated
- * return route and this node's NAME for the link it arrived on, both opaque to L4,
- * plus the `vertex_t::subscriber_t` delivery_compact opt-in. The injected sink
- * (a `tr::net` concern — @ref graph_hooks_t::remote_delivery) interprets these:
- * it maps @ref link to a transport child and emits a full-route `FWD{WRITE}` or,
- * when @ref delivery_compact, an auto-promoted label `COMPACT` (RFC-0004 §D/§E.1).
+ * return route and this node's NAME for the link it arrived on, both opaque to L4. The
+ * injected sink (a `tr::net` concern — @ref graph_hooks_t::remote_delivery) interprets
+ * these: it maps @ref link to a transport child and emits a `FWD{WRITE}` (RFC-0004 §D).
  * @ref link is borrowed for the sink call only; @ref return_route is a refcount
  * clone of the stored route segment (ADR-0041 §2) — the sink may rope it into an
  * egress frame, and it stays alive across a concurrent unsubscribe.
@@ -96,7 +94,6 @@ struct remote_delivery_t {
     /** @brief The edge's stored ACL fan-in context (#81) — the subject the sink's local
      *         element-0 consumption re-checks §6.2 under. */
     std::string_view caller;
-    bool delivery_compact = false; /**< @brief Opt-in to label-compacted delivery. */
 };
 
 /**
@@ -1474,7 +1471,7 @@ class graph_t {
      * status: a link with no name never subscribed anything. It is a rule, not a
      * coincidence of the comparison — a LOCAL admission stores the empty caller
      * context, so before #1056 an empty key compared equal to every local edge that
-     * carried a cold half (the `delivery_compact` opt-in) and reclaimed it graph-wide.
+     * carried a cold half and reclaimed it graph-wide.
      * @param link_name This node's NAME for the departed link; empty ⇒ no-op, 0.
      * @return The number of edges evicted, summed over the graph.
      */
@@ -2448,8 +2445,8 @@ class graph_t {
      *
      * Called by the FWD resolver on an inbound `:subscribers[]` WRITE (#59/#136); it
      * replaces the retired `add_remote_subscriber` parallel API. @p source_view (the
-     * SUBSCRIBER TLV, an owned copy) is parsed ONCE here — the `delivery_compact` opt-in
-     * comes from this parse (the resolver no longer parses it in parallel) and the view is
+     * SUBSCRIBER TLV, an owned copy) is parsed ONCE here — the delivery policy comes from
+     * this parse (the resolver no longer parses it in parallel) and the view is
      * retained zero-copy so a `:subscribers[]` read serves it back. A PATH child, if
      * present, names the consumer at ITS origin and is deliberately NOT bound as a local
      * re-dispatch target — remote delivery rides @p return_route (a view over a refcounted
@@ -3402,7 +3399,7 @@ class graph_t {
     // (owned by its parent's container via unique_ptr, never moved) AND never destroyed
     // while the graph lives. Implementing vertex retirement (the ADR "retire-LIST") must
     // NOT be a bare detach-from-parent — that would dangle every outstanding handle (the
-    // route_handle clear_link dangling-ref class, fixed in #220); it needs a vertex
+    // dangling-ref class #220 fixed); it needs a vertex
     // lifetime scheme (refcount / epoch reclamation, or a tombstone) first. Registering
     // the empty key fills this node in place (the "root vertex" the flat map allowed).
 

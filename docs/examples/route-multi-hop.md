@@ -7,8 +7,8 @@ same test, and the route consumes itself as it travels
 ([ADR-0040](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0040-net-plane-is-explicit-source-routed-only.md)).
 
 The check that matters is the negative one. After the write has crossed B, B's routing plane
-holds exactly what it held before: zero label bindings, zero link shells, the same
-receiver-context count. That bounds a forwarder's memory by its **topology** (how many links it
+holds exactly what it held before: the same receiver-context count, and no per-flow store
+exists for it to have written to. That bounds a forwarder's memory by its **topology** (how many links it
 has) rather than by its **traffic** (how many flows cross it) — the reason a 16 KB node can be a
 forwarder at all.
 
@@ -27,8 +27,7 @@ forwarder at all.
 - **The names are private.** `b` means something only to A and `c` means something only to B.
   `/b/c/sensor/temp` is the composition, spelled by whoever holds both mounts.
 - **Statelessness is a choice with a price, and the price is on the wire.** Every frame
-  re-carries its route. [The label plane](route-label-compact.md) is what buys that back for
-  flows that repeat — deliberately, per flow, and only when someone asks.
+  re-carries its route, and no hop keeps anything per flow to shorten it.
 - **This target needs the FWD net plane.** It is built only when `LIBTRACER_NET_PLANE` is on
   (the default). Nothing in it is conditional at run time.
 

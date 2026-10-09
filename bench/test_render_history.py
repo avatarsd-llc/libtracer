@@ -223,7 +223,7 @@ class LadderFamiliesAreCharted(_NoGit):
     def test_each_family_has_a_line_per_size(self):
         modes = {"eptype-stream-payload": "eptype-stream", "demux-value": "fwd-demux-value",
                  "cliff-heap": "cliff-alloc-heap", "cliff-pool": "cliff-alloc-pool",
-                 "compact-forward": "compact-forward", "borrow-payload": "inproc-borrow",
+                 "chain-forward": "chain-forward", "borrow-payload": "inproc-borrow",
                  "payload": "inproc"}
         benches = [{"name": f"{mode} {size}B/fan1/1ep p50 latency", "value": 10.0 + size / 64,
                     "unit": "ns", "extra": "h"}

@@ -129,7 +129,7 @@ inline constexpr arm_t kArms[] = {arm_t::H_BASELINE, arm_t::WIDE, arm_t::MID, ar
  * @brief Receive-thread counts the fan-out arm sweeps.
  *
  * Fixed rather than clamped to `hardware_concurrency`, exactly as `bench_rx_source_topology`
- * and `bench_route_handle_contention` do: ADR-0079 §Verification asks the sweep to "bracket
+ * does: ADR-0079 §Verification asks the sweep to "bracket
  * the thread counts that matter (single-thread MCU shape AND >= T where WIDE diverges)", and a
  * ladder that shrinks on a small runner brackets neither reproducibly.
  */

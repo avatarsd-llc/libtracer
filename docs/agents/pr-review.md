@@ -382,7 +382,7 @@ yourself**; CI already did.
 | Formatting | `clang-format-18 --dry-run --Werror` over the paths `core-ci.yml`'s format step lists — **version 18** (CI runs 18.1.3); another major version reformats untouched files | no |
 | Public-header docs gate | Doxygen with `core/Doxyfile` (`WARN_AS_ERROR=YES`) | no |
 | Doc citations (`doc-citations`) | `python3 tools/check_doc_citations.py` — fails on a symbol citation that is gone or ambiguous, and on any line-number citation in a living doc | no |
-| Symbol-size ratchet (`symbol-ratchet`) | `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer bench_compact_delivery -j && python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json` — toolchain-bound, so a local number is not CI's | no |
+| Symbol-size ratchet (`symbol-ratchet`) | `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer bench_chain_delivery -j && python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json` — toolchain-bound, so a local number is not CI's | no |
 | Perf gate (`perf`, path-filtered to `core/`, `bench/`, `docs/methodology.md`) | `gate-pr` in `.github/workflows/perf.yml`: a same-runner interleaved A/B against `main` via `bench/perf_gate.py`; a contributor does not reproduce it locally | no |
 | Docs build (`docs`) | `sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html` after `doxygen core/Doxyfile`; a Doxygen autolink inside backticks breaks `-n -W` — escape it with `%` | no |
 | Cortex-M0 footprint sentinel | the `sentinel` job in `.github/workflows/footprint-cortexm0.yml` (needs `arm-none-eabi`) | no |

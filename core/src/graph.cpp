@@ -2013,8 +2013,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
             remote_delivery_t{.link = r->link,
                               .return_route = r->return_route,
                               .reverse_route = r->reverse_route,
-                              .caller = r->caller,
-                              .delivery_compact = r->delivery_compact},
+                              .caller = r->caller},
             value);
 }
 
@@ -3543,8 +3542,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     if (return_route.empty()) return std::unexpected(status_t::INVALID_PATH);
     // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) through the door parse every subscriber
     // door shares (#869): decode, type check, parse, and the zero-copy retain the slot keeps.
-    // delivery_compact comes from this parse (the resolver's parallel subscriber_compact() is
-    // retired).
+    // The delivery policy comes from this parse (the resolver's parallel parse is retired).
     subscriber_t s;
     if (const auto parsed = parse_wire_subscriber(source_view, s, *tables_); !parsed)
         return std::unexpected(parsed.error());

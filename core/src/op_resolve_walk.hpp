@@ -873,7 +873,7 @@ template <class N, class ReplyError>
             }
             // ADR-0049: the wire append enters the graph's single admission door
             // (subscribe_wire → admit_subscriber) — the SUBSCRIBER TLV is parsed
-            // ONCE there (delivery_compact included), so no parallel parse here.
+            // ONCE there (delivery policy included), so no parallel parse here.
             // The link is WHERE this edge delivers; the subject is WHO subscribed
             // (ADR-0082). They are the same string for every caller that supplied no
             // peer handle, and differ exactly when the terminus derived a per-writer

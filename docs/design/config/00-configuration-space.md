@@ -99,7 +99,7 @@ full node.
 
 | CMake option | module | ESP-IDF counterpart | what dropping it removes |
 | --- | --- | --- | --- |
-| `LIBTRACER_NET_PLANE` | FWD routing plane (`op_resolve`, `route_handle`, `fwd_router`, `transport_vertex`) | none — the component has no counterpart | inter-node forwarding; a pure in-process graph still works |
+| `LIBTRACER_NET_PLANE` | FWD routing plane (`op_resolve`, `fwd_router`, `transport_vertex`) | none — the component has no counterpart | inter-node forwarding; a pure in-process graph still works |
 | `LIBTRACER_TRANSPORT_TCP` | `tcp_transport_t` | `CONFIG_LIBTRACER_TRANSPORT_TCP` | — |
 | `LIBTRACER_TRANSPORT_UDP` | `udp_transport_t` | `CONFIG_LIBTRACER_TRANSPORT_UDP` | — |
 | `LIBTRACER_TRANSPORT_WS` | `transport_ws_*` | `CONFIG_LIBTRACER_TRANSPORT_WS` — selects a *different implementation* on chips (see below) | — |

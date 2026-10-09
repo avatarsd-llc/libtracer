@@ -19,9 +19,10 @@
  * upstream so the slab IS the cap and there is no global heap to fall back to:
  *
  *  - the NET plane's store is `fwd_router_t`'s injected `label_src`/`rx` — the `#603` /
- *    `fe6adcd6` seam. It is drained by a peer-shaped flood of `ADVERTISE` frames fed through
- *    the public `on_frame` door, which is exactly the pre-ACL, receive-thread path #603 was
- *    filed against;
+ *    `fe6adcd6` seam. It is drained by a peer-shaped flood of terminus `FWD{WRITE}` frames fed
+ *    through the public `on_frame` door, the pre-ACL, receive-thread path #603 was filed
+ *    against: each one's decode arena draws from `rx`, and a bump source never reclaims it.
+ *    (Until #1951 the flood was ADVERTISE frames binding labels; that plane is gone.);
  *  - the GRAPH plane's store is `graph_t`'s injected `ctl` seam (ADR-0065 / ADR-0079).
  *
  * The **only** difference between the two arms below is whether those are two sources or one.
@@ -79,13 +80,12 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
-#include "route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -105,14 +105,14 @@ using tr::testing::make_value;
 /**
  * @brief Each plane's slab, in bytes — the SAME for both, in both arms.
  *
- * Small enough that a few hundred `ADVERTISE` frames drain it, large enough that a composed
+ * Small enough that a burst of terminus frames drains it, large enough that a composed
  * read of the little tree below fits comfortably in an untouched one. The number is not
  * load-bearing: the flood runs until the source refuses, so a bigger slab only means more
  * frames, and the folded arm starves at any size.
  */
 constexpr std::size_t kSlabBytes = 4096;
 
-/** @brief How many `ADVERTISE` frames one burst of inbound pressure carries. */
+/** @brief How many terminus frames one burst of inbound pressure carries. */
 constexpr std::uint16_t kBurst = 512;
 
 /** @brief This node's name for the link the flood arrives on. */
@@ -157,29 +157,26 @@ struct node_t {
     tr::mem::bump_source_t net_src;   /**< @brief Hard-bounded: no heap behind it. */
     tr::mem::bump_source_t graph_src; /**< @brief Same size, same hard bound. */
     graph_t g;                        /**< @brief The graph plane. */
-    fwd_router_t router; /**< @brief The net plane, drawing label + rx from `net_src`. */
+    fwd_router_t router; /**< @brief The net plane, drawing link state + rx from `net_src`. */
 };
 
 /**
- * @brief Apply one burst of inbound pressure: @p count `ADVERTISE` frames from label @p first.
+ * @brief Apply one burst of inbound pressure: @p count terminus `FWD{WRITE}` frames.
  *
  * Each frame goes through the public `on_frame` door — the same entry a transport receive
- * thread uses — and lands on `on_advertise`'s TERMINUS arm, because the route matches no
- * registered mount. That arm re-encodes the route into a block drawn from the injected label
- * source and then binds it, so every frame is two draws on the net-plane store and nothing
- * else. Distinct labels, so no frame is a free in-place rebind.
+ * thread uses — and terminates here, because its `dst` matches no registered mount. Its decode
+ * arena draws from the injected `rx` source, which a bump source never gives back, so every
+ * frame is a draw on the net-plane store and nothing else touches it.
  *
- * @return How many bindings the store actually holds afterwards.
+ * @return How many bytes the net-plane store has handed out afterwards.
  */
-std::size_t apply_pressure(node_t& n, std::uint16_t first, std::uint16_t count) {
-    const std::vector<std::byte> route = packed_path({"plane", "net", "flood"});
-    for (std::uint16_t i = 0; i < count; ++i) {
-        const std::uint16_t label = static_cast<std::uint16_t>(first + i);
-        if (label == 0) continue;  // 0 is the reserved label, never bound
-        const std::vector<std::byte> frame = tr::net::encode_advertise(label, route);
-        n.router.on_frame(kInLink, frame);
-    }
-    return n.router.handles().ingress_count();
+std::size_t apply_pressure(node_t& n, std::uint16_t count) {
+    const std::vector<std::byte> frame = tr::testing::b_fwd(
+        tr::graph::fwd_op_t::WRITE, packed_path({"plane", "net", "flood"}), packed_path({"up"}), {},
+        std::vector<std::byte>{std::byte{0x01}, std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
+                               std::byte{0x2A}});
+    for (std::uint16_t i = 0; i < count; ++i) n.router.on_frame(kInLink, frame);
+    return n.net_src.used();
 }
 
 /** @brief Is the net-plane store refusing right now? A direct read, not an inference. */
@@ -192,18 +189,14 @@ std::size_t apply_pressure(node_t& n, std::uint16_t first, std::uint16_t count) 
 /**
  * @brief Drive the flood until the net-plane store refuses, and report that it did.
  *
- * Bursts rather than one long loop so the label space (16 bits, and the reserved 0) is never
- * the thing that ends the flood: a slab this size is drained inside the first burst or two.
+ * Bursts rather than one long loop: a slab this size is drained inside the first burst or two.
  */
 void flood_net_plane_to_exhaustion(node_t& n) {
-    std::size_t bound = 0;
-    std::uint16_t next = 1;
-    for (int burst = 0; burst < 8 && !net_store_is_exhausted(n); ++burst) {
-        bound = apply_pressure(n, next, kBurst);
-        next = static_cast<std::uint16_t>(next + kBurst);
-    }
-    check(bound > 0, "flood: the net plane bound labels while its store could serve them");
-    check(bound < kBurst, "flood: and REFUSED rather than growing without bound");
+    std::size_t used = 0;
+    for (int burst = 0; burst < 8 && !net_store_is_exhausted(n); ++burst)
+        used = apply_pressure(n, kBurst);
+    check(used > 0, "flood: the net plane served frames while its store could");
+    check(used <= kSlabBytes, "flood: and REFUSED rather than growing past its slab");
     check(net_store_is_exhausted(n), "flood: the net-plane store is exhausted, not merely busy");
 }
 
@@ -216,10 +209,9 @@ void flood_net_plane_to_exhaustion(node_t& n) {
  */
 void hold_the_flood(node_t& n, std::string_view where) {
     check(net_store_is_exhausted(n), where);
-    const std::size_t before = n.router.handles().ingress_count();
-    (void)apply_pressure(n, 40000, kBurst);
-    check(n.router.handles().ingress_count() == before,
-          "flood: further inbound frames are refused by value, binding nothing");
+    const std::size_t before = n.net_src.used();
+    check(apply_pressure(n, kBurst) == before,
+          "flood: further inbound frames are refused by value, drawing nothing");
 }
 
 /** @brief Records that a delivery reached the subscriber, and the byte it carried. */

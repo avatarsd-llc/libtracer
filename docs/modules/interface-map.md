@@ -76,7 +76,7 @@ flowchart LR
 | [path](path.md) | `class path_t{ parse(); key(); field() }` · `bool valid_segment(string_view)` — THE segment predicate every minting boundary shares (ADR-0073 §1; the local parser and the wire creation door both call it, so they cannot drift) · `struct path_key_t` + `path_key_hash_t` |
 | [graph](graph.md) | `class graph_t{ register_vertex→vertex_handle_t; try_register_vertex; retire; read; write; assign; propagate; await; history; subscribe; unsubscribe; set_policy(vertex_handle_t, vertex_policy_t); set_hooks(graph_hooks_t); hooks(); subscribe_wire(vertex_handle_t, view_t source_view, view_t return_route, std::string link, view_t reverse_route = {}, std::string caller = {}) }` · `class vertex_handle_t` · `enum class role_t` · `struct vertex_policy_t` (the owner-declared per-vertex policy, RFC-0028 D12) · `struct graph_hooks_t` (the five graph-wide seams, RFC-0028 D9) · `struct delivery_policy_t` (the per-subscription packed policy, RFC-0022) · `struct handlers_t` — `read` and `await` return `result_t<value_ref_t>` (a reference to the published value); the folding reads `read_children_folded` / `read_children_materialized` / `read_subtree_folded` and `handlers_t::on_read` compose a new value and return it as the same `result_t<value_ref_t>` (RFC-0028 D11) |
 | [transport](transport.md) | `class transport_t{ send(span); send(iov); set_receiver() }` · `class loopback_channel_t` |
-| [fwd-router](fwd-router.md) | `class fwd_router_t{ fwd_router_t(graph_t&, mem::block_source_t* label_src = &mem::heap_source(), mem::block_source_t* rx = &mem::heap_source(), mem::mem_backend_t* flat = &mem::heap_backend(), std::size_t max_label_bindings_per_link = 0, mem::mem_backend_t* egress = &mem::heap_backend()); add_child; remove_child; on_frame; on_reply; advertise; send_compact; subscribe_toward(producer, mount_path); registry() }` — the label tables draw from the nothrow `label_src` block source (#603 defect 1 / ADR-0065), the terminus arena from the nothrow `rx` one, every rope flatten from `flat` and the reply egress from `egress` · `class child_registry_t{ add; erase; by_name; longest_prefix }` · `class op_resolver_t` · `class route_handle_t` — FWD source-routing (RFC-0004) |
+| [fwd-router](fwd-router.md) | `class fwd_router_t{ fwd_router_t(graph_t&, mem::block_source_t* label_src = &mem::heap_source(), mem::block_source_t* rx = &mem::heap_source(), mem::mem_backend_t* flat = &mem::heap_backend(), mem::mem_backend_t* egress = &mem::heap_backend()); add_child; remove_child; on_frame; on_reply; subscribe_toward(producer, mount_path); registry() }` — long-lived link state draws from the nothrow `label_src` block source (#603 defect 1 / ADR-0065), the terminus arena from the nothrow `rx` one, every rope flatten from `flat` and the reply egress from `egress` · `class child_registry_t{ add; erase; by_name; longest_prefix }` · `class op_resolver_t` — FWD source-routing (RFC-0004) |
 | transport-vertex | `class transport_vertex_t{ register_transport_type; register_module; provide_link; set_link_state; settings_of }` · `enum class conn_role_t` · `struct conn_settings_t{ addr; port; role; max_frame; kind; … }` — a connection as a `/net/<module>/<name>` vertex (ADR-0027); a `SPEC{name, config}` written to the module's `/net/<module>/conn` creator endpoint CONSTRUCTS and owns the real socket, the transport factory being the module's declared `kind` (built-ins `udp`/`tcp`/`ws`) — the `<module>` segment comes from the application's own `register_module` declaration, never derived by the library (ADR-0073 §4), and it fixes the role positionally, so the SPEC carries no `type` and no `role`; `provide_link` is the test/manual seam |
 
 ## Two contracts hold the stack together
@@ -94,8 +94,8 @@ role slots in without touching the others.
 
 ## Net-plane scope
 
-The net plane is the RFC-0004 remote-operation plane: `fwd_router_t` + `child_registry_t`,
-`op_resolver_t` and `route_handle_t` carry path-addressed `read` / `write` / `await` /
+The net plane is the RFC-0004 remote-operation plane: `fwd_router_t` + `child_registry_t`
+and `op_resolver_t` carry path-addressed `read` / `write` / `await` /
 `subscribe` over `FWD`, and a connection is itself a vertex at `/net/<module>/<name>`
 (`transport_vertex_t`, ADR-0027). The socket transports are WebSocket, UDP, TCP and CAN;
 `udp`, `tcp` and `ws` are also registered as `/net` connection kinds, while CAN is bound
@@ -120,8 +120,8 @@ source-routing needs no dedup.
   `## API reference` block generated from the headers; where the two disagree, the
   generated block is the one that was compiled. A signature read off this page and not
   off the header is a signature that may have moved.
-- **`fwd_router_t` takes four independent allocation seams, not one.** `mr` funds the
-  `route_handle` label tables; `rx` funds the terminus arena, which is built from a
+- **`fwd_router_t` takes four independent allocation seams, not one.** `mr` funds
+  long-lived link state; `rx` funds the terminus arena, which is built from a
   peer's frame behind no ACL; `flat` funds every rope flatten on the forward *and*
   terminus paths, including the terminus rope-tier ownership copy, which is likewise
   peer-driven; `egress` funds the reply egress. Each defaults to the global heap

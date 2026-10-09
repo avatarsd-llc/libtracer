@@ -85,12 +85,6 @@
       ],
       "file": "core/src/fwd_router.cpp"
     },
-    "tr::net::fwd_router_t::on_compact": {
-      "ccn": [
-        29
-      ],
-      "file": "core/src/fwd_router.cpp"
-    },
     "tr::net::fwd_router_t::route_fwd_forward": {
       "ccn": [
         18

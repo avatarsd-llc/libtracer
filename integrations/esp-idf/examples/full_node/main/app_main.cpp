@@ -149,38 +149,21 @@ bytes_t b_field_subscribers_append() {
  * @brief SUBSCRIBER{ PATH target, SETTINGS{ NAME "delivery_policy" VALUE u16 }? } — the
  *        remote-subscriber record a subscribe appends.
  *
- * The optional SETTINGS child carries two independent opt-ins, in the SAME child (so
- * neither introduced new wire structure):
- *
- *   - `delivery_policy` (u16, RFC-0022 §3.A): bits 0–1 reliability, 2–4 priority,
- *     5 `durability_request`, 6–15 reserved;
- *   - `delivery_compact` (u8, RFC-0004 §E.1): ask the producer to advertise a per-link
- *     LABEL for this subscription's return route and then stream lean `COMPACT` frames
- *     instead of re-carrying the whole route on every delivery.
- *
- * Both zero emits no child at all — absent ⇒ all-zero ⇒ the default behaviour,
- * byte-identically to what a sender that predates the keys produces.
+ * The optional SETTINGS child carries `delivery_policy` (u16, RFC-0022 §3.A): bits 0–1
+ * reliability, 2–4 priority, 5 `durability_request`, 6–15 reserved. Zero emits no child at
+ * all — absent ⇒ all-zero ⇒ the default behaviour, byte-identically to what a sender that
+ * predates the key produces.
  */
-bytes_t b_subscriber(std::span<const std::byte> target, std::uint16_t delivery_policy = 0,
-                     bool delivery_compact = false) {
+bytes_t b_subscriber(std::span<const std::byte> target, std::uint16_t delivery_policy = 0) {
     bytes_t body(tr::mem::heap_source());
     bool ok = append(body, target);
-    if (delivery_policy != 0 || delivery_compact) {
+    if (delivery_policy != 0) {
         bytes_t members(tr::mem::heap_source());
-        if (delivery_policy != 0) {
-            ok &= tr::wire::emit_name(members, "delivery_policy");
-            const std::array<std::byte, 2> bits{
-                std::byte{static_cast<std::uint8_t>(delivery_policy & 0xFF)},
-                std::byte{static_cast<std::uint8_t>(delivery_policy >> 8)}};
-            ok &= tr::wire::emit_tlv(members, type_t::VALUE, opt_t{},
-                                     std::span<const std::byte>(bits));
-        }
-        if (delivery_compact) {
-            ok &= tr::wire::emit_name(members, "delivery_compact");
-            const std::array<std::byte, 1> one{std::byte{1}};
-            ok &= tr::wire::emit_tlv(members, type_t::VALUE, opt_t{},
-                                     std::span<const std::byte>(one));
-        }
+        ok &= tr::wire::emit_name(members, "delivery_policy");
+        const std::array<std::byte, 2> bits{
+            std::byte{static_cast<std::uint8_t>(delivery_policy & 0xFF)},
+            std::byte{static_cast<std::uint8_t>(delivery_policy >> 8)}};
+        ok &= tr::wire::emit_tlv(members, type_t::VALUE, opt_t{}, std::span<const std::byte>(bits));
         ok &= tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true},
                                  tr::mem::as_span(members));
     }
@@ -244,10 +227,10 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_node_t& f) {
  * which is the opposite of what this example is for.
  *
  * It is a `pool_source_t` and not a `bump_source_t` for the reason ADR-0067 §1 gives:
- * label state is LONG-LIVED and churns (`clear_link` frees a whole link's tables on
- * every reconnect), and a bump source never reclaims, so it would serve a few link
- * flaps and then refuse every one after. Both of its bounds are injected — the slab
- * span AND the `size_class_t` span — and both are REPORTED at bring-up
+ * link state is LONG-LIVED and churns (a link's state is freed on every reconnect), and a bump
+ * source never reclaims, so it would serve a few link flaps and then refuse every one after. Both
+ * of its bounds are injected — the slab span AND the `size_class_t` span — and both are REPORTED at
+ * bring-up
  * (`used`/`classes_used`/`overflowed`), so the sizing below is a measurement to check
  * rather than a constant to trust.
  *
@@ -292,20 +275,17 @@ struct device_node_t {
     tr::mem::mem_backend_t& rx_pool =
         rx_backend(std::span<std::byte>(g_slab, kRxRegion), kRxSlotPayload);
     /**
-     * @brief Failable seam: the router's LABEL TABLES, bounded by the slab's middle region.
+     * @brief Failable seam: the router's LONG-LIVED link state, bounded by the slab's middle
+     *        region.
      *
      * A `tr::mem::pool_source_t` — bounded, RECYCLING, and nothrow: exhaustion is a
-     * `nullptr` the store answers by refusing to compact a NEW flow, which degrades it to
-     * the full-route `FWD{WRITE}` form and leaves every established flow alone. That is
-     * what makes an `ADVERTISE` storm from a peer a throughput event on this node instead
-     * of a reboot (#603 defect 1).
+     * `nullptr` the router answers by value, never a reboot (#603 defect 1).
      *
      * `sync_mutex_t`, not the interrupt-disable policy the RX pool uses, and the
      * difference is the frequency and the context. The RX pool is touched from an ISR and
      * on every datagram, so it needs `tr::esp::critical_guard_t` (`critical_pool_t`) on a chip.
-     * This source is touched only when a FLOW IS SET UP — `on_advertise` learning a binding on a
-     * receive thread, `ensure_egress` MINTING a label on the writer thread; the per-delivery reuse
-     * path finds the label already bound and reaches no allocator at all. That is exactly
+     * This source is touched only when a LINK IS SET UP; the per-delivery path reaches no
+     * allocator here at all. That is exactly
      * the "wiring frequency" case `sync_mutex_t` documents itself for, and it is portable
      * across both of this example's targets, so it needs no platform seam of its own.
      */
@@ -443,19 +423,14 @@ int run_host_probe(device_node_t& dev) {
     //    durability flag of its own, and a sibling subscriber that does not ask gets no
     //    replay.
     //
-    //    It ALSO opts into label compaction (RFC-0004 §E.1). That is what a streaming
-    //    consumer of a 1 kHz sensor does — re-carrying the whole return route on every
-    //    4-byte sample is ~16x overhead — and it is what makes the device's LABEL SOURCE
-    //    live: the producer advertises a per-link label for this route and thereafter
-    //    streams lean COMPACTs, and the label state that costs is drawn from the bounded
-    //    `label_src` region of the one slab. Without this bit the census printed at the
-    //    end would read 0 B used and prove nothing about the bound.
+    //    Every delivery is a full-route `FWD{WRITE}`; the router's long-lived link state
+    //    (receive contexts and the like) is drawn from the bounded `label_src` region of
+    //    the one slab, which the census printed at the end reports.
     router.on_frame(
         "self",
         b_fwd(tr::graph::fwd_op_t::WRITE, b_path({"net", "udp-client", "dev", "sensor", "temp"}),
               b_path({"probe"}), b_field_subscribers_append(),
-              b_subscriber(b_path({"probe"}), tr::graph::delivery_policy_t::kDurabilityRequest,
-                           /*delivery_compact=*/true)));
+              b_subscriber(b_path({"probe"}), tr::graph::delivery_policy_t::kDurabilityRequest)));
 
     // The latch delivery races our next call, so poll-read until it lands.
     bool latched = false;
@@ -508,8 +483,8 @@ extern "C" void app_main(void) {
         static_cast<unsigned>(kRxSlotPayload), static_cast<unsigned>(kLabelRegion));
 
     const int failures = run_host_probe(dev);
-    // The label source's own census, AFTER the self-proof has driven real advertises and
-    // compact deliveries through it. Both of its bounds are injected, so both are reported:
+    // The label source's own census, AFTER the self-proof has driven real deliveries through
+    // the router. Both of its bounds are injected, so both are reported:
     // a `used` near the region size means raise `kLabelRegion`, a non-zero `overflowed`
     // means raise `kLabelClasses`. Printing them is what makes the sizing above a
     // measurement rather than a guess, and it is the same discipline `rx_backend_slots()`

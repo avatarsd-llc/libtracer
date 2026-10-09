@@ -391,7 +391,7 @@ outside it, so a callback may re-enter the graph. Because a delivery landing on 
 does not re-fan from that target, re-entry cannot build a dispatch cycle.
 
 A remote subscriber's delivery does not go on the wire from here: the fan-out hands
-`{link, return_route, delivery_compact}` and the value to the graph's injected
+`{link, return_route, reverse_route, caller}` and the value to the graph's injected
 remote-delivery sink, which is a `tr::net` concern. See
 [fwd-router](fwd-router.md) and [transport](transport.md).
 

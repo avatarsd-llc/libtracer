@@ -99,8 +99,7 @@ using path_label_target_t = wire::path_ref_element_t;
  * value a peer might still be holding, so no stale label can ever validate falsely. Retirement
  * is invisible to correctness because it degrades to §8.3's already-accepted refuse-new path.
  *
- * All calls may race the transport's receive thread and synchronize internally, on the pattern
- * `route_handle_t` established for the §E.1 label plane.
+ * All calls may race the transport's receive thread and synchronize internally.
  */
 class path_label_table_t {
    public:
@@ -336,8 +335,8 @@ class path_label_table_t {
     mem::block_array_t<slot_t> slots_;
     std::uint32_t free_head_ = kNoSlot;
     // Linear, and deliberately: a node carries FEW peers, the entry dies when its count hits
-    // zero, and a scan over a flat array beats a node-based map with no per-entry allocation
-    // (route_handle_t's per-link tables took the same shape for the same reason). Reserved to
+    // zero, and a scan over a flat array beats a node-based map with no per-entry allocation.
+    // Reserved to
     // max_peers_ for the same reason slots_ is.
     mem::block_array_t<peer_census_t> peers_;
 };

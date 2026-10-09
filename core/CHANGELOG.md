@@ -73,6 +73,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - In-process API only: the `:subscribers[N]` wire spelling is
     [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019). A `subscription_t` carries
     no generation (#1932), so a stale handle whose slot was reused names the new edge.
+- **`router_stats_t::retired_rx`, the `:stats.router.drops` noun `retired_rx`** (RFC-0032 §6.1,
+  #1951). It counts every outer frame of a retired core type code (`0x11` `ADVERTISE`, `0x12`
+  `COMPACT`, `0x13` `HANDLE_NACK`) that reaches the router. A rising count names a peer still
+  running an older release.
 
 ### Changed
 
@@ -142,6 +146,40 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   whichever order the retire clears the registration and bumps the generation in: a mint that
   read the bumped generation off a vertex still flagged registered would carry the successor
   tenant's number (#603).
+
+### Removed
+
+- **BREAKING — COMPACT, ADVERTISE, HANDLE_NACK and the per-link handle tables are deleted
+  ([#1951](https://github.com/avatarsd-llc/libtracer/issues/1951), RFC-0032).** Every stream
+  delivery is now a `FWD{WRITE}` over the edge's PAIR chain (RFC-0024 §7.1) or its canonical
+  route, with an empty `src`; no forwarding hop keeps per-flow state. Removed from the public
+  API:
+  - `libtracer/route_handle.hpp` whole: `tr::net::route_handle_t`, `handle_binding_t`,
+    `encode_advertise`, `encode_compact`, `encode_handle_nack` and `label_tlv`;
+  - `fwd_router_t::advertise`, `send_compact`, `clear_link`, `on_compact_delivery`,
+    `on_stale_label` and `handles()`, with the `compact_delivery_fn_t` and `stale_label_fn_t`
+    sink types; `link_down` no longer clears label state, because there is none;
+  - `router_planes_t::max_label_bindings_per_link`. `router_planes_t::label_src` stays: the
+    router's long-lived link state (receive contexts, bus token caches) still draws from it;
+  - `wire::type_t::ADVERTISE`, `COMPACT` and `HANDLE_NACK` (`0x11`-`0x13`), and
+    `net::control_head_t` / `net::peek_control`;
+  - `graph::remote_delivery_t::delivery_compact`, `subscriber_remote_t::delivery_compact` and
+    `child_registry_t::mount_generation()`;
+  - the `:stats` nouns `labels_exhausted` and `refused_bindings` (`:stats.labels.table`) and
+    `labels_used` (`:stats.link.<child>`).
+
+  **What an older peer meets.** Its `SUBSCRIBER{SETTINGS{NAME "delivery_compact"}}` member is
+  an unknown member: skipped, and the subscription is served with ordinary `FWD{WRITE}`
+  deliveries. Its `ADVERTISE`, `COMPACT` or `HANDLE_NACK` frame is answered on the link it came in
+  on with one bare `ERROR{tr::schema::type_mismatch}` and counted in the new
+  `:stats.router.drops` noun `retired_rx` (`router_stats_t::retired_rx`), even when the answer
+  is refused (RFC-0032 §6.1); it is never dropped in silence. There is no fallback for an old
+  peer. A bare outer `ERROR` is never answered, so two nodes cannot loop. The answer is built on
+  the stack and allocates nothing. **Migration:** delete calls to the removed API and
+  any `delivery_compact` opt-in; a link that set `max_label_bindings_per_link` sets nothing.
+  `bench_compact_delivery` is replaced by `bench_chain_delivery` (`chain-forward`,
+  `chain-terminus`), and `bench_route_handle_contention`, `bench_hop_chain` and
+  `bench_originate`, which measured the label form against the path, are deleted.
 
 ### Fixed
 
