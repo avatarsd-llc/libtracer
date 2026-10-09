@@ -380,6 +380,12 @@ if(CONFIG_LIBTRACER_CREATION_HOOKS)
 else()
     set(LIBTRACER_CREATION_HOOKS false)
 endif()
+# The session-admission seam (#1841): off by default, the same early-pass fallback.
+if(CONFIG_LIBTRACER_SESSION_ADMISSION)
+    set(LIBTRACER_SESSION_ADMISSION true)
+else()
+    set(LIBTRACER_SESSION_ADMISSION false)
+endif()
 # Worker stack bytes; 0 = the IDF pthread default. Same early-pass fallback reasoning.
 if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)
     set(LIBTRACER_SELF_HEAL_WORKER_STACK ${CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK})
@@ -437,6 +443,7 @@ struct esp_config_t : default_config_t {
     static constexpr bool kBusLinks = ${LIBTRACER_BUS_LINKS};
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
     static constexpr bool kCreationHooks = ${LIBTRACER_CREATION_HOOKS};
+    static constexpr bool kSessionAdmission = ${LIBTRACER_SESSION_ADMISSION};
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
     static constexpr std::size_t kRxDrainFrames = ${LIBTRACER_RX_DRAIN_FRAMES};
     static constexpr std::size_t kRxDrainBytes = ${LIBTRACER_RX_DRAIN_BYTES};

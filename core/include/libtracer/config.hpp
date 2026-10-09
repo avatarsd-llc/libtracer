@@ -946,6 +946,28 @@ struct default_config_t {
     static constexpr bool kCreationHooks = false;
 
     /**
+     * @brief Whether the graph carries the SESSION-ADMISSION seam (#1841):
+     *        `graph_hooks_t::session_admission`, an embedder's per-session subscribe check and
+     *        its per-session teardown event.
+     *
+     * With it, every subscription admitted for a session (a remote subscribe, keyed by the link
+     * the departure evicts it by) is first offered to the installed hook, which may refuse it
+     * with `BACKPRESSURE` before the edge or its departure-index entry exists, and the hook is
+     * told once when that session's edges are torn down. That is what an embedder needs to hold
+     * each session to its own subscription budget; the library keeps no count of its own.
+     *
+     * **Default `false` on every profile — the lean choice.** Closed out, the graph has no slot
+     * for the hook, the subscribe and teardown paths carry no load or branch for it, and a
+     * `graph_hooks_t::session_admission` handed to `graph_t::set_hooks` is not stored (a debug
+     * build asserts on it, because a budget that silently does not apply is worse than none).
+     *
+     * **Who sets it.** An embedder that bounds what one session may subscribe to. The core test
+     * build sets it in its preset fragment `core/tests/instrumented/libtracer/config_override.hpp`.
+     * Override fragment: `static constexpr bool kSessionAdmission = true;`
+     */
+    static constexpr bool kSessionAdmission = false;
+
+    /**
      * @brief Whether a connection SPEC may carry the `insecure` key of the `quic` and
      *        `webtransport` kinds — the dial-side switch that skips server-certificate
      *        verification.
@@ -1099,6 +1121,8 @@ inline constexpr bool kInstrumentCounters = config_t::kInstrumentCounters;
 inline constexpr bool kFaultInjection = config_t::kFaultInjection;
 /** @brief @ref default_config_t::kCreationHooks for this build. */
 inline constexpr bool kCreationHooks = config_t::kCreationHooks;
+/** @brief @ref default_config_t::kSessionAdmission for this build. */
+inline constexpr bool kSessionAdmission = config_t::kSessionAdmission;
 /** @brief @ref default_config_t::kForceGuardedRmw for this build. */
 inline constexpr bool kForceGuardedRmw = config_t::kForceGuardedRmw;
 

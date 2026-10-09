@@ -142,6 +142,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   whichever order the retire clears the registration and bumps the generation in: a mint that
   read the bumped generation off a vertex still flagged registered would carry the successor
   tenant's number (#603).
+### Added
+
+- **A per-session subscribe check and a per-session teardown event:
+  `graph_hooks_t::session_admission` ([#1841](https://github.com/avatarsd-llc/libtracer/issues/1841)).**
+  An embedder could not hold each session to a subscription budget: the subscription observer
+  runs after the edge is admitted and is keyed by the caller context, which is the subject, so
+  every session of one subject shared one key. The new seam (`session_admission_fn_t`, handed a
+  `session_event_t`) is offered every subscription admitted for a session, after the SUBSCRIBE
+  gate and before the edge or its departure-index entry exists, and its `false` refuses it with
+  `BACKPRESSURE`. The session is the link name the departure evicts the edge by, so two sessions
+  of one subject are two keys. `RELEASE` gives back an admission the graph then refused, and
+  `END` fires once when `evict_link_edges` tears the session down (a link or bus peer departing),
+  so the embedder refunds the whole session at once. The library keeps no count. The seam is the
+  compile-time policy `config_t::kSessionAdmission` (ESP-IDF: `CONFIG_LIBTRACER_SESSION_ADMISSION`),
+  **off by default**: closed out, `graph_t` has no slot for it and the subscribe and departure
+  paths carry no load or branch for it. `edge_view_t` is unchanged. A debug build asserts when
+  `set_hooks` is handed the hook in a build without it.
 
 ### Fixed
 

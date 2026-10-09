@@ -377,6 +377,20 @@ menu "libtracer"
             a data write to a missing child is refused with not_found and creates
             nothing. This is a per-image choice.
 
+    config LIBTRACER_SESSION_ADMISSION
+        bool "Let the embedder admit each session's subscriptions"
+        default n
+        help
+            Bind tr::graph::config_t::kSessionAdmission = true (#1841): the graph
+            then carries graph_hooks_t::session_admission, a hook that is offered
+            every remote subscription before its edge is added, keyed by the
+            session it arrives on, and may refuse it with BACKPRESSURE; it is told
+            again when that session departs. Use it to hold each session to a
+            subscription budget of your own.
+
+            OFF by default, the lean choice. Off, the graph has no slot for the
+            hook and the subscribe and departure paths pay nothing for it.
+
     config LIBTRACER_ARENA_BYTES
         int "Default root: static arena size (bytes)"
         range 1024 4194304

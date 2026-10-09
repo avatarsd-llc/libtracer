@@ -62,6 +62,16 @@ std::string_view delivery_link(const remote_ptr_t& remote) noexcept {
     return remote ? std::string_view(remote->link) : std::string_view{};
 }
 
+/**
+ * @brief The SESSION an edge's cold half was admitted for (#1841) — the name its departure
+ *        evicts it by (`vertex_t::evict_link_edges`' `admitted_over`): the delivery link, or the
+ *        caller context for a field-write edge that bound none (#943). Empty for no cold half.
+ */
+std::string_view session_of(const remote_ptr_t& remote) noexcept {
+    if (!remote) return {};
+    return remote->link.empty() ? remote->caller.view() : remote->link.view();
+}
+
 // ---------------------------------------------------------------------------------------------
 // ADR-0080 — the reclamation seam's machinery, for all three policies.
 //
@@ -1341,6 +1351,9 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
     }
     // Outside every graph lock: the receiver takes its own control-plane lock (#1816).
     hold_link(link_name, false, routed);
+    // The session's teardown event (#1841), once per departure and whatever it held: the
+    // embedder refunds the session's whole charge here instead of tracking each edge.
+    (void)session_event(session_event_t::kind_t::END, link_name, nullptr, {});
     return total;
 }
 
@@ -3207,9 +3220,10 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     //
     // A refused entry (#1778: the table source is exhausted) refuses the ADMISSION, for the
     // same reason: an edge that no departure can find is a leak, not a degraded delivery.
-    if (s.remote && !link_index_.index_vertex(
-                        s.remote->link.empty() ? s.remote->caller.view() : s.remote->link.view(),
-                        link_token, v))
+    //
+    // The session-admission seam (#1841) runs inside the same step, ahead of the index entry:
+    // an embedder's per-session budget refuses here, BACKPRESSURE, before anything exists.
+    if (!admit_session(admitted, v, caller, link_token))
         return std::unexpected(status_t::BACKPRESSURE);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     // The hold is taken BEFORE the edge can be seen, for the reason the index entry above is:
@@ -3230,7 +3244,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // A displaced SUSPENDED edge was never counted (#1533), so it is an add here too.
         if (r == vertex_t::edge_replace_t::OUT_OF_RANGE) {
             note_subscriber_removed(v);
-            hold_link(delivery_link(admitted), false);
+            unwind_admission(admitted, v, caller);
             return std::unexpected(status_t::INVALID_PATH);
         }
         if (r == vertex_t::edge_replace_t::REPLACED_ACTIVE) note_subscriber_removed(v);
@@ -3249,7 +3263,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // status (ADR-0060 §3), the same one the store leg answers on exhaustion.
         if (idx == vertex_t::kNoSlot) {
             note_subscriber_removed(v);
-            hold_link(delivery_link(admitted), false);
+            unwind_admission(admitted, v, caller);
             return std::unexpected(status_t::BACKPRESSURE);
         }
     }
@@ -3271,6 +3285,42 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // link never lets the count touch zero between the two (#1816).
     hold_link(delivery_link(displaced), false);
     return subscription_t{v, idx};
+}
+
+bool graph_t::admit_session(const remote_ptr_t& remote, vertex_t* v, std::string_view caller,
+                            link_id_t link_token) {
+    if (!remote) return true;  // a local edge: no session, no departure to index it for
+    const std::string_view session = session_of(remote);
+    if (!session_event(session_event_t::kind_t::ADMIT, session, v, caller)) return false;
+    // A refused entry (#1778: the table source is exhausted) refuses the admission, and what
+    // the hook charged for it is given back: it is answered exactly as a refusal.
+    if (link_index_.index_vertex(session, link_token, v)) return true;
+    (void)session_event(session_event_t::kind_t::RELEASE, session, v, caller);
+    return false;
+}
+
+void graph_t::unwind_admission(const remote_ptr_t& remote, const vertex_t* v,
+                               std::string_view caller) const {
+    hold_link(delivery_link(remote), false);
+    (void)session_event(session_event_t::kind_t::RELEASE, session_of(remote), v, caller);
+}
+
+bool graph_t::dispatch_session_event(session_event_t::kind_t kind, std::string_view session,
+                                     const vertex_t* v, std::string_view caller) const {
+    // The coherent read (#1049), then dispatch from the snapshot. A local edge has no session
+    // and is never offered: its admission is the owner's own decision.
+    const auto hook = session_admission_.get();
+    if (hook.fn == nullptr || session.empty()) return true;
+    // A refused producer render reports an EMPTY producer, as `notify_subscription`'s does: the
+    // session is the decision's key, and the producer is context. Nothing renders on END.
+    std::array<std::byte, 256> scratch;  // a stack frame first (#1778)
+    mem::bump_source_t frame(scratch, *tables_);
+    mem::bytes_t producer(frame);
+    if (v != nullptr) (void)try_build_key(v, producer);
+    return hook.fn(hook.ctx, session_event_t{.kind = kind,
+                                             .session = session,
+                                             .producer = wire::key_view_t{mem::as_span(producer)},
+                                             .caller = caller});
 }
 
 void graph_t::notify_subscription(sub_event_t::kind_t kind, const vertex_t* v,
@@ -3487,6 +3537,11 @@ void graph_t::set_hooks(const graph_hooks_t& hooks) noexcept {
     wire_target_.set(hooks.wire_target.fn, hooks.wire_target.ctx);
     stats_sampler_.set(hooks.stats_sampler.fn, hooks.stats_sampler.ctx);
     link_hold_.set(hooks.link_hold.fn, hooks.link_hold.ctx);
+    // A build without the seam stores nothing (#1841); a budget installed there would silently
+    // admit everything, so a debug build says so instead.
+    assert((config_t::kSessionAdmission || hooks.session_admission.fn == nullptr) &&
+           "graph_hooks_t::session_admission needs config_t::kSessionAdmission = true");
+    session_admission_.set(hooks.session_admission.fn, hooks.session_admission.ctx);
 }
 
 graph_hooks_t graph_t::hooks() const noexcept {
@@ -3496,6 +3551,7 @@ graph_hooks_t graph_t::hooks() const noexcept {
     const auto wt = wire_target_.get();
     const auto ss = stats_sampler_.get();
     const auto lh = link_hold_.get();
+    const auto sa = session_admission_.get();
     auto sl = subject_lookup_.get();
     if (sl.fn == &graph_t::lookup_via_resolver) sl = {};  // the adapter, not a caller's hook
     return graph_hooks_t{.subject_resolver = {sr.fn, sr.ctx},
@@ -3504,7 +3560,8 @@ graph_hooks_t graph_t::hooks() const noexcept {
                          .wire_target = {wt.fn, wt.ctx},
                          .stats_sampler = {ss.fn, ss.ctx},
                          .link_hold = {lh.fn, lh.ctx},
-                         .subject_lookup = {sl.fn, sl.ctx}};
+                         .subject_lookup = {sl.fn, sl.ctx},
+                         .session_admission = {sa.fn, sa.ctx}};
 }
 
 void graph_t::hold_link(std::string_view link, bool held, std::size_t n) const {

@@ -1455,6 +1455,14 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(admission_link_kind_test)
     add_test(NAME admission_link_kind COMMAND admission_link_kind_test)
 
+    # #1841: the session-admission seam — an embedder holds each session to a subscription
+    # budget (refused BACKPRESSURE before the edge exists) and refunds it at the session's
+    # departure. Skips in a build that binds kSessionAdmission = false.
+    add_executable(session_admission_test session_admission_test.cpp)
+    target_link_libraries(session_admission_test PRIVATE libtracer)
+    libtracer_test_warnings(session_admission_test)
+    add_test(NAME session_admission COMMAND session_admission_test)
+
     # #1878: the app-field on-demand read seam — a declared field's read answers the owner's
     # live value, locally and over a link, and a refused client write never reads back.
     add_executable(app_field_read_hook_test app_field_read_hook_test.cpp)

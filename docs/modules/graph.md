@@ -100,13 +100,16 @@ class  subscription_t { /* opaque: producer vertex + :subscribers[] slot index; 
                            sole friend. Public: default-construct, copy, operator==. */ };
 
 template <class Fn> struct graph_hook_t { Fn fn; void* ctx; };  // one graph-wide seam
-struct graph_hooks_t {        // the five graph-wide seams as ONE aggregate (RFC-0028 D9)
+struct graph_hooks_t {        // the graph-wide seams as ONE aggregate (RFC-0028 D9)
     graph_hook_t<subject_resolver_fn_t> subject_resolver;       // ACL enforcement switch
     graph_hook_t<sub_observer_fn_t>     subscription_observer;
     graph_hook_t<remote_delivery_fn_t>  remote_delivery;        // the router installs it
     graph_hook_t<wire_target_fn_t>      wire_target;            // the router installs it
     graph_hook_t<stats_sampler_fn_t>    stats_sampler;          // the router installs it
-};
+    graph_hook_t<link_hold_fn_t>        link_hold;              // the transport plane's (#1816)
+    graph_hook_t<subject_lookup_fn_t>   subject_lookup;         // caller-storage ACL switch
+    graph_hook_t<session_admission_fn_t> session_admission;     // per-session subscribe check
+};                            // + teardown event (#1841); needs config_t::kSessionAdmission
 
 struct vertex_policy_t {      // everything the OWNER declares about one vertex (RFC-0028 D12)
     std::optional<retention_t> retention;          // unset ⇒ the role's default (§5.4)
@@ -793,6 +796,19 @@ a reply already being assembled.
 ```
 
 ```{doxygentypedef} tr::graph::subject_resolver_fn_t
+:project: libtracer
+```
+
+### The session-admission seam (#1841)
+
+Compiled in only with `config_t::kSessionAdmission` (off by default).
+
+```{doxygenstruct} tr::graph::session_event_t
+:project: libtracer
+:members:
+```
+
+```{doxygentypedef} tr::graph::session_admission_fn_t
 :project: libtracer
 ```
 
