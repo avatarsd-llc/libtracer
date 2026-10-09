@@ -5,19 +5,20 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0033 — A minimal Noise link binding: NNpsk0 over a datagram carrier
 
-<!-- status: proposed -->
+<!-- status: accepted -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0033 |
 | **Title** | A minimal Noise link binding: NNpsk0 over a datagram carrier |
-| **Status** | **proposed** (2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)). This document turns that direction into normative text. It needs **maintainer approval** before it is accepted, and §15 lists the choices still open, each with a recommendation. |
+| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
 | **Instrument** | **Amendment.** It adds an optional normative link binding: a datagram layout, a handshake, and MUSTs that a peer can observe on the wire. It also adds nouns to the `:stats.link.<child>` block of [reference/05](../../reference/05-protocol-tlvs.md), a normative annex. GOVERNANCE.md reserves both for an amendment. It changes no existing wire byte: a link that does not use the binding is unaffected. |
 | **Tracking issue** | [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063). It is a narrow slice pulled forward from [#1993](https://github.com/avatarsd-llc/libtracer/issues/1993) (an opaque credential member in `:identity` and the "Tracer over Noise" binding, v1.0.0). |
 | **Target spec version** | v1 itself. `docs/spec/v1.md` still reads "(DRAFT)". |
+| **Amends** | [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §4 as amended (Amendment 1), **for a Noise link only**: an operation on a dormant link fails at once instead of waiting one `connect_timeout` (§5.1), and an attempt an operation started stops at its attempt deadline (§5.7). [ADR-0086](../../adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8's pattern list (§10.4; the dated note lands in this RFC's pull request). [reference/05](../../reference/05-protocol-tlvs.md) §The seam census record and §Invalidation (§10.2, written in slice S1). |
 | **Builds on** | [ADR-0045](../../adr/0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) Decision 4 (link confidentiality is the link's job, by a Noise channel) and Decision 5 (trust is per hop); [ADR-0086](../../adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8 ("Tracer over Noise" is an optional normative link binding); [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) (link liveness); [RFC-0010](0010-owner-app-fields-and-schema.md) Amendment 2 (the `:stats.link.<child>` census); [RFC-0029](0029-one-path-primitive.md) §8.2 (a session boundary advances the generation). |
 | **Leaves to #1993** | The `:identity` credential member, the static-key patterns (IK, XX, KK) over the ed25519 node key, and the credential in the handshake payload. §7 says how they attach to this binding. |
 | **Relates to** | [#1649](https://github.com/avatarsd-llc/libtracer/issues/1649) (an ESP-IDF UDP link with Noise), which should be built against this binding (§10.3). |
@@ -49,12 +50,12 @@ smallest link binding that carries Tracer frames over that secret:
    passes `now`. Without it, a handshake or a session ends on its other events (§5.7).
 6. **Receiver pays.** All session state is part of the link and comes from the link's own source.
    Before the PSK is proven, the responder spends one key derivation and one tag check on a
-   datagram, and no Diffie-Hellman. Nothing is allocated (§5.8). A **replayed** first message is the
-   open problem: it passes the PSK check, and §15 Q7 sets out the options to close it.
+   datagram, and no Diffie-Hellman. Nothing is allocated (§5.8). A **replayed** first message
+   stops at an application-supplied counter, also before any Diffie-Hellman (§5.4, §6.5).
 7. **Failure is silent on the wire and loud in the counters.** A failed handshake or a failed
    decrypt is counted and never answered in clear (§5.9).
-8. **Reporting.** A DIAL link reports `up` only while it holds a confirmed session. Eight
-   counters join the link's `:stats` block (§5.10, §5.11).
+8. **Reporting.** A DIAL link reports `up` only once the responder has acknowledged its session.
+   Ten counters join the link's `:stats` block (§5.10, §5.11).
 
 The binding sits below the TLV layer. It changes no frame, no type code and no conformance
 vector. The core stays crypto-free (ADR-0045, ADR-0086 §Consequences): the binding is
@@ -154,8 +155,13 @@ ADR-0086 §Terms notes). Until then the terms are defined here.
   connection the responder. They never swap.
 - **Session.** The two transport keys, the send nonce and the replay window that one completed
   handshake yields.
-- **Confirmed session.** A session that has carried at least one valid transport message from the
-  initiator. The initiator's session is confirmed when it accepts the second handshake message.
+- **Confirmation, acknowledgement.** The initiator's first transport message on a new session
+  confirms it to the responder. The responder's first transport message on it acknowledges it to the
+  initiator. A session is **confirmed** on the responder once the confirmation arrives, and
+  **acknowledged** on the initiator once the acknowledgement arrives.
+- **Counter, mark.** An application-supplied number in every first message that strictly increases
+  across an initiator's attempts. The responder's **mark** is the highest counter it has accepted
+  on a link.
 - **Key phase.** One bit that tells a receiver which of its two sessions a transport message was
   sealed under. Each new session takes the other phase.
 
@@ -208,15 +214,18 @@ follow this section. A link that does not follow it is not a conforming Tracer N
   - The PSK SHOULD be 32 bytes from a cryptographic random source. A PSK derived from a
     human-chosen secret MUST be derived by the application with a deliberately slow key-derivation
     function first (§6.2).
-- **Handshake payloads:** each handshake payload is exactly one **flags byte**, so the first
-  message is as large as the second (§6.7).
-  - First message: bit 0 is `fresh`, set when the initiator held no session as it began the
-    attempt. Bits 7–1 MUST be zero.
-  - Second message: bit 0 is the key phase of the new session (§5.6). Bit 1 is `fresh`, set when the
-    responder held no current session as it answered. Bits 7–2 MUST be zero.
+- **Handshake payloads:** each handshake payload starts with one **flags byte**.
+  - First message: 9 bytes. The flags byte has bit 0 `fresh`, set when the initiator held no
+    session as it began the attempt; bits 7–1 MUST be zero. Then the **initiator counter**, a u64
+    little-endian (§5.4). The first message is larger than the second, so a responder never
+    sends more than it received (§6.7).
+  - Second message: 1 byte, the flags byte. Bit 0 is the key phase of the new session (§5.6). Bit 1
+    is `fresh`, set when the responder held no current session as it answered. Bits 7–2 MUST be
+    zero.
   - A receiver MUST treat any other payload as a failed handshake. The `fresh` bits drive the
     generation rule of §5.10.
-  - No application data rides in a handshake message (§6.5).
+  - No application data rides in a handshake message (§6.5). The counter is anti-replay
+    metadata, not application data.
 - **Crypto primitives:** X25519 (RFC 7748), ChaCha20-Poly1305 (RFC 8439) with Noise's nonce encoding
   (32 zero bits, then the 64-bit counter little-endian), and SHA-256 with Noise's HMAC-based HKDF.
   The **ephemeral keys** MUST come from a cryptographic random source that the application
@@ -233,7 +242,7 @@ follow this section. A link that does not follow it is not a conforming Tracer N
 
 | type | message | layout after the type byte | datagram size |
 | ---- | ---- | ---- | ---- |
-| `0x01` | handshake, first message (`-> psk, e`) | `e.pub` (32) ‖ encrypted flags byte (1) ‖ tag (16) | exactly **50** B |
+| `0x01` | handshake, first message (`-> psk, e`) | `e.pub` (32) ‖ encrypted flags byte (1) and counter (8) ‖ tag (16) | exactly **58** B |
 | `0x02` | handshake, second message (`<- e, ee`) | `e.pub` (32) ‖ encrypted flags byte (1) ‖ tag (16) | exactly **50** B |
 | `0x04` | transport message, key phase 0 | `nonce` (u64 LE, 8) ‖ ciphertext (frame length) ‖ tag (16) | 25 B + frame |
 | `0x05` | transport message, key phase 1 | as `0x04` | 25 B + frame |
@@ -246,8 +255,8 @@ tag check fail, so neither can steer a receiver into accepting anything (§6.6).
 **A frame maps to exactly one transport message.**
 
 - The plaintext of a transport message is either **empty** or **exactly one complete Tracer
-  frame** (header, body and any trailer). An empty plaintext is a **confirmation** (§5.4) and is
-  never delivered. A plaintext that does not parse as exactly one frame, with no byte left over,
+  frame** (header, body and any trailer). An empty plaintext is a confirmation, an
+  acknowledgement or an answer to one (§5.4), and is never delivered. A plaintext that does not parse as exactly one frame, with no byte left over,
   MUST be dropped after decryption and counted in `malformed_rx`.
 - Several frames are never packed into one message, and one frame is never split across messages.
   Batching is the application's decision (RFC-0025 Amendment 4) and arrives as one BATCH frame.
@@ -270,62 +279,115 @@ tag check fail, so neither can steer a receiver into accepting anything (§6.6).
 - A sender SHOULD keep `max_frame + 25` within the path MTU (1200 bytes is a safe default on an
   unknown path), because the binding does not fragment and a lost IP fragment loses the whole
   datagram.
-- A carrier whose datagram bound is below 50 bytes cannot carry the second handshake message,
+- A carrier whose datagram bound is below 58 bytes cannot carry the first handshake message,
   and a Noise link MUST refuse to be built over it.
 
-### 5.4 The handshake
+### 5.4 The handshake, the counter and the acknowledgement
 
 **Normative.** The procedure follows Noise §5 for the pattern of §2.2, with the tokens processed
 as Noise §9 requires for a PSK handshake: `psk` calls `MixKeyAndHash(psk)`, and every `e`
 calls `MixKey(e.pub)` after `MixHash(e.pub)`. Appendix A traces every step.
 
+A session is established in three steps: the two handshake messages, the **confirmation** (the
+initiator's first transport message on the session) and the **acknowledgement** (the responder's
+first transport message on it). One request and its reply take **two round trips**. The request
+stands in for the confirmation and the reply for the acknowledgement. The initiator reports `up`
+only after the acknowledgement.
+
+**The initiator counter.** Every first message carries a u64 counter (§5.2). It MUST strictly
+increase across all the attempts an initiator makes under one PSK. The retransmissions of one
+attempt are byte-identical, so they carry the same counter. The counter comes from an application
+seam, never from a library clock:
+
+- an initiator that has a wall clock or a monotonic counter that survives its reboots uses it (for
+  example, nanoseconds since an epoch);
+- an initiator without one combines a **persisted boot counter** (a u32, incremented once per
+  boot, so one flash write per boot) as the high half with an **attempt counter** kept in RAM as
+  the low half;
+- an initiator that can do neither must have its responder's mark cleared (below) after each of its
+  reboots. Otherwise its counter is refused until it passes the old one.
+
+**The responder's mark.** A responder keeps one u64 **mark** per link: the highest counter it has
+accepted. It starts at 0, so the first counter must be at least 1.
+
+- The mark **resets to 0 when the link's PSK is replaced**. A counter is only meaningful under the
+  PSK it was accepted with.
+- The application **can clear it** through a host seam, for example after replacing an initiator
+  that lost its counter.
+- It SHOULD be persisted across the responder's reboots, at one write each time it rises. If it is
+  kept in RAM only, then after a responder reboot each recorded first message can be replayed at
+  most once, in increasing counter order, until the live initiator's next attempt raises the mark
+  past all of them (§6.5).
+
 **Initiator (DIAL).**
 
-1. A handshake **attempt** starts when the link is demanded and has no session, or when a rekey is due
-   (§5.6). The initiator draws a fresh ephemeral key, writes the first message, sends it, and keeps
-   its 50 bytes and the handshake state in the link's handshake slot (§5.8).
-2. While no valid second message has arrived, it **retransmits the same 50 bytes** each time the
-   application's `now` passes the retry deadline (§5.7). Inside one attempt, every retransmission
-   is byte-identical.
-3. It MAY end an attempt and start a new one, with a new ephemeral key, when `now` passes the
-   attempt deadline. While a standing binding holds the link, it MUST NOT give up for good
-   (RFC-0014 §4: no give-up bound and no terminal state).
-4. When a second message decrypts, the initiator splits the keys (Noise §5.2: the first key
-   encrypts initiator→responder, the second responder→initiator), takes the key phase from the
-   payload, and installs the session as **current**. Its earlier session, if it had one, becomes
-   **previous** (§5.6).
-5. It then MUST at once send a **confirmation**: a transport message with an empty plaintext, on the
-   new session. If that is lost, the next transport message the initiator sends confirms the
-   session in its place.
-6. A second message that fails its tag check, or whose `ee` is all zero (§5.2), is dropped and
-   counted in `noise_handshake_failed`. A
-   second message that arrives when no attempt is in flight is dropped and counted in `noise_stale`.
-   Neither one is answered, and neither ends the attempt.
+1. A handshake **attempt** starts when the link is demanded and has no session, or when a rekey is
+   due (§5.6). The initiator draws a fresh ephemeral key and the next counter, writes the first
+   message (with `fresh` set if it holds no session), sends it, and keeps its 58 bytes and the
+   handshake state in the link's handshake slot (§5.8).
+2. While no valid second message has arrived, it **retransmits the same 58 bytes** each time the
+   application's `now` passes the retry deadline (§5.7).
+3. When a second message decrypts and its `ee` is not all zero (§5.2), the initiator splits the keys
+   (Noise §5.2: the first key encrypts initiator→responder, the second responder→initiator), takes
+   the key phase from the flags byte, and holds the result in its handshake slot as an
+   **unacknowledged** session. It discards its previous session, whose phase the new one takes
+   (§5.6). If the new phase equals its current session's phase, the responder has lost that
+   session (its `fresh` bit says so), and the initiator discards its current session too.
+4. It **confirms at once**: its first transport message on the new session is the confirmation. If
+   the application sends a frame at that moment, such as a request, the frame is the confirmation.
+   Otherwise the confirmation is empty.
+5. On a **first handshake** there is no old session. Frames the application sends before the
+   acknowledgement go out on the unacknowledged session: a send is admitted whenever the initiator
+   holds a session, acknowledged or not. The link's poll seam reports when it holds one, so an
+   application that wants one request and reply in two round trips sends its request then. An
+   application that waits for `up` takes three.
+6. On a **rekey**, the initiator goes on sending frames on its old current session until the
+   acknowledgement arrives, and sends only the confirmation (and the retries of step 7) on the new
+   one. A new session that the responder does not hold therefore never carries a frame.
+7. While the session is unacknowledged, each time `now` passes the retry deadline the initiator
+   **resends an empty confirmation** on it (a new nonce each time) before it considers a new
+   handshake. When `now` passes the attempt deadline, it abandons the unacknowledged session together
+   with the attempt (§5.7).
+8. The first authenticated transport message from the responder on the new session is the
+   **acknowledgement**. The session becomes **current**, the old current one becomes **previous**,
+   and the link reports `up` (§5.10).
+9. A second message that fails its tag check, carries an invalid flags byte, or yields an all-zero
+   `ee` is dropped and counted in `noise_handshake_failed`. A second message that arrives when no
+   attempt is in flight is dropped and counted in `noise_stale`. Neither one is answered, and
+   neither ends the attempt.
 
-**Responder (LISTEN).**
+**Responder (LISTEN).** It processes a first message in this order. The order is normative,
+because the checks are ordered by cost and the retransmit check must come before the counter
+check.
 
-1. On a first message, the responder runs `MixKeyAndHash(psk)`, `MixHash(e.pub)` and
-   `MixKey(e.pub)`, then checks the tag. **This is the PSK proof.** If the tag fails, the datagram
-   is dropped and counted in `noise_handshake_failed`. Nothing is sent, no state changes, and no
-   Diffie-Hellman has run.
-2. On a first message that is **byte-identical** to the one behind its pending handshake, the
-   responder MUST resend its stored second message unchanged, and count it in
-   `noise_retransmits`. Sending a fresh second message would split the two sides onto different
-   keys.
-3. On a first message whose ephemeral key is the one behind its **current** session, the responder
-   drops it and counts it in `noise_stale`: it is a late duplicate of a handshake that has
-   already finished.
-4. On any other first message that passes the tag check, the responder draws a fresh ephemeral,
-   computes `ee` (aborting on an all-zero result, §5.2), writes the second message with the key
-   phase of §5.6, sends it to the source address of the first message, and keeps the result as its
-   **pending** session. A pending session replaces any earlier pending one, which is counted in
-   `noise_pending_replaced`. It never replaces the current session. A **replayed** first message
-   takes this path too, and that is the open problem of §6.5 and §15 Q7.
+1. **Retransmit.** A first message that is **byte-identical** to the one behind its pending session
+   is answered with the stored second message, unchanged, and counted in `noise_retransmits`. It
+   is checked before anything else: that message already passed the PSK and counter checks, and its
+   counter is now equal to the mark, so it would fail the counter check. A fresh second message
+   would split the two sides onto different keys.
+2. **PSK proof.** The responder runs `MixKeyAndHash(psk)`, `MixHash(e.pub)` and `MixKey(e.pub)`,
+   then checks the tag. If the tag fails, the datagram is dropped and counted in
+   `noise_handshake_failed`. Nothing is sent, no state changes, and no Diffie-Hellman has run.
+3. **Flags and counter.** An invalid flags byte is counted in `noise_handshake_failed`. A counter not
+   above the mark is a **replay**: it is dropped and counted in `noise_handshake_replayed`. Nothing is
+   sent and no Diffie-Hellman runs. Otherwise **the mark rises to the counter now**, whether or not
+   the handshake later completes.
+4. **Answer.** The responder draws a fresh ephemeral, computes `ee` (aborting on an all-zero result,
+   §5.2), writes the second message with the key phase of §5.6 and its own `fresh` bit, sends it to
+   the source address of the first message, and keeps the result as its **pending** session, with
+   the stored second message. A pending session replaces an earlier pending one, which is counted in
+   `noise_pending_superseded`. It never replaces the current session.
 5. The responder MUST NOT send a transport message on a pending session. It goes on using its
    current session, if it has one, until the pending one is confirmed.
-6. The pending session is **confirmed** by the first transport message in its key phase that
-   passes the tag check and the replay check (§5.5). The pending session then becomes current,
-   and the old current one becomes previous.
+6. **Confirmation.** The first transport message in the pending session's phase that passes the
+   tag and replay checks (§5.5) confirms it. The pending session becomes current, the old current
+   one becomes previous, and the responder sends on the new session from then on.
+7. **Acknowledgement.** The responder's first transport message on the new current session is the
+   acknowledgement. It is the reply to a confirming request, when the application answers one. In
+   any case, the responder **answers every empty transport message from the initiator with one
+   empty transport message** on the same session. That acknowledges an empty confirmation, and it
+   answers each resent confirmation of initiator step 7. The answer is no larger than the message
+   it answers, and it goes only to an authenticated one.
 
 **Roles do not swap.** A first message that reaches an initiator, or a second message that
 reaches a responder, is dropped and counted in `noise_stale`. Two sides can never both initiate,
@@ -393,9 +455,9 @@ datagram never moves it, so a forged source address cannot redirect the session.
   becomes **previous**. The previous session receives only and never sends, so frames that were in
   flight under the old keys still land. A responder discards its previous session when it creates a
   pending one, because the pending session takes the previous session's phase. An initiator
-  discards its previous session when the new current one has the same phase (after the responder
-  lost its state). These two rules keep a phase from ever naming two sessions, so a receiver never
-  tries more than one key.
+  discards its previous session when it accepts a second message, for the same reason, and its
+  current one too when the new phase equals it (§5.4 initiator step 3). These rules keep a phase
+  from ever naming two sessions, so a receiver never tries more than one key.
 - **Keeping a previous session is optional.** A build MAY keep none, which is a compile-time
   policy that suits the narrowest targets. Messages in the old phase are then counted in
   `noise_stale` rather than delivered.
@@ -409,16 +471,23 @@ again. The deadlines are kind-private config, in the same units as `now`:
 
 | deadline | side | what happens when `now` passes it |
 | ---- | ---- | ---- |
-| retry | initiator | retransmit the first message (§5.4 step 2); the interval doubles on each retransmission, up to a kind-private cap |
-| attempt | initiator | MAY end the attempt and start a new one with a fresh ephemeral key (§5.4 step 3) |
-| pending expiry | responder | discard the pending session |
+| retry | initiator | before a second message: retransmit the first message (§5.4 initiator step 2). After it, while unacknowledged: resend an empty confirmation (step 7). The interval doubles on each retry, up to a kind-private cap |
+| attempt | initiator | end the attempt, and any unacknowledged session with it. A held link MAY then start a new attempt, with a fresh ephemeral key and a new counter. An unheld link returns to `dormant` (below) |
+| pending expiry | responder | discard the pending session, counted in `noise_pending_expired` |
 | `rekey_after` (age of the current session) | initiator | start a rekey (§5.6) |
 | `reject_after` (age of the current session) | both | discard the session: the link goes down (§5.10) |
 | previous expiry | both | discard the previous session |
 
+**An attempt on an unheld link stops at its attempt deadline.** An attempt that an operation
+started, on a link that no standing binding holds (refcount 0), MAY retransmit on `now` until its
+attempt deadline, and MUST then stop: the link returns to `dormant`, and no new attempt starts
+without a new demand. That is RFC-0014 Amendment 1's "no background retry at refcount 0", applied
+to a handshake. While a standing binding holds the link, attempts continue with no give-up bound
+(RFC-0014 §4).
+
 A deadline set to 0 is never due. **Without `now` calls, nothing expires by time**, and each
-operation resolves on its other events: a handshake completes when its second message arrives, a
-pending session ends when another first message replaces it, and a session ends on a confirmed
+operation resolves on its other events: a handshake completes when its acknowledgement arrives, a
+pending session ends when another first message replaces it, and a session ends on a completed
 rekey, on the nonce limit of §5.5, or on teardown. An application that never calls with `now` still
 gets a working link. It gets no retransmission, so a lost handshake datagram waits for the next
 demand.
@@ -437,16 +506,16 @@ demand.
   and `MixKeyAndHash(psk)` is the same for every handshake on a link, so an implementation SHOULD
   compute it once when the link is built. What remains per datagram is one `MixHash`, one HKDF and
   one 16-byte tag check. Key generation and the Diffie-Hellman run only after the tag verifies. A
-  first message that fails touches no state. A replayed first message passes the tag check, and
-  then costs a key generation and a Diffie-Hellman (§6.5, §15 Q7).
+  first message that fails touches no state. A replayed first message passes the tag check and
+  stops at the counter (§5.4), still before any Diffie-Hellman. The mark costs 8 bytes per link.
 - **No library-internal buffers.** A transport message is decrypted **in place** in the receive
   segment the carrier drew from the link's source. Sealing a frame needs a destination: the link
   draws one segment of `frame + 25` bytes from its own transmit source, or seals in place when it
   owns the frame's bytes. When the source is exhausted, the frame is dropped and counted in
   `dropped_tx`: backpressure, never an out-of-memory failure.
-- **The stored handshake messages** (50 bytes on each side) live in the handshake
-  slot. They are part of the link's state, not a queue, and the binding queues no frame while a
-  handshake runs: a send without a session fails (§5.1).
+- **The stored handshake messages** (the initiator's 58 bytes and the responder's 50) live in the
+  handshake slot. They are part of the link's state, not a queue, and the binding queues no frame while a
+  handshake runs: a send with no session, acknowledged or not, fails (§5.1).
 - **One peer per link.** This binding is for a point-to-point connection, which is what the
   `udp` kind is: one link, one peer, one session. A multi-peer listener would draw a session per
   peer from its own source **only after** the first message's tag check, and refuse newcomers when
@@ -456,7 +525,8 @@ demand.
 
 **Normative.** The binding has no error message, no reject, no cookie and no plaintext reply. The
 only datagram a responder ever sends that is not a transport message is a second message, and it
-sends one only to a first message whose PSK tag verified. Every failure is a silent drop on the
+sends one only to a first message whose PSK tag verified and whose counter was fresh (or to that
+message's byte-identical retransmission). Every failure is a silent drop on the
 wire and one counter step:
 
 | what arrived | counted in |
@@ -464,8 +534,9 @@ wire and one counter step:
 | reserved type; a handshake datagram of the wrong length; a transport datagram under 25 B or over `max_frame + 25`; a nonce at or above 2^62; a decrypted plaintext that is not exactly one frame | `malformed_rx` |
 | a handshake message whose tag fails (wrong PSK, or tampered), whose flags byte is invalid, or whose `ee` is all zero | `noise_handshake_failed` |
 | a transport message whose tag fails | `noise_decrypt_failed` |
+| a first message whose counter is not above the mark | `noise_handshake_replayed` |
 | a transport message refused by the replay window | `noise_replayed` |
-| a well-formed datagram for state this side does not hold: a phase with no session, a second message with no attempt in flight, a late first message, a message for the other role | `noise_stale` |
+| a well-formed datagram for state this side does not hold: a phase with no session, a second message with no attempt in flight, a message for the other role | `noise_stale` |
 
 Because nothing is answered, an initiator whose PSK is wrong learns nothing from the responder. It
 sees only a handshake that never completes. That is deliberate: a reply would tell a prober that
@@ -479,21 +550,22 @@ added.
 | role | state | on a Noise link it means |
 | ---- | ---- | ---- |
 | DIAL | `dormant` | no session, and no attempt in flight |
-| DIAL | `dialing` | the first attempt is in flight, and there is no session yet |
-| DIAL | `up` | a confirmed current session exists |
-| DIAL | `reconnecting` | the link had a session, has lost it (rejected by age or by the nonce limit), and a new attempt is in flight |
+| DIAL | `dialing` | the first attempt is in flight, or its session is not acknowledged yet |
+| DIAL | `up` | an acknowledged current session exists |
+| DIAL | `reconnecting` | the link had a session, has lost it (rejected by age, by the nonce limit, or because the responder answered `fresh` with the same phase), and a new attempt, or its unacknowledged session, is in flight |
 | LISTEN | `listening` | the carrier socket is bound. As RFC-0014 says of every LISTEN link, this reports that the socket can be reached, not that a peer is attached |
 | LISTEN | `bind-failed` | the carrier socket could not bind |
 
-- A rekey that completes while the old session is still current does **not** pass through
-  `dialing`. The link stays `up` across it.
+- A rekey does **not** pass through `dialing`. The old session stays current until the new one is
+  acknowledged, so the link stays `up` across it.
 - **A session boundary is a fresh peer, not a rekey.** The generation exists so that a pair
   issued by a far node that may have rebooted stops resolving (RFC-0029 §8.2). A side advances
   the connection vertex's generation, as a link going down with its tenancy kept does, when:
   - it discards its current session with no replacement (`reject_after`, or the nonce limit): the
     link goes down; or
-  - it confirms a session whose peer set `fresh` (§5.2): the far node started that handshake
-    holding no session, so it may have rebooted.
+  - a session whose peer set `fresh` (§5.2) becomes current (acknowledged on the initiator,
+    confirmed on the responder): the far node started that handshake holding no session, so it may
+    have rebooted.
 
   A routine rekey, with `fresh` clear on both sides, advances nothing. It keeps every pair valid,
   including RFC-0027 labels while they last, so a rekey costs no fall-back to strings. Because a
@@ -514,7 +586,9 @@ Every noun counts a failure or a loss symptom and is bumped off the success path
 | noun | counts |
 | ---- | ---- |
 | `noise_handshake_failed` | handshake messages refused by the tag check, by the flags byte, or by an all-zero `ee` (§5.9) |
-| `noise_pending_replaced` | responder pending sessions discarded unconfirmed, because another first message replaced them or they expired |
+| `noise_handshake_replayed` | first messages refused because their counter was not above the mark (§5.4) |
+| `noise_pending_superseded` | responder pending sessions discarded unconfirmed because a newer first message replaced them: the initiator restarted its attempt, which sizes the retry and attempt deadlines |
+| `noise_pending_expired` | responder pending sessions discarded unconfirmed at their expiry: the initiator went away mid-handshake |
 | `noise_retransmits` | first messages retransmitted (initiator), and stored second messages resent (responder) |
 | `noise_decrypt_failed` | transport messages refused by the tag check |
 | `noise_replayed` | transport messages refused by the replay window |
@@ -525,9 +599,12 @@ Every noun counts a failure or a loss symptom and is bumped off the success path
 `dropped_rx`, `malformed_rx` and `dropped_tx` keep their meanings: receive-source exhaustion, a
 peer's malformed datagram, and transmit-source exhaustion. A monitor reads an attack, a key mismatch or a
 lossy path off the difference between two snapshots: a rising `noise_handshake_failed` is a wrong
-PSK or a prober, a rising `noise_pending_replaced` is a replayed first message or a restarting
-initiator, a rising `noise_replayed` is duplication or replay, and a rising `noise_retransmits` is
-loss.
+PSK or a prober, a rising `noise_handshake_replayed` is a replayed first message (or an initiator
+that lost its counter), a rising `noise_pending_superseded` is an initiator that restarts too soon,
+a rising `noise_pending_expired` is one that vanishes mid-handshake, a rising `noise_replayed` is
+duplication or replay, and a rising `noise_retransmits` is loss. The two pending causes are separate
+counters because an operator sizes against them differently (core/STYLE.md §Introspection, counting
+doctrine rule 4).
 
 ## 6. Security considerations
 
@@ -563,38 +640,45 @@ ephemeral keys that is enough for the future.
 
 Reusing one PSK across several link pairs lets a datagram recorded on one link be replayed to
 another. On transport messages the replay window and the per-session keys defeat that. On a first
-message they do not (§6.5). The prologue binds the binding version, not the link. One PSK per link
+message the counter defeats it only on a link whose mark has already passed it, because each link
+keeps its own mark (§5.4). The prologue binds the binding version, not the link. One PSK per link
 pair keeps a replayed first message to the link it came from.
 
-### 6.5 First-message replay: the open problem
+### 6.5 First-message replay
 
-A first message is authenticated by the PSK but carries no freshness. There is no library clock
-to put a timestamp in it, which is what WireGuard does. An attacker who recorded **one** first
-message, at any time while the PSK lives, can inject it again from anywhere: it needs no position
-on the path. With the text as it stands, that buys three things.
+A first message is authenticated by the PSK, but the PSK alone gives it no freshness. There is no
+library clock to put a timestamp in it, which is what WireGuard does. Without the counter, an
+attacker who recorded **one** first message could inject it again from anywhere, at any time while
+the PSK lives. That would buy two things:
 
-- **A wedge.** Injected while a handshake or a rekey is in flight, the replay replaces the
-  responder's pending session (§5.4 responder step 4). The legitimate initiator still receives *its*
-  second message, installs that session and reports `up`. Every frame it then sends fails at the
-  responder (`noise_decrypt_failed`), and nothing tells the initiator. Without `now` calls this
-  lasts until the application forces a rekey. With them, it lasts until `rekey_after`. The same
-  works on the first handshake. The replay also costs the responder its previous session (§5.6).
-  This is strictly worse than dropping datagrams, which an attacker on the path can always do: a
-  dropped confirmation heals on the next frame, and a wedge does not.
-- **An unbounded Diffie-Hellman lever.** Each replay costs the responder one key generation and
-  one Diffie-Hellman, with no bound on the rate. That is milliseconds to tens of milliseconds on an
-  MCU, so a few dozen datagrams a second can hold its core.
-- **Nothing delivered.** The attacker can never produce a confirmation, so no frame reaches the
-  graph and the current session is never replaced.
+- **a wedge:** injected during a handshake or a rekey, the replay would replace the responder's
+  pending session, and the initiator would report `up` on a session the responder no longer held;
+- **a Diffie-Hellman lever:** each replay would cost the responder a key generation and a
+  Diffie-Hellman with no rate bound, enough to hold an MCU's core at a few dozen datagrams a
+  second.
 
-§15 Q7 sets out the options that close these, with their costs, and recommends one. Until it is
-ruled, this RFC claims no protection against first-message replay.
+The binding closes both with two mechanisms, as ruled in §15 Q7:
+
+- **The counter** (§5.4) stops a replay after the tag check and before any Diffie-Hellman, at the
+  cost of a wrong-PSK datagram. A replay therefore never reaches the pending session, so it cannot
+  wedge a handshake, and it never draws a Diffie-Hellman. If the mark is kept in RAM only, a
+  responder reboot reopens a bounded window: each recorded first message with a counter above zero
+  can be replayed at most once, in increasing order. That bounds the Diffie-Hellmans by the number
+  of recordings. It cannot wedge a live handshake either, because the live initiator's counter is
+  always the highest, and the mark rises past every lower one as soon as the live first message
+  passes its tag. Persisting the mark closes even that window.
+- **The acknowledgement** (§5.4) makes `up` truthful whatever else puts the two sides out of step,
+  such as a pending session that expired or a responder that rebooted mid-handshake. The initiator
+  reports `up` only after the responder has proved, on the new session, that it holds it.
+
+What a replay can still do is cost the responder a tag check and a counter compare, the same as a
+datagram from a sender without the PSK.
 
 **Why no application data rides in the first message.** Its payload is encrypted under a key
-derived only from the PSK and the initiator's public ephemeral key. It is replayable and not
-forward secret, so a request in it (a "0-RTT" recovery command) could be replayed and run again.
-Application data rides only in transport messages, which a replay cannot reproduce. Q7's option (b)
-puts anti-replay metadata there, not application data, so this rule does not forbid it.
+derived only from the PSK and the initiator's public ephemeral key, so it is not forward secret. A
+request in it (a "0-RTT" recovery command) would also be readable by anyone who later learns the
+PSK. Application data rides only in transport messages. The counter in the first message is
+anti-replay metadata, not application data.
 
 ### 6.6 Unauthenticated header bytes
 
@@ -609,16 +693,17 @@ the transport message exactly a Noise transport message.
 
 - **Without the PSK:** one `MixHash`, one HKDF and one tag check per datagram (§5.8), and no
   state. Nothing is answered.
-- **With a replayed first message:** one key generation and one Diffie-Hellman per datagram, with
-  no bound on the rate and no allocation, and the responder answers with a second message (§6.5).
-  This lever stays open until §15 Q7 is ruled.
-- **No amplification.** The first message and the second are both exactly 50 bytes (§5.3), so a
-  responder never sends more than it received, even to a spoofed source address. (With Q7's option
-  (b), the first message grows to 58 bytes and the inequality widens.)
+- **With a replayed first message:** the same, plus one 8-byte compare against the mark. No
+  Diffie-Hellman, no state, no answer (§6.5).
+- **No amplification.** The first message is 58 bytes and the second 50 (§5.3), so a responder never
+  sends more than it received, even to a spoofed source address. The empty-message answer of §5.4
+  is 25 bytes for 25, and only to an authenticated message.
 - **Flooding transport messages:** one tag check each, and at most one key per message (§5.6). The
   replay pre-check refuses a known nonce without decrypting.
-- **A cookie exchange** is not part of this text. Whether one is needed depends on §15 Q7: options
-  (b) and (d) remove the replay lever it would guard, and option (a) alone does not.
+- **No cookie is needed.** A cookie exchange exists to keep the Diffie-Hellman away from senders who
+  have not proved anything. Here a sender without the PSK stops at the tag, and a replayer stops at
+  the counter, both before any Diffie-Hellman. The only sender who can draw one is a holder of the
+  PSK with a fresh counter, and a cookie would not stop that sender.
 
 ### 6.8 Implementation hazards
 
@@ -640,8 +725,8 @@ except for the handshake:
 - **The patterns.** `IK` (the initiator knows the responder's static key; ADR-0086), `XX` (neither
   knows the other's in advance: trust on first use; ADR-0086), and `KK` (both know each other's: a
   provisioned pair). The protocol names, prologues and payload layouts are #1993's.
-- **The credential** rides in the handshake payload, where this binding carries only the flags
-  byte. The flags byte keeps its place, as the payload's first byte.
+- **The credential** rides in the handshake payload, where this binding carries the flags byte
+  and, in the first message, the counter. Both keep their places at the start of the payload.
 - **The subject** comes from the static key through the verifier policy (ADR-0086 Decision 3)
   instead of the fixed per-link subject of §5.10.
 - **A PSK can be added, but the cheap check cannot come from a Noise modifier.** `KKpsk0`,
@@ -651,8 +736,8 @@ except for the handshake:
   can check the PSK. In `IKpsk1` and `IKpsk2` the PSK comes after `es`, `s` and `ss`. NNpsk0 is
   cheap only because it has no static-key token before its payload. A pre-DH gate for an identity
   pattern needs a **binding-level MAC over the handshake datagram**, keyed from the PSK and checked
-  before any Noise processing, as WireGuard's `mac1` is. Whether #1993 offers the modifiers, the MAC
-  or both is its own decision (§15 Q5).
+  before any Noise processing, as WireGuard's `mac1` is. As ruled (§15 Q5), #1993 offers the
+  modifiers as options, and the MAC route is noted for it.
 - **Moving from NNpsk0 to an identity pattern** is a config change on both sides: a new pattern,
   the same carrier and the same connection vertex. Nothing on the graph side changes.
 
@@ -674,7 +759,8 @@ Analytic, from the layouts. Nothing is measured yet (§12).
 
 Above 1 KiB the overhead is negligible. The cost that grows there is the IP fragmentation the
 plain UDP link already pays (§5.3, path-MTU advice), and the binding neither adds to it nor
-removes it. A handshake is 50 + 50 bytes, plus the 25-byte confirmation.
+removes it. A handshake is 58 + 50 bytes, plus a 25-byte confirmation and a 25-byte
+acknowledgement, which a request and its reply replace.
 
 ### 8.2 RAM per link
 
@@ -682,8 +768,9 @@ removes it. A handshake is 50 + 50 bytes, plus the 25-byte confirmation.
 | ---- | ---- | ---- |
 | session (current) | two 32-byte keys, send nonce, highest nonce, `W`-bit bitmap (`W` = 64), phase | 96 B |
 | session (previous, optional) | the same | 96 B |
-| handshake | initiator: ephemeral private key, `ck`, `h`, `k`, 50-byte message. Responder: a session, the 50-byte message, the initiator's ephemeral key | 180 B |
-| **total** | | **about 370 B**, or about 280 B without a previous session |
+| handshake | initiator: ephemeral private key, `ck`, `h`, `k`, 58-byte message, then the unacknowledged session. Responder: a session and the 50-byte message | 190 B |
+| mark | the responder's highest accepted counter | 8 B |
+| **total** | | **about 390 B**, or about 300 B without a previous session |
 
 These are fixed and drawn when the link is built. The receive buffer grows by 25 bytes over the
 plain link's. A transmit segment of `frame + 25` bytes is drawn per send when the frame cannot be
@@ -703,7 +790,7 @@ sealed in place (§5.8).
 
 ### 8.4 Across the spectrum
 
-- **NARROW:** no previous session, `W` = 64, `max_frame` within one carrier datagram: about 280 B per
+- **NARROW:** no previous session, `W` = 64, `max_frame` within one carrier datagram: about 300 B per
   link and no allocation after build.
 - **MID:** with a previous session, so frames in flight survive a rekey.
 - **WIDE:** a larger `W` for high-rate links with deep reordering, chosen at compile time.
@@ -714,10 +801,10 @@ sealed in place (§5.8).
 | ---- | ---- |
 | No timers or clock reads | Every deadline is checked against the application's `now` (§5.7). Without it, operations resolve on their other events. |
 | No library-internal buffers | Decryption is in place. A sealed frame goes into a segment from the link's own source. The binding queues no frame during a handshake (§5.8). |
-| Receiver pays | All session state is a fixed part of the link, from its own source. A peer without the PSK causes no allocation and no Diffie-Hellman (§5.8, §6.7). A replayed first message causes a Diffie-Hellman until §15 Q7 is ruled. |
+| Receiver pays | All session state is a fixed part of the link, from its own source. A peer without the PSK causes no allocation and no Diffie-Hellman (§5.8, §6.7). Neither does a replayed first message: it stops at the counter (§5.4). |
 | Compile-time by default | The replay window `W`, keeping a previous session, and the crypto primitives are build-time choices. The PSK and the deadlines are per-link config. |
 | Core stays crypto-free | The binding is a `security_noise` module over host primitives (ADR-0045, ADR-0086). The core sees an ordinary link. |
-| Complexity by deletion | One framing, one rekey mechanism (a new handshake, not Noise `Rekey()` as well), no error path, and no fallback to plaintext. Q7 may add one acknowledgement or one counter, each a fixed field rather than a new path. |
+| Complexity by deletion | One framing, one rekey mechanism (a new handshake, not Noise `Rekey()` as well), no cookie path, no error path, and no fallback to plaintext. Replay is closed by one compare and one acknowledgement rule, not by a new path. The responder's old "ephemeral of the current session" check is deleted, because the counter subsumes it. |
 | Lookups population-independent | One peer per link, at most two sessions, and one key tried per message. |
 
 ## 10. Normative pages that change
@@ -729,20 +816,20 @@ with §6 marked informative and Appendix A as its worked example. `docs/spec/v1.
 it as an annex that applies **to a link that uses the binding**, and §1's sentence "a transport's
 native framing below the TLV layer (each transport documents its own binding)" gains "except the
 Noise link binding, which a link that uses Noise MUST follow (§3)". `docs/spec/index.md` §What is
-normative restates the list. §15 Q1 asks whether to do this or to keep the RFC as the binding's
-only text until #1993 extends it.
+normative restates the list. **Ruled (§15 Q1, 2026-10-10)**: the page is written in slice S1, and
+#1993 extends the same page with its patterns.
 
 ### 10.2 `docs/reference/05-protocol-tlvs.md` (normative annex)
 
 §The seam census record, the `:stats.link.<child>` row keeps every noun it lists today, including
 `labels_used` (whose removal is RFC-0032's, not this RFC's), and its noun cell gains: "and, on a
-Noise link (RFC-0033 §5.11), `noise_handshake_failed`, `noise_pending_replaced`,
-`noise_retransmits`, `noise_decrypt_failed`, `noise_replayed`, `noise_stale`, `noise_expired` and
-`noise_oversize`."
+Noise link (RFC-0033 §5.11), `noise_handshake_failed`, `noise_handshake_replayed`,
+`noise_pending_superseded`, `noise_pending_expired`, `noise_retransmits`, `noise_decrypt_failed`,
+`noise_replayed`, `noise_stale`, `noise_expired` and `noise_oversize`."
 
 In §Invalidation, the bullet on transports that cannot report a session boundary gains: "A Noise
-link (RFC-0033) reports one whenever a confirmed session's peer started fresh, or its session is
-discarded, so it carries no per-boot epoch. A routine rekey is not a boundary."
+link (RFC-0033) reports one whenever a session whose peer started fresh becomes current, or its
+session is discarded, so it carries no per-boot epoch. A routine rekey is not a boundary."
 
 ### 10.3 Informative pages, records and the glossary
 
@@ -759,15 +846,16 @@ discarded, so it carries no per-boot epoch. A routine rekey is not a boundary."
 
 - **ADR-0086 Decision 8** says that a Noise link uses "handshake pattern **XX** or **IK**", and that
   "a Noise link that does not follow the binding is not a conforming Tracer link". This RFC adds
-  `NNpsk0` as a sanctioned pattern of the same binding, for links with a PSK and no identity. At
-  acceptance, ADR-0086 gains a dated amendment note: Decision 8's pattern list reads "XX or IK
-  for links that carry identity (#1993), NNpsk0 for links that carry only a PSK (RFC-0033)". The
-  rest of Decision 8 stands: a Noise link that follows neither is not conforming.
+  `NNpsk0` as a sanctioned pattern of the same binding, for links with a PSK and no identity.
+  **Ruled (§15 Q2):** ADR-0086 carries a dated amendment note (2026-10-10, written in this RFC's pull
+  request). Decision 8's pattern list reads "XX or IK when the link carries identity (#1993),
+  NNpsk0 when it carries a PSK only (RFC-0033), all on one framing". The rest of Decision 8 stands:
+  a Noise link that follows neither is not conforming.
 - **#1649's design comment** proposes a secure-link adapter **in core**, a **bounded session LRU**
   and a **stateless cookie retry**. This RFC places the adapter in the `security_noise` module,
   because the core stays crypto-free (ADR-0045 Considered options, ADR-0086 §Consequences). It
-  refuses newcomers rather than evicting (§5.8). Whether a cookie is needed is §15 Q7's to decide
-  (§6.7). #1649's datagram
+  refuses newcomers rather than evicting (§5.8), and it needs no cookie, because the counter keeps
+  replays away from the Diffie-Hellman (§6.7). #1649's datagram
   mode (explicit counter, replay window, refuse a carrier too small for the overhead) is what §5.3 and
   §5.5 specify.
 - **RFC-0014's LISTEN row** is kept as it is: a Noise responder reports `listening`, not `up`. §15 Q4
@@ -775,7 +863,9 @@ discarded, so it carries no per-boot epoch. A routine rekey is not a boundary."
 - **RFC-0014 §4's dormant-link wait** (an operation on a dormant DIAL link waits for one connect
   attempt, bounded by `connect_timeout`) does not hold on a Noise link. The operation fails at once
   and starts the attempt, and the caller awaits `up` (§5.1). The wait needs a clock and a held
-  frame, and the binding has neither.
+  frame, and the binding has neither. An attempt an operation started on an unheld link stops at
+  its attempt deadline (§5.7), which is RFC-0014 Amendment 1's no-background-retry rule. RFC-0014's
+  status key and an amendment pointer are updated in slice S1.
 
 ## 11. Breaking surface
 
@@ -789,10 +879,10 @@ ignore unknown names. A node that does not build the `security_noise` module lin
 
 | Slice | Contents | Gate |
 | --- | --- | --- |
-| S0 | This RFC, and its approval. | maintainer approval |
-| S1 | The binding page and the annex edits of §10.1 and §10.2, in the form §15 Q1 rules. | docs build (`sphinx-build -n -W`) |
-| S2 | The `security_noise` module on host: the Noise link over any datagram link, the `now` poll seam, the slots, the counters; the §12.3 tests over an in-memory datagram link and over UDP. The Appendix A vectors as a test. | full core-ci matrix; the vectors match byte for byte |
-| S3 | ESP-IDF, through #1649: the same module over the ESP-IDF UDP link, with RAM per link and handshake time measured against §8. | ESP build and size gates; on-silicon handshake |
+| S0 | This RFC, its approval (2026-10-10), and ADR-0086's dated Decision 8 note (§10.4). | maintainer approval |
+| S1 (follow-up, to be filed) | The binding page `docs/reference/23-noise-link-binding.md`, its incorporation in v1 §1 and §3, `docs/spec/index.md`, reference/05 (§10.2), reference/10 and reference/19 (§10.3), RFC-0014's status key and amendment pointer, and the glossary term if a line is free. | docs build (`sphinx-build -n -W`) |
+| S2 ([#2064](https://github.com/avatarsd-llc/libtracer/issues/2064), the Noise link on host and ESP-IDF) | The `security_noise` module: the Noise link over any datagram link, the `now` poll seam, the counter seam, the mark, the slots, the counters; the §12.3 tests over an in-memory datagram link and over UDP; the Appendix A vectors as a test. **Its first slice gates on a third-party implementation reproducing Appendix A** (§15 Q6). The perf harness is [#2065](https://github.com/avatarsd-llc/libtracer/issues/2065). | full core-ci matrix; the vectors match byte for byte, from this code and from `snow` or `noiseprotocol` |
+| S3 ([#1649](https://github.com/avatarsd-llc/libtracer/issues/1649), the ESP-IDF UDP link with Noise) | The same module over the ESP-IDF UDP link, with RAM per link and handshake time measured against §8. | ESP build and size gates; on-silicon handshake |
 
 ### 12.2 Conformance vectors
 
@@ -800,9 +890,10 @@ The conformance suite today round-trips frames, and a Noise transcript is not a 
 **`noise/` category** whose cases are JSON transcripts: inputs (PSK, ephemeral private keys,
 prologue, plaintexts) and expected outputs (each datagram's bytes, the handshake hash and the two
 transport keys), as in Appendix A. A conforming Noise link reproduces every datagram byte for byte
-from the inputs. The first case is Appendix A's. Three more follow: a key-phase-1 rekey with
-`fresh` clear, a second message whose flags byte is invalid, and a first message whose ephemeral
-key is a low-order point, so that `ee` is all zero. The link must refuse the last two.
+from the inputs. The first case is Appendix A's. Four more follow: a key-phase-1 rekey with
+`fresh` clear, a second message whose flags byte is invalid, a first message whose ephemeral key is
+a low-order point (so that `ee` is all zero), and a first message whose counter equals the mark.
+The link must refuse the last three.
 
 ### 12.3 Behaviour tests (at the wire, over an in-memory datagram link)
 
@@ -814,10 +905,22 @@ key is a low-order point, so that `ee` is all zero. The link must refuse the las
   one key pair.
 - **No `now` calls:** with the first message lost, nothing is retransmitted, and the next demand
   completes the handshake.
-- **Replayed first message** while a session is current: the current session keeps working, the
-  pending one is never confirmed, nothing is delivered, and `noise_pending_replaced` counts it. A
-  replay injected during a rekey is the wedge of §6.5. The test for it is written once §15 Q7 is
-  ruled, and asserts whatever Q7 chooses.
+- **Replayed first message**, injected while a session is current, during a first handshake and
+  during a rekey: it is counted in `noise_handshake_replayed`, runs no X25519, sends nothing and
+  leaves the pending session alone. The handshake in flight completes, and the link reaches `up`.
+- **Retransmit before counter:** a lost second message is recovered by a byte-identical first
+  message, which is answered with the stored second message even though its counter equals the
+  mark.
+- **Responder reboot with the mark in RAM:** each recorded first message is accepted at most once,
+  in increasing counter order, and the live initiator's next attempt is accepted.
+- **Mark reset:** replacing the PSK resets the mark, and clearing it through the seam re-admits an
+  initiator whose counter went back.
+- **Acknowledgement:** the initiator stays `dialing` until the acknowledgement. A lost
+  acknowledgement is recovered by the resent empty confirmation, which is answered by one empty
+  message. A request and its reply complete in two round trips, with no empty message on the wire.
+  A rekey keeps frames on the old session until the new one is acknowledged.
+- **Unheld attempt:** an attempt started by an operation on an unheld link retransmits on `now`
+  until its attempt deadline, then stops and returns to `dormant`, and nothing more is sent.
 - **Replay window edges:** a second copy of the newest accepted nonce is refused, nonce 0 passes on a
   new session, a session with `highest < W` refuses duplicates without underflow, and a nonce of
   2^62 is refused before decryption.
@@ -862,10 +965,13 @@ key is a low-order point, so that `ee` is all zero. The link must refuse the las
   it back (§15 Q3).
 - **Noise's in-place `Rekey()`, in addition to a new handshake.** Rejected: two rekey mechanisms
   where one does, and the in-place one gives no new ephemeral keys.
-- **A cookie or retry exchange against handshake floods.** Not decided here. `psk0` places the
-  Diffie-Hellman behind the PSK for a sender without it, but a replayed first message gets past
-  that (§6.5). §15 Q7 decides whether the fix is a counter, an acknowledgement or a MAC, and so
-  whether a cookie is ever needed.
+- **A cookie or retry exchange against handshake floods.** Rejected: with the counter, both a
+  sender without the PSK and a replayer stop before any Diffie-Hellman (§6.7).
+- **A binding-level MAC before the Noise processing** (WireGuard's `mac1`, Q7 option (c)). Rejected
+  for NNpsk0: the PSK tag already is such a MAC, and a replayed message carries a valid one. It is
+  noted for #1993's identity patterns (§7).
+- **The acknowledgement alone, without the counter** (Q7 option (a) alone). Rejected: it makes `up`
+  truthful but leaves the Diffie-Hellman lever open.
 - **Application data in the first message (0-RTT).** Rejected: it would be replayable (§6.5).
 - **An error or reject message.** Rejected by ruling 7. It would also turn the responder into an
   oracle for probers.
@@ -877,100 +983,85 @@ key is a low-order point, so that `ee` is all zero. The link must refuse the las
 
 ## 14. What would falsify this RFC
 
-1. **An independent Noise implementation does not reproduce Appendix A.** The vectors were derived
-   from the Noise text without an independent implementation to hand (Appendix A). A mismatch is
-   a defect in this document, to be fixed before acceptance (§15 Q6).
+1. **A third-party Noise implementation does not reproduce Appendix A.** The vectors were derived
+   from the Noise text, and a second independent derivation matched, but both used the same
+   primitive library (Appendix A). A mismatch found by #2064's first slice is a defect in this
+   document, to be fixed by an erratum (§15 Q6).
 2. **A carrier that cannot carry the binding without fragmenting.** That would be a deployment where
    `max_frame + 25` cannot fit the carrier's datagram and a frame cannot be made smaller. It would
    call for a fragmenting binding, which this one deliberately is not.
 3. **A recovery flow that needs the responder to send first.** The responder cannot send until the
    initiator confirms (§5.4). If a real flow needs the board to speak first without the tool sending
    anything, the confirmation rule has to change.
-4. **First-message replay that the Q7 ruling does not close on a target that matters.** As drafted,
-   one recorded first message can wedge a handshake or a rekey and draw a Diffie-Hellman per
-   replay (§6.5). If the option the maintainer chooses leaves either open on a NARROW target
-   without persistent storage, the binding fails its own receiver-pays claim there and needs
-   another remedy.
+4. **Initiators that cannot keep a non-repeating counter.** The counter needs a wall clock, a
+   monotonic counter or one persisted boot counter on the initiator (§5.4). If the initiators that
+   matter have none of these, and clearing the responder's mark after each of their reboots is not
+   workable, the replay defence fails for them, and the binding needs another remedy.
 
-## 15. Questions for the maintainer, each with a recommendation
+## 15. Questions for the maintainer, with the rulings
 
-1. **Where does the normative text live?** (a) A new reference page, incorporated by v1 §3 as an
-   annex that applies to a link that uses the binding (§10.1). (b) This RFC alone, until #1993
-   extends it into the one "Tracer over Noise" page. **Recommendation: (a), landed in S1.**
-   ADR-0086 Decision 8 already rules that the binding is normative. An RFC is a change record, not
-   the place a reader looks for the current rule. #1993 then adds its patterns to the same page.
-2. **Amend ADR-0086 Decision 8's pattern list to admit `NNpsk0`?** **Recommendation: yes, at
-   acceptance, with a dated amendment note** (§10.4): XX or IK for identity, NNpsk0 for PSK only,
-   and one framing for all of them.
-3. **One peer per link only, for now?** **Recommendation: yes.** The `udp` kind is point-to-point,
+The maintainer ruled on **2026-10-10**: "all rec". Q7 was ruled as its recommendation, (a) together
+with (b), with three refinements the review proposed. The draft's question and recommendation
+follow each ruling.
+
+1. **Where does the normative text live? RULED 2026-10-10: (a).** A new reference page,
+   incorporated by v1 §3 as an annex that applies to a link that uses the binding (§10.1), and
+   #1993 extends it with its patterns. ADR-0086 Decision 8 already rules that the binding is
+   normative, and an RFC is a change record, not the place a reader looks for the current rule.
+   The page is slice S1.
+2. **Amend ADR-0086 Decision 8's pattern list to admit `NNpsk0`? RULED 2026-10-10: yes,** with a
+   dated amendment note at acceptance (§10.4). XX or IK when the link carries identity, NNpsk0 when
+   it carries a PSK only, and one framing for all of them.
+3. **One peer per link only, for now? RULED 2026-10-10: yes.** The `udp` kind is point-to-point,
    and the recovery case is one tool and one board. A multi-peer Noise listener is a later
-   amendment, with sessions drawn from the link's source after the PSK tag check, refusing newcomers
-   rather than evicting, and probably as a bus session anchor (RFC-0031).
-4. **Should a Noise responder report `up` while it holds a confirmed session?** RFC-0014 says that
-   a LISTEN link reports `listening`: the socket can be reached, not that a peer is attached.
-   **Recommendation: keep `listening`.** A responder that needs to know when an authenticated
-   peer arrives sees its first delivered frame. The counters report only failures (§5.11). A one-peer UDP
-   listener could truthfully report `up`, but that would be the first LISTEN link to do so and
+   amendment, with sessions drawn from the link's source after the PSK and counter checks, refusing
+   newcomers rather than evicting, and probably as a bus session anchor (RFC-0031).
+4. **Should a Noise responder report `up` while it holds a confirmed session? RULED 2026-10-10:
+   no, keep `listening`** per RFC-0014. A responder that needs to know when an authenticated peer
+   arrives sees its first delivered frame. The counters report only failures (§5.11). Reporting `up`
    would amend RFC-0014's LISTEN row for a single kind.
 5. **Should #1993 offer PSK modifiers of its identity patterns** (`KKpsk0`, `IKpsk1`, `IKpsk2`)?
-   **Recommendation: yes, as an option, for PSK-gated confidentiality.** They do **not** keep this
-   binding's "no Diffie-Hellman before a secret is proven" property: `KKpsk0` checks its tag only
-   after `es` and `ss`, and the IK variants only after `es`, `s` and `ss` (§7). If #1993 wants a
-   cheap pre-DH gate, it needs a binding-level MAC over the handshake datagram, keyed from the PSK,
-   as WireGuard's `mac1` is. It is #1993's decision. This RFC only keeps the framing ready for it.
-6. **The vectors' provenance.** No third-party Noise implementation was available offline when
-   this was drafted, so Appendix A was derived from the Noise text, over standard primitives (see
-   Appendix A for how). At review, a second derivation written independently from the Noise text
-   reproduced the first draft's vectors byte for byte. It used the same primitive library, so a
-   primitive bug common to both would not show. **Recommendation: make "a third-party
-   implementation (for example the `snow` crate's stateless transport, or `noiseprotocol` for
-   Python) reproduces Appendix A" a gate of S2,** and fix this document if it does not.
-7. **How is first-message replay closed (§6.5)?** A recorded first message, injected during a
-   handshake or a rekey, replaces the responder's pending session. The initiator then reports `up`
-   on a session the responder no longer holds (a wedge), and every replay costs the responder a key
-   generation and a Diffie-Hellman with no rate bound. The options:
-   - **(a) The responder acknowledges confirmation.** On confirming a pending session, the responder
-     sends one empty transport message on it. The initiator reports `up` only after it has received
-     an authenticated message on the new session, and on its retry deadline it starts a new attempt
-     instead of waiting. *Cost:* 25 bytes and half a round trip per handshake, and no new state.
-     *Closes* the wedge: a replay now delays a handshake and never strands one. *Leaves open* the
-     Diffie-Hellman lever and the loss of the previous session. Without `now` calls, a stranded
-     attempt waits for the next demand.
-   - **(b) An application-supplied increasing counter in the first message**, like WireGuard's
-     TAI64N timestamp without a clock. The first message's payload gains a u64 counter (58 B in all).
-     The responder keeps the highest counter it has accepted per link, and refuses a first message
-     whose counter is not higher. It checks this after the PSK tag and before any Diffie-Hellman,
-     so a replay costs what a wrong PSK costs. *Initiator cost:* the counter must never repeat
-     across its reboots, and it comes from a seam, because there is no library clock and an MCU may
-     have no RTC. A persisted boot counter (u32, one flash write per boot) in the high half and an
-     attempt counter in RAM in the low half suffice. A host can use its wall clock. An initiator
-     with no persistent storage cannot use (b): after a reboot, its counter would be refused until
-     it passed the old one. *Responder cost:* 8 bytes of RAM per link. If it keeps the high-water
-     mark only in RAM, a responder reboot lets each recorded first message above zero be replayed
-     at most once, in increasing order. That bounds the Diffie-Hellmans by the number of recordings.
-     It does not reopen the wedge, because the live initiator's counter is always the highest.
-     Persisting the mark (one flash write per accepted handshake) closes even that. *Closes* the
-     wedge and the Diffie-Hellman lever.
-   - **(c) A cheap MAC before any Diffie-Hellman,** like WireGuard's `mac1`. *Cost:* 16 bytes per
-     first message. For NNpsk0 it adds nothing: the PSK tag already is such a MAC, and a replayed
-     message carries a valid one. WireGuard bounds replay floods with `mac2`, a cookie that answers
-     an unproven peer and rotates a secret by time. Here that means a `now`-driven secret and a reply
-     before a live peer is proven, which ruling 7 forbids in spirit. (c) matters for #1993's
-     identity patterns (Q5), not for this one.
-   - **(d) A combination.**
+   **RULED 2026-10-10: yes, as options, for PSK-gated confidentiality,** with the corrected
+   reasoning. They do **not** keep this binding's "no Diffie-Hellman before a secret is proven"
+   property: `KKpsk0` checks its tag only after `es` and `ss`, and the IK variants only after `es`,
+   `s` and `ss` (§7). A cheap pre-DH gate needs a binding-level MAC over the handshake datagram,
+   keyed from the PSK, as WireGuard's `mac1` is, and that route is noted for #1993.
+6. **The vectors' provenance. RULED 2026-10-10:** a third-party implementation (`snow` or
+   `noiseprotocol`) must reproduce Appendix A **by #2064's first slice**. No third-party
+   implementation was available offline when this was drafted. At review, a second derivation
+   written independently from the Noise text reproduced the first draft's vectors byte for byte,
+   but with the same primitive library.
+7. **How is first-message replay closed (§6.5)? RULED 2026-10-10: (a) together with (b)**, with
+   three refinements, all carried by §5.4:
+   - the responder's mark **resets with the PSK**, the application **can clear it**, and an
+     initiator uses a **wall-clock or monotonic counter where it has one**, with a persisted boot
+     counter plus an attempt counter as the fallback;
+   - a **byte-identical** first message is answered with the stored second message **before** the
+     counter check, and the mark **rises when a first message passes its tag** (and its counter is
+     fresh);
+   - on the retry deadline, an initiator with an unacknowledged session **resends an empty
+     confirmation** before it starts a new handshake. A request may stand in for the confirmation and
+     its reply for the acknowledgement, so a single request and reply takes two round trips.
 
-   **Recommendation: (d), as (a) together with (b).** (b) closes both the wedge and the
-   Diffie-Hellman lever at the price of one persisted boot counter on the initiator. (a) makes `up`
-   truthful whatever else desynchronises the two sides, such as a pending session that expired or a
-   responder that rebooted mid-handshake, and costs 25 bytes per handshake. With both, no cookie is
-   needed, and §6.5, §6.7, §13 and Appendix A are updated to match. Use (a) alone only if the
-   initiators that matter cannot persist a counter, and then add a `now`-driven bound on how many
-   handshakes the responder answers per interval.
+   With both, no cookie is needed (§6.7). The options were:
+   - **(a) The responder acknowledges confirmation,** and the initiator reports `up` only after an
+     authenticated message on the new session. Cost: 25 bytes and half a round trip per handshake,
+     which a request and reply absorb. It closes the wedge, but not the Diffie-Hellman lever.
+   - **(b) An application-supplied increasing counter in the first message,** like WireGuard's
+     timestamp without a clock, checked after the PSK tag and before any Diffie-Hellman. Cost: 8 bytes
+     in the first message, 8 bytes of RAM per link, and a non-repeating counter on the initiator. It
+     closes both.
+   - **(c) A cheap MAC before any Diffie-Hellman,** like WireGuard's `mac1`. It adds nothing for
+     NNpsk0, whose PSK tag already is one and which a replay carries validly. It matters for #1993.
+   - **(d) A combination.** Recommended as (a) + (b), and ruled.
 
 ## 16. Discussion
 
 Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the comment window is waived by default while
-the project is solo-maintained. Sustained objections and their resolution are recorded in this
+the project is solo-maintained, and it was not invoked. The maintainer approved the RFC on
+2026-10-10 ("all rec" on §15), as the Status row records. The review of the first draft found the
+replay-window edge, first-message replay, a one-byte reflection gain and the Q5 reasoning, and
+each is fixed in this text. Sustained objections and their resolution are recorded in this
 section as they arrive.
 
 ---
@@ -994,9 +1085,10 @@ The script checks itself in three ways:
 
 None of these checks would catch a misreading of the Noise token rules shared by both sides. At
 review, a second derivation written independently from the Noise text reproduced the first draft's
-vectors byte for byte. The vectors below differ from that draft only in the flags bytes of §5.2,
-which change the handshake hash chain from the first payload on and leave the transport keys
-unchanged. §15 Q6 asks a third-party implementation to close the remaining caveat at S2.
+vectors byte for byte. The vectors below differ from that draft only in the handshake payloads of
+§5.2 (the flags bytes and the counter). Those change the handshake hash chain from the first
+payload on and leave the transport keys unchanged. As ruled (§15 Q6), a third-party implementation
+must reproduce them by #2064's first slice.
 
 ### A.2 Inputs
 
@@ -1009,6 +1101,8 @@ responder e     404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
 frame i->r      0100040070696e67      VALUE "ping" (type 0x01, opt 0x00, len 4)
 frame r->i      0100040070616e67      VALUE "pang"
 flags msg1      01   (fresh: the initiator held no session)
+counter         0000000100000001   (boot 1, attempt 1; on the wire as u64 LE 0100000001000000)
+msg1 payload    010100000001000000
 flags msg2      02   (key phase 0, fresh: the responder held no current session)
 ```
 
@@ -1040,42 +1134,44 @@ MixHash(prologue)
   ck 4bbe7fe7eab33e763d98f1fe9317d8897a7a9a04a88c24044826dbc2c6dc328d
   h  db820b8ecaf5fb8251d2c02ade5a068902ced283abd5a09a5a3b8fc81a4aca84
   k  9dd2bab4f776313d2482a17e73fdb37c763a50befe22035eed9d712ba42064f7
--> payload: EncryptAndHash(01)
-  h  7e4e60b55a64e0878164a047810095e3c71573c214dd7cff4359d6470bbc2a9a
+-> payload: EncryptAndHash(010100000001000000)
+  h  0c32366b9eff6d8a91281c32e2215ef9d68bc7116d35d15ec6134af103232b13
 <- e: MixHash(e.pub), MixKey(e.pub)
   ck b807d66b184d23acaf8f449ba584cfdd795dc30e9397383d32de3a5cace355f0
-  h  ce1c6f31baecd86e5c21c747d06db7d5f58a98aab134253100b56b12749aa75f
+  h  ae34928f61fe43786b5a099ae01961de783df919b1de23dcaff20a106548ad9b
   k  8451c478b7eb0f6e2665d44af680e48923b413c2acc8f6568b8d5028c4ce897e
 <- ee: MixKey(DH(e, re))
   ck 6b8a5bc652b3f9778cf22aa99918204288e05858977cd52ca474b347ac1e27c1
   k  fb638e73cc98b3390ce667b57f857412953104f938ffa43e949945f0dbcc6adc
 <- payload: EncryptAndHash(02)
-  h  d0926289a068420ade0a9f87a902aa629a94a366fcac8e3c1b1018d7f1b6358d
+  h  37f20e686b103bcec0394595c60564fa5eebe6daab15de29ca2fc0c289802e80
 ```
 
 The datagrams, type byte first:
 
 ```
-msg1 (50 B)  01
+msg1 (58 B)  01
              358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254
-             30 796947dca3161b28c7cfc966c5913522
+             305dfcc173612b6516 04ae630d4c171a9f19e1d41b12b973f2
 msg2 (50 B)  02
              79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a
-             94 c7e009e578198ed3b1a3d3c33971a13d
+             94 5968a975a98d942d263ea658be0b1b91
 ```
 
-(In each message, the byte after the ephemeral key is the encrypted flags byte, and the last 16
-bytes are its tag.)
+(After the ephemeral key come the encrypted payload, which is 9 bytes in `msg1` and 1 byte in
+`msg2`, and then its 16-byte tag.)
 
 After `Split()`:
 
 ```
-handshake hash  d0926289a068420ade0a9f87a902aa629a94a366fcac8e3c1b1018d7f1b6358d
+handshake hash  37f20e686b103bcec0394595c60564fa5eebe6daab15de29ca2fc0c289802e80
 k_i2r           810cde8f99b1a2a5a863e41b93fd1c11b29ab8fee3f3edcb662e163b245164ca
 k_r2i           f8ca9cf382ec15ac3609fa976595baafec96af6729b05edab8e41839ed09f6cd
 ```
 
-Transport messages (type `04` = key phase 0, then the nonce, the ciphertext and the tag):
+Transport messages (type `04` = key phase 0, then the nonce, the ciphertext and the tag). In this
+transcript the initiator confirms with an empty message and then sends its request. The responder's
+reply is its first message on the session, so the reply is also the acknowledgement:
 
 ```
 confirmation, initiator -> responder, n = 0, empty plaintext (25 B)
@@ -1103,6 +1199,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 NAME, PROLOGUE = b"Noise_NNpsk0_25519_ChaChaPoly_SHA256", b"Tracer over Noise v1"
 PSK, E_I, E_R = bytes(range(0, 32)), bytes(range(32, 64)), bytes(range(64, 96))
 PING, PANG = bytes.fromhex("0100040070696e67"), bytes.fromhex("0100040070616e67")
+P1 = b"\x01" + struct.pack("<Q", (1 << 32) | 1)  # msg1 payload: flags (fresh), counter (boot 1, attempt 1)
 
 def sha(*p): return hashlib.sha256(b"".join(p)).digest()
 def nonce(n): return b"\0" * 4 + struct.pack("<Q", n)
@@ -1141,12 +1238,12 @@ def unseal(k, d):
     n = struct.unpack("<Q", d[1:9])[0]; return n, ChaCha20Poly1305(k).decrypt(nonce(n), d[9:], b"")
 
 i, r = Sym(), Sym()
-i.mix_key_and_hash(PSK); i.e(pub(E_I)); m1 = b"\x01" + pub(E_I) + i.enc(b"\x01")  # flags: fresh
-r.mix_key_and_hash(PSK); r.e(m1[1:33]); assert r.dec(m1[33:]) == b"\x01"
+i.mix_key_and_hash(PSK); i.e(pub(E_I)); m1 = b"\x01" + pub(E_I) + i.enc(P1)
+r.mix_key_and_hash(PSK); r.e(m1[1:33]); assert r.dec(m1[33:]) == P1
 r.e(pub(E_R)); r.mix_key(dh(E_R, m1[1:33])); m2 = b"\x02" + pub(E_R) + r.enc(b"\x02")  # phase 0, fresh
 i.e(m2[1:33]); i.mix_key(dh(E_I, m2[1:33])); assert i.dec(m2[33:]) == b"\x02"
 (k1, k2), (r1, r2) = hkdf(i.ck, b"", 2), hkdf(r.ck, b"", 2)
-assert (k1, k2, i.h) == (r1, r2, r.h) and len(m1) == len(m2) == 50
+assert (k1, k2, i.h) == (r1, r2, r.h) and (len(m1), len(m2)) == (58, 50)
 c, f, g = seal(k1, 0, b""), seal(k1, 1, PING), seal(k2, 0, PANG)
 assert unseal(r1, c) == (0, b"") and unseal(r1, f) == (1, PING) and unseal(r2, g) == (0, PANG)
 for name, v in (("msg1", m1), ("msg2", m2), ("hash", i.h), ("k_i2r", k1), ("k_r2i", k2),
