@@ -14,6 +14,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`udp_transport_t`: an ephemeral bind owns its port
+  ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
+  set `SO_REUSEADDR`, which lets the kernel give a UDP socket a port another reuse-enabled
+  socket already holds. Datagrams for that port then went to whichever socket bound last, so a
+  receiver could silently get nothing. The option is now set only for a non-zero `bind_port`;
+  a named port keeps it. The API is unchanged.
+
 ## [0.19.0] — 2026-10-09
 
 ### Added
