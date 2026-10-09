@@ -36,7 +36,7 @@
  * | `:settings.app.active` | `rw` | `NAME <option>` selects it; an empty `STATUS` selects none |
  * | `:settings.app.options` | `ro` | the options and their refs, each ref with its state |
  *
- * Selecting is an ordinary field write. The value formats are RFC-0033's.
+ * Selecting is an ordinary field write. The value formats are RFC-0034's.
  *
  * **What it never does.** It never creates, unsubscribes or replaces a subscription: the
  * owner creates each one (suspended, for an option that is not active) and hands its handle
@@ -60,7 +60,7 @@ enum class selector_ref_state_t : std::uint8_t {
     INERT = 2,
 };
 
-/** @brief The `options` spelling of a @ref selector_ref_state_t (RFC-0033). */
+/** @brief The `options` spelling of a @ref selector_ref_state_t (RFC-0034). */
 [[nodiscard]] constexpr std::string_view to_string(selector_ref_state_t s) noexcept {
     switch (s) {
         case selector_ref_state_t::LIVE:
@@ -113,7 +113,7 @@ class subscription_selector_t {
     static_assert(kRefs > 0 && kOptions > 0, "a selector holds at least one ref and one option");
 
    public:
-    /** @brief The longest option name: one NAME segment (RFC-0033, 05 §`0x02`). */
+    /** @brief The longest option name: one NAME segment (RFC-0034, 05 §`0x02`). */
     static constexpr std::size_t kNameMax = 64;
 
     /** @brief A selector over @p g, attached to no vertex yet. @p g must outlive it. */
@@ -353,7 +353,7 @@ class subscription_selector_t {
 
     /**
      * @brief `SETTINGS{ NAME <option> SETTINGS{ NAME "ref" SETTINGS{ NAME "producer" PATH <key>
-     *        NAME "slot" VALUE <u32 LE> NAME "state" NAME <state> } … } … }` (RFC-0033).
+     *        NAME "slot" VALUE <u32 LE> NAME "state" NAME <state> } … } … }` (RFC-0034).
      *
      * Every ref's state is re-read first, so one read lists one coherent set of states. Each
      * level is staged and then wrapped, all on @p out's source. Caller holds `m_`.

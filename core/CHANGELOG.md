@@ -55,7 +55,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   carries none of it. The owner lists existing subscriptions under named options with `add`
   and switches with `select`, or with a write of `NAME <option>` to the instance's
   `:settings.app.active` field (an empty `STATUS` selects none); `:settings.app.options` reads
-  back every option and ref as RFC-0033 spells it. A switch suspends the refs only the old option
+  back every option and ref as RFC-0034 spells it. A switch suspends the refs only the old option
   lists, then resumes the ones only the new option lists, through `graph_t::set_suspended`:
   no unsubscribe or re-subscribe, no frame, no draw, and never a double delivery. A resume that
   answers `BACKPRESSURE` fails the switch with `BACKPRESSURE`, leaves the new option active and

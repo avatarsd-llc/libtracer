@@ -588,7 +588,7 @@ one lists, through `graph_t::set_suspended`: no unsubscribe, no frame, nothing d
 a double delivery. A resume refused for want of memory fails the switch with `BACKPRESSURE`,
 leaves the new option active and `settled()` false, and selecting it again retries.
 
-The instance's two app fields are its wire surface ([RFC-0033](../spec/rfcs/0033-subscription-selector-fields.md)):
+The instance's two app fields are its wire surface ([RFC-0034](../spec/rfcs/0034-subscription-selector-fields.md)):
 a write of `NAME <option>` to `:settings.app.active` selects (an empty `STATUS` selects none),
 and `:settings.app.options` reads back each option's refs as `<producer>:subscribers[N]` with
 a `live` / `suspended` / `inert` state. A ref whose subscription is gone stays listed as
