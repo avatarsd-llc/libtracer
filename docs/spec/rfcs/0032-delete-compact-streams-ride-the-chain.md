@@ -19,7 +19,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#1950](https://github.com/avatarsd-llc/libtracer/issues/1950) (RFC: delete COMPACT and the per-link handle tables); parent spec [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (one walk, the connection vertex is the door) |
 | **Target spec version** | v1 itself. `docs/spec/v1.md` still reads "(DRAFT)". RFC-0018, RFC-0023, RFC-0024, RFC-0027, RFC-0029, RFC-0030 and RFC-0031 took the same route. |
 | **Scope** | Stage 6 of #1938, milestone v0.20.0. The deletion [#1951](https://github.com/avatarsd-llc/libtracer/issues/1951) (delete COMPACT, the handle tables and every remnant) and the documentation sweep [#1952](https://github.com/avatarsd-llc/libtracer/issues/1952) (glossary, reference pages and the perf page describe chain delivery) are blocked on this RFC's approval. #1951 also waits for [#2042](https://github.com/avatarsd-llc/libtracer/issues/2042) (a forwarded PAIR write's RESULT is dropped silently at the originator), and not for #1946 (§15 Q5). Stage 7, [#1953](https://github.com/avatarsd-llc/libtracer/issues/1953) (CAN link-local compression, private to the transport), follows them and is bounded by §5.5. |
-| **Evidence** | The chain-versus-COMPACT report of [#1949](https://github.com/avatarsd-llc/libtracer/issues/1949) (bench: chain delivery against COMPACT, measured before COMPACT is deleted), landing as [PR #2037](https://github.com/avatarsd-llc/libtracer/pull/2037) (the `bench_chain_vs_compact` rows). Merged; §8 cites it. Classic-CAN frame counts come from [#2044](https://github.com/avatarsd-llc/libtracer/issues/2044) (bench: CAN frames per hop on the real CAN carriage), via [PR #2046](https://github.com/avatarsd-llc/libtracer/pull/2046), in review. The bench reports; it does not veto (ruling 4, §3). |
+| **Evidence** | The chain-versus-COMPACT report of [#1949](https://github.com/avatarsd-llc/libtracer/issues/1949) (bench: chain delivery against COMPACT, measured before COMPACT is deleted), landing as [PR #2037](https://github.com/avatarsd-llc/libtracer/pull/2037) (the `bench_chain_vs_compact` rows). Merged; §8 cites it. Classic-CAN frame counts come from [#2044](https://github.com/avatarsd-llc/libtracer/issues/2044) (bench: CAN frames per hop on the real CAN carriage), via [PR #2046](https://github.com/avatarsd-llc/libtracer/pull/2046), merged as `cdc87c2d`. The bench reports; it does not veto (ruling 4, §3). |
 | **Amends** | [RFC-0004](0004-remote-operation-addressing.md) §E.1 (**removed in full**, with its implementation pins) and §"Resolved during design" (the route-handle bullet); [RFC-0029](0029-one-path-primitive.md) §1 (the summary's "the single named exception" sentence), §3 ruling 6 (**withdrawn**), §5.3 (the "kept, unchanged" sentence), §9 (its heading and §9.2, **withdrawn**), the note under §11, §12.4 (the "§E.1 untouched" clause), §13.2's S3 row ("**not** `on_stale_label`, the delivery-compaction observer §9.2 keeps") and the 2026-10-02 erratum's `on_stale_label` row; [RFC-0010](0010-owner-app-fields-and-schema.md) Amendment 2 (three nouns leave the net-plane census and `retired_rx` joins it, §6.1, §6.3); reference/01 §Handling unknown type codes, for these three codes only (answered on the arrival link, counted, never passed through, §6.1); [RFC-0002](0002-protocol-error-model.md) §C (a receiver MUST NOT answer a bare outer `ERROR`, §6.1). |
 | **Ships with** | RFC-0010 §Erratum (2026-10-09), which corrects reference/05's credit of the three handle-store nouns to the RFC-0027 table. It is a separate instrument with no wire change (§6.3). |
 | **Supersedes, on acceptance** | [ADR-0062](../../adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md) (resolve-once label bindings) in full; [ADR-0035](../../adr/0035-implementing-rfc-0004-remote-operation-addressing.md) slice 4 (the route-handle mechanism) in part; [ADR-0038](../../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) in part (its label-compacted plane). |
@@ -422,12 +422,12 @@ break RSS down per arm.
 **Not reported.** The merged run gives no cold first-frame figure (the `COMPACT` arm's `ADVERTISE`
 included), so this RFC cites none.
 
-**CAN, on the real carriage (#2044, PR #2046, in review).** #2037's 8 B and 64 B field counts cut
+**CAN, on the real carriage (#2044, PR #2046, merged).** #2037's 8 B and 64 B field counts cut
 the WebSocket-style TLV frame into slices, which does not model CAN, so #2037 drew no CAN
 conclusion. [#2044](https://github.com/avatarsd-llc/libtracer/issues/2044) (bench: CAN frames per
 hop for the PAIR chain against COMPACT, on the real CAN carriage) counts frames at the CAN link seam
 with every inter-node link a production `can_transport_t`. Its figures are from
-[PR #2046](https://github.com/avatarsd-llc/libtracer/pull/2046), which is still in review. They are **lower bounds**: the bench binds each link point-to-point, so its frames omit the per-hop peer-name route element that a bus-addressed hop carries.
+[PR #2046](https://github.com/avatarsd-llc/libtracer/pull/2046) (merged as `cdc87c2d`), rechecked against a `bench_chain_vs_compact --can-frames` run on merged main (deterministic frame counts). They are **lower bounds**: the bench binds each link point-to-point, so its frames omit the per-hop peer-name route element that a bus-addressed hop carries.
 
 
 | 3 hops, classic CAN | chain frames (forward + reply) | `COMPACT` frames | total |
@@ -670,7 +670,7 @@ deleted.
   core code.
 - **A pair-only 8-byte short form of the chain** (4 + 8·H, dropping the escape header). Deferred
   by ruling 4: it is a follow-up only if CAN frame counts show that the 3 B per element matters.
-  #2044's counts (PR #2046, in review, §8.1) put the classic-CAN forward leg at 19 against 13 frames
+  #2044's counts (PR #2046, merged, §8.1) put the classic-CAN forward leg at 19 against 13 frames
   per hop for 64 B unbatched, +5.7% at N = 32 and +12% at 1 KiB. These are lower bounds: the
   point-to-point binding omits the per-hop peer-name route element. On CAN FD the forward legs are
   within one frame. The cost is accepted for now, and the fix is #1953 (CAN link-local compression,
