@@ -2255,6 +2255,31 @@ class graph_t {
                                              subscriber_release_fn_t release);
 
     /**
+     * @brief Suspend or resume the in-process subscription @p sub without removing it (#1533).
+     *
+     * The edge keeps its slot index, its callback pair, its binding and its admission
+     * decision; only its suspended flag moves, and no SUBSCRIBE gate runs again. A suspended
+     * edge is absent from the vertex's published edge array, so a write pays nothing for it:
+     * the cost is this call, which republishes the array once (one block from the graph's
+     * table source). A resume replays nothing — the edge delivers from the next propagated
+     * value on; durability stays a join-time property.
+     *
+     * Suspending is not a grace point: a fan-out already walking a snapshot that names the
+     * edge still delivers to it once. A context is freed only through @ref unsubscribe.
+     * @note The callback-form subscriptions only, as for @ref unsubscribe.
+     * @retval NOT_FOUND    No live edge @p sub names.
+     * @retval BACKPRESSURE A resume could not republish the edge array; the edge stays
+     *                      suspended and the call may be retried.
+     */
+    [[nodiscard]] result_t<void> set_suspended(const subscription_t& sub, bool suspended);
+
+    /**
+     * @brief Is the in-process subscription @p sub suspended (#1533)?
+     * @retval NOT_FOUND No live edge @p sub names.
+     */
+    [[nodiscard]] result_t<bool> is_suspended(const subscription_t& sub) const;
+
+    /**
      * @brief How many retired `{ctx, release}` pairs this PROCESS has dropped for want of a
      *        parking slot — each one a release hook that will never run (ADR-0080).
      *

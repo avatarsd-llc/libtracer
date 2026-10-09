@@ -569,6 +569,18 @@ struct subscriber_t {
      *         value-agnostic — WHICH vertices a sweep propagates is the vertex's
      *         `delivery_mode_t`, never a per-subscriber byte comparison). */
     bool active = true;
+    /**
+     * @brief Suspended flag (#1533): the edge keeps its slot, target, binding, cold half and
+     *        admission decision, and receives nothing.
+     *
+     * Not a per-delivery test. A suspended edge is left out of the vertex's published edge
+     * array (`%vertex_t::try_publish_edges`), so the fan-out never visits it; the bit is paid
+     * for by the toggle, which republishes the array, and never by a write. Host state only
+     * for now — it rides the record's tail padding beside @ref active, so it costs no byte —
+     * and the wire spelling that would read and write it through `:subscribers[N]` is a
+     * separate amendment.
+     */
+    bool suspended = false;
 
     /** @brief A blank edge (an inert slot shell, or a door's scratch record). */
     subscriber_t() = default;
@@ -802,13 +814,14 @@ class edge_snapshot_t {
 };
 
 /**
- * @brief One entry of a PUBLISHED edge array: the hot dispatch fields plus a liveness bit.
+ * @brief One entry of a PUBLISHED edge array: the hot dispatch fields, a liveness bit and the
+ *        slot index the entry mirrors.
  *
  * Written once, before the array is published, and never touched again — that is what lets a
  * reader copy it out with no lock. The `active` bit is the ONE mutable word, and it is
- * MONOTONE: it starts true and an unsubscribe (@ref vertex_t::clear_edge,
- * @ref vertex_t::evict_link_edges, retirement) flips it to false under the stripe lock. A
- * reader loads it and skips the entry.
+ * MONOTONE: it starts true and an unsubscribe or a suspend (@ref vertex_t::clear_edge,
+ * @ref vertex_t::evict_link_edges, @ref vertex_t::set_edge_suspended, retirement) flips it to
+ * false under the stripe lock. A reader loads it and skips the entry.
  *
  * That single mutable bit is not a hedge on immutability, it removes a failure mode. Without
  * it every unsubscribe would have to BUILD a smaller array, and an unsubscribe that cannot
@@ -816,6 +829,14 @@ class edge_snapshot_t {
  * down behind. With it, dropping an edge is allocation-free and therefore infallible; the
  * compaction that actually reclaims the dropped entry's refcount clones rides the next
  * successful publish, where a failure costs nothing but a delayed release.
+ *
+ * **The array carries only the edges that deliver (#1533).** A cleared slot and a suspended one
+ * contribute no entry, so the fan-out's copy loop walks exactly the edges it will dispatch —
+ * a vertex with M suspended rows costs the same per write as one without them. That is why the
+ * entry names its slot: the array no longer mirrors the slot table one-for-one, so the flip
+ * finds its entry by @ref slot (entries are in slot order). The index rides the padding after
+ * `active`, so the entry's width — the copy loop's bandwidth — and the loop's own loads are
+ * unchanged on every target.
  */
 struct pub_edge_t {
     subscriber_fn_t callback = nullptr; /**< @brief In-process sink fn (null ⇒ target-only). */
@@ -835,14 +856,21 @@ struct pub_edge_t {
      */
     remote_ptr_t remote;
     std::atomic<bool> active{true}; /**< @brief Monotone true -> false liveness bit. */
+    /** @brief The slot index this entry mirrors (#1533). Written before publish, never after;
+     *         read only by the liveness flip, under the stripe lock. */
+    std::uint32_t slot = 0;
 };
+
+static_assert(sizeof(void*) != 8 || sizeof(pub_edge_t) == 56,
+              "a published entry is 56 B — the slot index rides the liveness byte's padding");
 
 /**
  * @brief A vertex's published, immutable-after-publish edge array (#635) — what
  *        @ref vertex_t::snapshot_edges copies out under an edge pin instead of the stripe
  *        mutex.
  *
- * One allocation: this header immediately followed by `count` inline @ref pub_edge_t. The
+ * One allocation: this header immediately followed by `count` inline @ref pub_edge_t, in slot
+ * order, one per DELIVERING slot (active and not suspended). The
  * array is never resized, never reordered and never freed while any participant announces it
  * (`%edge_pin.hpp`); a control-plane mutation publishes a NEW array and pushes this one onto
  * the owning block's retire list. `retire_next` is touched only once the array is off the

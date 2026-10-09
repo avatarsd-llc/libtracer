@@ -2199,6 +2199,71 @@ class vertex_t {
         return result;
     }
 
+    /** @brief Outcome of @ref set_edge_suspended. */
+    enum class edge_suspend_t {
+        NOT_FOUND,    /**< @brief No active slot @p idx; nothing changed. */
+        DONE,         /**< @brief The slot now holds the requested state. */
+        BACKPRESSURE, /**< @brief A resume could not republish; the edge stays suspended. */
+    };
+
+    /**
+     * @brief Suspend or resume the edge in slot @p idx IN PLACE (#1533).
+     *
+     * The slot keeps everything its admission decided — index, target, minted binding, cold
+     * half, the SUBSCRIBE gate's verdict — and only its `suspended` flag moves. A suspend stops
+     * delivery at once and infallibly (the published entry's liveness bit, as an unsubscribe
+     * does), then republishes without the entry; a refused republish leaves a dead entry the
+     * copy loop skips until the next mutation, never a delivery. A resume republishes WITH the
+     * entry, and a refused republish rolls the flag back: the edge stays suspended and the
+     * caller is told. A no-change toggle republishes nothing.
+     *
+     * A suspended edge is absent from the published array, so the fan-out does no per-write
+     * work for it at all — not a skipped entry, not a branch. A resume replays nothing: the
+     * edge delivers from the next propagated value on, and the durability latch stays a
+     * join-time property.
+     *
+     * @param idx       The `:subscribers[N]` slot number.
+     * @param suspended The state to set.
+     */
+    edge_suspend_t set_edge_suspended(std::size_t idx, bool suspended) {
+        edge_block_t* b = nullptr;
+        {
+            const std::lock_guard lock(vertex_stripe_of(this).m);
+            b = edges_locked();
+            if (b == nullptr || idx >= b->slots.size() || !b->slots[idx].active)
+                return edge_suspend_t::NOT_FOUND;
+            subscriber_t& s = b->slots[idx];
+            if (s.suspended == suspended) return edge_suspend_t::DONE;
+            s.suspended = suspended;
+            if (suspended) deactivate_published(*b, idx);
+            if (!try_publish_edges(*b) && !suspended) {
+                s.suspended = true;  // the edge stays as it was: suspended, and unpublished
+                return edge_suspend_t::BACKPRESSURE;
+            }
+        }
+        scan_retired_edges(*b);
+        return edge_suspend_t::DONE;
+    }
+
+    /** @brief How many entries this vertex's published edge array holds — the edges one write
+     *         walks (#1533: delivering edges only; a cleared or suspended slot has none). A
+     *         diagnostic, read under the stripe lock; 0 when nothing was ever subscribed. */
+    [[nodiscard]] std::size_t published_edges() const {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const edge_block_t* b = edges_locked();
+        const edge_pub_t* p = b == nullptr ? nullptr : b->pub.load(std::memory_order_relaxed);
+        return p == nullptr ? 0 : p->count;
+    }
+
+    /** @brief Is the active slot @p idx suspended? `nullopt` when no active slot @p idx
+     *         exists. */
+    [[nodiscard]] std::optional<bool> edge_suspended(std::size_t idx) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const edge_block_t* b = edges_locked();
+        if (b == nullptr || idx >= b->slots.size() || !b->slots[idx].active) return std::nullopt;
+        return b->slots[idx].suspended;
+    }
+
     /**
      * @brief Deactivate AND reclaim every active subscriber edge stored against the
      *        link @p link — the per-vertex half of peer-departure eviction (RFC-0009
@@ -3331,15 +3396,20 @@ class vertex_t {
      * @brief Flip the published entry mirroring slot @p idx to INACTIVE. Call with the stripe
      *        lock held.
      *
-     * Allocation-free and therefore infallible, which is the point: an unsubscribe must stop
-     * a delivery even when the compacting republish behind it cannot allocate. The published
-     * array mirrors the slot table one-for-one (no compaction), so the index maps straight
-     * through — the same identity RFC-0009 §D.2 already guarantees for `:subscribers[N]`.
+     * Allocation-free and therefore infallible, which is the point: an unsubscribe or a suspend
+     * must stop a delivery even when the compacting republish behind it cannot allocate. The
+     * array carries only delivering slots, in slot order, each naming its slot index
+     * (#1533), so the entry is found by a binary search on that index. A slot with no entry —
+     * already cleared, already suspended, or never published — is a no-op.
      */
     static void deactivate_published(edge_block_t& b, std::size_t idx) noexcept {
         edge_pub_t* p = b.pub.load(std::memory_order_relaxed);
-        if (p == nullptr || idx >= p->count) return;
-        p->entries()[idx].active.store(false, std::memory_order_release);
+        if (p == nullptr) return;
+        pub_edge_t* const first = p->entries();
+        pub_edge_t* const last = first + p->count;
+        pub_edge_t* const e =
+            std::partition_point(first, last, [idx](const pub_edge_t& x) { return x.slot < idx; });
+        if (e != last && e->slot == idx) e->active.store(false, std::memory_order_release);
     }
 
     /**
@@ -3347,9 +3417,12 @@ class vertex_t {
      *        displaced one. Call with the stripe lock held; the caller runs
      *        `scan_retired_edges` afterwards, outside the lock.
      *
-     * The array mirrors the slot table one-for-one so that `deactivate_published` can index
-     * straight through; an inactive slot contributes an EMPTY entry, so a cleared edge's
-     * refcount clones are released here rather than lingering behind a flipped bit.
+     * The array holds one entry per DELIVERING slot — active and not suspended — in slot order,
+     * each naming its slot index for `deactivate_published` (#1533). A cleared or suspended
+     * slot contributes nothing, so the fan-out's copy loop never visits it: that is the
+     * partition the suspended bit asks for, with the disabled tail elided rather than stored
+     * behind a split index nobody reads. When no slot delivers, nothing is allocated and the
+     * published array is null.
      *
      * **ONE allocation total** (#1442): the array itself. The rebuild is O(slots) and always
      * will be — #635 bought lock-free fan-out with an immutable published array, so appending
@@ -3367,19 +3440,20 @@ class vertex_t {
      *         `BACKPRESSURE`, and a republish reaches no allocator but this one.
      */
     [[nodiscard]] bool try_publish_edges(edge_block_t& b) noexcept {
+        const auto delivers = [](const subscriber_t& s) { return s.active && !s.suspended; };
+        const auto live =
+            static_cast<std::size_t>(std::count_if(b.slots.begin(), b.slots.end(), delivers));
         edge_pub_t* np = nullptr;
-        if (!b.slots.empty()) {
-            np = alloc_edge_pub(b.slots.source(), b.slots.size());
+        if (live != 0) {
+            np = alloc_edge_pub(b.slots.source(), live);
             if (np == nullptr) return false;
             pub_edge_t* dst = np->entries();
-            for (const subscriber_t& s : b.slots) {
-                ::new (static_cast<void*>(dst + np->count)) pub_edge_t{};
-                pub_edge_t& e = dst[np->count];
+            for (std::size_t i = 0; i < b.slots.size(); ++i) {
+                const subscriber_t& s = b.slots[i];
+                if (!delivers(s)) continue;
+                pub_edge_t& e = *::new (static_cast<void*>(dst + np->count)) pub_edge_t{};
                 ++np->count;  // constructed ⇒ destroy_edge_pub can always unwind it
-                if (!s.active) {
-                    e.active.store(false, std::memory_order_relaxed);
-                    continue;
-                }
+                e.slot = static_cast<std::uint32_t>(i);
                 e.callback = s.callback;
                 e.callback_ctx = s.callback_ctx;
                 e.target_key = s.target_key;  // refcount clone — nothrow

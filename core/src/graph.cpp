@@ -3339,6 +3339,26 @@ result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t f
     return admit_subscriber(v, std::move(s), {});
 }
 
+result_t<void> graph_t::set_suspended(const subscription_t& sub, bool suspended) {
+    if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
+    // No SUBSCRIBE gate and no re-admission: the edge's admission decision stands (#1533).
+    switch (sub.vertex_->set_edge_suspended(sub.slot_, suspended)) {
+        case vertex_t::edge_suspend_t::NOT_FOUND:
+            return std::unexpected(status_t::NOT_FOUND);
+        case vertex_t::edge_suspend_t::BACKPRESSURE:
+            return std::unexpected(status_t::BACKPRESSURE);
+        case vertex_t::edge_suspend_t::DONE:
+            break;
+    }
+    return {};  // no replay: a resume delivers from the next propagated value
+}
+
+result_t<bool> graph_t::is_suspended(const subscription_t& sub) const {
+    if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
+    if (const std::optional<bool> s = sub.vertex_->edge_suspended(sub.slot_)) return *s;
+    return std::unexpected(status_t::NOT_FOUND);
+}
+
 result_t<void> graph_t::unsubscribe(const subscription_t& sub) { return unsubscribe(sub, nullptr); }
 
 result_t<void> graph_t::unsubscribe(const subscription_t& sub, subscriber_release_fn_t release) {
