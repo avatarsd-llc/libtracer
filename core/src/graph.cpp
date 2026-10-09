@@ -1302,12 +1302,13 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
     std::size_t routed = 0;  // the edges that held `link_name` (#1816), given back below
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
-        const std::size_t k = v->evict_link_edges(link_name, routed);
+        std::size_t quiet = 0;  // suspended edges were never counted (#1533)
+        const std::size_t k = v->evict_link_edges(link_name, routed, quiet);
         if (k == 0) continue;  // a stale index entry: the vertex's edges went individually
         // The k-fold mirror of note_subscriber_removed, under the same shared hold as
         // the clear (RFC-0005 bookkeeping: descendants' writes stop bubbling here).
-        v->bump_own_subs(-static_cast<std::int32_t>(k));
-        bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
+        v->bump_own_subs(-static_cast<std::int32_t>(k - quiet));
+        bump_subtree_listeners(v, -static_cast<std::int32_t>(k - quiet));
         total += k;
     }
     // Outside every graph lock: the receiver takes its own control-plane lock (#1816).
@@ -1340,10 +1341,11 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
     std::size_t total = 0;
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
-        const std::size_t k = v->evict_route_edges(link_name, route_wire, bound_echo);
+        std::size_t quiet = 0;
+        const std::size_t k = v->evict_route_edges(link_name, route_wire, bound_echo, quiet);
         if (k == 0) continue;
-        v->bump_own_subs(-static_cast<std::int32_t>(k));
-        bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
+        v->bump_own_subs(-static_cast<std::int32_t>(k - quiet));
+        bump_subtree_listeners(v, -static_cast<std::int32_t>(k - quiet));
         total += k;
     }
     // Every match was keyed on its delivery link, so every one held `link_name` (#1816).
@@ -1540,8 +1542,9 @@ bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_v
                                          ? v->edge_source(slot).value_or(view::view_t{})
                                          : view::view_t{};
     remote_ptr_t retired_remote;
-    if (!v->clear_edge(slot, retired_ctx, &retired_remote)) return false;
-    note_subscriber_removed(v);                       // RFC-0005 counter bookkeeping
+    bool was_suspended = false;
+    if (!v->clear_edge(slot, retired_ctx, &retired_remote, &was_suspended)) return false;
+    if (!was_suspended) note_subscriber_removed(v);   // RFC-0005 counts delivering edges only
     hold_link(delivery_link(retired_remote), false);  // the link hold this clear gives back (#1816)
     // Only a slot that WAS active is an unsubscribe; clearing an already-empty one changed
     // nothing and must not be reported as a removal. A no-op for the empty caller.
@@ -3196,15 +3199,17 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // back. The unwind costs a second subtree walk on a control-plane-COLD path, which is
         // the right side to pay on: over-counting only ever buys a snapshot that finds
         // nothing, while under-counting drops a delivery.
-        if (r != vertex_t::edge_replace_t::FILLED_EMPTY) note_subscriber_removed(v);
+        // A displaced SUSPENDED edge was never counted (#1533), so it is an add here too.
         if (r == vertex_t::edge_replace_t::OUT_OF_RANGE) {
+            note_subscriber_removed(v);
             hold_link(delivery_link(admitted), false);
             return std::unexpected(status_t::INVALID_PATH);
         }
-        // A replace that displaced a LIVE edge is two events, in causal order: the old
-        // subscription ended and a new one began. Reporting only the ADDED would leave an
-        // observer's inventory holding an edge that no longer exists.
-        if (r == vertex_t::edge_replace_t::REPLACED_ACTIVE)
+        if (r == vertex_t::edge_replace_t::REPLACED_ACTIVE) note_subscriber_removed(v);
+        // A replace that displaced an edge — delivering or suspended — is two events, in
+        // causal order: the old subscription ended and a new one began. Reporting only the
+        // ADDED would leave an observer's inventory holding an edge that no longer exists.
+        if (r != vertex_t::edge_replace_t::FILLED_EMPTY)
             notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, displaced_tlv, *slot);
         idx = *slot;
     } else {
@@ -3340,16 +3345,29 @@ result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t f
 }
 
 result_t<void> graph_t::set_suspended(const subscription_t& sub, bool suspended) {
-    if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
+    vertex_t* const v = sub.vertex_;
+    if (v == nullptr) return std::unexpected(status_t::NOT_FOUND);
     // No SUBSCRIBE gate and no re-admission: the edge's admission decision stands (#1533).
-    switch (sub.vertex_->set_edge_suspended(sub.slot_, suspended)) {
-        case vertex_t::edge_suspend_t::NOT_FOUND:
-            return std::unexpected(status_t::NOT_FOUND);
-        case vertex_t::edge_suspend_t::BACKPRESSURE:
-            return std::unexpected(status_t::BACKPRESSURE);
-        case vertex_t::edge_suspend_t::DONE:
-            break;
+    // The RFC-0005 counts are of DELIVERING edges, so the toggle moves them, under ONE shared
+    // map hold with the flip, as evict_link_edges does: a concurrent retire (unique lock) reads
+    // own_subs() before zeroing it and must see the pair whole. A resume counts FIRST, the
+    // order admit_subscriber uses (seq_cst ahead of the entry going live, against the
+    // fan-out's own_subs_ordered skip), and gives the count back if nothing changed; a suspend
+    // uncounts after the flip. Over-counting in between only buys a snapshot that skips it.
+    const std::shared_lock lock(map_mutex_);
+    const std::int32_t up = suspended ? 0 : 1;
+    if (up != 0) {
+        v->bump_own_subs(+1);
+        bump_subtree_listeners(v, +1);
     }
+    const vertex_t::edge_suspend_t r = v->set_edge_suspended(sub.slot_, suspended);
+    const std::int32_t down = r != vertex_t::edge_suspend_t::CHANGED ? up : 1 - up;
+    if (down != 0) {
+        v->bump_own_subs(-down);
+        bump_subtree_listeners(v, -down);
+    }
+    if (r == vertex_t::edge_suspend_t::NOT_FOUND) return std::unexpected(status_t::NOT_FOUND);
+    if (r == vertex_t::edge_suspend_t::BACKPRESSURE) return std::unexpected(status_t::BACKPRESSURE);
     return {};  // no replay: a resume delivers from the next propagated value
 }
 

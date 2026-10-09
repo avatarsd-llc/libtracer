@@ -13,20 +13,28 @@
  *      asked for durability at join.
  *   2. The slot survives: its index stays held (a new subscribe does not reuse it), the same
  *      handle resumes and then unsubscribes it, and a cleared handle answers NOT_FOUND.
- *   3. The published edge array carries only delivering edges: suspending M of N leaves N - M
- *      entries for the copy loop to walk, the same as a vertex that never had the M.
- *   4. A resume whose republish is refused rolls back: the edge stays suspended, says so, and
- *      a retry with room succeeds.
+ *   3. The published array carries the ACTIVE edges: a cleared slot leaves it, a suspended
+ *      one keeps its entry (clear), so a toggle republishes nothing.
+ *   4. A toggle draws nothing from any source, so it succeeds with the source exhausted; a
+ *      resume after a REFUSED republish answers BACKPRESSURE and changes nothing, and the next
+ *      successful mutation lets it through.
  *   5. The liveness flip finds its entry by slot — the published array no longer mirrors the
- *      slot table — observed where the flip alone decides: a suspend whose republish is
- *      refused silences exactly its own edge.
+ *      slot table — observed as a suspend silencing exactly its own edge.
+ *   6. The RFC-0005 counts are of DELIVERING edges: with 0 live and M suspended edges the
+ *      vertex has no subscribers, its descendants do not bubble, and clearing a suspended
+ *      edge does not uncount it a second time.
+ *   7. Toggling races a writer cleanly (the TSan legs run this): a writer thread against
+ *      suspend, resume and unsubscribe/re-subscribe on the same and neighbouring slots, and the
+ *      counts come out exact.
  */
 
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <new>
+#include <thread>
 #include <vector>
 
 #include "libtracer/tracer.hpp"
@@ -145,10 +153,11 @@ void test_slot_survives() {
           "an empty handle answers NOT_FOUND");
 }
 
-/** @brief (3) + (5) The published array holds delivering edges only, and the flip still finds
- *         the right entry once the array stops mirroring the slot table. */
-void test_published_array_is_the_delivering_edges() {
-    std::printf("the published array carries the delivering edges only:\n");
+/** @brief (3) + (5) The published array holds the ACTIVE edges: a cleared slot leaves it, a
+ *         suspended one keeps a skipped entry, and the flip still finds the right entry once
+ *         the array stops mirroring the slot table. */
+void test_published_array_is_the_active_edges() {
+    std::printf("the published array carries the active edges only:\n");
     graph_t g;
     const vertex_handle_t src = g.register_vertex(path_t("/s/c"), role_t::STORED_VALUE);
     constexpr std::size_t kN = 16;
@@ -158,9 +167,10 @@ void test_published_array_is_the_delivering_edges() {
     check(published(src) == kN, "16 edges, 16 published entries");
 
     for (std::size_t i = 0; i < kN; i += 2) (void)g.set_suspended(subs[i], true);
-    check(published(src) == kN / 2, "suspending 8 leaves 8 entries — none to skip");
+    check(published(src) == kN, "suspending 8 republishes nothing: their entries stay, clear");
 
-    // Clear the odd edges one at a time; the survivors keep receiving across each republish.
+    // Clear the odd edges one at a time; the survivors keep receiving across each republish,
+    // and the suspended ones stay silent through it (each republish rebuilds their entry clear).
     for (std::size_t i = 1; i < kN; i += 2) {
         (void)g.unsubscribe(subs[i]);
         (void)g.write(src, byte_value(static_cast<std::uint8_t>(i)));
@@ -168,51 +178,147 @@ void test_published_array_is_the_delivering_edges() {
             check(sinks[j].seen == static_cast<int>((i + 1) / 2),
                   "a still-live edge keeps receiving after a neighbour's unsubscribe");
     }
-    check(published(src) == 0, "all live edges cleared, the rest suspended: nothing published");
+    check(published(src) == kN / 2, "the cleared 8 left the array; the suspended 8 remain");
     for (std::size_t i = 0; i < kN; i += 2)
         check(sinks[i].seen == 0, "no suspended edge received anything");
 
     for (std::size_t i = 0; i < kN; i += 2) (void)g.set_suspended(subs[i], false);
-    check(published(src) == kN / 2, "resuming them republishes exactly those 8");
+    check(published(src) == kN / 2, "resuming them republishes nothing either");
     (void)g.write(src, byte_value(0x44));
     for (std::size_t i = 0; i < kN; i += 2)
         check(sinks[i].seen == 1 && sinks[i].last == 0x44, "each resumed edge takes the write");
 }
 
-/** @brief (4) A refused resume leaves the edge suspended and says so; a retry succeeds. */
-void test_refused_resume_rolls_back() {
-    std::printf("a refused resume rolls back and can be retried:\n");
+/** @brief (4) A toggle draws nothing; a resume after a refused republish answers BACKPRESSURE,
+ *         unchanged, until a successful mutation. */
+void test_toggle_allocates_nothing() {
+    std::printf("a toggle allocates nothing; a resume over a stale array is refused:\n");
     gate_source_t gate;
     graph_t g{gate};
     const vertex_handle_t src = g.register_vertex(path_t("/s/d"), role_t::STORED_VALUE);
-    counter_t lo, a, hi;
+    counter_t lo, a, hi, x;
     const auto slo = g.subscribe(path_t("/s/d"), count, &lo);
     const auto sa = g.subscribe(path_t("/s/d"), count, &a);
     const auto shi = g.subscribe(path_t("/s/d"), count, &hi);
-    check(slo && shi && sa && g.set_suspended(*sa, true).has_value(),
-          "three edges admitted, the middle one suspended");
+    const auto sx = g.subscribe(path_t("/s/d"), count, &x);
+    check(slo && sa && shi && sx, "four edges admitted");
 
+    gate.arm(0);  // every draw refused (the toggles only: a write draws its value's block)
+    check(g.set_suspended(*sa, true).has_value(), "a suspend with no room succeeds");
+    gate.disarm();
+    (void)g.write(src, byte_value(0x55));
+    check(a.seen == 0 && lo.seen == 1 && hi.seen == 1,
+          "... and silences exactly its own edge (the flip found its entry by slot)");
     gate.arm(0);
+    check(g.set_suspended(*sa, false).has_value(), "a resume with no room succeeds too");
+    check(g.set_suspended(*sa, true).has_value(), "... as does the next suspend");
+
+    check(g.unsubscribe(*sx).has_value(), "an unsubscribe with no room still takes effect");
     const auto r = g.set_suspended(*sa, false);
     gate.disarm();
-    check(!r && r.error() == status_t::BACKPRESSURE, "a resume with no room answers BACKPRESSURE");
+    check(!r && r.error() == status_t::BACKPRESSURE,
+          "after that refused republish, a resume answers BACKPRESSURE");
     check(g.is_suspended(*sa).value_or(false), "... and the edge is still suspended");
-    (void)g.write(src, byte_value(0x55));
-    check(a.seen == 0, "... and still receives nothing");
-
-    check(g.set_suspended(*sa, false).has_value(), "the retry with room succeeds");
     (void)g.write(src, byte_value(0x66));
-    check(a.seen == 1 && a.last == 0x66, "... and the edge delivers again");
+    check(a.seen == 0 && x.seen == 1, "... still receives nothing, and the cleared edge neither");
 
-    gate.arm(0);
-    check(g.set_suspended(*sa, true).has_value(), "a suspend with no room still succeeds");
-    gate.disarm();
+    counter_t y;
+    check(g.subscribe(path_t("/s/d"), count, &y).has_value(), "a successful mutation");
+    check(g.set_suspended(*sa, false).has_value(), "... and the resume goes through");
     (void)g.write(src, byte_value(0x77));
-    check(a.seen == 1, "... and silences the edge at once (the liveness flip, no allocation)");
-    // With the republish refused, the flip alone decides who is silenced: it must find the
-    // middle edge's entry by its slot, not its neighbours'.
-    check(lo.seen == 3 && hi.seen == 3 && lo.last == 0x77 && hi.last == 0x77,
-          "... and ONLY that edge: the flip found its own entry by slot");
+    check(a.seen == 1 && a.last == 0x77, "... and the edge delivers again");
+}
+
+/** @brief The raw vertex behind @p h, for the RFC-0005 counters. */
+tr::graph::vertex_t& raw(vertex_handle_t h) { return *std::bit_cast<tr::graph::vertex_t*>(h); }
+
+/** @brief (6) 0 live + M suspended is a vertex with no subscribers, to every reader. */
+void test_counts_are_delivering_edges() {
+    std::printf("0 live + M suspended edges count as no subscribers:\n");
+    graph_t g;
+    const vertex_handle_t top = g.register_vertex(path_t("/s/e"), role_t::STORED_VALUE);
+    const vertex_handle_t kid = g.register_vertex(path_t("/s/e/k"), role_t::STORED_VALUE);
+    constexpr std::size_t kM = 4;
+    std::vector<counter_t> sinks(kM);
+    std::vector<subscription_t> subs;
+    for (counter_t& c : sinks) subs.push_back(*g.subscribe(path_t("/s/e"), count, &c));
+    check(g.own_subs(top) == kM && raw(kid).listeners_above() == kM, "4 edges counted");
+
+    for (const subscription_t& s : subs) (void)g.set_suspended(s, true);
+    check(g.own_subs(top) == 0, "all suspended: own_subs is 0");
+    check(!g.has_subscribers(top), "... has_subscribers(top) is false");
+    check(raw(kid).listeners_above() == 0 && !g.has_subscribers(kid),
+          "... and the descendant no longer bubbles");
+    const vertex_handle_t late = g.register_vertex(path_t("/s/e/late"), role_t::STORED_VALUE);
+    check(raw(late).listeners_above() == 0, "a descendant made while suspended inherits 0");
+    (void)g.write(top, byte_value(1));
+    (void)g.write(kid, byte_value(2));
+    for (const counter_t& c : sinks) check(c.seen == 0, "no suspended edge received anything");
+
+    check(g.set_suspended(subs[0], true).has_value() && g.own_subs(top) == 0,
+          "a no-change suspend does not uncount twice");
+    check(g.unsubscribe(subs[1]).has_value() && g.own_subs(top) == 0 &&
+              raw(kid).listeners_above() == 0,
+          "clearing a suspended edge does not uncount it again (no underflow)");
+
+    check(g.set_suspended(subs[2], false).has_value(), "resume one");
+    check(g.own_subs(top) == 1 && raw(kid).listeners_above() == 1 &&
+              raw(late).listeners_above() == 1 && g.has_subscribers(top),
+          "... counts exactly it, on the vertex and every descendant");
+    check(g.set_suspended(subs[2], false).has_value() && g.own_subs(top) == 1,
+          "a no-change resume gives its speculative count back");
+    (void)g.write(kid, byte_value(3));
+    check(sinks[2].seen == 1 && sinks[2].last == 3, "... and the descendant's write bubbles to it");
+    check(g.unsubscribe(subs[2]).has_value() && g.unsubscribe(subs[3]).has_value() &&
+              g.unsubscribe(subs[0]).has_value(),
+          "clear the rest");
+    check(g.own_subs(top) == 0 && raw(kid).listeners_above() == 0, "every count back to 0");
+}
+
+/** @brief (7) A writer thread against toggles and churn; the counts come out exact. */
+void test_toggle_races_a_writer() {
+    std::printf("toggling races a writer cleanly:\n");
+    graph_t g;
+    const vertex_handle_t src = g.register_vertex(path_t("/s/f"), role_t::STORED_VALUE);
+    counter_t a, b;  // a: toggled; b: churned beside it; the third edge is always live
+    const auto sa = g.subscribe(path_t("/s/f"), count, &a);
+    auto sb = g.subscribe(path_t("/s/f"), count, &b);
+    std::atomic<int> c_seen{0};
+    const auto sc = g.subscribe(
+        path_t("/s/f"),
+        [](void* ctx, const value_t&) {
+            static_cast<std::atomic<int>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
+        },
+        &c_seen);
+    check(sa && sb && sc, "three edges admitted");
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> writes{0};
+    std::thread writer([&] {
+        while (!stop.load(std::memory_order_acquire)) {
+            (void)g.write(src, byte_value(7));
+            writes.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    constexpr int kIters = 2000;
+    bool ok = true;
+    for (int i = 0; i < kIters; ++i) {
+        ok = g.set_suspended(*sa, true).has_value() && ok;
+        ok = g.set_suspended(*sa, false).has_value() && ok;
+        if (i % 4 == 0) {
+            ok = g.unsubscribe(*sb).has_value() && ok;
+            sb = g.subscribe(path_t("/s/f"), count, &b);
+            ok = sb.has_value() && ok;
+        }
+    }
+    stop.store(true, std::memory_order_release);
+    writer.join();
+    check(ok, "every toggle and churn step answered OK");
+    check(g.own_subs(src) == 3, "the count is exact afterwards: three delivering edges");
+    check(writes.load() == 0 || c_seen.load() == writes.load(),
+          "the untouched neighbour received every write");
+    (void)g.set_suspended(*sa, true);
+    check(g.own_subs(src) == 2, "a final suspend uncounts exactly one");
 }
 
 }  // namespace
@@ -220,7 +326,9 @@ void test_refused_resume_rolls_back() {
 int main() {
     test_suspend_and_resume_deliver_correctly();
     test_slot_survives();
-    test_published_array_is_the_delivering_edges();
-    test_refused_resume_rolls_back();
+    test_published_array_is_the_active_edges();
+    test_toggle_allocates_nothing();
+    test_counts_are_delivering_edges();
+    test_toggle_races_a_writer();
     return tr::testing::summary("subscriber_suspend");
 }

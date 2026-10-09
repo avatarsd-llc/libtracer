@@ -278,6 +278,13 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "lazy rope reader — plus a flatten-then-arena arm, swept over frame size and link count.",
         "ns p50 · allocations per resolve"),
     instrument_t(
+        "bench_subscriber_suspend.cpp", "inproc", (),
+        "Writes to one producer with N live callback edges alone, beside N cleared slots and "
+        "beside N suspended edges, swept over fan-out and payload size, and times the "
+        "control-plane switch from one suspended edge to another against an unsubscribe plus "
+        "re-subscribe.",
+        "ns per write · deliveries/s · ns per switch"),
+    instrument_t(
         "bench_originate.cpp", "framed", (),
         "Drives the node that *starts* a remote operation: no inbound frame to read an address "
         "out of, so it encodes the `dst` and `src` PATHs from scratch, measured against the "

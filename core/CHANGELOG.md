@@ -17,24 +17,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 ### Added
 
 - **`graph_t::set_suspended` / `graph_t::is_suspended`: a subscription is suspended and
-  resumed in place, and a suspended edge costs a write nothing
+  resumed in place, allocating nothing
   ([#1533](https://github.com/avatarsd-llc/libtracer/issues/1533)).** A suspended edge keeps
-  its slot index, callback pair, binding, cold half and admission decision; it receives no
-  delivery, and a resume delivers from the next propagated value with no replay. The published
-  edge array now carries only the edges that deliver: a cleared or suspended slot has no entry,
-  so the fan-out copy loop never visits it (it used to load and skip every cleared slot's dead
-  entry). `pub_edge_t` gains `slot`, the slot index it mirrors, in the padding after `active`
-  (`pub_edge_t` stays 56 B); `subscriber_t::suspended` rides the record's
-  tail padding (`subscriber_t` stays 80 B). A suspend is infallible; a resume republishes the
-  array and answers `BACKPRESSURE` with the edge still suspended when the table source refuses
-  it. `vertex_t::published_edges()` reports the array's width. In-process API only: the
-  `:subscribers[N]` wire spelling is [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019).
-  Priced on the bench host (bench.slice, best of rounds, against v0.19.0): a switch costs
-  80-130 ns at fan-out 1-8 where an unsubscribe plus re-subscribe cost 187-219 ns, with no
-  re-admission (at fan-out 1024 both are two O(slots) republishes: 7.6 us against 5.8 us); a write to N live plus N suspended edges
-  costs what N live alone do (within 0-5 % at N = 1-1024, 64 B-16 KiB); the published array for
-  N + M slots shrinks from (N + M) x 56 B to N x 56 B. `bench_libtracer` inproc fan-out p50 is
-  unchanged (fan 8: 170 -> 160 ns, fan 1024 and 8192: +0.1 %).
+  its slot index, callback pair, binding, cold half and admission decision, and receives no
+  delivery; a resume delivers from the next propagated value with no replay. A toggle flips the
+  edge's published entry under the vertex's stripe lock: no republish, nothing drawn from any
+  source, no frame. A suspend cannot fail; a resume answers `BACKPRESSURE`, unchanged, only
+  after an edge republish on that vertex was refused for want of memory, until the next
+  successful subscribe or unsubscribe there. It is not a grace point: a fan-out that took its
+  snapshot before the flip still delivers once after the call returns.
+  - The RFC-0005 counts are of delivering edges: `own_subs`, `has_subscribers` and the
+    ancestors' bubbling count leave a suspended edge out, so a vertex whose every edge is
+    suspended skips the fan-out as one with none does, and no drop tally counts one.
+  - The published edge array now holds one entry per ACTIVE slot: a cleared slot has none (it
+    used to keep a dead one the copy loop loaded and skipped), and a suspended slot keeps its
+    entry with the liveness bit clear, so each suspended edge still costs a write one skipped
+    entry while other edges deliver.
+  - `pub_edge_t` gains `slot`, in the padding after `active`: 32 bits on LP64, 16 on ILP32, so
+    the entry stays 56 B and 32 B, both pinned by `static_assert`. On ILP32 a vertex is capped
+    at 65,536 subscriber slots (`add_edge` refuses past it). `subscriber_t::suspended` rides the
+    record's tail padding (80 B and 44 B, unchanged). `edge_block_t` gains `pub_current`.
+  - `vertex_t::set_edge_suspended` is the slot primitive; `vertex_t::published_edges()`
+    reports the array's width; `vertex_t::clear_edge`, `evict_link_edges` and
+    `evict_route_edges` report suspended edges so the counts are not unwound twice, and
+    `replace_edge` answers the new `edge_replace_t::REPLACED_SUSPENDED`.
+  - In-process API only: the `:subscribers[N]` wire spelling is
+    [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019). A `subscription_t` carries
+    no generation (#1932), so a stale handle whose slot was reused names the new edge.
 
 ### Changed
 

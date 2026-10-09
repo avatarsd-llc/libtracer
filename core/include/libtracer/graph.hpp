@@ -1030,8 +1030,9 @@ class graph_t {
     [[nodiscard]] std::uint32_t retire_generation(vertex_handle_t vh) const noexcept;
 
     /**
-     * @brief This vertex's OWN active subscriber-slot count (#635) — how many slots a
-     *        delivery here would feed, for sizing and observability.
+     * @brief This vertex's OWN delivering subscriber-slot count (#635) — how many slots a
+     *        delivery here would feed, for sizing and observability. A suspended slot
+     *        (@ref set_suspended) is not counted (#1533).
      *
      * @warning This is NOT the "is anyone listening" question, on two counts, and a
      *          producer must not gate a publish on it — use @ref has_subscribers.
@@ -2259,22 +2260,40 @@ class graph_t {
      *
      * The edge keeps its slot index, its callback pair, its binding and its admission
      * decision; only its suspended flag moves, and no SUBSCRIBE gate runs again. A suspended
-     * edge is absent from the vertex's published edge array, so a write pays nothing for it:
-     * the cost is this call, which republishes the array once (one block from the graph's
-     * table source). A resume replays nothing — the edge delivers from the next propagated
-     * value on; durability stays a join-time property.
+     * edge leaves the RFC-0005 counts (@ref own_subs, @ref has_subscribers, the ancestors'
+     * bubbling count), so a vertex whose every edge is suspended skips the fan-out exactly as
+     * one with none does; while other edges deliver, each suspended one costs a write one
+     * skipped entry of the published array. A resume replays nothing: the edge delivers from
+     * the next propagated value on, and durability stays a join-time property.
      *
-     * Suspending is not a grace point: a fan-out already walking a snapshot that names the
-     * edge still delivers to it once. A context is freed only through @ref unsubscribe.
+     * **What a toggle costs.** A flip of the edge's published entry under the vertex's stripe
+     * lock, plus the counter walk over the vertex's descendants that a subscribe also pays:
+     * no republish, and nothing drawn from any source, so a switch (one suspend plus one
+     * resume) allocates nothing and sends nothing. A suspend cannot fail. A resume can only
+     * after an edge republish on this vertex was refused for want of memory — the array may
+     * then name the slot's previous occupant — and answers BACKPRESSURE, unchanged, until the
+     * next successful subscribe or unsubscribe there.
+     *
+     * **The guarantee, exactly.** This is not a grace point. A fan-out that took its snapshot
+     * before the flip — concurrently on another thread, or re-entrantly up this one's stack —
+     * still delivers to the edge once AFTER this returns; every snapshot taken after the flip
+     * skips it. That is @ref unsubscribe's guarantee without the grace point, and a context is
+     * freed only through @ref unsubscribe.
+     *
+     * @warning A @ref subscription_t carries no generation (#1932): a stale handle whose slot
+     *          was cleared and then reused by a later subscribe names THAT edge, and suspends
+     *          or reads it (a cleared shell is reused by a later @ref subscribe, as
+     *          @ref unsubscribe notes).
      * @note The callback-form subscriptions only, as for @ref unsubscribe.
      * @retval NOT_FOUND    No live edge @p sub names.
-     * @retval BACKPRESSURE A resume could not republish the edge array; the edge stays
-     *                      suspended and the call may be retried.
+     * @retval BACKPRESSURE A resume after a refused edge republish on this vertex (see above);
+     *                      the edge stays suspended and the call may be retried.
      */
     [[nodiscard]] result_t<void> set_suspended(const subscription_t& sub, bool suspended);
 
     /**
      * @brief Is the in-process subscription @p sub suspended (#1533)?
+     * @warning The slot-reuse caveat of @ref set_suspended applies.
      * @retval NOT_FOUND No live edge @p sub names.
      */
     [[nodiscard]] result_t<bool> is_suspended(const subscription_t& sub) const;

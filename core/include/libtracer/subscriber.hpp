@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
 #include <span>
@@ -573,12 +574,11 @@ struct subscriber_t {
      * @brief Suspended flag (#1533): the edge keeps its slot, target, binding, cold half and
      *        admission decision, and receives nothing.
      *
-     * Not a per-delivery test. A suspended edge is left out of the vertex's published edge
-     * array (`%vertex_t::try_publish_edges`), so the fan-out never visits it; the bit is paid
-     * for by the toggle, which republishes the array, and never by a write. Host state only
-     * for now — it rides the record's tail padding beside @ref active, so it costs no byte —
-     * and the wire spelling that would read and write it through `:subscribers[N]` is a
-     * separate amendment.
+     * Not read by the fan-out: the slot's published entry carries the state as its liveness
+     * bit (`%vertex_t::set_edge_suspended` flips both, under the stripe lock, allocating
+     * nothing), and the RFC-0005 counts leave the edge out. Host state only for now — it rides
+     * the record's tail padding beside @ref active, so it costs no byte — and the wire
+     * spelling that would read and write it through `:subscribers[N]` is a separate amendment.
      */
     bool suspended = false;
 
@@ -818,10 +818,14 @@ class edge_snapshot_t {
  *        slot index the entry mirrors.
  *
  * Written once, before the array is published, and never touched again — that is what lets a
- * reader copy it out with no lock. The `active` bit is the ONE mutable word, and it is
- * MONOTONE: it starts true and an unsubscribe or a suspend (@ref vertex_t::clear_edge,
- * @ref vertex_t::evict_link_edges, @ref vertex_t::set_edge_suspended, retirement) flips it to
- * false under the stripe lock. A reader loads it and skips the entry.
+ * reader copy it out with no lock. The `active` bit is the ONE mutable word. For a removed
+ * edge it is MONOTONE: an unsubscribe, an eviction or retirement (@ref vertex_t::clear_edge,
+ * @ref vertex_t::evict_link_edges) flips it to false under the stripe lock and nothing sets it
+ * again. A suspend and a resume (@ref vertex_t::set_edge_suspended, #1533) flip it both ways,
+ * also under that lock, and that is sound because the entry still names a LIVE edge: its
+ * fields are immutable, nothing is released while it is suspended, and a resume flips only an
+ * entry the current array published for that very occupant (`edge_block_t::pub_current`). A
+ * reader loads the bit and skips the entry when it is clear.
  *
  * That single mutable bit is not a hedge on immutability, it removes a failure mode. Without
  * it every unsubscribe would have to BUILD a smaller array, and an unsubscribe that cannot
@@ -830,15 +834,28 @@ class edge_snapshot_t {
  * compaction that actually reclaims the dropped entry's refcount clones rides the next
  * successful publish, where a failure costs nothing but a delayed release.
  *
- * **The array carries only the edges that deliver (#1533).** A cleared slot and a suspended one
- * contribute no entry, so the fan-out's copy loop walks exactly the edges it will dispatch —
- * a vertex with M suspended rows costs the same per write as one without them. That is why the
- * entry names its slot: the array no longer mirrors the slot table one-for-one, so the flip
- * finds its entry by @ref slot (entries are in slot order). The index rides the padding after
- * `active`, so the entry's width — the copy loop's bandwidth — and the loop's own loads are
- * unchanged on every target.
+ * **The array carries only ACTIVE slots (#1533).** A cleared slot contributes no entry, so the
+ * copy loop never walks a dead one. A suspended slot KEEPS its entry, with the bit clear: that
+ * is what makes a toggle a flip — no republish, no allocation, no failure — at the price of one
+ * skipped entry per write for each suspended edge (the load-and-skip the loop already does).
+ * That is why the entry names its slot: the array no longer mirrors the slot table one-for-one,
+ * so the flip finds its entry by @ref slot (entries are in slot order). The index rides the
+ * padding after
+ * `active` (32 bits on LP64, 16 on ILP32, see @ref slot_index_t), so the entry's width — the
+ * copy loop's bandwidth, 56 B and 32 B — and the loop's own loads are unchanged on both.
  */
 struct pub_edge_t {
+    /**
+     * @brief The slot-index width: whatever fits the padding after @ref active (#1533).
+     *
+     * Seven spare bytes on LP64 hold 32 bits; three on ILP32 (rv32, Cortex-M) hold 16 only, so
+     * a narrow target caps a vertex at @ref kMaxSlot + 1 subscriber slots (`add_edge` refuses
+     * past it) rather than widen every entry the copy loop walks by 4 B.
+     */
+    using slot_index_t = std::conditional_t<(sizeof(void*) >= 8), std::uint32_t, std::uint16_t>;
+    /** @brief The highest slot index an entry can name. */
+    static constexpr std::size_t kMaxSlot = std::numeric_limits<slot_index_t>::max();
+
     subscriber_fn_t callback = nullptr; /**< @brief In-process sink fn (null ⇒ target-only). */
     void* callback_ctx = nullptr;       /**< @brief The sink's caller-owned context. */
     target_key_t target_key;            /**< @brief Local re-dispatch target (refcount share). */
@@ -858,11 +875,13 @@ struct pub_edge_t {
     std::atomic<bool> active{true}; /**< @brief Monotone true -> false liveness bit. */
     /** @brief The slot index this entry mirrors (#1533). Written before publish, never after;
      *         read only by the liveness flip, under the stripe lock. */
-    std::uint32_t slot = 0;
+    slot_index_t slot = 0;
 };
 
 static_assert(sizeof(void*) != 8 || sizeof(pub_edge_t) == 56,
-              "a published entry is 56 B — the slot index rides the liveness byte's padding");
+              "a published entry is 56 B on LP64 — the slot index rides the liveness padding");
+static_assert(sizeof(void*) != 4 || sizeof(pub_edge_t) == 32,
+              "a published entry is 32 B on ILP32 — the slot index rides the liveness padding");
 
 /**
  * @brief A vertex's published, immutable-after-publish edge array (#635) — what
@@ -937,6 +956,14 @@ struct edge_block_t {
     mem::block_array_t<subscriber_t> slots;
     std::atomic<edge_pub_t*> pub{nullptr}; /**< @brief The published array (null ⇒ no edges). */
     std::atomic<edge_pub_t*> retired{nullptr}; /**< @brief Displaced arrays awaiting a scan. */
+    /**
+     * @brief Did the last republish succeed (#1533)? Stripe-locked, like @ref slots.
+     *
+     * A refused republish can leave the published array naming a slot's PREVIOUS occupant (a
+     * replace whose republish failed), so a resume flips an entry back on only while this is
+     * true; otherwise it answers BACKPRESSURE until the next successful edge mutation.
+     */
+    bool pub_current = true;
 
     /** @brief An empty block drawing from @p src. */
     explicit edge_block_t(mem::block_source_t& src) noexcept : slots(src) {}

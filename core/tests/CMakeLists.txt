@@ -2912,6 +2912,6 @@ add_test(NAME path_key_seam COMMAND path_key_seam_test)
 
 # #1533: suspend/resume a subscription in place; a suspended edge is not published.
 add_executable(subscriber_suspend_test subscriber_suspend_test.cpp)
-target_link_libraries(subscriber_suspend_test PRIVATE libtracer)
+target_link_libraries(subscriber_suspend_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(subscriber_suspend_test)
 add_test(NAME subscriber_suspend COMMAND subscriber_suspend_test)
