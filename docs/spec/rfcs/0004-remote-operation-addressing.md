@@ -562,3 +562,40 @@ no error identity from it.
 (stage 4, [#1942](https://github.com/avatarsd-llc/libtracer/issues/1942)) retires `REPLY` and gives
 its reply write a top-level `ERROR` payload (§8.6). That is a separate, later amendment, and this
 erratum neither anticipates nor changes it.
+
+## Erratum (2026-10-09): a `REPLY` whose `dst` names a mount exactly is not a local terminus
+
+Follows [#2042](https://github.com/avatarsd-llc/libtracer/issues/2042). §B is right. The
+contradiction was in the exact-mount clause of the 2026-08-01 amendment and its restatement in
+the normative annex [reference/05](../../reference/05-protocol-tlvs.md) (the PAIR forward step),
+which is corrected in the same change.
+
+**What the text said.** The 2026-08-01 amendment: "a `dst` naming the mount exactly still
+addresses the connection vertex locally". reference/05: "A `REPLY` is routed by the same steps
+against its `dst`", where step 3 makes the connection vertex as the last element "a local
+terminus that addresses its own `:`-facets". Read together, a `REPLY` whose `dst` is one mount
+run terminates at the connection vertex.
+
+**What the behaviour is.** §B says the reply self-routes home via `src`, each reverse hop
+stripping its own run, "and so on back to the originator". Amendment 2 §Scope boundary keeps
+§B's accumulation for an empty `src` because "an empty seed `src` is currently the ordinary
+spelling for 'name me by the link I arrive on'". That seed only works if the hop that grew it
+sends the reply over that link. A `REPLY` carries no operation to apply at a connection vertex,
+so the exact-mount clause can only ever mean the request case it was written for (RFC-0020's bus
+NAMEs). The reference core read it literally, and the RESULT of every write forwarded from an
+origin behind node 0 was dropped at node 0 with no counter moved (#2042).
+
+**Why this is an erratum and not an amendment.** No frame type, field, code or grammar changes,
+and the reply that now reaches the originator is the frame §B always specified. It is a frame
+the reference core did not put on the wire before, so the change is visible to an origin behind
+a forwarder: it now receives the `RESULT` it was owed.
+
+**The correction.** reference/05 now says a `REPLY` whose `dst` is a NAME run naming a
+point-to-point mount exactly egresses over that link with `dst` re-headed as the empty `PATH`
+(the rule reference/05 already states for the hop that consumes a chain's final element). A
+request naming a mount exactly still addresses the connection vertex. A bus link's own NAME is
+still no next hop (RFC-0020). Pinned by `core/tests/fwd_reply_home_test.cpp` at 1 and 3 hops,
+for a PAIR-spelled and a NAME-spelled request.
+
+**Not changed.** An origin behind a forwarder still cannot decline the reply: Amendment 2's
+marker stays single-hop, and extending it is the separate proposal that amendment names.

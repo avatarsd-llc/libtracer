@@ -175,6 +175,31 @@ struct mount_hit_t {
     /** @brief The status a `rejected` hit answers: `INVALID_PATH` for a bus NAME with a
      *         residual, `NOT_FOUND` for a hop its mount's `:acl` refuses. */
     graph::status_t refusal = graph::status_t::INVALID_PATH;
+    /**
+     * @brief The point-to-point or bus mount the `dst` names EXACTLY, with nothing below it —
+     *        null otherwise. Not a hop for a request (that `dst` addresses the connection
+     *        vertex itself), but the last hop of a REPLY: see @ref take_reply_egress.
+     */
+    const child_registry_t::child_t* exact = nullptr;
+
+    /**
+     * @brief Make the mount a REPLY's `dst` names exactly its egress, `dst` consumed to empty
+     *        (#2042).
+     *
+     * A REPLY's `dst` is the request's accumulated `src` — a return route, never the address
+     * of a vertex here — so a run naming a point-to-point mount exactly means the originator
+     * is behind that link: §B's empty seed `src`, grown by the first hop alone (RFC-0004
+     * Amendment 2 §Scope boundary). Read as an address, it terminated here and the RESULT was
+     * dropped uncounted. A bus mount's own NAME stays no next hop (RFC-0020).
+     */
+    void take_reply_egress() noexcept {
+        const child_registry_t::egress_t eg = exact->egress();
+        if (eg.multi_peer) return;
+        link = eg.link;
+        link_name = exact->name;
+        entry = exact;
+        mount = exact;
+    }
 
     /** @brief Turn this hit into a `NOT_FOUND` refusal unless @p allowed — a refused hop is a
      *         rejected hit, answered by the one rejection arm, never a second one. */
@@ -237,9 +262,10 @@ template <class SegAt, class Retain>
     // `:children[]`, `:settings`, liveness value — so it terminates HERE. Only a dst with
     // something BELOW the mount is a forward (ADR-0038 §3a: a local dst descends to a local
     // vertex and terminates). A bus PEER is the exception: it has no vertex, so naming a peer
-    // exactly still forwards, with an empty residual.
+    // exactly still forwards, with an empty residual. The hit still names the mount (`exact`),
+    // because for a REPLY that run is the last hop, not an address (#2042).
     const std::optional<std::string_view> next = at(k);
-    if (!next) return {};
+    if (!next) return mount_hit_t{.peer = {}, .strip_k = k, .link_name = {}, .exact = c};
     // ONE snapshot of link + shape (#882). Read as two fields, a reconnect rebind that FLIPS
     // this name's shape could pair a stale point-to-point shape with the fresh BUS link and
     // send a directed request over the bus's broadcasting `send()` — the very fall-through
@@ -366,7 +392,7 @@ template <class Cursor>
     // one strip the rebuild applies (it walks nothing itself). A hit always read segment
     // `strip_k - 1` to match it (`strip_k >= 1`: no registry slot has zero segments), so the
     // walk answers; were it ever not to, past-the-end is the strip the rebuild refuses, a drop.
-    if (hit.link != nullptr) pre.strip_at = walk.end_of(hit.strip_k - 1).value_or(pre.dst_end + 1);
+    if (hit.strip_k != 0) pre.strip_at = walk.end_of(hit.strip_k - 1).value_or(pre.dst_end + 1);
     return hit;
 }
 
@@ -441,8 +467,20 @@ template <class Cursor>
     // Record where the consumed run ENDS — the strip the rebuild applies. Known only once the
     // descent has chosen `strip_k`, which is why it is filled here rather than in the peek. A
     // hit matched segments `0..strip_k-1` out of these `n`, so the index is in range.
-    if (hit.link != nullptr) pre.strip_at = seg_end[hit.strip_k - 1];
+    if (hit.strip_k != 0) pre.strip_at = seg_end[hit.strip_k - 1];
     return hit;
+}
+
+/**
+ * @brief The frame's op is `REPLY` — read at the offset the routing peek already located.
+ *
+ * A non-empty op VALUE is exactly the frame `peek_fwd_op` answers for, so this is that test
+ * without its second parse of the FWD and op headers (#1794).
+ */
+template <class Cursor>
+[[nodiscard]] bool is_reply(const Cursor& cur, const fwd_pre_t& pre) {
+    return pre.op_body_len != 0 && static_cast<fwd_op_t>(cur.byte_at(pre.op_body_off) &
+                                                         graph::kFwdOpcodeMask) == fwd_op_t::REPLY;
 }
 
 /**
@@ -2461,6 +2499,9 @@ bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor
         // routable ⇒ fall to the terminus.
         mount_hit_t hit = kind == fwd_dst_kind_t::PATH ? resolve_mount_at(registry_, cur, rd, pre)
                                                        : mount_hit_t{};
+        // A REPLY whose `dst` names a mount exactly leaves over it (#2042). Read only when the
+        // descent stopped exactly on a mount, so a forward hop pays one not-taken compare.
+        if (hit.exact != nullptr && is_reply(cur, pre)) hit.take_reply_egress();
         // The hop's authorization at the connection vertex the descent resolved, through the
         // SAME gate the bound and label arms run (`bound_egress`), so a hop's verdict never
         // depends on how it was spelled. A refused hop leaves as a rejected hit.
@@ -2502,8 +2543,7 @@ bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor
     // the ones it refused (it fills the op fields first): a non-empty op VALUE is exactly the
     // frame `peek_fwd_op` answered for, so this is that test without its second parse of the
     // FWD and op headers (#1794).
-    if (pre.op_body_len != 0 && static_cast<fwd_op_t>(cur.byte_at(pre.op_body_off) &
-                                                      graph::kFwdOpcodeMask) == fwd_op_t::REPLY) {
+    if (is_reply(cur, pre)) {
         // The accumulated return route is fully consumed — this node is the originator.
         reply(pre);
         return true;

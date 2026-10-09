@@ -508,7 +508,11 @@ A host receiving `FWD{op, dst, src, …}` reads the head element of `dst`:
      nothing.
 4. **Authorization**, at the dereferenced vertex, before any egress or operation (below).
 
-A `REPLY` is routed by the same steps against its `dst`. The forwarding hop is zero-heap and holds
+A `REPLY` is routed by the same steps against its `dst`, with one difference: its `dst` is a
+return route and never addresses a vertex on the hop reading it, so a NAME run naming a
+point-to-point mount exactly is the reply's **last hop**, not a local terminus. The reply egresses
+over that link with `dst` re-headed as the empty `PATH`, because the originator is behind it (an
+empty seed `src`, grown by the first hop; RFC-0004 erratum 2026-10-09). The forwarding hop is zero-heap and holds
 nothing across frames. The hop that consumes the **final** element and still has a frame to put on
 the wire re-heads its egress `dst` as a canonical **empty `PATH`**, so a client that never speaks a
 PAIR is never answered in one (RFC-0024 §7.1 erratum 3, kept).
