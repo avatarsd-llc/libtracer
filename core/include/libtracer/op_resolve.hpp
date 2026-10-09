@@ -301,7 +301,9 @@ class op_resolver_t {
      *              which stays a constant `true` on this tier because a borrowed span cannot
      *              be shortened by a refused allocation.
      *
-     *              The default is the global heap, so every existing call site is unchanged.
+     *              The default is `mem::heap_backend()` (the process-default backend: the host slab
+     *              pool, or the static arena on an MCU build), so every existing call site is
+     * unchanged.
      *
      *              A refused flatten is answered BY VALUE, never by reading a short span: the
      *              resolve walk carries a per-call "spans intact" flag (`spans_intact()` on the
@@ -324,12 +326,12 @@ class op_resolver_t {
      *              head was hard-wired to `view::heap_alloc`'s global heap regardless of every
      *              other injection. A DEDICATED seam, not `flat`: `flat` is documented and sized
      *              against FLATTEN (payload) bytes, and folding an egress head into it would
-     *              silently re-scope a budget deployments already set. The default is the global
-     *              heap, so every existing call site is byte-unchanged; a bounded node points it
-     *              at its own slab and this allocation joins the bound. A refusal returns an empty
-     *              rope that `or_backpressure` turns into an addressed `kind=ERROR`
-     *              `STATUS{BACKPRESSURE}` — exhaustion answered by value, never an abort. MUST be
-     *              thread-safe on the same terms as @p flat. Must outlive the resolver.
+     *              silently re-scope a budget deployments already set. The default is
+     *              `mem::heap_backend()` (host slab pool or MCU arena, not the system heap), so
+     * every existing call site is byte-unchanged; a bounded node points it at its own slab and this
+     * allocation joins the bound. A refusal returns an empty rope that `or_backpressure` turns into
+     * an addressed `kind=ERROR` `STATUS{BACKPRESSURE}` — exhaustion answered by value, never an
+     * abort. MUST be thread-safe on the same terms as @p flat. Must outlive the resolver.
      */
     explicit op_resolver_t(graph_t& graph, mem::mem_backend_t* flat = &mem::heap_backend(),
                            mem::mem_backend_t* egress = &mem::heap_backend(),

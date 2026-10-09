@@ -168,7 +168,8 @@ struct ws_client_config_t {
      *        a single-frame message's block carries the RFC-0028 §6.9 ingress-loan reserve.
      *        `io`: the ADR-0079 EGRESS store (#873) the masked-frame buffer, the
      *        enqueue-then-write queue's slots (#1661) AND the base class's gather temporary
-     *        draw from — one egress store per link; null means the process heap. Both bound
+     *        draw from — one egress store per link; null means the process net sub-pool
+     *        (`mem::net_source()`: the static arena on an MCU build, not the heap). Both bound
      *        once, at construction.
      */
     link_memory_t memory{};

@@ -365,18 +365,18 @@ struct transport_can_config_t {
                                    Unlike the count caps this is ALWAYS live — the
                                    age-out is the bound that holds under the shipped
                                    default config. */
-    mem::mem_backend_t* rx_backend =
-        nullptr; /**< @brief The byte seam an inbound data slice is COPIED into before it
-                      enters the reassembly buffer (`tr::view::over_bytes`'s injected
-                      form, #793). `nullptr` = the process heap, which is what this path
-                      used unconditionally before #911. A constrained node injects a
-                      bounded backend (`mem::pool_t`) so ingress exhaustion is a
-                      by-value refusal on the RX thread instead of a reach into the
-                      global heap; a refusal drops the whole group and ticks @ref
-                      can_transport_t::dropped_rx. Must outlive the transport — the
-                      segments it hands out are released by it. Companion to @ref
-                      reasm_src — that one bounds the reassembly STRUCTURE, this one the
-                      slice BYTES. */
+    mem::mem_backend_t*
+        rx_backend = nullptr; /**< @brief The byte seam an inbound data slice is COPIED into before
+                                 it enters the reassembly buffer (`tr::view::over_bytes`'s injected
+                                   form, #793). `nullptr` = the process net sub-pool
+                                   (`mem::net_backend()`; the static arena on an MCU build, not the
+                                 heap). A constrained node injects a bounded backend (`mem::pool_t`)
+                                 so ingress exhaustion is a by-value refusal on the RX thread
+                                 instead of a reach into the global heap; a refusal drops the whole
+                                 group and ticks @ref can_transport_t::dropped_rx. Must outlive the
+                                 transport — the segments it hands out are released by it. Companion
+                                 to @ref reasm_src — that one bounds the reassembly STRUCTURE, this
+                                 one the slice BYTES. */
 };
 
 /**
@@ -848,8 +848,8 @@ using transport_can = can_transport_t;
  *                 bytes (@ref transport_can_config_t::rx_backend). Injected here for
  *                 the same reason as @p reasm_src — a backend is a pointer, not a wire
  *                 value — so the seam is reachable from production registration and
- *                 not only from a unit test. `nullptr` = the process heap. Must
- *                 outlive every transport built here.
+ *                 not only from a unit test. `nullptr` = the process net sub-pool (the static arena
+ * on an MCU build, not the heap). Must outlive every transport built here.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
 [[nodiscard]] transport_factory_t can_transport_factory(mem::block_source_t* reasm_src = nullptr,
