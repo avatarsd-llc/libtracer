@@ -13,7 +13,7 @@
  *      subscriptions. Selecting none silences every ref.
  *   2. Selecting is an ordinary field write: `NAME <option>` selects, an empty `STATUS` selects
  *      none, an unknown name is NOT_FOUND, anything else TYPE_MISMATCH; `options` has no write
- *      surface. A read of either field answers the selector's state (RFC-0033 shapes).
+ *      surface. A read of either field answers the selector's state (RFC-0034 shapes).
  *   3. A refused switch under memory pressure answers BACKPRESSURE, leaves no target served
  *      twice and nothing double-delivered, and a retry completes it once the source has room.
  *   4. A dangling ref is listed INERT, a switch skips it, and nothing removes it.
@@ -132,7 +132,7 @@ struct listed_ref_t {
     std::size_t key_len; /**< @brief Its producer PATH key's length. */
 };
 
-/** @brief Parse an `options` read (RFC-0033) into a flat list; empty on a malformed value. */
+/** @brief Parse an `options` read (RFC-0034) into a flat list; empty on a malformed value. */
 std::vector<listed_ref_t> parse_options(std::span<const std::byte> bytes) {
     std::vector<listed_ref_t> out;
     const auto root = tlv_node_t::over(bytes);

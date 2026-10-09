@@ -3,13 +3,13 @@ SPDX-License-Identifier: CC-BY-4.0
 SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 -->
 
-# RFC 0033 — The subscription selector's two fields: `active` and `options`
+# RFC 0034 — The subscription selector's two fields: `active` and `options`
 
 <!-- status: proposed -->
 
 | Field | Value |
 | ---- | ---- |
-| **RFC** | 0033 |
+| **RFC** | 0034 |
 | **Title** | The subscription selector's two fields: `active` and `options` |
 | **Status** | **proposed** (2026-10-09). It needs the maintainer's approval. The comment window is waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke it explicitly if outside input is wanted. The maintainer ruled the placement and the field spelling on 2026-10-08 in [#2024](https://github.com/avatarsd-llc/libtracer/issues/2024): the selector is an adapter beside the core, `options` and `active` are ordinary fields on its own vertex with no new type codes, selecting is an ordinary field write, and the value format of `options` needs a short amendment. This is that amendment. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
