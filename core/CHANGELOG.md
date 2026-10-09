@@ -16,6 +16,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **`graph_t`: recheck vertex registration after the terminus access check.** An operation
+  finds its terminus vertex registered and then runs the vertex's access check with no lock
+  held, so a retire could land between the two. The check now tests the vertex's registration
+  once more after reading its ACEs, and `retire` marks the whole subtree unregistered before it
+  clears any vertex's ACEs, so an operation whose check overlaps a retire is refused
+  (`PERMISSION_DENIED`) instead of running against the placeholder. This covers every data
+  operation that takes a caller: read, write, assign, await, subscribe and the field surface,
+  `:children[]` creation included. Only the root, which is never registered, is not
+  rechecked, so top-level creation and the trusted local (empty) caller are unchanged. A vertex's copy-or-share threshold is now read and stored as a relaxed
+  atomic, since a retire stores it under a concurrent write. No signature or wire byte changes.
+
 - **`udp_transport_t`: an ephemeral bind owns its port
   ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
   set `SO_REUSEADDR`, which lets the kernel give a UDP socket a port another reuse-enabled
