@@ -49,11 +49,11 @@
  * inter-node link is a production `can_transport_t` (classic or FD) over an in-process bus, and
  * the census counts the frames its own segmenter writes through the `can_link_t` seam — the
  * advertise manifest on the control slot and the lean data slices — per hop, forward and reply
- * leg, with no timing. The link is bound point-to-point (a flat sink, no bus facet), so the routes
- * are the ones the wire arms use. The manifest path is one byte ("s"); each further 8 path bytes
- * adds one classic manifest frame (the manifest is classic-sliced even on an FD bus). A group the
- * 12-bit endpoint window cannot hold (`kCanMaxGroupSlices`) is refused whole by the transport and
- * reported as REFUSED.
+ * leg, with no timing. The link is bound point-to-point (a flat sink, no bus facet), so each route
+ * omits the production peer-name element per hop and the counts are LOWER BOUNDS. The manifest path
+ * is one byte ("s"); each further 8 path bytes adds one classic manifest frame (the manifest is
+ * classic-sliced even on an FD bus). A group the 12-bit endpoint window cannot hold
+ * (`kCanMaxGroupSlices`) is refused whole by the transport and reported as REFUSED.
  */
 
 #include <algorithm>
@@ -373,11 +373,12 @@ class can_end_t final : public tr::net::can_link_t {
 /**
  * @brief A point-to-point binding of a `can_transport_t` as a plain `transport_t`.
  *
- * The CAN transport is a BUS (`bus_link_t`): when the router sees a bus it names the peer in the
- * route. A two-node chain link has exactly one peer, which the transport's flat-sink path serves
- * ("a single-peer consumer needs no bus facet"); this shim installs that sink and hides the bus
- * facet, so the PAIR/COMPACT routes stay identical to the wire arms. The bytes on the CAN bus are
- * unchanged by it: every frame is still the transport's own `send()` output.
+ * LOWER BOUND. The CAN transport is a BUS (`bus_link_t`): in production the router names the peer
+ * in the route (`dst=/net/can/<bus>/n<node>/...`, `src` grows the sender's peer name, sends are
+ * directed). This shim installs the flat single-peer sink and hides the bus facet, so every route
+ * here is one peer element per hop SHORTER than production's: the PAIR forward and reply counts
+ * and COMPACT's ADVERTISE cold cost are lower bounds. The verdict's direction survives (PAIR only
+ * gets worse). Wiring the bus facet is left as a follow-up.
  */
 struct can_p2p_t final : transport_t {
     tr::net::can_transport_t* c = nullptr;
@@ -461,7 +462,7 @@ struct can_cell_t {
     std::size_t logical_B = 0;          // the frame handed to each hop's send(), from the wire arm
     std::uint64_t refused = 0;          // group not representable (dropped_tx)
     std::size_t delivered = 0;
-    can_count_t cold;  // compact: the ADVERTISE walk + first frame, all hops
+    can_count_t cold;  // compact: the ADVERTISE walk only, all hops
 };
 
 /** @brief One steady-state delivery on the real CAN carriage; the census is exact, not timed. */
