@@ -146,8 +146,8 @@ struct pair_t {
     std::vector<std::byte> src; /**< @brief The `src` B saw on the last request. */
 
     pair_t() {
-        (void)a.add_child("net/mem/b", a_to_b);
-        (void)b.add_child("net/mem/a", b_to_a);
+        (void)a.attach_link("net/mem/b", a_to_b);
+        (void)b.attach_link("net/mem/a", b_to_a);
         (void)gb.write(temp, make_value(b_value_u32(21)));
         (void)gb.write(hum, make_value(b_value_u32(55)));
         a.on_reply([](void* c, const tr::view::rope_t&) { ++static_cast<pair_t*>(c)->stray; },

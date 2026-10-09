@@ -162,7 +162,7 @@ void shape_snapshot_is_coherent() {
     bus_link_t bus;
     p2p_link_t peer;
     bus.peers.emplace_back("leaf", &peer);
-    (void)router.add_child("m/a", p2p);
+    (void)router.attach_link("m/a", p2p);
 
     const child_registry_t::child_t* const slot = router.registry().entry_by_name("m/a");
     check(slot != nullptr, "the mount slot is addressable");
@@ -205,9 +205,9 @@ void shape_snapshot_is_coherent() {
     await_reader(started);
     for (int i = 0; i < kRebinds; ++i) {
         if ((i & 1) == 0) {
-            (void)router.add_child("m/a", bus);
+            (void)router.attach_link("m/a", bus);
         } else {
-            (void)router.add_child("m/a", p2p);
+            (void)router.attach_link("m/a", p2p);
         }
     }
     stop.store(true, std::memory_order_relaxed);
@@ -245,8 +245,8 @@ void forward_never_broadcasts() {
     bus_link_t bus;
     p2p_link_t peer;
     bus.peers.emplace_back("leaf", &peer);
-    (void)router.add_child("in", inbound);
-    (void)router.add_child("m/a", p2p);
+    (void)router.attach_link("in", inbound);
+    (void)router.attach_link("m/a", p2p);
 
     const std::vector<std::byte> frame =
         tr::testing::b_fwd(fwd_op_t::READ, b_path({"m", "a", "leaf"}), b_path({"reply-ep"}));
@@ -275,9 +275,9 @@ void forward_never_broadcasts() {
     await_reader(started);
     for (int i = 0; i < kRebinds; ++i) {
         if ((i & 1) == 0) {
-            (void)router.add_child("m/a", bus);
+            (void)router.attach_link("m/a", bus);
         } else {
-            (void)router.add_child("m/a", p2p);
+            (void)router.attach_link("m/a", p2p);
         }
     }
     stop.store(true, std::memory_order_relaxed);

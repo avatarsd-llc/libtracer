@@ -157,8 +157,8 @@ void emit_path(std::vector<std::byte>& out, const std::vector<std::string>& segs
     tr::net::fwd_router_t router{graph};
     std::vector<counting_link_t> links(n);
     counting_link_t inbound;
-    for (std::size_t i = 0; i < n; ++i) router.add_child(join(mount_segments(w, i)), links[i]);
-    router.add_child("in", inbound);
+    for (std::size_t i = 0; i < n; ++i) router.attach_link(join(mount_segments(w, i)), links[i]);
+    router.attach_link("in", inbound);
 
     // Address the LAST-registered mount: the worst case for a single pass (every slot is
     // visited) and an honest one for the width loop too (it scans the whole table per width).
@@ -235,7 +235,7 @@ template <class Op>
     for (std::size_t i = 0; i < n; ++i) {
         const std::string name = join(mount_segments(w, i));
         (void)graph.register_vertex(tr::graph::path_t("/" + name), tr::graph::role_t::STORED_VALUE);
-        router.add_child(name, links[i]);
+        router.attach_link(name, links[i]);
     }
     std::vector<std::string> owned = mount_segments(w, n - 1);
     const tr::graph::path_t mount_path("/" + join(owned));

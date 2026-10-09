@@ -106,8 +106,8 @@ int main() {
     // Both links are RFC-0014 qualified mounts, three route segments each. `net/<module>/<name>`
     // is a convention, not a parse: the registry stores the name and matches it as route segments.
     recording_link_t downstream, upstream;
-    if (!router.add_child("net/ws-client/b", downstream) ||
-        !router.add_child("net/ws-server/cli", upstream)) {
+    if (!router.attach_link("net/ws-client/b", downstream) ||
+        !router.attach_link("net/ws-server/cli", upstream)) {
         std::fprintf(stderr, "route_qualified_mount: add_child failed — nothing registered\n");
         return 1;
     }
@@ -127,7 +127,7 @@ int main() {
     // Longest-prefix, not first-match: a deeper mount that also matches wins. This is what
     // keeps two modules' same-named connections from colliding.
     recording_link_t deeper;
-    const bool added_deeper = router.add_child("net/ws-client/b/inner", deeper);
+    const bool added_deeper = router.attach_link("net/ws-client/b/inner", deeper);
     check(ok, added_deeper, "a deeper mount registers alongside the shallower one");
     downstream.sent.clear();
     router.on_frame("net/ws-server/cli", fwd_write({"net", "ws-client", "b", "inner", "leaf"}, {}));

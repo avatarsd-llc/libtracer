@@ -236,13 +236,13 @@ bool ram_links() {
     graph_t g;
     tr::net::fwd_router_t router(g);
     std::deque<null_link_t> links(kRamN + 1);
-    if (!router.add_child("net/tcp/warm", links.back())) return false;
+    if (!router.attach_link("net/tcp/warm", links.back())) return false;
     bool ok = true;
     probe::window_t win;
     for (std::size_t i = 0; i < kRamN; ++i) {
         char name[40];
         std::snprintf(name, sizeof name, "net/tcp/conn-%05zu", i);
-        ok = router.add_child(name, links[i]) && ok;
+        ok = router.attach_link(name, links[i]) && ok;
     }
     const probe::counts_t c = win.result();
     if (!ok) return false;

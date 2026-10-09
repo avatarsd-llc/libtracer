@@ -332,7 +332,7 @@ void test_arena_refusal_is_answered_without_allocating() {
     arming_source_t rx;
     fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client;
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     const std::vector<std::byte> dst = b_path({"sensor", "temp"});
     const std::vector<std::byte> src = b_path({"client", "back"});
@@ -385,7 +385,7 @@ void test_bounded_pool_source_exhaustion_is_answered() {
                                 std::span<tr::mem::size_class_t>(classes)};
     fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client;
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     const std::vector<std::byte> dst = b_path({"sensor", "temp"});
     const std::vector<std::byte> src = b_path({"client"});
@@ -410,7 +410,7 @@ void test_egress_refusal_is_answered() {
     arming_backend_t egress;
     fwd_router_t router(g, {.egress = &egress});
     fixed_link_t client;
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     const std::vector<std::byte> dst = b_path({"sensor", "temp"});
     const std::vector<std::byte> src = b_path({"client"});
@@ -442,7 +442,7 @@ void test_rope_tier_refusal_is_answered() {
     arming_source_t rx;
     fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client(/*ropes=*/true);
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     const std::vector<std::byte> dst = b_path({"sensor", "temp"});
     const std::vector<std::byte> src = b_path({"client", "way", "home"});
@@ -474,7 +474,7 @@ void test_refusal_echoes_the_wire_time_stamp() {
     arming_source_t rx;
     fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client;
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     const std::vector<std::byte> dst = b_path({"sensor", "temp"});
     const std::vector<std::byte> src = b_path({"client"});
@@ -502,7 +502,7 @@ void test_frame_without_src_is_not_answered() {
     arming_source_t rx;
     fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client;
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     // op + dst and nothing else: a FWD the grammar accepts, with no return route.
     std::vector<std::byte> body;

@@ -116,7 +116,7 @@ int main() {
     // This node knows exactly one next hop, under the name "b". That name is LOCAL to this
     // node: nothing downstream has to agree with it, which is what makes the route composable.
     recording_link_t to_b;
-    if (!router.add_child("b", to_b)) {
+    if (!router.attach_link("b", to_b)) {
         std::fprintf(stderr, "route_dst_is_source_route: add_child failed — nothing registered\n");
         return 1;
     }

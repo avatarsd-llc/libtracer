@@ -21,21 +21,16 @@
  * every refusal from `p1` is paired with the identical frame from `p0` landing — the control
  * that makes each refusal the ACL's, and the proof that an allowed PAIR forwards.
  *
- * A case mounts the bus with NO connection vertex. Enforcing, it has nothing to grant a
- * right, so the PAIR naming one of its sessions' anchors is refused; the same graph without a
- * subject resolver forwards it (the control).
+ * A link cannot exist without its connection vertex (#1940): registering a mount whose vertex
+ * does not exist is refused, so no spelling reaches it, enforcing or not. Once the vertex
+ * exists the same registration succeeds and the same frame forwards (the control).
  *
- * Two cases pin ONE GATE rather than one `:acl` (#1939, RFC-0029 §6.4: the verdict is a
+ * One case pins ONE GATE rather than one `:acl` (#1939, RFC-0029 §6.4: the verdict is a
  * function of the vertex, the subject and the right alone). Two gates that read the same
- * `:acl` agree on every ACE, and still disagree where their own rules differ:
- *
- * - an opcode this build names no right for. The NAME hop forwarded it on a graph that
- *   enforces no ACL and the PAIR hop refused it; one gate gives both spellings one answer,
- *   forward when nothing is enforced and refuse when something is;
- * - a mount registered BEFORE its connection vertex exists. The NAME hop found the vertex
- *   by a keyed find at frame time and admitted the allowed caller, while the PAIR hop, which
- *   reaches the door through the slot recorded at registration, had none to reach. Both now
- *   reach the door the same way, so neither crosses a door recorded as missing.
+ * `:acl` agree on every ACE, and still disagree where their own rules differ: an opcode this
+ * build names no right for. The NAME hop forwarded it on a graph that enforces no ACL and the
+ * PAIR hop refused it; one gate gives both spellings one answer, forward when nothing is
+ * enforced and refuse when something is.
  */
 
 #include <cstddef>
@@ -195,26 +190,23 @@ struct node_t {
     fake_bus_t bus;
     recorder_t p2p;
 
-    /** @brief @p enforce installs the subject resolver; @p bus_vertex registers the bus
-     *         mount's connection vertex before it is mounted; @p p2p_late registers the
-     *         point-to-point one only AFTER its child is mounted. */
-    explicit node_t(bool enforce = true, bool bus_vertex = true, bool p2p_late = false) {
+    /** @brief @p enforce installs the subject resolver; @p p2p mounts the point-to-point
+     *         child (with its connection vertex) as well as the bus. */
+    explicit node_t(bool enforce = true, bool p2p_mounted = true) {
         if (enforce) {
             auto hooks = g.hooks();
             hooks.subject_resolver = {caller_is_subject, nullptr};
             g.set_hooks(hooks);
         }
-        if (bus_vertex) (void)g.register_vertex(path_t("/net/srv/bus"), role_t::STORED_VALUE);
-        if (!p2p_late) (void)g.register_vertex(path_t("/net/tcp/x"), role_t::STORED_VALUE);
-        check(router.add_child(std::string(kBus), bus), "bus mounted");
-        check(router.add_child(std::string(kP2p), p2p), "point-to-point child mounted");
-        if (p2p_late) (void)g.register_vertex(path_t("/net/tcp/x"), role_t::STORED_VALUE);
         const bytes_t acl = mount_acl();
-        check(g.write(path_t("/net/tcp/x:acl"), make_value(acl)).has_value(),
-              ":acl written on the point-to-point connection vertex");
-        if (bus_vertex)
-            check(g.write(path_t("/net/srv/bus:acl"), make_value(acl)).has_value(),
-                  ":acl written on the bus connection vertex");
+        check(router.attach_link(std::string(kBus), bus), "bus mounted with its vertex");
+        check(g.write(path_t("/net/srv/bus:acl"), make_value(acl)).has_value(),
+              ":acl written on the bus connection vertex");
+        if (p2p_mounted) {
+            check(router.attach_link(std::string(kP2p), p2p), "point-to-point child mounted");
+            check(g.write(path_t("/net/tcp/x:acl"), make_value(acl)).has_value(),
+                  ":acl written on the point-to-point connection vertex");
+        }
         bus.arrive("p0");
         bus.arrive("p1");
     }
@@ -281,17 +273,29 @@ void one_acl_every_spelling() {
           "PAIR anchor: p0's WRITE into p1's session forwards (the control)");
 }
 
-/** @brief 2: a mount with no connection vertex refuses a PAIR into one of its sessions. */
-void vertexless_mount() {
-    std::printf("a mount with no connection vertex refuses a PAIR anchor under enforcement:\n");
-    const auto forwards = [](bool enforce) {
-        node_t n(enforce, false);
-        check(!n.g.find(path_t("/net/srv/bus").key()).has_value(),
-              "the bus mount has no connection vertex");
-        return n.lands("p0", b_pair_path(n.anchor("p1")), [&] { return n.bus.delivered("p1"); });
-    };
-    check(!forwards(true), "enforcing: a PAIR into a session of a vertex-less mount is refused");
-    check(forwards(false), "not enforcing: the same PAIR forwards (the control)");
+/** @brief 2: a link cannot be registered without its connection vertex, so no spelling of
+ *         the hop reaches it (#1940). */
+void vertexless_mount_refused() {
+    std::printf("a mount with no connection vertex is refused, and nothing crosses it:\n");
+    // Not enforcing, so every refusal below is the registration's, never an ACL's.
+    node_t n(false, false);
+    const auto at_p2p = [&] { return n.p2p.n; };
+    const bytes_t name_dst = tr::testing::b_path({"net", "tcp", "x", "foo"});
+    check(!n.router.add_child(std::string(kP2p), n.p2p),
+          "add_child refuses a mount whose connection vertex does not exist");
+    check(!n.g.find(path_t("/net/tcp/x").key()).has_value(), "and registers no vertex");
+    check(!n.lands("p0", name_dst, at_p2p), "the NAME hop has no link to cross");
+    const vertex_handle_t v = n.g.register_vertex(path_t("/net/tcp/x"), role_t::STORED_VALUE);
+    check(n.router.add_child(std::string(kP2p), n.p2p),
+          "with the vertex in place the same add_child succeeds (the control)");
+    check(n.lands("p0", name_dst, at_p2p), "and the NAME hop crosses it");
+    check(n.lands("p0", b_pair_path(n.p2p_vertex(), {"foo"}), at_p2p), "and so does the PAIR hop");
+    // A re-add after the vertex retires is refused the same way: the door went with it.
+    (void)n.router.remove_child(kP2p);
+    check(n.g.retire(v).has_value(), "the connection vertex retires");
+    check(!n.router.add_child(std::string(kP2p), n.p2p),
+          "a re-add with the connection vertex retired is refused too");
+    check(!n.lands("p0", name_dst, at_p2p), "and nothing crosses the removed mount");
 }
 
 /** @brief An opcode with no nameable right: both spellings of one hop get ONE answer. */
@@ -313,23 +317,6 @@ void rightless_op_one_answer() {
     check(!crosses(true, true), "enforcing: the PAIR hop refuses it too");
 }
 
-/** @brief A door is the slot recorded at registration, for both spellings. */
-void late_vertex_one_door() {
-    std::printf("a vertex registered after its child is mounted is no door for either spelling:\n");
-    node_t n(true, true, true);
-    check(n.g.find(path_t("/net/tcp/x").key()).has_value(), "the vertex exists now");
-    const auto at_p2p = [&] { return n.p2p.n; };
-    check(!n.lands("p0", tr::testing::b_path({"net", "tcp", "x", "foo"}), at_p2p),
-          "enforcing: the NAME hop does not cross a door recorded as missing");
-    check(!n.lands("p0", b_pair_path(n.p2p_vertex(), {"foo"}), at_p2p),
-          "enforcing: nor does the PAIR hop");
-    check(n.router.add_child(std::string(kP2p), n.p2p), "re-mounted with its vertex in place");
-    check(n.lands("p0", tr::testing::b_path({"net", "tcp", "x", "foo"}), at_p2p),
-          "re-registered: the NAME hop crosses the door (the control)");
-    check(n.lands("p0", b_pair_path(n.p2p_vertex(), {"foo"}), at_p2p),
-          "re-registered: and so does the PAIR hop");
-}
-
 }  // namespace
 
 int main() {
@@ -338,8 +325,7 @@ int main() {
                                     "this build closed the ADR-0044 bus module out "
                                     "(kBusLinks = false); no session anchor exists to name");
     one_acl_every_spelling();
-    vertexless_mount();
+    vertexless_mount_refused();
     rightless_op_one_answer();
-    late_vertex_one_door();
     return tr::testing::summary("pair_hop_acl");
 }

@@ -274,7 +274,7 @@ struct node_t {
         (void)g.write(path_t("/sensor/temp"), owned(b_value_u32(1234)));
         (void)g.write(path_t("/sensor/humidity"), owned(b_value_u32(55)));
         if (mint) r.configure_path_labels(&labels);
-        (void)r.add_child(std::string(kInLink), cli);
+        (void)r.attach_link(std::string(kInLink), cli);
     }
 };
 
@@ -597,7 +597,7 @@ int main() {
         // Nothing was TOLD — no withdraw frame, no unbind, no lease, no TTL (§7.3). The peer
         // that reconnects at the same NAME is a different peer identity, and presenting the
         // predecessor's label buys it exactly one NOT_FOUND.
-        check(n.r.add_child(std::string(kInLink), n.cli), "a new child arrives at the same name");
+        check(n.r.attach_link(std::string(kInLink), n.cli), "a new child arrives at the same name");
         const std::size_t before = n.cli.sent.size();
         n.r.on_frame(kInLink, b_fwd_raw_op(kRead, b_path_label(*label), b_path({"reply-ep"})));
         check(n.r.label_resolves() == 0, "the successor's frame dereferences NOTHING");

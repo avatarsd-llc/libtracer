@@ -384,7 +384,7 @@ void test_span_tier_reply_head_draws_from_egress() {
         // egress is the 6th ctor arg; flat/rx keep their heap defaults so the ONLY injected
         // backend under test here is the reply-egress one.
         fwd_router_t router(n.g, raw_planes(&egress));
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         g_allocs = 0;
         g_arm = true;
         router.on_frame("in", frame);  // the SPAN (arena) tier — no rope, no frame_view
@@ -406,7 +406,7 @@ void test_span_tier_reply_head_draws_from_egress() {
         node_t n;
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
         fwd_router_t router(n.g, raw_planes());  // egress on the raw heap
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         g_allocs = 0;
         g_arm = true;
         router.on_frame("in", frame);
@@ -441,7 +441,7 @@ void test_mint_site_draws_from_egress() {
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x5A5A5A5Au))));
     arming_backend_t egress;
     fwd_router_t router(n.g, raw_planes(&egress));
-    (void)router.add_child("in", n.in);
+    (void)router.attach_link("in", n.in);
 
     router.on_frame("in",
                     b_fwd_mint(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"origin"})));
@@ -475,7 +475,7 @@ void test_egress_refusal_is_answered_by_value() {
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x33333333u))));
     arming_backend_t egress;
     fwd_router_t router(n.g, raw_planes(&egress));
-    (void)router.add_child("in", n.in);
+    (void)router.attach_link("in", n.in);
 
     egress.arm();
     router.on_frame("in", read_frame());
@@ -523,7 +523,7 @@ void test_saturated_reply_degrades_to_addressed_backpressure() {
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x44444444u))));
     arming_backend_t egress;
     fwd_router_t router(n.g, raw_planes(&egress));
-    (void)router.add_child("in", n.in);
+    (void)router.attach_link("in", n.in);
 
     // Refuse ONLY the RESULT head (the first egress draw): the rope is empty, `or_backpressure`
     // fires, and the error head — the second draw — is served. That is the saturated-snapshot
@@ -603,8 +603,8 @@ void test_ack_is_built_in_the_reply_store() {
         arming_backend_t egress;
         fwd_router_t router(n.g, raw_planes(&egress));
         rec_link_t rope_in{/*ropes=*/true};
-        (void)router.add_child("in", n.in);
-        (void)router.add_child("rin", rope_in);
+        (void)router.attach_link("in", n.in);
+        (void)router.attach_link("rin", rope_in);
         if (ropes) {
             rope_in.inject(as_rope(frame, 3));  // the ROPE tier, multi-link
         } else {
@@ -633,7 +633,7 @@ void test_reply_store_overflows_to_egress() {
         node_t n;
         arming_backend_t egress;
         fwd_router_t router(n.g, raw_planes(&egress));
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         router.on_frame("in", write_frame(src));
         check(egress.served() == 1, "the oversized head is drawn from egress");
         check(n.in.sent.size() == 1 && read_reply(n.in.sent[0]).is_fwd_reply &&
@@ -645,7 +645,7 @@ void test_reply_store_overflows_to_egress() {
         node_t n;
         arming_backend_t egress;
         fwd_router_t router(n.g, raw_planes(&egress));
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         router.on_frame("in", write_frame(b_path({"origin"}), /*mint=*/true));
         check(n.in.sent.size() == 1 && read_reply(n.in.sent[0]).has_path_ref,
               "instrument: the mint-requesting ack carries its PATH_REF");
@@ -667,7 +667,7 @@ void test_default_egress_unchanged() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x77777777u))));
     fwd_router_t router(n.g);  // no egress argument at all
-    (void)router.add_child("in", n.in);
+    (void)router.attach_link("in", n.in);
 
     const std::vector<std::byte> frame = read_frame();
     router.on_frame("in", frame);  // the SPAN (arena) tier
@@ -677,7 +677,7 @@ void test_default_egress_unchanged() {
     n.in.sent.clear();
 
     rec_link_t rope_in{/*ropes=*/true};
-    (void)router.add_child("rin", rope_in);
+    (void)router.attach_link("rin", rope_in);
     rope_in.inject(as_rope(b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"origin"})),
                            4));  // the ROPE tier, multi-link
     check(rope_in.sent.size() == 1, "the rope-tier terminus answers");

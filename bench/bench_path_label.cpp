@@ -313,8 +313,8 @@ struct chain_t {
         for (std::size_t i = 0; i + 1 < nodes; ++i) {
             down[i].peer = &up[i + 1];
             up[i + 1].peer = &down[i];
-            (void)routers[i]->add_child(down_name(i), down[i]);
-            (void)routers[i + 1]->add_child(up_name(i + 1), up[i + 1]);
+            (void)routers[i]->attach_link(down_name(i), down[i]);
+            (void)routers[i + 1]->attach_link(up_name(i + 1), up[i + 1]);
         }
         // The decoys, added LAST so the route's own child is never the newest entry — a
         // registry that answers fastest for whatever was registered most recently would make
@@ -326,10 +326,10 @@ struct chain_t {
                 (void)graphs[i]->register_vertex(*tr::graph::path_t::parse("/" + name),
                                                  tr::graph::role_t::STORED_VALUE);
                 decoys.push_back(std::make_unique<wire_link_t>());
-                (void)routers[i]->add_child(name, *decoys.back());
+                (void)routers[i]->attach_link(name, *decoys.back());
             }
         }
-        (void)routers[0]->add_child("net/ws-server/app", origin);
+        (void)routers[0]->attach_link("net/ws-server/app", origin);
     }
 
     /** @brief The full canonical address of the terminus vertex, seen from node 0. */

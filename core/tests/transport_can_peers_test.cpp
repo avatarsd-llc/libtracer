@@ -279,7 +279,7 @@ void test_enumeration_and_forwarding() {
         inbox.push(std::vector<std::byte>(f.begin(), f.end()));
     };
     tr::net::loopback_channel_t channel;
-    (void)router_t.add_child("cli", channel.a());
+    (void)router_t.attach_link("cli", channel.a());
     channel.b().set_receiver(cli_rx);
 
     tr::net::transport_can tcan_t(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
@@ -300,7 +300,7 @@ void test_enumeration_and_forwarding() {
     fwd_router_t router_p(graph_p);
     tr::net::transport_can tcan_p(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
                                   {0, 5, tr::net::can::can_frame_mode_t::CLASSIC, "boardB"});
-    (void)router_p.add_child("can0", tcan_p);
+    (void)router_p.attach_link("can0", tcan_p);
 
     // ----- bystander Q (CAN node 7): same bus, must never deliver n5 traffic. -
     std::atomic<int> q_deliveries{0};

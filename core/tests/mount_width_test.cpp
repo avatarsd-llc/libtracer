@@ -131,8 +131,8 @@ void test_width(std::size_t w) {
     tr::net::fwd_router_t router{graph};
     recording_link_t down;
     recording_link_t up;
-    check(router.add_child(name, down), "a mount of this width registers");
-    check(router.add_child("in", up), "the inbound link registers");
+    check(router.attach_link(name, down), "a mount of this width registers");
+    check(router.attach_link("in", up), "the inbound link registers");
     check(router.registry().live_size() == 2, "both are live children");
 
     std::vector<std::string> dst = mount;
@@ -160,19 +160,19 @@ void test_unaddressable_names_refused() {
     tr::net::fwd_router_t router{graph};
     recording_link_t link;
 
-    check(!router.add_child("", link), "an empty name is refused");
-    check(!router.add_child("a//b", link), "a name with an EMPTY segment is refused");
-    check(!router.add_child("a/", link), "a trailing separator is refused");
-    check(!router.add_child("/a", link), "a leading separator is refused");
+    check(!router.attach_link("", link), "an empty name is refused");
+    check(!router.attach_link("a//b", link), "a name with an EMPTY segment is refused");
+    check(!router.attach_link("a/", link), "a trailing separator is refused");
+    check(!router.attach_link("/a", link), "a leading separator is refused");
     check(router.registry().live_size() == 0,
           "and NOTHING was registered — no healthy-looking ghost");
 
     // The one real bound: a `dst` carries at most `kMaxSegments` segments, so a wider mount
     // cannot be the prefix of any address that exists.
     const std::string too_wide = join(mount_segments(tr::graph::kMaxSegments + 1));
-    check(!router.add_child(too_wide, link), "a name wider than the path budget is refused");
+    check(!router.attach_link(too_wide, link), "a name wider than the path budget is refused");
     const std::string at_budget = join(mount_segments(tr::graph::kMaxSegments));
-    check(router.add_child(at_budget, link), "a name exactly AT the budget is accepted");
+    check(router.attach_link(at_budget, link), "a name exactly AT the budget is accepted");
 }
 
 /** @brief Two mounts share a prefix — the wider one wins, whatever the table order. */
@@ -186,9 +186,9 @@ void test_longest_match_wins() {
     // Registered SHALLOW FIRST so a pass that returned the first hit rather than the widest
     // would answer wrongly — the old descent got this right only by starting at the widest
     // width, which is exactly the loop the single pass replaces.
-    (void)router.add_child("net/a/b", shallow);
-    (void)router.add_child("net/a/b/c/d", deep);
-    (void)router.add_child("in", in);
+    (void)router.attach_link("net/a/b", shallow);
+    (void)router.attach_link("net/a/b/c/d", deep);
+    (void)router.attach_link("in", in);
 
     router.on_frame("in", make_fwd(std::vector<std::string>{"net", "a", "b", "c", "d", "x"},
                                    std::vector<std::string>{"o"}));
@@ -206,8 +206,8 @@ void test_segment_boundaries() {
     tr::net::fwd_router_t router{graph};
     recording_link_t abc;
     recording_link_t in;
-    (void)router.add_child("net/abc", abc);
-    (void)router.add_child("in", in);
+    (void)router.attach_link("net/abc", abc);
+    (void)router.attach_link("in", in);
 
     // "net/ab" is a byte prefix of "net/abc"; "net"+"ab" as segments must NOT match it.
     router.on_frame(
@@ -225,8 +225,8 @@ void test_exact_mount_terminates() {
     tr::net::fwd_router_t router{graph};
     recording_link_t down;
     recording_link_t in;
-    (void)router.add_child("net/a/b/c/d/e", down);
-    (void)router.add_child("in", in);
+    (void)router.attach_link("net/a/b/c/d/e", down);
+    (void)router.attach_link("in", in);
 
     router.on_frame("in", make_fwd(std::vector<std::string>{"net", "a", "b", "c", "d", "e"},
                                    std::vector<std::string>{"o"}));
@@ -244,9 +244,9 @@ void test_narrow_after_wide() {
     // Order matters: the pass reaches `wide` first and walks the dst out to width 6, then
     // must walk BACK to width 1 for `narrow`. A walker that only ever moved forward would
     // answer the second slot from a stale cursor.
-    (void)router.add_child("q0/q1/q2/q3/q4/q5", wide);
-    (void)router.add_child("solo", narrow);
-    (void)router.add_child("in", in);
+    (void)router.attach_link("q0/q1/q2/q3/q4/q5", wide);
+    (void)router.attach_link("solo", narrow);
+    (void)router.attach_link("in", in);
 
     router.on_frame("in",
                     make_fwd(std::vector<std::string>{"solo", "x"}, std::vector<std::string>{"o"}));
@@ -265,8 +265,8 @@ void test_deep_mount_forwards() {
     tr::net::fwd_router_t router{graph};
     recording_link_t down;
     recording_link_t in;
-    (void)router.add_child("net/ws/s/rack/slot", down);  // 5 segments — past the old window
-    (void)router.add_child("in", in);
+    (void)router.attach_link("net/ws/s/rack/slot", down);  // 5 segments — past the old window
+    (void)router.attach_link("in", in);
 
     router.on_frame("in", make_fwd(std::vector<std::string>{"net", "ws", "s", "rack", "slot", "v"},
                                    std::vector<std::string>{"o"}));

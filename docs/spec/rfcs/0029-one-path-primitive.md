@@ -202,7 +202,7 @@ act" as a forwarder's).
 
 **Mixed spellings are legal and expected** (RFC-0027 §5.2, carried verbatim). Any element may be a
 NAME or a PAIR, in any order. A node that cannot issue a PAIR for its part — a shared mount (§10),
-a saturated slot, a connection vertex that does not exist yet — leaves that part as NAMEs and every
+a saturated slot, a connection vertex retired under its link — leaves that part as NAMEs and every
 other node's part still compacts. Because every element self-describes by its kind and is read by
 exactly one node, **skipping is not expressible**; RFC-0024 §7.1 erratum 1's strip-whole-list rule
 exists only for positional arrays and is retired with both of them (§5.3, §7.1).
@@ -282,7 +282,7 @@ strip rule with it. **Kept, unchanged:** RFC-0004 §E.1's `ADVERTISE`/`COMPACT`/
 **Normative.** A host receiving `FWD{op, dst, src, …}` reads the head element of `dst`:
 
 1. **NAME head.** Resolve as today: the strip-K mount descent (ADR-0061) if the leading run names a
-   registered child, else the local tree walk. Unchanged by this RFC except for §6.4 and §13.2 S6.
+   connection vertex, else the local tree walk. Unchanged by this RFC except for §6.4 and §13.2 S6.
 2. **PAIR head.** `deref_vertex_slot(index, generation)`: bounds, `bound_generation_matches`
    (which refuses a saturated element), `registered()`. Any refusal is **`NOT_FOUND`**, answered
    from the request's own `src` (§6.3); the host MUST NOT forward the frame, MUST NOT apply the
@@ -326,7 +326,7 @@ when it cannot — **never nothing**:
 - a **forwarding hop** contributes its PAIR for the connection vertex the reply **arrived over**,
   which is the one it egressed the request through (`fwd_router_t::hop_mint`, `core/src/fwd_router.cpp`,
   reads it off the frame's own arrival, never from a table); a hop that cannot — a shared mount, a
-  child with no connection vertex, a saturated slot — contributes the inbound child's mount run as
+  connection vertex retired under its link, a saturated slot — contributes the inbound child's mount run as
   NAMEs instead;
 - the **terminus** seeds the reply's `src` with its PAIR for the target vertex it applied the op to
   (the last element of the forward route), or the residual NAMEs it resolved if it cannot;
@@ -622,7 +622,7 @@ offset:
 
 | item | where | cost (estimated; **measured at S2**) |
 | --- | --- | --- |
-| reply-`src` growth at a **non-minting** relaying hop: its inbound mount run as NAMEs, where RFC-0027 erratum 2 had it contribute nothing | every `REPLY` relayed over a shared mount, a child with no connection vertex, or a saturated slot (§6.2) | one NAME run per such hop, **≈13–32 B** (one `1 + len` segment record per mount-run segment; 13 B for the shortest shipped `net/<module>/<name>` run, up to §5.2's 20–32 B canonical figure) |
+| reply-`src` growth at a **non-minting** relaying hop: its inbound mount run as NAMEs, where RFC-0027 erratum 2 had it contribute nothing | every `REPLY` relayed over a shared mount, a retired connection vertex, or a saturated slot (§6.2) | one NAME run per such hop, **≈13–32 B** (one `1 + len` segment record per mount-run segment; 13 B for the shortest shipped `net/<module>/<name>` run, up to §5.2's 20–32 B canonical figure) |
 | reply-`src` growth at a **minting** hop | every other relayed or issued `REPLY` | **11 B** per hop (one PAIR element, §5.2) |
 
 Both are paid on the reply leg only. The `reply-spread` four-link arm (S2's gate, §15 clause 1)
@@ -916,3 +916,37 @@ stands. The S6 outcome is the branch §15 clause 4 already wrote down, recorded
 as taken. §6.4's normative rule, that the verdict is spelling-independent, is now what the code
 does, including for an opcode the build names no right for, which both spellings refuse
 identically when enforcing.
+
+## Erratum (2026-10-09) — a link cannot exist without its connection vertex: §6 step 1 names the connection vertex, not a "registered child" ([#1940](https://github.com/avatarsd-llc/libtracer/issues/1940))
+
+**What the text said.**
+
+- §6 step 1 resolved a NAME head by the mount descent "if the leading run names a registered
+  child".
+- §4.2, §6.2 and §11 listed "a connection vertex that does not exist yet" and "a child with no
+  connection vertex" among the hops that cannot issue a PAIR.
+
+**What was wrong.** The text described a registry that could hold a link with no door. The model
+this RFC is written under (§6.4, and the one-walk spec #1938) has one: the connection vertex is
+the attachment point, and the shipped wiring (`transport_vertex_t::make_connection`) has always
+registered the vertex before its link. The reference implementation now enforces that.
+`fwd_router_t::add_child` refuses, by value, a mount whose connection vertex is not registered,
+and `fwd_router_t::attach_link` registers the two together for a link wired by hand. So a
+"registered child" and "a mount with a connection vertex" are one set, and `kNoConnSlot` is
+deleted: `child_registry_t::child_t::conn_slot` is written once, before the entry is published.
+
+**The correction.**
+
+| | corrected reading |
+| --- | --- |
+| **§6 step 1** | the descent applies "if the leading run names a **connection vertex**". |
+| **§4.2, §6.2, §11** | a hop cannot issue a PAIR for a shared mount, a saturated slot or a connection vertex **retired under its link**. A vertex that does not exist has no link to issue for. |
+
+The same wording is corrected in the normative annex
+([05-protocol-tlvs.md](../../reference/05-protocol-tlvs.md) §The per-hop algorithm).
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** No frame, TLV type, escape kind, flag bit, grammar, error identity or
+conformance vector changes. A node with no connection vertex for a run already answered every
+spelling of it as "no link": since the 2026-10-07 "refuse" ruling a vertex-less mount refused the
+hop under ACL enforcement, and the connection vertex is the only identity a PAIR can name.
