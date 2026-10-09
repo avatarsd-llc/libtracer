@@ -2706,6 +2706,13 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(empty_src_unacked_test)
     add_test(NAME empty_src_unacked COMMAND empty_src_unacked_test)
 
+    # #2042 — a forwarded write's RESULT reaches the originator behind node 0's link: a REPLY
+    # whose `dst` names a point-to-point mount exactly egresses over it, at H = 1 and 3.
+    add_executable(fwd_reply_home_test fwd_reply_home_test.cpp)
+    target_link_libraries(fwd_reply_home_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_reply_home_test)
+    add_test(NAME fwd_reply_home COMMAND fwd_reply_home_test)
+
     # #1645 — a node originates READ / WRITE / append through `fwd_router_t::originate`: no
     # caller-built wire bytes, no fake inbound link, the reply paired to a caller-owned record.
     add_executable(fwd_originate_test fwd_originate_test.cpp)

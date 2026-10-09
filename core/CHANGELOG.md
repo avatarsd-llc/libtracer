@@ -22,6 +22,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   socket already holds. Datagrams for that port then went to whichever socket bound last, so a
   receiver could silently get nothing. The option is now set only for a non-zero `bind_port`;
   a named port keeps it. The API is unchanged.
+- **A forwarded write's `RESULT` reaches an originator behind node 0's link
+  ([#2042](https://github.com/avatarsd-llc/libtracer/issues/2042)).** No API change. A `REPLY`
+  whose `dst` named a point-to-point mount exactly was taken as addressed to that connection
+  vertex, so node 0 dropped the reply uncounted. It now egresses over that link with an empty
+  `dst` (RFC-0004 erratum 2026-10-09). A request naming a mount exactly is unchanged. This holds
+  only until [#1946](https://github.com/avatarsd-llc/libtracer/issues/1946) lands RFC-0030 §8.5, after which an empty `src` is never grown and this
+  `RESULT` is never built.
 
 ## [0.19.0] — 2026-10-09
 

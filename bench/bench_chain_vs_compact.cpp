@@ -18,10 +18,11 @@
  *                cold cost), then every sample rides as `COMPACT{label, payload}`.
  *
  * The arms are NOT like-for-like on the reply leg. A forwarded PAIR write grows `src` at every
- * forwarder, so the terminus builds a RESULT and it is relayed back down to node 0 — where it is
- * dropped silently (the origin receives 0 frames; no router counter moves). So `pair` pays for an
- * ack that is built, carried H hops and discarded; COMPACT emits none. The shape is asserted
- * exactly (H reply frames, 0 at the origin) so any change is loud. To price it, `pair-norelay`
+ * forwarder, so the terminus builds a RESULT and it is relayed back to the originator through
+ * node 0 (#2042: H frames on the `up` links, 1 on the origin's link). So `pair` pays for an ack
+ * that is built and carried H + 1 links; COMPACT emits none. The shape is asserted exactly so any
+ * change is loud: RFC-0030 §8.5 (#1946) stops growing the empty `src`, and this RESULT is then
+ * never built. To price it, `pair-norelay`
  * repeats the PAIR arm with the reply's relay cut (the terminus still builds and sends it):
  * `pair` minus `pair-norelay` is the relay cost, and `pair-norelay` vs `compact` is the nearest
  * like-for-like the library allows without a core change.
@@ -617,12 +618,13 @@ struct cell_t {
         for (const auto& l : ch.up) c.rev_B += l.bytes;
         // The two spellings do NOT emit the same traffic: a PAIR write is relayed with `src`
         // GROWN at every forwarder (RFC-0029 §6.1; the empty-`src` marker only survives on a
-        // directly attached origin), so the terminus builds a RESULT and it is relayed down to
-        // node 0, which drops it silently (#2042): the origin receives 0 frames and no router
-        // counter moves. A COMPACT emits no reply. The shape is asserted exactly so a change in
-        // either direction is loud, and the reply leg has its own columns.
-        if (pair ? (c.rev != hops || ch.origin.frames != 0) : c.rev != 0)
-            fail(name, "the reply-leg census changed: pair must ack H frames, compact none");
+        // directly attached origin), so the terminus builds a RESULT and it is relayed home: one
+        // frame on each of the H `up` links and one on the origin's link, which node 0 now
+        // delivers (#2042). A COMPACT emits no reply. The shape is asserted exactly so a change
+        // in either direction is loud (RFC-0030 §8.5, #1946, makes it zero), and the reply leg
+        // has its own columns.
+        if (pair ? (c.rev != hops + 1 || ch.origin.frames != 1) : c.rev != 0)
+            fail(name, "the reply-leg census changed: pair must ack H + 1 frames, compact none");
 
         // The relay ablation: the terminus still builds and sends its RESULT, no hop relays it.
         if (norelay)
