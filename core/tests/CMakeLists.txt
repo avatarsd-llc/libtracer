@@ -1716,6 +1716,14 @@ target_link_libraries(admission_seam_test PRIVATE libtracer)
 libtracer_test_warnings(admission_seam_test)
 add_test(NAME admission_seam COMMAND admission_seam_test)
 
+# #2032 — re-registering at one vertex address reuses its admission and payload-right
+# declaration nodes: N register/retire cycles hold the table source flat after the first, and
+# every cycle is served its own hooks, rows and catalog, never a previous occupant's.
+add_executable(declaration_churn_test declaration_churn_test.cpp)
+target_link_libraries(declaration_churn_test PRIVATE libtracer)
+libtracer_test_warnings(declaration_churn_test)
+add_test(NAME declaration_churn COMMAND declaration_churn_test)
+
 add_executable(nonretaining_contract_test nonretaining_contract_test.cpp)
 target_link_libraries(nonretaining_contract_test PRIVATE libtracer)
 libtracer_test_warnings(nonretaining_contract_test)

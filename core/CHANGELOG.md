@@ -125,6 +125,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `dst` (RFC-0004 erratum 2026-10-09). A request naming a mount exactly is unchanged. This holds
   only until [#1946](https://github.com/avatarsd-llc/libtracer/issues/1946) lands RFC-0030 §8.5, after which an empty `src` is never grown and this
   `RESULT` is never built.
+- **Re-registering at one vertex address no longer grows the graph's declaration lists
+  ([#2032](https://github.com/avatarsd-llc/libtracer/issues/2032)).** A registration that
+  carries `handlers_t::on_admit`, `on_app_field_admit` or `on_app_field_read`, payload-right
+  rows or a `:schema` catalog, and every `graph_t::set_creation_hook`, used to prepend a node
+  that was never freed, so retiring and re-registering one path grew table-source memory, and
+  the write gate's walk for every older declarer, with each cycle. Each address now keeps one
+  node, so both are bounded by the addresses that ever declared. A re-registration rewrites the
+  hooks in place behind a two-sided latch, so a concurrent writer copies one registration's
+  hooks whole and never waits on the registering thread. The rows and catalog become one
+  immutable record published through the build's `lkv_slot_t`, which frees the displaced
+  record once no reader holds it. No API change.
 
 ## [0.19.0] — 2026-10-09
 

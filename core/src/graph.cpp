@@ -752,16 +752,16 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     }
     if (node->registered()) return std::unexpected(status_t::PATH_IN_USE);
     // The RFC-0014 Amendment 2 declaration is copied in here, before `fill` adopts the
-    // handlers: the rows are the graph's (one immortal node per declaring registration), the
-    // vertex keeps only the flag bit that says they exist. We are under the unique map lock,
+    // handlers: the rows are the graph's (one node per declaring address, #2032), the vertex
+    // keeps only the flag bit that says they exist. We are under the unique map lock,
     // which is exactly the hold `declare_payload_rights` requires. The RFC-0014 Amendment 3
-    // `:schema` catalog rides the same node, for the same reason and under the same hold.
+    // `:schema` catalog rides the same record, for the same reason and under the same hold.
     // Same treatment, same hold, and for the same reason (see `graph_t::admissions_`): the two
     // ADMISSION filters are taken here, before `fill` adopts the rest, so the seam block
     // `adopt_identity` may allocate is byte-for-byte the one it allocated before this feature.
-    // Each declaration raises its vertex flag as it lands (#1778). A node published for a
-    // refused registration is never walked once the refusal lowers the flags again, and a later
-    // declaration at this address is found first anyway.
+    // Each declaration raises its vertex flag as it lands (#1778). A declaration published for
+    // a refused registration is never read once the refusal lowers the flags again, and a later
+    // declaration at this address republishes over it anyway.
     // The policy lands on the still-unregistered node first (#1778), the delivery mode with its
     // sweep-set entry included (#1920): a refusal anywhere in this chain leaves a placeholder,
     // which `find` does not answer for and a sweep skips. The refusal clears every declaration
@@ -789,18 +789,27 @@ bool graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_
                                      std::span<const std::byte> catalog) {
     // The overwhelming majority: no node, no flag, no cost.
     if (rows.empty() && catalog.empty()) return true;
-    // PREPEND, so a re-registration at the same address publishes rows the walk finds before
-    // any the previous occupant left behind (the list is never unlinked — see the member's
-    // doc for why that is what makes the gate's walk lock-free). Filled before it is
-    // published, so a refused copy frees an unpublished node.
-    payload_right_node_t* const node = mem::make_in<payload_right_node_t>(*tables_, *tables_);
-    if (node == nullptr || !node->rows.append(rows.data(), rows.size()) ||
-        !mem::assign_bytes(node->catalog, catalog)) {
-        mem::drop_in(*tables_, node);
+    // The record is built WHOLE before it is published, so a reader that loads it sees this
+    // declaration entire; the slot then swaps it in for whatever this address declared before
+    // and releases that one once no reader holds it (#2032). A refusal anywhere publishes
+    // nothing and leaves the previous record standing. A count that would not fit its
+    // `std::uint32_t` makes a record `make_inline` refuses, so the cast below never truncates.
+    const auto n = static_cast<std::uint32_t>(rows.size());
+    value_t* const record =
+        value_t::make_inline(sizeof n + rows.size_bytes() + catalog.size(), *tables_);
+    payload_right_node_t* const node =
+        record != nullptr ? payload_rights_.find_or_make(v) : nullptr;
+    if (node != nullptr) {
+        std::byte* out = record->inline_bytes().data();
+        std::memcpy(out, &n, sizeof n);
+        if (!rows.empty()) std::memcpy(out + sizeof n, rows.data(), rows.size_bytes());
+        if (!catalog.empty())
+            std::memcpy(out + sizeof n + rows.size_bytes(), catalog.data(), catalog.size());
+    }
+    if (node == nullptr || !node->record.store(record)) {
+        value_t::release(record);
         return false;
     }
-    node->v = v;
-    payload_rights_.prepend(node);
     v->mark_payload_rights();
     return true;
 }
@@ -808,47 +817,39 @@ bool graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_
 bool graph_t::declare_admission(vertex_t* v, const handlers_t& h) {
     // The overwhelming majority: no node, no flag, no cost.
     if (!h.on_admit && !h.on_app_field_admit && !h.on_app_field_read) return true;
-    // PREPEND, so a re-registration at the same address publishes a filter the walk finds
-    // before any the previous occupant left behind (the list is never unlinked — see the
-    // member's doc for why that is what makes the read lock-free).
-    admission_node_t* const node = mem::make_in<admission_node_t>(
-        *tables_,
-        admission_node_t{v, h.on_admit, h.on_app_field_admit, h.on_app_field_read, {}, nullptr});
+    // ONE node per address: a re-registration republishes into the node the address already
+    // has (#2032), and a reader never sees a mix of this registration's hooks and the previous
+    // occupant's (see `admission_node_t`). The creation hook starts empty, as a new
+    // registration's does.
+    admission_node_t* const node = admissions_.find_or_make(v);
     if (node == nullptr) return false;
-    admissions_.prepend(node);
+    node->publish({h.on_admit, h.on_app_field_admit, h.on_app_field_read, {}});
     v->mark_admission();
     return true;
 }
 
 const graph_t::admission_node_t* graph_t::admission_for(const vertex_t* v) const noexcept {
     // Walks only for a vertex whose flag says it installed one — tested HERE, so no caller
-    // repeats it: the list holds one node per declaring registration, and a node is immortal,
-    // so no lock is needed to read one. The FIRST match is the vertex's own newest declaration
-    // — an older node left by a previous occupant of this address sits behind it and must
-    // never answer for it.
-    if (!v->has_admission()) return nullptr;
-    for (const admission_node_t* n = admissions_.head.load(std::memory_order_acquire); n != nullptr;
-         n = n->next)
-        if (n->v == v) return n;
-    return nullptr;
+    // repeats it: the list holds one node per declaring address, and a node is immortal, so no
+    // lock is needed to read one. A node whose flag is clear holds a previous occupant's hooks
+    // and is never answered for.
+    return v->has_admission() ? admissions_.find(v) : nullptr;
 }
 
 result_t<void> graph_t::set_creation_hook(vertex_handle_t parent, creation_hook_t hook) {
     if constexpr (!config_t::kCreationHooks) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     vertex_t* const v = parent.get();
-    // The unique map lock: `prepend` requires it, and it orders the install against a
+    // The unique map lock: `publish` requires it, and it orders the install against a
     // retirement, which clears the flag under the same hold.
     const std::unique_lock lock(map_mutex_);
     if (v == nullptr || !v->registered()) return std::unexpected(status_t::NOT_FOUND);
-    // A NEW node, newest first: a copy of the vertex's own admission node (its filters carry
-    // over unchanged) with the hook replaced. Nodes are immortal, so the old one stays readable
-    // by any walk already on it, and is never found again.
-    const admission_node_t* const own = admission_for(v);
-    admission_node_t* const node = mem::make_in<admission_node_t>(
-        *tables_, own != nullptr ? *own : admission_node_t{v, {}, {}, {}, {}, nullptr});
+    // Republished into the vertex's own node with only the hook replaced: its filters carry
+    // over unchanged when it has any, and a node left by a previous occupant contributes none.
+    admission_node_t* const node = admissions_.find_or_make(v);
     if (node == nullptr) return std::unexpected(status_t::BACKPRESSURE);
-    node->on_create = hook;
-    admissions_.prepend(node);
+    admission_hooks_t hooks = v->has_admission() ? node->current() : admission_hooks_t{};
+    hooks.on_create = hook;
+    node->publish(hooks);
     v->mark_creation_hook();
     return {};
 }
@@ -857,39 +858,44 @@ creation_hook_t graph_t::creation_hook_for(const vertex_t* v) const noexcept {
     // The same walk @ref admission_for makes, behind its own flag, so a miss under a parent
     // with no hook costs one relaxed bit test. Closed out, there is no slot to read.
     if constexpr (config_t::kCreationHooks) {
-        if (!v->has_creation_hook()) return {};
-        for (const admission_node_t* n = admissions_.head.load(std::memory_order_acquire);
-             n != nullptr; n = n->next)
-            if (n->v == v) return n->on_create;
+        if (const admission_node_t* const n =
+                v->has_creation_hook() ? admissions_.find(v) : nullptr)
+            return n->read(&admission_node_t::side_t::on_create);
     }
     return {};
+}
+
+graph_t::payload_record_t graph_t::declared_record(const vertex_t* v) const noexcept {
+    // Only a flagged vertex gets here, the node is immortal, and the slot hands back a retained
+    // record — the current declaration, whole, for as long as the caller holds it.
+    const payload_right_node_t* const n = payload_rights_.find(v);
+    return {n != nullptr ? n->record.load() : value_ref_t{}};
+}
+
+std::size_t graph_t::payload_record_t::row_count() const noexcept {
+    std::uint32_t n = 0;
+    if (held) std::memcpy(&n, held->only().bytes().data(), sizeof n);
+    return n;
+}
+
+payload_right_t graph_t::payload_record_t::row(std::size_t i) const noexcept {
+    payload_right_t r{};
+    std::memcpy(&r, held->only().bytes().data() + sizeof(std::uint32_t) + i * sizeof r, sizeof r);
+    return r;
+}
+
+std::span<const std::byte> graph_t::payload_record_t::catalog() const noexcept {
+    if (!held) return {};
+    return held->only().bytes().subspan(sizeof(std::uint32_t) +
+                                        row_count() * sizeof(payload_right_t));
 }
 
 acl_right_t graph_t::declared_write_right(const vertex_t* v, wire::type_t type) const {
-    // Walks only for a vertex whose flag says it declared: the list holds one node per
-    // declaring registration (a creator endpoint per transport module — a handful), and a
-    // node is immortal, so no lock is needed to read one.
-    for (const payload_right_node_t* n = payload_rights_.head.load(std::memory_order_acquire);
-         n != nullptr; n = n->next) {
-        if (n->v != v) continue;
-        for (const payload_right_t& row : n->rows)
-            if (row.type == type) return row.right;
-        // The vertex's own (newest) table had no row for this type — an undeclared type
-        // takes `WRITE`, and an older table left by a previous occupant of this address must
-        // not answer for it.
-        return acl_right_t::WRITE;
-    }
+    // The vertex's own current table, first match wins; an undeclared type takes `WRITE`.
+    const payload_record_t record = declared_record(v);
+    for (std::size_t i = 0, n = record.row_count(); i < n; ++i)
+        if (const payload_right_t row = record.row(i); row.type == type) return row.right;
     return acl_right_t::WRITE;
-}
-
-std::span<const std::byte> graph_t::declared_catalog(const vertex_t* v) const noexcept {
-    // The same walk `declared_write_right` makes, for the same reasons: only a flagged vertex
-    // gets here, nodes are immortal, and the FIRST match is the vertex's own newest
-    // declaration — an older node left by a previous occupant of this address never answers.
-    for (const payload_right_node_t* n = payload_rights_.head.load(std::memory_order_acquire);
-         n != nullptr; n = n->next)
-        if (n->v == v) return mem::as_span(n->catalog);
-    return {};
 }
 
 void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
@@ -2243,13 +2249,13 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
 
 admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view caller,
                            const net::link_kind_t* link) const {
-    const admission_node_t* a = admission_for(v);
-    if (a == nullptr || !a->on_admit) return std::optional<view::rope_t>{};
+    const admit_hook_t on_admit = admission_hook(v, &admission_node_t::side_t::on_admit);
+    if (!on_admit) return std::optional<view::rope_t>{};
     // Same `caller` the ACL gate one frame up ran on (#375): the filter and the gate that
     // admitted the write cannot disagree about who wrote. `link` is the arrival link's catalog
     // identity (#1650) — a pointer the router resolved once per link, never looked up here.
     const write_ctx_t ctx{.subject = caller, .link = link};
-    return a->on_admit(value, ctx);
+    return on_admit(value, ctx);
 }
 
 result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
