@@ -1518,7 +1518,7 @@ here is diagnostic. Quote the ratio, with the stamp, and never a bare absolute.
 
 Two `can_transport_t` ends over an in-memory pumped bus, sending directed FWD{WRITE} deliveries
 of N streams round-robin (a three-segment dst, a two-segment src: a 40-byte address run),
-classic and FD, payloads 4 B, 64 B and 1 KiB. The **before** arm runs both ends with
+classic and FD, payloads 4 B, 64 B, 1, 4 and 16 KiB. The **before** arm runs both ends with
 `compress_ids = 0`, which is exactly the pre-#1953 wire; the **after** arm binds each stream on
 its second send and then sends it on the sender's stream identifiers. N is 1, 64 and `max`, the
 most streams the 512-identifier window holds at that payload's slice count.
@@ -1569,6 +1569,23 @@ Host time per send (bench slice, best of 7, ns, before → after):
 The per-send TX lookup grows with the table from about 260 ns at N = 1 to about 630 ns at
 N = 512 (classic 4 B). It stays a keyed search and never a scan, and it is far below the
 before arm's per-advertise binding walks at every N.
+
+Above 1 KiB the remainder exceeds the 16-slice cap, so nothing binds. Frames are identical in
+both arms, and the after arm only adds the prefix hash and a sighting lookup per send. Host time
+per send (bench slice, best of 7, µs, before → after):
+
+| mode | payload | frames | N = 1 | N = 64 |
+|---|---:|---:|---:|---:|
+| classic | 1 KiB | 137 = 137 | 39.4 → 39.4 | 36.1 → 36.1 |
+| classic | 4 KiB | 521 = 521 | 293 → 313 | 305 → 297 |
+| classic | 16 KiB | 2057 = 2057 | 3794 → 3835 | 4080 → 4050 |
+| fd | 1 KiB | 20 = 20 | 5.41 → 5.35 | 5.83 → 5.41 |
+| fd | 4 KiB | 68 = 68 | 14.8 → 14.5 | 14.5 → 14.4 |
+| fd | 16 KiB | 260 = 260 | 93.5 → 95.1 | 91.5 → 91.2 |
+
+Every difference is inside run-to-run noise and changes sign between N = 1 and N = 64; the
+largest is classic 4 KiB at +6.7 % and −2.5 %. The 16 KiB classic cost is the pre-existing
+quadratic reassembly walk (#2049) in both arms.
 
 **The frames are the result; `ns_send` is host CPU, not bus time.** At 500 kbit/s one classic
 frame is ~250 µs on the wire, so a 4-byte send drops from ~2.5 ms of bus to ~0.25 ms. Host time

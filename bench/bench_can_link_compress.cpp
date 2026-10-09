@@ -38,6 +38,12 @@
  *   lost-hello  the same restart with the hello lost: frames lost before the link
  *               recovers, and the recovery pass's cost.
  *
+ * Payloads 4 B, 64 B, 1, 4 and 16 KiB; above the 16-slice cap nothing binds, so those rows show
+ * that large sends do not regress.
+ *
+ * Payloads 4 B, 64 B, 1, 4 and 16 KiB. Above the 16-slice cap nothing binds, so the large rows
+ * show that big sends do not regress.
+ *
  * Usage: bench_can_link_compress [rounds [payload]]   (default 7 rounds, every payload)
  */
 
@@ -356,7 +362,7 @@ int main(int argc, char** argv) {
     const std::size_t rounds = argc > 1 ? static_cast<std::size_t>(std::atoi(argv[1])) : 7;
     const std::size_t only = argc > 2 ? static_cast<std::size_t>(std::atoi(argv[2])) : 0;
     std::printf("# CAN link-local compression, N directed streams, report only (#1953)\n");
-    constexpr std::size_t kPayloads[] = {4, 64, 1024};
+    constexpr std::size_t kPayloads[] = {4, 64, 1024, 4096, 16384};
     for (const can::can_frame_mode_t mode :
          {can::can_frame_mode_t::CLASSIC, can::can_frame_mode_t::FD}) {
         const char* const name = mode == can::can_frame_mode_t::FD ? "fd" : "classic";
