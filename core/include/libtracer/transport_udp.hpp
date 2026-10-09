@@ -84,7 +84,7 @@ struct udp_config_t {
  * the backend's `max_segment_size()`, and a datagram longer than either is refused whole
  * (#1783). An injected bounded backend thereby keeps every receive buffer at its slot size.
  */
-class udp_transport_t : public transport_t, private posix_endpoint_t {
+class udp_transport_t final : public transport_t, private posix_endpoint_t {
    public:
     /** @brief The largest datagram one frame can occupy — the RX segment size a view
      *         receiver's frames are allocated at (the UDP payload bound, one datagram
@@ -108,7 +108,7 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
      */
     udp_transport_t(std::uint16_t bind_port, std::string_view peer_host, std::uint16_t peer_port,
                     const udp_config_t& config = {});
-    ~udp_transport_t() override;
+    ~udp_transport_t();
 
     udp_transport_t(const udp_transport_t&) = delete;
     udp_transport_t& operator=(const udp_transport_t&) = delete;

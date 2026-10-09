@@ -165,7 +165,6 @@ enum class alloc_hint_t : std::uint32_t { NONE = 0 };
 class mem_backend_t {
    public:
     explicit mem_backend_t(const char* name) noexcept;
-    virtual ~mem_backend_t() = default;
 
     // Allocate a fresh segment of at least `size` bytes (refcount = 1, for the
     // caller to adopt). Returns nullptr on backpressure / OOM / unsupported
@@ -196,6 +195,9 @@ class mem_backend_t {
     [[nodiscard]] virtual std::size_t max_segment_size() const noexcept;
 
     [[nodiscard]] const char* name() const noexcept;
+
+   protected:
+    ~mem_backend_t() = default;  // destroyed as the class it is, never through a base
 };
 
 }  // namespace tr::mem
@@ -237,7 +239,6 @@ namespace tr::mem {
 class block_source_t {
    public:
     explicit constexpr block_source_t(const char* name) noexcept;
-    virtual ~block_source_t() = default;
 
     // Storage for `bytes`, aligned to at least `align` — NOTHROW.
     // nullptr means exhaustion. It never falls back to the global heap and
@@ -250,6 +251,9 @@ class block_source_t {
     virtual void release(void* p, std::size_t bytes, std::size_t align) noexcept = 0;
 
     [[nodiscard]] const char* name() const noexcept;
+
+   protected:
+    ~block_source_t() = default;  // non-virtual: no deleting destructor (#2022)
 };
 
 // The process-wide default: the platform heap, nothrow.
@@ -406,7 +410,7 @@ Two companions ship with it, because the migrated call sites all need the same p
 
 [#1776](https://github.com/avatarsd-llc/libtracer/issues/1776) completes the container set [ADR-0083](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0083-one-allocation-seam.md) Decision 2 names, all over `block_source_t` and all reporting refusal by value: the vector above, the name/string store **`string_t`** (`mem_string.hpp`: an owning, NUL-terminated string, sized exactly on `assign`) and the sorted map **`sorted_map_t`** (`mem_sorted_map.hpp`: entries kept sorted in one `block_array_t`, heterogeneous binary-search lookup, and an insert that is refused moves nothing out of the caller's arguments). For callbacks, Decision 9's synchronous shape is **`tr::function_ref_t`** (`function_ref.hpp`). Nothing has migrated onto the new types yet; the directory batches of Decision 12 do that.
 
-The transport batch ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)) adds the one owner the set lacked: **`poly_ptr_t<T>`** (`mem_poly_ptr.hpp`), the sole owner of an object that may be of a class derived from `T`. A source is sized-reclaim, so an owner that knows only the base type could not return a derived object's block; `poly_ptr_t` records the block's size and alignment when `make_poly` builds the object and returns exactly that shape. A transport factory hands its concrete link back as a `transport_ptr_t` (`poly_ptr_t<transport_t>`) drawn from the receiving vertex's store, and a stream server's session table owns its derived sessions the same way.
+The transport batch ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)) adds the one owner the set lacked: **`poly_ptr_t<T>`** (`mem_poly_ptr.hpp`), the sole owner of an object that may be of a class derived from `T`. A source is sized-reclaim, so an owner that knows only the base type could not return a derived object's block; `poly_ptr_t` records the block's size and alignment when `make_poly` builds the object and returns exactly that shape. A transport factory hands its concrete link back as a `transport_ptr_t` (`poly_ptr_t<transport_t>`) drawn from the receiving vertex's store, and a stream server's session table owns its derived sessions the same way. It also records the destructor of the class `make_poly` built, so `T` needs no virtual destructor ([#2022](https://github.com/avatarsd-llc/libtracer/issues/2022)). That is why the seam bases (`block_source_t`, `mem_backend_t`, `transport_t`, `can_link_t`, a stream server's session) have protected, non-virtual destructors: a virtual destructor emits a deleting destructor, which names `operator delete` in every object that emits the class's vtable, and an MCU `libtracer.a` must name no heap entry point.
 
 `block_array_t` exposes `push_slot()` — claim one uninitialized slot and fill it **in place** — alongside `push_back`. That is not a convenience: building a 48-byte element as a temporary and copying it in writes the aggregate field-by-field to the stack and reads it back as wide loads, and the resulting store-forwarding stall made the first working migration of the terminus decode **45 % slower while executing fewer instructions** (IPC 5.03 → 2.55); with `push_slot` the same decode measures **236 ns against the unmigrated 241–251 ns**. Hot paths use `push_slot`.
 

@@ -217,7 +217,7 @@ struct ws_client_config_t {
  * tcp_server_transport_t since #871; what this class adds is the RFC 6455
  * packaging — the opening handshake and the frame codec.
  */
-class ws_server_transport_t : public stream_server_base_t {
+class ws_server_transport_t final : public stream_server_base_t {
    public:
     /** @brief The largest MESSAGE a peer may announce — the shared
      *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings max_frame`
@@ -272,7 +272,7 @@ class ws_server_transport_t : public stream_server_base_t {
     explicit ws_server_transport_t(std::uint16_t bind_port, const ws_server_config_t& config = {});
 
     /** @brief Stop the recv thread and close all sockets. */
-    ~ws_server_transport_t() override;
+    ~ws_server_transport_t();
 
     ws_server_transport_t(const ws_server_transport_t&) = delete;
     ws_server_transport_t& operator=(const ws_server_transport_t&) = delete;
@@ -442,7 +442,7 @@ using transport_ws_server = ws_server_transport_t;
  * (ws::encode_client_frame); inbound server frames are unmasked and decode the
  * same way the server's do. ok() confirms the handshake completed.
  */
-class ws_client_transport_t : public transport_t, private stream_endpoint_t {
+class ws_client_transport_t final : public transport_t, private stream_endpoint_t {
    public:
     /**
      * @brief Connect to @p host:@p port and run the client opening handshake.
@@ -462,7 +462,7 @@ class ws_client_transport_t : public transport_t, private stream_endpoint_t {
                           const ws_client_config_t& config = {});
 
     /** @brief Stop the recv thread and close the socket. */
-    ~ws_client_transport_t() override;
+    ~ws_client_transport_t();
 
     ws_client_transport_t(const ws_client_transport_t&) = delete;
     ws_client_transport_t& operator=(const ws_client_transport_t&) = delete;

@@ -3,7 +3,7 @@
  * @brief Unit tests for the core container set (#1776, ADR-0083 Decision 2 and 9): the vector
  *        (`block_array_t`), the name/string store (`string_t`), the sorted map
  *        (`sorted_map_t`, and the leaf-chunked `chunked_map_t`) and the non-owning
- *        `function_ref_t`.
+ *        `function_ref_t`, and the polymorphic owner `poly_ptr_t` (#1780, #2022).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -21,9 +21,11 @@
 #include <map>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "libtracer/function_ref.hpp"
 #include "libtracer/mem_chunked_map.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_string.hpp"
@@ -375,6 +377,57 @@ void test_function_ref() {
     check(widen(21) == 42, "fref: the result converts to R");
 }
 
+/** @brief A base with no virtual destructor, like the seam bases (#2022). */
+class poly_base_t {
+   public:
+    /** @brief The one virtual, so the class is polymorphic but has no deleting destructor. */
+    [[nodiscard]] virtual int id() const noexcept = 0;
+
+   protected:
+    /** @brief Destroyed only as the derived class it is. */
+    ~poly_base_t() = default;
+};
+static_assert(!std::has_virtual_destructor_v<poly_base_t>);
+
+/** @brief A first base that puts `poly_base_t` at a non-zero offset in `poly_derived_t`. */
+struct poly_pad_t {
+    long pad[3] = {}; /**< @brief Room before the second base. */
+};
+
+/** @brief Derived through a second base; counts its lives in `g_live`. */
+class poly_derived_t final : public poly_pad_t, public poly_base_t {
+   public:
+    /** @brief Hold @p v. */
+    explicit poly_derived_t(int v) noexcept : v_(v) { ++g_live; }
+    /** @brief One life ends. */
+    ~poly_derived_t() { --g_live; }
+    /** @brief The held value. */
+    [[nodiscard]] int id() const noexcept override { return v_; }
+
+   private:
+    int v_; /**< @brief The payload. */
+};
+
+/** @brief `poly_ptr_t`: owned through a base with a protected, non-virtual destructor, the
+ *         object is destroyed as the class `make_poly` built and its exact block returns. */
+void test_poly_ptr() {
+    g_live = 0;
+    refuse_nth_source_t src(0);
+    {
+        tr::mem::poly_ptr_t<poly_base_t> p = tr::mem::make_poly<poly_derived_t>(src, 7);
+        check(p && p->id() == 7 && g_live == 1, "poly: built and converted to the base");
+        tr::mem::poly_ptr_t<poly_base_t> q = std::move(p);
+        check(!p && q->id() == 7 && g_live == 1, "poly: a move transfers the object");
+        check(src.blocks_out_ == 1 && src.bytes_out_ == sizeof(poly_derived_t),
+              "poly: one block of the derived size");
+    }
+    check(g_live == 0, "poly: the derived destructor ran through the base owner");
+    check(src.blocks_out_ == 0 && src.bytes_out_ == 0, "poly: the exact block came back");
+    refuse_nth_source_t refusing(1);
+    tr::mem::poly_ptr_t<poly_base_t> r = tr::mem::make_poly<poly_derived_t>(refusing, 1);
+    check(!r && g_live == 0, "poly: a refusal is an empty owner and builds nothing");
+}
+
 }  // namespace
 
 /** @brief Run every section; the exit code is the failure count. */
@@ -385,5 +438,6 @@ int main() {
     test_sorted_map();
     test_chunked_map();
     test_function_ref();
+    test_poly_ptr();
     return tr::testing::summary("core_containers");
 }

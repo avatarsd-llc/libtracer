@@ -101,7 +101,7 @@ struct fake_link_t : tr::net::transport_t {
         ++g_links_alive;
         ++g_links_built;
     }
-    ~fake_link_t() override { --g_links_alive; }
+    ~fake_link_t() { --g_links_alive; }
     fake_link_t(const fake_link_t&) = delete;
     fake_link_t& operator=(const fake_link_t&) = delete;
     void send(std::span<const std::byte>) override {}

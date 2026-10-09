@@ -301,7 +301,7 @@ struct esp_ws_client_config_t {
  * the callback (@ref delivers_ropes is false). Naming `memory.rx` switches it to owning
  * rope delivery from that source (#1661). Point-to-point, so @ref bus is nullptr.
  */
-class esp_ws_client_link_t : public transport_t {
+class esp_ws_client_link_t final : public transport_t {
    public:
     /**
      * @brief Whether this image counts and logs failed dials — the application's
@@ -363,7 +363,7 @@ class esp_ws_client_link_t : public transport_t {
      * condemned link's recv thread outliving this destructor by up to `kDialTimeoutMs`,
      * holding the stack it already had; see the threading note at the top of this file.
      */
-    ~esp_ws_client_link_t() override;
+    ~esp_ws_client_link_t();
 
     esp_ws_client_link_t(const esp_ws_client_link_t&) = delete;
     esp_ws_client_link_t& operator=(const esp_ws_client_link_t&) = delete;

@@ -213,6 +213,9 @@ class mem_backend_t : public block_source_t {
     [[nodiscard]] virtual backend_tag tag() const noexcept { return backend_tag::UNKNOWN; }
 
    protected:
+    /** @brief Destroyed only as the class it is, like @ref block_source_t (#2022). */
+    ~mem_backend_t() = default;
+
     /**
      * @brief The one-block segment layout: draw `header + size` bytes at @p align through
      *        @ref try_alloc and place the header at the head. Defined in `%placement.hpp`.
