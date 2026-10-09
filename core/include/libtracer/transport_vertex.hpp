@@ -31,6 +31,7 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -42,7 +43,6 @@
 #include "libtracer/key_view.hpp"
 #include "libtracer/link_kind.hpp"
 #include "libtracer/mem_heap.hpp"
-#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_string.hpp"
@@ -348,9 +348,15 @@ class transport_vertex_t {
                        mem::block_source_t* egress_src = &mem::net_source());
 
     /**
-     * @brief Uninstall the routed-subscription hold seam (#1816) before any connection is
-     *        torn down, so a departure eviction during member destruction never calls back
-     *        into a half-destroyed plane.
+     * @brief Retire every creator endpoint this plane minted, after the endpoint calls already
+     *        in flight have returned, then uninstall the routed-subscription hold seam
+     *        (#1816) — all before any connection is torn down.
+     *
+     * The graph outlives this object, and a link this object does not own can keep writing
+     * to `<net_root>/<module>/conn` after it is gone; the endpoint then answers such a write
+     * as an absent path. The hold seam goes last, so a call that drains during destruction
+     * still finds it, and a departure eviction during member destruction never calls back
+     * into a half-destroyed plane.
      */
     ~transport_vertex_t();
 
@@ -1037,17 +1043,34 @@ class transport_vertex_t {
     // on the forward path.
     mem::block_array_t<module_decl_t> modules_;
 
-    /** @brief The creator endpoint's `on_write` context — the hook's `ctx` (RFC-0028 D10). */
+    /**
+     * @brief The creator endpoint's `on_write` context — the hook's `ctx` (RFC-0028 D10).
+     *
+     * It outlives this object. A link this object does not own (one the app wired into the
+     * router) can be writing to the endpoint while this object is destroyed, and a write that
+     * loaded the endpoint's seam before it was retired can still arrive afterwards. So the
+     * context is drawn from the graph's table source and freed by the graph, through
+     * `graph_t::park_release`, once no reader can still be on its way into it; until then a
+     * write that arrives finds `self` null and answers `NOT_FOUND`, as the absent path it
+     * now is. `calls` is what the destructor waits on before it lets anything go.
+     */
     struct endpoint_ctx_t {
-        transport_vertex_t* self; /**< @brief The owning transport vertex. */
+        transport_vertex_t* self; /**< @brief The owning transport vertex; null once it is gone.
+                                   *          Guarded by `m`. */
         mem::string_t module;     /**< @brief The module the endpoint creates under. */
         conn_catalog_t catalog;   /**< @brief The module's creation catalog (borrowed; empty ⇒
                                    *          none declared, nothing validated). */
+        mem::block_source_t* src; /**< @brief The source this context was drawn from. */
+        /** @brief The endpoint vertex the destructor retires; engaged once it is registered,
+         *         which every entry of `endpoints_` is. */
+        std::optional<graph::vertex_handle_t> vertex{};
+        std::mutex m{};               /**< @brief Guards `self` and `calls`. */
+        std::condition_variable cv{}; /**< @brief Signalled when `calls` returns to zero. */
+        std::size_t calls = 0;        /**< @brief Calls inside `endpoint_write` right now. */
     };
-    /** @brief One context per minted creator endpoint, each in its own block that never moves,
-     *         so a hook's `ctx` stays valid for this object's lifetime. Appended under
-     *         `ctl_m_`. */
-    mem::block_array_t<mem::poly_ptr_t<endpoint_ctx_t>> endpoints_;
+    /** @brief One context per minted creator endpoint, each in its own block that never moves.
+     *         Appended under `ctl_m_`; handed to the graph to free by the destructor. */
+    mem::block_array_t<endpoint_ctx_t*> endpoints_;
 };
 
 }  // namespace tr::net

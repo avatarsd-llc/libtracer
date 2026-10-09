@@ -1398,6 +1398,9 @@ class graph_t {
      * `find` a path, retire something else) without deadlocking, and an arbitrarily slow
      * destructor blocks no reader or writer.
      *
+     * Every release parked by @ref park_release runs here too, after the seams are freed and
+     * on the same thread, outside every graph lock.
+     *
      * Idempotent, and a no-op when nothing is parked. Not itself a reader-safety
      * mechanism: it neither waits for nor detects readers. An embedder that never calls it
      * keeps the pre-#576 behaviour — the park grows without bound — which @ref
@@ -1411,7 +1414,55 @@ class graph_t {
      *       object and crashes. Such an owner is safe HERE and only here — it must be
      *       collected explicitly, never left to teardown.
      */
-    void collect();
+    void collect() {
+        // Inline, not in graph.cpp, for the reason `park_release` is. The whole point is WHERE
+        // the free happens, so read the two scopes below.
+        mem::block_array_t<value_handlers_t*> dead(retired_seams_.seams.source());
+        mem::block_array_t<retired_callback_t> released(parked_releases_.releases.source());
+        {
+            // Under the map lock: nothing but the swap. The lock is what serialises us against
+            // retire_subtree's append, and it is all it is here for — a free under it would put
+            // arbitrary user-callback destructor code inside the graph's widest lock, which is
+            // the mutual-wait every earlier design round died on.
+            const std::unique_lock lock(map_mutex_);
+            std::swap(dead, retired_seams_.seams);
+            std::swap(released, parked_releases_.releases);
+        }
+        // Freed HERE — outside every graph lock, on the caller's thread, at a moment the
+        // embedder chose. So a seam callback's destructor may re-enter the graph, and a slow
+        // one blocks no reader or writer. Do not hoist this into the scope above.
+        seam_park_t::free_all(dead);
+        release_park_t::run_all(released);
+    }
+
+    /**
+     * @brief Hand the graph a retired seam's context to release at the next @ref collect.
+     *
+     * The other half of @ref retire for a seam owner that is going away. Retiring stops new
+     * calls through the seam, but a reader that loaded it before the retire may still be on
+     * its way into the callback, holding the context the owner would free — and only the
+     * point where @ref collect frees the parked seams is past every such reader. So an owner
+     * that retires its vertices and must then free their context parks the free here instead:
+     * @p release runs exactly once, `release.release(release.ctx)`, on the thread that calls
+     * @ref collect, outside every graph lock, after that call's parked seams are freed. A
+     * release still parked when the graph is destroyed runs in its teardown, with the same
+     * caveat as a parked seam there: it must not re-enter the graph.
+     *
+     * The callback is the ADR-0080 @ref retired_callback_t, the shape `unsubscribe` hands a
+     * retired subscription's context back through. Whatever reaches the context in the
+     * meantime is the owner's to answer; it stays valid until the release runs.
+     *
+     * @retval BACKPRESSURE The park could not grow; nothing is parked and @p release will
+     *         never run, so the context must stay valid for as long as the graph lives.
+     */
+    [[nodiscard]] result_t<void> park_release(retired_callback_t release) {
+        // Inline, not in graph.cpp: one more out-of-line function there re-partitions GCC's
+        // inline budget for the whole unit and grows `fan_out` (symbol ratchet).
+        const std::unique_lock lock(map_mutex_);
+        if (!parked_releases_.releases.push_back(release))
+            return std::unexpected(status_t::BACKPRESSURE);
+        return {};
+    }
 
     /**
      * @brief How many retired value seams are currently parked, awaiting @ref collect.
@@ -3780,6 +3831,31 @@ class graph_t {
      *         one flag test for the vertices without one, and always empty in a build without
      *         `config_t::kCreationHooks`. */
     [[nodiscard]] creation_hook_t creation_hook_for(const vertex_t* v) const noexcept;
+
+    /**
+     * @brief The releases @ref park_release parked: each runs once, when @ref collect frees
+     *        the parked seams, because that is the moment no reader can still be on its way
+     *        into one. Appended only under `map_mutex_` (unique).
+     *
+     * Declared LAST, away from `retired_seams_`, for two reasons. Its size moves no member the
+     * write and fan-out paths address. And it destructs FIRST, so a release still parked when
+     * the graph goes runs against a graph that is still whole.
+     */
+    struct release_park_t {
+        mem::block_array_t<retired_callback_t> releases; /**< @brief The parked releases. */
+        /** @brief An empty park drawing from @p src. */
+        explicit release_park_t(mem::block_source_t& src) noexcept : releases(src) {}
+        release_park_t(const release_park_t&) = delete;
+        release_park_t& operator=(const release_park_t&) = delete;
+        /** @brief Runs every release still parked. */
+        ~release_park_t() { run_all(releases); }
+        /** @brief Run and clear every release in @p r. */
+        static void run_all(mem::block_array_t<retired_callback_t>& r) noexcept {
+            for (const retired_callback_t& c : r) c.release(c.ctx);
+            r.clear();
+        }
+    };
+    release_park_t parked_releases_; /**< @brief See `release_park_t`. */
 };
 
 }  // namespace tr::graph

@@ -51,7 +51,7 @@ discounted. `evict_link_edges` is the one function that takes it twice.
 
 | taken | where | frequency |
 | --- | --- | --- |
-| **unique** | `graph.cpp:graph_t::register_vertex_key`, `graph.cpp:graph_t::retire`, `graph.cpp:graph_t::collect` | control plane |
+| **unique** | `graph.cpp:graph_t::register_vertex_key`, `graph.cpp:graph_t::retire`, `graph.hpp:void collect() {` | control plane |
 | shared | `graph.cpp:graph_t::find_ptr` — **so every `path_t` overload pays it once**; ≥3× and non-scaling (§6) | per op, path-addressed only |
 | shared | `graph.cpp:graph_t::vertex_slot`, `graph.cpp:graph_t::vertex_slot_at`, `graph.cpp:graph_t::deref_vertex_slot`, `graph.cpp:graph_t::vertex_slot_count` | per op, bound-path addressed only — see below |
 | shared | `graph_fields.cpp:field_surface_t::write_acl` — the `:acl` write only, not every `:field` write | per `:acl` write |

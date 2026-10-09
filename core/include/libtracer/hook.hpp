@@ -16,8 +16,10 @@
  * and that context.
  *
  * **Lifetime is the caller's.** A hook owns nothing: `ctx` must outlive every call the graph
- * can make through it — for a vertex seam, until the vertex is retired or the graph destroyed.
- * The usual shapes, in order of preference:
+ * can make through it — for a vertex seam, until the vertex is retired or the graph destroyed,
+ * and past a retire for a call that loaded the seam just before it. An owner that frees `ctx`
+ * on a threaded node hands that free to `graph_t::park_release`, which runs it once no such
+ * call can remain. The usual shapes, in order of preference:
  *
  * @code
  * // 1. A captureless lambda (or free function) and an object you already own:

@@ -49,6 +49,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - In-process API only: the `:subscribers[N]` wire spelling is
     [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019). A `subscription_t` carries
     no generation (#1932), so a stale handle whose slot was reused names the new edge.
+- **`graph_t::park_release`: free a retired seam's context once no reader can reach it.**
+  Retiring a vertex stops new calls through its seam, but a call that loaded the seam just
+  before the retire can still arrive. `park_release` takes the ADR-0080 `retired_callback_t`
+  and runs it once, at the next `graph_t::collect()` (or in the graph's teardown), after that
+  call's parked seams are freed. It answers `BACKPRESSURE` when the park cannot grow, and then
+  the context must stay valid for the graph's lifetime.
 
 ### Changed
 
@@ -88,6 +94,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `value_ref_t::composed` gains a `source` parameter that defaults to `mem::value_source()`, so
   existing callers are unchanged.
 
+- **`transport_vertex_t` retires its connection handler and drains in-flight calls on
+  destruction.** Destroying a transport vertex left each module's `<net_root>/<module>/conn`
+  creator endpoint registered on the graph, and did not wait for a call already inside it. A
+  link the transport vertex does not own, such as one the app wired into the router, could
+  still write to it. The destructor now waits for those calls to return, retires each
+  endpoint, and hands its context to `graph_t::park_release`; a write that arrives afterwards
+  answers `NOT_FOUND`. The endpoint context is now drawn from the graph's table source rather
+  than the transport vertex's egress source.
 - **`udp_transport_t`: an ephemeral bind owns its port
   ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
   set `SO_REUSEADDR`, which lets the kernel give a UDP socket a port another reuse-enabled
