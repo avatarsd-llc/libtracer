@@ -86,6 +86,32 @@ inline constexpr std::uint16_t kCanFirstDataEndpoint = 1;
 inline constexpr std::size_t kCanMaxGroupSlices =
     static_cast<std::size_t>(can::kEndpointMax) - kCanFirstDataEndpoint + 1u;
 
+/**
+ * @brief The stream window (#1953): how many of a node's own `endpoint` slots, from
+ *        @ref kCanFirstDataEndpoint up, a node that compresses keeps for native streams.
+ *
+ * A bound stream travels on CAN identifiers of its own: `[version|sender|endpoint]` with the
+ * endpoint inside the sender's window, one slot per slice. The identifiers are the SENDER's,
+ * so two nodes never transmit the same one and nothing needs coordinating on a shared bus.
+ * The window sits just above the control slot, so a stream frame wins arbitration over the
+ * same node's group traffic and loses it to its control stream. A node that announces
+ * compression places groups above the window only (@ref kCanFirstGroupEndpoint), which is
+ * what lets a receiver read a frame in the window as a stream frame; a node that does not
+ * announce it uses every slot for groups, as before.
+ */
+inline constexpr std::size_t kCanStreamIds = 512;
+
+/** @brief The first group `endpoint` of a node that announces compression (#1953). */
+inline constexpr std::uint16_t kCanFirstGroupEndpoint =
+    static_cast<std::uint16_t>(kCanFirstDataEndpoint + kCanStreamIds);
+
+/**
+ * @brief The most slices one native stream send may take (#1953). A longer remainder
+ *        travels as a full frame: the saving is the address run, a constant, and a long
+ *        send would hold that many identifiers for it.
+ */
+inline constexpr std::size_t kCanMaxStreamSlices = 16;
+
 /** @brief Default liveness window: a peer silent this long leaves the enumeration. */
 inline constexpr std::chrono::milliseconds kCanDefaultPeerTtl{3000};
 
@@ -377,6 +403,14 @@ struct transport_can_config_t {
                       segments it hands out are released by it. Companion to @ref
                       reasm_src — that one bounds the reassembly STRUCTURE, this one the
                       slice BYTES. */
+    std::size_t compress_ids =
+        kCanStreamIds; /**< @brief Link-local compression (#1953): how many of this node's
+                            stream-window identifiers it uses for the streams it sends, and
+                            how many streams it holds for any one sender. `0` turns
+                            compression off — the node never announces it, so its peers send
+                            it full frames and it sends them full frames, and its groups use
+                            every endpoint as before. Clamped to `%kCanStreamIds`. Both ends'
+                            tables draw from @ref reasm_src. */
 };
 
 /**
@@ -415,6 +449,25 @@ struct transport_can_config_t {
  *    name (derived from the CAN ID), which the FWD router uses as the hop's
  *    inbound NAME — replies route back per-peer with no per-request state.
  * No peer ever creates a vertex or any other graph state (ADR-0044 §1).
+ *
+ * **Link-local compression (#1953).** Two ends that both announce it (a flag on every
+ * advertise they emit) compress the directed traffic between them onto native CAN
+ * identifiers. A stream is a FWD's outer header and address run (`op`, `dst`, `src`) — the
+ * prefix a delivery repeats send after send. Its second send binds it: the full frame,
+ * behind a descriptor naming a block of the SENDER's stream-window identifiers
+ * (@ref kCanStreamIds); the receiver holds the prefix and acknowledges. Every later send is
+ * only the rest of the frame, one slice per identifier of the block, with no manifest: a
+ * 4-byte value is one classic frame. The receiver puts the prefix back in front, so the
+ * frame handed upward is byte-identical and nothing above this class sees the difference.
+ * The state is per peer on each end, bounded by @ref transport_can_config_t::compress_ids
+ * and the window, and it dies with the transport. A join hello resets it; a stream frame
+ * the receiver does not hold is answered by a refusal DIRECTED at its sender, which resets
+ * that one link only if the block is bound to the refusing node, so a bystander's refusal
+ * changes nothing. A peer that does not announce compression, a broadcast send, a frame
+ * that is not a FWD, a stream seen only once, and a stream the window has no room for all
+ * travel as full frames on the legacy wire. Lock order: `rx_m_` before `tx_m_` — the
+ * receive thread acknowledges and resets under both, and no `tx_m_` holder ever takes
+ * `rx_m_`.
  */
 class can_transport_t : public transport_t, public bus_link_t {
    public:
@@ -660,6 +713,7 @@ class can_transport_t : public transport_t, public bus_link_t {
     };
 
     // --- ingress (runs on the link's receive thread) ---
+    struct binding_t;
     void on_rx(const can_frame_data_t& frame);
     void learn_advertise(const can::advertise_t& adv);  // requires rx_m_ held
     struct node_rx_t;
@@ -688,11 +742,62 @@ class can_transport_t : public transport_t, public bus_link_t {
     // purpose: a group over kCanMaxGroupSlices fits at no base, and the caller must
     // learn that BEFORE it advertises a slice_count it cannot deliver.
     std::optional<std::uint16_t> alloc_base(std::size_t slice_count);  // requires tx_m_ held
-    // Slices adv's 18-byte header and cfg_.path (in place, never copied — this node only
-    // ever advertises its OWN path, so adv.path is left empty) into CLASSIC windows.
-    void emit_advertise(const can::advertise_t& adv);  // requires tx_m_ held
+    // Slices adv's 18-byte header and `path` (in place, never copied — this node only
+    // ever advertises its OWN path, so adv.path is left empty) into CLASSIC windows. Every
+    // advertise carries this node's compression capability bit.
+    void emit_advertise(const can::advertise_t& adv,
+                        std::string_view path);  // requires tx_m_ held
     void send_impl(std::span<const std::byte> frame, std::uint16_t target);
     void emit_hello();  // the join-time presence advertise (slice_count == 0)
+    // A hello-form control advertise (slice_count == 0) to `target`: a hello, or a
+    // stream acknowledgement whose `word` is `slot | epoch << 16` (#1953).
+    void emit_link_control(std::uint16_t target, std::uint8_t flags, std::uint32_t word,
+                           std::string_view path);  // takes tx_m_
+
+    // --- link-local compression (#1953) ---
+    struct link_form_t;
+    // How a send toward `target` goes on the wire: whole, a bind, or a native stream send.
+    [[nodiscard]] link_form_t link_form(std::span<const std::byte> frame,
+                                        std::uint16_t target);  // requires tx_m_ held
+    struct tx_peer_t;
+    struct tx_stream_t;
+    // The stream `frame[0, prefix)` names toward `peer`, bound first if this is its second
+    // send and the window has room; null = send it whole.
+    tx_stream_t* tx_stream(tx_peer_t& peer, std::span<const std::byte> frame,
+                           std::size_t prefix);  // requires tx_m_ held
+    // A free block of `k` stream-window identifiers (its first; 0 = none).
+    [[nodiscard]] std::uint16_t alloc_stream_ids(std::size_t k) const;  // requires tx_m_ held
+    // Unbind one stream toward `peer`, or every one, returning their identifiers.
+    void tx_unbind(tx_peer_t& peer, std::uint16_t base);  // requires tx_m_ held
+    void tx_reset(tx_peer_t& peer);                       // requires tx_m_ held
+    // A peer's capability bit, join hello, acknowledgement and refusal, onto this end's tables.
+    void note_link_control(const can::advertise_t& adv,
+                           const can::can_id_fields_t& from);  // requires rx_m_ held
+    // What goes in front of slice `index` of the group `binding` describes before it is held
+    // (nullopt refuses it): a native stream slice is held only in order, its first with the
+    // stream's prefix in front.
+    [[nodiscard]] std::optional<std::span<const std::byte>> rx_form(
+        const binding_t& binding, const reassembly_key_t& key, std::uint16_t base_ep,
+        std::uint16_t src_node,
+        std::uint32_t index);  // requires rx_m_ held
+    // The owned copy of one received slice, restored by `rx_form`; nullopt on a refusal.
+    [[nodiscard]] std::optional<tr::view::view_t> rx_slice(
+        const binding_t& binding, const reassembly_key_t& key, std::uint16_t base_ep,
+        std::uint16_t src_node, std::uint32_t index,
+        std::span<const std::byte> bytes);  // requires rx_m_ held
+    // Hold the stream a completed bind group carries and acknowledge it, or refuse it; returns
+    // how many leading bytes of `frame` are its descriptor (0 for any other group).
+    [[nodiscard]] std::size_t hold_bind(const binding_t& binding, std::uint16_t src_node,
+                                        const tr::view::rope_t& frame,
+                                        std::size_t n);  // requires rx_m_ held
+    // Forget every binding of `node` whose endpoint run overlaps `[lo, hi)`, and the prefix
+    // of each stream among them. No reassembly group is touched: one left behind can only
+    // age out, never complete (a stream slice is held only in order).
+    void drop_bindings(node_rx_t& node, std::uint16_t node_id, std::uint32_t lo,
+                       std::uint32_t hi);  // requires rx_m_ held
+    // A data frame no binding claims, inside `node`'s stream window: a stream this end does
+    // not hold. Refuses it to its sender (rate-limited); true when it is not to be parked.
+    bool refuse_stream_frame(const can::can_id_fields_t& fields);  // requires rx_m_ held
 
     /** @brief The store every RX table below is drawn from (`cfg.reasm_src`, resolved). */
     [[nodiscard]] static mem::block_source_t& rx_source(const transport_can_config_t& c) noexcept {
@@ -720,6 +825,10 @@ class can_transport_t : public transport_t, public bus_link_t {
         // sweep that may have marked it, so the only exit from a prior lap is being replaced.
         // Costs ZERO bytes: it lands in the tail padding `bool deliver` already had.
         bool prior_lap = false;
+        // A native stream's binding (#1953), made by this end when it held the stream, never
+        // advertised: exempt from the lap sweep, because the sender's group allocator never
+        // reaches its window.
+        bool native = false;
     };
     /**
      * @brief Per-remote-node receive state: its advertise byte stream, and the base
@@ -732,7 +841,7 @@ class can_transport_t : public transport_t, public bus_link_t {
      */
     struct node_rx_t {
         /** @brief Draw the control stream from @p src (the transport's RX store). */
-        explicit node_rx_t(mem::block_source_t& src) noexcept : control(src) {}
+        explicit node_rx_t(mem::block_source_t& src) noexcept : control(src), streams(src) {}
         mem::bytes_t control; /**< @brief Accumulated advertise byte stream. */
         // The base endpoint of the most recent advertise learned from this node.
         // `alloc_base` issues strictly ascending bases and wraps to
@@ -741,6 +850,50 @@ class can_transport_t : public transport_t, public bus_link_t {
         // conforming data advertise can claim, so a node's first advertise never reads
         // as a lap.
         std::uint16_t last_base = kCanControlEndpoint;
+        /** @brief The node announced link-local compression on its last advertise (#1953). */
+        bool compress = false;
+        /** @brief Stream frames from this node refused for want of a held stream since its
+         *         last bind. A refusal goes back to it when the count reaches a power of two,
+         *         so a lost state is recovered and a burst of frames is not a burst of
+         *         refusals. */
+        std::uint32_t refused = 0;
+        /** @brief Stream base endpoint -> the prefix this node bound there: what goes back
+         *         in front of the stream's first slice. Copied out of the bind group into the
+         *         RX store, so holding a stream holds no segment. */
+        mem::sorted_map_t<std::uint16_t, mem::bytes_t> streams;
+    };
+    /** @brief One stream this end sends a peer natively (#1953). */
+    struct tx_stream_t {
+        /** @brief Draw the prefix's bytes from @p src (the transport's RX store). */
+        explicit tx_stream_t(mem::block_source_t& src) noexcept : prefix(src) {}
+        std::size_t hash = 0;   /**< @brief The prefix's hash, its key in the index. */
+        std::uint16_t base = 0; /**< @brief Its first identifier, its key in the table. */
+        std::uint16_t k = 0;    /**< @brief Slices per send: identifiers held from `base`. */
+        std::uint8_t gen = 0;   /**< @brief Which bind this is (never 0), for its ack. */
+        bool acked = false;     /**< @brief The peer acknowledged holding it. */
+        mem::bytes_t prefix;    /**< @brief The outer header and address run it elides. */
+    };
+    /**
+     * @brief This end's compression state toward one peer (#1953): whether the peer
+     *        decompresses, and the streams bound to it.
+     *
+     * Streams are keyed by their base identifier, which is the sender's and unique across
+     * every peer it streams to, so a refusal naming an identifier finds at most one stream.
+     */
+    struct tx_peer_t {
+        /** @brief Draw every table from @p src (the transport's RX store). */
+        explicit tx_peer_t(mem::block_source_t& src) noexcept
+            : streams(src), index(src), seen(src) {}
+        bool capable = false; /**< @brief The peer announced compression. */
+        std::uint8_t gen = 0; /**< @brief The last bind's generation. */
+        /** @brief Base identifier -> the stream that holds the block from there. */
+        mem::sorted_map_t<std::uint16_t, tx_stream_t> streams;
+        /** @brief Prefix hash -> base identifier: one keyed lookup per send, not a scan. */
+        mem::sorted_map_t<std::size_t, std::uint16_t> index;
+        /** @brief Prefixes seen once (0), or declined by the peer (the bind's generation).
+         *         A stream binds on its second send, so a one-shot costs nothing; bounded at
+         *         twice `compress_ids`, past which the sightings start over. */
+        mem::sorted_map_t<std::size_t, std::uint8_t> seen;
     };
     /**
      * @brief One data slice parked until its advertise lands, with the stamp that
@@ -765,6 +918,15 @@ class can_transport_t : public transport_t, public bus_link_t {
     // node id -> its advertise byte stream + last advertised base (the lap witness).
     // Growth is one entry per distinct node heard, bounded by the 13-bit node space.
     mem::sorted_map_t<std::uint16_t, node_rx_t> nodes_;
+    // node id -> this end's compression state toward it (#1953), guarded by tx_m_. One
+    // entry per peer that announced compression, bounded by the 13-bit node space.
+    mem::sorted_map_t<std::uint16_t, tx_peer_t> tx_peers_;
+    // kAdvertiseFlagLinkCompress when compress_ids != 0, else 0: what every advertise
+    // this node emits says about it.
+    std::uint8_t cap_flag_ = 0;
+    // Which of this node's stream-window identifiers a stream holds, bit `e - 1` for
+    // endpoint `e` (#1953), guarded by tx_m_. Shared by every peer, so blocks never overlap.
+    std::array<std::uint64_t, kCanStreamIds / 64> stream_ids_{};
     // Data slices awaiting their advertise. Drawn from the injected resource (the
     // RX thread must not reach the global heap), bounded in COUNT by max_pending
     // and in AGE by rx_ttl; append-ordered, so both the stale prefix and the
@@ -820,7 +982,9 @@ using transport_can = can_transport_t;
  *    evict-oldest seam reachable in production at all (#912);
  *  - `max_pending` (VALUE u32) — the ceiling on data slices parked awaiting their
  *    advertise (0 = unbounded, host-bounded per RFC-0006);
- *  - `rx_ttl_ms` (VALUE u32) — the RX staleness window (0 = track `peer_ttl_ms`).
+ *  - `rx_ttl_ms` (VALUE u32) — the RX staleness window (0 = track `peer_ttl_ms`);
+ *  - `compress_ids` (VALUE u32) — link-local compression's stream-window identifiers
+ *    (default @ref kCanStreamIds; 0 = compression off).
  * A missing/invalid `ifname` or `node` fails with `TYPE_MISMATCH`; a socket that
  * cannot bind (no kernel CAN / non-Linux stub) fails with `TRANSPORT_DOWN` — the
  * TRANSIENT status, because the address resolved and it was the link that did not

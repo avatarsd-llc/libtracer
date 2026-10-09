@@ -178,6 +178,29 @@ inline constexpr std::uint16_t kCanBroadcastNode = 0xFFFF;
 inline constexpr std::uint8_t kAdvertiseFlagGroup = 0x01;
 
 /**
+ * @brief `flags` bit: the emitting node decompresses, so it may be sent native streams —
+ *        the capability bit of link-local compression (#1953).
+ *
+ * It also says the node keeps its stream window (`kCanStreamIds` endpoints above the
+ * control slot) out of its group allocation, so a frame there is one of its native stream
+ * frames. This and the three bits after it are private to the two ends of one CAN link. A
+ * decoder that predates them reads only @ref kAdvertiseFlagGroup and ignores the rest: a
+ * bystander still binds, consumes and drops a directed bind group exactly as before, and a
+ * hello-form acknowledgement or refusal still only refreshes liveness. None of them changes
+ * the frame the receiver hands upward. `can_transport_t` is their one producer and
+ * consumer; docs/reference/14-can-transport.md §Link-local compression is the exchange.
+ */
+inline constexpr std::uint8_t kAdvertiseFlagLinkCompress = 0x02;
+/** @brief `flags` bit: the group's payload is a bind descriptor, then the whole frame. */
+inline constexpr std::uint8_t kAdvertiseFlagStreamBind = 0x04;
+/** @brief `flags` bit: a hello-form advertise, directed at a stream's sender, that refuses
+ *         the stream holding the endpoint in `group_total_len` (its low 16 bits). */
+inline constexpr std::uint8_t kAdvertiseFlagStreamRefused = 0x08;
+/** @brief `flags` bit: a hello-form advertise, directed at a stream's sender, that
+ *         acknowledges holding the stream bound at the endpoint in `group_total_len`. */
+inline constexpr std::uint8_t kAdvertiseFlagStreamAck = 0x10;
+
+/**
  * @brief Largest `path_len` a well-formed advertise may carry.
  *
  * A wedge-resistance bound for the control-stream decoder: a desynchronized
@@ -216,7 +239,7 @@ inline constexpr std::uint16_t kAdvertiseMaxPathLen = 1024;
  * | ------ | ---- | ----- |
  * | 0      | 1    | magic = @ref kAdvertiseMagic |
  * | 1      | 1    | format version = @ref kAdvertiseFormatVersion |
- * | 2      | 1    | flags (@ref kAdvertiseFlagGroup) |
+ * | 2      | 1    | flags (@ref kAdvertiseFlagGroup, plus the link-local bits) |
  * | 3      | 1    | reserved, must be zero |
  * | 4      | 4    | can_id (u32 LE; a 29-bit value) |
  * | 8      | 4    | group_total_len (u32 LE; 0 for a single value) |
@@ -232,9 +255,12 @@ struct advertise_t {
     std::uint16_t slice_count = 1;     /**< @brief Slice count (1 = single value, 0 = hello). */
     std::uint16_t target = kCanBroadcastNode; /**< @brief Directed target node id, or
                                                    @ref kCanBroadcastNode for every node. */
-    std::string_view path; /**< @brief The libtracer path the id maps to — a VIEW (#1780):
-                                into the buffer @ref decode_advertise read, or the
-                                caller's own text when encoding. */
+    std::uint8_t link_flags = 0; /**< @brief The link-local `flags` bits beyond @ref group —
+                                      the `kAdvertiseFlagLinkCompress` family (#1953); an
+                                      older decoder ignores them. */
+    std::string_view path;       /**< @brief The libtracer path the id maps to — a VIEW (#1780):
+                                      into the buffer @ref decode_advertise read, or the
+                                      caller's own text when encoding. */
 
     /** @brief Field-wise equality (value type). */
     [[nodiscard]] bool operator==(const advertise_t&) const = default;
@@ -288,7 +314,8 @@ struct advertise_t {
 
     put_u8(kAdvertiseMagic);
     put_u8(kAdvertiseFormatVersion);
-    put_u8(a.group ? kAdvertiseFlagGroup : 0u);
+    put_u8(static_cast<std::uint8_t>((a.group ? kAdvertiseFlagGroup : 0u) |
+                                     (a.link_flags & ~kAdvertiseFlagGroup)));
     put_u8(0u);  // reserved, MBZ
     put_u32(a.can_id);
     put_u32(a.group_total_len);
@@ -356,6 +383,7 @@ struct advertise_t {
 
     advertise_t a;
     a.group = (u8(2) & kAdvertiseFlagGroup) != 0;
+    a.link_flags = static_cast<std::uint8_t>(u8(2) & ~kAdvertiseFlagGroup);
     a.can_id = u32(4);
     a.group_total_len = u32(8);
     a.slice_count = u16(12);

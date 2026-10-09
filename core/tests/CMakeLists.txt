@@ -334,6 +334,12 @@ if(LIBTRACER_TRANSPORT_CAN)
     target_link_libraries(transport_can_test PRIVATE libtracer)
     libtracer_test_warnings(transport_can_test)
     add_test(NAME transport_can COMMAND transport_can_test)
+    # #1953 — CAN link-local compression: negotiated per link, byte-exact round trip,
+    # legacy wire for a peer without it. A pumped in-memory bus, so byte counts are exact.
+    add_executable(transport_can_compress_test transport_can_compress_test.cpp)
+    target_link_libraries(transport_can_compress_test PRIVATE libtracer)
+    libtracer_test_warnings(transport_can_compress_test)
+    add_test(NAME transport_can_compress COMMAND transport_can_compress_test)
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_CAN AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)
@@ -2476,6 +2482,7 @@ set(LIBTRACER_BUS_TESTS
     session_anchor
     tcp
     transport_can
+    transport_can_compress
     transport_can_peers
     transport_vertex
     write_ctx

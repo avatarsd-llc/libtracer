@@ -1264,6 +1264,8 @@ void test_can_emit_advertise_wire_identical() {
     hello.group_total_len = 0;
     hello.slice_count = 0;
     hello.path = cfg.path;
+    // Compression is on by default, so every advertise announces it (#1953).
+    hello.link_flags = can::kAdvertiseFlagLinkCompress;
     const std::vector<std::byte> expect = advertise_vec(hello);
     check(raw->stream() == expect, "the emitted hello byte stream equals encode_advertise(hello)");
 }
