@@ -9,7 +9,7 @@ versioning/publish strategy.
 
 ## [0.19.0] — 2026-10-09
 
-No TypeScript-binding API changes. The `FwdRequestSpec.awaitTimeoutNs` doc comment now says the AWAIT deadline is the requester's own and `awaitTimeoutNs` is a hint (#1873); docs only. Released in lockstep with core.
+No TypeScript-binding API changes. The `FwdRequest.awaitTimeoutNs` doc comment now says the AWAIT deadline is the requester's own and `awaitTimeoutNs` is a hint (#1873); docs only. Released in lockstep with core.
 
 ## [0.18.1] — 2026-10-07
 
