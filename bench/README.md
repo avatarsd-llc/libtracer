@@ -42,6 +42,7 @@ for a local `preview.html` of the same charts.
 | `bench_scale_sweep` (`run_scale_sweep.sh`) | **#1485's vertex-count scaling sweep**: registered-vertex population over 10³/10⁴/10⁵/10⁶, built to **decompose** the topic-count growth #1480 measured rather than reproduce it — bound-handle delivery, resolution alone, a fixed-shape probe address (the ADR-0057 flatness claim), and a working-set control that keeps N resident while touching one. Plus `register_vertex_key` descent, the O(N) `vertex_slot` scan, `for_each_vertex`, and a **measured** bytes-per-vertex census. Diagnostic, never gated — see [what it decomposed](#bench_scale_sweep--the-vertex-count-scaling-sweep-1485). |
 | `bench_source_role` + `bench_source_role_alloc` | **#1505's retention-role write asymmetry**: the same write at a vertex that RETAINS a last-known-value (`STORED_VALUE`) and at one that retains nothing (`HANDLER`), swept over subscriber width 0/1/4 and value link count 1/4. The axis `inproc-target-*` does not cover — that pair sweeps the role of the delivery TARGET, this one the role of the vertex being WRITTEN, which is where the notify clone a `HANDLER` built before storing was paid — #1505 removed that clone, and these rows are the before/after. Fan-out **zero** is the isolating arm. The `_alloc` twin counts what each write allocates, which is what turned the shed-on-OOM exposure into a number; it is a separate binary for the reason `bench_store_escape` gives. Diagnostic, never gated — see [what it prices](#bench_source_role--the-retention-role-write-asymmetry-1505). |
 | `run_topics.sh` | **the topic-count comparison, in both address spellings on both engines** (#1485 addendum C): `topics-bound` (pre-bound handle / declared `Publisher`) and `topics-addr` (destination resolved inside every operation), over `kTopicLadder` = 1/100/10 000. Exists because the previous comparison put libtracer's resolve-per-write row against Zenoh's declared-publisher row — see [the asymmetry it removes](#run_topicssh--the-topic-count-comparison-both-spellings-both-engines-1485). |
+| `run_noise.sh` | **the Noise link harness (#2065)**: libtracer's plain UDP link (and the Noise link, #2064, behind a switch), Zenoh over UDP, TLS and QUIC, and ChaCha20-Poly1305 / NNpsk0 handshake cost per crypto backend, with RAM and an ESP-IDF flash census. One warm session per arm, setup on its own row. Diagnostic — see [the Noise link harness](#noise-link-harness--bench_noise_link-bench_zenoh_link-bench_noise_crypto-2065). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
 
@@ -1513,6 +1514,70 @@ against 1.1–3.2 M/s STREAM); T = 1 is the tight arm at **0.54x–0.56x**.
 `inproc/64/1/1`, so it would buy correlated evidence rather than coverage; and a many-thread
 aggregate rate is a property of the host — the same reason every other `scaling`-surface harness
 here is diagnostic. Quote the ratio, with the stamp, and never a bare absolute.
+
+### Noise link harness — `bench_noise_link`, `bench_zenoh_link`, `bench_noise_crypto` (#2065)
+
+The Noise link binding (RFC-0033, #2063; implemented by #2064) is measured from its first
+commit by a harness that was ready before it. Three binaries, one driver (`link_harness.hpp`):
+
+- **`bench_noise_link`**: libtracer's link arms. `udp` is the plain UDP link, the baseline.
+  `noise` is the #2064 link kind, compiled only with `-DLIBTRACER_BENCH_NOISE_LINK=ON`.
+  `make_noise_pair` is the one function that names that link, so #2064 adjusts it to the
+  constructor it ships and nothing else.
+- **`bench_zenoh_link`**: the Zenoh arms through the same driver. `udp` is the counterpart of
+  libtracer's `udp`. `tls` (over TCP) and `quic` are the counterpart of `noise`: **different
+  security protocols, same goal: authenticated encryption.** TLS 1.3 authenticates the server
+  with a certificate over a reliable stream; the Noise binding authenticates both ends with a
+  PSK over datagrams. The run makes a throwaway CA and server certificate with the `openssl`
+  command and skips both arms (saying so) without it.
+- **`bench_noise_crypto`**: the crypto floor under the Noise arm. It times ChaCha20-Poly1305
+  seal and open per frame, X25519, the Noise HKDF and each side's whole NNpsk0 handshake on
+  every backend the build found, with heap, allocations and stack. The backends are libsodium
+  and OpenSSL 3 from the system, and mbedTLS through its PSA API, built from a source tree
+  passed as `-DLIBTRACER_BENCH_MBEDTLS_SOURCE=` (ESP-IDF's copy: `$IDF_PATH/components/mbedtls/
+  mbedtls`). The handshake (`noise_crypto.hpp`) is written once over the backend. Every backend
+  must first reproduce RFC 7748's X25519 vector, and every other backend's transcript byte for
+  byte. Ephemerals are injected, so no row includes the RNG.
+
+**One session, warm, on both engines.** Each arm builds one pair and completes one exchange
+before any clock starts, then keeps that pair for every size. Setup is its own row: a fresh pair
+timed to its first reply, so the handshake is never amortized into the per-frame rows.
+
+| Row | What | Columns |
+| --- | --- | --- |
+| `link-<arm>-rr` | one request and its echo, one outstanding | RTT p50/p99/mean ns; exchanges/s; request MB/s |
+| `link-<arm>-stream` | blast for the window, 1 frame in 64 stamped | one-way p50/p99 under load; sent/s, delivered/s, MB/s; `NOTE` loss |
+| `link-<arm>-setup` | fresh pair to first reply (the handshake) | ns |
+| `LINK_RAM` | around the arm's first pair | heap (at `malloc`), RSS delta, threads |
+| `crypto-*` | per op, per backend | ns p50/p99; ops/s; MB/s |
+| `NOISE_RAM` | per backend | session bytes, handshake heap peak and allocations, stack |
+
+Sizes are 64 B, 1 KiB, 4 KiB, 16 KiB and the IPv4 datagram bound (65507 B, or 65491 B of
+plaintext under a 16-byte tag).
+
+```sh
+cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release \
+      -DLIBTRACER_BENCH_MBEDTLS_SOURCE=$IDF_PATH/components/mbedtls/mbedtls
+cmake --build bench/build --target bench_noise_link bench_zenoh_link bench_noise_crypto -j
+flock ../bench.lock bench/run_noise.sh bench/build 3   # on the bench CPUs, best of 3
+```
+
+**Flash and RAM on the chip.** `bench/esp_noise_crypto/` is an ESP-IDF app running the same
+handshake and AEAD over the mbedTLS PSA backend ESP-IDF ships. It is built twice, once per
+Kconfig choice: the backend, and `none` (every crypto call compiled out). The difference in
+`idf.py size` is the backend's flash and static RAM. Flashed, it prints the same rows with
+`esp_timer`.
+
+```sh
+cd bench/esp_noise_crypto
+idf.py -B build/psa  -DSDKCONFIG=build/psa/sdkconfig set-target esp32c6 build size
+idf.py -B build/none -DSDKCONFIG=build/none/sdkconfig \
+       -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.none" set-target esp32c6 build size
+```
+
+libsodium is in ESP-IDF's component registry, not in ESP-IDF itself, so its ESP build would
+fetch it. This harness fetches nothing; the libsodium arm is host-only. **Diagnostic, not a
+gate**, until the binding exists.
 
 ## What is measured
 

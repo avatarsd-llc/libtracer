@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Sized as a node ships: -Os (as integrations/esp-idf/examples/pin_bench sets it).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# ESP-IDF leaves ChaCha20 and ChaCha20-Poly1305 OFF by default; the Noise binding needs both.
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y

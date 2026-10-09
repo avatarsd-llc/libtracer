@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+
+menu "Noise crypto bench (#2065)"
+    choice NOISE_BENCH_BACKEND
+        prompt "Crypto backend"
+        default NOISE_BENCH_BACKEND_PSA
+        help
+            The backend the NNpsk0 handshake and the per-frame AEAD run on. NONE builds the
+            same app with every crypto call compiled out: the baseline image the backend's
+            flash and static RAM are measured against.
+
+        config NOISE_BENCH_BACKEND_NONE
+            bool "none (baseline image)"
+        config NOISE_BENCH_BACKEND_PSA
+            bool "mbedTLS PSA Crypto (ships with ESP-IDF)"
+    endchoice
+endmenu

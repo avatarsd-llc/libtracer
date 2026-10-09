@@ -453,6 +453,29 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "The same fan-in topology with timestamped payloads, on a fresh server per sweep point, "
         "so aggregate throughput and the full one-way latency distribution come from one run.",
         "frames/s · ns p50 / p99 / p999 / max"),
+    instrument_t(
+        "bench_noise_link.cpp", "net", (),
+        "The Noise link harness's libtracer arms: one warm link pair per arm on loopback — the "
+        "plain UDP link, and the Noise link (#2064) behind a build switch — timed for one "
+        "request and its echo, for a blast stream with 1-in-64 frames stamped, and for a fresh "
+        "pair's setup to first reply (the handshake, on a secured link), at 64 B, 1 KiB, 4 KiB, "
+        "16 KiB and the datagram bound, with the heap, resident set and threads one pair costs.",
+        "ns p50 / p99 RTT and one-way · exchanges/s, frames/s, MB/s · bytes per pair"),
+    instrument_t(
+        "bench_zenoh_link.cpp", "net", (),
+        "The Zenoh arms of the same harness, through the same driver: a warm session pair over "
+        "plain UDP, and over TLS and QUIC as the secured counterpart of the Noise link — "
+        "different security protocols with the same goal, authenticated encryption — with "
+        "setup (the handshake) on its own row.",
+        "ns p50 / p99 RTT and one-way · exchanges/s, frames/s, MB/s · bytes per pair"),
+    instrument_t(
+        "bench_noise_crypto.cpp", "framed", (),
+        "Prices the Noise_NNpsk0_25519_ChaChaPoly_SHA256 session on every crypto backend the "
+        "build found (libsodium, OpenSSL, mbedTLS PSA): ChaCha20-Poly1305 seal and open per "
+        "frame up to the datagram bound, X25519, HKDF and each side's whole handshake, with "
+        "the heap, allocations and stack each holds. Every backend must first reproduce the "
+        "RFC 7748 vector and every other backend's handshake transcript byte for byte.",
+        "ns p50 / p99 per op · frames/s, MB/s · bytes, allocations"),
     # -- concurrency & scaling, run locally on a many-core host -------------
     instrument_t(
         "bench_fanout_clone_storm.cpp", "scaling", (),
