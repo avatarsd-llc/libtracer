@@ -420,6 +420,13 @@ struct default_config_t {
      * report each sub-pool's high-water mark, and the root's census the bytes carved). An
      * application that injects its own root into every `graph_t` can bind a small value; the
      * defaults that take no graph (`tr::mem::value_source()` and its siblings) still draw here.
+     * With every source injected (the graph's root, the router's planes, the transport
+     * vertex's rx and egress stores), a long vertex name, a connection's liveness value and a
+     * bus link's `:children[]` listing draw nothing here (#2052). What a node still carves is
+     * the one value block a composed field read wraps its answer in (`%value_ref_t::composed`):
+     * 32 B per such read held at once on Cortex-M0 and on ESP32-C6. Measured on a bus
+     * connection created, published UP and listed with two peers: 288 B carved before #2052,
+     * 32 B after, on both targets.
      *
      * Not read where @ref kSlabPool is `true`: no arena is compiled there.
      *

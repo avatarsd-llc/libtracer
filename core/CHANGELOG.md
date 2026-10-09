@@ -70,6 +70,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `:children[]` creation included. Only the root, which is never registered, is not
   rechecked, so top-level creation and the trusted local (empty) caller are unchanged. A vertex's copy-or-share threshold is now read and stored as a relaxed
   atomic, since a retire stores it under a concurrent write. No signature or wire byte changes.
+- **A bus connection's `:children[]` listing and a connection's liveness value draw from the
+  owning graph, not the default root
+  ([#2052](https://github.com/avatarsd-llc/libtracer/issues/2052)).** The listing a
+  `transport_vertex_t` serves for a bus link staged its records on `mem::net_source()` and
+  copied its answer through `mem::heap_backend()`, and the 1-byte liveness value it publishes
+  for every connection came from `mem::heap_backend()` too, so a node that injected every
+  source still carved them from the default root (the static arena on an MCU). The listing now
+  stages on the graph's table source, and both answer from the graph's value backend, as the
+  graph's own `:children[]` door does. A bus connection created, published `UP` and listed with
+  two peers carved 288 B from the arena on Cortex-M0 and ESP32-C6, and now carves 32 B: the
+  value block of the composed read itself (`value_ref_t::composed`), which still draws from
+  `mem::value_source()`. The `path_key_t` spill named in the same issue already drew from the
+  graph's source since #1991. The API is unchanged.
 
 - **`udp_transport_t`: an ephemeral bind owns its port
   ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
