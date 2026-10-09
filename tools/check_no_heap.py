@@ -39,12 +39,16 @@ deletes one, and the linker cannot tell the difference either.
   more call to either from a function that already had one. A pinned site that is gone or shrank also
   fails until ``--repin`` lowers it, so the baseline never claims more than the truth.
   ``--repin`` only lowers pins; it never adds one.
-* RENAME. ``--rebaseline`` re-seeds the pins after a rename of a function, class or file, and
-  only that: every pinned function the build no longer has must match, one to one, a function the
-  baseline lacks that reaches the heap the same way (same entry points, same counts, with each
-  ``via <callee>`` read as ``via`` since the callee may be renamed too). Any other difference,
-  a new site with no vanished twin, a changed count on a site both have, a vanished pin with no
-  twin, refuses and writes nothing, so a rename that also adds a heap call cannot be laundered.
+* RENAME. ``--rebaseline`` re-seeds the pins after a rename or a signature change, and only
+  that. Each function the baseline lacks must pair with a pinned one the build no longer has,
+  in the SAME object and with the same demangled name once the parameter list and clone
+  suffixes (``.isra.0``, ``.constprop.0``) are stripped. A pair may keep its keys and counts or
+  have fewer, never a new key or a larger count; a ``via`` key may change only to the new name of
+  a callee that is itself a renamed pair. A function both builds have follows the same rule, so
+  its ``via`` keys can follow a renamed callee and nothing else. Per object the direct entry
+  points may not exceed the pins. An unpaired new function, an unpaired vanished pin (use
+  ``--repin``) or any rule broken refuses, lists every offender and writes nothing; success
+  prints each pair that moved.
 * ZERO is the end state: an empty target in the baseline, and then this check is the plain
   "no heap symbol at all" gate ADR-0083 §Consequences names. ``--strict`` runs that gate now.
 
@@ -242,33 +246,79 @@ def lower(pinned: Sites, found: Sites) -> Sites:
     return out
 
 
-def signature(fams: dict[str, int]) -> tuple:
-    """@brief A site's heap reach with callee names erased: a rename keeps it, a new call changes it."""
-    out: dict[str, int] = {}
-    for fam, n in fams.items():
-        k = "via" if fam.startswith("via ") else fam
-        out[k] = out.get(k, 0) + n
-    return tuple(sorted(out.items()))
+CLONE = re.compile(r"\.(?:isra|constprop|part|cold|lto_priv)\.\d+")
 
 
-def rebaseline(pinned: Sites, found: Sites) -> str | None:
-    """@brief None when @p found differs from @p pinned by renames alone, else why not.
+def base_name(section: str, names: dict[str, str]) -> str:
+    """@brief The demangled function name of @p section without parameters or clone suffixes."""
+    text = re.sub(r" \[clone [^\]]*\]", "", CLONE.sub("", names.get(section, section)))
+    if text.endswith(")") or text.endswith(") const"):
+        text = text[:-6] if text.endswith(") const") else text
+        depth = 0
+        for i in range(len(text) - 1, -1, -1):
+            depth += (text[i] == ")") - (text[i] == "(")
+            if depth == 0:
+                return text[:i]
+    return text
 
-    A rename moves a site to a new (object, section) key with the same signature. A site both
-    have must be identical, and the vanished and the appeared sites must pair off one to one.
+
+def rebaseline(pinned: Sites, found: Sites, names: dict[str, str] | None = None):
+    """@brief (problems, moves): why @p found is not @p pinned plus renames, and the pairs.
+
+    @p problems is empty when the change is renames alone; @p moves lists (object, old
+    section, new section) for each renamed pair.
     """
+    names = names or {}
     f, p = flat_sites(found), flat_sites(pinned)
+    gone = {k: p[k] for k in p.keys() - f.keys()}
+    new = {k: f[k] for k in f.keys() - p.keys()}
+    problems: list[str] = []
+    pairs: list[tuple[tuple[str, str], tuple[str, str]]] = []
+    groups: dict[tuple[str, str], tuple[list, list]] = {}
+    for k in gone:
+        groups.setdefault((k[0], base_name(k[1], names)), ([], []))[0].append(k)
+    for k in new:
+        groups.setdefault((k[0], base_name(k[1], names)), ([], []))[1].append(k)
+    for (obj, base), (olds, news) in sorted(groups.items()):
+        if not olds:
+            problems.append(f"{obj} {base}: new function reaches the heap, with no pinned "
+                            f"function of that name to be a rename of")
+        elif not news:
+            problems.append(f"{obj} {base}: pinned function is gone (lower it with --repin)")
+        elif len(olds) != len(news):
+            problems.append(f"{obj} {base}: {len(olds)} pinned against {len(news)} found; "
+                            f"not a one-to-one rename")
+        else:
+            def shape(fams):
+                return sorted((k if not k.startswith("via ") else "via", n)
+                              for k, n in fams.items())
+            olds, news = sorted(olds, key=lambda k: shape(gone[k])), \
+                sorted(news, key=lambda k: shape(new[k]))
+            pairs += list(zip(olds, news))
+    rename = {o[1]: n[1] for o, n in pairs}
+    rename = {short_section(o): short_section(n) for o, n in rename.items()}
+
+    def follow(fams):
+        return {("via " + rename.get(k[4:], k[4:]) if k.startswith("via ") else k): n
+                for k, n in fams.items()}
+
+    def check(label, was, now):
+        allowed = follow(was)
+        for fam, n in now.items():
+            if n > allowed.get(fam, 0):
+                problems.append(f"{label}: {fam} x{n} against {allowed.get(fam, 0)} pinned"
+                                f"; that is a new heap path, not a rename")
+    for old, nw in pairs:
+        check(f"{nw[0]} {nw[1]}", p[old], f[nw])
     for key in p.keys() & f.keys():
-        if p[key] != f[key]:
-            return f"{key[0]} {key[1]} changed its heap reach; that is not a rename (use --repin to lower)"
-    gone = sorted(signature(p[k]) for k in p.keys() - f.keys())
-    new = sorted(signature(f[k]) for k in f.keys() - p.keys())
-    if gone != new:
-        extra = [k for k in sorted(f.keys() - p.keys()) if signature(f[k]) not in gone]
-        where = f" ({extra[0][0]} {extra[0][1]})" if extra else ""
-        return (f"{len(new)} new site(s) against {len(gone)} vanished one(s), and they do not "
-                f"pair off by heap reach{where}: this adds or drops a heap call, not a rename")
-    return None
+        check(f"{key[0]} {key[1]}", p[key], f[key])
+    for obj in {k[0] for k in f}:
+        direct = lambda tab: sum(n for (o, _), fams in tab.items() if o == obj
+                                 for k, n in fams.items() if not k.startswith("via "))
+        if direct(f) > direct(p):
+            problems.append(f"{obj}: direct heap calls grew {direct(p)} -> {direct(f)}")
+    moves = [(o[0], o[1], n[1]) for o, n in pairs]
+    return problems, moves
 
 
 def flat_sites(sites: Sites) -> dict[tuple[str, str], dict[str, int]]:
@@ -357,13 +407,19 @@ def main() -> int:
         print(f"::error::no-heap: target {args.target!r} has no entry in {args.baseline}")
         return 1
     if args.rebaseline:
-        why = rebaseline(entry.get("sites", {}), found)
-        if why:
-            print(f"::error::no-heap [{args.target}]: --rebaseline refused: {why}")
+        raw = sorted({k[1] for k in flat_sites(found)} | {k[1] for k in flat_sites(
+            entry.get("sites", {}))})
+        problems, moves = rebaseline(entry.get("sites", {}), found, demangle(raw))
+        if problems:
+            for why in problems:
+                print(f"::error::no-heap [{args.target}]: --rebaseline refused: {why}")
             return 1
+        names = demangle(sorted({m[2] for m in moves} | {m[1] for m in moves}))
+        for obj, old, nw in moves:
+            print(f"moved: {obj}: {names.get(old, old)} -> {names.get(nw, nw)}")
         entry["sites"] = found
         path.write_text(dump(data), encoding="utf-8")
-        print(f"rebaselined {args.target}: renames only, "
+        print(f"rebaselined {args.target}: {len(moves)} rename(s), "
               f"{sum(flatten(found).values())} reference(s) re-seeded")
         return 0
     pinned: Sites = {} if args.strict else entry.get("sites", {})

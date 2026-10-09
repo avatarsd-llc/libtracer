@@ -192,31 +192,88 @@ class RatchetTest(unittest.TestCase):
 
 
 class RebaselineTest(unittest.TestCase):
+    SUB = "_ZN2tr5graph7graph_t9subscribeEv"
+    SUB2 = "_ZN2tr5graph7graph_t9subscribeEi"
+    D0 = "_ZN2tr5graph8vertex_tD0Ev"
+    D0I = "_ZN2tr5graph8vertex_tD0Ei"
+
     def setUp(self):
         self.pins = cnh.parse_relocs(BASE)
 
-    def renamed(self, extra_refs=None):
-        """@brief BASE with subscribe renamed, optionally also gaining a second heap call."""
-        old = "_ZN2tr5graph7graph_t9subscribeEv"
-        refs = ["_Znwj", "memcpy", "_ZdlPvj"] + (extra_refs or [])
-        graph = {("_ZN2tr5graph7graph_t10subscribe2Ev" if k == old else k): v
-                 for k, v in GRAPH.items()}
-        graph["_ZN2tr5graph7graph_t10subscribe2Ev"] = ("g", refs)
-        return archive(member("graph.cpp.obj", graph, DEBUG), member("path.cpp.obj", PATH),
-                       member("twai_link.cpp.obj", TWAI))
+    def build(self, graph=None, path=None, twai=None):
+        return archive(member("graph.cpp.obj", graph or GRAPH, DEBUG),
+                       member("path.cpp.obj", path or PATH),
+                       member("twai_link.cpp.obj", twai or TWAI))
+
+    def run_rb(self, text):
+        found = cnh.parse_relocs(text)
+        names = cnh.demangle(sorted({k for t in (found, self.pins)
+                                     for o in t.values() for k in o}))
+        return cnh.rebaseline(self.pins, found, names)
+
+    def renamed_graph(self, **over):
+        g = {}
+        for k, v in GRAPH.items():
+            g[{self.SUB: self.SUB2}.get(k, k)] = v
+        g.update(over)
+        return g
 
     def test_pure_rename_reseeds_cleanly(self):
-        found = cnh.parse_relocs(self.renamed())
-        self.assertNotEqual(cnh.compare(found, self.pins), ({}, {}), "the plain ratchet fails")
-        self.assertIsNone(cnh.rebaseline(self.pins, found))
+        problems, moves = self.run_rb(self.build(self.renamed_graph()))
+        self.assertEqual(problems, [])
+        self.assertEqual(moves, [("graph.cpp.obj", self.SUB, self.SUB2)])
+
+    def test_callers_via_keys_follow_a_renamed_callee(self):
+        realloc2 = REALLOC[:-2] + "Ei"
+        path = {(realloc2 if k == REALLOC else k): ("w", v[1]) if k == REALLOC else v
+                for k, v in PATH.items()}
+        path[EMPLACE] = ("w", [realloc2])
+        problems, moves = self.run_rb(self.build(path=path))
+        self.assertEqual(problems, [])
+        self.assertEqual(moves, [("path.cpp.obj", REALLOC, realloc2)])
 
     def test_rename_that_adds_a_heap_call_is_refused(self):
-        found = cnh.parse_relocs(self.renamed(["_Znwj"]))
-        self.assertIsNotNone(cnh.rebaseline(self.pins, found))
+        g = self.renamed_graph()
+        g[self.SUB2] = ("g", ["_Znwj", "_Znwj", "_ZdlPvj"])
+        self.assertTrue(self.run_rb(self.build(g))[0])
 
-    def test_new_site_without_a_vanished_twin_is_refused(self):
-        found = cnh.parse_relocs(with_fn("graph.cpp.obj", "_Z14tr_planted_newv", ["_Znwj"]))
-        self.assertIsNotNone(cnh.rebaseline(self.pins, found))
+    def test_shrink_plus_new_function_with_the_same_reach_is_refused(self):
+        g = dict(GRAPH)
+        del g[self.D0]
+        twai = dict(TWAI)
+        twai["_Z9brand_newv"] = ("g", ["_ZdlPvj"])
+        problems, _ = self.run_rb(self.build(g, twai=twai))
+        self.assertTrue(any("brand_new" in x for x in problems), problems)
+
+    def test_new_function_next_to_a_rename_is_refused(self):
+        g = self.renamed_graph()
+        g["_ZN2tr5graph4evilEv"] = ("g", ["_Znwj"])
+        problems, _ = self.run_rb(self.build(g))
+        self.assertTrue(any("evil" in x for x in problems), problems)
+
+    def test_direct_calls_moved_into_another_object_are_refused(self):
+        g = dict(GRAPH)
+        del g[self.D0]
+        twai = dict(TWAI)
+        twai[self.D0] = ("g", ["_ZdlPvj"])
+        self.assertTrue(self.run_rb(self.build(g, twai=twai))[0])
+
+    def test_direct_growth_in_a_renamed_function_is_refused(self):
+        g = self.renamed_graph()
+        g[self.SUB2] = ("g", ["_Znwj", "_ZdlPvj", "_ZdlPvj"])
+        problems, _ = self.run_rb(self.build(g))
+        self.assertTrue(problems)
+
+    def test_swapped_reach_between_renamed_pairs_is_refused(self):
+        g = {k: v for k, v in GRAPH.items() if k not in (self.SUB, self.D0)}
+        g[self.SUB2] = GRAPH[self.D0]
+        g[self.D0I] = GRAPH[self.SUB]
+        self.assertTrue(self.run_rb(self.build(g))[0])
+
+    def test_plain_deletion_is_left_to_repin(self):
+        g = dict(GRAPH)
+        del g[self.D0]
+        self.assertTrue(self.run_rb(self.build(g))[0])
 
 
 if __name__ == "__main__":
