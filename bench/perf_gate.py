@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import pathlib
 import random
 import re
@@ -896,6 +897,25 @@ NULL_FLOOR = 0.03   # ... and never below 3%
 # that no other row family did. 5x is the smallest multiplier that cleared every one of them
 # there; the floor stays at 3% (raising it to 5% cleared fewer).
 CLIFF_NULL_K = 5.0
+# The rows whose TIME is placement, not code (#2030). `cliff-alloc-heap` and `lkv-alloc-heap`
+# time one alloc/free in 3-60 ns, and a 32 B shift of identical code moves them by up to
+# x1.20 (the base build alone spreads x1.18-1.26 across shuffled link orders); three false
+# gate failures on PRs that did not touch the allocator (#1684, #2010, #2011) were exactly
+# this. No A/A null prices that without blinding the gate to a real 10%: a null fitted over
+# layouts is wider than the flat threshold, and the cap (ruling on #1874) holds the row at the
+# flat one, which a layout shift crosses. So these rows are gated by what a layout cannot move,
+# the INSTRUCTIONS per alloc/free pair (@ref instr_gate), and their timed legs keep only a
+# gross backstop: LAYOUT_BACKSTOP is above the worst layout spread measured and still catches
+# an allocator that has fallen onto a slow path (the #1768 class is x2.7).
+LAYOUT_BOUND_MODES = ("cliff-alloc-heap", "lkv-alloc-heap")
+LAYOUT_BACKSTOP = 1.5
+# A cliff size past the heap backend's last size class (64 KiB + the segment header) is served
+# by the host's malloc itself, whose state flips a process between two modes about x2 apart
+# (65584 B read 17.5 ns in most runs and 33-38 ns in others, one binary, one source; it also
+# counts 475 or 660 instructions). Neither time nor instructions is the library's there, so
+# the timed legs hold a backstop above that flip and the instruction ratchet skips the size.
+INSTR_LAST_CLASS = 65536
+HOST_SERVED_BACKSTOP = 3.0
 BOOT_N = 2000
 BOOT_CONF = 0.95
 LEGS = ("p50_ns", "mean_ns", "deliv_s")
@@ -921,9 +941,16 @@ def leg_factor(k: str, leg: str, null: dict[str, dict[str, float]]) -> tuple[flo
     never loosen it. A row whose null is wider than flat (a layout-sensitive row) is gated
     exactly as before the null existed — the flat factor, tick-guarded on the latency legs —
     and reported as `cap`. With no null entry: the same flat gating, reported as `flat`.
+
+    A layout-bound row (@ref LAYOUT_BOUND_MODES, #2030) takes neither: its timed legs are the
+    gross LAYOUT_BACKSTOP, source `layout`, and its real verdict is @ref instr_gate.
     """
     s = (null.get(k) or {}).get(leg)
     lower = leg == "deliv_s"
+    if k.split("/")[0] in LAYOUT_BOUND_MODES:
+        size = int(k.split("/")[1])
+        b = HOST_SERVED_BACKSTOP if size > INSTR_LAST_CLASS else LAYOUT_BACKSTOP
+        return (1 / b if lower else b), False, "layout"
     if s is None:
         return _FLAT[leg], not lower, "flat"
     t = max(NULL_FLOOR, (CLIFF_NULL_K if k.split("/")[0] in CLIFF_MODES else NULL_K) * s)
@@ -1375,6 +1402,84 @@ def segdraw_gate(cur: dict[int, dict[str, int]],
     return fails
 
 
+# --- THE INSTRUCTION RATCHET (#2030): the layout-bound rows' real gate -----------------
+# `bench_forward_heap` counts the user-mode instructions of one heap-backend alloc/free pair
+# at every cliff-ladder size (and 64 B / 1 KiB): `RESULT instr S=<size> x100=<n>`, the figure
+# x100 so a fraction survives. It is what `cliff-alloc-heap` and `lkv-alloc-heap` time, minus
+# the placement noise: nine builds of one source (default link order and eight shuffled ones)
+# read the same count at every size. A pair that costs more instructions than main's fails the
+# size, so a real extra-instructions regression fails however the code is laid out; the timed
+# legs of these rows keep only the gross LAYOUT_BACKSTOP. Fail: more than INSTR_REGRESS over
+# main AND more than INSTR_TICK instructions over (a ~100-instruction pair, so 10% more
+# instructions is ten and fails; one stray instruction does not). It sees only user-mode
+# instructions: a slowdown that adds none passes up to the timed backstop. A host with no counter
+# (`INSTR-UNAVAILABLE`) emits no rows on either arm and the gate says it is not run, unless
+# PERF_GATE_REQUIRE_INSTR=1 (perf.yml sets it on the self-hosted runner): then it FAILS.
+INSTR_REGRESS = 1.02
+INSTR_TICK = 2.0
+_INSTR_RE = re.compile(r"^RESULT instr S=(\d+) x100=(\d+)")
+
+
+def instr_parse(out: str) -> dict[int, int]:
+    """@brief The instruction rows of one `bench_forward_heap` run: {size: instructions x100}."""
+    got = {}
+    for line in out.splitlines():
+        m = _INSTR_RE.match(line)
+        if m:
+            got[int(m.group(1))] = int(m.group(2))
+    return got
+
+
+def instr_probe(bench_fwd: pathlib.Path) -> dict[int, int]:
+    """@brief The instruction rows of @p bench_fwd; empty when it cannot be run or the host
+    has no counter, which @ref instr_gate reports instead of passing in silence."""
+    try:
+        return instr_parse(fwd_output(bench_fwd))
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+
+
+def instr_gate(cur: dict[int, int], base: dict[int, int] | None) -> list[str]:
+    """@brief Instructions per alloc/free pair may not grow against main at any size.
+
+    A size main counts and the candidate does not is a FAIL (#1847's rule); with no rows on
+    either arm the ratchet is said not to have run (the host has no counter)."""
+    fails: list[str] = []
+    base = base or {}
+    if not cur and not base:
+        if os.environ.get("PERF_GATE_REQUIRE_INSTR") == "1":
+            return [f"instruction ratchet (#2030): no instruction rows on either arm, but this "
+                    f"runner is required to have the hardware counter "
+                    f"(PERF_GATE_REQUIRE_INSTR=1); the layout-bound allocator rows have no "
+                    f"other 10% guard"]
+        print("  instruction ratchet (#2030): no instruction rows on either arm (no hardware "
+              "counter on this host) — the layout-bound rows are gated by their timed "
+              "backstop alone")
+        return fails
+    for size in sorted(base):
+        if size not in cur:
+            fails.append(f"instr S={size}: main counts this size and the candidate does not "
+                         f"(a missing key is never 'not gated', #1847)")
+    if not base:
+        print(f"  instruction ratchet (#2030): main has no instruction rows (bootstrap), "
+              f"{len(cur)} sizes counted on the candidate, nothing to ratchet against")
+        return fails
+    worst = 0.0
+    for size in sorted(cur):
+        b = base.get(size)
+        if b is None:
+            continue
+        c = cur[size]
+        worst = max(worst, c / b if b else 1.0)
+        if c > b * INSTR_REGRESS and (c - b) / 100 > INSTR_TICK:
+            fails.append(f"instr S={size}: {b / 100:g} -> {c / 100:g} instructions per "
+                         f"alloc/free pair (x{c / b:.3f}; ratchet vs main, over "
+                         f"x{INSTR_REGRESS} and {INSTR_TICK:g})")
+    print(f"  instruction ratchet (#2030): {len(cur)} sizes, worst x{worst:.3f} of main, "
+          f"{len(fails)} fail")
+    return fails
+
+
 # --- THE #1808 EXACT ROWS: RAM probes, blocks per write, STREAM stripe sections -------------
 # `bench_forward_heap` prints three more kinds of exact row (bench/exact_rows.hpp), every
 # per-unit figure multiplied by 1000 so a fraction survives:
@@ -1608,6 +1713,7 @@ def mem_ratchet(bench_fwd: pathlib.Path | None, base_fwd: pathlib.Path | None) -
     if cand_ok and base_ok:
         return (mem_gate(mem_probe(bench_fwd), mem_probe(base_fwd))
                 + segdraw_gate(segdraw_probe(bench_fwd), segdraw_probe(base_fwd))
+                + instr_gate(instr_probe(bench_fwd), instr_probe(base_fwd))
                 + exact_gate(exact_probe(bench_fwd), exact_probe(base_fwd)))
     if not cand_ok and not base_ok:
         # Say so. A skipped gate that prints nothing is indistinguishable from a

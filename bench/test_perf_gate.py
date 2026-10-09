@@ -210,7 +210,8 @@ class ThresholdBoundary(unittest.TestCase):
     def test_the_cliff_rows_take_five_spreads_and_every_row_is_capped(self):
         """#1888's pin on `CLIFF_NULL_K`: 5 s on a cliff key, 3 s on any other, and a large
         s returns the flat factor with source `cap` on both."""
-        cliff, row = f"{pg.CLIFF_MODES[0]}/1024/1/1", "inproc/64/1/1"
+        # The pool's cliff row: the heap's is layout-bound and takes the backstop (#2030).
+        cliff, row = f"{pg.CLIFF_MODES[1]}/1024/1/1", "inproc/64/1/1"
         small = {cliff: {leg: 0.015 for leg in pg.LEGS}, row: {leg: 0.015 for leg in pg.LEGS}}
         self.assertAlmostEqual(pg.leg_factor(cliff, "p50_ns", small)[0], 1 + 5 * 0.015)
         self.assertAlmostEqual(pg.leg_factor(row, "p50_ns", small)[0], 1 + 3 * 0.015)
@@ -1437,8 +1438,16 @@ class AllocatorCliffFamily(unittest.TestCase):
             self.assertTrue(any("cliff at 4096 B" in w and "info" in w for w in warns), warns)
             self.assertIn("  i cliff-alloc-heap cliff at 4096 B", out.getvalue())
 
-    def test_a_faster_left_row_does_not_hide_a_slower_right_row(self):
+    def test_a_faster_left_row_does_not_hide_a_slower_right_row_pool(self):
+        """The pool family still reads the same-size rule at its null/flat threshold: x1.31."""
         cand = {**self.FAST_LEFT_CAND, 4096: [14.0] * 8}
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_cliff(self._samples({"cand": cand, "base": self.FAST_LEFT_MAIN},
+                                                   mode="cliff-alloc-pool"))
+        self.assertTrue(any("cliff at 4096 B" in f for f in fails), fails)
+
+    def test_a_faster_left_row_does_not_hide_a_slower_right_row(self):
+        cand = {**self.FAST_LEFT_CAND, 4096: [17.0] * 8}  # x1.59 of main: past the backstop
         with contextlib.redirect_stdout(io.StringIO()):
             fails, _ = pg.gate_cliff(self._samples({"cand": cand, "base": self.FAST_LEFT_MAIN}))
         self.assertTrue(any("cliff at 4096 B" in f for f in fails), fails)
@@ -1884,6 +1893,126 @@ class HistoryKeepsOneRunnersTuple(unittest.TestCase):
         a = {"p50_ns": 0.0, "p99_ns": 0.0, "deliv_s": 4.0e7}
         b = {"p50_ns": 0.0, "p99_ns": 0.0, "deliv_s": 4.4e7}
         self.assertEqual(pe.best_tuple([a, b]), b)
+
+
+class LayoutBoundRows(unittest.TestCase):
+    """@brief #2030: `cliff-alloc-heap` and `lkv-alloc-heap` are gated by instructions; their
+    timed legs hold only a backstop above any code-placement spread."""
+
+    KEYS = ("cliff-alloc-heap/1024/1/1", "cliff-alloc-heap/4096/1/1", "lkv-alloc-heap/1024/1/1")
+
+    def test_timed_legs_take_the_backstop_whatever_the_null_says(self):
+        null = {k: {leg: 0.01 for leg in pg.LEGS} for k in self.KEYS}
+        for k in self.KEYS:
+            for leg in pg.LEGS:
+                f, tick, src = pg.leg_factor(k, leg, null)
+                self.assertEqual(src, "layout")
+                self.assertFalse(tick)
+                self.assertAlmostEqual(f, 1 / pg.LAYOUT_BACKSTOP if leg == "deliv_s"
+                                       else pg.LAYOUT_BACKSTOP)
+        # the pool twin and the aged rows are not layout-bound
+        self.assertEqual(pg.leg_factor("cliff-alloc-pool/64/1/1", "p50_ns", {})[2], "flat")
+        self.assertEqual(pg.leg_factor("lkv-alloc-heap-aged/64/1/1", "p50_ns", {})[2], "flat")
+
+    def test_a_size_past_the_last_class_holds_the_wider_host_backstop(self):
+        """65584 B is the host malloc's: one binary reads 17.5 ns or 36 ns run to run."""
+        f = pg.leg_factor("cliff-alloc-heap/65584/1/1", "p50_ns", {})
+        self.assertEqual(f, (pg.HOST_SERVED_BACKSTOP, False, "layout"))
+        base = [17.5] * 8
+        v, _f, _s = pg.leg_verdict("cliff-alloc-heap/65584/1/1", "p50_ns", [36.0] * 8, base, {}, False)
+        self.assertFalse(v["fail"])
+
+    def test_a_layout_shift_of_x1_26_passes_on_every_leg(self):
+        """The worst spread measured over shuffled link orders (#2030) is x1.18-1.26."""
+        for k in self.KEYS:
+            for leg, sign in (("p50_ns", 1), ("mean_ns", 1), ("deliv_s", -1)):
+                base = [33.0, 33.2, 32.9, 33.1, 33.0, 33.3, 32.8, 33.1]
+                cand = [x * 1.26 ** sign for x in base]
+                v, _f, _s = pg.leg_verdict(k, leg, cand, base, {}, False)
+                self.assertFalse(v["fail"], (k, leg))
+
+    def test_a_slow_path_still_fails_the_timed_backstop(self):
+        """The #1768 shape (x2.7) is far past any layout."""
+        base = [17.6] * 8
+        v, _f, _s = pg.leg_verdict("lkv-alloc-heap/1024/1/1", "p50_ns", [47.0] * 8, base, {}, False)
+        self.assertTrue(v["fail"])
+
+    def test_cliff_heap_rows_pass_through_gate_cliff_under_a_layout_shift(self):
+        rows = {960: [12.1] * 8, 984: [12.2] * 8, 985: [18.3] * 8, 1040: [25.0] * 8}
+        shifted = {s: [x * 1.26 for x in v] for s, v in rows.items()}
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_cliff(AllocatorCliffFamily._samples({"cand": shifted, "base": rows}))
+        self.assertEqual(fails, [])
+
+    # --- the instruction ratchet ------------------------------------------------------------
+    OUT = "RESULT instr S=64 x100=10300\nRESULT instr S=1024 x100=10300\nRESULT instr S=4096 x100=23000\n"
+
+    def test_instr_rows_parse(self):
+        self.assertEqual(pg.instr_parse(self.OUT + "RESULT segdraw S=1 draws=1 bytes=1 max_block=1\n"),
+                         {64: 10300, 1024: 10300, 4096: 23000})
+
+    def _gate(self, cur, base):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            fails = pg.instr_gate(cur, base)
+        return fails, out.getvalue()
+
+    def test_identical_counts_pass(self):
+        base = pg.instr_parse(self.OUT)
+        self.assertEqual(self._gate(dict(base), base)[0], [])
+
+    def test_an_injected_ten_percent_of_instructions_fails_every_size(self):
+        base = pg.instr_parse(self.OUT)
+        cand = {s: int(v * 1.10) for s, v in base.items()}
+        fails, _ = self._gate(cand, base)
+        self.assertEqual(len(fails), 3, fails)
+
+    def test_one_stray_instruction_and_fewer_instructions_pass(self):
+        base = pg.instr_parse(self.OUT)
+        cand = {64: 10400, 1024: 9000, 4096: 23100}
+        self.assertEqual(self._gate(cand, base)[0], [])
+
+    def test_a_size_main_counts_and_the_candidate_does_not_fails(self):
+        base = pg.instr_parse(self.OUT)
+        fails, _ = self._gate({64: 10300, 1024: 10300}, base)
+        self.assertEqual(len(fails), 1)
+        self.assertIn("S=4096", fails[0])
+
+    def test_no_rows_on_a_runner_that_requires_the_counter_fails(self):
+        with unittest.mock.patch.dict("os.environ", {"PERF_GATE_REQUIRE_INSTR": "1"}):
+            fails, _ = self._gate({}, {})
+        self.assertEqual(len(fails), 1)
+        self.assertIn("required", fails[0])
+
+    def test_main_without_rows_is_a_bootstrap_not_a_zero_worst(self):
+        fails, out = self._gate(pg.instr_parse(self.OUT), {})
+        self.assertEqual(fails, [])
+        self.assertIn("bootstrap", out)
+        self.assertNotIn("x0.000", out)
+
+    def test_probe_of_an_unrunnable_binary_is_empty(self):
+        with unittest.mock.patch.object(pg, "fwd_output", side_effect=OSError):
+            self.assertEqual(pg.instr_probe(pathlib.Path("/nonexistent")), {})
+
+    def test_an_instr_fail_reaches_the_memory_ratchet_verdict(self):
+        base_out = self.OUT
+        cand_out = "RESULT instr S=64 x100=11400\nRESULT instr S=1024 x100=11400\nRESULT instr S=4096 x100=23000\n"
+        with tempfile.TemporaryDirectory() as d:
+            c, b = pathlib.Path(d, "c"), pathlib.Path(d, "b")
+            c.write_text("")
+            b.write_text("")
+            outs = {str(c): cand_out, str(b): base_out}
+            with unittest.mock.patch.object(pg, "fwd_output", side_effect=lambda p: outs[str(p)]), \
+                    unittest.mock.patch.object(pg, "mem_probe", return_value={}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                fails = pg.mem_ratchet(c, b)
+        self.assertTrue(any(f.startswith("instr S=64") for f in fails), fails)
+
+    def test_no_rows_on_either_arm_is_said_not_passed_silently(self):
+        fails, out = self._gate({}, {})
+        self.assertEqual(fails, [])
+        self.assertIn("no hardware counter", out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

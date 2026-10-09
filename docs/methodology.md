@@ -575,7 +575,7 @@ Details that make these trustworthy:
   same source* (one source built at three function alignments, so code layout moves the
   way an unrelated change moves it), **floor 3%**, and **capped at the flat thresholds**
   above: a measured null may tighten a row, never loosen it. The allocator-cliff rows
-  (`cliff-alloc-heap`, `cliff-alloc-pool`) take **5×** instead of 3×: banked on the bench
+  (`cliff-alloc-pool`; the heap twin is layout-bound and no longer takes a null, see below) take **5×** instead of 3×: banked on the bench
   CPUs, three of them false-failed a held-out A/A replay at 3× and none at 5×, and raising
   their floor to 5% instead cleared fewer. A stable row gets as little as
   3%, so a real 10% regression fails it. A row the null does not carry is gated on the flat
@@ -620,10 +620,39 @@ Details that make these trustworthy:
   Fitting on any three of the four windows and replaying the fourth gave false fails in 10 of
   54 sessions, all but two in the two daytime windows. The `cliff-alloc-heap` and
   `lkv-alloc-heap` rows move by up to x1.20 with code placement alone, more than three
-  alignment builds sample ([#2030](https://github.com/avatarsd-llc/libtracer/issues/2030)).
-  A same-source A/A between two layouts can
-  still fail these rows, as it could before #1807; the null cannot
-  remove that without loosening them, which was ruled out.
+  alignment builds sample ([#2030](https://github.com/avatarsd-llc/libtracer/issues/2030)),
+  so a null cannot price them without loosening them, which was ruled out. They are not
+  gated on time at all: see **The layout-bound rows** below.
+- **The layout-bound rows** ([#2030](https://github.com/avatarsd-llc/libtracer/issues/2030)).
+  `cliff-alloc-heap` and `lkv-alloc-heap` time one alloc/free in 3–60 ns, and where the linker
+  puts the code decides the figure: a 32 B shift of identical code moved them by x1.20, and one
+  source spread x1.18–1.26 over shuffled link orders (`-ffunction-sections`, lld
+  `--shuffle-sections`). A null fitted over layouts is wider than the flat threshold, so the
+  cap holds the row at the flat 15% and a layout crosses it; a null that loosened the row to
+  fit would stop catching a real 10%. So the verdict does not come from time. `bench_forward_heap`
+  counts the **user-mode instructions** of one heap-backend alloc/free pair at every cliff-ladder
+  size (`RESULT instr`, from `perf_event_open`, no clock): nine layouts of one source read the
+  same count at every size. The gate fails a size whose count is more than 2% and more than two
+  instructions over main's, so ten extra instructions (about 10% of a pair) fail on any layout. The timed
+  legs of these rows keep only a gross backstop of x1.5, which is above the worst measured
+  layout and still catches an allocator on a slow path (the #1768 class was x2.7); sizes past
+  the 64 KiB last class are not counted, because the host allocator's own state moves them run
+  to run (their timed legs hold a x3 backstop for the same reason). Replayed over nine layouts of
+  one source (default and eight shuffled link orders, ten rounds on the bench CPUs, 216 gate
+  sessions), these rows gave no false fail, the instruction count gave none in all 72 ordered
+  layout pairs, and ten injected extra instructions (+9.6%) failed all 48 sizes. A host with no hardware counter emits no rows and the gate says the ratchet did not run, except on the self-hosted bench runner, where `perf.yml` sets `PERF_GATE_REQUIRE_INSTR=1` and a missing counter fails the gate.
+
+  **What this gives up.** The count is of user-mode instructions only. A slowdown that adds none
+  (kernel work, since kernel mode is excluded, cache misses, an atomic or fence in place of a
+  plain store, mispredicts) is no longer held at the flat 15%: it passes up to **x1.5**. Before
+  this change these rows were held at the flat threshold or the null. The cliff-step check is
+  weaker in the same way: a new size-class cliff fails only when the right-hand row is slower
+  than main by the same-size rule, which is x1.5 for `cliff-alloc-heap`, so one up to x1.5 slower
+  passes (the test fixture for a slower right-hand row moved from x1.31 to x1.59 of main for that
+  reason; the pool family keeps the x1.31 fixture). The exact segment-draw ratchet is unaffected.
+  **Stated blind spot:** at 65584 B (past the last size class) there is no instruction row and the
+  time backstop is x3, so #2030's criterion 2 (a real extra-instructions regression must fail) is
+  not met at that size.
 - **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
   `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `compact-*` arms
@@ -643,7 +672,7 @@ Details that make these trustworthy:
   own fresh process, at every size of the cliff ladder: 960–1096 B in steps of 8 plus 985 B,
   and 2^k, 2^k − 48 and 2^k + 48 from 64 B to 64 KiB. They are batch rows (picosecond p50,
   every window at least 20 µs). The gate reads every size twice: against main at the same
-  size (the paired rule above, at the p50 threshold), and against the next smaller size,
+  size (the paired rule above, at the p50 threshold; for `cliff-alloc-heap` that threshold is the x1.5 backstop of the layout-bound rows below), and against the next smaller size,
   where a step of more than **1.75×** in the median and in a majority of pairs is a cliff.
   A cliff fails only when main does not have it and the row to the right of the step is
   itself slower than main by the same-size rule. One main has too is printed as a warning.
