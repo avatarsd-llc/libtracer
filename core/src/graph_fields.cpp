@@ -1078,9 +1078,9 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     // content of this `SETTINGS`, served verbatim. The graph owns the frame, the declarer owns
     // what is inside it. Behind the same flag bit as the payload-right rows, so a vertex that
     // declared neither does not walk.
-    const payload_record_t declared =
-        v->has_payload_rights() ? declared_record(v) : payload_record_t{};
-    const std::span<const std::byte> settings_children = declared.catalog();
+    mem::bytes_t declared(*tables_);
+    if (!declared_catalog(v, declared)) return std::unexpected(status_t::BACKPRESSURE);
+    const std::span<const std::byte> settings_children = mem::as_span(declared);
 
     // Staged on the table source (#1885); a refusal anywhere is BACKPRESSURE.
     mem::bytes_t point_body(*tables_);

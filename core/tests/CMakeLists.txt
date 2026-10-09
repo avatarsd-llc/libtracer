@@ -1724,6 +1724,13 @@ target_link_libraries(declaration_churn_test PRIVATE libtracer)
 libtracer_test_warnings(declaration_churn_test)
 add_test(NAME declaration_churn COMMAND declaration_churn_test)
 
+# #2032 — the two-sided sequence latch the declaration nodes publish through, under a tight
+# publish/read hammer, with an unlatched control arm that proves the hammer can see a tear.
+add_executable(seq_latch_test seq_latch_test.cpp)
+target_link_libraries(seq_latch_test PRIVATE libtracer)
+libtracer_test_warnings(seq_latch_test)
+add_test(NAME seq_latch COMMAND seq_latch_test)
+
 add_executable(nonretaining_contract_test nonretaining_contract_test.cpp)
 target_link_libraries(nonretaining_contract_test PRIVATE libtracer)
 libtracer_test_warnings(nonretaining_contract_test)

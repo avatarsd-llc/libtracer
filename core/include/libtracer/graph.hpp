@@ -50,6 +50,7 @@
 #include "libtracer/mem_string.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/reclaim.hpp"
+#include "libtracer/seq_latch.hpp"
 #include "libtracer/sink_slot.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/vertex.hpp"
@@ -3646,6 +3647,7 @@ class graph_t {
         ~immortal_list_t() {
             for (N* n = head.load(std::memory_order_relaxed); n != nullptr;) {
                 N* const next = n->next;
+                if constexpr (requires { n->release_storage(*src); }) n->release_storage(*src);
                 mem::drop_in(*src, n);
                 n = next;
             }
@@ -3657,7 +3659,9 @@ class graph_t {
             return nullptr;
         }
         /** @brief @p v's node, made empty and linked in when it has none. Under the unique map
-         *         lock. @retval nullptr The source refused the node; nothing was linked. */
+         *         lock. A whole-list walk, so a registration costs O(declaring addresses) — the
+         *         same walk a gated write makes, over the handful of addresses that declare.
+         *         @retval nullptr The source refused the node; nothing was linked. */
         [[nodiscard]] N* find_or_make(const vertex_t* v) noexcept {
             if (N* const n = find(v)) return n;
             N* const n = mem::make_in<N>(*src);
@@ -3670,24 +3674,59 @@ class graph_t {
     };
 
     /**
+     * @brief One grow-only table-source block a payload-right latch side points at: one
+     *        declaration encoded as 32-bit words, rewritten in place while it is big enough.
+     *
+     * The words: the row count, the catalog length in bytes, two words per row (its type, its
+     * right), then the catalog packed four bytes to a word. Every word is an atomic, written
+     * and read relaxed under the node's latch. A block too small for a new declaration is
+     * SUPERSEDED rather than freed, since a reader may still hold it: it stays on its
+     * successor's chain until the node is destroyed. A successor is at least twice its
+     * predecessor's size, so a side's chain holds fewer words than its live block — bounded by
+     * the largest declaration the address ever made, never by how often it made one.
+     */
+    struct payload_block_t {
+        std::size_t words = 0;                      /**< @brief Its capacity, fixed at birth. */
+        std::atomic<std::uint32_t>* word = nullptr; /**< @brief The words, after this header. */
+        payload_block_t* superseded = nullptr;      /**< @brief The block this one replaced. */
+    };
+
+    /** @brief One side of a payload-right latch: the block it reads. Stored with release once
+     *         the block is built and loaded with acquire, so a reader that meets a new block
+     *         also meets its construction, whichever side it is reading. */
+    struct payload_side_t {
+        std::atomic<payload_block_t*> block{nullptr}; /**< @brief The side's block, or null. */
+    };
+
+    /**
      * @brief One vertex address's declared payload-type → required-ACL-right rows (RFC-0014
      *        Am. 2) and `:schema` catalog (Am. 3), as a node of `%payload_rights_`.
      *
-     * The declaration is ONE immutable record, published through the build's LKV slot policy
-     * (`lkv_slot_t`, ADR-0069) — the library's one seam for publishing a value to lock-free
-     * readers and reclaiming the one it displaced. The rows and the catalog vary in size, so a
-     * re-registration cannot rewrite them in place under a reader; it builds a new record and
-     * the slot swaps it in, releasing the old one once no reader holds it. A reader retains the
-     * record it loaded, so it sees one declaration whole, never a mix of two.
-     *
-     * The record is an inline value: a `std::uint32_t` row count, the rows as
-     * @ref payload_right_t objects, then the catalog bytes (`%declare_payload_rights` writes
-     * it, `%payload_record_t` reads it).
+     * Published through the same two-sided `tr::seq_latch_t` as the admission hooks (#2032):
+     * a re-registration rewrites the inactive side's block in place, or grows it, and points
+     * readers at it. A reader scans the rows, or copies the catalog out, inside one latch read,
+     * so it sees one declaration whole and never a mix of two — lock-free under every slot and
+     * guard binding, with no reference count and nothing freed while the graph lives.
      */
     struct payload_right_node_t {
         const vertex_t* v = nullptr;          /**< @brief The declaring vertex. */
-        lkv_slot_t record;                    /**< @brief Its current declaration. */
+        tr::seq_latch_t<payload_side_t> decl; /**< @brief Its current declaration. */
         payload_right_node_t* next = nullptr; /**< @brief The previously linked node. */
+
+        /** @brief Publish @p rows and @p catalog, growing the inactive side's block from @p src
+         *         when it is too small. Under the unique map lock.
+         *         @retval false @p src refused a larger block; the declaration is unchanged. */
+        [[nodiscard]] bool publish(mem::block_source_t& src, std::span<const payload_right_t> rows,
+                                   std::span<const std::byte> catalog);
+        /** @brief The right the current declaration demands for @p type — `WRITE` when it has
+         *         no row for it. Lock-free. */
+        [[nodiscard]] acl_right_t right_for(wire::type_t type) const noexcept;
+        /** @brief Copy the current declaration's catalog into @p out, replacing its contents.
+         *         Lock-free. @retval false @p out's source refused the bytes. */
+        [[nodiscard]] bool copy_catalog(mem::bytes_t& out) const noexcept;
+        /** @brief Return every block either side ever held to @p src. Only when no reader can
+         *         remain: the owning list's destructor. */
+        void release_storage(mem::block_source_t& src) noexcept;
     };
 
     /**
@@ -3709,37 +3748,28 @@ class graph_t {
      */
     immortal_list_t<payload_right_node_t> payload_rights_;
 
-    /** @brief A loaded payload-right record, held for as long as its rows or catalog are read. */
-    struct payload_record_t {
-        value_ref_t held; /**< @brief The record; empty when the vertex has none. */
-        /** @brief The declared rows, in declaration order. */
-        [[nodiscard]] std::size_t row_count() const noexcept;
-        /** @brief Row @p i, copied out of the record. Precondition: `i < row_count()`. */
-        [[nodiscard]] payload_right_t row(std::size_t i) const noexcept;
-        /** @brief The declared `:schema` catalog bytes — empty when none was declared. */
-        [[nodiscard]] std::span<const std::byte> catalog() const noexcept;
-    };
-
     /** @brief Publish @p rows and @p catalog as @p v's declaration and set its flag. Call with
      *         `map_mutex_` held UNIQUE (the registration hold). A declaration with neither is
-     *         ignored. @retval false The table source refused the record or the node; the
+     *         ignored. @retval false The table source refused a block or the node; the
      *         previous declaration, if any, still stands. */
     [[nodiscard]] bool declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
                                               std::span<const std::byte> catalog);
 
-    /** @brief @p v's current payload-right record — empty unless it declared one. Lock-free
-     *         wherever the bound LKV slot's read is; the caller has already tested the flag. */
-    [[nodiscard]] payload_record_t declared_record(const vertex_t* v) const noexcept;
+    /** @brief Copy @p v's declared `:schema` catalog into @p out (empty unless it declared
+     *         one). Lock-free, and behind the flag bit: a vertex that declared nothing, or a
+     *         previous occupant's node, answers empty.
+     *         @retval false @p out's source refused the bytes. */
+    [[nodiscard]] bool declared_catalog(const vertex_t* v, mem::bytes_t& out) const noexcept;
 
     /** @brief The right @p v demands for a written TLV of @p type — `WRITE` unless @p v
-     *         declared a row for it. The caller has already tested the flag. */
+     *         declared a row for it. Lock-free; the caller has already tested the flag. */
     [[nodiscard]] acl_right_t declared_write_right(const vertex_t* v, wire::type_t type) const;
 
     /**
      * @brief A @ref hook_t held as two atomic words, so a reader can copy it out while the
      *        writer republishes the node it lives in (#2032).
      *
-     * Every access is RELAXED: the ordering is the admission node's latch, never the words'.
+     * Every access is RELAXED: the ordering is the owning node's latch, never the words'.
      */
     template <class H>
     struct atomic_hook_t {
@@ -3781,29 +3811,12 @@ class graph_t {
     /**
      * @brief One vertex address's ADMISSION filters (`handlers_t::on_admit` and
      *        `handlers_t::on_app_field_admit`), as a node of `%admissions_`, published
-     *        through a two-sided seqlock latch (#2032).
+     *        through a two-sided `tr::seq_latch_t` (#2032).
      *
-     * **Why a latch, and why two sides.** The hooks are fixed-size two-word values, so a
-     * re-registration can rewrite them IN PLACE and nothing is ever reclaimed — the
-     * ADR-0063 discipline: no reclamation problem because nothing is freed. What a rewrite
-     * must not do is let a reader copy a hook's `fn` from one registration and its `ctx` from
-     * the next. The node therefore holds the hooks twice. Readers copy from the side the
-     * sequence's low bit names; the writer rewrites only the OTHER side, then advances the
-     * sequence to point readers at it. A reader whose side was rewritten under it sees the
-     * sequence move and copies again.
-     *
-     * **Lock-free, not merely obstruction-free.** A reader retries only when a publish
-     * COMPLETED during its copy — progress — and never waits on a writer: a writer preempted
-     * mid-rewrite is rewriting the side no new reader reads. So a high-priority reader that
-     * preempts the registering thread on one core cannot spin on it, which a one-sided
-     * seqlock would allow.
-     *
-     * **Ordering.** The writer, serialized by the unique map lock: a release fence, the
-     * relaxed stores to the inactive side, then a release store of the sequence. The reader:
-     * an acquire load of the sequence, the relaxed loads, an acquire fence, then a relaxed
-     * re-load that must match. A reader that read any word the writer stored after its fence
-     * synchronizes with that fence, so its re-load sees the sequence the writer had already
-     * published, and it retries.
+     * The hooks are fixed-size two-word values, so a re-registration rewrites them IN PLACE
+     * and nothing is ever reclaimed — the ADR-0063 discipline. The latch is what stops a reader
+     * copying a hook's `fn` from one registration and its `ctx` from the next, and its two
+     * sides are what keep that read lock-free: see `seq_latch.hpp`.
      */
     struct admission_node_t {
         /** @brief One side of the latch: every hook the node carries. */
@@ -3820,38 +3833,31 @@ class graph_t {
              *         `config_t::kCreationHooks`. */
             [[no_unique_address]] creation_slot_t on_create{};
         };
-        const vertex_t* v = nullptr;       /**< @brief The declaring vertex. */
-        std::atomic<std::uint32_t> seq{0}; /**< @brief Its low bit names the side readers read. */
-        std::array<side_t, 2> sides{};     /**< @brief The latch's two copies of the hooks. */
-        admission_node_t* next = nullptr;  /**< @brief The previously linked node. */
+        const vertex_t* v = nullptr;      /**< @brief The declaring vertex. */
+        tr::seq_latch_t<side_t> hooks;    /**< @brief The current registration's hooks. */
+        admission_node_t* next = nullptr; /**< @brief The previously linked node. */
 
         /** @brief Copy out the current registration's hook @p m — one untorn latch read. */
         template <class M>
         [[nodiscard]] auto read(M side_t::*m) const noexcept {
-            for (;;) {
-                const std::uint32_t s = seq.load(std::memory_order_acquire);
-                const auto hook = (sides[s & 1U].*m).load();
-                std::atomic_thread_fence(std::memory_order_acquire);
-                if (seq.load(std::memory_order_relaxed) == s) return hook;
-            }
+            return hooks.read([m](const side_t& side) { return (side.*m).load(); });
         }
         /** @brief Every hook of the current registration, plainly. Writer side only: under the
          *         unique map lock nothing else publishes, so no latch read is needed. */
-        [[nodiscard]] admission_hooks_t current() const noexcept {
-            const side_t& c = sides[seq.load(std::memory_order_relaxed) & 1U];
+        [[nodiscard]] admission_hooks_t current() noexcept {
+            const side_t& c = hooks.current();
             return {c.on_admit.load(), c.on_app_field_admit.load(), c.on_app_field_read.load(),
                     c.on_create.load()};
         }
         /** @brief Publish @p h as the current registration's hooks. Under the unique map lock. */
         void publish(const admission_hooks_t& h) noexcept {
-            const std::uint32_t s = seq.load(std::memory_order_relaxed);
-            side_t& next_side = sides[(s + 1U) & 1U];
-            std::atomic_thread_fence(std::memory_order_release);
-            next_side.on_admit.store(h.on_admit);
-            next_side.on_app_field_admit.store(h.on_app_field_admit);
-            next_side.on_app_field_read.store(h.on_app_field_read);
-            next_side.on_create.store(h.on_create);
-            seq.store(s + 1U, std::memory_order_release);
+            (void)hooks.publish([&h](side_t& side) {
+                side.on_admit.store(h.on_admit);
+                side.on_app_field_admit.store(h.on_app_field_admit);
+                side.on_app_field_read.store(h.on_app_field_read);
+                side.on_create.store(h.on_create);
+                return true;
+            });
         }
     };
 

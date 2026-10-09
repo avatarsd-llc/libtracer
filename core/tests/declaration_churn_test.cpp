@@ -17,14 +17,16 @@
  * 1. N register / write / retire cycles at ONE path, each with its own `on_admit`, its own rows
  *    and its own catalog, hold the source's live blocks and bytes FLAT after the first cycle;
  * 2. every cycle is served the CURRENT registration's declarations, never a previous occupant's:
- *    the filter that runs, the right the gate demands, and the `:schema` catalog served;
+ *    the filter that runs, the right the gate demands, and the `:schema` catalog served —
+ *    including a BARE occupant that declares nothing after one that declared everything, which
+ *    shares the predecessor's node and must still see none of it;
  * 3. `set_creation_hook`, installed again and again, rewrites the same node in place — flat —
  *    and carries the vertex's filter over unchanged;
  * 4. a writer and a `:schema` reader racing the churn from another thread never see a torn
  *    declaration: no filter is ever called with another registration's context, and every
- *    catalog served is one registration's, whole (or none, for a read that met a retirement). (Its
- * teeth are under ThreadSanitizer and on a weakly ordered core; on the host it is the smoke test of
- * the latch.)
+ *    catalog served is one registration's, whole (or none, for a read that met a retirement).
+ *    This is the graph-level smoke test; the latch's own hammer, with a control arm that proves
+ *    it can see a tear, is `seq_latch_test`.
  *
  * Vector 1 fails on the pre-#2032 tree: the live-block count rises by two every cycle.
  */
@@ -146,6 +148,12 @@ admission_t record_admit(void* ctx, const tr::graph::value_t&, const write_ctx_t
     return std::nullopt;
 }
 
+/** @brief A creation hook that registers nothing — only its installation is under test. */
+tr::graph::result_t<void> create_nothing(void*, vertex_handle_t, std::span<const std::byte>,
+                                         std::string_view, const tr::view::rope_t&) {
+    return std::unexpected(status_t::NOT_FOUND);
+}
+
 /** @brief True iff @p hay contains @p needle as a contiguous run. */
 bool contains(std::span<const std::byte> hay, std::span<const std::byte> needle) {
     return std::search(hay.begin(), hay.end(), needle.begin(), needle.end()) != hay.end();
@@ -189,7 +197,7 @@ struct sample_t {
  */
 void test_reregistration_is_flat_and_current() {
     std::printf("vectors 1-2 — re-registration churn at one path:\n");
-    constexpr int kCycles = 32;
+    constexpr int kCycles = 33;
     counting_source_t src;
     {
         graph_t g(src);
@@ -200,6 +208,12 @@ void test_reregistration_is_flat_and_current() {
         }
         const path_t path("/ctl");
         const std::span<const std::byte> key = path.key();
+        // What `:schema` serves an occupant that declared no catalog: what a BARE cycle must get.
+        std::vector<std::byte> no_catalog;
+        if (const auto v = g.register_vertex_key(key, role_t::STORED_VALUE)) {
+            no_catalog = schema_bytes(g);
+            (void)g.retire(*v);
+        }
         int last_seen = -1;
         std::vector<occupant_t> occupants;
         occupants.reserve(kCycles);
@@ -207,18 +221,25 @@ void test_reregistration_is_flat_and_current() {
         bool hooks_current = true;
         bool rows_current = true;
         bool catalog_current = true;
+        bool bare_inherits_nothing = true;
         bool cycles_ok = true;
         for (int i = 0; i < kCycles; ++i) {
+            // Three kinds of occupant in turn: SPEC demands CREATE, SPEC demands WRITE, and a BARE
+            // one that declares nothing at all after an occupant that declared everything.
+            const int kind = i % 3;
+            const bool bare = kind == 2;
             occupants.push_back(occupant_t{i, &last_seen});
             handlers_t h;
-            h.on_admit = {&record_admit, &occupants.back()};
-            const bool even = (i % 2) == 0;
-            const payload_right_t rows[] = {
-                payload_right_t{type_t::SPEC, even ? acl_right_t::CREATE : acl_right_t::WRITE}};
+            if (!bare) h.on_admit = {&record_admit, &occupants.back()};
+            const payload_right_t rows[] = {payload_right_t{
+                type_t::SPEC, kind == 0 ? acl_right_t::CREATE : acl_right_t::WRITE}};
             std::vector<std::byte> catalog;
-            tr::wire::emit_name(catalog, even ? "even" : "odd!");
+            if (!bare) tr::wire::emit_name(catalog, kind == 0 ? "even" : "odd!");
 
-            const auto v = g.register_vertex_key(key, role_t::STORED_VALUE, h, {}, rows, catalog);
+            const auto v = g.register_vertex_key(
+                key, role_t::STORED_VALUE, h, {},
+                bare ? std::span<const payload_right_t>{} : std::span<const payload_right_t>(rows),
+                catalog);
             if (!v) {
                 check(false, "the path registers again");
                 return;
@@ -229,19 +250,39 @@ void test_reregistration_is_flat_and_current() {
 
             last_seen = -1;
             const auto w = g.write(*v, spec_payload(), "peer-c");
-            rows_current = rows_current && (w.has_value() == even);
-            hooks_current = hooks_current && (even ? last_seen == i : last_seen == -1);
-            catalog_current = catalog_current && contains(schema_bytes(g), catalog);
+            const bool spec_admitted = kind == 0;  // only CREATE-for-SPEC lets peer-c through
+            rows_current = rows_current && (w.has_value() == spec_admitted);
+            hooks_current = hooks_current && (spec_admitted ? last_seen == i : last_seen == -1);
+            const std::vector<std::byte> served = schema_bytes(g);
+            catalog_current =
+                catalog_current && (bare ? served == no_catalog : contains(served, catalog));
+            if (bare) {
+                // Nothing of the previous occupant answers: no filter ran above, SPEC took the
+                // WRITE fallback, the catalog is the empty one, and a creation hook installed now
+                // carries no filter over from the node the address shares with its predecessor.
+                if constexpr (tr::graph::config_t::kCreationHooks)
+                    cycles_ok = cycles_ok &&
+                                g.set_creation_hook(*v, {&create_nothing, nullptr}).has_value();
+                cycles_ok = cycles_ok && g.write(path_t("/ctl:acl"),
+                                                 make_value(allow("peer-c", acl_right_t::WRITE)))
+                                             .has_value();
+                last_seen = -1;
+                cycles_ok = cycles_ok && g.write(*v, spec_payload(), "peer-c").has_value();
+                bare_inherits_nothing = bare_inherits_nothing && last_seen == -1;
+            }
 
             cycles_ok = cycles_ok && g.retire(*v).has_value();
             drain_parked();
             after.push_back(sample_t{src.live(), src.stats().in_use});
         }
-        check(cycles_ok, "every cycle registers, authorizes peer-c and retires");
+        check(cycles_ok, "every cycle registers, authorizes its peer, writes and retires");
         check(hooks_current, "every cycle's write ran THAT cycle's filter, never an earlier one");
         check(rows_current, "every cycle's gate demanded THAT cycle's right for SPEC");
-        check(catalog_current, "every cycle's :schema served THAT cycle's catalog");
-        // The first cycle draws the nodes; the second is the first true re-registration.
+        check(catalog_current, "every cycle's :schema served THAT cycle's catalog, or none");
+        check(bare_inherits_nothing,
+              "a bare occupant meets no filter of its predecessor, even after a creation hook");
+        // The first two cycles draw the nodes and both latch sides' blocks; from then on every
+        // cycle, declaring or bare, reuses them.
         const sample_t base = after[1];
         bool flat = true;
         for (std::size_t i = 2; i < after.size(); ++i)
@@ -255,12 +296,6 @@ void test_reregistration_is_flat_and_current() {
 }
 
 // --- 3. the creation hook -------------------------------------------------------------------
-
-/** @brief A creation hook that registers nothing — only its installation is under test. */
-tr::graph::result_t<void> create_nothing(void*, vertex_handle_t, std::span<const std::byte>,
-                                         std::string_view, const tr::view::rope_t&) {
-    return std::unexpected(status_t::NOT_FOUND);
-}
 
 /**
  * @brief Vector 3 — installing the creation hook again and again rewrites one node, and the
@@ -328,6 +363,7 @@ admission_t admit_two(void* ctx, const tr::graph::value_t&, const write_ctx_t&) 
 void test_racing_reader_sees_whole_declarations() {
     std::printf("vector 4 — a reader racing the churn:\n");
     constexpr int kCycles = 2000;
+    constexpr int kMinReads = 2000;
     graph_t g;
     const path_t path("/ctl");
     const std::span<const std::byte> key = path.key();
@@ -361,8 +397,11 @@ void test_racing_reader_sees_whole_declarations() {
             reads.fetch_add(1, std::memory_order_relaxed);
         }
     });
+    // The churn starts once the reader is reading, and runs until it has raced enough reads:
+    // left to the scheduler, the cycles can all finish before the reader's first copy.
+    while (reads.load(std::memory_order_relaxed) == 0) std::this_thread::yield();
     bool cycles_ok = true;
-    for (int i = 0; i < kCycles; ++i) {
+    for (int i = 0; i < kCycles || reads.load(std::memory_order_relaxed) < kMinReads; ++i) {
         const bool odd = (i % 2) != 0;
         handlers_t h;
         h.on_admit = odd ? tr::graph::admit_hook_t{&admit_one, &one}
@@ -378,6 +417,7 @@ void test_racing_reader_sees_whole_declarations() {
     check(foreign_catalogs.load() == 0,
           "every catalog served was one registration's, whole, or none (a racing retirement)");
     std::printf("    (%d racing reads)\n", reads.load());
+    check(reads.load() >= kMinReads, "and the reader really raced the churn");
 }
 
 }  // namespace

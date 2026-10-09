@@ -15,6 +15,7 @@
 #include <map>
 #include <memory_resource>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string_view>
 #include <type_traits>
@@ -789,29 +790,123 @@ bool graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_
                                      std::span<const std::byte> catalog) {
     // The overwhelming majority: no node, no flag, no cost.
     if (rows.empty() && catalog.empty()) return true;
-    // The record is built WHOLE before it is published, so a reader that loads it sees this
-    // declaration entire; the slot then swaps it in for whatever this address declared before
-    // and releases that one once no reader holds it (#2032). A refusal anywhere publishes
-    // nothing and leaves the previous record standing. A count that would not fit its
-    // `std::uint32_t` makes a record `make_inline` refuses, so the cast below never truncates.
-    const auto n = static_cast<std::uint32_t>(rows.size());
-    value_t* const record =
-        value_t::make_inline(sizeof n + rows.size_bytes() + catalog.size(), *tables_);
-    payload_right_node_t* const node =
-        record != nullptr ? payload_rights_.find_or_make(v) : nullptr;
-    if (node != nullptr) {
-        std::byte* out = record->inline_bytes().data();
-        std::memcpy(out, &n, sizeof n);
-        if (!rows.empty()) std::memcpy(out + sizeof n, rows.data(), rows.size_bytes());
-        if (!catalog.empty())
-            std::memcpy(out + sizeof n + rows.size_bytes(), catalog.data(), catalog.size());
-    }
-    if (node == nullptr || !node->record.store(record)) {
-        value_t::release(record);
-        return false;
-    }
+    // ONE node per address, republished in place through its latch (#2032): a reader sees
+    // this declaration or the previous one, whole, and a refusal leaves the previous standing.
+    payload_right_node_t* const node = payload_rights_.find_or_make(v);
+    if (node == nullptr || !node->publish(*tables_, rows, catalog)) return false;
     v->mark_payload_rights();
     return true;
+}
+
+namespace {
+
+/** @brief Words a payload-right block header takes: the row count and the catalog length. */
+constexpr std::size_t kPayloadHeadWords = 2;
+/** @brief Words one payload-right row takes: its type and its right. */
+constexpr std::size_t kPayloadRowWords = 2;
+/** @brief Bytes of catalog one word carries. */
+constexpr std::size_t kCatalogBytesPerWord = sizeof(std::uint32_t);
+
+/** @brief The words a declaration of @p rows rows and @p catalog_bytes catalog bytes needs. */
+constexpr std::size_t payload_words(std::size_t rows, std::size_t catalog_bytes) noexcept {
+    return kPayloadHeadWords + kPayloadRowWords * rows +
+           (catalog_bytes + kCatalogBytesPerWord - 1) / kCatalogBytesPerWord;
+}
+
+}  // namespace
+
+bool graph_t::payload_right_node_t::publish(mem::block_source_t& src,
+                                            std::span<const payload_right_t> rows,
+                                            std::span<const std::byte> catalog) {
+    const std::size_t need = payload_words(rows.size(), catalog.size());
+    return decl.publish([&](payload_side_t& side) {
+        payload_block_t* block = side.block.load(std::memory_order_relaxed);
+        if (block == nullptr || block->words < need) {
+            // Grow: at least double, so the superseded chain stays under the live block.
+            const std::size_t words = std::max(need, block != nullptr ? 2 * block->words : need);
+            void* const raw = src.try_alloc(sizeof(payload_block_t) + words * sizeof(std::uint32_t),
+                                            alignof(payload_block_t));
+            if (raw == nullptr) return false;
+            auto* const grown = new (raw) payload_block_t{words, nullptr, block};
+            auto* const first = reinterpret_cast<std::atomic<std::uint32_t>*>(
+                static_cast<std::byte*>(raw) + sizeof(payload_block_t));
+            for (std::size_t i = 0; i < words; ++i) new (first + i) std::atomic<std::uint32_t>(0);
+            grown->word = std::launder(first);
+            // Release: a reader that loads this pointer, on either side, meets the
+            // construction above. The superseded block stays readable on the chain.
+            side.block.store(grown, std::memory_order_release);
+            block = grown;
+        }
+        std::atomic<std::uint32_t>* const w = block->word;
+        w[0].store(static_cast<std::uint32_t>(rows.size()), std::memory_order_relaxed);
+        w[1].store(static_cast<std::uint32_t>(catalog.size()), std::memory_order_relaxed);
+        std::size_t at = kPayloadHeadWords;
+        for (const payload_right_t& row : rows) {
+            w[at++].store(std::to_underlying(row.type), std::memory_order_relaxed);
+            w[at++].store(std::to_underlying(row.right), std::memory_order_relaxed);
+        }
+        for (std::size_t i = 0; i < catalog.size(); i += kCatalogBytesPerWord) {
+            std::uint32_t packed = 0;
+            std::memcpy(&packed, catalog.data() + i,
+                        std::min(kCatalogBytesPerWord, catalog.size() - i));
+            w[at++].store(packed, std::memory_order_relaxed);
+        }
+        return true;
+    });
+}
+
+acl_right_t graph_t::payload_right_node_t::right_for(wire::type_t type) const noexcept {
+    // Every index is bounded by the block's own capacity: a copy torn by a concurrent rewrite
+    // is discarded by the latch only after it was made, so it must not reach past the block.
+    return decl.read([type](const payload_side_t& side) {
+        const payload_block_t* const block = side.block.load(std::memory_order_acquire);
+        if (block == nullptr) return acl_right_t::WRITE;
+        const std::atomic<std::uint32_t>* const w = block->word;
+        const std::size_t rows =
+            std::min<std::size_t>(w[0].load(std::memory_order_relaxed),
+                                  (block->words - kPayloadHeadWords) / kPayloadRowWords);
+        for (std::size_t i = 0; i < rows; ++i) {
+            const std::size_t at = kPayloadHeadWords + kPayloadRowWords * i;
+            if (w[at].load(std::memory_order_relaxed) == std::to_underlying(type))
+                return static_cast<acl_right_t>(w[at + 1].load(std::memory_order_relaxed));
+        }
+        return acl_right_t::WRITE;
+    });
+}
+
+bool graph_t::payload_right_node_t::copy_catalog(mem::bytes_t& out) const noexcept {
+    // A retry overwrites what a torn copy left in `out`, so only the validated copy remains.
+    return decl.read([&out](const payload_side_t& side) {
+        out.clear();
+        const payload_block_t* const block = side.block.load(std::memory_order_acquire);
+        if (block == nullptr) return true;
+        const std::atomic<std::uint32_t>* const w = block->word;
+        const std::size_t rows =
+            std::min<std::size_t>(w[0].load(std::memory_order_relaxed),
+                                  (block->words - kPayloadHeadWords) / kPayloadRowWords);
+        const std::size_t first = kPayloadHeadWords + kPayloadRowWords * rows;
+        const std::size_t len = std::min<std::size_t>(
+            w[1].load(std::memory_order_relaxed), (block->words - first) * kCatalogBytesPerWord);
+        if (!out.resize_for_overwrite(len)) return false;
+        for (std::size_t i = 0; i < len; i += kCatalogBytesPerWord) {
+            const std::uint32_t packed =
+                w[first + i / kCatalogBytesPerWord].load(std::memory_order_relaxed);
+            std::memcpy(out.data() + i, &packed, std::min(kCatalogBytesPerWord, len - i));
+        }
+        return true;
+    });
+}
+
+void graph_t::payload_right_node_t::release_storage(mem::block_source_t& src) noexcept {
+    for (payload_side_t& side : decl.sides()) {
+        for (payload_block_t* b = side.block.load(std::memory_order_relaxed); b != nullptr;) {
+            payload_block_t* const older = b->superseded;
+            const std::size_t bytes = sizeof(payload_block_t) + b->words * sizeof(std::uint32_t);
+            b->~payload_block_t();  // the atomic words are trivially destructible
+            src.release(b, bytes, alignof(payload_block_t));
+            b = older;
+        }
+    }
 }
 
 bool graph_t::declare_admission(vertex_t* v, const handlers_t& h) {
@@ -865,37 +960,21 @@ creation_hook_t graph_t::creation_hook_for(const vertex_t* v) const noexcept {
     return {};
 }
 
-graph_t::payload_record_t graph_t::declared_record(const vertex_t* v) const noexcept {
-    // Only a flagged vertex gets here, the node is immortal, and the slot hands back a retained
-    // record — the current declaration, whole, for as long as the caller holds it.
-    const payload_right_node_t* const n = payload_rights_.find(v);
-    return {n != nullptr ? n->record.load() : value_ref_t{}};
-}
-
-std::size_t graph_t::payload_record_t::row_count() const noexcept {
-    std::uint32_t n = 0;
-    if (held) std::memcpy(&n, held->only().bytes().data(), sizeof n);
-    return n;
-}
-
-payload_right_t graph_t::payload_record_t::row(std::size_t i) const noexcept {
-    payload_right_t r{};
-    std::memcpy(&r, held->only().bytes().data() + sizeof(std::uint32_t) + i * sizeof r, sizeof r);
-    return r;
-}
-
-std::span<const std::byte> graph_t::payload_record_t::catalog() const noexcept {
-    if (!held) return {};
-    return held->only().bytes().subspan(sizeof(std::uint32_t) +
-                                        row_count() * sizeof(payload_right_t));
+bool graph_t::declared_catalog(const vertex_t* v, mem::bytes_t& out) const noexcept {
+    // Behind the flag bit, so a vertex that declared nothing does not walk; a node is immortal.
+    const payload_right_node_t* const n =
+        v->has_payload_rights() ? payload_rights_.find(v) : nullptr;
+    if (n == nullptr) {
+        out.clear();
+        return true;
+    }
+    return n->copy_catalog(out);
 }
 
 acl_right_t graph_t::declared_write_right(const vertex_t* v, wire::type_t type) const {
     // The vertex's own current table, first match wins; an undeclared type takes `WRITE`.
-    const payload_record_t record = declared_record(v);
-    for (std::size_t i = 0, n = record.row_count(); i < n; ++i)
-        if (const payload_right_t row = record.row(i); row.type == type) return row.right;
-    return acl_right_t::WRITE;
+    const payload_right_node_t* const n = payload_rights_.find(v);
+    return n != nullptr ? n->right_for(type) : acl_right_t::WRITE;
 }
 
 void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
