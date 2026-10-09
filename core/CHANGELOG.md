@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-09
+
 ### Added
 
 - **A public little-endian codec: `wire::load_le`, `wire::store_le` and `wire::append_le`
@@ -174,250 +176,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`graph_t::trim_tables()`
   ([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778)).** Releases the free slabs
   of a default graph's own table sub-pool; a no-op on a graph with an injected root.
-
-### Breaking
-
-- **The MCU default root is a static arena, with no heap behind it
-  ([#1783](https://github.com/avatarsd-llc/libtracer/issues/1783), ADR-0083 Decision 4).** On a
-  build whose `config_t::kSlabPool` is `false` (the ESP-IDF component binds it), the root a
-  `graph_t` takes when it is handed no source used to be the platform heap. It is now
-  `tr::mem::mcu_root()`: one static array of the new trait `kArenaBytes` (default 32,768) in
-  `.bss`, carved into the classes of `kSizeClasses`, with value, table and net sub-pools derived
-  from it as on the host. `tr::mem::default_root()`, `value_source()`, `table_source()`,
-  `net_source()`, `net_backend()` and the per-value `heap_backend()` all draw from it there.
-  - **What changes for an MCU application.** The default RAM is reserved at link time and fixed:
-    the arena never shrinks, and a block a class returns is reused by that class only. An
-    exhausted arena refuses: a write answers `BACKPRESSURE`, and a registration at init aborts
-    naming the sub-pool and the bytes it needed. A request larger than the last class is carved
-    at its own size and reused only at that size. The `:stats.mem.values`, `.tables` and `.net`
-    seams, which answered `SCHEMA_NOT_FOUND` there before, now report the sub-pools. The host
-    default (`kSlabPool` `true`) is unchanged.
-  - **Migration.** Size the arena: `static constexpr std::size_t kArenaBytes = …;` in the
-    override fragment (on ESP-IDF, `CONFIG_LIBTRACER_ARENA_BYTES`), against the peak the
-    `:stats.mem.*` seams report. A UDP link left on the default sources draws its receive
-    scratch and each receive segment at the datagram cap, 64 KiB apiece unless its SPEC sets
-    `max_frame`; give it its own receive backend or a `max_frame`, or size the arena for it. An
-    application that wants the old heap default injects it: `graph_t g(tr::mem::heap_source());`.
-  - New: `tr::mem::arena_t`, `arena_pool_t`, `arena_root_t`, `mcu_root_t` and `mcu_root()`
-    (`libtracer/mem_arena.hpp`), and `default_config_t::kArenaBytes` /
-    `tr::mem::kArenaBytes`.
-- **`tr::mem::source_allocator_t` and `libtracer/mem_source_alloc.hpp` are removed
-  ([#1783](https://github.com/avatarsd-llc/libtracer/issues/1783)).** The std-`Allocator`
-  adapter over a block source threw on exhaustion, and nothing in core used it once the core
-  containers replaced its sites (#1776, #1778). Migration: hold the elements in a
-  `tr::mem::block_array_t` over the same source (failable growth, by value), or, in host-only
-  code that keeps a std container, `std::pmr` over `tr::mem::source_resource_t`
-  (`libtracer/mem_source_pmr.hpp`), which stays as host interop.
-- **A write to a missing vertex is refused by default, and a parent opts in with a creation
-  hook ([#1945](https://github.com/avatarsd-llc/libtracer/issues/1945), RFC-0030 §7).** A data
-  write whose target, or an intermediate level, does not exist answers `NOT_FOUND` and creates
-  nothing, whatever its origin: `graph_t::write(const path_t&, …)`, a remote `FWD{WRITE}`, or a
-  branch write's landing site. The local `mkdir -p` walk is gone, and with it RFC-0005
-  Amendment 1's local/remote asymmetry.
-  - `graph_t::ensure_vertex` is removed. Register the vertex (`try_register_vertex`,
-    `register_vertex_key`), or install a creation hook on its parent.
-  - New `graph_t::set_creation_hook(parent, creation_hook_t)` and the `creation_hook_t` type.
-    On a miss below a hooked parent, the parent's `CREATE` right is checked for the writer
-    (`PERMISSION_DENIED`; neither the hook nor the payload is touched, so a denied writer draws
-    nothing), then the hook is shown the missing child's key, the writer's subject and the
-    payload, and registers the child itself or refuses (`NOT_FOUND`). Any other status the hook
-    answers, such as `BACKPRESSURE`, passes through to the writer (RFC-0030 §7.2 erratum). A
-    level the hook created is the parent of the next.
-  - New `graph_t::find_or_create(key, caller, payload)`: the resolve-or-create step for a
-    fieldless data write, the only request that may create; the remote terminus calls it. A
-    read or a `:field` write to a missing vertex is a plain `NOT_FOUND`, and never reaches a
-    hook or the `CREATE` gate.
-  - New compile-time policy `config_t::kCreationHooks`, **`false` on every profile**. Off, no
-    vertex has a hook slot, every miss refuses and draws nothing, and `set_creation_hook`
-    answers `SCHEMA_NOT_FOUND`. Turn it on with `static constexpr bool kCreationHooks = true;`
-    in `libtracer/config_override.hpp`. The core test preset turns it on.
-  - The `graph_write_creates` example is now `graph_creation_hook`.
-- **`target_key_t` is drawn from the graph's table source
-  ([#1912](https://github.com/avatarsd-llc/libtracer/issues/1912)).** It was a
-  `std::shared_ptr<const std::vector<std::byte>>`, two platform-heap draws per path-target
-  admission outside the seam; it is now an intrusive handle over one block of the source (the
-  count, the source and the key bytes). `*key` is a `std::span<const std::byte>` rather than a
-  vector. `try_make_target_key(src, key)` takes the source and a span instead of a vector it
-  moved from, and answers null when the source refuses, so the vector built outside the probe
-  is gone. The handle keeps the `shared_ptr`'s width, so `sizeof` of `subscriber_t`,
-  `edge_view_t` and `pub_edge_t` is unchanged.
-
-- **The graph core's remaining global-heap draws move onto the table source
-  ([#1885](https://github.com/avatarsd-llc/libtracer/issues/1885)).**
-  - `subscriber_remote_t::link` and `caller` are `mem::string_t`, and the record is built over a
-    source: `subscriber_remote_t(src)`. `subscriber_t::ensure_remote(src)` takes the source and
-    returns a pointer, `nullptr` when it refuses.
-  - `vertex_t::snapshot_edges` takes its overflow buffer as `mem::block_array_t<edge_view_t>&`.
-    `graph_t::fan_out` builds it over a frame on the publishing call's stack first and the table
-    source past it; the per-thread overflow vector is gone.
-  - `wire::path_key` returns `std::optional<std::span<const std::byte>>`, borrowed from the PATH
-    node, instead of copying the key into a `std::vector`.
-  - A subscribe whose target key cannot be held, or whose cold half the table source refuses,
-    answers `BACKPRESSURE` (it was refused as `TYPE_MISMATCH`, or admitted without its
-    `delivery_compact` opt-in, before).
-  - `:children`, `:schema`, `:settings`, `:settings.app`, `:stats` reads, `set_identity` and the
-    local target `subscribe` stage their TLVs on the table source or a stack frame over it, and
-    answer `BACKPRESSURE` when it refuses.
-
-- **The bound spelling of a `dst` is a `PATH` of PAIR elements; a `PATH_REF` (`0x14`) is no
-  longer an address ([RFC-0029](../docs/spec/rfcs/0029-one-path-primitive.md) slice S1).**
-  An owner-issued `(u32 index, u32 generation)` pair now rides INSIDE a canonical `PATH` as the
-  escape record `00 16 08 <idx LE><gen LE>` (11 bytes), and every node runs RFC-0029 §6 on a
-  PAIR head: dereference it (bounds, generation, registered), then a connection vertex with a
-  tail is a HOP (the head is consumed, the tail forwarded, `src` grown canonically), a last
-  element is the TERMINUS (the same `apply_op` the NAME spelling reaches; a connection vertex
-  named last reads its own facets), and any other vertex with a tail is refused. Observable:
-  - A `dst` spelled as a `PATH_REF` is refused `tr::path::invalid` at the router and at the
-    terminus, and never applied. The RFC-0024 vectors `fwd/fwd-bound-forward`,
-    `fwd/fwd-bound-forwarded` and `acl/bound-vs-canonical-{allow,deny}` remain codec vectors
-    only (retired by S2).
-  - A refused PAIR is **answered** `tr::path::not_found` (stale or saturated generation, index
-    out of range, retired vertex, a hop with no egress or denied by its `:acl`); RFC-0024's
-    bound hop dropped these silently. A tail below an ordinary vertex answers
-    `tr::path::invalid`, below a bus mount `tr::path::not_found`.
-  - `fwd_router_t::bound_dispatch` returns its `dst` spelled as PAIRs (`4 + 11 × (H − 1)`
-    bytes), and the reverse-list delivery leg and `vertex_t::evict_route_edges` store and match
-    the PAIR spelling.
-  - A PAIR is authorized where the NAME spelling of the same hop is: a hop at the connection
-    vertex it names, and a last element naming a bus session's anchor at that session's
-    mount connection vertex as well as at the anchor (`fwd_router_t::name_hop_allows`, the
-    gate the NAME hop runs). On a graph that enforces an ACL, a mount with no connection
-    vertex refuses such a PAIR, as it refuses the NAME spelling.
-  - `path_element_kind_t` gains `PAIR` (kind `0x16` at length 8; length 4 stays the RFC-0027
-    `LABEL`, any other length is `MALFORMED`), and `path_element_census_t` gains `pairs`.
-  - `net::peer_handle_t` derives from the shared `wire::pair_t` (above) instead of declaring
-    its own two fields. Positional and copy initialisation are unchanged; a designated
-    initialiser must now name the base: `peer_handle_t{wire::pair_t{.index = i, .generation = g}}`.
-
-- **One FWD header parse per hop: `rebuild_fwd_forward` takes the peek's `fwd_pre_t`
-  ([#1794](https://github.com/avatarsd-llc/libtracer/issues/1794)).** `fwd_frame_view.hpp`:
-  `rebuild_fwd_forward(cur, pre, mount_tlv, extra_seg, mint_fn, reverse_mint_fn,
-  reply_label)` reads the leading headers from `pre` and applies `pre.strip_at` as given,
-  refusing a strip past the `dst`. The `strip_k` parameter, the `pre == nullptr` self-parsing
-  arm and the single-NAME `rebuild_fwd_forward(cur, inbound_name)` overload are removed; call
-  `peek_fwd_dst_any` (or `peek_fwd_dst`) first and set `strip_at` from the descent, as the
-  router does. `fwd_pre_t::dst_ref` and `dst_to_path` are replaced by `dst_type`, the type the
-  shrunk `dst` is headed with. `fwd_dst_kind_t::EMPTY` is new: a canonical `PATH` with no
-  records, which the peek now fills `pre` for. On a `NONE` answer the peek still fills the op
-  fields when the frame has an op VALUE. `stack_writer_t::header_bare` and `header_path` are
-  merged into `header_route(type, body_len)`, and `stack_writer_t::header_bytes(body_len)`
-  reports a header's width. `rebuild_reply_mint` and `rebuild_request_reverse_mint` return
-  `void`; the caller sizes the body from `fwd_rebuild_t::mint` and `ref_body_len`. The bytes
-  on the wire are unchanged.
-- **`handlers_t::on_app_field_admit` receives the writer's `write_ctx_t`
-  ([#1832](https://github.com/avatarsd-llc/libtracer/issues/1832)).** The app-field admission
-  filter was handed the field key and the written TLV only, so it could not see who wrote or
-  which link the write arrived on, while `on_admit` and `on_write` see both (#1650). It now
-  takes the same context by `const&`: `write_ctx_t::subject` is the subject the ACL gate ran on,
-  and `write_ctx_t::link` is the arrival link's `(kind, role)`, null for the owner's own write.
-  `app_field_admit_hook_t` is now
-  `hook_t<result_t<view_t>(std::string_view, const view_t&, const write_ctx_t&)>`; the hook stays
-  a non-owning `{fn, ctx}` pair. A field write through
-  `graph_t::write(vertex_handle_t, const field_path_t&, rope_t, caller, link)` now hands
-  `caller` and `link` to the filter. Nothing else changes at run time. **Migration:** add a
-  trailing `const write_ctx_t&` parameter to every `on_app_field_admit` callable; a filter that
-  ignores it leaves the parameter unnamed.
-- **`mem::poly_ptr_t<T>` and `mem::make_poly<T>(src, args...)`
-  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)).** The failable
-  `std::make_unique` for an object that is owned through a base type. It records the block's
-  size and alignment, so a derived link is returned to its `block_source_t` at the shape it
-  was drawn with. An empty owner means the source refused.
-
-- **`link_memory_t::state`
-  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)).** The link's
-  connection-state store: a server's slot table and sessions, handshake and receive buffers,
-  the UDP receive scratch, the QUIC endpoint object and the WebTransport stream-context table.
-  Defaults to the net sub-pool. It is separate from `io` (the egress store), so a bound on
-  in-flight egress never caps how many peers can connect.
-
-- **`mem::block_array_t<T>::erase_front(n)`
-  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)).** Drops the first `n`
-  elements and keeps the rest at the front, in order, without allocating. A stream buffer or a
-  FIFO table uses it to compact. For a trivially copyable `T` it is one `memmove`.
-
-### Breaking
-
-- **The transports allocate through the one allocation seam
-  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780), ADR-0083).** tcp, udp,
-  ws, can, quic, webtransport and the self-heal engine no longer hold a `std::vector`,
-  `std::string`, `std::unique_ptr`, `std::function` or a bare `new`. Every growth site draws
-  from a `block_source_t`, and a runtime refusal sheds the frame or the peer and counts it.
-  An init-time refusal is a sizing bug and aborts with the source's name (ADR-0083 Q7). The
-  per-connection RAM census is unchanged or smaller.
-  - `transport_factory_t` is now
-    `inline_fn_t<result_t<transport_ptr_t>(const conn_settings_t&, const tlv_node_t*, block_source_t&)>`,
-    and `transport_ptr_t` is `mem::poly_ptr_t<transport_t>`. **Migration:** a registered
-    factory takes the third `block_source_t& src` argument and builds its link with
-    `make_transport<T>(src, ...)` (or `mem::make_poly<T>(src, ...)`), answering
-    `BACKPRESSURE` when it comes back empty. `make_checked<T>(src, args...)` takes the
-    source first.
-  - `can_transport_t` takes its link as `mem::poly_ptr_t<can_link_t>`.
-    `transport_can_config_t::reasm_mr` is replaced by `reasm_src` (a `block_source_t*`; null
-    means the net sub-pool), and `path` is a `std::string_view`.
-    `can_transport_factory(reasm_src, rx_backend)` takes the source.
-    `learned_binding(id, path_out)` copies the path into a caller buffer.
-    **Migration:** build the link with `mem::make_poly<my_link_t>(src, ...)` in place of
-    `std::make_unique`, and pass a `block_source_t` where a `memory_resource` was passed.
-  - `can::encode_advertise(bytes_t& out, adv)` writes into a failable buffer and returns
-    `bool`. `decode_advertise` returns a path that views the input buffer.
-    `can_reassembly_t(src, max_groups)` takes a `block_source_t`. Its `add_slice` and
-    `set_expected_count` are `[[nodiscard]] bool`, and false means the source refused.
-    `can_tx_pool_t(capacity, src)` draws its slots from `src`. **Migration:** keep the
-    encoded buffer alive while you read the decoded path, and handle the `false` returns.
-  - `ws::encode_frame` (which returned a `std::vector`) is replaced by
-    `ws::try_encode_frame(block_array_t<std::byte>& out, op, payload, fin)`, and the vector
-    `ws::encode_client_frame` is removed (use `try_encode_client_frame`).
-    `decode_frame` and `decode_frame_checked` take a mutable `std::span<std::byte>` and
-    unmask in place; `frame_t::payload` is a view into that buffer.
-    `ws::accept_key(key)` returns a fixed-size `accept_key_t` (`.view()` gives the text).
-    **Migration:** decode from a buffer you own, compare payloads with
-    `std::ranges::equal`, and call `.view()` where a string was used.
-  - `webtransport_transport_t::session_path(std::span<char> out)` writes the `:path` into
-    `out` and returns its full length. `wt_h3::huffman_decode` is replaced by
-    `huffman_decode_into` sized with `huffman_max_decoded(n)`, and
-    `encode_connect_field_section(out, authority, path)` appends to a caller sink.
-    **Migration:** call `session_path({})` for the length, then read into a buffer of that size.
-  - The transport constructors take `std::string_view` for host, path and certificate
-    arguments in place of `const std::string&`. **Migration:** none for callers that pass
-    strings or literals.
-  - `self_heal_link_t` takes its raw config as a span plus the source it copies into.
-    `liveness_publish_fn_t` is an `inline_fn_t`, and `bus_link_t::peer_visitor_t` is a
-    `function_ref_t`. **Migration:** an oversized capture now fails to compile. Capture a
-    pointer to the state instead.
-  - The ESP-IDF links (`httpd_ws_link_t`, `esp_ws_client_link_t`, `twai_link_t`) are not
-    migrated yet. A follow-up issue tracks them.
-- **The net plane's own state comes from the seam
-  ([#1779](https://github.com/avatarsd-llc/libtracer/issues/1779), ADR-0083).** The router's
-  registry slots, receiver contexts, bus-mount token caches and interned link kinds, its
-  origin-side scratch, and the `tx_handoff_t` ring no longer use `std::string`,
-  `std::vector`, `std::deque` or `std::make_unique`. They draw from the router's label plane
-  (`router_planes_t::label_src`, the net sub-pool by default), or from the source the
-  `tx_handoff_t` is given. A refusal is the call's ordinary failure answer: `add_child`
-  returns `false` with nothing registered, `bound_dispatch` / `label_dispatch` return
-  `nullopt`, `adopt_binding` / `adopt_path_label` return `false`, and a refused handoff ring
-  has no slots (`capacity() == 0`, so it drops and counts every overlapping record). Public
-  API changes, with migration:
-  - `fwd_router_t::add_child(std::string name, …)` and `child_registry_t::add(std::string
-    name, …)` take `std::string_view`. Callers compile unchanged.
-  - `child_registry_t::child_t::name` is a `std::string_view` and `mount_tlv` a
-    `std::span<const std::byte>`, both views of the slot's own text block, valid for the
-    registry's life. Compare with `==` or `std::ranges::equal`, not with a vector.
-  - `child_registry_t::mount_run_for(name)` is removed. Use
-    `child_registry_t::encode_mount_name(name, nullptr)` to measure a mount run and
-    `encode_mount_name(name, out)` to write it.
-  - `fwd_router_t::bound_dispatch_t::dst` and `label_dispatch_t::dst` are
-    `mem::block_array_t<std::byte>`. They are contiguous ranges, so pass them where a
-    `std::span<const std::byte>` is taken, and compare with `std::ranges::equal`.
-  - `fwd_router_t::session_anchor_id(mount, peer)` returns a `session_anchor_id_t`, a fixed
-    buffer that converts to `std::string_view`. An id longer than one packed segment record
-    (`wire::kPackedSegMaxBytes`) comes back empty, and the router anchors nothing for it. Write
-    `const auto id = fwd_router_t::session_anchor_id(m, p);` where a `std::string` was held.
-  - `tr::net::encode_advertise`, `encode_compact`, `encode_handle_nack` (`route_handle.hpp`) and
-    `encode_mount_tlv` (`fwd_frame_view.hpp`) are removed from the library. No production
-    path called them since #885. They returned owning vectors from the throwing global heap.
-    Tests and host tools can include `core/tests/route_frame_builder.hpp`, which keeps the
-    same names and bytes. Production code uses the router's own doors (`advertise`,
-    `send_compact`).
 
 ### Changed
 
@@ -611,6 +369,248 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - `graph_hooks_t::subject_resolver` → `subject_lookup`: append the token to `out` and
     return `{}`, or return the same error as before.
   - `key_view_t::split_levels(std::vector&)` → `for_each_level(emit)`, which allocates nothing.
+
+### Breaking
+
+- **The MCU default root is a static arena, with no heap behind it
+  ([#1783](https://github.com/avatarsd-llc/libtracer/issues/1783), ADR-0083 Decision 4).** On a
+  build whose `config_t::kSlabPool` is `false` (the ESP-IDF component binds it), the root a
+  `graph_t` takes when it is handed no source used to be the platform heap. It is now
+  `tr::mem::mcu_root()`: one static array of the new trait `kArenaBytes` (default 32,768) in
+  `.bss`, carved into the classes of `kSizeClasses`, with value, table and net sub-pools derived
+  from it as on the host. `tr::mem::default_root()`, `value_source()`, `table_source()`,
+  `net_source()`, `net_backend()` and the per-value `heap_backend()` all draw from it there.
+  - **What changes for an MCU application.** The default RAM is reserved at link time and fixed:
+    the arena never shrinks, and a block a class returns is reused by that class only. An
+    exhausted arena refuses: a write answers `BACKPRESSURE`, and a registration at init aborts
+    naming the sub-pool and the bytes it needed. A request larger than the last class is carved
+    at its own size and reused only at that size. The `:stats.mem.values`, `.tables` and `.net`
+    seams, which answered `SCHEMA_NOT_FOUND` there before, now report the sub-pools. The host
+    default (`kSlabPool` `true`) is unchanged.
+  - **Migration.** Size the arena: `static constexpr std::size_t kArenaBytes = …;` in the
+    override fragment (on ESP-IDF, `CONFIG_LIBTRACER_ARENA_BYTES`), against the peak the
+    `:stats.mem.*` seams report. A UDP link left on the default sources draws its receive
+    scratch and each receive segment at the datagram cap, 64 KiB apiece unless its SPEC sets
+    `max_frame`; give it its own receive backend or a `max_frame`, or size the arena for it. An
+    application that wants the old heap default injects it: `graph_t g(tr::mem::heap_source());`.
+  - New: `tr::mem::arena_t`, `arena_pool_t`, `arena_root_t`, `mcu_root_t` and `mcu_root()`
+    (`libtracer/mem_arena.hpp`), and `default_config_t::kArenaBytes` /
+    `tr::mem::kArenaBytes`.
+- **`tr::mem::source_allocator_t` and `libtracer/mem_source_alloc.hpp` are removed
+  ([#1783](https://github.com/avatarsd-llc/libtracer/issues/1783)).** The std-`Allocator`
+  adapter over a block source threw on exhaustion, and nothing in core used it once the core
+  containers replaced its sites (#1776, #1778). Migration: hold the elements in a
+  `tr::mem::block_array_t` over the same source (failable growth, by value), or, in host-only
+  code that keeps a std container, `std::pmr` over `tr::mem::source_resource_t`
+  (`libtracer/mem_source_pmr.hpp`), which stays as host interop.
+- **A write to a missing vertex is refused by default, and a parent opts in with a creation
+  hook ([#1945](https://github.com/avatarsd-llc/libtracer/issues/1945), RFC-0030 §7).** A data
+  write whose target, or an intermediate level, does not exist answers `NOT_FOUND` and creates
+  nothing, whatever its origin: `graph_t::write(const path_t&, …)`, a remote `FWD{WRITE}`, or a
+  branch write's landing site. The local `mkdir -p` walk is gone, and with it RFC-0005
+  Amendment 1's local/remote asymmetry.
+  - `graph_t::ensure_vertex` is removed. Register the vertex (`try_register_vertex`,
+    `register_vertex_key`), or install a creation hook on its parent.
+  - New `graph_t::set_creation_hook(parent, creation_hook_t)` and the `creation_hook_t` type.
+    On a miss below a hooked parent, the parent's `CREATE` right is checked for the writer
+    (`PERMISSION_DENIED`; neither the hook nor the payload is touched, so a denied writer draws
+    nothing), then the hook is shown the missing child's key, the writer's subject and the
+    payload, and registers the child itself or refuses (`NOT_FOUND`). Any other status the hook
+    answers, such as `BACKPRESSURE`, passes through to the writer (RFC-0030 §7.2 erratum). A
+    level the hook created is the parent of the next.
+  - New `graph_t::find_or_create(key, caller, payload)`: the resolve-or-create step for a
+    fieldless data write, the only request that may create; the remote terminus calls it. A
+    read or a `:field` write to a missing vertex is a plain `NOT_FOUND`, and never reaches a
+    hook or the `CREATE` gate.
+  - New compile-time policy `config_t::kCreationHooks`, **`false` on every profile**. Off, no
+    vertex has a hook slot, every miss refuses and draws nothing, and `set_creation_hook`
+    answers `SCHEMA_NOT_FOUND`. Turn it on with `static constexpr bool kCreationHooks = true;`
+    in `libtracer/config_override.hpp`. The core test preset turns it on.
+  - The `graph_write_creates` example is now `graph_creation_hook`.
+- **`target_key_t` is drawn from the graph's table source
+  ([#1912](https://github.com/avatarsd-llc/libtracer/issues/1912)).** It was a
+  `std::shared_ptr<const std::vector<std::byte>>`, two platform-heap draws per path-target
+  admission outside the seam; it is now an intrusive handle over one block of the source (the
+  count, the source and the key bytes). `*key` is a `std::span<const std::byte>` rather than a
+  vector. `try_make_target_key(src, key)` takes the source and a span instead of a vector it
+  moved from, and answers null when the source refuses, so the vector built outside the probe
+  is gone. The handle keeps the `shared_ptr`'s width, so `sizeof` of `subscriber_t`,
+  `edge_view_t` and `pub_edge_t` is unchanged.
+
+- **The graph core's remaining global-heap draws move onto the table source
+  ([#1885](https://github.com/avatarsd-llc/libtracer/issues/1885)).**
+  - `subscriber_remote_t::link` and `caller` are `mem::string_t`, and the record is built over a
+    source: `subscriber_remote_t(src)`. `subscriber_t::ensure_remote(src)` takes the source and
+    returns a pointer, `nullptr` when it refuses.
+  - `vertex_t::snapshot_edges` takes its overflow buffer as `mem::block_array_t<edge_view_t>&`.
+    `graph_t::fan_out` builds it over a frame on the publishing call's stack first and the table
+    source past it; the per-thread overflow vector is gone.
+  - `wire::path_key` returns `std::optional<std::span<const std::byte>>`, borrowed from the PATH
+    node, instead of copying the key into a `std::vector`.
+  - A subscribe whose target key cannot be held, or whose cold half the table source refuses,
+    answers `BACKPRESSURE` (it was refused as `TYPE_MISMATCH`, or admitted without its
+    `delivery_compact` opt-in, before).
+  - `:children`, `:schema`, `:settings`, `:settings.app`, `:stats` reads, `set_identity` and the
+    local target `subscribe` stage their TLVs on the table source or a stack frame over it, and
+    answer `BACKPRESSURE` when it refuses.
+
+- **The bound spelling of a `dst` is a `PATH` of PAIR elements; a `PATH_REF` (`0x14`) is no
+  longer an address ([RFC-0029](../docs/spec/rfcs/0029-one-path-primitive.md) slice S1).**
+  An owner-issued `(u32 index, u32 generation)` pair now rides INSIDE a canonical `PATH` as the
+  escape record `00 16 08 <idx LE><gen LE>` (11 bytes), and every node runs RFC-0029 §6 on a
+  PAIR head: dereference it (bounds, generation, registered), then a connection vertex with a
+  tail is a HOP (the head is consumed, the tail forwarded, `src` grown canonically), a last
+  element is the TERMINUS (the same `apply_op` the NAME spelling reaches; a connection vertex
+  named last reads its own facets), and any other vertex with a tail is refused. Observable:
+  - A `dst` spelled as a `PATH_REF` is refused `tr::path::invalid` at the router and at the
+    terminus, and never applied. The RFC-0024 vectors `fwd/fwd-bound-forward`,
+    `fwd/fwd-bound-forwarded` and `acl/bound-vs-canonical-{allow,deny}` remain codec vectors
+    only (retired by S2).
+  - A refused PAIR is **answered** `tr::path::not_found` (stale or saturated generation, index
+    out of range, retired vertex, a hop with no egress or denied by its `:acl`); RFC-0024's
+    bound hop dropped these silently. A tail below an ordinary vertex answers
+    `tr::path::invalid`, below a bus mount `tr::path::not_found`.
+  - `fwd_router_t::bound_dispatch` returns its `dst` spelled as PAIRs (`4 + 11 × (H − 1)`
+    bytes), and the reverse-list delivery leg and `vertex_t::evict_route_edges` store and match
+    the PAIR spelling.
+  - A PAIR is authorized where the NAME spelling of the same hop is: a hop at the connection
+    vertex it names, and a last element naming a bus session's anchor at that session's
+    mount connection vertex as well as at the anchor (`fwd_router_t::name_hop_allows`, the
+    gate the NAME hop runs). On a graph that enforces an ACL, a mount with no connection
+    vertex refuses such a PAIR, as it refuses the NAME spelling.
+  - `path_element_kind_t` gains `PAIR` (kind `0x16` at length 8; length 4 stays the RFC-0027
+    `LABEL`, any other length is `MALFORMED`), and `path_element_census_t` gains `pairs`.
+  - `net::peer_handle_t` derives from the shared `wire::pair_t` (above) instead of declaring
+    its own two fields. Positional and copy initialisation are unchanged; a designated
+    initialiser must now name the base: `peer_handle_t{wire::pair_t{.index = i, .generation = g}}`.
+
+- **One FWD header parse per hop: `rebuild_fwd_forward` takes the peek's `fwd_pre_t`
+  ([#1794](https://github.com/avatarsd-llc/libtracer/issues/1794)).** `fwd_frame_view.hpp`:
+  `rebuild_fwd_forward(cur, pre, mount_tlv, extra_seg, mint_fn, reverse_mint_fn,
+  reply_label)` reads the leading headers from `pre` and applies `pre.strip_at` as given,
+  refusing a strip past the `dst`. The `strip_k` parameter, the `pre == nullptr` self-parsing
+  arm and the single-NAME `rebuild_fwd_forward(cur, inbound_name)` overload are removed; call
+  `peek_fwd_dst_any` (or `peek_fwd_dst`) first and set `strip_at` from the descent, as the
+  router does. `fwd_pre_t::dst_ref` and `dst_to_path` are replaced by `dst_type`, the type the
+  shrunk `dst` is headed with. `fwd_dst_kind_t::EMPTY` is new: a canonical `PATH` with no
+  records, which the peek now fills `pre` for. On a `NONE` answer the peek still fills the op
+  fields when the frame has an op VALUE. `stack_writer_t::header_bare` and `header_path` are
+  merged into `header_route(type, body_len)`, and `stack_writer_t::header_bytes(body_len)`
+  reports a header's width. `rebuild_reply_mint` and `rebuild_request_reverse_mint` return
+  `void`; the caller sizes the body from `fwd_rebuild_t::mint` and `ref_body_len`. The bytes
+  on the wire are unchanged.
+- **`handlers_t::on_app_field_admit` receives the writer's `write_ctx_t`
+  ([#1832](https://github.com/avatarsd-llc/libtracer/issues/1832)).** The app-field admission
+  filter was handed the field key and the written TLV only, so it could not see who wrote or
+  which link the write arrived on, while `on_admit` and `on_write` see both (#1650). It now
+  takes the same context by `const&`: `write_ctx_t::subject` is the subject the ACL gate ran on,
+  and `write_ctx_t::link` is the arrival link's `(kind, role)`, null for the owner's own write.
+  `app_field_admit_hook_t` is now
+  `hook_t<result_t<view_t>(std::string_view, const view_t&, const write_ctx_t&)>`; the hook stays
+  a non-owning `{fn, ctx}` pair. A field write through
+  `graph_t::write(vertex_handle_t, const field_path_t&, rope_t, caller, link)` now hands
+  `caller` and `link` to the filter. Nothing else changes at run time. **Migration:** add a
+  trailing `const write_ctx_t&` parameter to every `on_app_field_admit` callable; a filter that
+  ignores it leaves the parameter unnamed.
+- **`mem::poly_ptr_t<T>` and `mem::make_poly<T>(src, args...)`
+  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)).** The failable
+  `std::make_unique` for an object that is owned through a base type. It records the block's
+  size and alignment, so a derived link is returned to its `block_source_t` at the shape it
+  was drawn with. An empty owner means the source refused.
+
+- **`link_memory_t::state`
+  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)).** The link's
+  connection-state store: a server's slot table and sessions, handshake and receive buffers,
+  the UDP receive scratch, the QUIC endpoint object and the WebTransport stream-context table.
+  Defaults to the net sub-pool. It is separate from `io` (the egress store), so a bound on
+  in-flight egress never caps how many peers can connect.
+
+- **`mem::block_array_t<T>::erase_front(n)`
+  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)).** Drops the first `n`
+  elements and keeps the rest at the front, in order, without allocating. A stream buffer or a
+  FIFO table uses it to compact. For a trivially copyable `T` it is one `memmove`.
+
+- **The transports allocate through the one allocation seam
+  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780), ADR-0083).** tcp, udp,
+  ws, can, quic, webtransport and the self-heal engine no longer hold a `std::vector`,
+  `std::string`, `std::unique_ptr`, `std::function` or a bare `new`. Every growth site draws
+  from a `block_source_t`, and a runtime refusal sheds the frame or the peer and counts it.
+  An init-time refusal is a sizing bug and aborts with the source's name (ADR-0083 Q7). The
+  per-connection RAM census is unchanged or smaller.
+  - `transport_factory_t` is now
+    `inline_fn_t<result_t<transport_ptr_t>(const conn_settings_t&, const tlv_node_t*, block_source_t&)>`,
+    and `transport_ptr_t` is `mem::poly_ptr_t<transport_t>`. **Migration:** a registered
+    factory takes the third `block_source_t& src` argument and builds its link with
+    `make_transport<T>(src, ...)` (or `mem::make_poly<T>(src, ...)`), answering
+    `BACKPRESSURE` when it comes back empty. `make_checked<T>(src, args...)` takes the
+    source first.
+  - `can_transport_t` takes its link as `mem::poly_ptr_t<can_link_t>`.
+    `transport_can_config_t::reasm_mr` is replaced by `reasm_src` (a `block_source_t*`; null
+    means the net sub-pool), and `path` is a `std::string_view`.
+    `can_transport_factory(reasm_src, rx_backend)` takes the source.
+    `learned_binding(id, path_out)` copies the path into a caller buffer.
+    **Migration:** build the link with `mem::make_poly<my_link_t>(src, ...)` in place of
+    `std::make_unique`, and pass a `block_source_t` where a `memory_resource` was passed.
+  - `can::encode_advertise(bytes_t& out, adv)` writes into a failable buffer and returns
+    `bool`. `decode_advertise` returns a path that views the input buffer.
+    `can_reassembly_t(src, max_groups)` takes a `block_source_t`. Its `add_slice` and
+    `set_expected_count` are `[[nodiscard]] bool`, and false means the source refused.
+    `can_tx_pool_t(capacity, src)` draws its slots from `src`. **Migration:** keep the
+    encoded buffer alive while you read the decoded path, and handle the `false` returns.
+  - `ws::encode_frame` (which returned a `std::vector`) is replaced by
+    `ws::try_encode_frame(block_array_t<std::byte>& out, op, payload, fin)`, and the vector
+    `ws::encode_client_frame` is removed (use `try_encode_client_frame`).
+    `decode_frame` and `decode_frame_checked` take a mutable `std::span<std::byte>` and
+    unmask in place; `frame_t::payload` is a view into that buffer.
+    `ws::accept_key(key)` returns a fixed-size `accept_key_t` (`.view()` gives the text).
+    **Migration:** decode from a buffer you own, compare payloads with
+    `std::ranges::equal`, and call `.view()` where a string was used.
+  - `webtransport_transport_t::session_path(std::span<char> out)` writes the `:path` into
+    `out` and returns its full length. `wt_h3::huffman_decode` is replaced by
+    `huffman_decode_into` sized with `huffman_max_decoded(n)`, and
+    `encode_connect_field_section(out, authority, path)` appends to a caller sink.
+    **Migration:** call `session_path({})` for the length, then read into a buffer of that size.
+  - The transport constructors take `std::string_view` for host, path and certificate
+    arguments in place of `const std::string&`. **Migration:** none for callers that pass
+    strings or literals.
+  - `self_heal_link_t` takes its raw config as a span plus the source it copies into.
+    `liveness_publish_fn_t` is an `inline_fn_t`, and `bus_link_t::peer_visitor_t` is a
+    `function_ref_t`. **Migration:** an oversized capture now fails to compile. Capture a
+    pointer to the state instead.
+  - The ESP-IDF links (`httpd_ws_link_t`, `esp_ws_client_link_t`, `twai_link_t`) are not
+    migrated yet. A follow-up issue tracks them.
+- **The net plane's own state comes from the seam
+  ([#1779](https://github.com/avatarsd-llc/libtracer/issues/1779), ADR-0083).** The router's
+  registry slots, receiver contexts, bus-mount token caches and interned link kinds, its
+  origin-side scratch, and the `tx_handoff_t` ring no longer use `std::string`,
+  `std::vector`, `std::deque` or `std::make_unique`. They draw from the router's label plane
+  (`router_planes_t::label_src`, the net sub-pool by default), or from the source the
+  `tx_handoff_t` is given. A refusal is the call's ordinary failure answer: `add_child`
+  returns `false` with nothing registered, `bound_dispatch` / `label_dispatch` return
+  `nullopt`, `adopt_binding` / `adopt_path_label` return `false`, and a refused handoff ring
+  has no slots (`capacity() == 0`, so it drops and counts every overlapping record). Public
+  API changes, with migration:
+  - `fwd_router_t::add_child(std::string name, …)` and `child_registry_t::add(std::string
+    name, …)` take `std::string_view`. Callers compile unchanged.
+  - `child_registry_t::child_t::name` is a `std::string_view` and `mount_tlv` a
+    `std::span<const std::byte>`, both views of the slot's own text block, valid for the
+    registry's life. Compare with `==` or `std::ranges::equal`, not with a vector.
+  - `child_registry_t::mount_run_for(name)` is removed. Use
+    `child_registry_t::encode_mount_name(name, nullptr)` to measure a mount run and
+    `encode_mount_name(name, out)` to write it.
+  - `fwd_router_t::bound_dispatch_t::dst` and `label_dispatch_t::dst` are
+    `mem::block_array_t<std::byte>`. They are contiguous ranges, so pass them where a
+    `std::span<const std::byte>` is taken, and compare with `std::ranges::equal`.
+  - `fwd_router_t::session_anchor_id(mount, peer)` returns a `session_anchor_id_t`, a fixed
+    buffer that converts to `std::string_view`. An id longer than one packed segment record
+    (`wire::kPackedSegMaxBytes`) comes back empty, and the router anchors nothing for it. Write
+    `const auto id = fwd_router_t::session_anchor_id(m, p);` where a `std::string` was held.
+  - `tr::net::encode_advertise`, `encode_compact`, `encode_handle_nack` (`route_handle.hpp`) and
+    `encode_mount_tlv` (`fwd_frame_view.hpp`) are removed from the library. No production
+    path called them since #885. They returned owning vectors from the throwing global heap.
+    Tests and host tools can include `core/tests/route_frame_builder.hpp`, which keeps the
+    same names and bytes. Production code uses the router's own doors (`advertise`,
+    `send_compact`).
 
 ## [0.18.1] — 2026-10-07
 

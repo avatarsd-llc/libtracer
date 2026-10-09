@@ -18,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-09
+
+No `rmw_tracer`-specific changes. `rmw_tracer` builds against the C++ core, so the core 0.19.0 breaking changes apply when it is rebuilt against this release; see core's 0.19.0 section, in particular the one allocation seam (`tr::mem::source_allocator_t` removed, the MCU default root a static arena) and a write to a missing vertex being refused by default.
+
 ## [0.18.1] — 2026-10-07
 
 No `rmw_tracer`-specific changes. `rmw_tracer` builds against the C++ core, so it picks up core's 0.18.1 fixes when it is rebuilt against this release. No API changes.

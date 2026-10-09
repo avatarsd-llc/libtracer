@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-09
+
 ### Added
 
 - **`CONFIG_LIBTRACER_CREATION_HOOKS` — a Kconfig switch for `config_t::kCreationHooks`

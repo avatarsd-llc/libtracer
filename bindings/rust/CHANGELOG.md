@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-09
+
+No Rust-binding API changes. The `FwdRequest::await_timeout_ns` doc comment now says the AWAIT deadline is the requester's own and `await_timeout` is a hint (#1873); docs only. The Rust crate is a native implementation and does not link the C++ core. Released in lockstep with core.
+
 ## [0.18.1] — 2026-10-07
 
 No Rust-binding changes. The Rust crate is a native implementation and does not link the C++ core. Released in lockstep with core.
