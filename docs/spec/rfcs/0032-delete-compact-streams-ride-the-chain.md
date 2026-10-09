@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0032 — Delete `COMPACT` and the per-link handle tables: every stream rides the chain, and no hop holds state for it
 
-<!-- status: proposed -->
+<!-- status: accepted -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0032 |
 | **Title** | Delete `COMPACT` and the per-link handle tables: every stream rides the chain, and no hop holds state for it |
-| **Status** | **proposed** (2026-10-09). **Every §15 question was ruled by the maintainer on 2026-10-09** ("all rec", with Q3 and Q5 changed and Q6 extended, §15). The §8 figures are filled in from PR #2037 (merged). The CAN rows are from #2044 (PR #2046, in review). Acceptance is recorded here when the maintainer gives it. The direction was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (one walk, the connection vertex is the door), §"Addendum: stages 5 and 6", questions 5–8, "all rec". This document turns that ruling into normative text, and §15 lists the choices the ruling left open, each with a recommendation. |
+| **Status** | **accepted** (2026-10-09; proposed the same day), **maintainer approval** on [PR #2043](https://github.com/avatarsd-llc/libtracer/pull/2043): "approve but we need to fix canbus later". The classic-CAN small-sample cost is accepted for now; the follow-up is #1953 (§15 Q4). Every §15 question was ruled on 2026-10-09 ("all rec", with Q3 and Q5 changed and Q6 extended). The comment window was waived by default and not invoked. The §8 figures are from PR #2037 (merged) and the CAN rows from #2044 (PR #2046). The direction was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (one walk, the connection vertex is the door), §"Addendum: stages 5 and 6", questions 5–8, "all rec". This document turns that ruling into normative text, and §15 lists the choices the ruling left open, each with a recommendation. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -449,8 +449,9 @@ with every inter-node link a production `can_transport_t`. Its figures are from
   counted, for both arms alike: on classic CAN 1 KiB at N = 32 and 16 KiB at N ≥ 8, and on FD 16 KiB
   at N = 32.
 
-This RFC draws no verdict from these figures beyond quoting them. Ruling 4's short-form question
-stays §15 Q4's.
+This RFC draws no verdict from these figures beyond quoting them. At acceptance the maintainer
+accepted the classic-CAN small-sample cost for now, with #1953 (CAN link-local compression, PR
+#2048) as the fix (§15 Q4).
 
 ### 8.2 Analytic, from the frame layouts
 
@@ -672,7 +673,8 @@ deleted.
   #2044's counts (PR #2046, in review, §8.1) put the classic-CAN forward leg at 19 against 13 frames
   per hop for 64 B unbatched, +5.7% at N = 32 and +12% at 1 KiB. These are lower bounds: the
   point-to-point binding omits the per-hop peer-name route element. On CAN FD the forward legs are
-  within one frame. The decision is §15 Q4's. It would be its own amendment to the PAIR element and is not part of this RFC.
+  within one frame. The cost is accepted for now, and the fix is #1953 (CAN link-local compression,
+  PR #2048) rather than a short form (§15 Q4). It would be its own amendment to the PAIR element and is not part of this RFC.
 - **Library-side batching** (a flush timer or a per-subscriber accumulator). Rejected. It breaks
   the no-timers rule and the no-library-buffers rule, and RFC-0025 Amendment 4 already ruled
   batching user-orchestrated.
@@ -720,8 +722,12 @@ and Q6 extended. The draft's recommendation follows each ruling.
    mixed path must be loud.
 4. **The pair-only short form for classic CAN. RULED 2026-10-09: as recommended, decide on the CAN
    rows.** #2037 drew no CAN conclusion. #2044's rows (bench: CAN frames per hop on the real CAN
-   carriage) are in PR #2046, in review, and §8.1 quotes them. The decision is the maintainer's, once
-   #2046 lands; this RFC records none. File a follow-up amendment only if small unbatched classic-CAN
+   carriage) are in PR #2046, and §8.1 quotes them. **Accepted 2026-10-09, with the RFC ("approve
+   but we need to fix canbus later"): the classic-CAN small-sample cost is accepted for now.** The fix
+   is the follow-up [#1953](https://github.com/avatarsd-llc/libtracer/issues/1953) (CAN link-local
+   compression, [PR #2048](https://github.com/avatarsd-llc/libtracer/pull/2048)). The maintainer
+   ruled the same day that it maps streams to native CAN IDs, private to the CAN transport, which is
+   the ground §5.5 already gives it. This RFC states nothing further about it. File a follow-up amendment only if small unbatched classic-CAN
    samples are a real workload and BATCH or stage 7 does not cover it.
 5. **What does #1951's merge wait for? RULED 2026-10-09: #2042, not #1946.** #1951 (delete COMPACT)
    waits for [#2042](https://github.com/avatarsd-llc/libtracer/issues/2042) (a forwarded PAIR
@@ -737,6 +743,6 @@ and Q6 extended. The draft's recommendation follows each ruling.
 ## 16. Discussion
 
 Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the comment window is waived by default while
-the project is solo-maintained, and it is not invoked here. Maintainer approval is recorded on this
-RFC's pull request and in the Status row at acceptance. Sustained objections and their resolution are
+the project is solo-maintained, and it was not invoked. Maintainer approval was given on 2026-10-09,
+on this RFC's pull request (#2043), and is recorded in the Status row. Sustained objections and their resolution are
 recorded in this section as they arrive.

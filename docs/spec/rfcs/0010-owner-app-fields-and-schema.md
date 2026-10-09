@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0010 — Owner-writable application property fields: the field descriptor table, the reserved `settings.app` namespace, and owner-defined `:schema`
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: RFC-0032 -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0010 |
 | **Title** | Owner-writable application property fields: the field descriptor table, the reserved `settings.app` namespace, and owner-defined `:schema` |
-| **Status** | **accepted** (2026-07-19 — maintainer ruling, window waived; in-comment from 2026-07-17, draft since 2026-07-09) |
+| **Status** | **accepted** (2026-07-19 — maintainer ruling, window waived; in-comment from 2026-07-17, draft since 2026-07-09) **Amended by [RFC-0032](0032-delete-compact-streams-ride-the-chain.md)** (accepted 2026-10-09): Amendment 2's census loses `labels_exhausted`, `refused_bindings` and `labels_used`, and gains `retired_rx`. |
 | **Author(s)** | origin-firmware integration (drafted for maintainer review) |
 | **Created** | 2026-07-09 |
 | **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |
