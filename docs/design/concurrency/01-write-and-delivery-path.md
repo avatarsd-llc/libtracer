@@ -254,22 +254,11 @@ and the delivery itself no longer allocates at all. The `try_*` sites whose elem
 ride that relocation keep the residual, tabulated in
 [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md) and stated at each site.
 
-**The COMPACT leg is the one that flattens.** `value.try_materialize(*flat_)`
-(`fwd_router.cpp:fwd_router_t::deliver_remote`) precedes the compact encode, because a COMPACT wraps a contiguous
-payload. Single-link — the common case — that materialize is a zero-copy adopt; a multi-link
-value pays one flatten per delivery, out of the router's INJECTED byte backend rather than the
-global heap. A REFUSED flatten drops the delivery (`fwd_router.cpp:fwd_router_t::deliver_remote`) — since #917 that is a
-test on the named refusal, so a legitimately empty value is delivered rather than swept up with
-the OOM by an `empty()` guess.
-Auto-promotion advertises the label once per flow and then streams
-compact frames; a dropped fresh ADVERTISE self-heals through the peer's `HANDLE_NACK`
-([RFC-0004 — Remote operation
-addressing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md)
-§E.1).
-
-So delivery compaction trades a per-delivery flatten on multi-link values for a smaller frame.
-On single-link values it costs nothing; on roped values it is the one place the delivery path
-copies payload.
+**Chain delivery never flattens.** A remote delivery is a `FWD{WRITE}` carrying the full `PAIR`
+chain: the head is built in a stack buffer and the value's spans ride by reference as a
+scatter-gather list, so a multi-link value costs no copy of its own on the delivery path. The
+per-link `COMPACT` form, which wrapped a contiguous payload and flattened a multi-link value once
+per delivery, is retired (RFC-0004 §E.1; see the retirement note on the perf page).
 
 ---
 
@@ -294,9 +283,8 @@ struct delivery_drops_t {
 | --- | --- | --- |
 | `no_target` | the target PATH resolved to no live vertex — retired, or never created | `graph.cpp:graph_t::dispatch_edge_target` |
 | `denied` | a subscription edge's delivery was refused by the target's `:acl`, gated on the **edge's stored caller**, not the writer's | `graph.cpp:graph_t::dispatch_edge_target` |
-| `denied` | a WRITE was refused at the graph's own gate — the API write, the `FWD{WRITE}` terminus and both `COMPACT` terminus arms enter through it | `graph.cpp:graph_t::write_impl` |
-| `no_target` | a net-plane route resolved to no vertex (`fwd_router.cpp:fwd_router_t::deliver_local`), or its binding vanished under a concurrent unbind (`fwd_router.cpp:fwd_router_t::on_compact`) | `fwd_router.cpp:fwd_router_t::on_compact`, `fwd_router.cpp:fwd_router_t::deliver_local` |
-| `out_of_memory` | a `COMPACT` terminus could not draw the payload's one value block or reserve its rope | `fwd_router.cpp:fwd_router_t::on_compact`, `fwd_router.cpp:fwd_router_t::deliver_local` |
+| `denied` | a WRITE was refused at the graph's own gate — the API write and the `FWD{WRITE}` terminus enter through it | `graph.cpp:graph_t::write_impl` |
+| `no_target` | a net-plane route resolved to no vertex (`fwd_router.cpp:fwd_router_t::deliver_local`) | `fwd_router.cpp:fwd_router_t::deliver_local` |
 | `out_of_memory` | a target delivery's store was declined — the slot publish, the receiving ring's admission, or the clone a HANDLER target still takes | `graph.cpp:graph_t::dispatch_edge_target` |
 | `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:if (src[i].active.load(std::memory_order_acquire)) ++drops.truncated` |
 

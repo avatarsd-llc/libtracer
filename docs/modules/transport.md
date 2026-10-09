@@ -16,8 +16,7 @@ separate `libtracer_quic` module, msquic-backed).
 
 ## The seam
 
-A transport accepts a complete frame's bytes — a `FWD` frame, or a route-handle
-control frame (ADVERTISE / COMPACT / HANDLE_NACK) — and emits them; inbound frames
+A transport accepts a complete frame's bytes — a `FWD` frame — and emits them; inbound frames
 arrive on the installed sink, which may fire on an internal transport thread. Framing
 below the TLV is the transport's own business: a datagram kind needs none, a stream
 kind adds a `u32-LE length ++ frame` record (`core/include/libtracer/transport_tcp.hpp`),
