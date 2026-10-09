@@ -181,6 +181,13 @@ add_executable(bench_rx_source_topology bench_rx_source_topology.cpp)
 target_link_libraries(bench_rx_source_topology PRIVATE libtracer)
 target_compile_options(bench_rx_source_topology PRIVATE -Wall -Wextra)
 
+# The declaration-gated write rows (#2032): a write through an `on_admit` filter and through a
+# payload-right table, 64 B .. 16 KiB, with and without re-registration churn at a sibling
+# address, plus the table bytes that churn leaves live. Diagnostic, not a perf gate.
+add_executable(bench_admission_gate bench_admission_gate.cpp)
+target_link_libraries(bench_admission_gate PRIVATE libtracer)
+target_compile_options(bench_admission_gate PRIVATE -Wall -Wextra)
+
 # The LKV slot under concurrency (ADR-0064 2, #604): today's atomic<shared_ptr> against a
 # no-reclamation ceiling, epoch-based reclamation and hazard pointers, in three shapes, plus
 # the same question on the real graph_t::write path. The ADR's own closing consequence names
