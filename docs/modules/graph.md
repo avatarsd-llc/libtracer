@@ -801,7 +801,21 @@ a reply already being assembled.
 
 ### The session-admission seam (#1841)
 
-Compiled in only with `config_t::kSessionAdmission` (off by default).
+Compiled in only with `config_t::kSessionAdmission` (off by default); without it,
+`graph_hooks_t::session_admission` is an empty type, and installing a hook does not compile.
+
+The hook is offered every remote subscription as `ADMIT` before the edge exists, and its `false`
+refuses with `BACKPRESSURE`. Every admitted edge is given back exactly once, in one of two ways:
+
+- `RELEASE`, once per edge, when the edge ends by any route other than its session's departure:
+  it failed to land, it was cleared, a `[N]` replace displaced it, a route refusal reclaimed it,
+  or its producer retired.
+- `END`, when the session departs (`evict_link_edges`).
+
+`END` fires **at least once** per departure and is safe to repeat: a bus peer's arrival also
+clears its name, and a child link's down notifier and its removal both depart it. No `END` fires
+at node teardown. A `RELEASE` may follow `END` for the same session, so an embedder floors the
+session's charge at zero.
 
 ```{doxygenstruct} tr::graph::session_event_t
 :project: libtracer

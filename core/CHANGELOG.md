@@ -149,16 +149,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   An embedder could not hold each session to a subscription budget: the subscription observer
   runs after the edge is admitted and is keyed by the caller context, which is the subject, so
   every session of one subject shared one key. The new seam (`session_admission_fn_t`, handed a
-  `session_event_t`) is offered every subscription admitted for a session, after the SUBSCRIBE
-  gate and before the edge or its departure-index entry exists, and its `false` refuses it with
-  `BACKPRESSURE`. The session is the link name the departure evicts the edge by, so two sessions
-  of one subject are two keys. `RELEASE` gives back an admission the graph then refused, and
-  `END` fires once when `evict_link_edges` tears the session down (a link or bus peer departing),
-  so the embedder refunds the whole session at once. The library keeps no count. The seam is the
-  compile-time policy `config_t::kSessionAdmission` (ESP-IDF: `CONFIG_LIBTRACER_SESSION_ADMISSION`),
-  **off by default**: closed out, `graph_t` has no slot for it and the subscribe and departure
-  paths carry no load or branch for it. `edge_view_t` is unchanged. A debug build asserts when
-  `set_hooks` is handed the hook in a build without it.
+  `session_event_t`) is offered every subscription admitted for a session as `ADMIT`, after the
+  SUBSCRIBE gate and before the edge or its departure-index entry exists, and its `false` refuses
+  it with `BACKPRESSURE`. The session is the link name the departure evicts the edge by, so two
+  sessions of one subject are two keys. Every admitted edge is given back exactly once: by one
+  `RELEASE` when it ends on its own (it failed to land, was cleared, was displaced by a `[N]`
+  replace, was reclaimed by a route refusal, or its producer retired), or by its session's `END`
+  when `evict_link_edges` tears the session down. `END` fires at least once per departure and is
+  safe to repeat; none fires at node teardown; a `RELEASE` may follow `END`, so an embedder floors
+  the charge at zero. The library keeps no count. The seam is the compile-time policy
+  `config_t::kSessionAdmission` (ESP-IDF: `CONFIG_LIBTRACER_SESSION_ADMISSION`), **off by
+  default**: closed out, `graph_t` has no slot for it, the subscribe and teardown paths carry no
+  load or branch for it, and `graph_hooks_t::session_admission` is an empty type, so installing a
+  hook does not compile. `edge_view_t` is unchanged.
 
 ### Fixed
 

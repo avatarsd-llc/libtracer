@@ -18,15 +18,19 @@
  * 3. the session's departure (`evict_link_edges`, which `fwd_router_t::link_down` and a bus
  *    peer's departure both run) fires one `END`, the embedder refunds all `kBudget` there, and
  *    the session can subscribe again;
- * 4. an admission the hook granted but the graph then refused (a `:subscribers[N]` replace
- *    naming no slot) is `RELEASE`d, so the embedder's charge stays exact;
+ * 4. every edge that ends one at a time gives its charge back with one `RELEASE`: an admission
+ *    the graph then refused (a `:subscribers[N]` replace naming no slot), a clear, a replace's
+ *    displaced edge, a route refusal and the producer's retirement — so subscribe/unsubscribe
+ *    churn and repeated `[0]` replaces never exhaust the budget;
  * 5. a local subscription has no session and is never offered;
  * 6. with no hook installed every subscription is admitted, exactly as before.
  *
  * Every vector fails with the production change reverted: the seam does not exist, so this file
- * does not compile. The no-hook build's cost is a compile-time claim (`config_t::
- * kSessionAdmission` off folds every read away) and `edge_view_t`'s size is pinned by the
- * `static_assert` in subscriber.hpp, which this change leaves alone.
+ * does not compile. In a build without `kSessionAdmission` the vectors are skipped, and the
+ * `static_assert` below pins that installing the hook there does not compile. The no-hook build's
+ * cost is a compile-time claim (`config_t:: kSessionAdmission` off folds every read away) and
+ * `edge_view_t`'s size is pinned by the `static_assert` in subscriber.hpp, which this change leaves
+ * alone.
  */
 
 #include <cstddef>
@@ -34,6 +38,8 @@
 #include <cstdio>
 #include <initializer_list>
 #include <map>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -101,6 +107,7 @@ struct budget_t {
     std::vector<std::string> ends;      /**< @brief Every `END`'s session, in order. */
     std::vector<std::string> callers;   /**< @brief Every `ADMIT`'s caller, in order. */
     std::vector<std::string> producers; /**< @brief Every `ADMIT`'s producer key, in order. */
+    int underflows = 0;                 /**< @brief `RELEASE`s with nothing charged. */
     int releases = 0;                   /**< @brief How many `RELEASE`s arrived. */
 
     /** @brief The installed hook. */
@@ -117,8 +124,12 @@ struct budget_t {
                 ++self.charged[session];
                 return true;
             case session_event_t::kind_t::RELEASE:
+                // Floored at zero, as the contract asks: a RELEASE may trail its session's END.
                 ++self.releases;
-                --self.charged[session];
+                if (self.charged[session] == 0)
+                    ++self.underflows;
+                else
+                    --self.charged[session];
                 return true;
             case session_event_t::kind_t::END:
                 self.ends.push_back(session);
@@ -129,11 +140,44 @@ struct budget_t {
     }
 };
 
-/** @brief Install @p b's hook on @p g (or clear the seam, for null). */
+/** @brief Whether @p H's session-admission member has a `fn` to install. */
+template <class H>
+concept has_session_hook = requires(H h) { h.session_admission.fn; };
+
+/** @brief A build without the seam has no `fn` to install: naming it does not compile. */
+static_assert(tr::graph::kSessionAdmission == has_session_hook<tr::graph::graph_hooks_t>,
+              "graph_hooks_t::session_admission has a fn exactly when kSessionAdmission is on");
+
+/**
+ * @brief Install @p b's hook on @p g (or clear the seam, for null).
+ *
+ * The member is only a `{fn, ctx}` pair when the build has the seam, so the assignment sits in
+ * a generic lambda's `if constexpr`: it is compiled where the member has a `fn`, and this file
+ * still builds (and skips) where it does not.
+ */
 void install(graph_t& g, budget_t* b) {
     auto hooks = g.hooks();
-    hooks.session_admission = {b != nullptr ? &budget_t::hook : nullptr, b};
+    [b](auto& hook) {
+        if constexpr (requires { hook.fn; }) hook = {b != nullptr ? &budget_t::hook : nullptr, b};
+    }(hooks.session_admission);
     g.set_hooks(hooks);
+}
+
+/** @brief An empty `STATUS` — the `:subscribers[N]` clear sentinel. */
+std::vector<std::byte> b_clear() {
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::STATUS, opt_t{}, std::span<const std::byte>{});
+    return out;
+}
+
+/** @brief The `:subscribers[N]` field, or the `:subscribers[]` append for no @p slot. */
+field_path_t subscribers(std::optional<std::uint16_t> slot) {
+    field_path_t f;
+    f.steps.push_back(field_step_t{.name = "subscribers",
+                                   .indexed = true,
+                                   .append = !slot.has_value(),
+                                   .index = slot.value_or(0)});
+    return f;
 }
 
 /** @brief Vectors 1-3 and 6: the budget per session, its refund at departure, and no hook. */
@@ -205,6 +249,64 @@ void test_refused_landing_is_released() {
     check(budget.callers.size() == 1, "the replace was offered to the hook");
     check(budget.releases == 1, "and its charge released when it did not land");
     check(budget.charged["peer"] == 0, "the embedder's charge is exact");
+    check(budget.underflows == 0, "no RELEASE without its ADMIT");
+}
+
+/** @brief Vector 4: subscribe/unsubscribe churn never exhausts the budget. */
+void test_churn_gives_back() {
+    graph_t g;
+    const vertex_handle_t p = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    budget_t budget;
+    install(g, &budget);
+    for (int i = 0; i < 2 * kBudget; ++i) {
+        check(!wire_sub(g, p, "s1", "alice"), "churn: the subscribe is admitted");
+        // The freed slot is reused, so the one live edge is always at [0].
+        check(g.write(p, subscribers(0), tr::view::rope_t{make_value(b_clear())}, "s1").has_value(),
+              "churn: the :subscribers[0] clear lands");
+    }
+    check(budget.charged["s1"] == 0, "churn: every clear gave its charge back");
+    check(budget.releases == 2 * kBudget, "churn: one RELEASE per cleared edge");
+    check(budget.underflows == 0, "churn: no RELEASE without its ADMIT");
+}
+
+/** @brief Vector 4: a `[0]` replace is net zero — the displaced edge is RELEASEd. */
+void test_replace_is_net_zero() {
+    graph_t g;
+    const vertex_handle_t p = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/t"), role_t::STORED_VALUE);
+    budget_t budget;
+    install(g, &budget);
+    const auto sub = [] { return tr::view::rope_t{make_value(b_subscriber("t"))}; };
+    check(g.write(p, subscribers(std::nullopt), sub(), "peer").has_value(),
+          "replace: the first edge is appended");
+    for (int i = 0; i < kBudget + 1; ++i)
+        check(g.write(p, subscribers(0), sub(), "peer").has_value(),
+              "replace: every [0] write is admitted");
+    check(budget.charged["peer"] == 1, "replace: one live edge, one charge");
+    check(budget.releases == kBudget + 1, "replace: each displaced edge was RELEASEd");
+}
+
+/** @brief Vector 4: a route refusal and the producer's retirement each give back per edge. */
+void test_route_refusal_and_retire_give_back() {
+    graph_t g;
+    const vertex_handle_t p = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    const vertex_handle_t q = g.register_vertex(path_t("/q"), role_t::STORED_VALUE);
+    budget_t budget;
+    install(g, &budget);
+
+    for (int i = 0; i < kBudget; ++i) check(!wire_sub(g, p, "s1", "alice"), "route: admitted");
+    const std::vector<std::byte> route = b_route("s1");
+    check(g.evict_route_edges("s1", route) == static_cast<std::size_t>(kBudget),
+          "route: the refusal reclaims the session's edges");
+    check(budget.charged["s1"] == 0 && budget.releases == kBudget,
+          "route: one RELEASE per reclaimed edge");
+
+    for (int i = 0; i < kBudget; ++i) check(!wire_sub(g, q, "s1", "alice"), "retire: admitted");
+    check(g.retire(q).has_value(), "retire: the producer retires");
+    check(budget.charged["s1"] == 0 && budget.releases == 2 * kBudget,
+          "retire: one RELEASE per edge the retirement dropped");
+    check(budget.ends.empty(), "neither is a session departure");
+    check(budget.underflows == 0, "no RELEASE without its ADMIT");
 }
 
 /** @brief Vector 5: a local subscription has no session and is never offered. */
@@ -230,6 +332,9 @@ int main() {
     } else {
         test_budget_per_session();
         test_refused_landing_is_released();
+        test_churn_gives_back();
+        test_replace_is_net_zero();
+        test_route_refusal_and_retire_give_back();
         test_local_subscription_is_not_offered();
         return tr::testing::summary("session_admission");
     }

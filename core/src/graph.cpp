@@ -1234,10 +1234,11 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     // Each dropped routed edge gives its link hold back, outside every graph lock: an edge
     // is reported exactly twice over its life, and retirement is one of its ends (#1816).
     // The tables themselves are destroyed when `gone` leaves scope — outside the locks too.
+    // The session charge goes back with it (#1841); the producer has just retired, so the
+    // event names none. An edge with no link or no session gives back nothing on that side.
     for (const mem::block_array_t<subscriber_t>& table : gone)
         for (const subscriber_t& e : table)
-            if (e.active && e.remote != nullptr && !e.remote->link.empty())
-                hold_link(delivery_link(e.remote), false);
+            if (e.active) release_edges(delivery_link(e.remote), session_of(e.remote), nullptr);
     // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so the
     // sweep lock is not held across the retire walk. A stale entry would otherwise (a) leak, and
     // worse (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the leaked
@@ -1389,8 +1390,9 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
         bump_subtree_listeners(v, -static_cast<std::int32_t>(k - quiet));
         total += k;
     }
-    // Every match was keyed on its delivery link, so every one held `link_name` (#1816).
-    hold_link(link_name, false, total);
+    // Every match was keyed on its delivery link, so every one held `link_name` (#1816) and was
+    // charged to it as its session (#1841): both go back, one edge at a time.
+    release_edges(link_name, link_name, nullptr, total);
     return total;
 }
 
@@ -1585,8 +1587,9 @@ bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_v
     remote_ptr_t retired_remote;
     bool was_suspended = false;
     if (!v->clear_edge(slot, retired_ctx, &retired_remote, &was_suspended)) return false;
-    if (!was_suspended) note_subscriber_removed(v);   // RFC-0005 counts delivering edges only
-    hold_link(delivery_link(retired_remote), false);  // the link hold this clear gives back (#1816)
+    if (!was_suspended) note_subscriber_removed(v);  // RFC-0005 counts delivering edges only
+    // The link hold (#1816) and the session charge (#1841) this clear gives back.
+    release_edges(delivery_link(retired_remote), session_of(retired_remote), v);
     // Only a slot that WAS active is an unsubscribe; clearing an already-empty one changed
     // nothing and must not be reported as a removal. A no-op for the empty caller.
     notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, cleared_tlv, slot);
@@ -3244,7 +3247,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // A displaced SUSPENDED edge was never counted (#1533), so it is an add here too.
         if (r == vertex_t::edge_replace_t::OUT_OF_RANGE) {
             note_subscriber_removed(v);
-            unwind_admission(admitted, v, caller);
+            release_edges(delivery_link(admitted), session_of(admitted), v);
             return std::unexpected(status_t::INVALID_PATH);
         }
         if (r == vertex_t::edge_replace_t::REPLACED_ACTIVE) note_subscriber_removed(v);
@@ -3263,7 +3266,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // status (ADR-0060 §3), the same one the store leg answers on exhaustion.
         if (idx == vertex_t::kNoSlot) {
             note_subscriber_removed(v);
-            unwind_admission(admitted, v, caller);
+            release_edges(delivery_link(admitted), session_of(admitted), v);
             return std::unexpected(status_t::BACKPRESSURE);
         }
     }
@@ -3283,7 +3286,8 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     notify_subscription(sub_event_t::kind_t::ADDED, v, caller, admitted_tlv, idx);
     // The admitted edge's hold was taken before the slot verb, so a replace over the same
     // link never lets the count touch zero between the two (#1816).
-    hold_link(delivery_link(displaced), false);
+    // The displaced edge's charge goes back with its hold (#1841): a replace is net zero.
+    release_edges(delivery_link(displaced), session_of(displaced), v);
     return subscription_t{v, idx};
 }
 
@@ -3295,14 +3299,17 @@ bool graph_t::admit_session(const remote_ptr_t& remote, vertex_t* v, std::string
     // A refused entry (#1778: the table source is exhausted) refuses the admission, and what
     // the hook charged for it is given back: it is answered exactly as a refusal.
     if (link_index_.index_vertex(session, link_token, v)) return true;
-    (void)session_event(session_event_t::kind_t::RELEASE, session, v, caller);
+    (void)session_event(session_event_t::kind_t::RELEASE, session, v, {});
     return false;
 }
 
-void graph_t::unwind_admission(const remote_ptr_t& remote, const vertex_t* v,
-                               std::string_view caller) const {
-    hold_link(delivery_link(remote), false);
-    (void)session_event(session_event_t::kind_t::RELEASE, session_of(remote), v, caller);
+void graph_t::release_edges(std::string_view link, std::string_view session, const vertex_t* v,
+                            std::size_t n) const {
+    // One event per edge, like the hold (#1816): the receiver keeps a plain count and nothing
+    // else. In a build without the seam the loop's body is `true` and folds away.
+    hold_link(link, false, n);
+    for (std::size_t i = 0; i < n; ++i)
+        (void)session_event(session_event_t::kind_t::RELEASE, session, v, {});
 }
 
 bool graph_t::dispatch_session_event(session_event_t::kind_t kind, std::string_view session,
@@ -3537,11 +3544,12 @@ void graph_t::set_hooks(const graph_hooks_t& hooks) noexcept {
     wire_target_.set(hooks.wire_target.fn, hooks.wire_target.ctx);
     stats_sampler_.set(hooks.stats_sampler.fn, hooks.stats_sampler.ctx);
     link_hold_.set(hooks.link_hold.fn, hooks.link_hold.ctx);
-    // A build without the seam stores nothing (#1841); a budget installed there would silently
-    // admit everything, so a debug build says so instead.
-    assert((config_t::kSessionAdmission || hooks.session_admission.fn == nullptr) &&
-           "graph_hooks_t::session_admission needs config_t::kSessionAdmission = true");
-    session_admission_.set(hooks.session_admission.fn, hooks.session_admission.ctx);
+    // A build without the seam has no `fn` to store (#1841): the member is an empty type there,
+    // so an install does not compile rather than being dropped. The generic lambda is what lets
+    // the discarded arm name a member the closed build does not have.
+    [this](const auto& hook) {
+        if constexpr (requires { hook.fn; }) session_admission_.set(hook.fn, hook.ctx);
+    }(hooks.session_admission);
 }
 
 graph_hooks_t graph_t::hooks() const noexcept {
@@ -3551,17 +3559,22 @@ graph_hooks_t graph_t::hooks() const noexcept {
     const auto wt = wire_target_.get();
     const auto ss = stats_sampler_.get();
     const auto lh = link_hold_.get();
-    const auto sa = session_admission_.get();
     auto sl = subject_lookup_.get();
     if (sl.fn == &graph_t::lookup_via_resolver) sl = {};  // the adapter, not a caller's hook
-    return graph_hooks_t{.subject_resolver = {sr.fn, sr.ctx},
-                         .subscription_observer = {so.fn, so.ctx},
-                         .remote_delivery = {rd.fn, rd.ctx},
-                         .wire_target = {wt.fn, wt.ctx},
-                         .stats_sampler = {ss.fn, ss.ctx},
-                         .link_hold = {lh.fn, lh.ctx},
-                         .subject_lookup = {sl.fn, sl.ctx},
-                         .session_admission = {sa.fn, sa.ctx}};
+    graph_hooks_t out{.subject_resolver = {sr.fn, sr.ctx},
+                      .subscription_observer = {so.fn, so.ctx},
+                      .remote_delivery = {rd.fn, rd.ctx},
+                      .wire_target = {wt.fn, wt.ctx},
+                      .stats_sampler = {ss.fn, ss.ctx},
+                      .link_hold = {lh.fn, lh.ctx},
+                      .subject_lookup = {sl.fn, sl.ctx}};
+    [this](auto& hook) {  // the closed build's member has nothing to fill (#1841)
+        if constexpr (requires { hook.fn; }) {
+            const auto sa = session_admission_.get();
+            hook = {sa.fn, sa.ctx};
+        }
+    }(out.session_admission);
+    return out;
 }
 
 void graph_t::hold_link(std::string_view link, bool held, std::size_t n) const {

@@ -496,11 +496,12 @@ using link_hold_fn_t = void (*)(void* ctx, std::string_view link, bool held);
  * @brief One SESSION-ADMISSION event (#1841) — what @ref graph_hooks_t::session_admission is
  *        handed.
  *
- * A SESSION is this node's name for the link a subscription was admitted over: the name
- * `graph_t::evict_link_edges` reclaims the subscription by when that link or bus peer departs.
- * It is the delivery link for a wire subscribe, so two sessions of one subject are two
- * sessions, and the caller context for a `:subscribers[]` field-write that bound no link. A
+ * A SESSION (CONTEXT.md §Session) is this node's name for the link a subscription was admitted
+ * over: the name `graph_t::evict_link_edges` reclaims the subscription by when that link or bus
+ * peer departs. It is the delivery link for a wire subscribe, so two sessions of one subject are
+ * two sessions, and the caller context for a `:subscribers[]` field-write that bound no link. A
  * local subscription (the empty caller context, no link) has no session and is never offered.
+ * It is not a bus peer's session anchor (`mount:peer`), which names a vertex.
  *
  * Every member is BORROWED for the call only — copy what must outlive it.
  */
@@ -514,16 +515,25 @@ struct session_event_t {
          */
         ADMIT,
         /**
-         * @brief A subscription the hook ADMITTED did not land after all — the graph's own
-         *        table source refused its index entry or its slot, or a `[N]` replace named
-         *        no slot — so the hook gives back exactly what that ADMIT charged.
+         * @brief ONE edge an `ADMIT` charged to the `session` has ended, so the hook gives back
+         *        exactly that one charge. Fired once per edge, for every end but the session's
+         *        own departure: the edge did not land after all (the table source refused its
+         *        index entry or its slot, or a `[N]` replace named no slot), it was cleared
+         *        (`unsubscribe`, a `:subscribers[N]` clear), a `[N]` replace displaced it, a route
+         *        refusal reclaimed it, or its producer retired.
          */
         RELEASE,
         /**
          * @brief The session's edges were torn down at its departure (`evict_link_edges`): a
          *        link or bus peer went down, or a successor took its name. Everything charged to
-         *        the `session` may be refunded at once. Fired once per departure, also for a
-         *        session that holds nothing (a successor's arrival clears its name first).
+         *        the `session` may be refunded at once.
+         *
+         * At least once per departure and SAFE TO REPEAT: a bus peer's arrival clears its name
+         * first, and a child link's down notifier and its removal both depart it, so a session
+         * may see an `END` with nothing charged, or two in a row. No `END` fires at node
+         * teardown (the graph's or the router's destruction): the embedder's ledger ends with
+         * its `ctx`. A `RELEASE` dispatched by a concurrent clear may arrive AFTER the `END`
+         * for the same session, so an embedder floors the session's charge at zero.
          */
         END
     };
@@ -534,12 +544,13 @@ struct session_event_t {
     std::string_view session;
     /**
      * @brief Canonical key of the PRODUCER the subscription is on (concatenated NAME records,
-     *        as in @ref sub_event_t::producer). Empty on `END`, which names no producer.
+     *        as in @ref sub_event_t::producer). Empty on `END`, which names no producer, and on
+     *        a `RELEASE` whose producer retired or that a route refusal reclaimed.
      */
     wire::key_view_t producer;
     /**
      * @brief The caller context the SUBSCRIBE gate ran under — the subscriber's SUBJECT, which
-     *        several sessions may share. Empty on `END`.
+     *        several sessions may share. Set on `ADMIT` only; empty on `RELEASE` and `END`.
      */
     std::string_view caller;
 };
@@ -552,21 +563,31 @@ struct session_event_t {
  *         `BACKPRESSURE` — refused, nothing was added, so nothing is owed back. Read for
  *         `ADMIT` only; `RELEASE` and `END` are notifications.
  *
- * An embedder that holds each session to a budget of N subscriptions charges on an admitting
- * `ADMIT`, refunds on `RELEASE`, and drops the session's whole charge on `END`. An edge cleared
- * individually (a `:subscribers[N]` clear, a route refusal, the producer's retirement) is not
- * reported: the charge is per session, and the session's `END` refunds it.
+ * An embedder that holds each session to a budget of N live subscriptions charges one on an
+ * admitting `ADMIT`, refunds one on each `RELEASE` (floored at zero), and drops the session's
+ * whole charge on `END`. Every admitted edge is therefore given back exactly once: by its own
+ * `RELEASE`, or by its session's `END`. A `[N]` replace is offered as an `ADMIT` before the edge
+ * it displaces is `RELEASE`d, so a session already at its budget is refused a replace even
+ * though the replace would leave its count unchanged.
  *
  * @warning Runs SYNCHRONOUSLY on the subscribing (or departing) thread, outside every graph
  *          lock, inside the operation it gates — so it must be cheap and non-blocking, and it
  *          MUST NOT re-enter `graph_t`, for the reason @ref sub_observer_fn_t gives.
  *
  * @note Exists only in a build with `config_t::kSessionAdmission` (off by default): without
- *       it the graph has no slot for the hook and pays nothing for it. The ADR-0047 `{fn, ctx}`
+ *       it the graph has no slot for the hook and pays nothing for it, and installing one does
+ *       not compile (@ref graph_hooks_t::session_admission). The ADR-0047 `{fn, ctx}`
  *       shape, published through a @ref tr::sink_slot_t like every other graph seam; @p ctx
  *       is caller-owned and must outlive every subscribe and departure the graph can still see.
  */
 using session_admission_fn_t = bool (*)(void* ctx, const session_event_t& event);
+
+/**
+ * @brief @ref graph_hooks_t::session_admission in a build without `config_t::kSessionAdmission`:
+ *        no `fn` and no `ctx`, so a hook installed there is a compile error, never a budget
+ *        that silently does not apply.
+ */
+struct no_session_admission_t {};
 
 /**
  * @brief One `{fn, ctx}` graph seam: a captureless function pointer and the context handed
@@ -701,10 +722,13 @@ struct graph_hooks_t {
      *        and teardown event (@ref session_admission_fn_t).
      *
      * Null (the default) admits every subscription, which is every node without a per-session
-     * budget. Stored only by a build with `config_t::kSessionAdmission`; without it this
-     * member is ignored and a debug build asserts that it was left null.
+     * budget. In a build without `config_t::kSessionAdmission` the member is the empty
+     * `%no_session_admission_t`: it costs the aggregate nothing, and naming its `fn` does
+     * not compile.
      */
-    graph_hook_t<session_admission_fn_t> session_admission{};
+    [[no_unique_address]] std::conditional_t<kSessionAdmission,
+                                             graph_hook_t<session_admission_fn_t>,
+                                             no_session_admission_t> session_admission{};
 };
 
 /**
@@ -3160,10 +3184,14 @@ class graph_t {
     // session and is not indexed: true. False ⇒ refused, nothing admitted, nothing owed.
     [[nodiscard]] bool admit_session(const remote_ptr_t& remote, vertex_t* v,
                                      std::string_view caller, link_id_t link_token);
-    // The give-back for an edge `admit_session` admitted whose slot verb then refused it: the
-    // link hold taken for it (#1816) and the session charge (#1841). Called with NO graph lock.
-    void unwind_admission(const remote_ptr_t& remote, const vertex_t* v,
-                          std::string_view caller) const;
+    // The ONE give-back for @p n admitted edges that ended — refused by the slot verb, cleared,
+    // displaced by a replace, reclaimed by a route refusal or by their producer's retirement: the
+    // link hold each took over @p link (#1816) and the session charge each made to @p session
+    // (#1841), one event per edge. A session departure is not one of these: `END` resets the
+    // session instead. An empty @p link or @p session gives back nothing on that side. Called
+    // with NO graph lock held.
+    void release_edges(std::string_view link, std::string_view session, const vertex_t* v,
+                       std::size_t n = 1) const;
     // Offer one event to the session-admission seam (#1841); true = admitted, which is also the
     // answer with nothing installed, for an empty session, and for every RELEASE / END. In a
     // build without `config_t::kSessionAdmission` this folds to `true` at compile time, so the
