@@ -186,7 +186,8 @@ int main(int argc, char** argv) {
     const auto fan_wanted = [only_fan](std::size_t n) { return only_fan == 0 || only_fan == n; };
     constexpr std::array<std::size_t, 3> kFans{1, 32, 1024};
     constexpr std::array<std::size_t, 4> kSizes{64, 1024, 4096, 16384};
-    std::printf("RAM sizeof_selector_64x16=%zu sizeof_subscription=%zu\n", sizeof(selector_t),
+    std::printf("RAM sizeof_selector_8x4=%zu sizeof_selector_64x16=%zu sizeof_subscription=%zu\n",
+                sizeof(tr::graph::subscription_selector_t<>), sizeof(selector_t),
                 sizeof(subscription_t));
 
     for (std::size_t n : kFans) {

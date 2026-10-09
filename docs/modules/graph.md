@@ -584,26 +584,34 @@ followed by the owner's own announce write.
 build that does not include it carries none of it. A `subscription_selector_t<kRefs, kOptions>`
 is one vertex whose owner lists existing subscriptions under named options and makes one option
 active. A switch suspends what only the old option lists and then resumes what only the new
-one lists, through `graph_t::set_suspended`: no unsubscribe, no frame, nothing drawn, and never
-a double delivery. A resume refused for want of memory fails the switch with `BACKPRESSURE`,
-leaves the new option active and `settled()` false, and selecting it again retries.
+one lists, through `graph_t::set_suspended`: no unsubscribe, no frame, nothing drawn, and no
+double delivery among the refs it lists. The selector owns those refs' suspend bit and does not
+watch it, so a peer's (re)subscribe delivers until the owner lists it and switches. A resume
+refused for want of memory fails the switch with `BACKPRESSURE` and leaves it partly applied:
+the new option is active, `settled()` is false, and selecting it again retries. Two operations
+that meet on one instance never wait: the later one answers `BACKPRESSURE` and changes nothing.
 
 The instance's two app fields are its wire surface ([RFC-0034](../spec/rfcs/0034-subscription-selector-fields.md)):
 a write of `NAME <option>` to `:settings.app.active` selects (an empty `STATUS` selects none),
 and `:settings.app.options` reads back each option's refs as `<producer>:subscribers[N]` with
 a `live` / `suspended` / `inert` state. A ref whose subscription is gone stays listed as
-`inert`, and switches skip it.
+`inert`, and switches skip it, until the owner calls `remove` or lists the same address again.
+
+The instance costs a pointer and a 16-bit slot per ref and a borrowed name per option, nothing
+outside the object: 176 B at the default `<8, 4>` on LP64 (100 B on ILP32), 1,064 B at
+`<64, 16>` (680 B). An `options` read renders up to `kRefs × kOptions` ref records with keys of
+up to 1 KiB each, staged at about twice that on the graph's table source.
 
 ```cpp
-tr::graph::subscription_selector_t<> sel(g);  // 64 refs, 16 options: 2416 B, no draw
+tr::graph::subscription_selector_t<> sel(g);  // 8 refs, 4 options: 176 B, no draw
 (void)sel.attach(path_t("/route"));
 (void)g.subscribe(path_t("/in"), path_t("/out/a"));     // the owner creates each one:
 (void)g.subscribe(path_t("/in"), path_t("/out/b"));     // slots 0 and 1 of a fresh /in
 auto to_a = g.subscription_at(in, 0);                   // a handle by `/in:subscribers[0]`
 auto to_b = g.subscription_at(in, 1);
-(void)g.set_suspended(*to_b, true);                     // suspended unless active
-(void)sel.add("a", *to_a);
-(void)sel.add("b", *to_b);
+(void)g.set_suspended(to_b, true);                      // suspended unless active
+(void)sel.add("a", to_a);                               // names are borrowed: literals here
+(void)sel.add("b", to_b);
 (void)sel.select("b");                                  // or write `active` remotely
 ```
 

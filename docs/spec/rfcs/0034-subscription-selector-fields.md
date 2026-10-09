@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0034 — The subscription selector's two fields: `active` and `options`
 
-<!-- status: proposed -->
+<!-- status: accepted -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0034 |
 | **Title** | The subscription selector's two fields: `active` and `options` |
-| **Status** | **proposed** (2026-10-09). It needs the maintainer's approval. The comment window is waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke it explicitly if outside input is wanted. The maintainer ruled the placement and the field spelling on 2026-10-08 in [#2024](https://github.com/avatarsd-llc/libtracer/issues/2024): the selector is an adapter beside the core, `options` and `active` are ordinary fields on its own vertex with no new type codes, selecting is an ordinary field write, and the value format of `options` needs a short amendment. This is that amendment. |
+| **Status** | **accepted** — maintainer ruling 2026-10-10 on the [#2068](https://github.com/avatarsd-llc/libtracer/pull/2068) review: approved as an amendment once renumbered from 0033 (that number went to the Noise link binding), shipped without a ref generation ([#1932](https://github.com/avatarsd-llc/libtracer/issues/1932)) under the documented caveat, with an owner-explicit remove, and with the partial switch on `backpressure` that §2.1 states. Comment window waived by the sole maintainer per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window". The maintainer ruled the placement and the field spelling on 2026-10-08 in [#2024](https://github.com/avatarsd-llc/libtracer/issues/2024): the selector is an adapter beside the core, `options` and `active` are ordinary fields on its own vertex with no new type codes, selecting is an ordinary field write, and the value format of `options` needs a short amendment. This is that amendment. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Instrument** | **Amendment.** Below `settings.app.` the bytes are owner-defined ([RFC-0010](0010-owner-app-fields-and-schema.md) §A.1), so nothing here changes the core. What this fixes is a value format a peer can observe on any node that offers the selector type, so that a remote controller written against one node reads and drives another. It mints no type code, no field outside `settings.app.`, no error and no `:stats` noun. |
@@ -39,10 +39,15 @@ two application fields on its own vertex, and this RFC fixes their values.
 - A write of an empty `STATUS` (`0x09`, `length = 0`) MUST select no option.
 - A write naming no option MUST answer `tr::path::not_found` and change nothing.
 - Any other value, an empty `NAME` included, MUST answer `tr::schema::type_mismatch`.
-- A switch that a producer's memory refuses MUST answer `tr::flow::backpressure`. The written
-  option is then active, every ref outside it is suspended, and some of its own refs are still
-  suspended. Writing it again retries them. A node MUST NOT deliver one write twice to one target
-  during a switch; a gap is permitted.
+- A switch that a producer's memory refuses MUST answer `tr::flow::backpressure`, and is then
+  partly applied: the written option is active, every ref outside it is suspended, and some of
+  its own refs are still suspended. Writing it again retries them. This is the one refused write
+  that leaves state behind, and it is accepted as such: the write is idempotent, so a writer that
+  retries on `backpressure`, as it does for any write, completes it.
+- A write that arrives while another switch, `options` read or owner call is running on the same
+  selector MAY answer `tr::flow::backpressure` and change nothing; a retry completes it.
+- During a switch a node MUST NOT deliver one write twice to one target through two refs it
+  lists; a gap is permitted. The bound is over the refs whose suspend bit the selector owns (§2.3).
 - A read answers `NAME <active option>`, or an empty `STATUS` when none is active.
 
 Writing the option that is already active is a retry and is otherwise a no-op.
@@ -68,12 +73,37 @@ SETTINGS {
 
 - A ref is the address of the subscription it names: `<producer>:subscribers[N]`.
 - `inert` marks a ref whose subscription is gone. It MUST stay listed, and a switch MUST skip it
-  without failing. Nothing removes it automatically.
+  without failing. Nothing removes it automatically; the owner may remove it (§4), and listing
+  the same address again (a later subscribe that reuses the slot) makes it live or suspended
+  again, as the graph says.
 - A reader MUST ignore a member pair it does not know. A later amendment is expected to add
   `NAME "generation" VALUE <u32 LE>` to each ref once subscriptions carry a generation
   ([#1932](https://github.com/avatarsd-llc/libtracer/issues/1932)).
 - `options` has no write surface. A write answers `tr::schema::not_found`, including the owner's.
   The owner lists refs through its host API (§4).
+- **The size of a read.** A ref can be listed in every option, so a selector of `R` refs and `O`
+  options renders at most `R × O` ref records, each carrying a producer key of up to 1 KiB
+  (`kMaxPathBytes`). At the reference implementation's widest documented sizing, 64 refs and 16
+  options, that is 1,024 records and about 1.1 MiB encoded. The node stages the levels and then
+  copies the result out, so one read holds about twice its encoded size at its peak, on the
+  node's own table source; a refused draw answers `tr::flow::backpressure`. A node that cannot
+  afford that sizes its selectors smaller; the default (8 refs, 4 options) is at most 32 records.
+
+### 2.3 Who owns the suspend bit
+
+A selector owns the suspended-or-delivering state of every subscription it lists. It does not
+watch it: it acts on what it last set, and re-reads it only for `options`, for one ref's state,
+and when the owner lists the ref again. So:
+
+- Anything else that resumes a listed subscription (the owner toggling it directly, or a
+  subscribe that reuses the slot of one that was removed) leaves it delivering until the owner
+  lists it again or a switch's suspend reaches it.
+- A peer's (re)subscribe is admitted delivering, like every subscribe, and delivers until the
+  owner lists it and switches. A remote spelling for "admit suspended" is #2019's
+  (`:subscribers[N]` suspend), not this RFC's.
+
+The no-double-delivery rule of §2.1 holds over the refs a selector lists while it owns their
+bit; outside that, two subscriptions to one target deliver twice, as they would with no selector.
 
 ## 3. Compatibility
 
@@ -82,6 +112,9 @@ these fields. No conformance vector changes; the reference implementation's host
 shapes (`core/tests/subscription_selector_test.cpp`).
 
 ## 4. Out of scope, and why
+
+The owner's host API lists a ref in an option, removes a ref from every option, and selects; a
+remove leaves the subscription in the state it holds.
 
 - **A remote write of `options`.** A peer cannot name a subscription by `(index, generation)`
   until #1932 gives subscriptions a generation, and cannot suspend one remotely until #2019 (the

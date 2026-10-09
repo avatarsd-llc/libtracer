@@ -3371,19 +3371,6 @@ result_t<void> graph_t::set_suspended(const subscription_t& sub, bool suspended)
     return {};  // no replay: a resume delivers from the next propagated value
 }
 
-result_t<subscription_t> graph_t::subscription_at(vertex_handle_t producer,
-                                                  std::size_t slot) const {
-    if (!producer.get()->edge_suspended(slot)) return std::unexpected(status_t::NOT_FOUND);
-    return subscription_t{producer.get(), slot};
-}
-
-result_t<std::size_t> graph_t::subscription_address(const subscription_t& sub,
-                                                    mem::bytes_t& producer_key) const {
-    if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
-    if (!try_build_key(sub.vertex_, producer_key)) return std::unexpected(status_t::BACKPRESSURE);
-    return sub.slot_;
-}
-
 result_t<bool> graph_t::is_suspended(const subscription_t& sub) const {
     if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
     if (const std::optional<bool> s = sub.vertex_->edge_suspended(sub.slot_)) return *s;

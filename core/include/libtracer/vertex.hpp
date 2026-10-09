@@ -424,6 +424,11 @@ struct handlers_t {
      *          bytes out before returning — so it may point at storage the filter owns, but that
      *          storage must outlive the return. The context is BORROWED for the call, as for
      *          @ref on_admit. Unset ⇒ bytes store verbatim, as before.
+     * @note "Nothing is stored" binds the field, not the owner's state. An owner whose admit
+     *       ACTS on the write may refuse after acting in part, and then says so: the
+     *       subscription selector (#2024, RFC-0034 §2.1) answers a BACKPRESSURE to an `active`
+     *       write with the new option active and the switch partly applied, and the same
+     *       write, repeated, completes it.
      */
     app_field_admit_hook_t on_app_field_admit;
     /**
