@@ -50,7 +50,7 @@ PAGES = {
     "path.md": ["path.hpp"],
     "graph.md": [
         "graph.hpp", "vertex.hpp", "vertex_handle.hpp", "value.hpp", "hook.hpp", "app_fields.hpp",
-        "function_ref.hpp", "subscriber.hpp",
+        "function_ref.hpp", "subscriber.hpp", "subscription_selector.hpp",
         "vertex_stripe.hpp", "lkv_slot.hpp", "edge_pin.hpp", "qsbr.hpp", "link_id.hpp",
         "link_index.hpp", "thread_id.hpp",
     ],
