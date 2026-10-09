@@ -1110,26 +1110,35 @@ std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noex
 }
 
 std::optional<vertex_slot_t> graph_t::vertex_slot_at(std::uint32_t index) const noexcept {
-    // LOCK-FREE (#1939): the index is append-only and publishes its size, so an in-range slot
-    // is a written one. What the shared hold used to buy — a generation read that cannot
-    // straddle a retire — is bought by reading the generation on BOTH sides of the
-    // registration test, which is `deref_vertex_slot`'s rule and is argued there.
+    // The MINT keeps the shared hold. A retire bumps the generation first and clears the
+    // registration last (ADR-0062), and a revival does not bump, so a generation read
+    // between the two would stamp the SUCCESSOR tenant's number onto an element (#603). The
+    // unique hold a retire keeps throughout is what excludes that window; reading the
+    // generation twice, as `deref_vertex_slot` does, would not — both reads land after the
+    // bump. The honouring side needs no hold (#1939, argued in `deref_vertex_slot`).
+    const std::shared_lock lock(map_mutex_);
     if (index >= vertex_slots_.size()) return std::nullopt;
     const vertex_t* const v = vertex_slots_[index];
     const std::uint32_t gen = v->retire_gen();
     if (gen == kGenerationSaturated) return std::nullopt;  // permanently unbindable (§4.4 r3)
     // A retired-but-not-yet-revived vertex is a PLACEHOLDER, and minting for one is how an
-    // element outlives the tenancy it was issued against: `retire` bumps the generation and
-    // clears `registered_`, so an element minted in that window already carries the number
-    // the SUCCESSOR tenant will validate under, and `deref_vertex_slot` would honour it once
-    // the vertex revives at the same path. The validate-on-use stamp is the whole guard here
-    // (#511), so it has to be refused on the side that ISSUES an element as well as on the
-    // side that honours one — the same symmetry rule 3 needed. A hop that cannot mint STRIPS
-    // the mint answer (§7.1 erratum 1) and the origin stays canonical.
+    // element outlives the tenancy it was issued against: refused on the side that ISSUES an
+    // element as well as on the side that honours one — the same symmetry rule 3 needed. A
+    // hop that cannot mint STRIPS the mint answer (§7.1 erratum 1) and the origin stays
+    // canonical.
+    if (!v->registered()) return std::nullopt;
+    return vertex_slot_t{.index = index, .generation = gen};
+}
+
+std::optional<vertex_handle_t> graph_t::registered_vertex_at(std::uint32_t index) const noexcept {
+    // LOCK-FREE (#1939): a door holds a SLOT, not an element, so there is no generation to
+    // validate and none is issued. The index is append-only with a published size, so an
+    // in-range slot is a written one; a placeholder is no door.
+    if (index >= vertex_slots_.size()) return std::nullopt;
+    vertex_t* const v = vertex_slots_[index];
     if (!v->registered()) return std::nullopt;
     std::atomic_thread_fence(std::memory_order_acquire);  // pairs with `fill`'s release store
-    if (v->retire_gen() != gen) return std::nullopt;
-    return vertex_slot_t{.index = index, .generation = gen};
+    return vertex_handle_t{v};
 }
 
 bool graph_t::allows(vertex_handle_t v, std::string_view caller, acl_right_t right) const {

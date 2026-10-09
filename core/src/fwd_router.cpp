@@ -2325,14 +2325,13 @@ bool fwd_router_t::door_allows(const child_registry_t::child_t* door, std::strin
                                std::optional<graph::acl_right_t> right) const {
     // One relaxed load on a graph that enforces no ACL, and nothing else.
     if (door == nullptr || !graph_.acl_enforced()) return true;
-    // The door's connection vertex, by the slot `add_child` recorded: a bounds check and two
-    // loads, lock-free (#1939). Enforcing, a door with none has nothing to grant the right and
-    // refuses (fail closed), as does an op this build names no right for.
-    const std::optional<graph::vertex_slot_t> slot =
-        right ? graph_.vertex_slot_at(door->conn_slot.load(std::memory_order_relaxed))
-              : std::nullopt;
+    // The door's connection vertex, by the slot `add_child` recorded: a bounds check, a load
+    // and the registration test, lock-free (`registered_vertex_at`, #1939). Enforcing, a door
+    // with none has nothing to grant the right and refuses (fail closed), as does an op this
+    // build names no right for.
     const std::optional<graph::vertex_handle_t> v =
-        slot ? graph_.deref_vertex_slot(slot->index, slot->generation) : std::nullopt;
+        right ? graph_.registered_vertex_at(door->conn_slot.load(std::memory_order_relaxed))
+              : std::nullopt;
     // THE `allows` of the router — every spelling's hop is decided here (RFC-0029 §6.4).
     return v && graph_.allows(*v, caller, *right);
 }

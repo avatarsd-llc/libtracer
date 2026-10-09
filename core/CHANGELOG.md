@@ -106,13 +106,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     (`transport_vertex_t::make_connection`) registers the vertex first.
   - A PAIR naming a session anchor is gated at its mount's door only; the anchor, which sits
     outside the path tree and has no `:acl` ancestry, is no longer asked separately.
-- **The PAIR arm takes no graph lock
+- **A PAIR hop takes no graph lock
   ([#1939](https://github.com/avatarsd-llc/libtracer/issues/1939)).** The vertex index is
   append-only with an atomically published size (the ADR-0063 pattern): chunks never move and a
-  grown directory is kept, not freed, so `graph_t::deref_vertex_slot`, `vertex_slot_at` and
-  `vertex_slot_count` are a bounds check, a slot load and a generation compare, with no
-  `map_mutex_` hold. The generation is read on both sides of the registration test, so a
-  retire and revival that straddle a lookup still refuse a stale element.
+  grown directory is kept, not freed. So `graph_t::deref_vertex_slot` (the honouring side) and
+  `vertex_slot_count` are a bounds check, a slot load and a generation compare with no
+  `map_mutex_` hold, and the new `graph_t::registered_vertex_at` gives a door its connection
+  vertex the same way. The generation is read on both sides of the registration test, so a
+  stale element is still refused across a retire and revival. The **mint**,
+  `graph_t::vertex_slot_at`, keeps its shared hold: a retire bumps the generation before it
+  clears the registration, and a mint read in that window would carry the successor tenant's
+  number (#603).
 
 ### Fixed
 

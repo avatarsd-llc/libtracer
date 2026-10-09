@@ -20,6 +20,13 @@
  *   directory regrowths while another drives PAIR hops; every hop forwards. Run under TSan
  *   (the `tsan` CI job builds every test with `-fsanitize=thread`), this is the data-race
  *   check of the lock-free index.
+ * - **No mint of the successor's generation.** One thread retires and revives a vertex at the
+ *   same path; another mints for its slot (`vertex_slot_at`, the forwarder's mint) the whole
+ *   time. A retire bumps the generation BEFORE it clears the registration flag (ADR-0062), and
+ *   a revival does not bump, so a mint that read the bumped generation off a vertex still
+ *   flagged registered would issue an element that validates against the NEXT tenant (#603).
+ *   Every mint made entirely inside one `retire` call must therefore be the retiring tenant's
+ *   generation or nothing.
  */
 
 #include <atomic>
@@ -194,10 +201,54 @@ void hops_during_growth() {
     check(n.g.vertex_slot_count() > 2000, "the index grew past 2000 slots");
 }
 
+/** @brief A mint made inside a retire never carries the successor tenant's generation. */
+void mint_never_carries_successor() {
+    std::printf("a mint inside a retire never issues the next tenant's generation:\n");
+    graph_t g;
+    const path_t at("/churn/v");
+    const auto first = g.vertex_slot(g.register_vertex(at, role_t::STORED_VALUE));
+    check(first.has_value(), "the churned vertex registered with a slot");
+    if (!first) return;
+    const std::uint32_t index = first->index;
+    // `seq` is odd while a `retire` call is in progress; `retiring` is the generation of the
+    // tenant that call retires, published before `seq` turns odd.
+    std::atomic<std::uint32_t> seq{0};
+    std::atomic<std::uint32_t> retiring{0};
+    std::atomic<bool> stop{false};
+    std::atomic<std::size_t> bad{0};
+    std::atomic<std::size_t> inside{0};
+    std::thread minter([&] {
+        while (!stop.load(std::memory_order_acquire)) {
+            const std::uint32_t s0 = seq.load(std::memory_order_acquire);
+            const std::uint32_t g0 = retiring.load(std::memory_order_acquire);
+            const auto e = g.vertex_slot_at(index);
+            const std::uint32_t s1 = seq.load(std::memory_order_acquire);
+            if (s0 != s1 || (s0 & 1u) == 0 || !e) continue;
+            inside.fetch_add(1, std::memory_order_relaxed);
+            if (e->generation != g0) bad.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    constexpr int kCycles = 20000;
+    for (int i = 0; i < kCycles; ++i) {
+        const auto h = g.find(at.key());
+        if (!h) break;
+        retiring.store(g.retire_generation(*h), std::memory_order_release);
+        seq.fetch_add(1, std::memory_order_acq_rel);  // odd: a retire is in progress
+        (void)g.retire(*h);
+        seq.fetch_add(1, std::memory_order_acq_rel);  // even: it has returned
+        (void)g.register_vertex(at, role_t::STORED_VALUE);
+    }
+    stop.store(true, std::memory_order_release);
+    minter.join();
+    std::printf("  (%zu mints landed inside a retire)\n", inside.load());
+    check(bad.load() == 0, "no mint inside a retire carried the successor's generation");
+}
+
 }  // namespace
 
 int main() {
     hop_takes_no_lock();
     hops_during_growth();
+    mint_never_carries_successor();
     return tr::testing::summary("pair_hop_lock_free");
 }

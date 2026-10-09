@@ -347,7 +347,7 @@ exactly the provenance §B's "the responder's own endpoint" was reaching for and
 any other vantage.
 
 **Why no request flag.** RFC-0024 spent `op` bit 7 so that a hop only pays for a mint when asked.
-A PAIR costs the issuing hop one `vertex_slot_at` — a bounds test and two loads, with no lock —
+A PAIR costs the issuing hop one `vertex_slot_at` — a shared lock, a bounds test and two loads —
 and no allocation, so there is nothing to protect with a flag; and a mint that *reads* a slot is
 post-auth by construction, because the reply it rides exists only after the terminus's gates passed
 (RFC-0027 §8.1's intent, satisfied without a lambda — ruling 9's third divergence).
@@ -462,7 +462,7 @@ saturated vertex is permanently unbindable and every mint for it falls back to t
 invalidation axis: no owner check (there is no table to own a label), no per-peer stamp
 (`label_peer` is deleted), no TTL. "Peer departure" is caught by three guards the inventory's §3
 lists, all already shipped for the pair: the connection vertex's generation, the child tombstone
-(`conn_slot = kNoConnSlot` on `remove_child`; `child_registry_t::by_conn_slot` then answers null and the egress
+(`remove_child` tombstones the registry entry; `child_registry_t::by_conn_slot` tests `live()`, then answers null and the egress
 drops), and the session anchor's retire for bus sessions (`fwd_router_t::bus_peer_down`, `core/src/fwd_router.cpp`).
 
 ### 8.2 The open fact, verified: a same-named re-add does NOT bump today, and MUST
@@ -883,8 +883,8 @@ the deletion list agree with §9.2's normative text, which already kept the mech
 
 - §6 step 3, §8.1 and §13.2's S6 row named `ctx_by_conn_slot` as the lookup from a slot to the
   child whose connection vertex it is.
-- §6.2 priced a PAIR mint as "a shared lock, a bounds test and two loads", and §4.1 called the
-  vertex index a `std::deque`.
+- §8.1 said a removed child's `conn_slot` is reset to `kNoConnSlot`, and §4.1 called the vertex
+  index a `std::deque`.
 - §13.2's S6 row and §15 clause 4 left open whether the tree walk or the registry's
   `longest_prefix` resolves a NAME-spelled mount.
 
@@ -892,23 +892,25 @@ the deletion list agree with §9.2's normative text, which already kept the mech
 `fwd_router_t::ctx_by_conn_slot` is deleted. The slot now sits on the registry entry
 (`child_registry_t::child_t::conn_slot`, recorded for point-to-point and bus mounts alike), and
 `child_registry_t::by_conn_slot` finds the door from it. The vertex index is now an append-only
-chunked array whose size is published atomically (ADR-0063's pattern). So `vertex_slot_at` and
-`deref_vertex_slot` take no lock: they read the generation on both sides of the registration
-test instead.
+chunked array whose size is published atomically (ADR-0063's pattern). So `deref_vertex_slot`, the
+honouring side of a PAIR, takes no lock: it reads the generation on both sides of the
+registration test instead. A door's ACL lookup, `graph_t::registered_vertex_at`, takes none
+either, because it holds a slot and issues no generation. The **mint**, `vertex_slot_at`, keeps
+the shared lock. A retire bumps the generation before it clears the registration, so a
+lock-free mint could issue the successor tenant's generation (#603).
 
 **The correction.**
 
 | | corrected reading |
 | --- | --- |
 | **§4.1** | the index is the chunked, lock-free-to-read `graph_t::vertex_slots_`. |
-| **§6 step 3, §8.1, §13.2 S6** | the door lookup is `child_registry_t::by_conn_slot`. |
-| **§6.2** | a PAIR mint is "a bounds test and two loads, with no lock". |
+| **§6 step 3, §8.1, §13.2 S6** | the door lookup is `child_registry_t::by_conn_slot`. §8.1's tombstone is the registry entry's `live()` test; `conn_slot` itself is left alone on `remove_child`. |
 | **S6 outcome** | **§15 clause 4 fired.** In `bench_mount_resolve`'s lookup table, even the floor of a tree walk (one keyed `graph_t::find` of the exact mount) loses to `longest_prefix` at S6's gate cell: at W = 12, N = 64 it takes 82 ns against 68 ns. At N ≤ 8 it loses by 4–5× at every width. It wins only at W ≤ 3, N = 64. So the registry index stays as the NAME spelling's accelerator, and ruling 9's first item reads "one lookup semantics, two indexes". What is ONE, as §6.4 requires, is the door and the gate: the NAME descent, a PAIR hop and a PAIR naming a session anchor all end on the registry entry whose `conn_slot` is the connection vertex, and all are decided by `fwd_router_t::door_allows`, the router's only `graph_t::allows` call. |
 
 **Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
 wire surface moves.** No frame, TLV type, escape kind, flag bit, grammar, error identity or
-conformance vector changes. The symbol names and the lock note are informative pointers into the
-reference implementation. The S6 outcome is the branch §15 clause 4 already wrote down, recorded
+conformance vector changes. The symbol names and the lock note are informative pointers into the reference implementation. §6.2's price of a mint, a shared lock, still
+stands. The S6 outcome is the branch §15 clause 4 already wrote down, recorded
 as taken. §6.4's normative rule, that the verdict is spelling-independent, is now what the code
 does, including for an opcode the build names no right for, which both spellings refuse
 identically when enforcing.

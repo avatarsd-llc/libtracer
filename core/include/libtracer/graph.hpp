@@ -1320,6 +1320,23 @@ class graph_t {
     [[nodiscard]] std::optional<vertex_slot_t> vertex_slot_at(std::uint32_t index) const noexcept;
 
     /**
+     * @brief The vertex at slot @p index while it is registered — a DOOR's lookup, lock-free.
+     *
+     * A router that recorded a mount's connection vertex by slot asks this per frame to
+     * evaluate the door's ACL (RFC-0029 §6.4). It holds a slot, not an element, so no
+     * generation is compared or issued: unlike @ref vertex_slot_at this cannot mint, and so
+     * takes no lock (#1939). A bounds check, a slot load and the registration test.
+     *
+     * @retval std::nullopt @p index is out of range, or the slot holds a retired or
+     *         never-registered placeholder.
+     *
+     * @warning Like @ref deref_vertex_slot, the answer authorizes nothing; the caller asks
+     *          `allows` at the returned vertex.
+     */
+    [[nodiscard]] std::optional<vertex_handle_t> registered_vertex_at(
+        std::uint32_t index) const noexcept;
+
+    /**
      * @brief Evaluate the ACL at @p v for @p caller and @p right — the §6.2 check, exposed.
      *
      * The same predicate every data op already runs before it acts, published for the ONE
