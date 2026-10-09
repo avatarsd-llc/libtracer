@@ -17,18 +17,23 @@
  *  - `compact` — one `ADVERTISE` binds a label at every hop (untimed warm-up, reported as the
  *                cold cost), then every sample rides as `COMPACT{label, payload}`.
  *
- * The arms are NOT like-for-like on the reply leg, and that is the finding to read first: a
- * forwarded PAIR write is acknowledged (a RESULT travels home through every hop), a COMPACT is
- * not. This is the asymmetry that voided `bench_hop_chain`'s first figures, so it is counted per
- * direction, asserted (pair must ack, compact must not) and reported as `rev_frames`/`rev_B`;
- * pair latency and throughput INCLUDE that leg, and nothing in core was changed to suppress it.
+ * The arms are NOT like-for-like on the reply leg. A forwarded PAIR write grows `src` at every
+ * forwarder, so the terminus builds a RESULT and it is relayed back down to node 0 — where it is
+ * dropped silently (the origin receives 0 frames; no router counter moves). So `pair` pays for an
+ * ack that is built, carried H hops and discarded; COMPACT emits none. The shape is asserted
+ * exactly (H reply frames, 0 at the origin) so any change is loud. To price it, `pair-norelay`
+ * repeats the PAIR arm with the reply's relay cut (the terminus still builds and sends it):
+ * `pair` minus `pair-norelay` is the relay cost, and `pair-norelay` vs `compact` is the nearest
+ * like-for-like the library allows without a core change.
  *
  * Cells: hops {1,3} x payload {64, 1024, 16384} B x batch N {1, 8, 32}. N > 1 is the optional
  * BATCH arm: N sample frames composed into ONE `BATCH` value (`compose_batch`, composed
  * UNTIMED — the app's cost, not the library's forward path) and written once; per-sample figures
- * divide by N. CAN is derived, not simulated: the bytes each hop carries are cut into classic
- * (8 B) and FD (64 B) data fields (`can_frame_count`'s division) — header-elided framing, so
- * this is a lower bound on frames, identical for both arms.
+ * divide by N. The pair cost grows with N (the terminus walks the BATCH children), COMPACT's does
+ * not. `tlv8`/`tlv64` cut the TLV bytes of each hop's frame into 8/64 B fields: arithmetic on the
+ * ws-style frame, NOT the CAN carriage (which is header-elided and carries a FWD as a directed
+ * group); it supports no CAN conclusion. Rows with `warm=NO-alloc-per-frame` allocate per frame
+ * (16 KiB batches cross the pinned mmap threshold) and measure the allocator, not the protocol.
  *
  * Columns of the report (one `CELL` line each, plus the standard `RESULT` row):
  *   wire_B_per_hop  bytes the frame carries on each hop's link, origin to sink
@@ -36,7 +41,7 @@
  *   MBps            payload throughput (samples x payload / second)
  *   allocs/bytes    heap allocations around one warm delivery (RAM axis; the process peak RSS
  *                   is the one `RSS family=` line at the end)
- *   can8/can64      CAN data-field frames per hop (classic / FD)
+ *   tlv8/tlv64      TLV bytes per hop cut into 8/64 B fields (NOT CAN carriage)
  *
  * NOT a wall-clock network number: the chain runs synchronously on this thread.
  */
@@ -304,7 +309,8 @@ struct cell_t {
                               std::size_t n) {
     char name[96];
     std::snprintf(name, sizeof name, "%s/h%zu/p%zu/n%zu", arm, hops, payload, n);
-    const bool pair = std::strcmp(arm, "pair") == 0;
+    const bool pair = std::strncmp(arm, "pair", 4) == 0;
+    const bool norelay = std::strcmp(arm, "pair-norelay") == 0;
     const std::size_t rss0 = bench::peak_rss_kb();
     cell_t c;
     {
@@ -344,9 +350,14 @@ struct cell_t {
         // terminus ANSWERS and the RESULT routes home through every hop. A COMPACT emits no
         // reply at all. Both facts are asserted so a change in either is loud, and the reply
         // leg is reported as its own columns instead of being folded into "bytes per hop".
-        if (pair ? c.rev == 0 : c.rev != 0)
-            fail(name, "the reply-leg census changed: pair must ack, compact must not");
+        // The shape, exactly: the reply is built and relayed down to node 0, which drops it
+        // WITHOUT counting (origin receives 0 frames). A change in either direction is loud.
+        if (pair ? (c.rev != hops || ch.origin.frames != 0) : c.rev != 0)
+            fail(name, "the reply-leg census changed: pair must ack H frames, compact none");
 
+        // The relay ablation: the terminus still builds and sends its RESULT, no hop relays it.
+        if (norelay)
+            for (auto& l : ch.up) l.peer = nullptr;
         g_allocs = g_bytes = 0;
         g_arm = true;
         op();
@@ -383,11 +394,11 @@ void report(const char* arm, std::size_t hops, std::size_t payload, std::size_t 
     const double ns_sample = c.p50_ns / static_cast<double>(n);
     const double mbps = c.ops_s * static_cast<double>(n * payload) / 1e6;
     std::printf(
-        "CELL arm=%s hops=%zu payload=%zu N=%zu origin_B=%zu wire_B_per_hop=%s ns_op=%.1f "
+        "CELL warm=%s arm=%s hops=%zu payload=%zu N=%zu origin_B=%zu wire_B_per_hop=%s ns_op=%.1f "
         "ns_sample=%.1f samples_s=%.0f MBps=%.1f allocs=%zu alloc_B=%zu cold_ns=%llu "
-        "can8=%s can64=%s rev_frames=%zu rev_B=%zu\n",
-        arm, hops, payload, n, c.origin_B, hb.c_str(), c.p50_ns, ns_sample,
-        c.ops_s * static_cast<double>(n), mbps, c.allocs, c.abytes,
+        "tlv8=%s tlv64=%s rev_frames=%zu rev_B=%zu\n",
+        c.allocs == 0 ? "yes" : "NO-alloc-per-frame", arm, hops, payload, n, c.origin_B, hb.c_str(),
+        c.p50_ns, ns_sample, c.ops_s * static_cast<double>(n), mbps, c.allocs, c.abytes,
         static_cast<unsigned long long>(c.cold_ns), can8.c_str(), can64.c_str(), c.rev, c.rev_B);
 }
 
@@ -405,7 +416,9 @@ int main(int /*argc*/, char** argv) {
                 // Alternate the arms inside one process and one cell, so drift is common-mode.
                 const cell_t a = run_cell("pair", h, p, n);
                 const cell_t b = run_cell("compact", h, p, n);
+                const cell_t a2 = run_cell("pair-norelay", h, p, n);
                 report("pair", h, p, n, a);
+                report("pair-norelay", h, p, n, a2);
                 report("compact", h, p, n, b);
             }
     bench::emit_family_rss("chain-vs-compact", start_kb);

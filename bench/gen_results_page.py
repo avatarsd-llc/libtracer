@@ -290,6 +290,12 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "actually carries so the address collapse is asserted rather than assumed.",
         "ns p50 per hop · wire bytes per hop"),
     instrument_t(
+        "bench_chain_vs_compact.cpp", "framed", (),
+        "Stream delivery over the RFC-0029 PAIR chain against the RFC-0004 COMPACT handle at 1 "
+        "and 3 hops, 64 B to 16 KiB, unbatched and with BATCH, with the PAIR arm's reply leg "
+        "priced separately. A report for the stage-6 decision, not a gate.",
+        "ns p50 per frame · wire bytes per hop"),
+    instrument_t(
         "bench_path_label.cpp", "framed", (),
         "Carries one `FWD{op=READ}` through a chain of real forwarder hops twice, differing "
         "only in whether each hop's mount run is spelled as its segments or as the RFC-0027 "
