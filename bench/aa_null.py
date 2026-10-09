@@ -191,7 +191,7 @@ def bank(raw: dict, width: int = pg.PAIRS_DEFAULT, held_out: dict | None = None)
     rows: dict[str, dict[str, float]] = {}
     windows = split_windows(raw)
     for k in sorted(raw["samples"]):
-        if k.split("/")[0] in pg.LAYOUT_BOUND_MODES:
+        if pg.layout_bound(k):
             continue  # gated by instructions, not by a null (#2030)
         for leg in pg.LEGS:
             spreads = []
@@ -236,7 +236,7 @@ def evaluate(raw: dict, null: dict, width: int = pg.PAIRS_DEFAULT) -> dict:
     @return {"sessions": n, "false_fail_sessions": n, "false_fails": {key: n},
              "detect": {key: (caught, sessions)}} where `detect` injects INJECT on that
              key alone and counts the sessions that FAIL it. The layout-bound rows
-             (`perf_gate.LAYOUT_BOUND_MODES`) are judged for false fails only: their timed legs
+             (`perf_gate.layout_bound`) are judged for false fails only: their timed legs
              are a backstop and their 10% is caught by the instruction ratchet.
     """
     gated = {f"{m}/{s}/{f}/{e}" for (_b, m, s, f, e) in pg.POINTS}
@@ -257,7 +257,7 @@ def evaluate(raw: dict, null: dict, width: int = pg.PAIRS_DEFAULT) -> dict:
                 if failed:
                     sessions[(x, y, s)].append(f"{k} {'+'.join(failed)}")
                     false_by_key[k] = false_by_key.get(k, 0) + 1
-                if k.split("/")[0] in pg.LAYOUT_BOUND_MODES:
+                if pg.layout_bound(k):
                     continue  # its timed legs are a backstop; the 10% is caught by instr_gate
                 d = detect.setdefault(k, [0, 0])
                 d[1] += 1

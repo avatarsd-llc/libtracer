@@ -2013,6 +2013,42 @@ class LayoutBoundRows(unittest.TestCase):
         self.assertEqual(fails, [])
         self.assertIn("no hardware counter", out)
 
+    # --- the copy-store rows (#2039) --------------------------------------------------------
+    STORE = ("lkv-store-heap/64/1/1", "lkv-store-heap/1024/1/1", "lkv-store-pool/64/1/1")
+    STORE_OUT = ("RESULT instr-store B=heap S=64 x100=25600\n"
+                 "RESULT instr-store B=heap S=1024 x100=29200\n"
+                 "RESULT instr-store B=pool S=64 x100=24300\n")
+
+    def test_store_rows_take_the_layout_backstop_and_their_large_twins_do_not(self):
+        for k in self.STORE:
+            self.assertEqual(pg.leg_factor(k, "p50_ns", {})[2], "layout", k)
+        for k in ("lkv-store-heap/16384/1/1", "lkv-store-pool/16384/1/1",
+                  "lkv-store-pool/1024/1/1", "lkv-store-heap-aged/64/1/1"):
+            self.assertEqual(pg.leg_factor(k, "p50_ns", {})[2], "flat", k)
+
+    def test_store_instr_rows_parse_beside_the_pair_rows(self):
+        got = pg.instr_parse(self.OUT + self.STORE_OUT)
+        self.assertEqual(got["store-heap/64"], 25600)
+        self.assertEqual(got["store-pool/64"], 24300)
+        self.assertEqual(got[64], 10300)
+
+    def test_an_injected_ten_percent_of_store_instructions_fails_each_row(self):
+        base = pg.instr_parse(self.OUT + self.STORE_OUT)
+        cand = dict(base)
+        for k in list(base):
+            if isinstance(k, str):
+                cand[k] = int(base[k] * 1.10)
+        fails, _ = self._gate(cand, base)
+        self.assertEqual(len(fails), 3, fails)
+        self.assertTrue(all("store-" in f and "copy-store" in f for f in fails), fails)
+
+    def test_a_store_row_main_counts_and_the_candidate_does_not_fails(self):
+        base = pg.instr_parse(self.OUT + self.STORE_OUT)
+        cand = {k: v for k, v in base.items() if k != "store-pool/64"}
+        fails, _ = self._gate(cand, base)
+        self.assertEqual(len(fails), 1)
+        self.assertIn("store-pool/64", fails[0])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -908,6 +908,22 @@ CLIFF_NULL_K = 5.0
 # gross backstop: LAYOUT_BACKSTOP is above the worst layout spread measured and still catches
 # an allocator that has fallen onto a slow path (the #1768 class is x2.7).
 LAYOUT_BOUND_MODES = ("cliff-alloc-heap", "lkv-alloc-heap")
+# The copy-store rows are layout-bound at their small sizes only (#2039): 10-60 ns of alloc
+# plus a 64 B or 1 KiB copy false-failed 7-24 of 216 replay sessions on unchanged source. Their
+# 16 KiB twins are dominated by the copy and are not here.
+LAYOUT_BOUND_STORE_ROWS = (("lkv-store-heap", 64), ("lkv-store-heap", 1024),
+                           ("lkv-store-pool", 64))
+
+
+def layout_bound(k: str) -> bool:
+    """@brief Whether row key @p k (`mode/size/fan/ep`) is gated by instructions, not time."""
+    mode, _, rest = k.partition("/")
+    if mode in LAYOUT_BOUND_MODES:
+        return True
+    size = rest.split("/")[0]
+    return size.isdigit() and (mode, int(size)) in LAYOUT_BOUND_STORE_ROWS
+
+
 LAYOUT_BACKSTOP = 1.5
 # A cliff size past the heap backend's last size class (64 KiB + the segment header) is served
 # by the host's malloc itself, whose state flips a process between two modes about x2 apart
@@ -947,7 +963,7 @@ def leg_factor(k: str, leg: str, null: dict[str, dict[str, float]]) -> tuple[flo
     """
     s = (null.get(k) or {}).get(leg)
     lower = leg == "deliv_s"
-    if k.split("/")[0] in LAYOUT_BOUND_MODES:
+    if layout_bound(k):
         size = int(k.split("/")[1])
         b = HOST_SERVED_BACKSTOP if size > INSTR_LAST_CLASS else LAYOUT_BACKSTOP
         return (1 / b if lower else b), False, "layout"
@@ -1418,19 +1434,25 @@ def segdraw_gate(cur: dict[int, dict[str, int]],
 INSTR_REGRESS = 1.02
 INSTR_TICK = 2.0
 _INSTR_RE = re.compile(r"^RESULT instr S=(\d+) x100=(\d+)")
+_INSTR_STORE_RE = re.compile(r"^RESULT instr-store B=(\w+) S=(\d+) x100=(\d+)")
 
 
-def instr_parse(out: str) -> dict[int, int]:
-    """@brief The instruction rows of one `bench_forward_heap` run: {size: instructions x100}."""
-    got = {}
+def instr_parse(out: str) -> dict:
+    """@brief The instruction rows of one `bench_forward_heap` run: {size: instructions x100}
+    for the alloc/free pair and {"store-<heap|pool>/<size>": instructions x100} for the
+    copy-store (#2039)."""
+    got: dict = {}
     for line in out.splitlines():
         m = _INSTR_RE.match(line)
         if m:
             got[int(m.group(1))] = int(m.group(2))
+        m = _INSTR_STORE_RE.match(line)
+        if m:
+            got[f"store-{m.group(1)}/{m.group(2)}"] = int(m.group(3))
     return got
 
 
-def instr_probe(bench_fwd: pathlib.Path) -> dict[int, int]:
+def instr_probe(bench_fwd: pathlib.Path) -> dict:
     """@brief The instruction rows of @p bench_fwd; empty when it cannot be run or the host
     has no counter, which @ref instr_gate reports instead of passing in silence."""
     try:
@@ -1439,8 +1461,18 @@ def instr_probe(bench_fwd: pathlib.Path) -> dict[int, int]:
         return {}
 
 
-def instr_gate(cur: dict[int, int], base: dict[int, int] | None) -> list[str]:
-    """@brief Instructions per alloc/free pair may not grow against main at any size.
+def _instr_label(key) -> str:
+    """@brief `S=64` for an alloc/free size, `store-heap/64` for a copy-store row."""
+    return f"S={key}" if isinstance(key, int) else str(key)
+
+
+def _instr_unit(key) -> str:
+    return "alloc/free pair" if isinstance(key, int) else "copy-store"
+
+
+def instr_gate(cur: dict, base: dict | None) -> list[str]:
+    """@brief Instructions per alloc/free pair (and per copy-store, #2039) may not grow against
+    main at any size.
 
     A size main counts and the candidate does not is a FAIL (#1847's rule); with no rows on
     either arm the ratchet is said not to have run (the host has no counter)."""
@@ -1456,24 +1488,24 @@ def instr_gate(cur: dict[int, int], base: dict[int, int] | None) -> list[str]:
               "counter on this host) — the layout-bound rows are gated by their timed "
               "backstop alone")
         return fails
-    for size in sorted(base):
+    for size in sorted(base, key=str):
         if size not in cur:
-            fails.append(f"instr S={size}: main counts this size and the candidate does not "
+            fails.append(f"instr {_instr_label(size)}: main counts this size and the candidate does not "
                          f"(a missing key is never 'not gated', #1847)")
     if not base:
         print(f"  instruction ratchet (#2030): main has no instruction rows (bootstrap), "
               f"{len(cur)} sizes counted on the candidate, nothing to ratchet against")
         return fails
     worst = 0.0
-    for size in sorted(cur):
+    for size in sorted(cur, key=str):
         b = base.get(size)
         if b is None:
             continue
         c = cur[size]
         worst = max(worst, c / b if b else 1.0)
         if c > b * INSTR_REGRESS and (c - b) / 100 > INSTR_TICK:
-            fails.append(f"instr S={size}: {b / 100:g} -> {c / 100:g} instructions per "
-                         f"alloc/free pair (x{c / b:.3f}; ratchet vs main, over "
+            fails.append(f"instr {_instr_label(size)}: {b / 100:g} -> {c / 100:g} instructions per "
+                         f"{_instr_unit(size)} (x{c / b:.3f}; ratchet vs main, over "
                          f"x{INSTR_REGRESS} and {INSTR_TICK:g})")
     print(f"  instruction ratchet (#2030): {len(cur)} sizes, worst x{worst:.3f} of main, "
           f"{len(fails)} fail")
