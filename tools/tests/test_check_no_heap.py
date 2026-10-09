@@ -191,5 +191,33 @@ class RatchetTest(unittest.TestCase):
         self.assertEqual(len(new), 9)
 
 
+class RebaselineTest(unittest.TestCase):
+    def setUp(self):
+        self.pins = cnh.parse_relocs(BASE)
+
+    def renamed(self, extra_refs=None):
+        """@brief BASE with subscribe renamed, optionally also gaining a second heap call."""
+        old = "_ZN2tr5graph7graph_t9subscribeEv"
+        refs = ["_Znwj", "memcpy", "_ZdlPvj"] + (extra_refs or [])
+        graph = {("_ZN2tr5graph7graph_t10subscribe2Ev" if k == old else k): v
+                 for k, v in GRAPH.items()}
+        graph["_ZN2tr5graph7graph_t10subscribe2Ev"] = ("g", refs)
+        return archive(member("graph.cpp.obj", graph, DEBUG), member("path.cpp.obj", PATH),
+                       member("twai_link.cpp.obj", TWAI))
+
+    def test_pure_rename_reseeds_cleanly(self):
+        found = cnh.parse_relocs(self.renamed())
+        self.assertNotEqual(cnh.compare(found, self.pins), ({}, {}), "the plain ratchet fails")
+        self.assertIsNone(cnh.rebaseline(self.pins, found))
+
+    def test_rename_that_adds_a_heap_call_is_refused(self):
+        found = cnh.parse_relocs(self.renamed(["_Znwj"]))
+        self.assertIsNotNone(cnh.rebaseline(self.pins, found))
+
+    def test_new_site_without_a_vanished_twin_is_refused(self):
+        found = cnh.parse_relocs(with_fn("graph.cpp.obj", "_Z14tr_planted_newv", ["_Znwj"]))
+        self.assertIsNotNone(cnh.rebaseline(self.pins, found))
+
+
 if __name__ == "__main__":
     unittest.main()

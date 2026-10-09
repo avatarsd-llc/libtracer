@@ -39,6 +39,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (`footprint-cortexm0.yml`) and on the ESP32-C6 component archive (`esp-idf.yml`). The pins
   are what core still references today, mostly deleting destructors and std containers not
   yet on the seam; they can only be lowered, and an empty baseline is the plain no-heap gate.
+- **`check_no_heap.py --rebaseline` re-seeds the pins after a pure rename
+  ([#2028](https://github.com/avatarsd-llc/libtracer/issues/2028)).** It accepts only a change
+  in which every vanished pinned function pairs, one to one, with a new function that reaches
+  the heap the same way; a rename that also adds or drops a heap call is refused and nothing is
+  written.
 - **`op_resolver_t::resolve` takes a `reply_store`: an acknowledgement is built in caller
   storage ([#1658](https://github.com/avatarsd-llc/libtracer/issues/1658)).** A trailing
   `std::span<std::byte> reply_store = {}` on both overloads. The reply to a WRITE or a subscribe
