@@ -66,7 +66,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   gone is listed `inert` and skipped until the owner removes it or adds the same address again,
   which re-reads it. Operations that meet on one instance never wait: the later one answers
   `BACKPRESSURE` and changes nothing. The selector never creates or deletes a subscription,
-  persists nothing and copies no option name (names are borrowed). Its tables are fixed arrays
+  persists nothing and copies no option name (names are borrowed; a temporary `std::string`
+  name does not compile, and a slot past 65,535 is refused with `INVALID_PATH`). A read of
+  `active` never refuses, so a `BACKPRESSURE` switch tells "busy" from "partly applied". Its tables are fixed arrays
   sized by the template: `<8, 4>` by default, 176 B on LP64 and 100 B on ILP32; `<64, 16>` is
   1,064 B and 680 B. An `options` read renders at most `kRefs × kOptions` ref records, each with
   a key of up to 1 KiB, staged at about twice that on the graph's table source. An instance is
