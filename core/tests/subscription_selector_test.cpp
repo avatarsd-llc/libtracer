@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <memory_resource>
 #include <new>
 #include <span>
 #include <string>
@@ -82,12 +83,19 @@ static_assert(sizeof(guarded_selector_t) == sizeof(selector_t), "the binding cos
 template <class Sel>
 concept takes_temporary_name = requires(Sel& s, subscription_t r) { s.add(std::string("a"), r); };
 template <class Sel>
+concept takes_temporary_const_name =
+    requires(Sel& s, subscription_t r, const std::string&& n) { s.add(std::move(n), r); };
+template <class Sel>
+concept takes_temporary_pmr_name =
+    requires(Sel& s, subscription_t r) { s.add(std::pmr::string("a"), r); };
+template <class Sel>
 concept takes_lasting_name = requires(Sel& s, subscription_t r, std::string& n) {
     s.add("a", r);
     s.add(n, r);
     s.add(std::string_view("a"), r);
 };
-static_assert(!takes_temporary_name<selector_t> && takes_lasting_name<selector_t>);
+static_assert(!takes_temporary_name<selector_t> && !takes_temporary_const_name<selector_t> &&
+              !takes_temporary_pmr_name<selector_t> && takes_lasting_name<selector_t>);
 
 /** @brief A one-byte write payload. */
 tr::view::view_t byte_value(std::uint8_t b) {
@@ -585,8 +593,10 @@ void test_one_at_a_time(const char* binding) {
     check(active_refused.load() == 0, "and an active read never refused: it takes no flag");
     std::printf("    (%d of 2000 switches met a read and were refused)\n", refused);
 
+    // Capped, so a flag left set with no holder fails here instead of hanging the test.
     result_t<void> done = sel.select("b");
-    while (!done) done = sel.select("b");
+    for (int tries = 1; !done && tries < 1000; ++tries) done = sel.select("b");
+    check(done.has_value(), "a retried switch completes within 1,000 tries (no stuck flag)");
     (void)g.write(in, byte_value(1));
     const int a_seen = a.seen;
     check(sel.settled() && b.seen >= 1 && g.is_suspended(*sa).value_or(false),

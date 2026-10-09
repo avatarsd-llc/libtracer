@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <optional>
 #include <span>
-#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -222,7 +221,7 @@ class subscription_selector_t {
      *
      * @warning @p option is BORROWED, not copied: the bytes must outlive the selector (a
      *          string literal, or the owner's own static configuration), since a later read of
-     *          `options` puts them on the wire. A temporary `std::string` does not compile (the
+     *          `options` puts them on the wire. A temporary owning string does not compile (the
      *          deleted overload below). A name already created keeps its first view.
      * @retval INVALID_PATH @p option is not one NAME segment (1 to 64 bytes, no reserved
      *                      character), or @p ref's slot is past 65,535 (permanent: the
@@ -252,9 +251,13 @@ class subscription_selector_t {
     }
 
     /** @brief A temporary name would dangle once the call returns, and a later `options`
-     *         read would put freed bytes on the wire, so it does not compile. */
+     *         read would put freed bytes on the wire, so it does not compile: any class-type
+     *         rvalue that converts to `std::string_view` and is not one (an owning string of
+     *         any allocator, const or not). Literals, lvalues and views still bind above. */
     template <class S>
-        requires std::same_as<S, std::string>
+        requires(!std::is_lvalue_reference_v<S> && std::is_class_v<std::remove_cvref_t<S>> &&
+                 std::is_convertible_v<S, std::string_view> &&
+                 !std::is_same_v<std::remove_cvref_t<S>, std::string_view>)
     result_t<void> add(S&& option, subscription_t ref) = delete;
 
     /**
