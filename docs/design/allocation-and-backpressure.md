@@ -338,10 +338,10 @@ drops that one delivery (`core/src/fwd_router.cpp:fwd_router_t::deliver_remote`)
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:graph_t::delivery_drops`): four relaxed monotonic counters — `no_target`, `denied`,
 `out_of_memory`, `fan_out_truncated` (`graph.hpp:graph_t::delivery_drops_t`) — incremented only on a drop, so the
-delivering path is byte-identical while nothing drops. The net plane adds to the same four
-through one public door, `count_external_drop` (#1068), so a remote delivery shed for want of
-memory is as visible as a local one; `denied` is not among that door's causes because a refusal
-is counted at the WRITE gate itself, on every plane. Nothing in the library reads them; a
+delivering path is byte-identical while nothing drops. `denied` is counted at the WRITE gate
+itself, on every plane; the net plane's own drops happen before the graph is involved and are
+counted by the router (`router_stats_t`). Its one public door into these four,
+`count_external_drop` (#1068), served only the COMPACT terminus and was deleted with it (#1951). Nothing in the library reads them; a
 deployment chooses whether to alarm. What they count is shed **deliveries**: the sharpest OOM shed
 is an `assign` whose pending mark cannot be allocated, which abandons the vertex's whole
 subscriber set and still returns success (`core/src/graph.cpp:graph_t::mark_pending`), so it moves the counter by

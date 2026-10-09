@@ -775,11 +775,9 @@ template <class N, class ReplyError>
     if (req.op == fwd_op_t::WRITE) {
         // The WRITE arm's refusals go through @p reply_error, `resolve_node`'s one refusal
         // channel, which is silent when no reply was requested. RFC-0004 Amendment 2 (#1502):
-        // an unacknowledged write's failures are DROPPED, not answered, and that is not a new
-        // drop policy — it is the one a denied `COMPACT` delivery has always run under
-        // (reference/05 §route-handle, the #974 ruling: *"a denied delivery is dropped like
-        // any other unwritable one"*). One channel, so no arm can answer a route that is not
-        // there.
+        // an unacknowledged write's failures are DROPPED, not answered (the #974 ruling: *"a
+        // denied delivery is dropped like any other unwritable one"*). One channel, so no arm
+        // can answer a route that is not there.
         if (!req.payload.has_value()) return reply_error(status_t::TYPE_MISMATCH);
         const N& payload_node = *req.payload;
 
@@ -796,7 +794,7 @@ template <class N, class ReplyError>
         // accumulated return route) are subscription-scoped and keep the ADR-0041 §2
         // one-copy behavior unconditionally (ADR-0042 §3 pinning applies to the value
         // store only). The slot retains `src` (copied once, trailer-sliced) + the
-        // inbound link so the producer fan-out delivers FWD{WRITE}/COMPACT home. A
+        // inbound link so the producer fan-out delivers its FWD{WRITE}s home. A
         // wire TLV is never empty, so an empty copy is exactly an allocation failure
         // ⇒ BACKPRESSURE.
         if (remote_sub) {
@@ -1081,9 +1079,9 @@ template <class N>
     // state (#766).
     //
     // An unacknowledged request (@ref parsed_fwd_t::no_reply) short-circuits it to the empty
-    // rope the router drops: RFC-0004 Amendment 2's drop policy is the same one a denied
-    // `COMPACT` delivery already runs under, and the alternative — an addressed error on a
-    // zero-length route — is precisely the garbage frame the amendment exists to stop.
+    // rope the router drops (RFC-0004 Amendment 2's drop policy): the alternative — an
+    // addressed error on a zero-length route — is precisely the garbage frame the amendment
+    // exists to stop.
     const auto reply_error = [&](status_t s) -> rope_t {
         if (req.no_reply) return view::rope_t{};
         return assemble_error_reply(route, s, egress);

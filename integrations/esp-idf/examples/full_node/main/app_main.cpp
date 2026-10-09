@@ -214,17 +214,17 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_node_t& f) {
  * | --- | --- | --- |
  * | front, 12 KiB | a synchronised `pool_t` (`rx_backend`) | RX datagram segments — fixed slots,
  * exhaustion = backpressure (ADR-0042) | | middle, 2 KiB | a `tr::mem::pool_source_t` | the
- * router's LABEL TABLES (#603 defect 1) | | back, 10 KiB | `monotonic_buffer_resource` +
+ * router's long-lived LINK STATE (#603 defect 1) | | back, 10 KiB | `monotonic_buffer_resource` +
  * `synchronized_pool_resource` | the remaining pmr containers (LKV control blocks) |
  *
- * The label region is new, and it exists to KEEP a bound this example already
- * advertised rather than to add one. The label tables used to draw from the pmr
- * resource in the back region; since #603 defect 1 they draw from an injected
- * `tr::mem::block_source_t`, because a `std::pmr::memory_resource` cannot report
- * exhaustion by value and a peer's `ADVERTISE` reaches this store on a receive thread,
- * pre-ACL — on `-fno-exceptions` that was a peer-triggerable reboot. Leaving
- * `label_src` at its default would have quietly moved the label tables OUT of the slab,
- * which is the opposite of what this example is for.
+ * The middle region exists to KEEP a bound this example already states rather than to add
+ * one. The router's long-lived link state (receive contexts, bus token caches) draws from
+ * an injected `tr::mem::block_source_t`, `label_src`, because a `std::pmr::memory_resource`
+ * cannot report exhaustion by value and a peer reaches this store on a receive thread,
+ * pre-ACL — on `-fno-exceptions` that was a peer-triggerable reboot (#603 defect 1).
+ * Leaving `label_src` at its default would have quietly moved that state OUT of the slab,
+ * which is the opposite of what this example is for. (The name is historical: until #1951
+ * the route-handle label tables drew from it too.)
  *
  * It is a `pool_source_t` and not a `bump_source_t` for the reason ADR-0067 §1 gives:
  * link state is LONG-LIVED and churns (a link's state is freed on every reconnect), and a bump
@@ -239,13 +239,14 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_node_t& f) {
  * this target), as are the graph's own three seams (the example default-constructs the graph).
  * Bounding those is a separate follow-on — ADR-0067 §3 wants a PER-CHILD source there rather than
  * one shared across receive threads, which is a different topology from the single shared source
- * the label plane wants. See docs/reference/09 §the second L0 seam and
+ * the router's link state wants. See docs/reference/09 §the second L0 seam and
  * docs/interop/esp32-production-node.md.
  */
 constexpr std::size_t kSlabBytes = 24 * 1024;
 constexpr std::size_t kRxRegion = 12 * 1024; /**< @brief Synchronised pool: RX datagram segments. */
 constexpr std::size_t kRxSlotPayload = 1536; /**< @brief One UDP/MTU-sized datagram per slot. */
-constexpr std::size_t kLabelRegion = 2 * 1024; /**< @brief Recycling source: the label tables. */
+constexpr std::size_t kLabelRegion =
+    2 * 1024; /**< @brief Recycling source: the router's link state. */
 /**
  * @brief Free-list slots for the label source — one per distinct `(bytes, align)` shape.
  *
@@ -298,8 +299,8 @@ struct device_node_t {
      * The synchronized pool on top recycles freed blocks and makes the resource safe for
      * the recv threads. Two things are NOT among them: the terminus arena (since #588 it
      * draws from the router's `rx` block source, left at its default net sub-pool, the static
-     * arena, here) and the label tables (since #603 defect 1 they draw from `label_src` above — a
-     * pmr resource cannot report exhaustion by value, which is the whole defect).
+     * arena, here) and the router's link state (since #603 defect 1 it draws from `label_src`
+     * above — a pmr resource cannot report exhaustion by value, which is the whole defect).
      */
     std::pmr::monotonic_buffer_resource arena{g_slab + kRxRegion + kLabelRegion,
                                               kSlabBytes - kRxRegion - kLabelRegion};

@@ -320,13 +320,11 @@ remaining snapshot shed is tallied inside `vertex_t::snapshot_edges` (`vertex.hp
 this plane** goes through one door, `count_drop` (`graph.cpp:graph_t::count_drop`), so a path here that abandons an
 admitted delivery without counting it is a visible omission.
 
-The net plane reaches that door through exactly one public method, `count_external_drop`
-(`graph.hpp:graph_t::count_external_drop`, `graph.cpp:graph_t::count_external_drop`), which maps its two causes onto `count_drop` and adds no
-second counting mechanism (#1068). It is a method rather than a friendship because the
-counters are a published surface while the internal drop sites are not: a deliverer needs to
-add to the numbers, not to reach into the machinery that maintains them. `denied` is absent
-from it on purpose — a refusal is counted at the WRITE gate, on every plane, so a router that
-also counted the `PERMISSION_DENIED` it discards would report one refusal twice.
+The net plane no longer reaches that door. Its one public method into it,
+`count_external_drop` (#1068), served only the COMPACT terminus and was deleted with it
+(#1951): every remote delivery is now a `FWD{WRITE}` that reaches the graph's own WRITE gate,
+which counts a refusal on every plane, and the router counts the frames it loses before the
+graph is involved in `router_stats_t`.
 
 The two sheds that happen *before* the fan-out went through this door in #1003, and the plane
 boundary that used to qualify this section is gone. A STREAM ring-append refused under

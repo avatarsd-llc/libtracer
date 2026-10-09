@@ -141,8 +141,8 @@ std::optional<std::span<const std::byte>> path_key(const tlv_node_t& path) {
     // first append (#681 / #436) — the bug where a peer's `PATH{VALUE "sensor"}` bound a
     // label to `/sensor`. A packed body cannot mistype a child, because it has none; what
     // it CAN carry is a ragged length or the `len == 0` escape, and this is **canonical /
-    // key context** (this function's callers are the ADVERTISE route resolve and the
-    // SUBSCRIBER target), where RFC-0018 §5.4 rejects the escape. Refusing here means a
+    // key context** (this function's caller is the SUBSCRIBER target), where RFC-0018 §5.4
+    // rejects the escape. Refusing here means a
     // malformed route still produces no key at all rather than a partial one.
     if (path.opt().pl) return std::nullopt;
     const std::span<const std::byte> body = path.payload();
