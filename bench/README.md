@@ -1537,18 +1537,36 @@ commit by a harness that was ready before it. Three binaries, one driver (`link_
   passed as `-DLIBTRACER_BENCH_MBEDTLS_SOURCE=` (ESP-IDF's copy: `$IDF_PATH/components/mbedtls/
   mbedtls`). The handshake (`noise_crypto.hpp`) is written once over the backend. Every backend
   must first reproduce RFC 7748's X25519 vector, and every other backend's transcript byte for
-  byte. Ephemerals are injected, so no row includes the RNG.
+  byte. Ephemerals are injected, so no row includes the RNG. The backend is a **compile-time
+  seam**: a build picks one, and nothing is chosen at run time. On a host the measured
+  backends differ by a factor (OpenSSL's AEAD is 1.6–2.9× libsodium's and mbedTLS's at 1 KiB
+  and above), so a host build of #2064 (Noise link binding) can take the fast one while an
+  ESP build takes the one ESP-IDF ships.
 
 **One session, warm, on both engines.** Each arm builds one pair and completes one exchange
 before any clock starts, then keeps that pair for every size. Setup is its own row: a fresh pair
 timed to its first reply, so the handshake is never amortized into the per-frame rows.
+`run_noise.sh` runs every arm and every crypto backend in its own fresh process (`--arm=`,
+`--backend=`; the #1809 rule), pinned to one CPU set (`BENCH_CPUS`, default the caller's).
+
+**Link against session: the streaming rows compare different shapes.** A libtracer arm is a
+**libtracer link, unbatched**: one `send` is one frame, one datagram, one syscall. A Zenoh arm
+is a **Zenoh session, batched**: its default publisher packs small puts into one transport
+frame. So the 64 B streaming gap is batching, not framing cost, and no network throughput
+comparison between the two is published from these rows; the composed-graph comparison is
+`run_compose.sh`'s. The `stream-batch` row is the libtracer link batched the way an
+application batches (`compose_batch`, K values per send), which also shows one send's fixed
+cost (a syscall; on the Noise arm, one seal) spread over K values. Request/reply rows use
+Zenoh's **express** publishers, which skip batching, and neither engine copies a frame on send
+or receive, so the RTT rows are one frame per send on both sides.
 
 | Row | What | Columns |
 | --- | --- | --- |
 | `link-<arm>-rr` | one request and its echo, one outstanding | RTT p50/p99/mean ns; exchanges/s; request MB/s |
 | `link-<arm>-stream` | blast for the window, 1 frame in 64 stamped | one-way p50/p99 under load; sent/s, delivered/s, MB/s; `NOTE` loss |
-| `link-<arm>-setup` | fresh pair to first reply (the handshake) | ns |
-| `LINK_RAM` | around the arm's first pair | heap (at `malloc`), RSS delta, threads |
+| `link-<arm>-stream-batch` | the stream with K values per send (`compose_batch`), libtracer only | as `stream`, counted per value; `fanout` = K |
+| `link-<arm>-setup` | fresh pair to first reply (the handshake); quantized below ~100 µs by the harness's re-send grain | ns |
+| `LINK_RAM` | around the arm's first pair | heap kept by the window's own blocks (#1420 rule), RSS delta, threads |
 | `crypto-*` | per op, per backend | ns p50/p99; ops/s; MB/s |
 | `NOISE_RAM` | per backend | session bytes, handshake heap peak and allocations, stack |
 
@@ -1559,20 +1577,25 @@ plaintext under a 16-byte tag).
 cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release \
       -DLIBTRACER_BENCH_MBEDTLS_SOURCE=$IDF_PATH/components/mbedtls/mbedtls
 cmake --build bench/build --target bench_noise_link bench_zenoh_link bench_noise_crypto -j
-flock ../bench.lock bench/run_noise.sh bench/build 3   # on the bench CPUs, best of 3
+BENCH_CPUS=2-6 flock ../bench.lock bench/run_noise.sh bench/build 3   # bench CPUs, best of 3
 ```
 
 **Flash and RAM on the chip.** `bench/esp_noise_crypto/` is an ESP-IDF app running the same
 handshake and AEAD over the mbedTLS PSA backend ESP-IDF ships. It is built twice, once per
 Kconfig choice: the backend, and `none` (every crypto call compiled out). The difference in
-`idf.py size` is the backend's flash and static RAM. Flashed, it prints the same rows with
-`esp_timer`.
+`idf.py size` is the backend's flash and static RAM. Two more builds bring Wi-Fi up
+(`sdkconfig.wifi`, station init without association), with and without the backend: their
+difference is the backend's MARGINAL flash on a node that already ships Wi-Fi, whose own
+crypto links much of what PSA dispatch pulls in. Flashed, it prints the same rows with
+`esp_timer`; the X25519 and handshake timing on silicon is not yet measured, and an ESP
+backend choice waits on it.
 
 ```sh
 cd bench/esp_noise_crypto
 idf.py -B build/psa  -DSDKCONFIG=build/psa/sdkconfig set-target esp32c6 build size
 idf.py -B build/none -DSDKCONFIG=build/none/sdkconfig \
        -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.none" set-target esp32c6 build size
+# the same pair over Wi-Fi: add ";sdkconfig.wifi" to SDKCONFIG_DEFAULTS, in build/wifipsa, build/wifi
 ```
 
 libsodium is in ESP-IDF's component registry, not in ESP-IDF itself, so its ESP build would

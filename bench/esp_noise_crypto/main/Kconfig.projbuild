@@ -15,4 +15,12 @@ menu "Noise crypto bench (#2065)"
         config NOISE_BENCH_BACKEND_PSA
             bool "mbedTLS PSA Crypto (ships with ESP-IDF)"
     endchoice
+
+    config NOISE_BENCH_WITH_WIFI
+        bool "Bring Wi-Fi up (station init, no association)"
+        default n
+        help
+            Initializes the Wi-Fi stack so its own crypto (wpa_supplicant over mbedTLS) is
+            linked. Built with and without a backend, the difference is the backend's MARGINAL
+            flash on a node that already ships Wi-Fi.
 endmenu

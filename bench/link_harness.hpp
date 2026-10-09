@@ -33,13 +33,38 @@
  *    per second, `deliv/s` = delivered per second, `MB/s` = delivered payload; the latency
  *    columns are the one-way latency of 1 frame in 64, stamped at send (the loaded latency). A
  *    `NOTE` line carries sent, delivered and the loss.
- *  - `link-<arm>-setup` — fresh pair to first reply, in ns.
+ *  - `link-<arm>-stream-batch` — the same window with K values per send, packed into one
+ *    batch frame (`compose_batch`, RFC-0008's batch carriage) and unpacked by the server end;
+ *    the `fanout` column carries K = min(16, what fits one frame), and every rate counts
+ *    VALUES. Value sizes 64 B, 1 KiB and 4 KiB. It shows what one send's fixed cost (a
+ *    syscall, and on the Noise arm one seal) comes to spread over K values. Arms whose engine
+ *    batches by itself stage nothing and skip the row.
+ *  - `link-<arm>-setup` — fresh pair to first reply, in ns. Each setup also waits out the
+ *    harness's own re-send grain (100 µs), so a setup row below about 100 µs is quantized.
  *  - `LINK_RAM system arm metric value` — `heap_live_bytes` (both ends, after the first
  *    exchange, counted at `malloc`), `rss_delta_bytes` (resident set, which also sees thread
  *    stacks) and `threads_added`.
  *
  * Every timing row carries the payload sizes 64 B, 1 KiB, 4 KiB, 16 KiB and the arm's largest
  * payload (the IPv4 datagram bound, 65507 B, for a UDP link).
+ *
+ * @section shapes Link against session: what the streaming rows compare
+ *
+ * A libtracer arm drives a LINK: every `send` is one frame, one datagram, one syscall, with no
+ * batching of its own (`shape=link-unbatched` on the `NOTE` lines). A Zenoh arm drives a
+ * SESSION, whose streaming publisher batches small puts into one transport frame by default
+ * (`shape=session-batched`). The two streaming rows therefore measure different shapes, and
+ * the gap at 64 B is batching, not framing cost. The `stream-batch` row is the libtracer link
+ * with the batching done the way an application does it (`compose_batch`); the composed-graph
+ * comparison, which is what the methodology publishes, is `run_compose.sh`'s. Request/reply
+ * rows use Zenoh's express publishers, which skip that batching, so the RTT rows are one
+ * frame per send on both sides.
+ *
+ * @section heap Heap readings
+ *
+ * `heap_live_bytes` counts only blocks allocated inside the window and still live at its end;
+ * a free of an older block costs the window nothing (`malloc_probe.cpp`, the #1420 rule), and
+ * every binary runs the probe's own canary before any row.
  */
 #pragma once
 
@@ -108,10 +133,11 @@ inline void put_u64(std::span<std::byte> f, std::size_t off, std::uint64_t v) {
  */
 struct rx_state_t {
     std::atomic<std::uint64_t> reply_seq{~std::uint64_t{0}}; /**< @brief Last echoed sequence. */
-    std::atomic<std::uint64_t> server_frames{0};  /**< @brief Frames of this epoch received. */
-    std::atomic<bool> echo{true};                 /**< @brief Server end echoes requests. */
-    std::atomic<std::uint8_t> epoch{0};           /**< @brief The current row's epoch. */
-    std::atomic<bool> record{false};              /**< @brief Server end records probes. */
+    std::atomic<std::uint64_t> server_frames{0}; /**< @brief Frames of this epoch received. */
+    std::atomic<bool> echo{true};                /**< @brief Server end echoes requests. */
+    std::atomic<std::uint8_t> epoch{0};          /**< @brief The current row's epoch. */
+    std::atomic<bool> record{false};             /**< @brief Server end records probes. */
+    std::atomic<bool> batch{false}; /**< @brief Datagrams carry a K-value batch, not a frame. */
     std::atomic_flag lat_lock = ATOMIC_FLAG_INIT; /**< @brief Guards @ref lat (probes only). */
     Latency lat;                                  /**< @brief Probe one-way latencies. */
 
@@ -153,10 +179,27 @@ class link_pair_t {
     /** @brief Send @p f from the client end to the server end. */
     virtual void send(std::span<const std::byte> f) = 0;
     /**
+     * @brief Send @p f as a streaming-row frame. A pair whose engine has a distinct streaming
+     *        path (Zenoh's batched publisher, against its express one for request/reply)
+     *        overrides it; by default it is @ref send.
+     */
+    virtual void send_stream(std::span<const std::byte> f) { send(f); }
+    /**
      * @brief The application clock seam: a link with no timers of its own (the Noise binding,
      *        #2064) is driven with `now` while the harness waits. Default: nothing to drive.
      */
     virtual void tick(std::uint64_t /*now*/) {}
+    /**
+     * @brief Prepare @p k values of @p value_bytes each for `stream-batch` rows and return their
+     *        writable payloads, which the harness stamps before every @ref send_batch. Empty
+     *        when this pair does not pack batches (the row is then skipped).
+     */
+    virtual std::vector<std::span<std::byte>> stage_batch(std::size_t /*k*/,
+                                                          std::size_t /*value_bytes*/) {
+        return {};
+    }
+    /** @brief Pack the staged values into one batch and send it as one frame. */
+    virtual void send_batch() {}
 };
 
 /** @brief One arm: its row labels, its pair factory and its largest payload. */
@@ -164,6 +207,9 @@ struct arm_t {
     const char* system;      /**< @brief The `system` column (`libtracer`, `zenoh`). */
     const char* name;        /**< @brief The arm in the mode: `link-<name>-rr`. */
     std::size_t max_payload; /**< @brief The largest payload one frame may carry. */
+    /** @brief What the streaming rows measure, printed on their `NOTE` lines: a libtracer
+     *         link (unbatched) or a Zenoh session (batched by default). */
+    const char* shape;
     /** @brief Build a fresh, wired pair; null if the link could not come up. */
     std::function<std::unique_ptr<link_pair_t>(rx_state_t&)> make;
 };
@@ -174,6 +220,7 @@ struct options_t {
     double stream_s = 0.5;   /**< @brief Blast window of a streaming row. */
     double setup_s = 2.0;    /**< @brief Time budget of the setup row. */
     std::string_view only{}; /**< @brief Run just this arm (`--arm=<name>`), empty = all. */
+    bool list = false;       /**< @brief Print the compiled arms' names and exit (`--list`). */
 };
 
 /**
@@ -193,9 +240,11 @@ struct options_t {
             o.setup_s /= 5;
         } else if (a.starts_with("--arm=")) {
             o.only = a.substr(6);
+        } else if (a == "--list") {
+            o.list = true;
         } else {
-            std::fprintf(stderr, "%s: unknown argument '%s' (--quick, --arm=<name>)\n", argv[0],
-                         argv[i]);
+            std::fprintf(stderr, "%s: unknown argument '%s' (--quick, --arm=<name>, --list)\n",
+                         argv[0], argv[i]);
             return false;
         }
     }
@@ -223,8 +272,8 @@ struct options_t {
     return n;
 }
 
-/** @brief Build a frame of @p size with its header stamped. */
-inline void stamp(std::vector<std::byte>& f, kind_t kind, std::uint64_t seq, std::uint8_t epoch) {
+/** @brief Stamp the harness header (send time, sequence, kind, epoch) into @p f. */
+inline void stamp(std::span<std::byte> f, kind_t kind, std::uint64_t seq, std::uint8_t epoch) {
     put_u64(f, kSeqOffset, seq);
     f[kKindOffset] = static_cast<std::byte>(kind);
     f[kEpochOffset] = static_cast<std::byte>(epoch);
@@ -327,9 +376,17 @@ inline void drain(rx_state_t& rx, link_pair_t& p) {
     }
 }
 
-/** @brief The streaming row at @p size on a warm pair. */
+/**
+ * @brief The streaming row at @p size on a warm pair: one frame per send when @p k is 0
+ *        (`stream`), else @p k values of @p size packed into one batch per send
+ *        (`stream-batch`, counted per value). A pair that stages no batch skips the row.
+ */
 inline void stream_row(const arm_t& a, link_pair_t& p, rx_state_t& rx, std::size_t size,
-                       const options_t& o) {
+                       const options_t& o, std::size_t k = 0) {
+    const std::vector<std::span<std::byte>> staged =
+        k > 0 ? p.stage_batch(k, size) : std::vector<std::span<std::byte>>{};
+    if (k > 0 && staged.size() != k) return;
+    rx.batch.store(k > 0);
     rx.echo.store(false, std::memory_order_relaxed);
     const auto epoch = static_cast<std::uint8_t>(rx.epoch.load() + 1);
     rx.epoch.store(epoch);
@@ -347,11 +404,20 @@ inline void stream_row(const arm_t& a, link_pair_t& p, rx_state_t& rx, std::size
     std::uint64_t sent = 0;
     const std::uint64_t t0 = now_ns();
     std::uint64_t now = t0;
+    std::uint64_t sends = 0;
     while (now - t0 < window) {
-        stamp(f, sent % kProbeEvery == 0 ? kind_t::PROBE : kind_t::BULK, sent, epoch);
-        p.send(f);
-        ++sent;
-        if ((sent & 63) == 0) p.tick(now);
+        if (k == 0) {
+            stamp(f, sent % kProbeEvery == 0 ? kind_t::PROBE : kind_t::BULK, sent, epoch);
+            p.send_stream(f);
+            ++sent;
+        } else {
+            for (const std::span<std::byte> v : staged) {
+                stamp(v, sent % kProbeEvery == 0 ? kind_t::PROBE : kind_t::BULK, sent, epoch);
+                ++sent;
+            }
+            p.send_batch();
+        }
+        if ((++sends & 63) == 0) p.tick(now);
         now = now_ns();
     }
     // Read the count WITH the clock, so a frame drained after the window is not credited to it
@@ -360,6 +426,7 @@ inline void stream_row(const arm_t& a, link_pair_t& p, rx_state_t& rx, std::size
     const double secs = static_cast<double>(now - t0) / 1e9;
     drain(rx, p);
     rx.record.store(false);
+    rx.batch.store(false);
     const std::uint64_t total = rx.server_frames.load(std::memory_order_relaxed);
     while (rx.lat_lock.test_and_set(std::memory_order_acquire)) {
     }
@@ -368,13 +435,17 @@ inline void stream_row(const arm_t& a, link_pair_t& p, rx_state_t& rx, std::size
     const double sps = static_cast<double>(sent) / secs;
     const double dps = static_cast<double>(in_window) / secs;
     char buf[64];
-    emit(a.system, mode(buf, a, "stream"), size, 1, 1, sps, dps,
-         dps * static_cast<double>(size) / 1e6, s);
-    emit_tail(a.system, mode(buf, a, "stream"), size, 1, 1, s);
-    std::printf("NOTE mode=%s system=%s size=%zu sent=%llu delivered=%llu loss=%.4f\n", buf,
-                a.system, size, static_cast<unsigned long long>(sent),
-                static_cast<unsigned long long>(total),
-                sent > 0 ? 1.0 - static_cast<double>(total) / static_cast<double>(sent) : 0.0);
+    const char* row = k > 0 ? "stream-batch" : "stream";
+    const int fan = k > 0 ? static_cast<int>(k) : 1;
+    emit(a.system, mode(buf, a, row), size, fan, 1, sps, dps, dps * static_cast<double>(size) / 1e6,
+         s);
+    emit_tail(a.system, mode(buf, a, row), size, fan, 1, s);
+    std::printf(
+        "NOTE mode=%s system=%s size=%zu values_per_send=%zu shape=%s sent=%llu delivered=%llu "
+        "loss=%.4f\n",
+        buf, a.system, size, k > 0 ? k : std::size_t{1}, k > 0 ? "link-batched" : a.shape,
+        static_cast<unsigned long long>(sent), static_cast<unsigned long long>(total),
+        sent > 0 ? 1.0 - static_cast<double>(total) / static_cast<double>(sent) : 0.0);
     std::fflush(stdout);
     rx.epoch.store(static_cast<std::uint8_t>(epoch + 1));
 }
@@ -419,7 +490,16 @@ inline void emit_ram(const arm_t& a, const char* metric, long long v) {
  * @return False if the arm's link never came up (no rows were emitted for it).
  */
 inline bool run_arm(const arm_t& a, const options_t& o) {
+    if (o.list) {
+        std::printf("%s\n", a.name);
+        return true;
+    }
     if (!o.only.empty() && o.only != a.name) return true;
+    if (malloc_probe::kAvailable && !malloc_probe::canary()) {
+        std::fprintf(stderr, "FATAL arm %s/%s: malloc probe canary failed (#1420)\n", a.system,
+                     a.name);
+        std::exit(1);
+    }
     rx_state_t rx;
     std::vector<std::byte> f(64, std::byte{0x5A});
     const long long rss0 = rss_bytes();
@@ -433,11 +513,15 @@ inline bool run_arm(const arm_t& a, const options_t& o) {
         return false;
     }
     emit_ram(a, "heap_live_bytes", heap.live);
+    if (heap.untracked != 0) emit_ram(a, "heap_untracked_blocks", heap.untracked);
     emit_ram(a, "rss_delta_bytes", rss_bytes() - rss0);
     emit_ram(a, "threads_added", thread_count() - thr0);
     std::uint64_t seq = 1;
     for (const std::size_t size : sizes_for(a.max_payload)) rr_row(a, *p, rx, size, o, seq);
     for (const std::size_t size : sizes_for(a.max_payload)) stream_row(a, *p, rx, size, o);
+    for (const std::size_t v : {std::size_t{64}, std::size_t{1024}, std::size_t{4096}})
+        if (const std::size_t k = std::min<std::size_t>(16, (a.max_payload - 32) / (v + 4)); k > 1)
+            stream_row(a, *p, rx, v, o, k);
     p.reset();
     setup_row(a, o);
     return true;

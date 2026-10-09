@@ -21,7 +21,14 @@
 #include <cstdio>
 #include <vector>
 
+#include "sdkconfig.h"
 #include "esp_heap_caps.h"
+#if defined(CONFIG_NOISE_BENCH_WITH_WIFI)
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
+#include "nvs_flash.h"
+#endif
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -109,5 +116,18 @@ void run() { std::printf("# esp_noise_crypto: baseline image, no crypto backend\
 
 extern "C" void app_main(void) {
     std::printf("# esp_noise_crypto (#2065)\n");
+#if defined(CONFIG_NOISE_BENCH_WITH_WIFI)
+    // Station init and start, no association: enough to link Wi-Fi and its own crypto, so the
+    // backend's flash can be measured as a margin over a node that already ships Wi-Fi.
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+    const wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    std::printf("# wifi: station started (not associated)\n");
+#endif
     run();
 }

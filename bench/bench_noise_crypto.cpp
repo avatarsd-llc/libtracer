@@ -54,6 +54,8 @@
  *
  *     bench_noise_crypto            # every row
  *     bench_noise_crypto --quick    # a tenth of the time budget (a smoke run)
+ *     bench_noise_crypto --backend=libsodium   # one backend's rows (the checks still run all)
+ *     bench_noise_crypto --list     # the compiled backends' names
  *     LIBTRACER_BENCH_SECONDS=0.5   # time budget per row (default 0.25 s)
  */
 
@@ -476,15 +478,30 @@ int main(int argc, char** argv) {
         const double v = std::strtod(env, nullptr);
         if (v > 0.0) g_budget_s = v;
     }
+    std::string_view only;
     for (int i = 1; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--quick") {
+        const std::string_view a(argv[i]);
+        if (a == "--quick") {
             g_budget_s /= 10.0;
+        } else if (a.starts_with("--backend=")) {
+            only = a.substr(10);
+        } else if (a == "--list") {
+            for_each_backend([]<class B>() { std::printf("%s\n", B::kName); });
+            return 0;
         } else {
             // An unknown argument must refuse, never fall through to a different run (#1040).
-            std::fprintf(stderr, "bench_noise_crypto: unknown argument '%s' (only --quick)\n",
+            std::fprintf(stderr,
+                         "bench_noise_crypto: unknown argument '%s' (--quick, --backend=<name>, "
+                         "--list)\n",
                          argv[i]);
             return 2;
         }
+    }
+    // The heap rows are only as good as the probe: refuse to run on one that cannot tell a
+    // window's own blocks from older ones it frees (#1420).
+    if (bench::malloc_probe::kAvailable && !bench::malloc_probe::canary()) {
+        std::fprintf(stderr, "FATAL bench_noise_crypto: malloc probe canary failed\n");
+        return 1;
     }
 
     std::size_t compiled = 0;
@@ -509,7 +526,8 @@ int main(int argc, char** argv) {
     check_agreement();
     std::printf("# checks: rfc7748 vector, byte-identical transcripts, cross-backend interop OK\n");
 
-    for_each_backend([]<class B>() {
+    for_each_backend([only]<class B>() {
+        if (!only.empty() && only != B::kName) return;
         aead_rows<B>();
         primitive_rows<B>();
         handshake_rows<B>();

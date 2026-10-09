@@ -35,8 +35,14 @@
 #include <cstdio>
 #include <memory>
 #include <span>
+#include <vector>
 
 #include "bench_common.hpp"
+#include "libtracer/batch.hpp"
+#include "libtracer/frame.hpp"
+#include "libtracer/mem_borrowed.hpp"
+#include "libtracer/rope.hpp"
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "link_harness.hpp"
 
@@ -49,13 +55,25 @@ namespace {
 using bench::link::link_pair_t;
 using bench::link::rx_state_t;
 
-/** @brief The server end's sink: report, and echo what the harness says to echo. */
+/**
+ * @brief The server end's sink: report, and echo what the harness says to echo. On a
+ *        `stream-batch` row each datagram is one batch record, and every sample in it is
+ *        reported as the frame it carries.
+ */
 struct server_sink_t {
     rx_state_t* rx = nullptr;            /**< @brief Where frames are reported. */
     tr::net::transport_t* end = nullptr; /**< @brief The server end, for the echo. */
     /** @brief The borrowed-span receiver callable. */
     void operator()(std::span<const std::byte> f) const {
-        if (rx->on_server(f)) end->send(f);
+        if (!rx->batch.load(std::memory_order_relaxed)) {
+            if (rx->on_server(f)) end->send(f);
+            return;
+        }
+        const auto node = tr::wire::tlv_node_t::over(f);
+        if (!node) return;
+        const auto b = tr::wire::read_batch(*node, /*dt_ns=*/1);
+        if (!b) return;
+        for (const tr::wire::tlv_node_t sample : b->samples) (void)rx->on_server(sample.payload());
     }
 };
 
@@ -84,6 +102,29 @@ class pair_t final : public link_pair_t {
     }
     void send(std::span<const std::byte> f) override { client_->send(f); }
 
+    std::vector<std::span<std::byte>> stage_batch(std::size_t k, std::size_t v) override {
+        frames_.assign(k, {});
+        views_.clear();
+        std::vector<std::span<std::byte>> out;
+        const std::vector<std::byte> body(v, std::byte{0x5A});
+        for (std::vector<std::byte>& f : frames_) {
+            tr::wire::emit_tlv(f, tr::wire::type_t::VALUE, tr::wire::opt_t{}, body);
+            views_.push_back(
+                tr::view::view_t::over(tr::view::borrow_const(std::span<const std::byte>(f))));
+            out.push_back(std::span<std::byte>(f).subspan(f.size() - v));
+        }
+        return out;
+    }
+
+    /** @brief What an application does: rope the K samples into one value, send it once. */
+    void send_batch() override {
+        const tr::view::rope_t r = tr::wire::compose_batch(
+            tr::mem::heap_backend(), tr::wire::batch_carriage_t::STANDALONE, 1, views_);
+        iov_.clear();
+        r.walk([this](std::span<const std::byte> s) { iov_.push_back(s); });
+        client_->send(std::span<const std::span<const std::byte>>(iov_));
+    }
+
 #if defined(LIBTRACER_BENCH_NOISE_LINK)
     void tick(std::uint64_t now) override {
         if constexpr (requires(T& t) { t.tick(now); }) {
@@ -98,6 +139,9 @@ class pair_t final : public link_pair_t {
     std::unique_ptr<T> client_;
     server_sink_t server_sink_;
     client_sink_t client_sink_;
+    std::vector<std::vector<std::byte>> frames_;   // the staged sample frames
+    std::vector<tr::view::view_t> views_;          // borrowed views over frames_
+    std::vector<std::span<const std::byte>> iov_;  // the composed rope's links
 };
 
 /**
@@ -144,11 +188,11 @@ int main(int argc, char** argv) {
     bench::link::options_t o;
     if (!bench::link::parse_options(argc, argv, o)) return 2;
     std::printf("# bench_noise_link: libtracer link arms (#2065), one warm pair per arm\n");
-    bench::emit_clock_floor();
+    if (!o.list) bench::emit_clock_floor();
     const bench::link::arm_t arms[] = {
-        {"libtracer", "udp", bench::link::kDatagramBound, make_udp_pair},
+        {"libtracer", "udp", bench::link::kDatagramBound, "link-unbatched", make_udp_pair},
 #if defined(LIBTRACER_BENCH_NOISE_LINK)
-        {"libtracer", "noise", bench::link::kDatagramBound - 16, make_noise_pair},
+        {"libtracer", "noise", bench::link::kDatagramBound - 16, "link-unbatched", make_noise_pair},
 #endif
     };
 #if !defined(LIBTRACER_BENCH_NOISE_LINK)

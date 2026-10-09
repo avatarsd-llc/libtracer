@@ -25,7 +25,17 @@
  *    server certificate (EC P-256, 127.0.0.1) with the `openssl` command at start-up and deletes
  *    them at exit; without the command, both arms print why and are skipped.
  *
- * Every `put` uses Zenoh's defaults (congestion control included); the streaming row's `NOTE`
+ * Request/reply and setup puts go through EXPRESS publishers (`is_express`), which skip
+ * Zenoh's batching, so an RTT row is one frame per send on both engines; the streaming row's
+ * puts go through a default publisher, which batches small puts into one transport frame —
+ * the SESSION shape (`shape=session-batched` on its `NOTE` lines), against libtracer's
+ * unbatched LINK (`link_harness.hpp` §shapes; the composed-graph comparison is
+ * `run_compose.sh`'s). Every `put` lends the harness's frame to Zenoh without copying it (a
+ * `Bytes` over the caller's buffer, whose deleter flags its release; the harness waits for it
+ * before re-stamping, and a pair that ever had to wait prints a `NOTE`), and both receive
+ * ends read only the 18-byte header out of the payload and echo it by reference
+ * (`Bytes::clone`), so neither side copies a frame the libtracer arms do not. Every put
+ * otherwise uses Zenoh's defaults (congestion control included); the streaming row's `NOTE`
  * line reports what was lost. Built only when zenoh-c is vendored (`bench/fetch_zenoh.sh`).
  * Diagnostic, not a gate.
  *
@@ -39,6 +49,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -136,29 +148,33 @@ class zenoh_pair_t final : public link_pair_t {
     zenoh_pair_t(rx_state_t& rx, const char* proto) {
         const std::uint16_t port = free_port();
         server_.emplace(zenoh::Session::open(make_config(proto, true, port)));
-        rep_.emplace(server_->declare_publisher(zenoh::KeyExpr("bench/link/rep")));
+        rep_.emplace(server_->declare_publisher(zenoh::KeyExpr("bench/link/rep"), express()));
         req_sub_.emplace(server_->declare_subscriber(
             zenoh::KeyExpr("bench/link/req"),
             [this, &rx](const zenoh::Sample& s) {
-                auto v = s.get_payload().as_vector();
-                if (rx.on_server(std::as_bytes(std::span(v))))
-                    rep_->put(zenoh::Bytes(std::move(v)));
+                header_t h{};
+                if (rx.on_server(header(s, h))) rep_->put(s.get_payload().clone());
             },
             zenoh::closures::none));
         client_.emplace(zenoh::Session::open(make_config(proto, false, port)));
-        req_.emplace(client_->declare_publisher(zenoh::KeyExpr("bench/link/req")));
+        req_.emplace(client_->declare_publisher(zenoh::KeyExpr("bench/link/req"), express()));
+        bulk_.emplace(client_->declare_publisher(zenoh::KeyExpr("bench/link/req")));
         rep_sub_.emplace(client_->declare_subscriber(
             zenoh::KeyExpr("bench/link/rep"),
             [&rx](const zenoh::Sample& s) {
-                const auto v = s.get_payload().as_vector();
-                rx.on_client(std::as_bytes(std::span(v)));
+                header_t h{};
+                rx.on_client(header(s, h));
             },
             zenoh::closures::none));
     }
 
     ~zenoh_pair_t() override {
+        if (held_waits_ != 0)
+            std::printf("NOTE zenoh pair: %llu puts held the lent frame past put()\n",
+                        static_cast<unsigned long long>(held_waits_));
         // The client end first, so the server never echoes into a closed session.
         rep_sub_.reset();
+        bulk_.reset();
         req_.reset();
         client_.reset();
         req_sub_.reset();
@@ -166,16 +182,46 @@ class zenoh_pair_t final : public link_pair_t {
         server_.reset();
     }
 
-    void send(std::span<const std::byte> f) override {
-        const auto* b = reinterpret_cast<const std::uint8_t*>(f.data());
-        req_->put(zenoh::Bytes(std::vector<std::uint8_t>(b, b + f.size())));
-    }
+    void send(std::span<const std::byte> f) override { lend(*req_, f); }
+    void send_stream(std::span<const std::byte> f) override { lend(*bulk_, f); }
 
    private:
+    /** @brief The harness header, read out of a received payload. */
+    using header_t = std::array<std::uint8_t, bench::link::kHeader>;
+
+    /** @brief Options of an express publisher (no batching). */
+    static zenoh::Session::PublisherOptions express() {
+        zenoh::Session::PublisherOptions o;
+        o.is_express = true;
+        return o;
+    }
+
+    /** @brief Copy only the header of @p s's payload into @p h; the span the harness reads. */
+    static std::span<const std::byte> header(const zenoh::Sample& s, header_t& h) {
+        const std::size_t n = s.get_payload().reader().read(h.data(), h.size());
+        return std::as_bytes(std::span(h.data(), n));
+    }
+
+    /** @brief Put @p f on @p pub without copying it; return once Zenoh released it. */
+    void lend(zenoh::Publisher& pub, std::span<const std::byte> f) {
+        released_.store(false, std::memory_order_relaxed);
+        auto* p = reinterpret_cast<std::uint8_t*>(const_cast<std::byte*>(f.data()));
+        pub.put(zenoh::Bytes(p, f.size(), [this](std::uint8_t*) {
+            released_.store(true, std::memory_order_release);
+        }));
+        if (released_.load(std::memory_order_acquire)) return;
+        ++held_waits_;
+        while (!released_.load(std::memory_order_acquire)) {
+        }
+    }
+
+    std::atomic<bool> released_{true};
+    unsigned long long held_waits_ = 0;
     std::optional<zenoh::Session> server_;
     std::optional<zenoh::Session> client_;
     std::optional<zenoh::Publisher> rep_;
     std::optional<zenoh::Publisher> req_;
+    std::optional<zenoh::Publisher> bulk_;
     std::optional<zenoh::Subscriber<void>> req_sub_;
     std::optional<zenoh::Subscriber<void>> rep_sub_;
 };
@@ -194,6 +240,8 @@ template <const char* Proto>
 constexpr char kUdp[] = "udp";
 constexpr char kTls[] = "tls";
 constexpr char kQuic[] = "quic";
+/** @brief What a Zenoh arm's streaming rows measure (`link_harness.hpp` §shapes). */
+constexpr const char* kShape = "session-batched";
 
 }  // namespace
 
@@ -205,17 +253,17 @@ int main(int argc, char** argv) {
     std::printf(
         "# secured arms (tls, quic) vs libtracer noise: different security protocols, same goal: "
         "authenticated encryption\n");
-    bench::emit_clock_floor();
+    if (!o.list) bench::emit_clock_floor();
     g_tls_dir = make_tls_material();
     std::vector<bench::link::arm_t> arms = {
-        {"zenoh", "udp", bench::link::kDatagramBound, make_pair<kUdp>}};
+        {"zenoh", "udp", bench::link::kDatagramBound, kShape, make_pair<kUdp>}};
     if (g_tls_dir.empty()) {
         std::printf(
             "# arms zenoh/tls, zenoh/quic: skipped (no openssl command for the "
             "throwaway certificate)\n");
     } else {
-        arms.push_back({"zenoh", "tls", bench::link::kDatagramBound, make_pair<kTls>});
-        arms.push_back({"zenoh", "quic", bench::link::kDatagramBound, make_pair<kQuic>});
+        arms.push_back({"zenoh", "tls", bench::link::kDatagramBound, kShape, make_pair<kTls>});
+        arms.push_back({"zenoh", "quic", bench::link::kDatagramBound, kShape, make_pair<kQuic>});
     }
     bool ok = true;
     for (const auto& a : arms) ok &= bench::link::run_arm(a, o);

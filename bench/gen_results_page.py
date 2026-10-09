@@ -459,14 +459,19 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "plain UDP link, and the Noise link (#2064) behind a build switch — timed for one "
         "request and its echo, for a blast stream with 1-in-64 frames stamped, and for a fresh "
         "pair's setup to first reply (the handshake, on a secured link), at 64 B, 1 KiB, 4 KiB, "
-        "16 KiB and the datagram bound, with the heap, resident set and threads one pair costs.",
+        "16 KiB and the datagram bound, with the heap, resident set and threads one pair costs. "
+        "The stream is a libtracer LINK, unbatched (one frame per send); a stream-batch twin "
+        "packs K values per send with compose_batch. The composed-graph comparison with Zenoh "
+        "is run_compose.sh's.",
         "ns p50 / p99 RTT and one-way · exchanges/s, frames/s, MB/s · bytes per pair"),
     instrument_t(
         "bench_zenoh_link.cpp", "net", (),
         "The Zenoh arms of the same harness, through the same driver: a warm session pair over "
         "plain UDP, and over TLS and QUIC as the secured counterpart of the Noise link — "
         "different security protocols with the same goal, authenticated encryption — with "
-        "setup (the handshake) on its own row.",
+        "setup (the handshake) on its own row. Request/reply uses express publishers; the "
+        "stream is a Zenoh SESSION, batched by default, so it is not a link-for-link "
+        "throughput comparison (run_compose.sh is).",
         "ns p50 / p99 RTT and one-way · exchanges/s, frames/s, MB/s · bytes per pair"),
     instrument_t(
         "bench_noise_crypto.cpp", "framed", (),

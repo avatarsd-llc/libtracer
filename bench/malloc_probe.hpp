@@ -9,7 +9,8 @@
  * `malloc_probe.cpp` defines `malloc`, `calloc`, `realloc`, `free` and the aligned forms in the
  * executable, forwarding to glibc's `__libc_*` entry points. A definition in the executable
  * interposes for every shared library too, so libsodium's, OpenSSL's and mbedTLS's heap traffic
- * is counted along with the C++ runtime's (`operator new` calls `malloc`). Counting is armed per
+ * is counted along with the C++ runtime's (`operator new` calls `malloc`). Only blocks allocated
+ * inside a window move its balance (see `malloc_probe.cpp`, #1420). Counting is armed per
  * window and is process-global, so a caller arms it around single-threaded work, or reads it
  * knowing every thread is included. glibc only; on another C library the interposer is not
  * built and every reading is zero (`kAvailable` says which).
@@ -26,6 +27,8 @@ struct reading_t {
     long long peak = 0;   /**< @brief High-water of @ref live within the window. */
     long long allocs = 0; /**< @brief Allocation calls while armed. */
     long long frees = 0;  /**< @brief Free calls while armed. */
+    /** @brief Window blocks the charge table could not record; their bytes stay charged. */
+    long long untracked = 0;
 };
 
 /** @brief True when the interposer is compiled in (glibc). */
@@ -36,5 +39,12 @@ void arm();
 
 /** @brief Stop counting and return the window's reading. */
 reading_t disarm();
+
+/**
+ * @brief The #1420 check: a block allocated before a window and freed inside it costs the
+ *        window nothing, and a block allocated and kept inside one is seen.
+ * @return False when the probe is blind or charges a pre-window free; no reading is then valid.
+ */
+[[nodiscard]] bool canary();
 
 }  // namespace bench::malloc_probe
