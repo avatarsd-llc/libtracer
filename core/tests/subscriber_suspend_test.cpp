@@ -15,9 +15,10 @@
  *      handle resumes and then unsubscribes it, and a cleared handle answers NOT_FOUND.
  *   3. The published array carries the ACTIVE edges: a cleared slot leaves it, a suspended
  *      one keeps its entry (clear), so a toggle republishes nothing.
- *   4. A toggle draws nothing from any source, so it succeeds with the source exhausted; a
- *      resume after a REFUSED republish answers BACKPRESSURE and changes nothing, and the next
- *      successful mutation lets it through.
+ *   4. A toggle draws nothing from any source, so it succeeds with the source exhausted. A
+ *      resume after a REFUSED republish rebuilds the stale array itself: with the source still
+ *      exhausted it answers BACKPRESSURE and changes nothing, and the RETRY succeeds once the
+ *      source has room, with no other mutation in between.
  *   5. The liveness flip finds its entry by slot — the published array no longer mirrors the
  *      slot table — observed as a suspend silencing exactly its own edge.
  *   6. The RFC-0005 counts are of DELIVERING edges: with 0 live and M suspended edges the
@@ -26,6 +27,8 @@
  *   7. Toggling races a writer cleanly (the TSan legs run this): a writer thread against
  *      suspend, resume and unsubscribe/re-subscribe on the same and neighbouring slots, and the
  *      counts come out exact.
+ *   8. A remote (routed) slot toggles through the same per-slot primitive #2019's wire door
+ *      will drive: one link goes silent and comes back, the other keeps receiving.
  */
 
 #include <atomic>
@@ -34,9 +37,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <new>
+#include <string_view>
 #include <thread>
 #include <vector>
 
+#include "graph_sinks.hpp"
+#include "libtracer/packed_path.hpp"
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
@@ -189,10 +196,10 @@ void test_published_array_is_the_active_edges() {
         check(sinks[i].seen == 1 && sinks[i].last == 0x44, "each resumed edge takes the write");
 }
 
-/** @brief (4) A toggle draws nothing; a resume after a refused republish answers BACKPRESSURE,
- *         unchanged, until a successful mutation. */
+/** @brief (4) A toggle draws nothing; a resume after a refused republish rebuilds the array,
+ *         answering BACKPRESSURE, unchanged, only while the source has no room. */
 void test_toggle_allocates_nothing() {
-    std::printf("a toggle allocates nothing; a resume over a stale array is refused:\n");
+    std::printf("a toggle allocates nothing; a resume over a stale array rebuilds it:\n");
     gate_source_t gate;
     graph_t g{gate};
     const vertex_handle_t src = g.register_vertex(path_t("/s/d"), role_t::STORED_VALUE);
@@ -215,18 +222,82 @@ void test_toggle_allocates_nothing() {
 
     check(g.unsubscribe(*sx).has_value(), "an unsubscribe with no room still takes effect");
     const auto r = g.set_suspended(*sa, false);
-    gate.disarm();
     check(!r && r.error() == status_t::BACKPRESSURE,
-          "after that refused republish, a resume answers BACKPRESSURE");
-    check(g.is_suspended(*sa).value_or(false), "... and the edge is still suspended");
+          "after that refused republish, a resume with no room answers BACKPRESSURE");
+    gate.disarm();
+    check(g.is_suspended(*sa).value_or(false) && g.own_subs(src) == 2,
+          "... and the edge is still suspended, its speculative count given back");
     (void)g.write(src, byte_value(0x66));
     check(a.seen == 0 && x.seen == 1, "... still receives nothing, and the cleared edge neither");
 
-    counter_t y;
-    check(g.subscribe(path_t("/s/d"), count, &y).has_value(), "a successful mutation");
-    check(g.set_suspended(*sa, false).has_value(), "... and the resume goes through");
+    // The source has room again and NOTHING else on the vertex changed: the retry itself
+    // rebuilds the stale array (the selector's case: switch edges under memory pressure).
+    check(g.set_suspended(*sa, false).has_value(), "the retry, once the source has room, succeeds");
+    check(g.own_subs(src) == 3 && published(src) == 3,
+          "... counts the edge, and rebuilt the array without the cleared edge");
     (void)g.write(src, byte_value(0x77));
-    check(a.seen == 1 && a.last == 0x77, "... and the edge delivers again");
+    check(a.seen == 1 && a.last == 0x77 && x.seen == 1 && lo.seen == 3,
+          "... and the edge delivers again, the cleared one still does not");
+    gate.arm(0);
+    check(g.set_suspended(*sa, true).has_value() && g.set_suspended(*sa, false).has_value(),
+          "... and with the array current again, a switch draws nothing");
+    gate.disarm();
+}
+
+/** @brief A sink for the graph's remote-delivery hook: deliveries per link name. */
+struct link_counts_t {
+    int a = 0; /**< @brief Deliveries routed over link "a". */
+    int b = 0; /**< @brief Deliveries routed over link "b". */
+};
+
+/** @brief A SUBSCRIBER{ PATH @p marker } TLV, as a peer's SUBSCRIBE carries it. */
+tr::view::view_t subscriber_tlv(std::string_view marker) {
+    std::vector<std::byte> path;
+    (void)tr::wire::emit_path_segment(path, marker);
+    std::vector<std::byte> body;
+    tr::wire::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{}, path);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::SUBSCRIBER, tr::wire::opt_t{.pl = true}, body);
+    return make_value(out);
+}
+
+/** @brief A return route naming @p link. */
+tr::view::view_t route_to(std::string_view link) {
+    std::vector<std::byte> path;
+    (void)tr::wire::emit_path_segment(path, link);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, path);
+    return make_value(out);
+}
+
+/** @brief (8) A remote (routed) slot toggles through the same primitive (#2019's layer). */
+void test_remote_slot_toggles() {
+    std::printf("a remote (routed) slot suspends and resumes in place:\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/s/r"), role_t::STORED_VALUE);
+    link_counts_t seen;
+    const tr::testing::remote_sink_guard_t sink(
+        g, [&](const tr::graph::remote_delivery_t& d, const value_t&) {
+            (d.link == "a" ? seen.a : seen.b) += 1;
+        });
+    check(g.subscribe_wire(v, subscriber_tlv("pa"), route_to("a"), "a").has_value() &&
+              g.subscribe_wire(v, subscriber_tlv("pb"), route_to("b"), "b").has_value(),
+          "two routed edges, slots 0 (link a) and 1 (link b)");
+    tr::graph::vertex_t& raw_v = *std::bit_cast<tr::graph::vertex_t*>(v);
+    using edge_suspend_t = tr::graph::vertex_t::edge_suspend_t;
+
+    check(raw_v.set_edge_suspended(0, true) == edge_suspend_t::CHANGED, "suspend slot 0");
+    check(raw_v.edge_suspended(0).value_or(false) && published(v) == 2,
+          "... it reads back suspended and keeps its entry");
+    (void)g.write(v, byte_value(0x21));
+    check(seen.a == 0 && seen.b == 1, "... link a receives nothing, link b still does");
+
+    check(raw_v.set_edge_suspended(0, false) == edge_suspend_t::CHANGED, "resume slot 0");
+    (void)g.write(v, byte_value(0x22));
+    check(seen.a == 1 && seen.b == 2, "... and both links receive the next write, no replay");
+    check(raw_v.set_edge_suspended(0, false) == edge_suspend_t::UNCHANGED &&
+              raw_v.set_edge_suspended(2, true) == edge_suspend_t::NOT_FOUND,
+          "a no-change toggle is UNCHANGED; an empty slot is NOT_FOUND");
 }
 
 /** @brief The raw vertex behind @p h, for the RFC-0005 counters. */
@@ -330,5 +401,6 @@ int main() {
     test_toggle_allocates_nothing();
     test_counts_are_delivering_edges();
     test_toggle_races_a_writer();
+    test_remote_slot_toggles();
     return tr::testing::summary("subscriber_suspend");
 }

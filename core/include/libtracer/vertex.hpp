@@ -2049,13 +2049,11 @@ class vertex_t {
             b = ensure_edges(tables);
             if (b == nullptr) return kNoSlot;  // OOM on the block itself: admit nothing
             tr::mem::block_array_t<subscriber_t>& subs = b->slots;
-            idx = subs.size();
-            for (std::size_t i = 0; i < subs.size(); ++i) {
-                if (!subs[i].active) {
-                    idx = i;
-                    break;
-                }
-            }
+            // The lowest cleared slot, or one past the end (#1533 folded the search loop).
+            idx = static_cast<std::size_t>(
+                std::find_if(subs.begin(), subs.end(),
+                             [](const subscriber_t& x) { return !x.active; }) -
+                subs.begin());
             if (idx == subs.size()) {
                 // A published entry names its slot in the liveness padding (#1533): 16 bits
                 // on ILP32, so a narrow target refuses the slot it could not name.
@@ -2233,9 +2231,9 @@ class vertex_t {
      * entry's liveness bit move. Nothing is republished and nothing is allocated, either way:
      * the suspended slot keeps its entry, clear, and the copy loop skips it. Every snapshot
      * taken after this returns sees the new state; a snapshot already taken still delivers
-     * once (not a grace point — see `%graph_t::set_suspended`). A suspend cannot fail. A
-     * resume can only after a refused republish (`edge_block_t::pub_current`), and then
-     * changes nothing.
+     * once (not a grace point — see `%graph_t::set_suspended`). A suspend cannot fail. The
+     * exception is a resume after a refused republish (`edge_block_t::pub_current`): it
+     * rebuilds the array first, and if that draw is refused it changes nothing.
      *
      * The RFC-0005 counts are the CALLER's
      * (`%graph_t::set_suspended` moves them), so that a vertex with only suspended edges also
@@ -2253,8 +2251,12 @@ class vertex_t {
         subscriber_t& s = b->slots[idx];
         if (s.suspended == suspended) return edge_suspend_t::UNCHANGED;
         // A resume turns an entry back ON, so the entry must be this occupant's: a refused
-        // republish may have left one naming the slot's previous edge (see pub_current).
-        if (!suspended && !b->pub_current) return edge_suspend_t::BACKPRESSURE;
+        // republish may have left one naming the slot's previous edge (see pub_current). It
+        // rebuilds that stale array first — the one draw a toggle can make, from the block's
+        // own source, only on this arm — so a retry succeeds once the source has room again.
+        // The displaced array waits on the retired list for the next mutation's scan.
+        if (!suspended && !b->pub_current && !try_publish_edges(*b))
+            return edge_suspend_t::BACKPRESSURE;
         s.suspended = suspended;
         set_published_live(*b, idx, !suspended);
         return edge_suspend_t::CHANGED;
@@ -3479,21 +3481,23 @@ class vertex_t {
             // after every entry store, which a 1024-edge churn profile showed.
             for (const subscriber_t& s : b.slots) {
                 if (!s.active) continue;
-                pub_edge_t& e = *::new (static_cast<void*>(dst + np->count)) pub_edge_t{};
+                // Every field COPY-CONSTRUCTED in place, never assigned over a default: no
+                // previous value is released, so the rebuild reaches no deallocator and a
+                // resume may run it (#1533). The target key and the cold half are refcount
+                // shares, nothrow. The cold half is SHARED, not copied (#1442): immutable after
+                // admission, so the entry names the slot's record instead of reproducing it —
+                // no `#981` string-copy residual, and #1448 took the same two copies off the
+                // DELIVERY path (`copy_entry`), so no holder of this record copies its bytes.
+                ::new (static_cast<void*>(dst + np->count)) pub_edge_t{
+                    .callback = s.callback,
+                    .callback_ctx = s.callback_ctx,
+                    .target_key = s.target_key,
+                    .binding = s.binding,
+                    .remote = s.remote,
+                    .active{!s.suspended},
+                    .slot = static_cast<pub_edge_t::slot_index_t>(&s - first),
+                };
                 ++np->count;  // constructed ⇒ destroy_edge_pub can always unwind it
-                e.slot = static_cast<pub_edge_t::slot_index_t>(&s - first);
-                e.active.store(!s.suspended, std::memory_order_relaxed);
-                e.callback = s.callback;
-                e.callback_ctx = s.callback_ctx;
-                e.target_key = s.target_key;  // refcount clone — nothrow
-                e.binding = s.binding;
-                // The cold half is SHARED, not copied (#1442): immutable after admission, so
-                // the entry names the slot's record instead of reproducing it. One relaxed
-                // increment, nothrow, and no `#981` string-copy residual to carry here — the
-                // two `try_assign` probe windows that used to live on this line are gone from
-                // the republish entirely. #1448 then took the same two off the DELIVERY path
-                // (`copy_entry`), so no holder of this record copies its bytes any more.
-                e.remote = s.remote;
             }
         }
         // seq_cst, not release: this exchange and the pinned reader's validating load must

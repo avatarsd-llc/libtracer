@@ -2269,10 +2269,12 @@ class graph_t {
      * **What a toggle costs.** A flip of the edge's published entry under the vertex's stripe
      * lock, plus the counter walk over the vertex's descendants that a subscribe also pays:
      * no republish, and nothing drawn from any source, so a switch (one suspend plus one
-     * resume) allocates nothing and sends nothing. A suspend cannot fail. A resume can only
-     * after an edge republish on this vertex was refused for want of memory — the array may
-     * then name the slot's previous occupant — and answers BACKPRESSURE, unchanged, until the
-     * next successful subscribe or unsubscribe there.
+     * resume) allocates nothing and sends nothing. A suspend cannot fail. The one exception
+     * is a resume after an edge republish on this vertex was refused for want of memory: the
+     * array may then name the slot's previous occupant, so the resume rebuilds it first, the
+     * one draw a toggle makes, from the vertex's own edge source. If that draw is refused too,
+     * it answers BACKPRESSURE with nothing changed, and a retry succeeds once the source has
+     * room again.
      *
      * **The guarantee, exactly.** This is not a grace point. A fan-out that took its snapshot
      * before the flip — concurrently on another thread, or re-entrantly up this one's stack —
@@ -2286,8 +2288,8 @@ class graph_t {
      *          @ref unsubscribe notes).
      * @note The callback-form subscriptions only, as for @ref unsubscribe.
      * @retval NOT_FOUND    No live edge @p sub names.
-     * @retval BACKPRESSURE A resume after a refused edge republish on this vertex (see above);
-     *                      the edge stays suspended and the call may be retried.
+     * @retval BACKPRESSURE A resume that had to rebuild a stale edge array (see above) and was
+     *                      refused the draw; the edge stays suspended and a retry may succeed.
      */
     [[nodiscard]] result_t<void> set_suspended(const subscription_t& sub, bool suspended);
 

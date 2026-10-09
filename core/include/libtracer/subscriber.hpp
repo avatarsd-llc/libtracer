@@ -961,7 +961,7 @@ struct edge_block_t {
      *
      * A refused republish can leave the published array naming a slot's PREVIOUS occupant (a
      * replace whose republish failed), so a resume flips an entry back on only while this is
-     * true; otherwise it answers BACKPRESSURE until the next successful edge mutation.
+     * true; otherwise it republishes first and answers BACKPRESSURE only if that is refused.
      */
     bool pub_current = true;
 

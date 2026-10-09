@@ -22,9 +22,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   its slot index, callback pair, binding, cold half and admission decision, and receives no
   delivery; a resume delivers from the next propagated value with no replay. A toggle flips the
   edge's published entry under the vertex's stripe lock: no republish, nothing drawn from any
-  source, no frame. A suspend cannot fail; a resume answers `BACKPRESSURE`, unchanged, only
-  after an edge republish on that vertex was refused for want of memory, until the next
-  successful subscribe or unsubscribe there. It is not a grace point: a fan-out that took its
+  source, no frame. A suspend cannot fail. A resume draws only after an edge republish on that
+  vertex was refused for want of memory: it rebuilds the array itself, and answers
+  `BACKPRESSURE`, unchanged, if that draw is refused too; a retry succeeds once the source has
+  room. It is not a grace point: a fan-out that took its
   snapshot before the flip still delivers once after the call returns.
   - The RFC-0005 counts are of delivering edges: `own_subs`, `has_subscribers` and the
     ancestors' bubbling count leave a suspended edge out, so a vertex whose every edge is
