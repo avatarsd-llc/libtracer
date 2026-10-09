@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0032 |
 | **Title** | Delete `COMPACT` and the per-link handle tables: every stream rides the chain, and no hop holds state for it |
-| **Status** | **accepted** (2026-10-09; proposed the same day), **maintainer approval** on [PR #2043](https://github.com/avatarsd-llc/libtracer/pull/2043): "approve but we need to fix canbus later". The classic-CAN small-sample cost is accepted for now; the follow-up is #1953 (§15 Q4). Every §15 question was ruled on 2026-10-09 ("all rec", with Q3 and Q5 changed and Q6 extended). The comment window was waived by default and not invoked. The §8 figures are from PR #2037 (merged) and the CAN rows from #2044 (PR #2046). The direction was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (one walk, the connection vertex is the door), §"Addendum: stages 5 and 6", questions 5–8, "all rec". This document turns that ruling into normative text, and §15 lists the choices the ruling left open, each with a recommendation. |
+| **Status** | **accepted** (2026-10-09; proposed the same day), **maintainer approval**, recorded as a comment on issue [#1950](https://github.com/avatarsd-llc/libtracer/issues/1950): "approve, but we need to fix canbus later". The classic-CAN small-sample cost is accepted for now; the follow-up is #1953 (§15 Q4). Every §15 question was ruled on 2026-10-09 ("all rec", with Q3 and Q5 changed and Q6 extended). The comment window was waived by default and not invoked. The §8 figures are from PR #2037 (merged) and the CAN rows from #2044 (PR #2046). The direction was **ruled** on 2026-10-07 in [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938) (one walk, the connection vertex is the door), §"Addendum: stages 5 and 6", questions 5–8, "all rec". This document turns that ruling into normative text, and §15 lists the choices the ruling left open, each with a recommendation. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -479,8 +479,9 @@ These are byte counts from the layouts, with `src` empty and ungrown as RFC-0030
 - **NARROW** (an MCU on CAN or a constrained WebSocket link). It loses the handle store's code and
   its per-link tables, which today draw from the link's source and refuse on exhaustion. It pays
   the per-sample bytes of §8.2, which weigh most on small unbatched samples (+36% at 64 B, §8.1).
-  On classic CAN the forward leg is 19 against 13 frames per hop at 64 B unbatched, and +5.7% or
-  less with BATCH or at 1 KiB and above (§8.1, PR #2046). These are lower bounds, since the
+  On classic CAN at 3 hops the forward leg is 19 against 13 frames per hop at 64 B unbatched, and
+  +2.2% at N = 32, +4.5% at 1 KiB and +0.3% at 16 KiB. With today's reply leg included, the totals
+  are +5.7%, +12% and +0.8% (§8.1, PR #2046). These are lower bounds, since the
   bench's point-to-point binding omits the per-hop peer-name route element. BATCH (§5.3) and the transport's link-local compression (§5.5, stage 7) are the two
   remedies. Both are local decisions, and neither puts state in a hop.
 - **MID** (a gateway forwarding a few streams). The forward path becomes the ordinary per-hop
@@ -671,7 +672,8 @@ deleted.
 - **A pair-only 8-byte short form of the chain** (4 + 8·H, dropping the escape header). Deferred
   by ruling 4: it is a follow-up only if CAN frame counts show that the 3 B per element matters.
   #2044's counts (PR #2046, merged, §8.1) put the classic-CAN forward leg at 19 against 13 frames
-  per hop for 64 B unbatched, +5.7% at N = 32 and +12% at 1 KiB. These are lower bounds: the
+  per hop for 64 B unbatched, and +2.2% at N = 32 and +4.5% at 1 KiB. With today's reply leg the
+  totals are +5.7% and +12%. These are lower bounds: the
   point-to-point binding omits the per-hop peer-name route element. On CAN FD the forward legs are
   within one frame. The cost is accepted for now, and the fix is #1953 (CAN link-local compression,
   PR #2048) rather than a short form (§15 Q4). It would be its own amendment to the PAIR element and is not part of this RFC.
@@ -704,8 +706,8 @@ The bench does not falsify it (ruling 4). These would:
 
 ## 15. Questions for the maintainer, with the rulings
 
-The maintainer ruled on **2026-10-09**, on this RFC's pull request
-([#2043](https://github.com/avatarsd-llc/libtracer/pull/2043)): "all rec", with Q3 and Q5 changed
+The maintainer ruled on **2026-10-09**, in a comment on issue
+[#1950](https://github.com/avatarsd-llc/libtracer/issues/1950): "all rec", with Q3 and Q5 changed
 and Q6 extended. The draft's recommendation follows each ruling.
 
 1. **Retire `0x11`–`0x13` without reassigning them in v1? RULED 2026-10-09: yes, as recommended.**
@@ -722,7 +724,7 @@ and Q6 extended. The draft's recommendation follows each ruling.
    mixed path must be loud.
 4. **The pair-only short form for classic CAN. RULED 2026-10-09: as recommended, decide on the CAN
    rows.** #2037 drew no CAN conclusion. #2044's rows (bench: CAN frames per hop on the real CAN
-   carriage) are in PR #2046, and §8.1 quotes them. **Accepted 2026-10-09, with the RFC ("approve
+   carriage) are in PR #2046, and §8.1 quotes them. **Accepted 2026-10-09, with the RFC ("approve,
    but we need to fix canbus later"): the classic-CAN small-sample cost is accepted for now.** The fix
    is the follow-up [#1953](https://github.com/avatarsd-llc/libtracer/issues/1953) (CAN link-local
    compression, [PR #2048](https://github.com/avatarsd-llc/libtracer/pull/2048)). The maintainer
@@ -744,5 +746,5 @@ and Q6 extended. The draft's recommendation follows each ruling.
 
 Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the comment window is waived by default while
 the project is solo-maintained, and it was not invoked. Maintainer approval was given on 2026-10-09,
-on this RFC's pull request (#2043), and is recorded in the Status row. Sustained objections and their resolution are
+in a comment on issue [#1950](https://github.com/avatarsd-llc/libtracer/issues/1950), and is recorded in the Status row. Sustained objections and their resolution are
 recorded in this section as they arrive.
