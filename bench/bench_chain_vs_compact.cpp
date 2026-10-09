@@ -344,14 +344,12 @@ struct cell_t {
         if (c.fwd != hops) fail(name, "not exactly one frame per hop");
         c.rev_B = ch.origin.bytes;
         for (const auto& l : ch.up) c.rev_B += l.bytes;
-        // The two spellings do NOT emit the same traffic, and the bench states it rather than
-        // hiding it: a PAIR write is relayed with `src` GROWN at every forwarder (RFC-0029
-        // §6.1; the empty-`src` marker only survives on a directly attached origin), so the
-        // terminus ANSWERS and the RESULT routes home through every hop. A COMPACT emits no
-        // reply at all. Both facts are asserted so a change in either is loud, and the reply
-        // leg is reported as its own columns instead of being folded into "bytes per hop".
-        // The shape, exactly: the reply is built and relayed down to node 0, which drops it
-        // WITHOUT counting (origin receives 0 frames). A change in either direction is loud.
+        // The two spellings do NOT emit the same traffic: a PAIR write is relayed with `src`
+        // GROWN at every forwarder (RFC-0029 §6.1; the empty-`src` marker only survives on a
+        // directly attached origin), so the terminus builds a RESULT and it is relayed down to
+        // node 0, which drops it silently (#2042): the origin receives 0 frames and no router
+        // counter moves. A COMPACT emits no reply. The shape is asserted exactly so a change in
+        // either direction is loud, and the reply leg has its own columns.
         if (pair ? (c.rev != hops || ch.origin.frames != 0) : c.rev != 0)
             fail(name, "the reply-leg census changed: pair must ack H frames, compact none");
 
