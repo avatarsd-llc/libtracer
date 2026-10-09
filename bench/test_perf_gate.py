@@ -1908,11 +1908,21 @@ class LayoutBoundRows(unittest.TestCase):
                 f, tick, src = pg.leg_factor(k, leg, null)
                 self.assertEqual(src, "layout")
                 self.assertFalse(tick)
-                self.assertAlmostEqual(f, 1 / pg.LAYOUT_BACKSTOP if leg == "deliv_s"
-                                       else pg.LAYOUT_BACKSTOP)
+                b = pg.ROW_BACKSTOPS.get(k.rsplit("/", 2)[0], pg.LAYOUT_BACKSTOP)
+                self.assertAlmostEqual(f, 1 / b if leg == "deliv_s" else b)
         # the pool twin and the aged rows are not layout-bound
         self.assertEqual(pg.leg_factor("cliff-alloc-pool/64/1/1", "p50_ns", {})[2], "flat")
         self.assertEqual(pg.leg_factor("lkv-alloc-heap-aged/64/1/1", "p50_ns", {})[2], "flat")
+
+    def test_row_backstops_are_tighter_than_the_default_and_keyed_on_real_rows(self):
+        """@brief #2055: a tightened row takes its own bound; every other row the default."""
+        for key, b in pg.ROW_BACKSTOPS.items():
+            self.assertLess(b, pg.LAYOUT_BACKSTOP)
+            self.assertTrue(pg.layout_bound(key + "/1/1"))
+            self.assertEqual(pg.leg_factor(key + "/1/1", "p50_ns", {}), (b, False, "layout"))
+            self.assertAlmostEqual(pg.leg_factor(key + "/1/1", "deliv_s", {})[0], 1 / b)
+        self.assertEqual(pg.leg_factor("lkv-store-heap/1024/1/1", "p50_ns", {})[0],
+                         pg.LAYOUT_BACKSTOP)
 
     def test_a_size_past_the_last_class_holds_the_wider_host_backstop(self):
         """65584 B is the host malloc's: one binary reads 17.5 ns or 36 ns run to run."""

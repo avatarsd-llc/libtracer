@@ -925,6 +925,13 @@ def layout_bound(k: str) -> bool:
 
 
 LAYOUT_BACKSTOP = 1.5
+# Per-row tightenings of LAYOUT_BACKSTOP, keyed `mode/size` (#2055). Each is the worst
+# cross-layout median spread of any timed leg over the nine-layout campaign x1.1, rounded up
+# to 0.05, and replays with 0 false fails over its 216 sessions (docs/methodology.md has the
+# table). A row absent here keeps LAYOUT_BACKSTOP: `lkv-store-heap/1024` stays there because
+# its throughput leg spreads x1.35 across layouts, and x1.35 x 1.1 rounds back up to 1.5.
+ROW_BACKSTOPS = {"lkv-alloc-heap/1024": 1.35, "lkv-store-heap/64": 1.25,
+                 "lkv-store-pool/64": 1.35}
 # A cliff size past the heap backend's last size class (64 KiB + the segment header) is served
 # by the host's malloc itself, whose state flips a process between two modes about x2 apart
 # (65584 B read 17.5 ns in most runs and 33-38 ns in others, one binary, one source; it also
@@ -965,7 +972,8 @@ def leg_factor(k: str, leg: str, null: dict[str, dict[str, float]]) -> tuple[flo
     lower = leg == "deliv_s"
     if layout_bound(k):
         size = int(k.split("/")[1])
-        b = HOST_SERVED_BACKSTOP if size > INSTR_LAST_CLASS else LAYOUT_BACKSTOP
+        b = (HOST_SERVED_BACKSTOP if size > INSTR_LAST_CLASS
+             else ROW_BACKSTOPS.get(k.rsplit("/", 2)[0], LAYOUT_BACKSTOP))
         return (1 / b if lower else b), False, "layout"
     if s is None:
         return _FLAT[leg], not lower, "flat"
