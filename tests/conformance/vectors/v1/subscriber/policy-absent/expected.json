@@ -6,7 +6,7 @@
   "decoded": {
     "type": "0x04 SUBSCRIBER",
     "structured": true,
-    "meaning": "SUBSCRIBER{ PATH{ NAME \"client\" }, SETTINGS{ NAME \"delivery_compact\" VALUE u8=0 } } — a SETTINGS child that names NO delivery_policy: absent ⇒ all-zero ⇒ today's behaviour (RFC-0022 §5.1)",
+    "meaning": "SUBSCRIBER{ PATH{ NAME \"client\" }, SETTINGS{ NAME \"delivery_compact\" VALUE u8=0 } } — a SETTINGS child that names NO delivery_policy, only the RETIRED delivery_compact key (RFC-0032 §6.2), which a receiver ignores: absent ⇒ all-zero ⇒ today's behaviour (RFC-0022 §5.1)",
     "note": "byte-identical to what a pre-RFC-0022 sender emits; a receiver MUST NOT read a neighbouring SETTINGS key as the policy"
   }
 }

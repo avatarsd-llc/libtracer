@@ -265,8 +265,8 @@ DEFAULT_TIER = "advisory"
 #
 # The two `lkv-store-*` legs are here because of what happened without them (#1250):
 # reshaping `rope_t::flatten`'s wrapper cost 25-48% on EVERY `materialize` path — branch
-# and field writes, `op_resolve` reads, FWD COMPACT emission, the RX span sink — and not
-# one of the then-ten points is downstream of that call, so every gate stayed green
+# and field writes, `op_resolve` reads, the FWD COMPACT emission of the time, the RX span
+# sink — and not one of the then-ten points is downstream of that call, so every gate stayed green
 # through a release. They cost NOTHING extra to run: `bench_libtracer`'s default sweep
 # already emits these rows (`run_lkv_store_rows`), so this is two more keys read out of
 # output the gate was already collecting, not two more measurements — the added

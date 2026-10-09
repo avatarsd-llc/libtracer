@@ -515,10 +515,9 @@ It is therefore *refusals*, not *refusals nobody was told about*: an API caller 
 through could not be summed. `assign`, a control-plane field write and a denied READ are each
 a different right or a different path, and are deliberately not folded in.
 
-A deliverer **outside** the graph — the net plane resolving a label to a vertex and writing it
-— counts its own abandoned deliveries through `count_external_drop`, the one public door to
-these counters. It names only `NO_TARGET` and `OUT_OF_MEMORY`: a denial is counted at the gate
-that produces it, so offering it there would count one refusal twice.
+No deliverer outside the graph adds to these counters. The one that did, the COMPACT terminus,
+was deleted with `count_external_drop` (#1951); a remote delivery is now a `FWD{WRITE}` that
+meets the graph's own WRITE gate, and the router counts its own losses in `router_stats_t`.
 
 Counted, never enforced: nothing in the library reads them, so a deployment chooses
 whether to alarm. They are relaxed monotonic and incremented only **on** a drop, so the

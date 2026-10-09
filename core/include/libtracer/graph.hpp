@@ -857,7 +857,7 @@ class graph_t {
 
     /**
      * @brief Where this graph's VALUES are drawn from (ADR-0083 Decision 3, #1777): every
-     *        published value, the default ring admissions, and a router's warm COMPACT copy.
+     *        published value and the default ring admissions.
      *
      * The value sub-pool of the host root (`:stats.mem.values`) on a default graph that
      * @ref derives_sub_pools; the injected root otherwise.
@@ -2648,13 +2648,10 @@ class graph_t {
      * fan-in gate denies the edge's stored caller, otherwise drops every delivery for the
      * rest of its life with nothing anywhere to say so.
      *
-     * Two counters reach past that edge, because the same blindness was reachable from the
-     * net plane (#1068). A COMPACT terminus delivery is a write like any other, and the
-     * router that performs it discards the status: an `:acl` that refuses the inbound link,
-     * a route that no longer resolves, or an allocation that fails under pressure each shed
-     * a frame that an operator could not see. @ref count_external_drop is the door that
-     * plane counts through, and @ref denied is counted at the graph's own WRITE gate so it
-     * is one number for every plane rather than one per deliverer.
+     * @ref denied reaches past that edge (#1068): it is counted at the graph's own WRITE
+     * gate, so it is one number for every plane that writes rather than one per deliverer.
+     * The net plane's own drops die before the graph is involved and are counted by the
+     * router (`router_stats_t`), never here.
      *
      * The drop is not always ONE delivery, and the counters say so by counting deliveries
      * rather than events (#896): a fan-out truncated by an unreservable overflow buffer
@@ -2669,17 +2666,15 @@ class graph_t {
      * pays nothing when nothing is dropped, exactly like @ref ancestor_walks.
      */
     struct delivery_drops_t {
-        /** @brief The target PATH resolved to no live vertex (retired, or never created) —
-         *         a subscription edge's target, or a net-plane route that no longer names
-         *         one (@ref count_external_drop). */
+        /** @brief A subscription edge's target PATH resolved to no live vertex (retired, or
+         *         never created). */
         std::uint64_t no_target = 0;
         /** @brief A WRITE was refused by the target's `:acl` (#81, #1068). Counted on EVERY
          *         plane the value-write path is entered from — an API `write`, a
-         *         FWD{WRITE} terminus, a COMPACT terminus, and a subscription edge's
-         *         fan-in gate — so this is "refusals", not "refusals nobody was told
-         *         about": an API caller both receives `PERMISSION_DENIED` and counts here.
-         *         Deliberately NOT counted: `assign` (the no-delivery state half), a
-         *         control-plane field write, and a denied READ — each a different right or
+         *         FWD{WRITE} terminus, and a subscription edge's fan-in gate — so this is
+         * "refusals", not "refusals nobody was told about": an API caller both receives
+         * `PERMISSION_DENIED` and counts here. Deliberately NOT counted: `assign` (the no-delivery
+         * state half), a control-plane field write, and a denied READ — each a different right or
          *         a different path, and folding them in would make one number mean four
          *         things. */
         std::uint64_t denied = 0;
@@ -2701,33 +2696,6 @@ class graph_t {
      * monotonic counters whose useful reading is "is this growing", not an instant.
      */
     [[nodiscard]] delivery_drops_t delivery_drops() const noexcept;
-
-    /**
-     * @brief Why a deliverer OUTSIDE the graph abandoned a delivery before it could write.
-     *
-     * Narrow on purpose (#1068). It names only the two ways a net-plane delivery dies
-     * without ever reaching @ref write — the route resolves to no vertex, or the payload
-     * view cannot be allocated. There is deliberately no `DENIED`: a refusal happens AT the
-     * graph's own WRITE gate, which counts it there, so offering it here would let one
-     * refusal be counted twice by a caller that also saw `PERMISSION_DENIED`.
-     */
-    enum class external_drop_t : std::uint8_t { NO_TARGET, OUT_OF_MEMORY };
-
-    /**
-     * @brief Count `n` deliveries an off-graph deliverer declined, into @ref delivery_drops.
-     *
-     * The ONE public door to the drop counters (#1068). The net plane performs deliveries
-     * the graph never sees — a COMPACT terminus resolves a label to a vertex and writes it
-     * — so the drops on that path are invisible to every counting site inside `graph_t`.
-     * This is a method rather than a friendship because the counters are a public,
-     * documented surface while the internal drop sites are not: a deliverer needs to add to
-     * the published numbers, not to reach into the machinery that maintains them.
-     *
-     * @p n is a delivery count, never an event count, exactly as for the internal sites: a
-     * deliverer that sheds N deliveries counts N. Relaxed monotonic; costs nothing when
-     * nothing is dropped.
-     */
-    void count_external_drop(external_drop_t why, std::uint64_t n) noexcept;
 
    private:
     /**
@@ -2808,10 +2776,9 @@ class graph_t {
     // DELIVERY is the caller's call; count_store_drops is where each site records its answer.
     // `caller` is the ACL caller context this store runs under — the very value the WRITE
     // gate one frame up just evaluated — and it becomes `write_ctx_t::subject` on the
-    // HANDLER leg (#375). REQUIRED, not defaulted, for the same reason
-    // `fwd_router_t::deliver_local`'s is: empty means the trusted local host, so a defaulted
-    // parameter would let a new write path silently present a remote write to a handler as
-    // the owner's own. It is also `write_ctx_t::subject` for the retaining roles' ADMISSION
+    // HANDLER leg (#375). REQUIRED, not defaulted: empty means the trusted local host, so a
+    // defaulted parameter would let a new write path silently present a remote write to a handler
+    // as the owner's own. It is also `write_ctx_t::subject` for the retaining roles' ADMISSION
     // filter (`handlers_t::on_admit`), which runs here — above the storing tail, so a refusal
     // never becomes state and a normalisation is the only value any reader can reach.
     // `take` is the write path's fused drain (#1713), forwarded to publish_value: non-null only
@@ -3623,9 +3590,8 @@ class graph_t {
      */
     mem::block_source_t* ctl_ = &mem::heap_source();
 
-    /** @brief The VALUE sub-pool (#1777): every published value, the graph-level DEFAULT
-     *         receiver-ring admissions (RFC-0025 §4.6.1 clause 3) and a router's warm COMPACT
-     *         copy draw from it.
+    /** @brief The VALUE sub-pool (#1777): every published value and the graph-level DEFAULT
+     *         receiver-ring admissions (RFC-0025 §4.6.1 clause 3) draw from it.
      *
      *         The root's value sub-pool on a default graph, and the injected root itself
      *         otherwise, so every graph-level byte still draws from the one store the host

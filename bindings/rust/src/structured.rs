@@ -342,9 +342,10 @@ impl DeliveryPolicy {
  * @brief The delivery policy a SUBSCRIBER carries, or [`DeliveryPolicy::default`] when it
  * names none — absent ⇒ all-zero ⇒ today's behaviour (RFC-0022 §3.A).
  *
- * A `SETTINGS` child that names a DIFFERENT key (e.g. `delivery_compact`) is not the
- * policy: the word must be read by name, never by position. Returning the default for
- * such a record is what the `subscriber/policy-absent` vector pins.
+ * A `SETTINGS` child that names a DIFFERENT key (e.g. the retired `delivery_compact`,
+ * RFC-0032 §6.2) is not the policy: the word must be read by name, never by position.
+ * Returning the default for such a record is what the `subscriber/policy-absent` and
+ * `subscriber/compact-key-retired` vectors pin.
  *
  * The walk is the plain NAME-field family's (#995), exactly the C++
  * `parse_subscriber_tlv` → `config_reader_t` rule: the LAST **well-formed** occurrence

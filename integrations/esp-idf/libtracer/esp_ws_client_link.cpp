@@ -977,13 +977,11 @@ void esp_ws_client_link_t::recv_loop() {
                 // It fires on a blip too, and that is the choice, not an oversight. The
                 // link cannot tell a blip from a peer that REBOOTED: the reconnect
                 // rebuilds the transport pair and says nothing, so keeping the child's
-                // edges and label bindings across it is only sound if the far side kept
-                // its own — and a rebooted peer has forgotten every subscription and
-                // every label it ever issued, leaving this node producing into a session
-                // that no longer exists and resolving compact labels against a stranger's
-                // label space. Re-establishing after a flap is cheap and correct;
-                // resurrecting stale routing is neither. This is also what core's
-                // portable `ws_client_transport_t` does at the end of its recv loop
+                // edges across it is only sound if the far side kept its own — and a
+                // rebooted peer has forgotten every subscription, leaving this node
+                // producing into a session that no longer exists. Re-establishing after a flap is
+                // cheap and correct; resurrecting stale routing is neither. This is also what
+                // core's portable `ws_client_transport_t` does at the end of its recv loop
                 // (core/src/transport_ws.cpp), which this type claims to be a drop-in
                 // for. Guarded by the `stop_` break above, on core's rule: a LOCAL
                 // teardown is not a peer departure and reports nothing.

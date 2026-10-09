@@ -1345,12 +1345,14 @@ void test_can_send_advertise_allocates_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// #1951 — the answer to a type the router does not serve, on the same injector
+// #1951 — the answer to a retired type, on the same injector
 //
-// A frame whose outer type is not a FWD — an older peer's retired ADVERTISE / COMPACT /
-// HANDLE_NACK among them — is counted and answered `ERROR{tr::schema::type_mismatch}`. It is
-// peer-provoked and runs on the transport receive threads, so the answer is built on the
-// stack; this case drives the ROUTER's own door (`on_frame`) and holds it to zero allocations.
+// An outer frame of a retired type code — an older peer's ADVERTISE / COMPACT / HANDLE_NACK
+// (0x11-0x13) — is counted in `retired_rx` and answered with one bare
+// `ERROR{tr::schema::type_mismatch}` (RFC-0032 §6.1). Any other non-FWD outer frame is dropped,
+// as before. The answer is peer-provoked and runs on the transport receive threads, so the answer
+// is built on the stack; this case drives the ROUTER's own door (`on_frame`) and holds it to zero
+// allocations.
 // ---------------------------------------------------------------------------
 
 /**

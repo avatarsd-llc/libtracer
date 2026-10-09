@@ -321,7 +321,7 @@ libtracer_test_warnings(ws_test)
 add_test(NAME ws COMMAND ws_test)
 
 # #55 — transport_can pure framing layer (29-bit ID codec, can_framing,
-# can_reassembly, advertise codec; no SocketCAN). Links libtracer for heap_alloc.
+# can_reassembly, the CAN transport's own advertise codec; no SocketCAN). Links libtracer for heap_alloc.
 add_executable(can_frames_test can_frames_test.cpp)
 target_link_libraries(can_frames_test PRIVATE libtracer)
 libtracer_test_warnings(can_frames_test)
@@ -1839,6 +1839,9 @@ if(LIBTRACER_NET_PLANE)
     add_executable(fwd_fanout_test fwd_fanout_test.cpp)
     target_link_libraries(fwd_fanout_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_fanout_test)
+    # Feeds the RFC-0032 retired-code and retired-key vectors' own bytes to the router.
+    target_compile_definitions(fwd_fanout_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME fwd_fanout COMMAND fwd_fanout_test)
 endif()
 
@@ -2681,10 +2684,10 @@ if(LIBTRACER_NET_PLANE)
     add_test(NAME retained_subscription_seam COMMAND retained_subscription_seam_test)
 endif()
 
-# #1582 — the router's four peer-reachable `view::over_bytes` ownership copies (the cold and
-# warm COMPACT payload, the host-local subscribe door's route + SUBSCRIBER TLVs) draw from the
-# injected `flat` seam; a refusal is a counted drop / BACKPRESSURE, never a heap fallback.
-# #1714 — the warm COMPACT arm no longer copies through `flat`: it draws ONE block in all.
+# #1582 — the router's peer-reachable `view::over_bytes` ownership copies (the host-local
+# subscribe door's route + SUBSCRIBER TLVs) draw from the injected `flat` seam; a refusal is a
+# counted drop / BACKPRESSURE, never a heap fallback. The COMPACT payload copies went with
+# COMPACT (#1951).
 if(LIBTRACER_NET_PLANE)
     add_executable(router_flat_seam_test router_flat_seam_test.cpp)
     target_link_libraries(router_flat_seam_test PRIVATE libtracer)

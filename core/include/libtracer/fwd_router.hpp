@@ -75,9 +75,9 @@ struct fwd_pre_t;
  *
  * Every field counts a **`dropped`**, not a `refused`: these sites lose a frame and tell
  * nobody, which is exactly why the doctrine requires them counted. They are ROUTER-LOCAL and
- * deliberately NOT folded through `graph_t::count_external_drop` — these frames die
- * before the graph is involved, and that door's exclusion rules exist to stop one refusal
- * being tallied on both sides of the net/graph seam (#1503 Q2).
+ * deliberately NOT folded into the graph's delivery-drop counters — these frames die before
+ * the graph is involved, and one refusal must not be tallied on both sides of the net/graph
+ * seam (#1503 Q2).
  *
  * The resource causes are split per-cause because a sizing operator grows a *different* seam
  * for each; the malformed/opcode drops are fused into @ref malformed_rx because they are one
@@ -480,7 +480,7 @@ class fwd_router_t {
      * @brief One snapshot of this router's counted cold-path drops (#1503 step 3).
      *
      * See @ref router_stats_t for what each field means and why the drops are counted HERE
-     * rather than through `graph_t::count_external_drop`. Snapshot coherence is the
+     * rather than in the graph's delivery-drop counters. Snapshot coherence is the
      * `core/STYLE.md` §Introspection clause: six relaxed loads, so use the difference
      * between two snapshots, never the instant.
      */
@@ -2017,7 +2017,7 @@ class fwd_router_t {
      *        holder left, then give the session an identity anchor (#1223 step 2, #1609).
      *
      * An arrival is the RE-TENANT edge: the name has just changed hands and the new session
-     * has sent nothing, so every edge, label binding and await still filed under @p peer is a
+     * has sent nothing, so every edge and await still filed under @p peer is a
      * predecessor's whose departure never reached this router. The arrival runs that
      * departure (`bus_peer_down`) first, which makes "edges under a peer name belong to
      * its current holder" true by construction rather than by a sweeper's care; when the
