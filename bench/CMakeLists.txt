@@ -138,6 +138,12 @@ add_executable(bench_hop_chain bench_hop_chain.cpp)
 target_link_libraries(bench_hop_chain PRIVATE libtracer)
 target_compile_options(bench_hop_chain PRIVATE -Wall -Wextra)
 
+# Chain delivery over RFC-0029 PAIR against RFC-0004 §E.1 COMPACT, measured before COMPACT is
+# deleted (stage 6, #1949). A report, not a gate.
+add_executable(bench_chain_vs_compact bench_chain_vs_compact.cpp)
+target_link_libraries(bench_chain_vs_compact PRIVATE libtracer)
+target_compile_options(bench_chain_vs_compact PRIVATE -Wall -Wextra)
+
 add_executable(bench_terminus_tier bench_terminus_tier.cpp)
 target_link_libraries(bench_terminus_tier PRIVATE libtracer)
 target_compile_options(bench_terminus_tier PRIVATE -Wall -Wextra)
