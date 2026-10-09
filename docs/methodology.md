@@ -96,6 +96,8 @@ Several named *modes* isolate distinct costs on the same axes:
   in-frame slots (it spills), and `stream-defer` a burst of `assign`s delivered by one
   covering `propagate`; both per cycle, batch-timed
   ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)).
+- `route-handle-egress-mt1` / `-mt2` / `-mt4` — **retired** with the route handle (see
+  [Retired series](#retired-series)).
 - `seam-class-c1` / `-c8` / `-c32`, `seam-direct`, `seam-fallback` — the allocation seam's
   two decisions: finding a block's size class among C classes, and a full `bump_source_t`
   falling back to its upstream pool (`seam-direct` is that pool alone).
@@ -225,8 +227,9 @@ which is why it is a series of its own rather than folded into RSS.
 The in-process surfaces above measure the graph. A separate set of benches measures the
 **network plane** — what a frame costs between arriving and being applied — because the two
 move independently and an improvement to one can hide a regression in the other. They cover
-the three shapes a frame takes: a transit hop that never resolves, a cold terminus resolve
-an established flow pays once, and the warm `COMPACT` frame that dominates a running system.
+the three shapes a frame takes: a transit hop that never resolves, a cold terminus resolve,
+and the steady-state chain delivery that dominates a running system — a `FWD{WRITE}` carrying
+the full `PAIR` chain, which shrinks by one element per hop and needs no state at any hop.
 
 Every bench on this surface reports latency **and** exact allocation counts, and every one
 calibrates its own batch size against the host clock rather than hardcoding a number: a
@@ -242,6 +245,31 @@ before timing: the public by-name `on_frame` door is one production frames never
 fails to run must not cost a commit its whole history point — but an empty one emits a build
 warning naming the file, because a silently-empty transcript is otherwise a green job that
 recorded nothing.
+
+#### Retired series
+
+COMPACT delivery left the protocol and the router with RFC-0032 (#1951), which removes RFC-0004
+§E.1 (`ADVERTISE`, `COMPACT`, `HANDLE_NACK` and the per-link handle tables), so the series that
+measured it have no code left to run. They stay in the build-to-build history as a closed record, and
+their rows are not comparable to anything after the cut.
+
+| Series | What it measured | Why it ended |
+| --- | --- | --- |
+| `compact-forward/*`, `compact-terminus/*` (`bench_compact_delivery`) | the Nth `COMPACT` frame on an already-advertised binding: a forward hop that swaps the label and re-emits, and a terminus that resolves it locally | the frame and its label store were deleted; `bench_chain_delivery`'s `chain-forward/*`, `chain-terminus/*` and `chain-delivery` RSS line took their gate points |
+| `route-handle-egress-mt1` / `-mt2` / `-mt4` | producer threads sharing one advertised route-handle flow | the egress reuse read belonged to the handle table |
+
+The replacement is the delivery every flow now takes: chain delivery, a `FWD{WRITE}` carrying the
+full `PAIR` chain, which each hop consumes one element of. It holds no state at any hop, so
+there is no warm/cold split, no first-frame advertise and no stale-label repair to price. Its
+cost is bytes: the frame is larger on every hop but the last, by 11 B per remaining PAIR
+element (RFC-0029 §5.2). The
+maintainer ruling is that this multi-hop byte cost is accepted and the bench **reports**
+it rather than vetoing it, with `BATCH` (`0x80`) available to the application as the way to
+amortise headers on a steady flow. The one-time before/after comparison against COMPACT (1 and 3
+hops, 64 B to 16 KiB, batch 1 to 32) was taken in #1949 before the code was deleted; the
+standing rows are `chain-forward/*` and `chain-terminus/*` (`bench_chain_delivery`) and
+`fwd-demux-*`. Row-level history of the retired series stays in the
+bench history, not in these pages.
 
 ### 4 · libtracer vs Zenoh (absolute, best of 3 rounds, same runner)
 
@@ -438,7 +466,7 @@ Details that make these trustworthy:
   Those last two are here because of what happened without them
   ([#1250](https://github.com/avatarsd-llc/libtracer/issues/1250)): reshaping
   `rope_t::flatten`'s wrapper cost **25–48%** on every path through `materialize` —
-  branch and field writes, `op_resolve` reads, FWD COMPACT emission, the RX span sink —
+  branch and field writes, `op_resolve` reads, FWD delivery emission, the RX span sink —
   and no gated point at the time was downstream of that call, so the loss shipped with
   every gate green. They are read out of `RESULT` rows the default sweep already emits,
   so they add no wall-clock. The two 1 KiB heap rows joined them after the same kind of
@@ -609,7 +637,7 @@ Details that make these trustworthy:
   way. In the 2026-10-09 null (27 fit rounds in three windows, banked from main@738c0a29)
   the null tightens 27 of the 89 legs outside the cliff family and 18 of the 294 cliff legs;
   every other leg is at the cap. Rows at the cap on every leg: `acl-inherit-d4-mt4`,
-  `compact-forward/16384`, both `eptype-stream` rows, all three `fwd-demux-*` rows, both
+  both `eptype-stream` rows, all three `fwd-demux-*` rows, both
   `inproc-borrow` rows, `inproc-mt4`, `inproc-path/64/1/8192`, `inproc/16384`,
   `lkv-alloc-heap/1024`, `mixed`, `poolalloc-mt4`, and the `store-lat` full, net-fwd and
   narrow graph-read rows. `fold-b4/512/1/1` is tightened on p50 only (x1.113). The three `compact-*` rows it carried were dropped

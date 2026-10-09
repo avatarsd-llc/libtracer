@@ -779,7 +779,19 @@ A forwarded `FWD` builds no frame: the rebuilt head goes to a stack buffer and t
 handed to the transport by reference as a scatter-gather list, which is why the forward charts
 are flat in payload size. Zero allocations **in the router** is not zero on the wire —
 a transport that does not override the gather form concatenates once in
-`transport_t::send(iov)`."""
+`transport_t::send(iov)`.
+
+### Retired series
+
+`compact-forward`, `compact-terminus` and `route-handle-egress-*` are no longer produced. They
+measured RFC-0004 §E.1's per-link route handle (`ADVERTISE` / `COMPACT` / `HANDLE_NACK`), which
+RFC-0032 removed from the protocol and the router (#1951); delivery became chain delivery: a `FWD{WRITE}` carrying
+the full `PAIR` chain, one element consumed per hop, no state held. Their history stays in the
+charts as a closed record and is not comparable to later points; `chain-forward` and
+`chain-terminus` (`bench_chain_delivery`) are the rows that replaced them. The cost chain delivery pays is
+bytes on the wire, not time per hop, and the maintainer has ruled that multi-hop byte cost
+accepted: the benches report it and never veto on it. `BATCH` is the application's tool for
+amortising headers on a steady flow."""
 
 
 def _parse_codec(out: str) -> list[tuple[int, float, float, float]]:
