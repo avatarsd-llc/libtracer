@@ -132,6 +132,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [RFC-0029](spec/rfcs/0029-one-path-primitive.md) | One path primitive: the owner-issued `(index, generation)` pair, carried per hop, local = forwarded | accepted | [RFC-0031](spec/rfcs/0031-bus-session-anchors-are-children-of-their-door.md) (part) | [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part), [RFC-0024](spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) (part), [RFC-0027](spec/rfcs/0027-label-switched-path-compression.md) |
 | [RFC-0030](spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md) | The host API walks the graph: a graph-owned path object, creation refused by default, the reply as a remote write, `AWAIT` and `REPLY` retired | accepted |  | [ADR-0006](adr/0006-read-write-await-api-no-connect.md) (part), [ADR-0084](adr/0084-remote-await-completes-from-a-receiver-side-waiter.md), [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part) |
 | [RFC-0031](spec/rfcs/0031-bus-session-anchors-are-children-of-their-door.md) | Bus-session anchors are child vertices under their door: one walk and one gate reach a session, send-through is directed | accepted |  | [RFC-0020](spec/rfcs/0020-bus-name-not-a-routable-next-hop.md) (part), [RFC-0029](spec/rfcs/0029-one-path-primitive.md) (part) |
+| [RFC-0032](spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) | Delete `COMPACT` and the per-link handle tables: every stream rides the chain, and no hop holds state for it | proposed |  |  |
 
 ## Numbering gaps
 
