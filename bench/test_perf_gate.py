@@ -1438,6 +1438,14 @@ class AllocatorCliffFamily(unittest.TestCase):
             self.assertTrue(any("cliff at 4096 B" in w and "info" in w for w in warns), warns)
             self.assertIn("  i cliff-alloc-heap cliff at 4096 B", out.getvalue())
 
+    def test_a_faster_left_row_does_not_hide_a_slower_right_row_pool(self):
+        """The pool family still reads the same-size rule at its null/flat threshold: x1.31."""
+        cand = {**self.FAST_LEFT_CAND, 4096: [14.0] * 8}
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_cliff(self._samples({"cand": cand, "base": self.FAST_LEFT_MAIN},
+                                                   mode="cliff-alloc-pool"))
+        self.assertTrue(any("cliff at 4096 B" in f for f in fails), fails)
+
     def test_a_faster_left_row_does_not_hide_a_slower_right_row(self):
         cand = {**self.FAST_LEFT_CAND, 4096: [17.0] * 8}  # x1.59 of main: past the backstop
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1969,6 +1977,36 @@ class LayoutBoundRows(unittest.TestCase):
         fails, _ = self._gate({64: 10300, 1024: 10300}, base)
         self.assertEqual(len(fails), 1)
         self.assertIn("S=4096", fails[0])
+
+    def test_no_rows_on_a_runner_that_requires_the_counter_fails(self):
+        with unittest.mock.patch.dict("os.environ", {"PERF_GATE_REQUIRE_INSTR": "1"}):
+            fails, _ = self._gate({}, {})
+        self.assertEqual(len(fails), 1)
+        self.assertIn("required", fails[0])
+
+    def test_main_without_rows_is_a_bootstrap_not_a_zero_worst(self):
+        fails, out = self._gate(pg.instr_parse(self.OUT), {})
+        self.assertEqual(fails, [])
+        self.assertIn("bootstrap", out)
+        self.assertNotIn("x0.000", out)
+
+    def test_probe_of_an_unrunnable_binary_is_empty(self):
+        with unittest.mock.patch.object(pg, "fwd_output", side_effect=OSError):
+            self.assertEqual(pg.instr_probe(pathlib.Path("/nonexistent")), {})
+
+    def test_an_instr_fail_reaches_the_memory_ratchet_verdict(self):
+        base_out = self.OUT
+        cand_out = "RESULT instr S=64 x100=11400\nRESULT instr S=1024 x100=11400\nRESULT instr S=4096 x100=23000\n"
+        with tempfile.TemporaryDirectory() as d:
+            c, b = pathlib.Path(d, "c"), pathlib.Path(d, "b")
+            c.write_text("")
+            b.write_text("")
+            outs = {str(c): cand_out, str(b): base_out}
+            with unittest.mock.patch.object(pg, "fwd_output", side_effect=lambda p: outs[str(p)]), \
+                    unittest.mock.patch.object(pg, "mem_probe", return_value={}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                fails = pg.mem_ratchet(c, b)
+        self.assertTrue(any(f.startswith("instr S=64") for f in fails), fails)
 
     def test_no_rows_on_either_arm_is_said_not_passed_silently(self):
         fails, out = self._gate({}, {})

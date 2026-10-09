@@ -35,6 +35,7 @@ class instr_counter_t {
         attr.size = sizeof(attr);
         attr.config = PERF_COUNT_HW_INSTRUCTIONS;
         attr.disabled = 1;
+        attr.pinned = 1;  // never multiplexed: a counter it cannot get reads 0, not a partial count
         attr.exclude_kernel = 1;
         attr.exclude_hv = 1;
         fd_ = static_cast<int>(syscall(__NR_perf_event_open, &attr, 0, -1, -1, 0));

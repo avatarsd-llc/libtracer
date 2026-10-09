@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import pathlib
 import random
 import re
@@ -1409,9 +1410,11 @@ def segdraw_gate(cur: dict[int, dict[str, int]],
 # read the same count at every size. A pair that costs more instructions than main's fails the
 # size, so a real extra-instructions regression fails however the code is laid out; the timed
 # legs of these rows keep only the gross LAYOUT_BACKSTOP. Fail: more than INSTR_REGRESS over
-# main AND more than INSTR_TICK instructions over (a ~100-instruction pair, so a 10% slowdown
-# is ten instructions and fails; one stray instruction does not). A host with no counter
-# (`INSTR-UNAVAILABLE`) emits no rows on either arm and the gate says it is not run.
+# main AND more than INSTR_TICK instructions over (a ~100-instruction pair, so 10% more
+# instructions is ten and fails; one stray instruction does not). It sees only user-mode
+# instructions: a slowdown that adds none passes up to the timed backstop. A host with no counter
+# (`INSTR-UNAVAILABLE`) emits no rows on either arm and the gate says it is not run, unless
+# PERF_GATE_REQUIRE_INSTR=1 (perf.yml sets it on the self-hosted runner): then it FAILS.
 INSTR_REGRESS = 1.02
 INSTR_TICK = 2.0
 _INSTR_RE = re.compile(r"^RESULT instr S=(\d+) x100=(\d+)")
@@ -1444,6 +1447,11 @@ def instr_gate(cur: dict[int, int], base: dict[int, int] | None) -> list[str]:
     fails: list[str] = []
     base = base or {}
     if not cur and not base:
+        if os.environ.get("PERF_GATE_REQUIRE_INSTR") == "1":
+            return [f"instruction ratchet (#2030): no instruction rows on either arm, but this "
+                    f"runner is required to have the hardware counter "
+                    f"(PERF_GATE_REQUIRE_INSTR=1); the layout-bound allocator rows have no "
+                    f"other 10% guard"]
         print("  instruction ratchet (#2030): no instruction rows on either arm (no hardware "
               "counter on this host) — the layout-bound rows are gated by their timed "
               "backstop alone")
@@ -1452,6 +1460,10 @@ def instr_gate(cur: dict[int, int], base: dict[int, int] | None) -> list[str]:
         if size not in cur:
             fails.append(f"instr S={size}: main counts this size and the candidate does not "
                          f"(a missing key is never 'not gated', #1847)")
+    if not base:
+        print(f"  instruction ratchet (#2030): main has no instruction rows (bootstrap), "
+              f"{len(cur)} sizes counted on the candidate, nothing to ratchet against")
+        return fails
     worst = 0.0
     for size in sorted(cur):
         b = base.get(size)

@@ -276,6 +276,11 @@ jobs:
             fi
           done
       - name: Performance gate (INTERLEAVED same-runner A/B vs main) — BLOCKING tier
+        # The self-hosted bench runner has the instruction counter and must keep it: the
+        # layout-bound allocator rows have no other 10% guard (#2030). A fork's hosted runner
+        # may lack it and keeps print-and-pass.
+        env:
+          PERF_GATE_REQUIRE_INSTR: ${{ runner.environment == 'self-hosted' && '1' || '' }}
         run: |
           python3 bench/perf_gate.py --tier blocking \
             --baseline-bench ../main-baseline/bench/build/bench_libtracer \
