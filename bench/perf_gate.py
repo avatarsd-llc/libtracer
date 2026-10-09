@@ -925,13 +925,13 @@ def layout_bound(k: str) -> bool:
 
 
 LAYOUT_BACKSTOP = 1.5
-# Per-row tightenings of LAYOUT_BACKSTOP, keyed `mode/size` (#2055). Each is the worst
-# cross-layout median spread of any timed leg over the nine-layout campaign x1.1, rounded up
-# to 0.05, and replays with 0 false fails over its 216 sessions (docs/methodology.md has the
+# Per-row tightenings of LAYOUT_BACKSTOP, keyed `mode/size` (#2055). Each is 1.1 x the larger
+# of the worst cross-layout median spread of any timed leg and the smallest backstop that
+# replays clean over the nine-layout campaign, rounded up to 0.05, and replays with 0 false fails over its 216 sessions (docs/methodology.md has the
 # table). A row absent here keeps LAYOUT_BACKSTOP: `lkv-store-heap/1024` stays there because
 # its throughput leg spreads x1.35 across layouts, and x1.35 x 1.1 rounds back up to 1.5.
 ROW_BACKSTOPS = {"lkv-alloc-heap/1024": 1.35, "lkv-store-heap/64": 1.25,
-                 "lkv-store-pool/64": 1.35}
+                 "lkv-store-pool/64": 1.45}
 # A cliff size past the heap backend's last size class (64 KiB + the segment header) is served
 # by the host's malloc itself, whose state flips a process between two modes about x2 apart
 # (65584 B read 17.5 ns in most runs and 33-38 ns in others, one binary, one source; it also
@@ -966,7 +966,7 @@ def leg_factor(k: str, leg: str, null: dict[str, dict[str, float]]) -> tuple[flo
     and reported as `cap`. With no null entry: the same flat gating, reported as `flat`.
 
     A layout-bound row (@ref LAYOUT_BOUND_MODES, #2030) takes neither: its timed legs are the
-    gross LAYOUT_BACKSTOP, source `layout`, and its real verdict is @ref instr_gate.
+    gross backstop (ROW_BACKSTOPS, else LAYOUT_BACKSTOP), source `layout`, and its real verdict is @ref instr_gate.
     """
     s = (null.get(k) or {}).get(leg)
     lower = leg == "deliv_s"
@@ -1433,7 +1433,7 @@ def segdraw_gate(cur: dict[int, dict[str, int]],
 # the placement noise: nine builds of one source (default link order and eight shuffled ones)
 # read the same count at every size. A pair that costs more instructions than main's fails the
 # size, so a real extra-instructions regression fails however the code is laid out; the timed
-# legs of these rows keep only the gross LAYOUT_BACKSTOP. Fail: more than INSTR_REGRESS over
+# legs of these rows keep only a gross per-row backstop (LAYOUT_BACKSTOP or ROW_BACKSTOPS). Fail: more than INSTR_REGRESS over
 # main AND more than INSTR_TICK instructions over (a ~100-instruction pair, so 10% more
 # instructions is ten and fails; one stray instruction does not). It sees only user-mode
 # instructions: a slowdown that adds none passes up to the timed backstop. A host with no counter

@@ -663,15 +663,16 @@ Details that make these trustworthy:
   **Backstop per row** ([#2055](https://github.com/avatarsd-llc/libtracer/issues/2055)). The x1.5 was inherited from the
   allocation-step spread; the same nine-layout campaign (10 rounds, 216 sessions per row) gives each
   `lkv` row its own. "Spread" is the largest, over the p50, mean and throughput legs, of the worst-to-best
-  per-layout median; the bound is that spread x1.1 rounded up to 0.05, and each bound false-fails none of the
-  216 replayed sessions (the smallest bound that replays clean is in the last column).
+  per-layout median. The "smallest clean bound" is the lowest backstop, found by a sweep in steps of 0.01
+  (not 0.05) from x1.35 down, at which none of the 216 replayed sessions false-fails. The bound is 1.1 x the
+  larger of the two, rounded up to 0.05, so it clears both the layout spread and the lowest replay-clean point.
 
-  | row | worst spread (p50 / mean / throughput) | bound | smallest clean bound |
+  | row | worst spread (p50 / mean / throughput) | smallest clean bound | bound |
   | --- | --- | --- | --- |
-  | `lkv-alloc-heap/1024` | x1.18 / x1.20 / x1.20 | x1.35 (was x1.5) | x1.20 |
-  | `lkv-store-heap/64` | x1.08 / x1.09 / x1.10 | x1.25 (was x1.5) | x1.12 |
-  | `lkv-store-heap/1024` | x1.16 / x1.19 / x1.35 | x1.5 (unchanged) | below x1.05 |
-  | `lkv-store-pool/64` | x1.18 / x1.19 / x1.15 | x1.35 (was x1.5) | x1.30 |
+  | `lkv-alloc-heap/1024` | x1.18 / x1.20 / x1.20 | x1.20 | x1.35 (was x1.5) |
+  | `lkv-store-heap/64` | x1.08 / x1.09 / x1.10 | x1.11 | x1.25 (was x1.5) |
+  | `lkv-store-heap/1024` | x1.16 / x1.19 / x1.35 | below x1.05 | x1.5 (unchanged) |
+  | `lkv-store-pool/64` | x1.18 / x1.19 / x1.15 | x1.29 | x1.45 (was x1.5) |
 
   `lkv-store-heap/1024` is not tightened: its p50 spread is only x1.16, but its throughput leg spreads x1.35 across
   layouts, which x1.1 rounds back to x1.5, and one bound serves all three legs. The replay alone would allow a tighter
