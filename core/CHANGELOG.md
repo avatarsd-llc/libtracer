@@ -22,9 +22,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   once more after reading its ACEs, and `retire` marks the whole subtree unregistered before it
   clears any vertex's ACEs, so an operation whose check overlaps a retire is refused
   (`PERMISSION_DENIED`) instead of running against the placeholder. This covers every data
-  operation that takes a caller: read, write, assign, await, subscribe and the field surface;
-  `CREATE`, which is asked of the never-registered root, is unchanged, and so is the trusted
-  local (empty) caller. A vertex's copy-or-share threshold is now read and stored as a relaxed
+  operation that takes a caller: read, write, assign, await, subscribe and the field surface,
+  `:children[]` creation included. Only the root, which is never registered, is not
+  rechecked, so top-level creation and the trusted local (empty) caller are unchanged. A vertex's copy-or-share threshold is now read and stored as a relaxed
   atomic, since a retire stores it under a concurrent write. No signature or wire byte changes.
 
 - **`udp_transport_t`: an ephemeral bind owns its port

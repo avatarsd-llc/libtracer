@@ -1792,10 +1792,10 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // `retire_subtree` flips the whole subtree unregistered BEFORE it clears any ACEs (a
     // release store, then the release clear of the OWN_ACES bit and the stripe-locked clear of
     // the list), so a gate that read a cleared ACE sees the flag down here, through this fence,
-    // and refuses. CREATE is the one right asked of an unregistered vertex on purpose: the
-    // root, as the parent of a top-level creation, is never registered.
+    // and refuses. The root is the one vertex asked unregistered on purpose: it is the parent
+    // of a top-level creation, and it is never registered and never retired.
     std::atomic_thread_fence(std::memory_order_acquire);
-    return allowed && (right == acl_right_t::CREATE || v->registered());
+    return allowed && (v->registered() || v->parent() == nullptr);
 }
 
 void graph_t::mark_subtree_acl_dirty(vertex_t* v) {

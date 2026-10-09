@@ -19,7 +19,8 @@
  *   so it is the seam that holds an operation there: `p0`'s first resolution parks while the
  *   main thread retires `/t`, then the operation finishes its check. Every terminus operation
  *   is bracketed this way: a WRITE through the production `fwd_router_t` by PAIR and by NAME,
- *   and a READ, an AWAIT and a SUBSCRIBE on the handle in hand. Each must be refused.
+ *   and a READ, an AWAIT, a SUBSCRIBE and a `:children[]` creation on the handle in hand.
+ *   Each must be refused, and the creation must leave no child behind.
  * - **Concurrent.** `/t` is a handler vertex. One thread retires and revives it, rewriting its
  *   `:acl` after each revival; another sends `p0`'s WRITE through the router the whole time,
  *   by PAIR and by NAME. A WRITE made entirely inside one `retire` call must never reach the
@@ -109,6 +110,18 @@ bytes_t write_to_t(bool pair, path_pair_t e) {
     bytes_t dst;
     tr::wire::emit_tlv(dst, type_t::PATH, opt_t{}, body);
     return tr::testing::b_fwd(fwd_op_t::WRITE, dst, tr::testing::b_path({}), {}, value_byte());
+}
+
+/** @brief A `SPEC{ type stored_value, name @p name }`, the `:children[]` creation value. */
+tr::view::view_t child_spec(std::string_view name) {
+    bytes_t body;
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, "stored_value");
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    bytes_t out;
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
+    return tr::testing::make_value(out);
 }
 
 /** @brief Holds `p0`'s first subject resolution until the test lets it go. */
@@ -212,6 +225,14 @@ void bracketed_terminus_ops() {
                                    tr::view::view_t{}, "p0");
         });
         check(!r && r.error() == status_t::PERMISSION_DENIED, "a SUBSCRIBE is refused");
+    }
+    {
+        bracket_node_t n;
+        const path_t append("/t:children[]");
+        tr::graph::result_t<void> r{};  // a value: it must become the refusal
+        bracket(n.g, n.park, [&] { r = n.g.write(*n.h, append.field(), child_spec("c"), "p0"); });
+        check(!r && r.error() == status_t::PERMISSION_DENIED, "a :children[] creation is refused");
+        check(!n.g.find(path_t("/t/c").key()), "no child was created under /t");
     }
 }
 
