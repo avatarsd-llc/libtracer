@@ -49,12 +49,11 @@ set(LIBTRACER_SOURCES_REQUIRED
     "${_libtracer_src}/loopback.cpp"
 )
 
-# The FWD net/routing plane: op_resolve, route_handle, fwd_router, transport_vertex.
+# The FWD net/routing plane: op_resolve, fwd_router, transport_vertex.
 set(LIBTRACER_SOURCES_NET_PLANE
     "${_libtracer_src}/fwd_reply.cpp"
     "${_libtracer_src}/op_resolve.cpp"
     "${_libtracer_src}/op_resolve_view.cpp"
-    "${_libtracer_src}/route_handle.cpp"
     "${_libtracer_src}/path_label_table.cpp"
     "${_libtracer_src}/fwd_router.cpp"
     "${_libtracer_src}/fwd_originate.cpp"

@@ -121,29 +121,21 @@ add_executable(bench_forward_rope bench_forward_rope.cpp)
 target_link_libraries(bench_forward_rope PRIVATE libtracer)
 target_compile_options(bench_forward_rope PRIVATE -Wall -Wextra)
 
-# Terminus tier comparison (ADR-0053): the eager arena reader vs the lazy view reader on
-# the SAME frame. Replaces argument with measurement on whether the single-link
-# short-circuit in on_frame_rope_impl is a fast path or a missed one.
-# Steady-state compacted delivery (ADR-0062): what an ESTABLISHED flow costs per frame —
-# the case delivery compaction exists for, and the one no other bench times.
-add_executable(bench_compact_delivery bench_compact_delivery.cpp)
-target_link_libraries(bench_compact_delivery PRIVATE libtracer)
-target_compile_options(bench_compact_delivery PRIVATE -Wall -Wextra)
+# Steady-state stream delivery over the PAIR chain (#1951): what an established stream costs per
+# sample at a terminus and at a forwarding hop, plus the per-link state a hop keeps for it.
+add_executable(bench_chain_delivery bench_chain_delivery.cpp)
+target_link_libraries(bench_chain_delivery PRIVATE libtracer)
+target_compile_options(bench_chain_delivery PRIVATE -Wall -Wextra)
 
-add_executable(bench_originate bench_originate.cpp)
-target_link_libraries(bench_originate PRIVATE libtracer)
-target_compile_options(bench_originate PRIVATE -Wall -Wextra)
-
-add_executable(bench_hop_chain bench_hop_chain.cpp)
-target_link_libraries(bench_hop_chain PRIVATE libtracer)
-target_compile_options(bench_hop_chain PRIVATE -Wall -Wextra)
-
-# Chain delivery over RFC-0029 PAIR against RFC-0004 §E.1 COMPACT, measured before COMPACT is
-# deleted (stage 6, #1949). A report, not a gate.
+# Chain delivery over the RFC-0029 PAIR chain at 1 and 3 hops, with and without the reply
+# relay (#1949). Its COMPACT arm went with COMPACT itself (#1951). A report, not a gate.
 add_executable(bench_chain_vs_compact bench_chain_vs_compact.cpp)
 target_link_libraries(bench_chain_vs_compact PRIVATE libtracer)
 target_compile_options(bench_chain_vs_compact PRIVATE -Wall -Wextra)
 
+# Terminus tier comparison (ADR-0053): the eager arena reader vs the lazy view reader on
+# the SAME frame. Replaces argument with measurement on whether the single-link
+# short-circuit in on_frame_rope_impl is a fast path or a missed one.
 add_executable(bench_terminus_tier bench_terminus_tier.cpp)
 target_link_libraries(bench_terminus_tier PRIVATE libtracer)
 target_compile_options(bench_terminus_tier PRIVATE -Wall -Wextra)
@@ -167,12 +159,6 @@ target_compile_options(bench_fanout_clone_storm PRIVATE -Wall -Wextra)
 add_executable(bench_await_wakeup_storm bench_await_wakeup_storm.cpp)
 target_link_libraries(bench_await_wakeup_storm PRIVATE libtracer)
 target_compile_options(bench_await_wakeup_storm PRIVATE -Wall -Wextra)
-
-# route_handle per-link-lock contention: many producers doing steady-state
-# ensure_egress (reuse reads) on one hot link. Diagnostic, not a perf gate.
-add_executable(bench_route_handle_contention bench_route_handle_contention.cpp)
-target_link_libraries(bench_route_handle_contention PRIVATE libtracer)
-target_compile_options(bench_route_handle_contention PRIVATE -Wall -Wextra)
 
 # The FWD router's RX failable-source topology (ADR-0067 3, #625): shared heap vs one
 # shared pool vs one pool per child, swept over T receive threads. Diagnostic, not a perf

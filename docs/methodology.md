@@ -96,9 +96,6 @@ Several named *modes* isolate distinct costs on the same axes:
   in-frame slots (it spills), and `stream-defer` a burst of `assign`s delivered by one
   covering `propagate`; both per cycle, batch-timed
   ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)).
-- `route-handle-egress-mt1` / `-mt2` / `-mt4` — producer threads on one advertised
-  route-handle flow, the egress reuse read a compacted delivery takes. Advisory: charted,
-  never gated.
 - `seam-class-c1` / `-c8` / `-c32`, `seam-direct`, `seam-fallback` — the allocation seam's
   two decisions: finding a block's size class among C classes, and a full `bump_source_t`
   falling back to its upstream pool (`seam-direct` is that pool alone).
@@ -162,8 +159,8 @@ prints `RSS family=<name> start_kb= peak_kb= delta_kb=`, the high-water mark min
 resident set the family started from. It replaced a whole-run "max RSS" from
 `/usr/bin/time -v`, which was the harness's peak, not any family's footprint
 ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). The single-family binaries
-`bench_compact_delivery`, `bench_forward_demux` and `bench_store_sweep latency` print the same
-line (`compact-delivery`, `forward-demux`, `store-lat`) after their last row. Their start
+`bench_chain_delivery`, `bench_forward_demux` and `bench_store_sweep latency` print the same
+line (`chain-delivery`, `forward-demux`, `store-lat`) after their last row. Their start
 figure is the process's high-water mark before the first row, one `getrusage` call, because
 any read of `/proc` ahead of their rows moved them
 ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)).
@@ -236,13 +233,12 @@ calibrates its own batch size against the host clock rather than hardcoding a nu
 routing operation costs the same order as `clock_gettime`, so timing one operation at a time
 measures the clock instead of the code.
 
-`bench_forward_demux` and `bench_compact_delivery` are recorded into the build-to-build
+`bench_forward_demux` and `bench_chain_delivery` are recorded into the build-to-build
 history alongside the in-process series, so a routing or delivery regression shows up as a
 trend rather than being noticed later. They emit the same `RESULT` rows as `bench_libtracer`,
-so they need no separate aggregation. `bench_compact_delivery` drives every frame through
+so they need no separate aggregation. `bench_chain_delivery` drives every frame through
 the child's **receiver ctx**, the way a link's receive thread delivers it, and asserts so
-before timing: the public by-name `on_frame` door it used to call is one production frames
-never take ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). Their transcripts are tolerated-empty — a bench that
+before timing: the public by-name `on_frame` door is one production frames never take ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). Their transcripts are tolerated-empty — a bench that
 fails to run must not cost a commit its whole history point — but an empty one emits a build
 warning naming the file, because a silently-empty transcript is otherwise a green job that
 recorded nothing.
@@ -415,7 +411,7 @@ Details that make these trustworthy:
   **16 KiB payload-ladder** rows, one per data-path family
   ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)): `inproc/16384/1/1`,
   `inproc-borrow/16384/1/1`, `lkv-store-heap/16384/1/1`, `lkv-store-pool/16384/1/1`,
-  `eptype-stream/16384/1/1`, `compact-forward/16384/1/1` and `fwd-demux-value/16384/1/1`
+  `eptype-stream/16384/1/1`, `chain-forward/16384/1/1` and `fwd-demux-value/16384/1/1`
   (the forward hop keyed by its VALUE payload rather than its frame size); and eight
   **store-latency** rows from `bench_store_sweep`
   ([#1869](https://github.com/avatarsd-llc/libtracer/issues/1869)), the p50 of each of its
@@ -505,7 +501,7 @@ Details that make these trustworthy:
   list that declares a bounded history depth, and therefore the only one downstream of the
   **`STREAM` role's retention work**. Nothing else on the list touches that path, so a
   pullback confined to retention was invisible to all fourteen predecessors, which is the
-  same guard-gap shape as `lkv-store-*` and the compact/demux arms below. It costs **no
+  same guard-gap shape as `lkv-store-*` and the chain/demux arms below. It costs **no
   wall-clock**: the default sweep already emits the row. And all three legs bite at the
   nominal thresholds — it measures **~190 ns** p50 and mean over five best-of-rounds on a
   busy 31-core host, far above the sub-100 ns band where the tick guard would demand an
@@ -542,12 +538,14 @@ Details that make these trustworthy:
   Fourteen of the thirty-five come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
   v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
-  They are `compact-forward/64/1/1` and `compact-terminus/64/1/1` — the compact-delivery
-  tier's forward hop and its terminus, from `bench_compact_delivery`; and
+  They are `chain-forward/64/1/1` and `chain-terminus/64/1/1` — a stream delivery's
+  forward hop and its terminus over the PAIR chain, from `bench_chain_delivery`, which
+  replaced the compact-delivery pair when COMPACT was retired
+  ([#1951](https://github.com/avatarsd-llc/libtracer/issues/1951)); and
   `fwd-demux-fixed/61/1/1` and `fwd-demux-scan/61/64/64` — the fixed-slot and scanning
   arms of the FWD demux, from `bench_forward_demux`; plus the two 16 KiB ladder rows from
   those binaries, named above; and the eight store-latency rows from `bench_store_sweep`,
-  also named above. Each `POINTS` entry names the binary that produces it. The compact and
+  also named above. Each `POINTS` entry names the binary that produces it. The chain and
   demux binaries emit the same 12-column `RESULT` format; `bench_store_sweep`'s
   `RESULT_STORE_LAT` row is folded into that shape by the gate. This costs three extra
   processes per arm per pair.
@@ -614,7 +612,9 @@ Details that make these trustworthy:
   `compact-forward/16384`, both `eptype-stream` rows, all three `fwd-demux-*` rows, both
   `inproc-borrow` rows, `inproc-mt4`, `inproc-path/64/1/8192`, `inproc/16384`,
   `lkv-alloc-heap/1024`, `mixed`, `poolalloc-mt4`, and the `store-lat` full, net-fwd and
-  narrow graph-read rows. `fold-b4/512/1/1` is tightened on p50 only (x1.113). 97 of the 98
+  narrow graph-read rows. `fold-b4/512/1/1` is tightened on p50 only (x1.113). The three `compact-*` rows it carried were dropped
+  with COMPACT ([#1951](https://github.com/avatarsd-llc/libtracer/issues/1951)); the `chain-*`
+  rows that replace them are not in it, and are decided flat until the next bank. 97 of the 98
   cliff rows hold at least one leg at the cap. The held-out window gave no A/A false fail in
   18 sessions, and an injected 10% slowdown failed 12 of the 133 rows in every session.
   Fitting on any three of the four windows and replaying the fourth gave false fails in 10 of
@@ -683,7 +683,7 @@ Details that make these trustworthy:
   not met at that size.
 - **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
-  `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `compact-*` arms
+  `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `chain-*` arms
   and `fwd-demux-value`, and, since
   [#1907](https://github.com/avatarsd-llc/libtracer/issues/1907), the pooled-backend
   `inproc-pool`, `inproc-pool-borrow` and `inproc-pool-batch` rows. The two-process network
@@ -691,7 +691,7 @@ Details that make these trustworthy:
   because a 64 KiB datagram is over the IPv4 limit. 984 and 985 B sit either side of the heap's one-block boundary (984 B
   plus the 48 B segment header is glibc's 1032 B per-thread-cache ceiling). Rows a family
   did not have before run after its existing rows, so no existing row moves. Above 8 KiB the
-  operation budget shrinks in proportion to the payload, and the `compact-*` and
+  operation budget shrinks in proportion to the payload, and the `chain-*` and
   `fwd-demux-value` ladder rows run at a quarter of their binary's time budget, so the
   ladder adds seconds to a sweep rather than minutes. Only the 16 KiB rows are gated, and
   not the `inproc-pool*` or network ones.
@@ -1319,7 +1319,7 @@ taskset -c 2 ./bench/build/bench_forward_heap        # the allocation probes (ze
 # LIBTRACER_BENCH_SECONDS; longer means tighter percentiles, never a different measurement.
 taskset -c 2 ./bench/build/bench_forward_demux       # forward hop vs registry size
 taskset -c 2 ./bench/build/bench_terminus_tier       # terminus: eager arena vs lazy rope reader
-taskset -c 2 ./bench/build/bench_compact_delivery    # steady-state warm compacted delivery
+taskset -c 2 ./bench/build/bench_chain_delivery      # steady-state stream delivery, PAIR chain
 
 # The comparison surface needs Zenoh vendored first:
 bench/fetch_zenoh.sh && cmake --build bench/build -j

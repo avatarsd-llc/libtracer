@@ -35,7 +35,7 @@
  *
  * DIAGNOSTIC, not a CI gate: thread-contention numbers are runner-dependent, so this is
  * deliberately not wired into perf.yml's regression gate — the same call
- * bench_route_handle_contention and bench_fanout_clone_storm make.
+ * bench_fanout_clone_storm makes.
  *
  * Output: the shared bench RESULT contract (bench_common.hpp) —
  *   mode=rx_source_<config>, fanout=T, pub_per_s=per-thread forwards/s,
@@ -85,9 +85,8 @@ using tr::wire::type_t;
 /**
  * @brief Receive-thread counts to sweep.
  *
- * Fixed rather than clamped to `hardware_concurrency`, exactly as
- * bench_route_handle_contention does, so a many-core host measures the tail and a small
- * runner still shows the onset plus the oversubscribed regime.
+ * Fixed rather than clamped to `hardware_concurrency`, so a many-core host measures the tail and a
+ * small runner still shows the onset plus the oversubscribed regime.
  */
 constexpr std::size_t kThreads[] = {1, 2, 4, 8, 16, 24};
 

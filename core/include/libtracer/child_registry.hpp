@@ -49,8 +49,8 @@ namespace tr::net {
  * prepended to `src` on the way back. Lookups are lock-free.
  *
  * **Link identity is the QUALIFIED name `"<module>/<name>"`** — one string, so every
- * existing consumer of a link identity (route-handle label tables, subscriber-edge
- * eviction, the departure notifiers) keeps working on an opaque string and needs no
+ * existing consumer of a link identity (subscriber-edge eviction, the departure
+ * notifiers) keeps working on an opaque string and needs no
  * signature change. The demux, which holds two raw segment spans and must not allocate
  * on the hot path (`bench_forward_heap`'s `allocs=0` gate), matches through
  * @ref longest_prefix, which compares each slot's key against the `dst` prefix in place
@@ -83,8 +83,7 @@ namespace tr::net {
  * a dormant caveat into a live hazard by making connection create/remove a RUNTIME operation.
  * The storage is now an append-only CHUNKED LIST: a chunk is never moved, resized, or freed
  * before this object dies, so a slot's address is fixed from the moment it is published.
- * ADR-0062's forward cache builds on exactly that — it holds a `const child_t*` and reads the
- * tombstone as its invalidation.
+ * A holder may therefore keep a `const child_t*` and read the tombstone as its invalidation.
  *
  * **Writers are serialized by the caller; readers are not (ADR-0063).** @ref add and @ref erase
  * are control-plane calls and must not run concurrently with each other — `add`'s scan-then-
@@ -101,7 +100,7 @@ class child_registry_t {
      * are long-lived control state whose high-water mark is the count of DISTINCT link names
      * ever registered, so a bounded node wants them inside its slab like everything else.
      * `fwd_router_t` points this at its `label_src` for exactly that reason: same lifetime
-     * class as the label tables, and deliberately NOT the per-frame `rx` store, which a
+     * class as the rest of its link state, and deliberately NOT the per-frame `rx` store, which a
      * @ref tr::mem::bump_source_t may legitimately be.
      *
      * The default is @ref tr::mem::heap_source, and the process-default composition is
@@ -425,9 +424,6 @@ class child_registry_t {
             // slot was matched by name. The assert pins that purity invariant.
             assert(hit->mount_tlv.size() == encode_mount_name(name, nullptr));
             hit->egress_.store(egress, std::memory_order_release);
-            // A tombstone coming back to life changes what a `dst` prefix resolves to, so it
-            // moves the mount shape exactly as a fresh append does (#765).
-            bump_generation();
             return true;
         }
         child_t* const slot = append();
@@ -446,7 +442,6 @@ class child_registry_t {
         slot->mount_tlv = std::span<const std::byte>(text + name.size(), mount_bytes);
         slot->egress_.store(egress, std::memory_order_release);
         publish(slot);
-        bump_generation();
         return true;
     }
 
@@ -463,33 +458,6 @@ class child_registry_t {
             if (c == '/') ++n;
         }
         return n;
-    }
-
-    /**
-     * @brief The MOUNT-SHAPE generation — bumped whenever a `dst` prefix could start or stop
-     *        resolving to a different mount (#765).
-     *
-     * The third validate-on-use stamp, beside `graph_t::retire_generation` (a revived vertex)
-     * and the slot tombstone (a departed link). Neither of those two can see the hazard this
-     * one exists for: bind a label through mount `net/ws/s`, then register `net/ws/s/rack`, and
-     * a full `FWD` resolves against the NEW, deeper mount while a `COMPACT` riding the old
-     * label still dereferences the binding made against the old split. Both targets are alive
-     * and both are the vertex/link they always were — what moved is the POINT at which the
-     * address divides into "local mount" and "remote residual".
-     *
-     * Until #523 the two planes agreed about a deeper mount only because NEITHER could reach it
-     * — the descent capped its width, so the deeper registration was unroutable to both. That
-     * is agreement by mutual failure, and lifting the width bound ends it.
-     *
-     * Coarse ON PURPOSE: it counts mount-table mutations, not the mounts a given label depends
-     * on. A mutation that could not have changed one label's split still restamps it, and that
-     * label takes the RFC-0004 §E.1 self-heal — drop, observe, `HANDLE_NACK`, re-advertise. A
-     * per-label dependency set would be a reverse index, which is the option ADR-0062 already
-     * rejected: it moves work onto the control plane's lock to serve the minority flow, and it
-     * is a SECOND invalidation mechanism beside one that works.
-     */
-    [[nodiscard]] std::uint32_t mount_generation() const noexcept {
-        return generation_.load(std::memory_order_acquire);
     }
 
     /**
@@ -641,9 +609,9 @@ class child_registry_t {
     /**
      * @brief @ref longest_prefix over a ready-made segment list — the control plane's form.
      *
-     * `on_advertise` holds decoded `NAME` children, not a frame cursor, and `subscribe_toward`
-     * holds a parsed `path_t`. Same descent, same answer: the two planes resolving a mount by
-     * different rules is precisely what #516 was.
+     * A caller holding segments rather than a frame cursor (a parsed `path_t`, a test) gets the
+     * same descent and the same answer: two planes resolving a mount by different rules is
+     * precisely what #516 was.
      */
     [[nodiscard]] const child_t* longest_prefix(std::span<const std::string_view> segs) const {
         return longest_prefix([segs](std::size_t i) -> std::optional<std::string_view> {
@@ -693,9 +661,6 @@ class child_registry_t {
             }
             return false;
         });
-        // A departed mount moves the split for every `dst` that used to descend through it,
-        // so it restamps the label plane exactly as a registration does (#765).
-        if (erased) bump_generation();
         return erased;
     }
 
@@ -751,7 +716,7 @@ class child_registry_t {
     /**
      * @brief The link addressed by @p name (nullptr if none), peer fallback included.
      *
-     * The identity lookup used off the mount-descent path (reply/advertise plumbing, which
+     * The identity lookup used off the mount-descent path (reply plumbing, which
      * addresses a link by its qualified name). Resolution order (ADR-0044): an exact child
      * NAME wins; otherwise each registered BUS child is asked to resolve @p name as a
      * currently-audible peer. Prefer @ref longest_prefix on the forward path, and
@@ -931,9 +896,6 @@ class child_registry_t {
         return pos == key.size();
     }
 
-    /** @brief Publish a mount-shape change (#765). Control plane only. */
-    void bump_generation() noexcept { generation_.fetch_add(1, std::memory_order_release); }
-
     /**
      * @brief An append-only chunked list — the ADR-0063 container (#521).
      *
@@ -1029,8 +991,6 @@ class child_registry_t {
     mem::block_source_t* src_;
 
     std::atomic<chunk_t*> head_{nullptr};
-    /** @brief The mount-shape generation (#765) — see @ref mount_generation. */
-    std::atomic<std::uint32_t> generation_{1};
 };
 
 }  // namespace tr::net

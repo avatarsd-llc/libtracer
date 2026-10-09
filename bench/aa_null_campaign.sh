@@ -57,7 +57,7 @@ JOBS="${JOBS:-8}"
 ROOT="$(git rev-parse --show-toplevel)"
 REV="$(git -C "$ROOT" rev-parse --short HEAD)"
 WORK="${WORK:-/home/$USER/scratch/aa-null-$REV}"
-TARGETS=(bench_libtracer bench_forward_heap bench_compact_delivery bench_forward_demux
+TARGETS=(bench_libtracer bench_forward_heap bench_chain_delivery bench_forward_demux
          bench_store_sweep)
 
 if (( WINDOWS * ROUNDS < 25 )); then

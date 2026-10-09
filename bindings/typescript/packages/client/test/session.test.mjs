@@ -6,8 +6,8 @@
  *
  * Pending requests reject when the transport closes mid-flight; a per-request
  * timeout fires (and a late reply still consumes its FIFO slot so later
- * requests stay correlated); inbound ADVERTISE/COMPACT frames surface a loud
- * CompactFlowError instead of a silent drop; and the RFC-0002 error registry
+ * requests stay correlated); the retired ADVERTISE/COMPACT codes are unknown
+ * frames like any other; and the RFC-0002 error registry
  * is complete — registered codes AND string-form (NAME tr::… path) identities
  * surface typed on FwdError.
  */
@@ -17,7 +17,6 @@ import assert from 'node:assert/strict';
 import { encode, TYPE } from '@avatarsd-llc/libtracer';
 import {
   LibtracerClient,
-  CompactFlowError,
   FwdError,
   FWD_ERROR,
   FWD_ERROR_PATH,
@@ -150,9 +149,9 @@ test('requestTimeoutMs: 0 disables the deadline', async () => {
   assert.deepEqual([...tlv.payload], [0x01]);
 });
 
-/* ------------------------------------------------- loud compact failure --- */
+/* ------------------------------------------------- retired route handles --- */
 
-test('inbound ADVERTISE (0x11) and COMPACT (0x12) frames emit CompactFlowError on onError', () => {
+test('the retired ADVERTISE (0x11) and COMPACT (0x12) codes are unknown frames', () => {
   const t = new FakeTransport();
   const client = new LibtracerClient(t);
   const errors = [];
@@ -160,20 +159,14 @@ test('inbound ADVERTISE (0x11) and COMPACT (0x12) frames emit CompactFlowError o
   const values = [];
   client.onValue((v) => values.push(v));
 
-  // ADVERTISE{ VALUE label(u16), PATH } and COMPACT{ VALUE label(u16), VALUE }.
+  // The shapes an older peer sent: ADVERTISE{ VALUE label(u16), PATH } and
+  // COMPACT{ VALUE label(u16), VALUE }. Neither carries a value this client delivers.
   const label = bare(TYPE.VALUE, Uint8Array.of(0x2a, 0x00));
   t.inject(encode(bare(0x11, new Uint8Array(0), [label, bare(TYPE.VALUE, Uint8Array.of(1))])));
   t.inject(encode(bare(0x12, new Uint8Array(0), [label, bare(TYPE.VALUE, Uint8Array.of(2))])));
 
-  assert.equal(errors.length, 2);
-  assert.ok(errors[0] instanceof CompactFlowError);
-  assert.equal(errors[0].name, 'CompactFlowError');
-  assert.equal(errors[0].frameType, 0x11);
-  assert.match(errors[0].message, /ADVERTISE/);
-  assert.match(errors[0].message, /not supported by this client yet/);
-  assert.equal(errors[1].frameType, 0x12);
-  assert.match(errors[1].message, /COMPACT/);
-  assert.equal(values.length, 0, 'nothing is delivered from a compact-flow frame');
+  assert.equal(values.length, 0, 'nothing is delivered from a retired frame');
+  assert.equal(errors.length, 0, 'and no special error type exists for them any more');
 });
 
 /* ------------------------------------------------- error registry parity --- */

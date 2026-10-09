@@ -373,8 +373,8 @@ export function encodeConnSpec(o: ConnSpecOptions): Uint8Array {
 export interface SubscriberOptions {
   /**
    * @brief This subscription's DELIVERY policy — the packed 16-bit field of RFC-0022 §3.A,
-   * carried as `SETTINGS{ NAME "delivery_policy" VALUE u16 }` (the same `SETTINGS` child
-   * `delivery_compact` uses, so no new wire structure).
+   * carried as `SETTINGS{ NAME "delivery_policy" VALUE u16 }` (a NAME-tagged member of the
+   * subscriber's `SETTINGS` child, so no new wire structure).
    *
    * Bit 0–1 reliability (0 = best-effort, 1 = reliable), bits 2–4 priority (0–7, 0 =
    * default), bit 5 `durability_request` (deliver the producer's latched last value on

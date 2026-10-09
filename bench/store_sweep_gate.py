@@ -30,8 +30,8 @@ WHAT MUST NEVER BE BANKED HERE, stated rather than implied by omission
 
   * **The fan-out T-sweep** (`RESULT_STORE_TPUT`, T >= 2). Standing in-tree practice is
     that thread-contention benches are DIAGNOSTIC-not-gated —
-    `bench_rx_source_topology`, `bench_route_handle_contention` and
-    `bench_fanout_clone_storm` all decline the gate on that ground — and the sweep's own
+    `bench_rx_source_topology` and
+    `bench_fanout_clone_storm` both decline the gate on that ground — and the sweep's own
     banked run put the unpinned throughput window's A/A null at 58.9 %. A gate whose
     null is 58.9 % is a flaky red, and a flaky red teaches everyone to ignore the gate.
   * **The process-heap escape high-water** (`RESULT_STORE_ESCAPE`).

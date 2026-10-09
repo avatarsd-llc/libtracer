@@ -60,7 +60,7 @@ PAGES = {
         "security_noise_sodium.hpp", "security_noise_psa.hpp",
     ],
     "fwd-router.md": [
-        "fwd_router.hpp", "fwd_frame_view.hpp", "op_resolve.hpp", "route_handle.hpp",
+        "fwd_router.hpp", "fwd_frame_view.hpp", "op_resolve.hpp",
         "child_registry.hpp", "transport_vertex.hpp", "path_label.hpp", "path_label_table.hpp",
         "sink_slot.hpp",
     ],

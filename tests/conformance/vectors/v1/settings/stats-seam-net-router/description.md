@@ -14,11 +14,12 @@ SETTINGS (PL=1) {
   NAME "reply_iov_dropped"     VALUE u64 = 0
   NAME "delivery_iov_dropped"  VALUE u64 = 0
   NAME "malformed_rx"          VALUE u64 = 0
+  NAME "retired_rx"            VALUE u64 = 0
 }
 ```
 
 ```
-0B40E000
+0B40FA00
 02000F00666C617474656E5F64726F70706564010008000000000000000000
 02001300666F72776172645F696F765F64726F70706564010008000000000000000000
 02000D006172656E615F64726F70706564010008000000000000000000
@@ -26,10 +27,14 @@ SETTINGS (PL=1) {
 020011007265706C795F696F765F64726F70706564010008000000000000000000
 0200140064656C69766572795F696F765F64726F70706564010008000000000000000000
 02000C006D616C666F726D65645F7278010008000000000000000000
+02000A00726574697265645F7278010008000000000000000000
 ```
 
-`4 (header) + 224 (payload) = 228 bytes`; a trailer rides per the serving link's egress
+`4 (header) + 250 (payload) = 254 bytes`; a trailer rides per the serving link's egress
 policy, as for any reply.
+
+`retired_rx` counts outer frames of a retired core type code
+([RFC-0032](../../../../../../docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §6.1).
 
 **What the vector is for.** The BYTES are Amendment 1's shape and nothing about them is new
 — that is the point. What Amendment 2 changes is **where the block comes from**. The

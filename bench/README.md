@@ -29,7 +29,7 @@ for a local `preview.html` of the same charts.
 | `bench_transport_iov` | **the term the zero-heap gate cannot see**: at what scatter-gather width does a *real* transport start allocating per frame? Measured spill: 17 caller spans / ~288 B, against a structural `kFwdMaxIov` of 9. |
 | `bench_fanout_clone_storm` | **many-core refcount contention**: T threads clone+release one shared segment — the per-subscriber fan-out primitive under wide fan-out (ADR-0032 128-core row). |
 | `bench_await_wakeup_storm` | **many-core await fan-in**: one writer storms writes while W threads `await` one vertex — condvar/notify_all + vertex-lock scaling (ADR-0032 128-core row). |
-| `bench_route_handle_contention` | **per-link-lock contention**: T producers doing steady-state `ensure_egress` reuse-reads on one hot link (its header carries the finding that `shared_mutex` does not help). |
+| `bench_chain_delivery` | **steady-state stream delivery over the PAIR chain** (#1951): the Nth `FWD{WRITE}` of an established stream resolved at its terminus (`chain-terminus`) or forwarded one hop (`chain-forward`), over the payload ladder to 64 KiB, plus the per-link state a hop keeps (`mode=link-state`). Gated: `chain-forward` 64 B and 16 KiB, `chain-terminus` 64 B. |
 | `bench_conn_ram` | **per-connection RAM census**: what one connection costs on each transport (TCP / WS / UDP / CAN) — link base, per-connection bytes, what survives teardown. **Gated (warn)** on the pinned host — see [the RAM censuses in CI](#the-ram-censuses-in-ci-1228). |
 | `bench_ram_census_tcp` | **whole-node RAM census**: the heap a 100-vertex graph (values 4..64 B, mixed int / array / STREAM) holds, staged from an empty `graph_t` through a `/net:children[]`-created TCP listener to steady state under a real remote peer **process**. **Trend-only** on the pinned host. |
 | `bench_path_label` | **RFC-0027 §12.4's normative gate**: what a minted **path label** saves per hop, as a slope over hop count and over registry width, and what it saves on the TERMINUS RESIDUAL against address depth — clause 2's axis, the one §3.3 nominates as deciding. See [the RFC-0027 gate](#bench_path_label--the-rfc-0027-124-gate-1325-car-5). |
@@ -649,7 +649,7 @@ now banks its **deterministic half**, and only that half.
 throughput window's own A/A null in the #941 banked run read **58.9 %** (the pinned window's
 read 0.87 % in the same run — the difference IS the exclusion), and standing
 in-tree practice is that thread-contention benches are DIAGNOSTIC-not-gated
-(`bench_rx_source_topology`, `bench_route_handle_contention`, `bench_fanout_clone_storm` all
+(`bench_rx_source_topology` and `bench_fanout_clone_storm` both
 decline the gate on that ground). `bench/ram_census_pins.json` records a `tcp-server hw_peak`
 moving **66 %** across runs and ~41 KB within one, which is why `ram_census.py` already keeps
 high-water columns out of its pins. A gate over either would be a flaky red, and a flaky red
@@ -807,9 +807,9 @@ taskset -c 24 ./bench/build/bench_path_label   # RESULT mode=plabel-{string,labe
 
 [RFC-0027](../docs/spec/rfcs/0027-label-switched-path-compression.md) §12.4 makes a bench
 gate **normative for acceptance of the implementation**, and no instrument in the tree
-answered it. `bench_hop_chain` measures RFC-0004 §E.1's per-link route handle (a `COMPACT`
-frame), not a **path label**; it is fixed at four hops, and its own arms self-void as
-non-comparable. So this harness exists.
+answered it. `bench_hop_chain` measured RFC-0004 §E.1's per-link route handle (a `COMPACT`
+frame), not a **path label**; it was fixed at four hops, and its own arms self-voided as
+non-comparable (it was retired with COMPACT, #1951). So this harness exists.
 
 A chain of `H + 1` real `fwd_router_t` hops carries the **same** `FWD{op=READ}` twice,
 differing only in how `dst` is spelled — the full canonical address, or the 7-byte label
@@ -1139,8 +1139,8 @@ A republish copies a pointer and takes an increment where it used to allocate a 
 two strings; the retire scan decrements where it used to free them.
 
 Both pinned widths are **unchanged**: the handle is one pointer, as the `std::unique_ptr` was,
-and the 4-byte counter fits `subscriber_remote_t`'s pre-existing tail padding (`delivery_compact`
-ends at offset 113 in a 120-byte, 8-aligned record). Nothing was paid for out of `pub_edge_t`.
+and the 4-byte counter fits `subscriber_remote_t`'s pre-existing tail padding (`caller` ends
+at offset 112 in a 120-byte, 8-aligned record). Nothing was paid for out of `pub_edge_t`.
 
 **Latency.** `bench_subscribe_index`, `sub-wire`, best-of-rounds over 9 rounds × 2 tags, two
 runs per binary interleaved `B N N B` in one window, `taskset -c 2`. Each leg carries its own
@@ -1410,7 +1410,7 @@ harness does not quote cross-binary deltas. Rather than dress one up, the mechan
 off directly, in two facts that need no timing at all:
 
 - **`dispatch_edge_remote` never reads `e.binding`.** Its `remote_delivery_t` is built from
-  `link`, `return_route`, `reverse_route`, `caller` and `delivery_compact`, and nothing else.
+  `link`, `return_route`, `reverse_route` and `caller`, and nothing else.
   There is no code path by which the binding can enter this leg.
 - **The only residual mechanism is bytes streamed, and it has no headroom here.** The fan-out
   loop streams `F × sizeof(pub_edge_t)`, which the binding grew 48 → 56 B. At this gate's widest
@@ -1787,11 +1787,11 @@ baseline ran every axis for minutes, both emitting well-formed rows under the sa
 
 Every data-path family runs over `bench::kPayloadLadder` — 64, 984, 985, 1024, 4096, 16384 and
 65536 B: `inproc` and `inproc-borrow` (the sizes `kSizes` lacks, after its rows), the four
-`lkv-*` rows, `eptype-stream`, both `compact-*` arms and `fwd-demux-value` (the forward hop,
+`lkv-*` rows, `eptype-stream`, both `chain-*` arms and `fwd-demux-value` (the forward hop,
 one link, keyed by its VALUE payload), and, since #1907, `inproc-pool`, `inproc-pool-borrow`
 and `inproc-pool-batch` (the ladder sizes `kSizes` lacks, after their rows). 984 / 985 B straddle the heap's one-block boundary.
 Above 8 KiB the operation budget shrinks in proportion to the payload
-(`bench::ladder_budget`), and the `compact-*` / `fwd-demux-value` ladder rows take a quarter
+(`bench::ladder_budget`), and the `chain-*` / `fwd-demux-value` ladder rows take a quarter
 of their binary's time budget each. The 16 KiB row of each family is a gated point, except
 the three `inproc-pool*` families, which are charted and not gated.
 
@@ -1803,7 +1803,7 @@ The default sweep is no longer one process. It is a list of **families** (`kFami
 run starts each one as its own child process, `bench_libtracer --family <name>`, in the
 historical order, so the transcript keeps every row, ordinal and line shape. Every bench
 process — the driver, each family, an isolated mode such as the `lkv` ratio report's, and
-`bench_compact_delivery` / `bench_forward_demux` — first re-executes itself under one fixed
+`bench_chain_delivery` / `bench_forward_demux` — first re-executes itself under one fixed
 `GLIBC_TUNABLES` string (`bench_process.hpp`: mmap threshold 128 KiB, trim threshold 32 MiB,
 8 arenas), because glibc otherwise slides those thresholds while a run is in progress.
 `bench_store_sweep latency` (the gated `store-lat-*` rows) does the same. Each of those
@@ -1841,8 +1841,8 @@ stderr as `FAMILY-ORDER`). It exists to check the isolation: a shuffled run must
 inside its A/A spread. Each family also prints its own RSS delta on stdout, `RSS family=<name>
 start_kb= peak_kb= delta_kb=` (#1808): the high-water mark minus the resident set it started
 from, which replaces the whole-run `/usr/bin/time -v` max RSS (the harness's peak).
-`bench_compact_delivery`, `bench_forward_demux` and `bench_store_sweep latency` print the same
-line after their last row (`compact-delivery`, `forward-demux`, `store-lat`). Their start
+`bench_chain_delivery`, `bench_forward_demux` and `bench_store_sweep latency` print the same
+line after their last row (`chain-delivery`, `forward-demux`, `store-lat`). Their start
 figure is the high-water mark before the first row (`bench::peak_rss_kb`, one `getrusage`):
 a `fopen`, or even an `open`/`read` of `/proc/self/statm`, ahead of their rows moved them
 (#1908).
@@ -1880,7 +1880,6 @@ craft libtracer":
 | `cliff-alloc-heap` / `cliff-alloc-pool` | **the allocator-cliff family** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)): one segment `alloc` + `destroy`, as `lkv-alloc-*`, but timed as a batch row (`bench::time_batches`, picosecond p50, every window at least 20 µs) at every size of `bench::cliff_sizes`: 960–1096 B in steps of 8 plus 985 B, and 2^k, 2^k − 48, 2^k + 48 from 64 B to 64 KiB. Families `cliff-heap` and `cliff-pool`, each in its own fresh process; the pool has one 64 KiB slot so its row should be flat. `perf_gate.py` judges each size against main and against its smaller neighbour (a new step over 1.75x fails when the row right of it is also slower than main). The exact half is `bench_forward_heap`'s `RESULT segdraw` rows: what one heap segment asks the allocator for at the same sizes, ratcheted exactly and checked against the 1032 B fast-path ceiling. |
 | `stream-w1` / `-w2` / `-w4` | 1, 2 and 4 writer threads on ONE STREAM vertex (depth 16, one counting subscriber), #1713's single-lock admission under contention ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). Family `stream-mt` (MULTI), T capped by the affinity mask. Delivery counted at the subscriber after a covering sweep. |
 | `stream-spill` / `stream-defer` | batch-timed per CYCLE (#1808): six `assign`s then one `write` whose take spills past `ring_take_t::kInline`; four `assign`s then one covering `propagate`. Family `stream`. The refused-spill deferral is an exact row in `bench_forward_heap` (`RESULT streamlock defer`). |
-| `route-handle-egress-mt1` / `-mt2` / `-mt4` | T producer threads on one advertised `route_handle_t` flow, the reuse read (#1808). Throughput only; advisory, not gated. Family `route-handle` (MULTI). |
 | `seam-class-c1` / `-c8` / `-c32`, `seam-direct`, `seam-fallback` | the allocation seam (#1808): 64 B `try_alloc` + `release` on a `pool_source_t` whose 64 B class is the last of C; and a full `bump_source_t` falling back to its upstream pool, against that pool alone. Family `alloc-seam`. |
 | `seam-values` / `seam-tables` | the shipped host slab pool ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)): `try_alloc` + `release` on `tr::mem::host_root()`'s value sub-pool (through the thread's cache) and table sub-pool (one class lock per request), at 64, 984, 985, 1024, 4096, 16384, 65536 and 65552 B and at 65600 B, the first request past the last class (64 KiB plus a segment header, [#1990](https://github.com/avatarsd-llc/libtracer/issues/1990)), which falls back to the root. Batch rows after the #1808 seam rows in family `alloc-seam`. Each refuses (exit 2) if its size's class decision is not the one the label names, or if a timed request was refused. Charted, not gated. The exact half is `bench_forward_heap`'s gated `RESULT seamclass` rows: the classes one write's segment and record select at each payload-ladder size. |
 | `inproc-pool-batch` | the window-calibrated twin of the heap-view `inproc-pool` rows (#1808), in its own family so the quantized pool rows did not move. |
@@ -1960,7 +1959,7 @@ different now.
 
 #### Batch rows: picosecond figures, a 20 µs window floor, and the clock floor (#1804)
 
-Every batch row — `fold-b*`, the `-batch` twins, `path-parse`, `compact-*`, `fwd-demux-*` and
+Every batch row — `fold-b*`, the `-batch` twins, `path-parse`, `chain-*`, `fwd-demux-*` and
 `bench_store_sweep`'s `store-lat-*` rows (#1904) — times through one loop, `bench::time_batches`
 in `bench_common.hpp`:
 
@@ -1979,7 +1978,7 @@ The `lkv-*` rows time their whole loop as one block, so they have exactly one me
 **throughput** (also charted as ns/delivery). Their p50 and mean columns read 0; they used to
 repeat `1e9 / ops` truncated to whole ns, which the gate counted as three legs agreeing. The
 ungated bulk-window benches follow the same rule (#1904): `bench_fanout_clone_storm`,
-`bench_await_wakeup_storm`, `bench_route_handle_contention`, `bench_rx_source_topology`,
+`bench_await_wakeup_storm`, `bench_rx_source_topology`,
 `bench_writer_fanin` and `bench_hazard_node` print their rate and 0 in every latency column,
 and `bench_hazard_node` no longer follows its rows with a `RESULT_TAIL`. `test_perf_gate.py`
 fails any bench source that builds a `Summary` from one figure repeated, any gated binary that

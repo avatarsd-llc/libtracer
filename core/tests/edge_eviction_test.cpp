@@ -16,8 +16,8 @@
  *     edges, and the RFC-0005 subtree-listener bookkeeping survive intact;
  *   - slot indices of surviving edges never renumber (§D.2), a re-subscribe REUSES
  *     the freed slots before `subs_` grows, and the reused slot delivers;
- *   - `fwd_router_t::link_down` evicts AND drops the link's route-handle label
- *     state (reusing clear_link), so a compact flow's egress binding dies with it;
+ *   - `fwd_router_t::link_down` evicts the departed link's edges and leaves every other
+ *     link's alone;
  *   - an edge admitted through `graph_t::field_write` (the RFC-0009 §D.1
  *     `:subscribers[N]` replace, which stores the inbound link only as the gate
  *     context) is reclaimed by that link's teardown too (#943);
@@ -135,7 +135,8 @@ std::vector<std::byte> b_subscriber(std::string_view marker) {
 
 /**
  * @brief SUBSCRIBER{ PATH @p marker, SETTINGS qos{ NAME "delivery_compact" VALUE u8 1 } } —
- *        the RFC-0004 §E.1 opt-in, which is what forces a cold half onto the slot.
+ *        the retired RFC-0004 §E.1 opt-in, which an older peer may still send. It forced a
+ *        cold half onto the slot until #1951; it is an unknown member now.
  */
 std::vector<std::byte> b_subscriber_compact(std::string_view marker) {
     std::vector<std::byte> body = b_path({marker});
@@ -708,9 +709,9 @@ void test_slot_reuse_and_index_stability() {
     check(hits == 3, "D, E and F (two reused slots + one appended) all deliver");
 }
 
-/** @brief fwd_router_t::link_down = graph eviction + route-handle label drop, per link. */
+/** @brief fwd_router_t::link_down evicts the departed link's edges, and only that link's. */
 void test_router_link_down() {
-    std::printf("fwd_router_t::link_down (evict + clear_link):\n");
+    std::printf("fwd_router_t::link_down (evict):\n");
     graph_t g;
     fwd_router_t router(g);
     fake_link_t cli, other;
@@ -718,22 +719,8 @@ void test_router_link_down() {
     (void)router.add_child("other", other);
 
     (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
-    // A compact-flagged subscribe over 'cli' (so label state forms), a plain one over
-    // 'other'. SUBSCRIBER{ PATH, SETTINGS qos{delivery_compact=1} } mirrors
-    // fwd_fanout_test's builder inline.
-    std::vector<std::byte> sub_body = b_path({"cli"});
-    {
-        std::vector<std::byte> qos;
-        append(qos, b_name("delivery_compact"));
-        append(qos, b_value_u8(1));
-        std::vector<std::byte> settings;
-        tr::wire::emit_tlv(settings, type_t::SETTINGS, opt_t{.pl = true}, qos);
-        append(sub_body, settings);
-    }
-    std::vector<std::byte> sub_compact;
-    tr::wire::emit_tlv(sub_compact, type_t::SUBSCRIBER, opt_t{.pl = true}, sub_body);
     cli.inject(b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"cli"}), b_field_subscribers_append(),
-                     sub_compact));
+                     b_subscriber("c")));
     other.inject(b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"other"}),
                        b_field_subscribers_append(), b_subscriber("o")));
     cli.drain();
@@ -741,16 +728,11 @@ void test_router_link_down() {
 
     check(g.write(path_t("/s"), rope_t{make_value(b_value_u8(0x21))}).has_value(),
           "write /s pre-departure");
-    check(cli.count() >= 2, "compact flow established (ADVERTISE + COMPACT to cli)");
-    std::array<std::byte, 256> route_buf{};
-    check(router.handles().copy_egress_route("cli", 1, route_buf) != 0,
-          "route-handle egress binding exists for cli");
+    check(cli.count() == 1, "cli's subscription delivers before the departure");
     cli.drain();
     other.drain();
 
     router.link_down("cli");
-    check(router.handles().copy_egress_route("cli", 1, route_buf) == 0,
-          "link_down dropped cli's label state");
     check(g.write(path_t("/s"), rope_t{make_value(b_value_u8(0x22))}).has_value(),
           "write /s post-departure");
     check(cli.count() == 0, "no delivery to the departed link");
@@ -869,15 +851,15 @@ void test_evict_reaches_field_write_admitted_edges() {
  * The predicate keys on the link an edge was ADMITTED over: `subscriber_remote_t::link` when
  * the cold half carries one, the stored `caller` gate context otherwise (#943). A LOCAL door
  * passes the empty context, so a local edge's admitting spelling is empty too — and an empty
- * PARAMETER compared equal to it, reclaiming the edge. The case is reachable because a local
- * edge CAN carry a cold half: the shared SUBSCRIBER parse calls `ensure_remote()` for the
- * `delivery_compact` opt-in at every door, local ones included.
+ * PARAMETER compared equal to it, reclaiming the edge. The case was reachable because the
+ * shared SUBSCRIBER parse called `ensure_remote()` for the `delivery_compact` opt-in at every
+ * door, local ones included. That opt-in is an unknown member since #1951 and forces no cold
+ * half any more, so the `/tc` arm is now a second plain edge carrying the retired member; the
+ * empty-key rule is kept, and so is the arm, because it pins that the retired member admits
+ * and delivers like any other.
  *
  * `graph_t::evict_link_edges` returns a count and has no error channel, so the empty key is a
- * no-op returning 0, not a new status. Two arms, and the CONTROL arm is what identifies the
- * mechanism: the compact edge (cold half, both spellings empty) is the one that was reclaimed;
- * the plain edge (no cold half at all, so `s.remote == nullptr` skips it) never was, and
- * asserting on it alone would pass no matter what the predicate did.
+ * no-op returning 0, not a new status.
  */
 void test_empty_link_name_evicts_nothing() {
     std::printf("an eviction keyed on the EMPTY link name matches nothing (#1056):\n");
@@ -893,20 +875,20 @@ void test_empty_link_name_evicts_nothing() {
     };
 
     // Both admitted through the LOCAL `:subscribers[]` field-write door — the 3-arg write, so
-    // the caller context is empty. `/tc` opts into delivery_compact (⇒ a cold half whose `link`
-    // AND `caller` are both empty); `/tp` carries no settings at all (⇒ no cold half).
+    // the caller context is empty. `/tc` carries the retired delivery_compact member (an
+    // unknown member, #1951); `/tp` carries no settings at all.
     const auto append_fp = path_t::parse("/p:subscribers[]");
     check(append_fp.has_value(), "the :subscribers[] append field-path parses");
     check(append_fp.has_value() &&
               g.write(p, append_fp->field(), make_value(b_subscriber_compact("tc"))).has_value(),
-          "admit a LOCAL delivery_compact subscriber under an empty caller");
+          "admit a LOCAL subscriber carrying the retired delivery_compact member");
     check(append_fp.has_value() &&
               g.write(p, append_fp->field(), make_value(b_subscriber("tp"))).has_value(),
           "admit a plain LOCAL subscriber under an empty caller");
 
     check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x61))}).has_value(), "write /p");
     check(value_of("/tc") == b_value_u8(0x61),
-          "the compact local edge IS delivering (the test is not vacuous)");
+          "the retired-member local edge IS delivering (the test is not vacuous)");
     check(value_of("/tp") == b_value_u8(0x61), "the plain local edge IS delivering");
 
     check(g.evict_link_edges("") == 0, "evict('') reclaims nothing and reports 0");
@@ -914,7 +896,7 @@ void test_empty_link_name_evicts_nothing() {
     check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x62))}).has_value(),
           "write /p after the empty-key eviction");
     check(value_of("/tc") == b_value_u8(0x62),
-          "the compact local edge STILL delivers after evict('')");
+          "the retired-member local edge STILL delivers after evict('')");
     check(value_of("/tp") == b_value_u8(0x62), "the plain local edge still delivers");
 
     // The listener bookkeeping must be untouched too: a DESCENDANT write still bubbles to /p's

@@ -287,12 +287,6 @@ FAMILIES: list[dict] = [
               "its take; stream-defer = 4 assigns + one covering propagate (#1808)",
          pat=r"^(stream-spill|stream-defer) 64B/fan1/1ep",
          label=lambda m: m.group(1), key=lambda m: m.group(1), log=False,),
-    dict(id="route-handle", section="dispatch",
-         title="Route-handle egress reuse read — by producer threads (advisory)",
-         cond="route-handle-egress-mt<T> · one advertised flow · aggregate reads/s (#1808)",
-         pat=r"^route-handle-egress-mt(\d+) 32B/fan1/1ep",
-         label=lambda m: f"mt{m.group(1)}", key=_num, log=False,
-         px=dict(label="producer threads", log=True, fmt="count")),
     dict(id="pool-batch", section="dispatch",
          title="Write through an injected pool — batch-timed, by payload",
          cond="inproc-pool-batch · fan-out 1 · window-calibrated twin of inproc-pool (#1808)",
@@ -444,7 +438,7 @@ FAMILIES: list[dict] = [
     dict(id="mem-family-rss", section="memory", suite="latency",
          title="RSS each bench family adds to its fresh process",
          cond="bench_libtracer · `RSS family=` peak minus start, per family (#1808), and the "
-              "single-family bench_compact_delivery and bench_forward_demux (#1908); replaces "
+              "single-family bench_chain_delivery and bench_forward_demux (#1908); replaces "
               "the whole-run max RSS, which was the harness peak",
          names=[("inproc-size RSS delta", "inproc-size"),
                 ("inproc-fan RSS delta", "inproc-fan"),
@@ -454,7 +448,7 @@ FAMILIES: list[dict] = [
                 ("stream RSS delta", "stream"),
                 ("stream-mt RSS delta", "stream-mt"),
                 ("inproc-pool-batch RSS delta", "inproc-pool-batch"),
-                ("compact-delivery RSS delta", "compact-delivery"),
+                ("chain-delivery RSS delta", "chain-delivery"),
                 ("forward-demux RSS delta", "forward-demux")],
          log=True, fmt="num", ylabel="KB"),
     # -- throughput suite ---------------------------------------------------
@@ -505,17 +499,18 @@ FAMILIES: list[dict] = [
          pat=r"^fwd-demux-scan (?:61|79)B/fan(\d+)/\d+ep",
          label=lambda m: f"{m.group(1)} links", key=_num, log=False,
          px=dict(label="registered links", log=True, fmt="count")),
-    dict(id="compact-terminus", section="routing",
-         title="COMPACT terminus — by payload size",
-         cond="compact-terminus · a framed COMPACT delivery resolved at its terminus",
-         pat=r"^compact-terminus (\d+)B/fan1/1ep",
+    dict(id="chain-terminus", section="routing",
+         title="Stream delivery at its terminus — by payload size",
+         cond="chain-terminus · a stream's FWD{WRITE} over its PAIR chain, resolved at its "
+              "terminus (#1951)",
+         pat=r"^chain-terminus (\d+)B/fan1/1ep",
          label=lambda m: f"terminus {m.group(1)} B", key=_num, log=False,
          px=dict(label="payload size", log=True, fmt="bytes")),
-    dict(id="compact-forward", section="routing",
-         title="COMPACT forward hop — by payload size",
-         cond="compact-forward · the zero-allocation forward path (ADR-0038 §3) — flat with "
-              "payload is the property this chart exists to show",
-         pat=r"^compact-forward (\d+)B/fan1/1ep",
+    dict(id="chain-forward", section="routing",
+         title="Stream delivery through a forwarding hop — by payload size",
+         cond="chain-forward · the zero-allocation forward path (ADR-0038 §3) on a stream's PAIR "
+              "chain — flat with payload is the property this chart exists to show",
+         pat=r"^chain-forward (\d+)B/fan1/1ep",
          label=lambda m: f"forward {m.group(1)} B", key=_num, log=False,
          px=dict(label="payload size", log=True, fmt="bytes")),
     # The payload ladder (#1806): rows at 64 B .. 64 KiB, one line per size, so the 1/4/16/64 KiB
@@ -644,14 +639,14 @@ INSTRUMENT_SOURCES: list[tuple[str, list[str]]] = [
      r"|inproc-target-\w+"
      r"|inproc-mt\d+|eptype-[\w-]+|fold-b\d+|acl-\S+|mixed|path-parse|lkv-\S+"
      r"|poolalloc-mt\d+|heapalloc-mt\d+|cliff-alloc-\w+|inproc-pool-batch|stream-\w+"
-     r"|route-handle-\S+|seam-\S+|dce-canary)\b",
+     r"|seam-\S+|dce-canary)\b",
      ["bench/bench_libtracer.cpp", "bench/delivery_count.hpp"]),
     (r"^zenoh ", ["bench/bench_zenoh.cpp"]),
     (r"^fwd-demux-", ["bench/bench_forward_demux.cpp"]),
-    (r"^compact-", ["bench/bench_compact_delivery.cpp"]),
+    (r"^chain-", ["bench/bench_chain_delivery.cpp"]),
     (r"^heap (allocs|bytes) per ", ["bench/bench_forward_heap.cpp"]),
     (r" RSS delta$", ["bench/bench_libtracer.cpp", "bench/bench_process.hpp",
-                      "bench/bench_compact_delivery.cpp", "bench/bench_forward_demux.cpp"]),
+                      "bench/bench_chain_delivery.cpp", "bench/bench_forward_demux.cpp"]),
     (r"\(ramprobe\)$|\(seamclass\)$|^seam blocks per |^heap blocks per \w+ write "
      r"|^stripe sections ",
      ["bench/bench_forward_heap.cpp", "bench/exact_rows.cpp"]),
