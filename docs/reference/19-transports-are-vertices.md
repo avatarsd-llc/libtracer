@@ -352,7 +352,7 @@ worth choosing for exactly that (it is measured to collapse under fan-out just a
 the only point that survives a fan-out and the multi-RX-host recipe, paid for in per-store
 slack (≈14 KB on an ESP32-C6-class target, an estimate ADR-0079 marks as owing a measured
 high-water-mark census). **None of the three is a default** — every seam defaults to the
-process heap, so a node that says nothing is all-heap. The point for this page: the knob is an injected
+process default root (the static arena on an MCU build, the slab pool on a host), so a node that says nothing is all-default-root. The point for this page: the knob is an injected
 store reached through an accessor, not a `store` field on `conn_settings_t` — the same rule,
 applied to a resource instead of a config key.
 
