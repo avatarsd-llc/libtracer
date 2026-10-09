@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -84,6 +85,12 @@ enum class selector_ref_state_t : std::uint8_t {
  * @tparam kRefs    How many DISTINCT refs one instance holds, across all its options, at most
  *                  64. A ref listed in several options counts once.
  * @tparam kOptions How many options one instance holds, at most 254.
+ * @tparam G        The guard the busy flag takes on a core with no atomic read-modify-write:
+ *                  the build's `tr::graph::guard_t`.
+ * @tparam kNative  Whether taking the flag is one atomic exchange (`true`) or a load and a
+ *                  store inside @p G's section; the target decides, as for
+ *                  `tr::rmw_counter_t`. A test passes `false` to run the guarded binding on a
+ *                  host that has atomic RMW.
  *
  * **What an instance costs** (RAM, inside the object; nothing else is allocated):
  * - per ref: a producer handle (one pointer) and a 16-bit slot, packed with no padding, so
@@ -98,7 +105,7 @@ enum class selector_ref_state_t : std::uint8_t {
  * handle and the slot as 16 bits and rebuilds the handle with
  * `%graph_t::subscription_at` for each toggle, which costs nothing. 16 bits are exact on
  * ILP32, where a vertex holds at most 65,536 slots; on LP64 @ref add refuses a slot past
- * 65,535.
+ * 65,535 for good, with `INVALID_PATH`: the selector cannot spell that address.
  *
  * **A switch from A to B** suspends every ref that is live and not in B, then resumes every
  * ref of B that is suspended. A ref in both is not touched. Suspending first is what rules out
@@ -137,8 +144,10 @@ enum class selector_ref_state_t : std::uint8_t {
  * OS lock, and it cannot invert priorities. Taking it is one atomic exchange where the core
  * has one, else a load and a store inside the build's guard (`tr::graph::guard_t`), as
  * `tr::rmw_counter_t` does. A switch holds it across `%graph_t::set_suspended`, which takes the
- * graph's own locks; a guard section could not be held there. @ref active and @ref settled read
- * atomics and never refuse.
+ * graph's own locks; a guard section could not be held there. @ref active, @ref settled and a
+ * read of the `active` field read atomics and never refuse, so a `BACKPRESSURE` switch can
+ * be told apart: if the option it named is now active, it was partly applied; if not, the
+ * selector was busy and nothing changed. Either way, the same write again completes it.
  *
  * **What an `options` read can cost.** A ref can be listed in every option, so a read renders
  * at most `kRefs × kOptions` ref records, each with a producer key of up to 1 KiB
@@ -156,7 +165,8 @@ enum class selector_ref_state_t : std::uint8_t {
  *       context of its vertex's field seams. The destructor retires the vertex and leaves every
  *       subscription in the state it holds.
  */
-template <std::size_t kRefs = 8, std::size_t kOptions = 4>
+template <std::size_t kRefs = 8, std::size_t kOptions = 4, class G = guard_t,
+          bool kNative = std::atomic<bool>::is_always_lock_free>
 class subscription_selector_t {
     static_assert(kRefs > 0 && kRefs <= 64, "a selector holds 1 to 64 refs: one bit each");
     static_assert(kOptions > 0 && kOptions < 255, "a selector holds 1 to 254 options");
@@ -211,21 +221,24 @@ class subscription_selector_t {
      * new edge took, an INERT one included: the selector then takes the graph's word for it.
      *
      * @warning @p option is BORROWED, not copied: the bytes must outlive the selector (a
-     *          string literal, or the owner's own static configuration). A name already
-     *          created keeps its first view.
+     *          string literal, or the owner's own static configuration), since a later read of
+     *          `options` puts them on the wire. A temporary `std::string` does not compile (the
+     *          deleted overload below). A name already created keeps its first view.
      * @retval INVALID_PATH @p option is not one NAME segment (1 to 64 bytes, no reserved
-     *                      character).
+     *                      character), or @p ref's slot is past 65,535 (permanent: the
+     *                      selector cannot spell that address).
      * @retval NOT_FOUND    @p ref names no live subscription.
-     * @retval BACKPRESSURE A new ref past @p kRefs, a new option past @p kOptions, a slot past
-     *                      65,535, or another operation on this selector is running.
+     * @retval BACKPRESSURE A new ref past @p kRefs, a new option past @p kOptions, or another
+     *                      operation on this selector is running.
      */
     [[nodiscard]] result_t<void> add(std::string_view option, subscription_t ref) {
         if (!valid_segment(option)) return std::unexpected(status_t::INVALID_PATH);
         const result_t<bool> suspended = g_->is_suspended(ref);
         if (!suspended) return std::unexpected(suspended.error());
         const std::optional<ref_t> key = pack(ref);
+        if (!key) return std::unexpected(status_t::INVALID_PATH);
         const hold_t hold(*this);
-        if (!key || !hold) return std::unexpected(status_t::BACKPRESSURE);
+        if (!hold) return std::unexpected(status_t::BACKPRESSURE);
         const std::size_t o = find_option(option);
         const std::size_t r = find_ref(*key);
         if ((o == n_options_ && n_options_ == kOptions) || (r == n_refs_ && n_refs_ == kRefs))
@@ -237,6 +250,12 @@ class subscription_selector_t {
         members_[o] = with(members_[o], r, true);
         return {};
     }
+
+    /** @brief A temporary name would dangle once the call returns, and a later `options`
+     *         read would put freed bytes on the wire, so it does not compile. */
+    template <class S>
+        requires std::same_as<S, std::string>
+    result_t<void> add(S&& option, subscription_t ref) = delete;
 
     /**
      * @brief Drop @p ref from every option, leaving its subscription in the state it holds.
@@ -343,8 +362,9 @@ class subscription_selector_t {
      */
     class hold_t {
        public:
-        /** @brief Try to take @p s's flag; never waits. */
-        explicit hold_t(subscription_selector_t& s) noexcept : s_(s), held_(s.try_take()) {}
+        /** @brief Try to take @p s's flag, unless @p take is false; never waits. */
+        explicit hold_t(subscription_selector_t& s, bool take = true) noexcept
+            : s_(s), held_(take && s.try_take()) {}
         /** @brief Give the flag back, if this took it. */
         ~hold_t() {
             if (held_) s_.busy_.store(false, std::memory_order_release);
@@ -359,17 +379,22 @@ class subscription_selector_t {
         bool held_;                  /**< @brief Whether the take succeeded. */
     };
 
-    /** @brief Take the busy flag, or answer false: one exchange on a core with atomic RMW, else
-     *         a load and a store inside @p G's section, as `tr::rmw_counter_t` does. */
-    template <class G = guard_t>
+    /**
+     * @brief Take the busy flag, or answer false: one exchange on a core with atomic RMW, else
+     *        a load and a store inside @p G's section, as `tr::rmw_counter_t` does.
+     *
+     * The guarded store runs only when the flag was clear. The release (`hold_t`'s destructor)
+     * is a plain store outside the section, so a store of `true` over a flag seen held could
+     * land after that release and leave the flag set with no holder.
+     */
     [[nodiscard]] bool try_take() noexcept {
-        if constexpr (std::atomic<bool>::is_always_lock_free) {
+        if constexpr (kNative) {
             return !busy_.exchange(true, std::memory_order_acquire);
         } else {
             const guard_scope_t<G> section(&busy_);
-            const bool was = busy_.load(std::memory_order_relaxed);
+            if (busy_.load(std::memory_order_acquire)) return false;
             busy_.store(true, std::memory_order_relaxed);
-            return !was;
+            return true;
         }
     }
 
@@ -482,20 +507,22 @@ class subscription_selector_t {
     }
 
     /** @brief The read seam (`handlers_t::on_app_field_read`): both fields are answered from
-     *         the selector's own state. An empty reference is a refused draw or a busy
-     *         selector (BACKPRESSURE). */
+     *         the selector's own state. `active` reads atomics and never takes the busy flag,
+     *         so a writer whose switch was refused can always read which option is active;
+     *         `options` takes it. An empty reference is a refused draw or a busy selector
+     *         (BACKPRESSURE). */
     static std::optional<value_ref_t> read_field(void* ctx, std::string_view name) {
         auto& self = *static_cast<subscription_selector_t*>(ctx);
-        const hold_t hold(self);
-        if (!hold) return value_ref_t{};
         std::array<std::byte, 512> scratch;
         mem::bump_source_t frame(scratch, self.g_->table_source());
         mem::bytes_t out(frame);
-        const bool ok = name == "active" ? self.emit_active(out) : self.emit_options(out);
+        const bool active = name == "active";
+        const hold_t hold(self, !active);
+        const bool ok = active ? self.emit_active(out) : (hold && self.emit_options(out));
         return ok ? value_ref_t::copy(mem::as_span(out), self.g_->value_source()) : value_ref_t{};
     }
 
-    /** @brief `NAME <active>`, or an empty `STATUS` when none is. Caller holds the flag. */
+    /** @brief `NAME <active>`, or an empty `STATUS` when none is. Needs no flag. */
     [[nodiscard]] bool emit_active(mem::bytes_t& out) const {
         const std::string_view a = active();
         if (a.empty()) return wire::emit_tlv(out, wire::type_t::STATUS, {}, {});

@@ -27,8 +27,10 @@
  *      lists it again, and switches like any ref (the review's slot-reuse case).
  *  10. `remove` drops a ref from every option, leaves its subscription as it is, and frees its
  *      place.
- *  11. One operation at a time: a peer's switches and reads that meet answer BACKPRESSURE and
- *      change nothing, and a retry completes them.
+ *  11. One operation at a time: a peer's switches and `options` reads that meet answer
+ *      BACKPRESSURE and change nothing, a retry completes them, and an `active` read never
+ *      refuses. The same again on the busy flag's guarded binding (no atomic RMW).
+ *  12. A temporary option name does not compile; a literal and an lvalue do.
  */
 
 #include "libtracer/subscription_selector.hpp"
@@ -70,6 +72,22 @@ using tr::wire::type_t;
 
 /** @brief The selector under test: room for 8 refs and 4 options. */
 using selector_t = tr::graph::subscription_selector_t<8, 4>;
+/** @brief The same, with the busy flag on its guarded binding: a load and a store inside the
+ *         build's guard, as a core with no atomic read-modify-write takes it. */
+using guarded_selector_t = tr::graph::subscription_selector_t<8, 4, tr::graph::guard_t, false>;
+static_assert(sizeof(guarded_selector_t) == sizeof(selector_t), "the binding costs no bytes");
+
+// (12) A temporary name would dangle once add() returns, and a later `options` read would put
+// freed bytes on the wire: it does not compile. A literal and an lvalue do.
+template <class Sel>
+concept takes_temporary_name = requires(Sel& s, subscription_t r) { s.add(std::string("a"), r); };
+template <class Sel>
+concept takes_lasting_name = requires(Sel& s, subscription_t r, std::string& n) {
+    s.add("a", r);
+    s.add(n, r);
+    s.add(std::string_view("a"), r);
+};
+static_assert(!takes_temporary_name<selector_t> && takes_lasting_name<selector_t>);
 
 /** @brief A one-byte write payload. */
 tr::view::view_t byte_value(std::uint8_t b) {
@@ -530,25 +548,30 @@ void test_remove() {
     check(!full && full.error() == status_t::BACKPRESSURE, "and the table is full again");
 }
 
-/** @brief (11) Operations that meet answer BACKPRESSURE and change nothing; a retry completes. */
-void test_one_at_a_time() {
-    std::printf("a peer's switches and reads that meet never wait and never half-run:\n");
+/** @brief (11) Operations that meet answer BACKPRESSURE and change nothing; a retry completes.
+ *         @p Sel picks the busy flag's binding. */
+template <class Sel>
+void test_one_at_a_time(const char* binding) {
+    std::printf("a peer's switches and reads that meet never wait and never half-run (%s):\n",
+                binding);
     graph_t g;
     const vertex_handle_t in = g.register_vertex(path_t("/in"), role_t::STORED_VALUE);
     counter_t a, b;
     const auto sa = g.subscribe(path_t("/in"), count, &a);
     const auto sb = g.subscribe(path_t("/in"), count, &b);
     (void)g.set_suspended(*sb, true);
-    selector_t sel(g);
+    Sel sel(g);
     const auto vh = sel.attach(path_t("/sel"));
     check(vh && sel.add("a", *sa) && sel.add("b", *sb) && sel.select("a"), "options a and b");
 
     std::atomic<bool> stop{false};
     std::atomic<int> odd{0};
+    std::atomic<int> active_refused{0};
     std::thread reader([&] {
         while (!stop.load()) {
             const auto r = g.read(*vh, path_t("/x:settings.app.options").field());
             if (!r && r.error() != status_t::BACKPRESSURE) ++odd;
+            if (!g.read(*vh, path_t("/x:settings.app.active").field())) ++active_refused;
         }
     });
     int refused = 0;
@@ -559,6 +582,7 @@ void test_one_at_a_time() {
     stop = true;
     reader.join();
     check(odd.load() == 0, "every answer was success or BACKPRESSURE");
+    check(active_refused.load() == 0, "and an active read never refused: it takes no flag");
     std::printf("    (%d of 2000 switches met a read and were refused)\n", refused);
 
     result_t<void> done = sel.select("b");
@@ -584,6 +608,7 @@ int main() {
     test_target_form();
     test_slot_reuse();
     test_remove();
-    test_one_at_a_time();
+    test_one_at_a_time<selector_t>("one atomic exchange");
+    test_one_at_a_time<guarded_selector_t>("guarded load and store");
     return tr::testing::summary("subscription_selector");
 }
