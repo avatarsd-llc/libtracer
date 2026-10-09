@@ -1555,6 +1555,21 @@ descriptor) and a 3-frame acknowledgement, then it is native again; a lost hello
 frame for the whole link, not one per stream. Every delivered frame is byte-identical
 (`delivered_exact=yes`).
 
+Host time per send (bench slice, best of 7, ns, before → after):
+
+| mode | payload | N = 1 | N = 64 | N = max |
+|---|---:|---:|---:|---:|
+| classic | 4 | 5950 → 260 | 5298 → 357 | 5512 → 629 (512) |
+| classic | 64 | 5504 → 1617 | 6796 → 2857 | 6271 → 2088 (56) |
+| classic | 1024 | 39383 → 39372 | 36112 → 36102 | — |
+| fd | 4 | 12334 → 280 | 14799 → 361 | 15155 → 608 (512) |
+| fd | 64 | 6385 → 438 | 7149 → 559 | 10353 → 814 (256) |
+| fd | 1024 | 5412 → 5353 | 5828 → 5410 | — |
+
+The per-send TX lookup grows with the table from about 260 ns at N = 1 to about 630 ns at
+N = 512 (classic 4 B). It stays a keyed search and never a scan, and it is far below the
+before arm's per-advertise binding walks at every N.
+
 **The frames are the result; `ns_send` is host CPU, not bus time.** At 500 kbit/s one classic
 frame is ~250 µs on the wire, so a 4-byte send drops from ~2.5 ms of bus to ~0.25 ms. Host time
 per send is reported per N so the per-send TX lookup (one hash of the prefix, one keyed search)
