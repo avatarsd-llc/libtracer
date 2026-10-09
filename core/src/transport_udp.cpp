@@ -70,8 +70,13 @@ udp_transport_t::udp_transport_t(std::uint16_t bind_port, std::string_view peer_
     fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd_ < 0) return;
 
-    const int one = 1;
-    ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    // SO_REUSEADDR only on a NAMED port (#2027). On an ephemeral bind it lets the kernel hand
+    // out a port another reuse-enabled UDP socket already holds, and unicast datagrams for that
+    // port then reach whichever socket bound last, not this one.
+    if (bind_port != 0) {
+        const int one = 1;
+        ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    }
 
     sockaddr_in local{};
     local.sin_family = AF_INET;

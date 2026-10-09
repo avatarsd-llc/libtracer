@@ -317,7 +317,14 @@ void test_client_queue_race() {
 void test_server_two_doors_race() {
     std::printf("server -> client: broadcast and directed sends onto one peer stay whole:\n");
     race_sink_t sink;
-    tr::net::ws_server_transport_t server(0, {.peer_named = tr::net::kBusLinks});
+    // `max_peers = 1` (#2027): a DIRECTED send's per-record bound is the liveness window ÷ the
+    // server's peer cap (#1295), and an unset cap is window ÷ kBoundedWaitMs = 100 peers, so
+    // the directed door got 100 ms. A record that stalls that long mid-write closes the peer by
+    // contract. The client's receiver checks every byte of frames up to 300 KB, and under TSan
+    // on a loaded runner that can hold its socket full past 100 ms: the link closed, the frames
+    // still in flight were lost, and the round never drained. This suite has one peer and
+    // tests frame integrity, not liveness, so the cap of 1 gives each door the whole window.
+    tr::net::ws_server_transport_t server(0, {.max_peers = 1, .peer_named = tr::net::kBusLinks});
     check(server.ok(), "server listening");
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     check(client.ok(), "client connected");

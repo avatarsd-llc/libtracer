@@ -18,8 +18,14 @@
  * LEARN-PEER mode (empty peer host), and the sender is then aimed at the port the kernel granted.
  */
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -439,6 +445,46 @@ void test_settings_max_frame() {
 }
 
 /**
+ * @brief An ephemeral bind owns its port: datagrams for it reach this socket (#2027).
+ *
+ * `bind_port` 0 used to set `SO_REUSEADDR` too, and on a UDP socket that lets the kernel's
+ * ephemeral pick land on a port another reuse-enabled socket already holds. Unicast datagrams
+ * for a shared port reach whichever socket bound LAST, so a receiver bound first got nothing,
+ * about once in 6,000 binds with a few sockets open. Waiting for that collision would make a
+ * flaky test, so this one makes it on purpose: a raw socket with `SO_REUSEADDR` binds the
+ * receiver's port directly. A port-0 bind refuses it with `EADDRINUSE`; with the old option
+ * the intruder bound, took every datagram, and the receiver below saw none.
+ */
+void test_ephemeral_bind_owns_its_port() {
+    std::printf("UDP transport — an ephemeral bind owns its port (#2027):\n");
+    std::atomic<int> got{0};
+    auto rx = [&](std::span<const std::byte>) { got.fetch_add(1); };
+    tr::net::udp_transport_t d(0, "", 0);  // the receiver binds FIRST
+    check(d.ok(), "the receiver bound an ephemeral port");
+    d.set_receiver(rx);
+
+    const int intruder = ::socket(AF_INET, SOCK_DGRAM, 0);
+    const int one = 1;
+    ::setsockopt(intruder, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in at{};
+    at.sin_family = AF_INET;
+    at.sin_addr.s_addr = htonl(INADDR_ANY);
+    at.sin_port = htons(d.local_port());
+    const int rc = ::bind(intruder, reinterpret_cast<sockaddr*>(&at), sizeof(at));
+    const int err = errno;
+    check(rc != 0 && err == EADDRINUSE,
+          "a reuse-enabled socket cannot share the port an ephemeral bind took");
+
+    tr::net::udp_transport_t c(0, "127.0.0.1", d.local_port());  // the sender binds AFTER
+    check(c.ok(), "the sender bound");
+    const std::vector<std::byte> frame(32, std::byte{0x5A});
+    for (int i = 0; i < 3; ++i) c.send(std::span<const std::byte>(frame));
+    check(wait_until([&] { return got.load() == 3; }, 10s),
+          "every datagram sent to the receiver's port reached the receiver");
+    ::close(intruder);
+}
+
+/**
  * @brief ADR-0042 end to end: two nodes over real UDP with owning view delivery and a share
  *        threshold the payload clears (RFC-0028 §5.3) — the WRITE lands ZERO-copy (the graph's
  *        stored segment IS the RX frame segment, proven by pointer identity through graph read).
@@ -579,6 +625,7 @@ int main() {
     test_view_pool_exhaustion();
     test_settings_max_frame();
     test_span_scratch_bounded_by_backend();
+    test_ephemeral_bind_owns_its_port();
     test_two_nodes_zero_copy_store();
     test_tx_drop_counted();
     return tr::testing::summary("udp");
