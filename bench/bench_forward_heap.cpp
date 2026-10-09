@@ -68,6 +68,7 @@
  * capturing the bytes the wired transport is handed — no threads, no sockets, no lwIP.
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -90,6 +91,7 @@
 #include "bench_common.hpp"
 #include "exact_rows.hpp"
 #include "heap_probe.hpp"
+#include "instr_count.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_source.hpp"
@@ -723,6 +725,60 @@ void segment_draw_rows() {
     }
 }
 
+/**
+ * @brief Instructions per heap-backend alloc/free pair at every cliff-ladder size, plus 64 B and
+ *        1 KiB (#2030): `RESULT instr S=<size> x100=<instructions per pair x 100>`.
+ *
+ * The timed `cliff-alloc-heap` and `lkv-alloc-heap` rows (3-60 ns) move x1.2 with code
+ * placement alone, which no threshold fitted over a handful of layouts can price without
+ * also blinding the gate to a real 10%. An instruction count does not move with placement, so
+ * `perf_gate.py` gates these rows on this figure. Sizes past the 64 KiB last class are skipped (the
+ * host allocator's own state, not placement). The operation is the one both timed families run
+ * (`backend.alloc(S)` adopted by a `segment_ptr_t` that drops at once). Each of five windows of
+ * 4096 pairs follows a warm pair; the row is the SMALLEST window, which drops an interrupt or a
+ * refill that landed in one. Nothing is printed when the host has no counter.
+ */
+void instr_rows() {
+    bench::instr_counter_t counter;
+    if (!counter.available()) {
+        std::printf(
+            "INSTR-UNAVAILABLE: perf_event_open refused; the allocator rows are not gated "
+            "by instruction count\n");
+        return;
+    }
+    constexpr std::size_t kHeader =
+        tr::mem::segment_header_bytes(tr::mem::heap_backend_t::kBlockAlign);
+    constexpr std::size_t kPairs = 4096, kWindows = 5;
+    std::vector<std::size_t> sizes = bench::cliff_sizes(kHeader);
+    sizes.push_back(64);
+    sizes.push_back(1024);
+    std::sort(sizes.begin(), sizes.end());
+    sizes.erase(std::unique(sizes.begin(), sizes.end()), sizes.end());
+    tr::mem::mem_backend_t& backend = tr::mem::heap_backend();
+    for (const std::size_t size : sizes) {
+        // Past the last size class the host's malloc serves the block itself, and its cost
+        // depends on the process's mmap/brk state (65584 B reads 475 or 660 instructions per
+        // pair run to run on one binary), which is the host's, not the library's.
+        if (size > 65536) continue;
+        std::uint64_t best = ~std::uint64_t{0};
+        for (std::size_t w = 0; w <= kWindows; ++w) {  // window 0 is the warm-up
+            counter.start();
+            for (std::size_t i = 0; i < kPairs; ++i) {
+                tr::view::segment_t* seg = backend.alloc(size);
+                if (seg != nullptr) {
+                    const tr::view::segment_ptr_t p = tr::view::segment_ptr_t::adopt(seg);
+                    bench::do_not_optimize(p);
+                }
+            }
+            const std::uint64_t n = counter.stop();
+            if (w != 0 && n != 0 && n < best) best = n;
+        }
+        if (best == ~std::uint64_t{0}) continue;
+        std::printf("RESULT instr S=%zu x100=%llu\n", size,
+                    static_cast<unsigned long long>(best * 100 / kPairs));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1223,6 +1279,7 @@ int main() {
         }
     }
 
+    instr_rows();         // the allocator rows's instruction counts (#2030)
     segment_draw_rows();  // the cliff family's exact counts (#1806); gated by perf_gate.py
     // RAM per edge, per link and per 1 KiB value, blocks per write, and the STREAM write's
     // stripe-lock sections (#1808); all exact, all gated by perf_gate.py.

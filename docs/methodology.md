@@ -620,10 +620,27 @@ Details that make these trustworthy:
   Fitting on any three of the four windows and replaying the fourth gave false fails in 10 of
   54 sessions, all but two in the two daytime windows. The `cliff-alloc-heap` and
   `lkv-alloc-heap` rows move by up to x1.20 with code placement alone, more than three
-  alignment builds sample ([#2030](https://github.com/avatarsd-llc/libtracer/issues/2030)).
-  A same-source A/A between two layouts can
-  still fail these rows, as it could before #1807; the null cannot
-  remove that without loosening them, which was ruled out.
+  alignment builds sample ([#2030](https://github.com/avatarsd-llc/libtracer/issues/2030)),
+  so a null cannot price them without loosening them, which was ruled out. They are not
+  gated on time at all: see **The layout-bound rows** below.
+- **The layout-bound rows** ([#2030](https://github.com/avatarsd-llc/libtracer/issues/2030)).
+  `cliff-alloc-heap` and `lkv-alloc-heap` time one alloc/free in 3–60 ns, and where the linker
+  puts the code decides the figure: a 32 B shift of identical code moved them by x1.20, and one
+  source spread x1.18–1.26 over shuffled link orders (`-ffunction-sections`, lld
+  `--shuffle-sections`). A null fitted over layouts is wider than the flat threshold, so the
+  cap holds the row at the flat 15% and a layout crosses it; a null that loosened the row to
+  fit would stop catching a real 10%. So the verdict does not come from time. `bench_forward_heap`
+  counts the **user-mode instructions** of one heap-backend alloc/free pair at every cliff-ladder
+  size (`RESULT instr`, from `perf_event_open`, no clock): nine layouts of one source read the
+  same count at every size. The gate fails a size whose count is more than 2% and more than two
+  instructions over main's, so a real 10% (about ten instructions) fails on any layout. The timed
+  legs of these rows keep only a gross backstop of x1.5, which is above the worst measured
+  layout and still catches an allocator on a slow path (the #1768 class was x2.7); sizes past
+  the 64 KiB last class are not counted, because the host allocator's own state moves them run
+  to run (their timed legs hold a x3 backstop for the same reason). Replayed over nine layouts of
+  one source (default and eight shuffled link orders, ten rounds on the bench CPUs, 216 gate
+  sessions), these rows gave no false fail, the instruction count gave none in all 72 ordered
+  layout pairs, and ten injected extra instructions (+9.6%) failed all 48 sizes. A host with no hardware counter emits no rows and the gate says the ratchet did not run.
 - **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
   `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `compact-*` arms

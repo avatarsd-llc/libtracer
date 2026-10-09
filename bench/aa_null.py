@@ -58,14 +58,17 @@ MIN_ROUNDS = 25  # the shortest fit `bank` accepts (#1888: 15 rounds under-estim
 INJECT = 1.10  # the synthetic regression evaluate() must catch: 10% slower on every leg
 
 
-def measure(builds: list[pathlib.Path], rounds: int) -> dict:
+def measure(builds: list[pathlib.Path], rounds: int, only: list[str] | None = None) -> dict:
     """@brief Time every gate step on every build, @p rounds times, rotating the start.
+
+    @param only Step labels to measure (e.g. the `cliff-heap` and `lkv` families) instead of
+           every step: the layout campaign for the layout-bound rows (#2030) times just those.
 
     @return {"builds": [...], "rounds": R, "samples": {key: [[metric|None per round]
             per build]}} — None marks a round dropped as contended.
     """
     bins = [pg._siblings(b / "bench_libtracer") for b in builds]
-    plan = pg.gate_plan(*bins)
+    plan = [st for st in pg.gate_plan(*bins) if not only or st.label in only]
     samples: dict[str, list[list]] = {}
     for step in plan:
         rows_by: dict[str, list[list]] = {}
@@ -188,6 +191,8 @@ def bank(raw: dict, width: int = pg.PAIRS_DEFAULT, held_out: dict | None = None)
     rows: dict[str, dict[str, float]] = {}
     windows = split_windows(raw)
     for k in sorted(raw["samples"]):
+        if k.split("/")[0] in pg.LAYOUT_BOUND_MODES:
+            continue  # gated by instructions, not by a null (#2030)
         for leg in pg.LEGS:
             spreads = []
             for w in windows:
@@ -230,7 +235,9 @@ def evaluate(raw: dict, null: dict, width: int = pg.PAIRS_DEFAULT) -> dict:
     A session is one ordered build pair over one window of `width` rounds — one gate run.
     @return {"sessions": n, "false_fail_sessions": n, "false_fails": {key: n},
              "detect": {key: (caught, sessions)}} where `detect` injects INJECT on that
-             key alone and counts the sessions that FAIL it.
+             key alone and counts the sessions that FAIL it. The layout-bound rows
+             (`perf_gate.LAYOUT_BOUND_MODES`) are judged for false fails only: their timed legs
+             are a backstop and their 10% is caught by the instruction ratchet.
     """
     gated = {f"{m}/{s}/{f}/{e}" for (_b, m, s, f, e) in pg.POINTS}
     samples = {k: v for k, v in raw["samples"].items()
@@ -250,6 +257,8 @@ def evaluate(raw: dict, null: dict, width: int = pg.PAIRS_DEFAULT) -> dict:
                 if failed:
                     sessions[(x, y, s)].append(f"{k} {'+'.join(failed)}")
                     false_by_key[k] = false_by_key.get(k, 0) + 1
+                if k.split("/")[0] in pg.LAYOUT_BOUND_MODES:
+                    continue  # its timed legs are a backstop; the 10% is caught by instr_gate
                 d = detect.setdefault(k, [0, 0])
                 d[1] += 1
                 d[0] += bool(_verdicts(cs, bs, k, null, INJECT))
@@ -260,7 +269,7 @@ def evaluate(raw: dict, null: dict, width: int = pg.PAIRS_DEFAULT) -> dict:
 
 
 def _cmd_measure(a: argparse.Namespace) -> int:
-    raw = measure([pathlib.Path(b).resolve() for b in a.build], a.rounds)
+    raw = measure([pathlib.Path(b).resolve() for b in a.build], a.rounds, a.family)
     raw["date"] = time.strftime("%Y-%m-%d")
     raw["host"] = a.host
     raw["conditions"] = pg.LEDGER.line()
@@ -325,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--build", action="append", required=True,
                    help="a bench build directory (repeat; two or more layouts of one source)")
     m.add_argument("--rounds", type=int, default=10)
+    m.add_argument("--family", action="append",
+                   help="measure only this step label (repeat); default every step")
     m.add_argument("--host", default="", help="free text recorded with the samples")
     m.add_argument("--out", required=True)
     m.set_defaults(fn=_cmd_measure)
