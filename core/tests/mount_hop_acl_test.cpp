@@ -243,7 +243,18 @@ struct node_t {
         p1 = std::make_unique<client_t>(server.local_port());
         check(wait_until([&] { return anchor("p1").has_value(); }), "session p1 accepted");
     }
-    ~node_t() {
+    ~node_t() { quiesce(); }
+
+    /**
+     * @brief Stop every in-flight delivery: close the sessions, then unmount the listener.
+     *
+     * A session's frame is handled on the listener's receive thread, so a dial or write it
+     * started can still be running when the case body returns. Closing the sessions and
+     * removing the mount joins that thread; a case that owns state the handler reaches (a
+     * `transport_vertex_t`, a link) calls this before that state goes out of scope (#2057).
+     * Idempotent.
+     */
+    void quiesce() {
         p1.reset();
         p0.reset();
         (void)router.remove_child(kMount);
@@ -398,6 +409,9 @@ void upgrade_layout() {
     check(!root.has_value() && root.error() == tr::graph::status_t::NOT_FOUND,
           "a write to /:acl answers NOT_FOUND");
 
+    // The last dial may still be running on the listener's receive thread: join it before
+    // `net`, `b2` and the channel it reaches go out of scope (#2057).
+    n.quiesce();
     ch.shutdown();
     (void)r_b.remove_child("net/down/a");
 }
