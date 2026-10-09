@@ -60,6 +60,17 @@ constexpr std::size_t kProbeCap = 64;
 charge_t g_charges[kCharges];
 std::atomic_flag g_lock = ATOMIC_FLAG_INIT;
 
+/**
+ * @brief Write every page of the charge table at start-up, before any RSS reading. The table
+ *        is zero-initialized BSS, so its pages are first made resident by a WRITE; left lazy,
+ *        each would land inside a window and be charged to `rss_delta_bytes` there.
+ */
+const bool g_table_resident = [] {
+    auto* bytes = reinterpret_cast<volatile unsigned char*>(g_charges);
+    for (std::size_t at = 0; at < sizeof(g_charges); at += 4096) bytes[at] = 0;
+    return true;
+}();
+
 /** @brief The table slot @p p hashes to. */
 std::size_t slot_of(const void* p) {
     return static_cast<std::size_t>(
