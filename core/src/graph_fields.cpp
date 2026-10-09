@@ -1056,11 +1056,9 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view::view_t& spec_
 }
 
 bool graph_t::schema_protocol_part(const vertex_t* v, mem::bytes_t& out) const noexcept {
-    if (v->has_payload_rights()) {
-        const payload_record_t declared = declared_record(v);
-        const std::span<const std::byte> catalog = declared.catalog();
-        if (!out.append(catalog.data(), catalog.size())) return false;
-    }
+    // The catalog leads, so it is copied straight into the empty `out` (it replaces what is
+    // there); a vertex that declared none leaves `out` empty.
+    if (!declared_catalog(v, out)) return false;
     // Absent means "delivers", the default, so every schema a vertex served before this
     // amendment is served byte-for-byte unchanged.
     if (v->role() != role_t::HANDLER || v->handlers().deliver_written) return true;
