@@ -590,25 +590,38 @@ Details that make these trustworthy:
   real gate run at the 3% floor. It is re-banked there when the CPU layout changes and when
   a gated row is added. A bank is fitted on **25 or more rounds** (`aa_null.py bank` refuses
   fewer), measured in several windows of one runner stop each, and pooled so that no gate
-  window straddles two stops; a further window the fit never sees is replayed into the
-  null's meta, which records each window's date and rounds, the held-out A/A false-fail
-  count and how many rows an injected 10% slowdown fails in every session.
+  window straddles two stops. Each leg banks the spread of its **noisiest window**, not the
+  spread pooled over all of them: a layout offset between two builds moves with host state
+  (in the 2026-10-09 bank, `fwd-demux-scan`'s `-falign-functions=64` build ran level with the
+  others in one window and 9–12% slower in two), and the pooled spread diluted that to a
+  threshold the held-out window then false-failed in 6 of 18 sessions. A further window the
+  fit never sees is replayed into the null's meta, which records each window's date and
+  rounds, the held-out A/A false-fail count and how many rows an injected 10% slowdown fails
+  in every session.
   [`bench/aa_null_campaign.sh`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/aa_null_campaign.sh)
   is that procedure on the bench host: it waits until no perf run is queued or running
-  before each stop, and restarts the runner after every window, failures included.
+  before each stop (or, with `DRAIN=1`, takes the runner's job label away and waits for its
+  current job), and restarts the runner after every window, failures and signals included.
 - **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
   or past the flat threshold, because builds of one source move them by several percent
   (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they keep the
   verdict they had before the null existed — the flat threshold **and** the old rule
   (medians breach, the arms' [min..max] ranges are disjoint, a strict majority of pairs
   breach) — and the report says `cap`. A row the null does not carry is decided the same
-  way. In the bench-CPU null the capped rows outside the cliff family are:
-  `acl-inherit-d4-mt4`, `eptype-stream/16384`, `fold-b4/512/1/1` and `poolalloc-mt4` (every
-  leg); `fwd-demux-value/16384`, `fwd-demux-scan`, `inproc/16384`, `inproc-borrow/64` and
-  `inproc-path/64/1/8192` (two legs); throughput on the `lkv-store-*` rows, `lkv-alloc-heap/1024`,
-  `inproc-borrow/16384` and `inproc-mt4`; the mean on `eptype-stream/64`, `inproc/64/1024/1`
-  and `inproc-target-handler`; and p50 on five of the eight `store-lat-*` rows. 56 of the 98
-  cliff rows hold at least one leg at the cap. A same-source A/A between two layouts can
+  way. In the 2026-10-09 null (27 fit rounds in three windows, banked from main@738c0a29)
+  the null tightens 27 of the 89 legs outside the cliff family and 18 of the 294 cliff legs;
+  every other leg is at the cap. Rows at the cap on every leg: `acl-inherit-d4-mt4`,
+  `compact-forward/16384`, both `eptype-stream` rows, all three `fwd-demux-*` rows, both
+  `inproc-borrow` rows, `inproc-mt4`, `inproc-path/64/1/8192`, `inproc/16384`,
+  `lkv-alloc-heap/1024`, `mixed`, `poolalloc-mt4`, and the `store-lat` full, net-fwd and
+  narrow graph-read rows. `fold-b4/512/1/1` is tightened on p50 only (x1.113). 97 of the 98
+  cliff rows hold at least one leg at the cap. The held-out window gave no A/A false fail in
+  18 sessions, and an injected 10% slowdown failed 12 of the 133 rows in every session.
+  Fitting on any three of the four windows and replaying the fourth gave false fails in 10 of
+  54 sessions, all but two in the two daytime windows. The `cliff-alloc-heap` and
+  `lkv-alloc-heap` rows move by up to x1.20 with code placement alone, more than three
+  alignment builds sample ([#2030](https://github.com/avatarsd-llc/libtracer/issues/2030)).
+  A same-source A/A between two layouts can
   still fail these rows, as it could before #1807; the null cannot
   remove that without loosening them, which was ruled out.
 - **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).

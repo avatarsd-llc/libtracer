@@ -1758,6 +1758,26 @@ class AaNullPoolsRunnerStops(unittest.TestCase):
                          [("2026-10-08", 13), ("2026-10-09", 12)])
         self.assertEqual(meta["banked"], "2026-10-09")
 
+    def test_a_pooled_fit_banks_its_noisiest_window(self):
+        """Layout offsets move with host state: one window can show none and the next 10%.
+        Measured on the bench host, pooling dilutes that window to a threshold the next
+        window false-fails; the row banks the worst window's spread instead."""
+        import aa_null
+        quiet = [self.window(9, d) for d in ("d1", "d2")]
+        loud = self.window(9, "d3", offsets=(0, 0.08, 0))
+        one = aa_null.bank(loud)["rows"]["inproc/64/1/1"]["p50_ns"]
+        pooled = aa_null.bank(aa_null.pool(quiet + [loud]))["rows"]["inproc/64/1/1"]["p50_ns"]
+        self.assertAlmostEqual(pooled, one, places=5)
+        self.assertGreater(pg.leg_factor("inproc/64/1/1", "p50_ns",
+                                         {"inproc/64/1/1": {"p50_ns": pooled}})[0], 1.08)
+
+    def test_window_columns_split_back_out_of_a_pool(self):
+        import aa_null
+        a, b = self.window(8, "d1"), self.window(9, "d2")
+        parts = aa_null.split_windows(aa_null.pool([a, b]))
+        self.assertEqual([p["rounds"] for p in parts], [8, 9])
+        self.assertEqual(parts[1]["samples"]["inproc/64/1/1"], b["samples"]["inproc/64/1/1"])
+
     def test_one_measurement_still_banks_as_one_window(self):
         import aa_null
         meta = aa_null.bank(self.window(10, "2026-10-08"))["meta"]
@@ -1815,6 +1835,22 @@ class AaNullCampaignScript(unittest.TestCase):
         self.assertRegex(text, r"trap\s+\S*restart\S*\s+EXIT")
         self.assertIn("systemctl start", text)
 
+    def test_a_signal_ends_the_script_instead_of_resuming_it(self):
+        """A bare handler on TERM returns and the script runs on to the next window."""
+        text = self.SCRIPT.read_text()
+        self.assertNotRegex(text, r"trap\s+restart_runner\s+.*(INT|TERM)")
+        for sig in ("INT", "TERM"):
+            self.assertRegex(text, r"trap\s+'exit \d+'\s+" + sig)
+
+    def test_a_drained_runner_gets_its_job_label_back_on_every_exit(self):
+        text = self.SCRIPT.read_text()
+        restart = text[text.index("restart_runner() {"):]
+        restart = restart[:restart.index("\n}\n")]
+        self.assertIn("restore_label", restart)  # the EXIT trap runs restart_runner
+        drain = text[text.index("drain_runner() {"):]
+        drain = drain[:drain.index("\n}\n")]
+        self.assertLess(drain.index("labels/"), drain.index("runner_busy >/dev/null; do"))
+
     def test_it_waits_for_both_perf_workflows_before_stopping_the_runner(self):
         text = self.SCRIPT.read_text()
         for wf in ("perf.yml", "perf-local.yml"):
@@ -1824,6 +1860,14 @@ class AaNullCampaignScript(unittest.TestCase):
 
     def test_it_holds_out_a_window_the_fit_does_not_use(self):
         self.assertIn("--held-out", self.SCRIPT.read_text())
+
+    def test_a_shared_bench_lock_is_held_from_before_the_stop_to_after_the_restart(self):
+        text = self.SCRIPT.read_text()
+        self.assertIn("BENCH_LOCK", text)
+        body = text[text.index("measure_window() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertLess(body.index("flock"), body.index("systemctl stop"))
+        self.assertLess(body.rindex("restart_runner"), body.rindex("{lock_fd}>&-"))
 
 
 class HistoryKeepsOneRunnersTuple(unittest.TestCase):
