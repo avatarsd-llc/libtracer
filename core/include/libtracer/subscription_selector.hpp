@@ -111,9 +111,8 @@ enum class selector_ref_state_t : std::uint8_t {
  * a double delivery when A and B reach one target through two different subscriptions; the
  * price is a gap, from the first suspend to the last resume, in which that target receives
  * nothing. Each toggle is `%graph_t::set_suspended`: no unsubscribe, no re-subscribe and no
- * frame, so a switch also reaches a subscriber behind a link at once. A suspend draws nothing; a
- * resume draws only to rebuild its producer's stale edge list (after a refused republish there),
- * from that producer's edge source.
+ * frame, so a switch also reaches a subscriber behind a link at once. Neither a suspend nor a
+ * resume draws anything (#1622).
  *
  * **The selector owns the suspend bit of every ref it lists.** It acts on what it last set and
  * does not watch the graph: it re-reads a ref's state only for `options`, for @ref state, and
@@ -124,12 +123,13 @@ enum class selector_ref_state_t : std::uint8_t {
  * owner lists it and switches: admitting it suspended needs a remote spelling (#2019). "No
  * double delivery" is a promise over the refs listed here, while the selector owns their bit.
  *
- * **A refused switch.** A resume can answer `BACKPRESSURE` (a resume after an edge republish on
- * its producer was refused for want of memory). The switch then reports `BACKPRESSURE` and is
+ * **A refused switch.** A toggle cannot be refused for want of memory since #1622, so this arm
+ * is reached only if a resume answers an error other than `NOT_FOUND`; it is kept as the
+ * contract for that case. The switch then reports that error and is
  * partly applied (RFC-0034 §2.1): B stays the active option and @ref settled turns false; every
  * ref outside B is suspended, the refs of B that resumed deliver, and the refused ones stay
  * suspended. Selecting B again (or writing `active` again) retries only the refs still
- * suspended; a retry succeeds once the producer's source has room. It is the one refused
+ * suspended. It is the one refused
  * `active` write that leaves state behind, which the admit seam's doc
  * (`handlers_t::on_app_field_admit`) allows.
  *

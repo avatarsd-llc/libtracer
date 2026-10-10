@@ -14,8 +14,8 @@
  *   2. Selecting is an ordinary field write: `NAME <option>` selects, an empty `STATUS` selects
  *      none, an unknown name is NOT_FOUND, anything else TYPE_MISMATCH; `options` has no write
  *      surface. A read of either field answers the selector's state (RFC-0034 shapes).
- *   3. A refused switch under memory pressure answers BACKPRESSURE, leaves no target served
- *      twice and nothing double-delivered, and a retry completes it once the source has room.
+ *   3. A switch under memory pressure completes: a toggle draws nothing (#1622), so a refused
+ *      republish on the producer cannot refuse it, and nothing is double-delivered.
  *   4. A dangling ref is listed INERT, a switch skips it, and nothing removes it on its own.
  *   5. Teardown: destroying the selector retires its vertex and leaves every subscription in the
  *      state it held; retiring a producer makes its refs inert.
@@ -31,8 +31,8 @@
  *      BACKPRESSURE and change nothing, a retry completes them, and an `active` read never
  *      refuses. The same again on the busy flag's guarded binding (no atomic RMW).
  *  12. A temporary option name does not compile; a literal and an lvalue do.
- *  13. A switch suspends before it resumes: at a resume's one draw, the only delivering edge on
- *      the producer is the one being resumed (#2161).
+ *  13. A switch suspends before it resumes (#2161): under memory pressure it draws nothing, and
+ *      the producer counts only the resumed edge after it (#1622).
  */
 
 #include "libtracer/subscription_selector.hpp"
@@ -320,9 +320,9 @@ void test_fields() {
     check(read_field(g, *vh, "active") == ok_status, "and active then reads as an empty STATUS");
 }
 
-/** @brief (3) A refused switch under memory pressure, and its retry. */
+/** @brief (3) A switch under memory pressure: a toggle draws nothing, so it cannot be refused. */
 void test_refused_switch() {
-    std::printf("a refused switch never double-delivers, and a retry completes it:\n");
+    std::printf("a switch under memory pressure completes, and never double-delivers:\n");
     gate_source_t gate;
     graph_t g{gate};
     const vertex_handle_t in = g.register_vertex(path_t("/in"), role_t::STORED_VALUE);
@@ -336,37 +336,30 @@ void test_refused_switch() {
 
     gate.arm();
     check(sel.select("a").has_value(), "re-selecting the active option draws nothing");
-    // An unrelated unsubscribe whose republish is refused leaves /in's array stale, so the next
-    // resume on /in has to rebuild it: the one draw a toggle can make.
+    // An unrelated unsubscribe whose republish is refused leaves a dead entry in /in's array.
+    // Since #1622 that is the only staleness a refusal leaves, and a resume flips its own entry
+    // without rebuilding, so the switch needs no room at all.
     check(g.unsubscribe(*so).has_value(), "an unsubscribe with no room still takes effect");
-    const auto r = sel.select("b");
-    check(!r && r.error() == status_t::BACKPRESSURE, "the switch to b answers BACKPRESSURE");
-    check(sel.active() == "b" && !sel.settled(), "b is active and the switch is not settled");
+    check(sel.select("b").has_value() && sel.active() == "b" && sel.settled(),
+          "the switch to b completes with no room");
     gate.disarm();
     (void)g.write(in, byte_value(1));
-    check(a.seen == 0 && b.seen == 0 && other.seen == 0,
-          "in between, nothing delivers: a gap, never a double delivery");
-    check(sel.state(*sb).value_or(selector_ref_state_t::INERT) == selector_ref_state_t::SUSPENDED,
-          "the refused ref is still suspended");
-
-    check(sel.select("b").has_value() && sel.settled(), "the retry, with room, completes");
-    (void)g.write(in, byte_value(2));
-    check(a.seen == 0 && b.seen == 1, "and b delivers");
+    check(a.seen == 0 && b.seen == 1 && other.seen == 0,
+          "and b alone delivers: never a double delivery");
 
     gate.arm();
     check(sel.select("a").has_value() && sel.select("b").has_value(),
-          "with the array current again, a switch draws nothing");
+          "a switch back and forth draws nothing either");
     gate.disarm();
 }
 
 /**
- * @brief (13) Suspend before resume, observed inside the switch (#2161).
+ * @brief (13) Suspend before resume (#2161), seen from outside the switch.
  *
- * The toggles themselves call nothing back, and writes between switches cannot tell the two
- * orders apart. The one point a switch can be seen from inside is the draw a resume makes to
- * rebuild a stale edge array, from the graph's own source: there, the producer's
- * delivering-edge count (RFC-0005, which a resume bumps before it flips) must hold the resumed
- * edge alone. Resume first, and A's edge is still counted beside it.
+ * The toggles call nothing back, and since #1622 a resume never draws (it used to rebuild a
+ * stale edge array, the one point a switch could be observed from inside). What is left to
+ * check is the outcome: with no room, the switch makes no draw, and the producer's
+ * delivering-edge count (RFC-0005) ends at the resumed edge alone.
  */
 void test_suspend_before_resume() {
     std::printf("a switch suspends every ref outside the new option before it resumes one:\n");
@@ -381,8 +374,6 @@ void test_suspend_before_resume() {
     selector_t sel(g);
     check(sel.add("a", *sa) && sel.add("b", *sb) && sel.select("a"), "a selector on a");
 
-    // A refused republish (an unrelated unsubscribe) leaves /in's array stale, so the switch's
-    // resume of b must rebuild it: one draw, served, inside the switch.
     gate.arm();
     check(g.unsubscribe(*so).has_value() && g.own_subs(in) == 1,
           "an unsubscribe with no room takes effect");
@@ -390,12 +381,8 @@ void test_suspend_before_resume() {
     gate.watch(g, in);
     check(sel.select("b").has_value() && sel.settled(), "the switch to b completes");
     gate.unwatch();
-    check(gate.draws() >= 1, "the resume of b drew from the source, inside the switch");
-    // This relies on a resume raising the delivering-edge count BEFORE it flips the edge, a
-    // documented, deliberate order (graph_t::set_suspended counts first, as admit_subscriber
-    // does): at the draw, b is already counted and a must already be uncounted.
-    check(gate.draws() >= 1 && gate.count_at(0) == 1,
-          "at that draw, b's edge is the only one counted: a was suspended first");
+    check(gate.draws() == 0, "the switch drew nothing from the source, though it had room");
+    check(g.own_subs(in) == 1, "b's edge is the only one counted after it");
 
     (void)g.write(in, byte_value(1));
     check(a.seen == 0 && b.seen == 1 && other.seen == 0, "and after it, only b delivers");

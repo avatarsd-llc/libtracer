@@ -78,9 +78,9 @@
       "source": "measured",
       "arm": "tcp-remote-sub",
       "metric": "per_sub",
-      "value": 958,
+      "value": 558,
       "goal": null,
-      "moved_by": "#2171 (first pin)",
+      "moved_by": "#1622 (store the subscriber table once: a slot keeps only its cold remainder)",
       "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
     },
     {
@@ -89,9 +89,9 @@
       "source": "measured",
       "arm": "ws-remote-sub",
       "metric": "per_sub",
-      "value": 958,
+      "value": 558,
       "goal": null,
-      "moved_by": "#2176 (WS exact-size ingress)",
+      "moved_by": "#1622 (store the subscriber table once: a slot keeps only its cold remainder)",
       "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
     },
     {
@@ -100,9 +100,9 @@
       "source": "measured",
       "arm": "udp-remote-sub",
       "metric": "per_sub",
-      "value": 958,
+      "value": 558,
       "goal": null,
-      "moved_by": "#2171 (first pin)",
+      "moved_by": "#1622 (store the subscriber table once: a slot keeps only its cold remainder)",
       "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
     },
     {

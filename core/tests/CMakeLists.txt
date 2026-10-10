@@ -3017,3 +3017,10 @@ add_executable(structured_record_test structured_record_test.cpp)
 target_link_libraries(structured_record_test PRIVATE libtracer)
 libtracer_test_warnings(structured_record_test)
 add_test(NAME structured_record COMMAND structured_record_test)
+
+# #1622 (L7): the subscriber table is stored once: the published edge array carries the
+# dispatch fields and the slot table the cold remainder; a refused replace changes nothing.
+add_executable(edge_slot_table_test edge_slot_table_test.cpp)
+target_link_libraries(edge_slot_table_test PRIVATE libtracer)
+libtracer_test_warnings(edge_slot_table_test)
+add_test(NAME edge_slot_table COMMAND edge_slot_table_test)
