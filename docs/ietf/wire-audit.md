@@ -7,10 +7,13 @@
 > [GOVERNANCE.md](https://github.com/avatarsd-llc/libtracer/blob/main/.github/GOVERNANCE.md).
 > Where this page and the specification disagree, the specification wins.
 
-The elements come from [Protocol v1](../spec/v1.md) and the three annexes its §3 incorporates:
+The elements come from [Protocol v1](../spec/v1.md) and the four annexes its §3 incorporates:
 [01-data-format.md](../reference/01-data-format.md),
-[05-protocol-tlvs.md](../reference/05-protocol-tlvs.md) and
-[03-addressing.md](../reference/03-addressing.md) §path syntax. Each one was cross-checked
+[05-protocol-tlvs.md](../reference/05-protocol-tlvs.md),
+[03-addressing.md](../reference/03-addressing.md) §path syntax and
+[23-noise-link-binding.md](../reference/23-noise-link-binding.md), which applies only to a link
+that uses the Noise binding and was incorporated after this audit was taken, so its elements are
+not audited here. Each of the first three was cross-checked
 against the C++ codec and resolver and against `tests/conformance/vectors/v1/`. The audit was
 taken at main `4a7496aa`.
 

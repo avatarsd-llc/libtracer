@@ -742,8 +742,9 @@ frame "pang", responder -> initiator, n = 0 (33 B)
 
 ### A.4 The generator
 
-Run with Python 3 and the `cryptography` package. It prints A.3 and fails if the two sides
-disagree.
+Run with Python 3 and the `cryptography` package. It prints the two handshake datagrams, the
+handshake hash, the two transport keys and the three transport messages of A.3, each as one hex
+line. It does not print the step-by-step symmetric states. It fails if the two sides disagree.
 
 ```python
 import hashlib, hmac, struct
