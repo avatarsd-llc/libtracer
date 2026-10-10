@@ -1,6 +1,6 @@
 # Access control uses NFSv4-style ACEs with inheritance; `admin` is precisely `WRITE_ACL`
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: RFC-0036 -->
 
 Status: accepted
 

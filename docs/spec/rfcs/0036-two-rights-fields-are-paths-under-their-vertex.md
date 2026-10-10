@@ -5,16 +5,16 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0036 — Two rights, and `:` fields are paths under their vertex
 
-<!-- status: proposed -->
+<!-- status: accepted -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0036 |
 | **Title** | Two rights, and `:` fields are paths under their vertex |
-| **Status** | **proposed** (2026-10-10). The maintainer set the direction on 2026-10-10; this document is awaiting rulings on §12. |
+| **Status** | **accepted** (2026-10-10, maintainer approval; proposed the same day). The maintainer set the direction on 2026-10-10 and ruled **"all rec"** on every §12 question the same day. The rulings are folded into the text, and §12 records them. Comment window waived by the sole maintainer. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-10 |
-| **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. `docs/implementations.md` lists no registered implementation, so the waiver's revert trigger has not fired. |
+| **Comment window** | Waived by the maintainer, as is the default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. `docs/implementations.md` lists no registered implementation, so the waiver's revert trigger has not fired. |
 | **Instrument** | **Amendment.** It changes the `access_mask` registry of [reference/05](../../reference/05-protocol-tlvs.md) §`0x0A`, a normative annex. An `:acl` write that is accepted today is refused, and several field writes change which caller they admit. A conforming peer can observe each of these changes. |
 | **Tracking issue** | [#2088](https://github.com/avatarsd-llc/libtracer/issues/2088). It blocks [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019) (wire spelling for a suspended subscriber slot), whose RFC-0035 has an open question that this RFC answers (§8). |
 | **Target spec version** | v1 itself. `docs/spec/v1.md` still reads "(DRAFT)". |
@@ -115,7 +115,7 @@ the reserved range together with `0x100` and above.
 
 **Install-time refusal.** An `:acl` write MUST be refused with `tr::schema::type_mismatch`
 (`0x0030`) when any ACE's `access_mask` has a bit set outside `0x03`. The whole write is refused and
-nothing is stored. This is the same family of refusal as a DENY ACE under the ALLOW-only profile,
+nothing is stored. The rule covers every bit outside `0x03`: the six retired bits and `0x100` and above alike, so a right defined later can never be stored and left inert by an older core (§12 Q3). This is the same family of refusal as a DENY ACE under the ALLOW-only profile,
 or a flag bit beyond `INHERIT`: an ACE whose meaning the evaluator would silently weaken is not
 stored (#906). A mask of `0` stays legal. It grants nothing, as it does today.
 
@@ -150,6 +150,10 @@ write path must carry its caller for this to hold, which #974 enforced.
 
 - A write of `v:acl` from any caller that is not the owner MUST be refused with
   `tr::access::denied` (`0x0050`). No ACE can grant it, so no ACE is evaluated.
+- This rule, and the owner-only rule of §3.4, hold **on every node, with or without ACL
+  enforcement**. They are identity tests and need no resolver. On a node with no resolver, reads
+  and writes stay open by default, but a remote peer still cannot plant ACEs that would take effect
+  once a resolver is installed later (§12 Q2).
 - A read of `v:acl` needs READ on `v`, like every other field. A peer that can read the vertex can
   read who else may read it. A node that wants to hide its policy withholds READ.
 - There is no owner subject token. `OWNER@` stays what ADR-0020's erratum made it: an ordinary
@@ -165,7 +169,8 @@ admission (RFC-0010 §A.3), receives the request together with the writer's subj
 writes the target's `:acl` through the host API as the owner. The peer needs WRITE on the owner-app
 vertex and nothing else. The policy for who may grant what to whom, how far delegation goes, and
 what gets audited lives in the application, where ADR-0086 puts identity. The protocol defines no
-admin vertex type (§12 Q7).
+admin vertex type. Reference/13 gains an informative recipe for one when the documentation for
+this RFC lands (§12 Q7, §13).
 
 ### 3.4 `v:subscribers[]`: your own entry needs READ, everyone else's is the owner's
 
@@ -175,7 +180,9 @@ the replacer the holder. An edge admitted by a local host call is held by the ow
 already stores the context per edge (`subscriber_remote_t::caller`,
 `core/include/libtracer/subscriber.hpp:subscriber_remote_t`), so the holder costs no new state.
 Two holders are compared as RFC-0035 §7.1 compares them: both contexts are resolved through the
-node's subject lookup at check time (§12 Q1).
+node's subject lookup at check time, so a peer that comes back over a new link under the same key
+still holds its entry. A node with no resolver installed compares the two stored contexts byte for
+byte (§12 Q1).
 
 | Write | The caller holds the entry | The caller does not |
 | ---- | ---- | ---- |
@@ -217,7 +224,7 @@ having created it.
 
 It **starts with no ACEs of its own**. Its effective ACL is the `INHERIT` ACEs of its ancestors,
 and if there are none it is open by default, which is today's rule for any vertex. The core stamps
-no creator ACE (§12 Q5). A creation hook or a transport factory runs locally with the creator's
+no creator ACE (§12 Q5, ruled). A creation hook or a transport factory runs locally with the creator's
 caller context in hand. If the application wants its creators to manage what they create, it can
 install such an ACE as the owner. That is policy, and it costs the core nothing.
 
@@ -264,7 +271,7 @@ administration, because there is no administration right left to inherit.
 | fan-out and delivery | unchanged |
 | subscribe admission | unchanged: one `acl_allows` for a different bit |
 | `:acl` write | cheaper: an empty-context test instead of an ACE walk and a resolver call |
-| `[N]` write by a non-owner | one holder comparison on a cold control-plane path: up to two subject lookups with a resolver installed (§12 Q1), a byte compare without one |
+| `[N]` write by a non-owner | one holder comparison on a cold control-plane path: up to two subject lookups with a resolver installed, a byte compare without one (§12 Q1) |
 | code size | an indicative figure from a RelWithDebInfo x86-64 build of a 2026-10-09 branch (`c75583e2`): `graph_t::declared_write_right` (81 B) goes, `declare_payload_rights` (506 B) loses its rows half, and the `write_acl` door (779 B) loses an `acl_allows` call. That is roughly **0.3–0.5 KB less `.text`** on x86-64. The implementation PR measures it on the ESP32 size gate |
 | gate decision points | counted by reading `origin/main`, to be confirmed by the complexity ratchet (#1790): `graph.cpp` **−11** (`write_impl` −2, `declared_write_right` −4, `leading_type` −3, `declare_payload_rights` −2), `graph_fields.cpp` **+1** (`read_acl` −1, the `[N]` holder-or-owner test +2), `security_acl.hpp` **+1** (the mask term). **About −9 net**, all by deletion and merging; no function is split |
 
@@ -284,16 +291,20 @@ upgrade note in §7.
   that installs its ACLs at boot with SUBSCRIBE, CREATE, READ_ACL or WRITE_ACL set gets
   `type_mismatch`, and nothing is installed, so the vertex stays as open or as closed as it was. The
   refusal is loud on purpose: an ACE that silently lost bits would change what it grants.
-- **A remote `:acl` write is refused** even for a peer that held WRITE_ACL.
+- **A remote `:acl` write is refused** even for a peer that held WRITE_ACL, and also on a node
+  with no resolver installed, where it used to succeed (§3.3).
 - **A peer with READ can now subscribe** where it used to need SUBSCRIBE too. The cost of the edges
   it can hold is bounded by the node's `retained` seam
   ([reference/09](../../reference/09-memory-substrate.md)), which is sized against the subscription
   population, and its exhaustion refuses the admission as `backpressure`. A READ-only "poll but
-  never subscribe" grant is no longer expressible (§12 Q6).
+  never subscribe" grant is no longer expressible. That was accepted (§12 Q6). An owner-declared
+  "no remote subscribers" flag is added only if a deployment asks for one.
 - **A peer with WRITE can no longer clear or replace another party's slot.** A holder with READ
   can now clear its own slot without WRITE.
 - **Creating through a creator endpoint needs WRITE** on the endpoint, and WRITE now also removes.
-  Create-only and remove-only are no longer separately grantable through the ACL (§12 Q4).
+  Create-only and remove-only are no longer separately grantable through the ACL. A deployment
+  that needs create-only refuses `NAME` from non-owners in the endpoint's admission filter, which
+  sees the payload type and the writer's subject (§12 Q4).
 - **Vectors** (`tests/conformance/vectors/v1/acl/`):
   - `acl/acl-aces` is **unchanged**. Its masks are `0x03` and `0x01`.
   - `acl/ace-duplicate-key` is **repaired in place**. The second `access_mask` value changes from
@@ -353,7 +364,8 @@ this RFC, and it lands after it (#2088 blocks #2019):
 - **§7.2's table** becomes §3.4's table. The create and the caller's own `[N]` clear, toggle and
   replace need READ, where RFC-0035 proposed SUBSCRIBE. Another party's slot is owner-only, where
   RFC-0035 proposed WRITE_ACL. The sentence "a node built without ACL enforcement admits every
-  caller to every operation, ownership included" follows the ruling on §12 Q2.
+  caller to every operation, ownership included" is replaced: per §12 Q2, other parties' slots
+  stay owner-only on such a node too, and the holder comparison falls back to bytes (§12 Q1).
 - **§7.2's order paragraph** reads "a non-owner without READ" in place of "a caller that holds
   neither SUBSCRIBE nor WRITE_ACL". The disclosure argument is unchanged.
 - **§7.3**: the holder keeps READ, where RFC-0035 says SUBSCRIBE, so it can resume or re-append.
@@ -382,8 +394,8 @@ owns nothing on the wire" stand unchanged.
 ## 10. What this overrides, explicitly
 
 - **ADR-0020**: "`admin` is precisely `WRITE_ACL`" and its eight-bit mask. The ADR's other
-  decisions stand: NFSv4-style ACEs, ALLOW and DENY, `INHERIT`, the MCU subset and `EVERYONE@`. On
-  acceptance its status key gains `superseded-in-part-by: RFC-0036`. The owner-semantics item its
+  decisions stand: NFSv4-style ACEs, ALLOW and DENY, `INHERIT`, the MCU subset and `EVERYONE@`. Its
+  status key carries `superseded-in-part-by: RFC-0036`. The owner-semantics item its
   #1033 erratum left open is closed without a reserved token, by §3.3.
 - **RFC-0014 §5 and Amendment 2**: the create-but-not-remove split and the payload-right table.
   "The create right is delegable on the endpoint's own ACL without any right on the parent
@@ -425,41 +437,31 @@ owns nothing on the wire" stand unchanged.
   grants something other than what its writer wrote, which is the failure #906 removed from the
   parser.
 
-## 12. Open questions for the maintainer
+## 12. Rulings
 
-Each has a recommendation, judged on throughput, latency, RAM and the NARROW to WIDE spectrum.
+The maintainer ruled **"all rec"** on 2026-10-10: each question took its recommended option. The
+text above already states each ruling, and this section records the question and its answer.
 
-1. **How two holders are compared.** (a) Resolve both caller contexts through the subject lookup at
-   check time, as RFC-0035 §7.1 does: this is stable when a peer comes back over a new link under
-   the same key, and costs up to two lookups on a cold path. (b) Byte-compare the stored contexts:
-   no lookup, but a peer that reconnects loses its own edge to the owner. **Recommended: (a)**,
-   which falls back to (b) when no resolver is installed.
-2. **Whether the two owner rules hold on a node without enforcement.** (a) Always: they are
-   identity tests that need no resolver, they cost one branch, and they stop a peer from planting
-   ACEs that wake up when a resolver is installed later. (b) Only once a resolver is installed,
-   which keeps "open by default" literal, as RFC-0035 §7.2 assumed. **Recommended: (a)**. Read and
-   write stay open by default.
-3. **What install refuses.** (a) Every bit outside `0x03`, the six retired ones and `0x100` and
-   above alike, with `type_mismatch`: one compare, and a future right is never inert on an old
-   core. (b) The six retired bits only, so that reserved high bits stay storable. **Recommended:
-   (a)**. A new error identity is not needed; `type_mismatch` already covers DENY under ALLOW-only.
-4. **Create-versus-remove on a creator endpoint.** (a) Accept that WRITE does both. A deployment
-   that needs create-only refuses `NAME` from non-owners in the endpoint's admission filter, which
-   sees the type and the subject. (b) Keep the payload-right table with only READ and WRITE in it.
-   That is useless. (c) Split create and remove into two vertices, which is a wire change.
-   **Recommended: (a)**. It deletes the table and keeps the hot-path saving.
-5. **The initial ACL of a remotely created child.** (a) Inherit only. The core stamps nothing, and
-   a hook may install a creator ACE as the owner. This costs no RAM and stores no identity. (b) The
-   core stamps `{creator, READ|WRITE}` on every created child, which costs an ACE, a subject copy
-   and an ACL-cache invalidation per creation. **Recommended: (a)**.
-6. **The lost poll-only grant.** (a) Accept it. Edge cost is bounded by the `retained` seam and
-   refused as `backpressure`. (b) Add an owner-declared "no remote subscribers" vertex policy bit
-   later, if a deployment asks for one. That is a compile-time or registration-time declaration, not
-   an ACL right. **Recommended: (a) now, with (b) filed only on demand.**
-7. **A standard admin vertex type.** (a) None for now. Reference/13 gains an informative recipe for
-   an owner-app vertex that applies ACEs. (b) Specify a typed admin vertex now, as RFC-0034 does
-   for the selector, so that two management tools interoperate. **Recommended: (a)**, and an RFC
-   for (b) once a second tool exists.
+1. **How two holders are compared.** Ruled: through the subject lookup at check time, falling back
+   to a byte compare of the stored contexts when no resolver is installed (§3.4). Rejected: a byte
+   compare always, which would make a peer that reconnects lose its own edge.
+2. **Whether the owner-only rules hold without enforcement.** Ruled: always (§3.3). They cost one
+   branch and need no resolver. Rejected: only once a resolver is installed.
+3. **What install refuses.** Ruled: every bit outside `0x03`, with `type_mismatch` (§3.1).
+   Rejected: refusing only the six retired bits, and a new error identity.
+4. **Create versus remove on a creator endpoint.** Ruled: WRITE allows both, and the endpoint's
+   admission filter can refuse removals from non-owners (§6). The payload-right table is deleted.
+   Rejected: a table holding only READ and WRITE, and splitting the endpoint into two vertices.
+5. **The initial ACL of a remotely created child.** Ruled: inheritance only. The core stamps
+   nothing, and a hook may install a creator ACE as the owner (§3.6). Rejected: a core-stamped
+   creator ACE on every created child.
+6. **The lost poll-only grant.** Ruled: accepted. Edge cost stays bounded by the `retained` seam
+   (§6). An owner-declared "no remote subscribers" flag is filed only if a deployment asks.
+7. **A standard admin vertex type.** Ruled: none now. Reference/13 gains an informative recipe for
+   an owner-app vertex that applies ACEs (§3.3). It lands with the documentation slice of §13,
+   together with the rest of reference/13's formation text, which still describes WRITE_ACL until
+   the core change ships. A typed admin vertex gets its own RFC once a second management tool needs
+   one.
 
 ## 13. Implementation (follows acceptance)
 
@@ -471,13 +473,15 @@ Each has a recommendation, judged on throughput, latency, RAM and the NARROW to 
    `core/tests/acl_test.cpp` and `bindings/rust/tests/conformance_vectors.rs`. Change the Rust
    reader and its CHANGELOG.
 3. **Docs.** Reference/05 §`0x0A` (the registry, the enforcement paragraph and the upgrade note),
-   reference/02 (write-creates and the `[N]` table), reference/13 (formation and the admin recipe),
-   reference/18 and reference/19 (the CREATE gate), CONTEXT.md, ADR-0020's status key, a forward
+   reference/02 (write-creates and the `[N]` table), reference/13 (formation, and the admin-vertex
+   recipe of §12 Q7),
+   reference/18 and reference/19 (the CREATE gate), CONTEXT.md, a forward
    note on RFC-0014 Amendment 2, and the ESP-IDF README sentence.
 4. **RFC-0035** is revised per §8 before it is accepted.
 
 ## Discussion
 
 The maintainer's direction of 2026-10-10 is "two rights, and `:` fields are paths under their
-vertex". This document turns it into normative text, maps it onto every gate in the reference core,
-and lists what is still open in §12.
+vertex". This document turned it into normative text and mapped it onto every gate in the
+reference core. The maintainer accepted it on 2026-10-10 and ruled "all rec" on the seven
+questions in §12.
