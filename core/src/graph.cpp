@@ -1110,12 +1110,17 @@ std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noex
 }
 
 std::optional<vertex_slot_t> graph_t::vertex_slot_at(std::uint32_t index) const noexcept {
-    // The MINT keeps the shared hold. A retire bumps the generation first and clears the
-    // registration last (ADR-0062), and a revival does not bump, so a generation read
-    // between the two would stamp the SUCCESSOR tenant's number onto an element (#603). The
-    // unique hold a retire keeps throughout is what excludes that window; reading the
-    // generation twice, as `deref_vertex_slot` does, would not — both reads land after the
-    // bump. The honouring side needs no hold (#1939, argued in `deref_vertex_slot`).
+    // The MINT keeps the shared hold, so it never depends on the ORDER of a retire's steps.
+    // A revival does not bump, so a mint that read the bumped generation off a vertex still
+    // flagged registered would stamp the SUCCESSOR tenant's number onto an element (#603).
+    // Today `retire_subtree` clears the registration BEFORE the bump, and the generation load
+    // is an acquire of the bump's release, so a lock-free mint that saw the bump would also
+    // see the placeholder. But that rests on one ordering inside `retire`, and
+    // `revert_to_placeholder`'s ADR-0062 note asks for the bump before anything else: the
+    // order that reopens the window. Under the hold, which a retire keeps unique throughout,
+    // the mint sees a whole retire or none of it, in either order. `pair_hop_lock_free_test`
+    // fails with the hold removed AND the bump moved first, and passes with either kept.
+    // The honouring side needs no hold (#1939, argued in `deref_vertex_slot`).
     const std::shared_lock lock(map_mutex_);
     if (index >= vertex_slots_.size()) return std::nullopt;
     const vertex_t* const v = vertex_slots_[index];
@@ -1179,9 +1184,9 @@ std::optional<vertex_handle_t> graph_t::deref_vertex_slot(std::uint32_t index,
     // are no address.
     //
     // The generation is read AGAIN after the registration test, and that second read is what
-    // the shared hold used to provide. A retire bumps the generation and then clears the
-    // registration; a revival sets it again. A reader that saw the old generation and then
-    // the REVIVED registration has its second read ordered after the bump (the revival's
+    // the shared hold used to provide. A retire clears the registration and bumps the
+    // generation; a revival sets the registration again. A reader that saw the old generation and
+    // then the REVIVED registration has its second read ordered after the bump (the revival's
     // release store is what it acquired), so it refuses, instead of honouring a stale element
     // against the successor tenancy (#603).
     if (!v->registered()) return std::nullopt;

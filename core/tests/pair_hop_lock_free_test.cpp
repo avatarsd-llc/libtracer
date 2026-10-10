@@ -22,11 +22,13 @@
  *   check of the lock-free index.
  * - **No mint of the successor's generation.** One thread retires and revives a vertex at the
  *   same path; another mints for its slot (`vertex_slot_at`, the forwarder's mint) the whole
- *   time. A retire bumps the generation BEFORE it clears the registration flag (ADR-0062), and
- *   a revival does not bump, so a mint that read the bumped generation off a vertex still
- *   flagged registered would issue an element that validates against the NEXT tenant (#603).
- *   Every mint made entirely inside one `retire` call must therefore be the retiring tenant's
- *   generation or nothing.
+ *   time. A revival does not bump, so a mint that read the bumped generation off a vertex
+ *   still flagged registered would issue an element that validates against the NEXT tenant
+ *   (#603). Every mint made entirely inside one `retire` call must therefore be the retiring
+ *   tenant's generation or nothing. Since #2061 a retire clears the flag BEFORE the bump, so
+ *   this holds lock-free too; what the case pins is that the mint's shared hold keeps it
+ *   true if the bump ever moves first again (ADR-0062's order). Measured: it fails with the
+ *   hold removed and the bump moved first, and passes with either one kept.
  */
 
 #include <atomic>

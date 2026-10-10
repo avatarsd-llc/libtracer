@@ -114,9 +114,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `map_mutex_` hold, and the new `graph_t::registered_vertex_at` gives a door its connection
   vertex the same way. The generation is read on both sides of the registration test, so a
   stale element is still refused across a retire and revival. The **mint**,
-  `graph_t::vertex_slot_at`, keeps its shared hold: a retire bumps the generation before it
-  clears the registration, and a mint read in that window would carry the successor tenant's
-  number (#603).
+  `graph_t::vertex_slot_at`, keeps its shared hold, so it sees a whole retire or none of it
+  whichever order the retire clears the registration and bumps the generation in: a mint that
+  read the bumped generation off a vertex still flagged registered would carry the successor
+  tenant's number (#603).
 
 ### Fixed
 

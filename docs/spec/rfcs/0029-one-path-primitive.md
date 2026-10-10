@@ -896,8 +896,10 @@ chunked array whose size is published atomically (ADR-0063's pattern). So `deref
 honouring side of a PAIR, takes no lock: it reads the generation on both sides of the
 registration test instead. A door's ACL lookup, `graph_t::registered_vertex_at`, takes none
 either, because it holds a slot and issues no generation. The **mint**, `vertex_slot_at`, keeps
-the shared lock. A retire bumps the generation before it clears the registration, so a
-lock-free mint could issue the successor tenant's generation (#603).
+the shared lock, so a mint sees a whole retire or none of it whichever order the retire
+clears the registration and bumps the generation in. A lock-free mint that read the bumped
+generation off a vertex still flagged registered would issue the successor tenant's generation
+(#603).
 
 **The correction.**
 
