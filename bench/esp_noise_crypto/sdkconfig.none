@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# The baseline image: the same app with every crypto call compiled out.
+CONFIG_NOISE_BENCH_BACKEND_NONE=y

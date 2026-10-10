@@ -243,7 +243,8 @@ if(EXISTS ${ZC}/lib/libzenohc.so AND EXISTS ${ZCPP}/include/zenoh.hxx)
     add_executable(bench_zenoh bench_zenoh.cpp)
     add_executable(bench_zenoh_net bench_zenoh_net.cpp)
     add_executable(bench_zenoh_compose bench_zenoh_compose.cpp)
-    foreach(t bench_zenoh bench_zenoh_net bench_zenoh_compose)
+    add_executable(bench_zenoh_link bench_zenoh_link.cpp malloc_probe.cpp)  # #2065
+    foreach(t bench_zenoh bench_zenoh_net bench_zenoh_compose bench_zenoh_link)
         target_include_directories(${t} PRIVATE ${ZC}/include ${ZCPP}/include)
         target_link_libraries(${t} PRIVATE ${ZC}/lib/libzenohc.so)
         target_compile_definitions(${t} PRIVATE ZENOHCXX_ZENOHC)
@@ -327,6 +328,71 @@ target_compile_options(bench_mount_resolve PRIVATE -Wall -Wextra)
 add_executable(bench_tcp_baseline bench_tcp_baseline.cpp)
 target_link_libraries(bench_tcp_baseline PRIVATE libtracer)
 target_compile_options(bench_tcp_baseline PRIVATE -Wall -Wextra)
+
+# The Noise link harness (#2065), measured before the binding lands (RFC-0033 #2063, #2064).
+# Diagnostic, not a perf gate. Three binaries share link_harness.hpp / malloc_probe.cpp:
+#  - bench_noise_link: libtracer's LINK arms — the plain UDP link now, the Noise link behind
+#    LIBTRACER_BENCH_NOISE_LINK (needs #2064's link kind in the tree);
+#  - bench_noise_crypto: the CRYPTO arm — per-frame ChaCha20-Poly1305 and the NNpsk0 handshake
+#    on every backend found here (libsodium, OpenSSL, mbedTLS PSA); a backend that is not found
+#    is left out, never fetched;
+#  - bench_zenoh_link (in the Zenoh block below): Zenoh over UDP, TLS and QUIC, the same rows.
+# malloc_probe.cpp interposes malloc for the whole executable, so it is linked only here.
+option(LIBTRACER_BENCH_NOISE_LINK "Compile bench_noise_link's Noise arm (needs #2064)" OFF)
+add_executable(bench_noise_link bench_noise_link.cpp malloc_probe.cpp)
+target_link_libraries(bench_noise_link PRIVATE libtracer)
+target_compile_options(bench_noise_link PRIVATE -Wall -Wextra)
+if(LIBTRACER_BENCH_NOISE_LINK)
+    target_compile_definitions(bench_noise_link PRIVATE LIBTRACER_BENCH_NOISE_LINK=1)
+endif()
+
+add_executable(bench_noise_crypto bench_noise_crypto.cpp malloc_probe.cpp)
+target_compile_options(bench_noise_crypto PRIVATE -Wall -Wextra)
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(BENCH_SODIUM QUIET IMPORTED_TARGET libsodium)
+endif()
+if(BENCH_SODIUM_FOUND)
+    target_link_libraries(bench_noise_crypto PRIVATE PkgConfig::BENCH_SODIUM)
+    target_compile_definitions(bench_noise_crypto PRIVATE LIBTRACER_BENCH_HAVE_SODIUM=1)
+endif()
+find_package(OpenSSL QUIET COMPONENTS Crypto)
+if(OPENSSL_FOUND AND OPENSSL_VERSION VERSION_GREATER_EQUAL 3.0)
+    target_link_libraries(bench_noise_crypto PRIVATE OpenSSL::Crypto)
+    target_compile_definitions(bench_noise_crypto PRIVATE LIBTRACER_BENCH_HAVE_OPENSSL=1)
+endif()
+# mbedTLS has no system package worth measuring (Ubuntu ships 2.28, no PSA ChaCha20-Poly1305),
+# and the one that matters is the copy ESP-IDF builds. Point this at an mbedTLS 3.6 or 4.x
+# source tree — e.g. $IDF_PATH/components/mbedtls/mbedtls — and it is built from that tree,
+# offline, with its default configuration plus the one ESP-IDF option that changes a frame's
+# cost: MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS (IDF's esp_config.h sets it; without it every PSA
+# call copies its buffers through the heap). ESP-IDF's 4.x fork includes two public headers its
+# port directory supplies; noise_crypto_shim/ stands in for them on the host.
+set(LIBTRACER_BENCH_MBEDTLS_SOURCE "" CACHE PATH
+    "mbedTLS 3.6/4.x source tree for bench_noise_crypto's PSA backend (empty = skip)")
+if(LIBTRACER_BENCH_MBEDTLS_SOURCE)
+    include(ExternalProject)
+    set(BENCH_MBEDTLS_BIN ${CMAKE_BINARY_DIR}/mbedtls-build)
+    ExternalProject_Add(bench_mbedtls
+        SOURCE_DIR ${LIBTRACER_BENCH_MBEDTLS_SOURCE}
+        BINARY_DIR ${BENCH_MBEDTLS_BIN}
+        CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF
+                   -DGEN_FILES=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                   "-DCMAKE_C_FLAGS=-I${CMAKE_CURRENT_SOURCE_DIR}/noise_crypto_shim -DMBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS"
+                   -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
+        INSTALL_COMMAND ""
+        BUILD_BYPRODUCTS ${BENCH_MBEDTLS_BIN}/library/libmbedcrypto.a)
+    add_dependencies(bench_noise_crypto bench_mbedtls)
+    target_include_directories(bench_noise_crypto SYSTEM PRIVATE
+        ${LIBTRACER_BENCH_MBEDTLS_SOURCE}/include
+        ${LIBTRACER_BENCH_MBEDTLS_SOURCE}/tf-psa-crypto/include
+        ${LIBTRACER_BENCH_MBEDTLS_SOURCE}/tf-psa-crypto/drivers/builtin/include
+        ${BENCH_MBEDTLS_BIN}/include ${BENCH_MBEDTLS_BIN}/tf-psa-crypto/include)
+    target_link_libraries(bench_noise_crypto PRIVATE ${BENCH_MBEDTLS_BIN}/library/libmbedcrypto.a)
+    target_compile_definitions(bench_noise_crypto PRIVATE LIBTRACER_BENCH_HAVE_PSA=1)
+endif()
+message(STATUS "bench_noise_crypto backends: sodium=${BENCH_SODIUM_FOUND} "
+               "openssl=${OPENSSL_FOUND} mbedtls-psa=${LIBTRACER_BENCH_MBEDTLS_SOURCE}")
 
 # Per-connection RAM census (the transport plane's half of the ADR-0038 memory gate):
 # a counting operator-new measures the LIVE heap a real established connection holds,

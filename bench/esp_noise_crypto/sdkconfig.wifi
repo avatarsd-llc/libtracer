@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Overlay: bring Wi-Fi up (station init), to measure a backend's marginal flash over Wi-Fi.
+CONFIG_NOISE_BENCH_WITH_WIFI=y
