@@ -396,27 +396,42 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
 }
 
 transport_vertex_t::~transport_vertex_t() {
-    // The creator endpoints first. Each context is cut loose from this object under its own
-    // lock, after every call already inside `endpoint_write` has returned; a call that comes
-    // in afterwards finds no plane and answers NOT_FOUND. Only then is the endpoint retired,
-    // so `<net_root>/<module>/conn` stops resolving, and its context handed to the graph to
-    // free once no reader can still reach it (`graph_t::park_release`). If the park is
-    // refused, the context is left to the graph's lifetime rather than freed under a reader.
+    // Destroying the plane from inside a call through it (an endpoint write, or a liveness
+    // subscriber reached from a discharge) would wait below for a call that is this thread's
+    // own: fail loudly instead of hanging.
+    assert(!ops_held_by_this_thread() &&
+           "transport_vertex_t destroyed from inside its own control-plane operation");
+    // The creator endpoints first, so no connection can be created while the rest goes. Each
+    // context is cut loose from this object under its own lock, after every call already
+    // inside `endpoint_write` has returned; a call that comes in afterwards finds no plane and
+    // answers NOT_FOUND. Only then is the endpoint retired, so `<net_root>/<module>/conn`
+    // stops resolving, and its context handed to the graph to free once no reader can still
+    // reach it (`graph_t::park_release`). If either is refused, the context is left to the
+    // graph's lifetime rather than freed while the endpoint, or a reader, can still name it.
     for (endpoint_ctx_t* const e : endpoints_) {
         {
             std::unique_lock lock(e->m);
             e->self = nullptr;
             e->cv.wait(lock, [e] { return e->calls == 0; });
         }
-        (void)graph_.retire(*e->vertex);
+        if (!graph_.retire(*e->vertex)) continue;
         (void)graph_.park_release({e, [](void* c) {
                                        auto* const ctx = static_cast<endpoint_ctx_t*>(c);
                                        mem::drop_in(*ctx->src, ctx);
                                    }});
     }
-    // Before `conns_` destructs: destroying an owned socket can fire its departure eviction,
-    // which gives back each evicted edge's hold through this seam. Cleared only if it is
-    // still this plane's, so a plane wired later onto the same graph keeps its own.
+    // Then every connection, through the same removal a peer's `remove` takes: un-routed
+    // from the router, its engine stopped, its identity vertex retired, and only then its
+    // socket closed — so neither a forward from a link that outlives this object nor a read
+    // of the connection vertex reaches a socket that is gone. One transaction per
+    // connection, because each collects one connection's phase 2.
+    for (bool more = true; more;) {
+        ctl_txn_t txn(*this, ctl_scope_t::OPERATION);
+        more = !conns_.empty() && remove_connection_locked(txn, conns_.at(0).key).has_value();
+    }
+    // Last: closing a socket above can fire its departure eviction, which gives back each
+    // evicted edge's hold through this seam. Cleared only if it is still this plane's, so a
+    // plane wired later onto the same graph keeps its own.
     if constexpr (kSelfHealLinks) {
         graph::graph_hooks_t hooks = graph_.hooks();
         if (hooks.link_hold.ctx != this) return;
@@ -1038,8 +1053,8 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // peer — rejecting that hop is #741. See reference/14 §Forwarding. Kind-neutral in the one
     // sense that matters here: any transport whose
     // bus() is non-null gets this wiring; point-to-point links keep the plain
-    // vertex. The captured facet lives exactly as long as the link (the class's
-    // documented lifetime contract — the graph must not outlive this object).
+    // vertex. The captured facet lives exactly as long as the link, and the link outlives
+    // the connection vertex: removal, and this object's destructor, retire it first.
     graph::handlers_t handlers;
     // Asked through `bus_of` (#375 deliverable 3): on a target that closed the bus module out
     // every connection vertex is the plain one, and the synthesis below — with the TLV
@@ -1200,9 +1215,10 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     // BUS link. The identity vertex bears a value seam iff it was given one at creation, and
     // that happens only when `link->bus() != nullptr` (CAN; a tcp/ws server wired
     // `peer_named = true`). Tearing down a point-to-point connection — every dial link, UDP,
-    // loopback, a default-wired server — parks NOTHING, so a default deployment never needs
-    // a collect() point. A bus node parks one ~96 B value_handlers_t per teardown, which is
-    // the case #576 exists for. We do NOT collect here even then: this runs on whatever
+    // loopback, a default-wired server — parks NOTHING here; a bus node parks one ~96 B
+    // value_handlers_t per teardown, which is the case #576 exists for. (Destroying this
+    // object parks on every deployment, one per creator endpoint: see the destructor.) We
+    // do NOT collect here, nor there: this runs on whatever
     // thread the teardown arrived on, which is precisely the free location graph_t::collect()
     // exists to take out of the library's hands. The embedder calls collect() where it knows
     // no reader holds a seam.

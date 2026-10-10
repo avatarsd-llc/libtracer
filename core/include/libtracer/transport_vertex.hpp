@@ -262,11 +262,11 @@ struct listing_t {
  * A staging under some OTHER module that happens to share the leaf NAME is a different
  * connection: it is neither used nor consumed here.
  *
- * Destruction semantics (honest): there is no child-removal / connection-teardown
- * model yet (#66), so an owned transport lives as long as this `transport_vertex_t` —
- * its recv thread is joined when this object destructs. Declare the
- * `transport_vertex_t` AFTER the graph and router it binds (the usual stack order), so
- * owned transports stop delivering frames before the router they feed is gone.
+ * Destruction semantics: an owned transport lives until its connection is removed or this
+ * `transport_vertex_t` destructs. The destructor detaches its connections from the router
+ * and graph before closing them, in the order @ref remove_connection uses, so its recv
+ * thread is joined after its name has stopped resolving. Declare the `transport_vertex_t`
+ * AFTER the graph and router it binds (the usual stack order): both must outlive it.
  */
 class transport_vertex_t {
    public:
@@ -348,15 +348,19 @@ class transport_vertex_t {
                        mem::block_source_t* egress_src = &mem::net_source());
 
     /**
-     * @brief Retire every creator endpoint this plane minted, after the endpoint calls already
-     *        in flight have returned, then uninstall the routed-subscription hold seam
-     *        (#1816) — all before any connection is torn down.
+     * @brief Retire the connection handlers and drain in-flight calls, then detach every
+     *        connection from the router and graph before closing it.
      *
-     * The graph outlives this object, and a link this object does not own can keep writing
-     * to `<net_root>/<module>/conn` after it is gone; the endpoint then answers such a write
-     * as an absent path. The hold seam goes last, so a call that drains during destruction
-     * still finds it, and a departure eviction during member destruction never calls back
-     * into a half-destroyed plane.
+     * In order: each creator endpoint this plane minted is retired once the calls already
+     * inside it have returned, and answers any later write as an absent path; then each
+     * connection is removed exactly as @ref remove_connection removes it (un-routed, its
+     * engine stopped, its vertex retired, then its socket closed); last, the routed-
+     * subscription hold seam (#1816) is uninstalled, so a departure eviction fired by a
+     * closing socket still finds it. The graph and the router must outlive this object, and
+     * the embedder's next @ref graph::graph_t::collect frees what the endpoints parked.
+     *
+     * Must not run from inside a call through this object (an endpoint write, or a
+     * liveness subscriber reached from one of its operations): that is asserted.
      */
     ~transport_vertex_t();
 
@@ -1046,13 +1050,12 @@ class transport_vertex_t {
     /**
      * @brief The creator endpoint's `on_write` context — the hook's `ctx` (RFC-0028 D10).
      *
-     * It outlives this object. A link this object does not own (one the app wired into the
-     * router) can be writing to the endpoint while this object is destroyed, and a write that
-     * loaded the endpoint's seam before it was retired can still arrive afterwards. So the
-     * context is drawn from the graph's table source and freed by the graph, through
-     * `graph_t::park_release`, once no reader can still be on its way into it; until then a
-     * write that arrives finds `self` null and answers `NOT_FOUND`, as the absent path it
-     * now is. `calls` is what the destructor waits on before it lets anything go.
+     * It outlives this object. A retired value seam is freed only at `graph_t::collect`
+     * (ADR-0072), so the context the seam names lives as long: it is drawn from the graph's
+     * table source and freed by the graph, through `graph_t::park_release`, at that same
+     * point. Until then a write that arrives finds `self` null and answers `NOT_FOUND`, as
+     * the absent path the endpoint now is. `calls` is what the destructor drains before it
+     * lets anything go.
      */
     struct endpoint_ctx_t {
         transport_vertex_t* self; /**< @brief The owning transport vertex; null once it is gone.
