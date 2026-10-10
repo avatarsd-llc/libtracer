@@ -1199,7 +1199,7 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         retire_subtree(root, gone);
         // Close the epoch AFTER every seam above is unpublished: a router frame that loaded
         // one of them is online at this epoch or older, and collect() waits it out.
-        const std::uint64_t epoch = detail_qsbr::advance();
+        const std::uint32_t epoch = detail_qsbr::advance();
         for (std::size_t i = parked_before; i < retired_seams_.seams.size(); ++i)
             retired_seams_.seams[i].epoch = epoch;
     }

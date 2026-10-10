@@ -3215,7 +3215,7 @@ class graph_t {
     /** @brief One parked seam block and the epoch it was parked at. */
     struct parked_seam_t {
         value_handlers_t* seam;  /**< @brief The detached block. */
-        std::uint64_t epoch = 0; /**< @brief Free once every participant is past this. */
+        std::uint32_t epoch = 0; /**< @brief Free once every participant is past this. */
     };
     struct seam_park_t {
         mem::block_array_t<parked_seam_t> seams; /**< @brief The parked blocks. */
@@ -3840,7 +3840,7 @@ class graph_t {
     /** @brief One parked release and the epoch it was parked at (see `parked_seam_t`). */
     struct parked_release_t {
         retired_callback_t release; /**< @brief Run once, at the first ripe collect(). */
-        std::uint64_t epoch = 0;    /**< @brief Ripe once every participant is past this. */
+        std::uint32_t epoch = 0;    /**< @brief Ripe once every participant is past this. */
     };
     struct release_park_t {
         mem::block_array_t<parked_release_t> releases; /**< @brief The parked releases. */

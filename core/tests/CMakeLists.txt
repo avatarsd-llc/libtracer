@@ -1324,6 +1324,10 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
     libtracer_test_warnings(collect_test)
     add_test(NAME collect COMMAND collect_test)
+    add_executable(qsbr_epoch_wrap_test qsbr_epoch_wrap_test.cpp)
+    target_link_libraries(qsbr_epoch_wrap_test PRIVATE libtracer)
+    libtracer_test_warnings(qsbr_epoch_wrap_test)
+    add_test(NAME qsbr_epoch_wrap COMMAND qsbr_epoch_wrap_test)
 endif()
 
 # #82 — in-band :children[] SPEC vertex creation (ADR-0017). Reads the shared `spec/`

@@ -160,11 +160,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (`originate`, `bound_send`, `label_send`, `advertise`, `send_compact`, `link_down`) and, on
   a publish, one per remote subscriber edge: each `deliver_remote` opens its own unless the
   writer is already inside a bracket (under `reclaim_qsbr`, `fan_out`'s bracket covers the
-  whole publish and the edges nest). The epoch is 64-bit, so on a 32-bit target without
-  64-bit atomics, such as ESP32-C6, its load and both stores are `libatomic` calls that each
-  mask interrupts. Measured in the PR. `fan_out`'s `reclaim_qsbr` bracket now shares the frame
+  whole publish and the edges nest). All three accesses are 32-bit, so they are plain loads
+  and stores on a target without 64-bit atomics such as ESP32-C6, not `libatomic` calls that
+  mask interrupts (counted in the PR). The QSBR epoch is now 31 bits and wraps; it is
+  compared as a serial number, and `detail_qsbr::advance` does not bump it while a bracket
+  open 2^29 advances ago is still open. A bracket held open that long (one advance per
+  retired seam or parked release, never per frame) only delays frees until it closes; it
+  never lets one through early. `fan_out`'s `reclaim_qsbr` bracket now shares the frame
   bracket's nesting depth, so a dispatch inside a frame neither re-announces nor goes
-  quiescent early. Each parked seam and release carries its 8 B epoch.
+  quiescent early. Each parked seam and release carries its 4 B epoch.
 - **`udp_transport_t`: an ephemeral bind owns its port
   ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
   set `SO_REUSEADDR`, which lets the kernel give a UDP socket a port another reuse-enabled
