@@ -101,7 +101,7 @@ struct twai_link_config_t {
  * (#962); the lock covers the submission — the node handle and the pool's
  * serialized acquire — and nothing that blocks.
  */
-class twai_link_t : public can_link_t {
+class twai_link_t final : public can_link_t {
    public:
     /**
      * @brief Bring the on-chip TWAI controller up on @p config's pins/bitrate.
@@ -119,7 +119,7 @@ class twai_link_t : public can_link_t {
      * writer parked on the slot semaphore and waits only for them to leave,
      * rather than queueing behind their timeouts (#962).
      */
-    ~twai_link_t() override;
+    ~twai_link_t();
 
     twai_link_t(const twai_link_t&) = delete;
     twai_link_t& operator=(const twai_link_t&) = delete;

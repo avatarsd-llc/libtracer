@@ -6,7 +6,8 @@
     "naming an entry point or by calling, within libtracer.a, one that does (to a fixpoint). A pin",
     "may only be lowered (--repin); a function not pinned here, or one that gained a path or a",
     "count, fails CI. Empty targets are the goal. Most pins are deleting destructors and std",
-    "containers not yet on the seam, and everything that calls them; the PR for #1783 lists them."
+    "containers not yet on the seam, and everything that calls them; the PR for #1783 lists them.",
+    "One-time exception (#2022 slice 1, PR #2077): 14 esp32c6 pins were ADDED by hand, none a new heap call; every added edge ends at a function already pinned on main, directly or through a new destructor stub/lambda thunk: 7 calls the closure could not see through a vtable before (make_poly's recorded ~X for tcp, tcp_server, can, tcp session; send(span)->send(iov) devirtualized by final x3), 4 address references to those thunks, and main's 2 invoke_impl->ctor edges now appear as 3 entries after the factory lambda went out of line. Not a precedent: every other change to this file only lowers pins."
   ],
   "targets": {
     "cortex-m0": {
@@ -15,22 +16,9 @@
         "frame.o": {
           "_ZN2tr4wire6encodeERKNS0_5tlv_tE": {"operator new": 1}
         },
-        "mem_heap.o": {
-          "_ZN2tr3mem11host_root_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem11slab_pool_tINS_10no_guard_tELj81ELb0EED0Ev": {"operator delete": 1},
-          "_ZN2tr3mem12arena_pool_tINS_10no_guard_tELj81EED0Ev": {"operator delete": 1},
-          "_ZN2tr3mem12arena_root_tINS_10no_guard_tELj81EED0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13host_values_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem14heap_backend_tD0Ev": {"operator delete": 1}
-        },
-        "mem_pool.o": {
-          "_ZN2tr3mem6pool_tD0Ev": {"operator delete": 1}
-        },
         "mem_source.o": {
           "_ZN2tr3mem13heap_source_t7releaseEPvjj": {"operator delete": 2},
-          "_ZN2tr3mem13heap_source_t9try_allocEjj": {"operator new": 2},
-          "_ZN2tr3mem13heap_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13null_source_tD0Ev": {"operator delete": 1}
+          "_ZN2tr3mem13heap_source_t9try_allocEjj": {"operator new": 2}
         },
         "path.o": {
           "_ZN2tr5graph6path_t16cache_path_labelESt4spanIKSt4byteLj4294967295EE": {"operator delete": 1, "via _ZNSt12_Vector_baseISt4byteSaIS0_EE11_M_allocateEj.isra.0": 1},
@@ -49,48 +37,34 @@
       "source": "integrations/esp-idf/examples/full_node, idf.py set-target esp32c6 (espressif/idf:release-v6.0)",
       "sites": {
         "backend_set.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": {"operator delete": 1}
         },
         "builtin_transport_tcp.cpp.obj": {
-          "_ZN2tr11inline_fn_tIFSt8expectedINS_3mem10poly_ptr_tINS_3net11transport_tEEENS_5graph8status_tEERKNS4_15conn_settings_tEPKNS_4wire10tlv_node_tERNS2_14block_source_tEELj16EE11invoke_implIZNS4_22register_tcp_transportERNS4_18transport_vertex_tEPNS2_13mem_backend_tEPSH_EUlSC_SG_SI_E_EES9_PKvSC_OSG_SI_": {"via _ZN2tr3net15tcp_transport_tC1ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_12tcp_config_tE": 1, "via _ZN2tr3net22tcp_server_transport_tC1EtRKNS0_19tcp_server_config_tE": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
+          "_ZN2tr11inline_fn_tIFSt8expectedINS_3mem10poly_ptr_tINS_3net11transport_tEEENS_5graph8status_tEERKNS4_15conn_settings_tEPKNS_4wire10tlv_node_tERNS2_14block_source_tEELj16EE11invoke_implIZNS4_22register_tcp_transportERNS4_18transport_vertex_tEPNS2_13mem_backend_tEPSH_EUlSC_SG_SI_E_EES9_PKvSC_OSG_SI_": {"via _ZZN2tr3net22register_tcp_transportERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tEENKUlRKNS0_15conn_settings_tEPKNS_4wire10tlv_node_tERS6_E_clESA_SE_SF_": 1},
           "_ZN2tr3net22register_tcp_transportERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": {"via _ZN2tr11inline_fn_tIFSt8expectedINS_3mem10poly_ptr_tINS_3net11transport_tEEENS_5graph8status_tEERKNS4_15conn_settings_tEPKNS_4wire10tlv_node_tERNS2_14block_source_tEELj16EE11invoke_implIZNS4_22register_tcp_transportERNS4_18transport_vertex_tEPNS2_13mem_backend_tEPSH_EUlSC_SG_SI_E_EES9_PKvSC_OSG_SI_": 2, "via _ZN2tr3net18transport_vertex_t23register_transport_typeESt17basic_string_viewIcSt11char_traitsIcEENS_11inline_fn_tIFSt8expectedINS_3mem10poly_ptr_tINS0_11transport_tEEENS_5graph8status_tEERKNS0_15conn_settings_tEPKNS_4wire10tlv_node_tERNS8_14block_source_tEELj16EEENS0_23transport_kind_traits_tE": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1}
+          "_ZZN2tr3mem9make_polyINS_3net15tcp_transport_tEJRKSt17basic_string_viewIcSt11char_traitsIcEERKtNS2_12tcp_config_tEEEENS0_10poly_ptr_tIT_EERNS0_14block_source_tEDpOT0_ENUlPvE_4_FUNESL_": {"via _ZN2tr3net15tcp_transport_tD1Ev": 1},
+          "_ZZN2tr3mem9make_polyINS_3net22tcp_server_transport_tEJRKtNS2_19tcp_server_config_tEEEENS0_10poly_ptr_tIT_EERNS0_14block_source_tEDpOT0_ENUlPvE_4_FUNESF_": {"via _ZN2tr3net22tcp_server_transport_tD1Ev": 1},
+          "_ZZN2tr3net22register_tcp_transportERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tEENKUlRKNS0_15conn_settings_tEPKNS_4wire10tlv_node_tERS6_E_clESA_SE_SF_": {"via _ZN2tr3net15tcp_transport_tC1ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_12tcp_config_tE": 1, "via _ZN2tr3net22tcp_server_transport_tC1EtRKNS0_19tcp_server_config_tE": 1, "via _ZZN2tr3mem9make_polyINS_3net15tcp_transport_tEJRKSt17basic_string_viewIcSt11char_traitsIcEERKtNS2_12tcp_config_tEEEENS0_10poly_ptr_tIT_EERNS0_14block_source_tEDpOT0_ENUlPvE_4_FUNESL_": 2, "via _ZZN2tr3mem9make_polyINS_3net22tcp_server_transport_tEJRKtNS2_19tcp_server_config_tEEEENS0_10poly_ptr_tIT_EERNS0_14block_source_tEDpOT0_ENUlPvE_4_FUNESF_": 2}
         },
         "builtin_transport_udp.cpp.obj": {
           "_ZN2tr11inline_fn_tIFSt8expectedINS_3mem10poly_ptr_tINS_3net11transport_tEEENS_5graph8status_tEERKNS4_15conn_settings_tEPKNS_4wire10tlv_node_tERNS2_14block_source_tEELj16EE11invoke_implIZNS4_22register_udp_transportERNS4_18transport_vertex_tEPNS2_13mem_backend_tEPSH_EUlSC_SG_SI_E_EES9_PKvSC_OSG_SI_": {"via _ZN2tr3net15udp_transport_tC1EtSt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_12udp_config_tE": 2},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3net22register_udp_transportERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": {"via _ZN2tr11inline_fn_tIFSt8expectedINS_3mem10poly_ptr_tINS_3net11transport_tEEENS_5graph8status_tEERKNS4_15conn_settings_tEPKNS_4wire10tlv_node_tERNS2_14block_source_tEELj16EE11invoke_implIZNS4_22register_udp_transportERNS4_18transport_vertex_tEPNS2_13mem_backend_tEPSH_EUlSC_SG_SI_E_EES9_PKvSC_OSG_SI_": 2, "via _ZN2tr3net18transport_vertex_t23register_transport_typeESt17basic_string_viewIcSt11char_traitsIcEENS_11inline_fn_tIFSt8expectedINS_3mem10poly_ptr_tINS0_11transport_tEEENS_5graph8status_tEERKNS0_15conn_settings_tEPKNS_4wire10tlv_node_tERNS8_14block_source_tEELj16EEENS0_23transport_kind_traits_tE": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1}
+          "_ZN2tr3net22register_udp_transportERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": {"via _ZN2tr11inline_fn_tIFSt8expectedINS_3mem10poly_ptr_tINS_3net11transport_tEEENS_5graph8status_tEERKNS4_15conn_settings_tEPKNS_4wire10tlv_node_tERNS2_14block_source_tEELj16EE11invoke_implIZNS4_22register_udp_transportERNS4_18transport_vertex_tEPNS2_13mem_backend_tEPSH_EUlSC_SG_SI_E_EES9_PKvSC_OSG_SI_": 2, "via _ZN2tr3net18transport_vertex_t23register_transport_typeESt17basic_string_viewIcSt11char_traitsIcEENS_11inline_fn_tIFSt8expectedINS_3mem10poly_ptr_tINS0_11transport_tEEENS_5graph8status_tEERKNS0_15conn_settings_tEPKNS_4wire10tlv_node_tERNS8_14block_source_tEELj16EEENS0_23transport_kind_traits_tE": 1}
         },
         "builtin_transports.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3net27register_builtin_transportsERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": {"via _ZN2tr3net22register_tcp_transportERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": 1, "via _ZN2tr3net22register_udp_transportERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1}
-        },
-        "critical_pool.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem19synchronized_pool_tINS_3esp16critical_guard_tEED0Ev": {"operator delete": 1}
-        },
-        "device_backend.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1}
+          "_ZN2tr3net27register_builtin_transportsERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": {"via _ZN2tr3net22register_tcp_transportERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": 1, "via _ZN2tr3net22register_udp_transportERNS0_18transport_vertex_tEPNS_3mem13mem_backend_tEPNS3_14block_source_tE": 1}
         },
         "esp_ws_client_link.cpp.obj": {
           "_ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE12grow_emplaceIJRNS0_14block_source_tEEEEPS4_jDpOT_": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE8relocateEPS4_S6_S6_": 2},
           "_ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE6regrowEj": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE8relocateEPS4_S6_S6_": 1},
           "_ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE8relocateEPS4_S6_S6_": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net12tx_handoff_t4nextEv": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 2},
           "_ZN2tr3net20esp_ws_client_link_t13deliver_ownedEj": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": 1},
           "_ZN2tr3net20esp_ws_client_link_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": {"via _ZN2tr3net12tx_handoff_t4nextEv": 1},
+          "_ZN2tr3net20esp_ws_client_link_t4sendESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net20esp_ws_client_link_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": 1},
           "_ZN2tr3net20esp_ws_client_link_t9recv_loopEv": {"via _ZN2tr3net20esp_ws_client_link_t13deliver_ownedEj": 1},
           "_ZN2tr3net20esp_ws_client_link_tC2ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_22esp_ws_client_config_tE": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE12grow_emplaceIJRNS0_14block_source_tEEEEPS4_jDpOT_": 1, "via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE6regrowEj": 1, "via _ZNSt6threadC1IZN2tr3net20esp_ws_client_link_tC4ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS2_22esp_ws_client_config_tEEUlvE_JEvEEOT_DpOT0_": 2},
-          "_ZN2tr3net20esp_ws_client_link_tD0Ev": {"operator delete": 1, "via _ZN2tr3net20esp_ws_client_link_tD1Ev": 1},
           "_ZN2tr3net20esp_ws_client_link_tD2Ev": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
-          "_ZN2tr5graph16rx_loan_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph7value_t7releaseEPKS1_": {"via _ZN2tr5graph7value_t7destroyEPS1_": 1},
           "_ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 6},
           "_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN2tr3net20esp_ws_client_link_tC4ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS4_22esp_ws_client_config_tEEUlvE_EEEEE6_M_runEv": {"via _ZN2tr3net20esp_ws_client_link_t9recv_loopEv": 1},
@@ -101,31 +75,23 @@
           "unlikely._ZN2tr5graph7value_t7destroyEPS1_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3}
         },
         "frame.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr4wire6encodeERKNS0_5tlv_tE": {"operator new": 1}
         },
         "fwd_originate.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net12fwd_router_t9originateERNS1_8origin_tENS_5graph8fwd_op_tERKNS4_6path_tESt4spanIKSt4byteLj4294967295EEPS7_": {"via _ZN2tr3net12fwd_router_t13on_frame_implESt17basic_string_viewIcSt11char_traitsIcEESt4spanIKSt4byteLj4294967295EEPKNS_4view6view_tEPKNS1_14child_rx_ctx_tEbNS0_13peer_handle_tE": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3},
-          "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1}
+          "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1}
         },
         "fwd_reply.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZN2tr4view6rope_t15reserve_spilledEj": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 1, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE7reserveEj": 1},
           "_ZN2tr4view6rope_t6appendENS0_6view_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 3, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE7reserveEj": 1},
-          "_ZN2tr5graph12_GLOBAL__N_122caller_store_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph13reply_store_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph14assemble_replyERKNS0_13reply_route_tENS0_12reply_kind_tESt4spanIKSt4byteLj4294967295EES5_IKNS_4view6view_tELj4294967295EEjRNS_3mem13mem_backend_tES8_": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 15, "via _ZN2tr4view6rope_t15reserve_spilledEj": 1, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 5, "via _ZN2tr5graph14assemble_replyERKNS0_13reply_route_tENS0_12reply_kind_tESt4spanIKSt4byteLj4294967295EES5_IKNS_4view6view_tELj4294967295EEjRNS_3mem13mem_backend_tES8_": 1},
           "_ZN2tr5graph20assemble_error_replyERKNS0_13reply_route_tENS0_8status_tERNS_3mem13mem_backend_tE": {"via _ZN2tr5graph14assemble_replyERKNS0_13reply_route_tENS0_12reply_kind_tESt4spanIKSt4byteLj4294967295EES5_IKNS_4view6view_tELj4294967295EEjRNS_3mem13mem_backend_tES8_": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": {"via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE7reserveEj": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1}
         },
         "fwd_router.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net12_GLOBAL__N_1L19reject_bus_name_hopERKNS0_16child_registry_tESt17basic_string_viewIcSt11char_traitsIcEESt4spanIKSt4byteLj4294967295EERKNS0_9fwd_pre_tERNS_3mem14block_source_tERNSG_13mem_backend_tENS_5graph8status_tE": {"via _ZN2tr4view6rope_tD1Ev": 1, "via _ZN2tr5graph20assemble_error_replyERKNS0_13reply_route_tENS0_8status_tERNS_3mem13mem_backend_tE": 1, "via _ZNK2tr4view6rope_t15try_materializeERNS_3mem13mem_backend_tE": 1, "via _ZNSt8expectedIN2tr4view6view_tENS1_13flatten_err_tEED1EvQoont27is_trivially_destructible_vIT_Ent27is_trivially_destructible_vIT0_E": 1},
           "_ZN2tr3net12fwd_router_t10on_compactESt17basic_string_viewIcSt11char_traitsIcEEtSt4spanIKSt4byteLj4294967295EEPKNS1_14child_rx_ctx_tENS0_13peer_handle_tE": {"via _ZN2tr3net12fwd_router_t13deliver_localESt4spanIKSt4byteLj4294967295EES5_St17basic_string_viewIcSt11char_traitsIcEEPKNS0_11link_kind_tE": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 1, "via _ZN2tr4view6rope_tD1Ev": 2, "via _ZN2tr5graph7graph_t5writeENS0_15vertex_handle_tENS_4view6rope_tESt17basic_string_viewIcSt11char_traitsIcEEPKNS_3net11link_kind_tE": 1, "via _ZN2tr5graph7value_t7releaseEPKS1_.part.0": 1},
           "_ZN2tr3net12fwd_router_t11bus_peer_upERKNS1_14child_rx_ctx_tENS0_13peer_handle_tESt17basic_string_viewIcSt11char_traitsIcEE": {"via _ZN2tr3net12fwd_router_t13bus_peer_downERKNS1_14child_rx_ctx_tENS0_13peer_handle_tESt17basic_string_viewIcSt11char_traitsIcEE": 1, "via _ZN2tr5graph7graph_t23register_session_anchorESt17basic_string_viewIcSt11char_traitsIcEE": 1},
@@ -156,8 +122,6 @@
           "_ZN2tr4view6rope_t6appendENS0_6view_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 3, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE7reserveEj": 1},
           "_ZN2tr4view6rope_tD2Ev": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EED1Ev": 1},
           "_ZN2tr4view6rope_taSEOS1_.isra.0": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EED1Ev": 1},
-          "_ZN2tr5graph16rx_loan_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph7value_t7releaseEPKS1_.part.0": {"via _ZN2tr5graph7value_t7destroyEPS1_": 1},
           "_ZNK2tr3net12fwd_router_t12bound_egressENS_4wire6pair_tESt17basic_string_viewIcSt11char_traitsIcEENS_5graph11acl_right_tE": {"via _ZNK2tr5graph7graph_t6allowsENS0_15vertex_handle_tESt17basic_string_viewIcSt11char_traitsIcEENS0_11acl_right_tE": 1},
           "_ZNK2tr3net12fwd_router_t14bound_dispatchERKNS_5graph6path_tENS2_11acl_right_tE": {"via _ZNK2tr3net12fwd_router_t12bound_egressENS_4wire6pair_tESt17basic_string_viewIcSt11char_traitsIcEENS_5graph11acl_right_tE": 1},
@@ -208,10 +172,7 @@
           "_ZN2tr3mem13block_array_tINS_5graph12subscriber_tEE9give_backEv": {"via _ZN2tr5graph12subscriber_tD1Ev": 1},
           "_ZN2tr3mem13block_array_tIZNKS_5graph7graph_t19read_subtree_foldedENS2_15vertex_handle_tESt17basic_string_viewIcSt11char_traitsIcEEE11snap_node_tE12grow_emplaceIJS9_EEEPS9_jDpOT_": {"via _ZN2tr5graph11value_ref_tD1Ev": 2},
           "_ZN2tr3mem13block_array_tIZNS_5graph12_GLOBAL__N_1L17parse_branch_nodeERKNS_4wire11tlv_arena_tEmRKNS_4view6view_tESt4spanIKSt4byteLj4294967295EERNS1_INS3_13branch_node_tEEERNS0_14block_source_tEE6open_tE12grow_emplaceIJSL_EEEPSL_jDpOT_.constprop.0": {"via _ZZN2tr5graph12_GLOBAL__N_1L17parse_branch_nodeERKNS_4wire11tlv_arena_tEmRKNS_4view6view_tESt4spanIKSt4byteLj4294967295EERNS_3mem13block_array_tINS1_13branch_node_tEEERNSE_14block_source_tEEN6open_tD1Ev": 2},
-          "_ZN2tr3mem13bump_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3mem6detail18borrowed_backend_t7destroyEPNS_4view9segment_tE": {"operator delete": 1},
-          "_ZN2tr3mem6detail18borrowed_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3mem7drop_inINS_5graph12edge_block_tEEEvRNS0_14block_source_tEPT_": {"via _ZN2tr3mem13block_array_tINS_5graph12subscriber_tEE9give_backEv": 1, "via _ZN2tr5graph16destroy_edge_pubERNS_3mem14block_source_tEPNS0_10edge_pub_tE": 2},
           "_ZN2tr3mem7drop_inINS_5graph12ring_state_tEEEvRNS0_14block_source_tEPT_": {"via _ZN2tr5graph12ring_state_t11release_allEv": 1},
           "_ZN2tr3mem7drop_inINS_5graph12vertex_ext_tEEEvRNS0_14block_source_tEPT_": {"via _ZN2tr3mem7drop_inINS_5graph12ring_state_tEEEvRNS0_14block_source_tEPT_": 1, "via _ZNSt6vectorIN2tr5graph5ace_tESaIS2_EED1Ev": 2},
@@ -238,10 +199,8 @@
           "_ZN2tr5graph15value_storage_tILj8EEC2EONS_4view6rope_tE": {"via _ZN2tr4view6rope_tD1Ev": 1, "via _ZN2tr4view6rope_taSEOS1_.isra.0": 1},
           "_ZN2tr5graph15value_storage_tILj8EED2Ev": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
           "_ZN2tr5graph16destroy_edge_pubERNS_3mem14block_source_tEPNS0_10edge_pub_tE": {"via _ZN2tr5graph12remote_ptr_tD1Ev": 1},
-          "_ZN2tr5graph16rx_loan_source_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph18scan_retired_edgesERNS0_12edge_block_tE": {"via _ZN2tr5graph16destroy_edge_pubERNS_3mem14block_source_tEPNS0_10edge_pub_tE": 1},
           "_ZN2tr5graph19release_reservationERNS_3mem14block_source_tEPNS0_12ring_entry_tE": {"via _ZN2tr5graph11value_ref_tD1Ev": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph5ace_tC2ERKS1_": {"operator new": 1},
           "_ZN2tr5graph7graph_t10set_policyENS0_15vertex_handle_tENS0_15vertex_policy_tE": {"via _ZN2tr5graph7graph_t12apply_policyEPNS0_8vertex_tENS0_6role_tEONS0_15vertex_policy_tESt4spanIKSt4byteLj4294967295EE": 1},
           "_ZN2tr5graph7graph_t10write_implEPNS0_8vertex_tENS_4view6rope_tESt17basic_string_viewIcSt11char_traitsIcEEPKNS_3net11link_kind_tE": {"via _ZN2tr4view6rope_tD1Ev": 1, "via _ZN2tr5graph7graph_t11relay_writeEPNS0_8vertex_tENS_4view6rope_tESt17basic_string_viewIcSt11char_traitsIcEEPKNS_3net11link_kind_tE": 1, "via _ZN2tr5graph7graph_t11store_valueEPNS0_8vertex_tEONS_4view6rope_tERNS2_13store_drops_tESt17basic_string_viewIcSt11char_traitsIcEEPKNS_3net11link_kind_tEPNS2_11ring_take_tE": 1, "via _ZN2tr5graph7graph_t12write_branchEPNS0_8vertex_tERKNS_4view6rope_tESt17basic_string_viewIcSt11char_traitsIcEEPKNS_3net11link_kind_tEb": 1, "via _ZN2tr5graph7graph_t13clear_pendingEPNS0_8vertex_tEPKNS0_7value_tE": 1, "via _ZN2tr5graph7graph_t14deliver_vertexEPNS0_8vertex_tERKNS0_7value_tE": 2, "via _ZN2tr5graph7graph_t15deliver_currentEPNS0_8vertex_tE": 1, "via _ZN2tr5graph7graph_t21handler_write_deliverEPNS0_8vertex_tEONS_4view6rope_tESt17basic_string_viewIcSt11char_traitsIcEEPKNS_3net11link_kind_tE": 1, "via _ZN2tr5graph8vertex_t11ring_take_tD1Ev": 1, "via _ZNK2tr5graph7graph_t10acl_allowsEPNS0_8vertex_tESt17basic_string_viewIcSt11char_traitsIcEENS0_11acl_right_tE": 1, "via _ZNSt8expectedIN2tr5graph11value_ref_tENS1_8status_tEED1EvQoont27is_trivially_destructible_vIT_Ent27is_trivially_destructible_vIT0_E": 1},
@@ -367,8 +326,6 @@
           "unlikely._ZN2tr5graph7value_t7destroyEPS1_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3}
         },
         "graph_fields.cpp.obj": {
-          "_ZN2tr3mem13bump_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3mem7drop_inINS_5graph11acl_state_tEEEvRNS0_14block_source_tEPT_": {"via _ZNSt6vectorIN2tr5graph5ace_tESaIS2_EED1Ev": 2},
           "_ZN2tr4view10over_bytesESt4spanIKSt4byteLj4294967295EERNS_3mem13mem_backend_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
@@ -381,9 +338,7 @@
           "_ZN2tr5graph12remote_ptr_tD2Ev": {"via _ZN2tr5graph12remote_ptr_t11free_recordEPNS0_19subscriber_remote_tE": 1},
           "_ZN2tr5graph12subscriber_t13ensure_remoteERNS_3mem14block_source_tE": {"via _ZN2tr5graph12remote_ptr_tD1Ev": 1},
           "_ZN2tr5graph12subscriber_tD2Ev": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr5graph12remote_ptr_tD1Ev": 1},
-          "_ZN2tr5graph16rx_loan_source_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph21parse_wire_subscriberERKNS_4view6view_tERNS0_12subscriber_tERNS_3mem14block_source_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr5graph12subscriber_t13ensure_remoteERNS_3mem14block_source_tE": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph7graph_t12create_childEPNS0_8vertex_tERKNS_4view6view_tE": {"operator delete": 2, "via _ZNSt12_Vector_baseISt4byteSaIS0_EE11_M_allocateEj.isra.0": 3, "via _ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": 3},
           "_ZN2tr5graph7graph_t15field_surface_t11read_schemaERKS1_PNS0_8vertex_tERKNS0_12field_path_tESt17basic_string_viewIcSt11char_traitsIcEE": {"via _ZN2tr5graph7graph_t15field_surface_t11single_linkERKS1_RKSt8expectedINS_4view6view_tENS0_8status_tEE": 1, "via _ZNK2tr5graph7graph_t10acl_allowsEPNS0_8vertex_tESt17basic_string_viewIcSt11char_traitsIcEENS0_11acl_right_tE": 1, "via _ZNK2tr5graph7graph_t11read_schemaEPNS0_8vertex_tE": 1, "via _ZNSt8expectedIN2tr4view6view_tENS0_5graph8status_tEED1EvQoont27is_trivially_destructible_vIT_Ent27is_trivially_destructible_vIT0_E": 1},
           "_ZN2tr5graph7graph_t15field_surface_t11single_linkERKS1_RKSt8expectedINS_4view6view_tENS0_8status_tEE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 1, "via _ZN2tr4view6rope_tD1Ev": 1, "via _ZNK2tr5graph7graph_t24composed_or_backpressureEONS_4view6rope_tE": 1},
@@ -424,7 +379,6 @@
           "unlikely._ZN2tr5graph7value_t7destroyEPS1_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3}
         },
         "httpd_ws_link.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net13fixed_array_tINS0_15httpd_ws_link_t9tx_slot_tEE5resetEv": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
           "_ZN2tr3net15httpd_ws_link_t10queue_sendERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EE": {"via _ZN2tr3net15httpd_ws_link_t15release_tx_workEPNS1_9tx_work_tE": 2, "via _ZN2tr3net15httpd_ws_link_t7tx_workEPv": 2},
           "_ZN2tr3net15httpd_ws_link_t10queue_sendERKNS1_13session_ref_tESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net15httpd_ws_link_t10queue_sendERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EE": 1},
@@ -438,23 +392,20 @@
           "_ZN2tr3net15httpd_ws_link_t17peer_resolution_t4sendESt4spanIKS3_IKSt4byteLj4294967295EELj4294967295EE": {"via _ZN2tr3net15httpd_ws_link_t10queue_sendERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EE": 1, "via _ZN2tr3net15httpd_ws_link_t12send_in_callERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EE": 1},
           "_ZN2tr3net15httpd_ws_link_t17peer_resolution_t4sendESt4spanIKS3_IKSt4byteLj4294967295EELj4294967295EERKNS_5graph7value_tE": {"via _ZN2tr3net15httpd_ws_link_t12send_in_callERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EE": 1, "via _ZN2tr3net15httpd_ws_link_t19queue_send_retainedERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EERKNS_5graph7value_tE": 1},
           "_ZN2tr3net15httpd_ws_link_t17peer_resolution_t4sendESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net15httpd_ws_link_t17peer_resolution_t4sendESt4spanIKS3_IKSt4byteLj4294967295EELj4294967295EE": 1},
-          "_ZN2tr3net15httpd_ws_link_t17peer_resolution_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net15httpd_ws_link_t18deliver_owned_copyENS0_13peer_handle_tESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net15httpd_ws_link_t13deliver_ownedENS0_13peer_handle_tENS_4view6view_tE": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "_ZN2tr3net15httpd_ws_link_t19queue_send_retainedERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EERKNS_5graph7value_tE": {"via _ZN2tr3net15httpd_ws_link_t10queue_sendERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EE": 1, "via _ZN2tr3net15httpd_ws_link_t15release_tx_workEPNS1_9tx_work_tE": 2, "via _ZN2tr3net15httpd_ws_link_t7tx_workEPv": 2, "via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
           "_ZN2tr3net15httpd_ws_link_t19send_posted_in_parkEv": {"via _ZN2tr3net15httpd_ws_link_t11send_postedEPNS1_9tx_work_tEb": 1, "via _ZN2tr3net15httpd_ws_link_t15release_tx_workEPNS1_9tx_work_tE": 1},
           "_ZN2tr3net15httpd_ws_link_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": {"via _ZN2tr3net15httpd_ws_link_t10queue_sendERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EE": 1},
           "_ZN2tr3net15httpd_ws_link_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EERKNS_5graph7value_tE": {"via _ZN2tr3net15httpd_ws_link_t19queue_send_retainedERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EERKNS_5graph7value_tE": 1},
+          "_ZN2tr3net15httpd_ws_link_t4sendESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net15httpd_ws_link_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": 1},
           "_ZN2tr3net15httpd_ws_link_t7pace_rxEij": {"via _ZN2tr3net15httpd_ws_link_t19send_posted_in_parkEv": 1},
           "_ZN2tr3net15httpd_ws_link_t7tx_workEPv": {"via _ZN2tr3net15httpd_ws_link_t11send_postedEPNS1_9tx_work_tEb": 1, "via _ZN2tr3net15httpd_ws_link_t15release_tx_workEPNS1_9tx_work_tE": 1},
           "_ZN2tr3net15httpd_ws_link_tC2EPvPKcRKNS0_17httpd_ws_config_tE": {"via _ZN2tr3net15httpd_ws_link_t10ws_handlerEP9httpd_req": 2, "via _ZN2tr3net15httpd_ws_link_t13alloc_buffersEv": 1},
           "_ZN2tr3net15httpd_ws_link_tC2EtRKNS0_17httpd_ws_config_tE": {"via _ZN2tr3net15httpd_ws_link_t10ws_handlerEP9httpd_req": 2, "via _ZN2tr3net15httpd_ws_link_t13alloc_buffersEv": 1},
-          "_ZN2tr3net15httpd_ws_link_tD0Ev": {"operator delete": 1, "via _ZN2tr3net15httpd_ws_link_tD1Ev": 1},
           "_ZN2tr3net15httpd_ws_link_tD2Ev": {"via _ZN2tr3net13fixed_array_tINS0_15httpd_ws_link_t9tx_slot_tEE5resetEv": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZN2tr4view6rope_t6appendENS0_6view_tE": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 3},
           "_ZN2tr4view6rope_tD2Ev": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3},
-          "_ZN2tr5graph16rx_loan_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph7value_t7releaseEPKS1_": {"via _ZN2tr5graph7value_t7destroyEPS1_": 1},
           "_ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 1, "via _ZN2tr4view6rope_tD1Ev": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": {"via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": 1},
@@ -462,15 +413,10 @@
           "unlikely._ZN2tr5graph7value_t7destroyEPS1_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3}
         },
         "lkv_node_pool.cpp.obj": {
-          "_ZN2tr3mem11slab_pool_tINS_3esp16critical_guard_tELj1ELb0EED0Ev": {"operator delete": 1},
           "_ZN2tr3mem13heap_source_t7releaseEPvjj": {"operator delete": 2},
-          "_ZN2tr3mem13heap_source_t9try_allocEjj": {"operator new": 2},
-          "_ZN2tr3mem13heap_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1}
+          "_ZN2tr3mem13heap_source_t9try_allocEjj": {"operator new": 2}
         },
         "loopback.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net18loopback_channel_tC2Ev": {"via _ZN2tr3net19loopback_endpoint_t5startEv": 2, "via _ZN2tr3net19loopback_endpoint_tC1Ev": 2},
           "_ZN2tr3net18loopback_channel_tD2Ev": {"via _ZN2tr3net19loopback_endpoint_tD1Ev": 2},
           "_ZN2tr3net19loopback_endpoint_t3runEv": {"operator delete": 1, "via _ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": 5},
@@ -478,42 +424,19 @@
           "_ZN2tr3net19loopback_endpoint_t5startEv": {"_ZNSt6thread15_M_start_threadESt10unique_ptrINS_6_StateESt14default_deleteIS1_EEPFvvE": 1, "operator new": 1},
           "_ZN2tr3net19loopback_endpoint_t7enqueueESt6vectorISt4byteSaIS3_EE": {"via _ZNSt5dequeISt6vectorISt4byteSaIS1_EESaIS3_EE16_M_push_back_auxIJS3_EEEvDpOT_": 1},
           "_ZN2tr3net19loopback_endpoint_tC2Ev": {"operator new": 2},
-          "_ZN2tr3net19loopback_endpoint_tD0Ev": {"operator delete": 1, "via _ZN2tr3net19loopback_endpoint_tD1Ev": 1},
           "_ZN2tr3net19loopback_endpoint_tD2Ev": {"operator delete": 2, "via _ZSt8_DestroyIPSt6vectorISt4byteSaIS1_EEEvT_S5_": 3},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": {"operator delete": 1},
           "_ZNSt5dequeISt6vectorISt4byteSaIS1_EESaIS3_EE16_M_push_back_auxIJS3_EEEvDpOT_": {"operator delete": 1, "operator new": 2},
           "_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN2tr3net19loopback_endpoint_t5startEvEUlvE_EEEEE6_M_runEv": {"via _ZN2tr3net19loopback_endpoint_t3runEv": 1},
           "_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN2tr3net19loopback_endpoint_t5startEvEUlvE_EEEEED0Ev": {"operator delete": 1},
           "_ZSt8_DestroyIPSt6vectorISt4byteSaIS1_EEEvT_S5_": {"via _ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": 1}
         },
-        "mem_heap.cpp.obj": {
-          "_ZN2tr3mem11host_root_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem11slab_pool_tINS_3esp16critical_guard_tELj81ELb0EED0Ev": {"operator delete": 1},
-          "_ZN2tr3mem12arena_pool_tINS_3esp16critical_guard_tELj81EED0Ev": {"operator delete": 1},
-          "_ZN2tr3mem12arena_root_tINS_3esp16critical_guard_tELj81EED0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13host_values_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem14heap_backend_tD0Ev": {"operator delete": 1}
-        },
-        "mem_pool.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem6pool_tD0Ev": {"operator delete": 1}
-        },
         "mem_source.cpp.obj": {
           "_ZN2tr3mem13heap_source_t7releaseEPvjj": {"operator delete": 2},
-          "_ZN2tr3mem13heap_source_t9try_allocEjj": {"operator new": 2},
-          "_ZN2tr3mem13heap_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13null_source_tD0Ev": {"operator delete": 1}
-        },
-        "mem_source_backend.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem16source_backend_tD0Ev": {"operator delete": 1}
+          "_ZN2tr3mem13heap_source_t9try_allocEjj": {"operator new": 2}
         },
         "op_resolve.cpp.obj": {
           "_ZN2tr14function_ref_tIFRKNS_4view6rope_tEvEE11call_objectIZNS_5graph12_GLOBAL__N_1L8find_dstINS9_10arena_nodeEEESt8expectedINS8_15vertex_handle_tENS8_8status_tEERKNS9_12parsed_fwd_tIT_EERKNS8_12field_path_tESt4spanIKSt4byteLj4294967295EESt17basic_string_viewIcSt11char_traitsIcEEPKNS1_6view_tERNS8_7graph_tERNS_3mem13mem_backend_tEEUlvE_EES4_NS6_7bound_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr4view6rope_tD1Ev": 1, "via _ZN2tr5graph12_GLOBAL__N_1L17share_or_copy_tlvINS1_10arena_nodeEEENS1_12stored_tlv_tERKT_PKNS_4view6view_tEjRNS_3mem14block_source_tERNSC_13mem_backend_tE.isra.0": 1, "via _ZN2tr5graph7value_t7releaseEPKS1_": 2, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EED1Ev": 1},
-          "_ZN2tr3mem13bump_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZN2tr4view6rope_t6appendENS0_6view_tE": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 3},
           "_ZN2tr4view6rope_tD2Ev": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EED1Ev": 1},
@@ -522,8 +445,6 @@
           "_ZN2tr5graph12_GLOBAL__N_1L20assemble_result_ropeERKNS0_13reply_route_tERKNS0_7value_tERNS_3mem13mem_backend_tESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr5graph14assemble_replyERKNS0_13reply_route_tENS0_12reply_kind_tESt4spanIKSt4byteLj4294967295EES5_IKNS_4view6view_tELj4294967295EEjRNS_3mem13mem_backend_tES8_": 1},
           "_ZN2tr5graph12_GLOBAL__N_1L7own_tlvINS1_10arena_nodeEEENS_4view6view_tERKT_RNS_3mem13mem_backend_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 5},
           "_ZN2tr5graph13op_resolver_t7resolveERKNS_4wire11tlv_arena_tERKNS0_13inbound_ref_tEPKNS_4view6view_tEPKNS2_6pair_tEPbSt4spanISt4byteLj4294967295EE": {"operator new": 2, "via _ZN2tr14function_ref_tIFRKNS_4view6rope_tEvEE11call_objectIZNS_5graph12_GLOBAL__N_1L8find_dstINS9_10arena_nodeEEESt8expectedINS8_15vertex_handle_tENS8_8status_tEERKNS9_12parsed_fwd_tIT_EERKNS8_12field_path_tESt4spanIKSt4byteLj4294967295EESt17basic_string_viewIcSt11char_traitsIcEEPKNS1_6view_tERNS8_7graph_tERNS_3mem13mem_backend_tEEUlvE_EES4_NS6_7bound_tE": 2, "via _ZN2tr4view13segment_ptr_t5resetEv": 11, "via _ZN2tr4view6rope_tD1Ev": 14, "via _ZN2tr5graph12_GLOBAL__N_1L15or_backpressureENS_4view6rope_tERKNS0_13reply_route_tERNS_3mem13mem_backend_tE": 5, "via _ZN2tr5graph12_GLOBAL__N_1L17share_or_copy_tlvINS1_10arena_nodeEEENS1_12stored_tlv_tERKT_PKNS_4view6view_tEjRNS_3mem14block_source_tERNSC_13mem_backend_tE.isra.0": 1, "via _ZN2tr5graph12_GLOBAL__N_1L20assemble_result_ropeERKNS0_13reply_route_tERKNS0_7value_tERNS_3mem13mem_backend_tESt4spanIKSt4byteLj4294967295EE": 2, "via _ZN2tr5graph12_GLOBAL__N_1L7own_tlvINS1_10arena_nodeEEENS_4view6view_tERKT_RNS_3mem13mem_backend_tE": 2, "via _ZN2tr5graph14assemble_replyERKNS0_13reply_route_tENS0_12reply_kind_tESt4spanIKSt4byteLj4294967295EES5_IKNS_4view6view_tELj4294967295EEjRNS_3mem13mem_backend_tES8_": 3, "via _ZN2tr5graph20assemble_error_replyERKNS0_13reply_route_tENS0_8status_tERNS_3mem13mem_backend_tE": 9, "via _ZN2tr5graph7graph_t14subscribe_wireENS0_15vertex_handle_tENS_4view6view_tES4_St17basic_string_viewIcSt11char_traitsIcEES4_S8_NS0_9link_id_tE": 1, "via _ZN2tr5graph7graph_t5awaitENS0_15vertex_handle_tENSt6chrono8durationIxSt5ratioILx1ELx1000000000EEEESt17basic_string_viewIcSt11char_traitsIcEE": 1, "via _ZN2tr5graph7graph_t5writeENS0_15vertex_handle_tERKNS0_12field_path_tENS_4view6rope_tESt17basic_string_viewIcSt11char_traitsIcEEPKNS_3net11link_kind_tE": 1, "via _ZN2tr5graph7value_t7releaseEPKS1_": 3, "via _ZNK2tr5graph7graph_t16read_subscribersENS0_15vertex_handle_tERNS_3mem13block_array_tINS_4view6view_tEEESt17basic_string_viewIcSt11char_traitsIcEE": 1, "via _ZNK2tr5graph7graph_t4readENS0_15vertex_handle_tERKNS0_12field_path_tESt17basic_string_viewIcSt11char_traitsIcEE": 1, "via _ZNK2tr5graph7graph_t6allowsENS0_15vertex_handle_tESt17basic_string_viewIcSt11char_traitsIcEENS0_11acl_right_tE": 1, "via _ZNSt6vectorIN2tr5graph12field_step_tESaIS2_EE17_M_realloc_appendIJEEEvDpOT_": 1, "via _ZNSt6vectorIN2tr5graph12field_step_tESaIS2_EED1Ev": 2, "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": 1, "via _ZZN2tr5graph12_GLOBAL__N_1L12resolve_nodeINS1_10arena_nodeEEESt8expectedINS_4view6rope_tENS0_8status_tEERNS0_7graph_tERKT_St17basic_string_viewIcSt11char_traitsIcEESH_PKNS5_6view_tERNS_3mem13mem_backend_tESN_SN_SN_PFSt8optionalINS_4wire6pair_tEEPvSH_ESS_PFSt4spanIKSt4byteLj4294967295EESS_SH_SQ_ESS_PKSQ_NS0_17link_token_seam_tENS0_18await_defer_seam_tEENKUlS7_E_clES7_": 3},
-          "_ZN2tr5graph16rx_loan_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph7value_t7releaseEPKS1_": {"via _ZN2tr5graph7value_t7destroyEPS1_": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": {"via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1},
@@ -536,8 +457,6 @@
         },
         "op_resolve_view.cpp.obj": {
           "_ZN2tr14function_ref_tIFRKNS_4view6rope_tEvEE11call_objectIZNS_5graph12_GLOBAL__N_1L8find_dstINS9_9view_nodeEEESt8expectedINS8_15vertex_handle_tENS8_8status_tEERKNS9_12parsed_fwd_tIT_EERKNS8_12field_path_tESt4spanIKSt4byteLj4294967295EESt17basic_string_viewIcSt11char_traitsIcEEPKNS1_6view_tERNS8_7graph_tERNS_3mem13mem_backend_tEEUlvE_EES4_NS6_7bound_tE": {"via _ZN2tr4view6rope_tD1Ev": 1, "via _ZN2tr4view6rope_taSEOS1_.isra.0": 1, "via _ZN2tr5graph12_GLOBAL__N_1L17share_or_copy_tlvINS1_9view_nodeEEENS1_12stored_tlv_tERKT_PKNS_4view6view_tEjRNS_3mem14block_source_tERNSC_13mem_backend_tE.isra.0": 1, "via _ZN2tr5graph7value_t7releaseEPKS1_": 2},
-          "_ZN2tr3mem13bump_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZN2tr4view6rope_t6appendENS0_6view_tE": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr4view6view_taSEOS1_.isra.0": 2, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 3},
           "_ZN2tr4view6rope_tC2ERKS1_": {"operator new": 1},
@@ -556,8 +475,6 @@
           "_ZN2tr5graph12_GLOBAL__N_1L20assemble_result_ropeERKNS0_13reply_route_tERKNS0_7value_tERNS_3mem13mem_backend_tESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr5graph14assemble_replyERKNS0_13reply_route_tENS0_12reply_kind_tESt4spanIKSt4byteLj4294967295EES5_IKNS_4view6view_tELj4294967295EEjRNS_3mem13mem_backend_tES8_": 1},
           "_ZN2tr5graph12_GLOBAL__N_1L7own_tlvINS1_9view_nodeEEENS_4view6view_tERKT_RNS_3mem13mem_backend_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 4, "via _ZN2tr4view6rope_tD1Ev": 1, "via _ZNK2tr4view6rope_t7subropeEjj": 1},
           "_ZN2tr5graph13op_resolver_t7resolveERKNS_4wire10tlv_view_tERKNS0_13inbound_ref_tEPKNS_4view6view_tEPKNS2_6pair_tEPbSt4spanISt4byteLj4294967295EE": {"via _ZN2tr4view6rope_tD1Ev": 1, "via _ZN2tr4wire10tlv_view_tC1ERKS1_": 1, "via _ZN2tr5graph12_GLOBAL__N_19view_nodeD1Ev": 1, "via _ZN2tr5graph12_GLOBAL__N_1L12resolve_nodeINS1_9view_nodeEEESt8expectedINS_4view6rope_tENS0_8status_tEERNS0_7graph_tERKT_St17basic_string_viewIcSt11char_traitsIcEESH_PKNS5_6view_tERNS_3mem13mem_backend_tESN_SN_SN_PFSt8optionalINS_4wire6pair_tEEPvSH_ESS_PFSt4spanIKSt4byteLj4294967295EESS_SH_SQ_ESS_PKSQ_NS0_17link_token_seam_tENS0_18await_defer_seam_tE": 1},
-          "_ZN2tr5graph16rx_loan_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph7value_t7releaseEPKS1_": {"via _ZN2tr5graph7value_t7destroyEPS1_": 1},
           "_ZNK2tr4view6rope_t7subropeEjj": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 1},
           "_ZNK2tr5graph12_GLOBAL__N_19view_node12ensure_cacheEv": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr4view6view_taSEOS1_.isra.0": 1},
@@ -578,40 +495,23 @@
           "unlikely._ZN2tr5graph7value_t7destroyEPS1_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3}
         },
         "path.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph6path_t16cache_path_labelESt4spanIKSt4byteLj4294967295EE": {"operator delete": 1, "via _ZNSt12_Vector_baseISt4byteSaIS0_EE11_M_allocateEj.isra.0": 1},
           "_ZN2tr5graph6path_t5parseESt17basic_string_viewIcSt11char_traitsIcEE": {"operator delete": 5, "operator new": 1, "via _ZNSt12_Vector_baseISt4byteSaIS0_EE11_M_allocateEj.isra.0": 3, "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": 8, "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEC1ISt17basic_string_viewIcS2_EvEERKT_RKS3_": 2},
           "_ZNSt12_Vector_baseISt4byteSaIS0_EE11_M_allocateEj.isra.0": {"operator new": 1},
           "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": {"operator delete": 1},
           "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEC2ISt17basic_string_viewIcS2_EvEERKT_RKS3_": {"operator new": 1}
         },
-        "path_label_table.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1}
-        },
         "posix_endpoint.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3net13slot_server_tD0Ev": {"operator delete": 1, "via _ZN2tr3net13slot_server_tD1Ev": 1},
           "_ZN2tr3net13slot_server_tD2Ev": {"via _ZN2tr3net17stream_endpoint_tD2Ev": 1},
           "_ZN2tr3net16posix_endpoint_t5startENS_11inline_fn_tIFvvELj8EEEj": {"pthread_create": 1},
           "_ZN2tr3net17stream_endpoint_tD2Ev": {"via _ZN2tr5graph7value_t7destroyEPS1_": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
-          "_ZN2tr5graph16rx_loan_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "unlikely._ZN2tr5graph7value_t7destroyEPS1_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3}
         },
         "rope.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZNK2tr4view6rope_t11try_flattenERNS_3mem13mem_backend_tE": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1}
         },
-        "rope_decode.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1}
-        },
-        "route_handle.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1}
-        },
         "self_heal_link.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net16self_heal_link_t11wire_socketERNS1_6sock_tE": {"via _ZZN2tr3net16self_heal_link_t11wire_socketERNS1_6sock_tEENUlPvE_4_FUNES4_": 2, "via _ZZN2tr3net16self_heal_link_t11wire_socketERNS1_6sock_tEENUlPvNS_4view6rope_tEE_4_FUNES4_S6_": 2},
           "_ZN2tr3net16self_heal_link_t11worker_mainEv": {"via _ZN2tr3net16self_heal_link_t14attempt_lockedERSt11unique_lockISt5mutexE": 2},
           "_ZN2tr3net16self_heal_link_t12ready_socketEv": {"via _ZN2tr3net16self_heal_link_t20ensure_worker_lockedEv": 1},
@@ -623,24 +523,13 @@
           "_ZN2tr3net16self_heal_link_t4sendESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net16self_heal_link_t12ready_socketEv": 1},
           "_ZN2tr3net16self_heal_link_t7acquireEv": {"via _ZN2tr3net16self_heal_link_t20ensure_worker_lockedEv": 1},
           "_ZN2tr3net16self_heal_link_t7releaseEv": {"via _ZN2tr3net16self_heal_link_t20ensure_worker_lockedEv": 1},
-          "_ZN2tr3net16self_heal_link_tD0Ev": {"operator delete": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZNK2tr3net15receiver_slot_tIJEE12deliver_ropeENS_4view6rope_tERNS_3mem13mem_backend_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZNK2tr4view6rope_t11try_flattenERNS_3mem13mem_backend_tE": 1, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EED1Ev": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EED2Ev": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "_ZZN2tr3net16self_heal_link_t11wire_socketERNS1_6sock_tEENUlPvE_4_FUNES4_": {"via _ZN2tr3net16self_heal_link_t14on_socket_downERNS1_6sock_tE": 1},
           "_ZZN2tr3net16self_heal_link_t11wire_socketERNS1_6sock_tEENUlPvNS_4view6rope_tEE_4_FUNES4_S6_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZNK2tr3net15receiver_slot_tIJEE12deliver_ropeENS_4view6rope_tERNS_3mem13mem_backend_tE": 1, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EED1Ev": 1}
         },
-        "socketcan_link_stub.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
-          "_ZN2tr3net16socketcan_link_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1}
-        },
-        "tlv_arena.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1}
-        },
         "tlv_view.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZN2tr4view6rope_tD2Ev": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3},
           "_ZN2tr4wire10tlv_view_t10children_t4nextEv": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 4, "via _ZN2tr4view6rope_tD1Ev": 3, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 3},
@@ -654,18 +543,15 @@
           "_ZN2tr11inline_fn_tIFvRKNS_3net16can_frame_data_tEELj8EE11invoke_implIZNS1_15can_transport_tC4ENS_3mem10poly_ptr_tINS1_10can_link_tEEERKNS1_22transport_can_config_tEEUlS4_E_EEvPKvS4_": {"via _ZN2tr3net15can_transport_t5on_rxERKNS0_16can_frame_data_tE": 1},
           "_ZN2tr3mem13block_array_tINS0_12sorted_map_tINS_3net16can_reassembly_t10slice_id_tENS_4view6view_tESt4lessIvEE7entry_tEE12grow_emplaceIJRKSt10in_place_tRKS5_S7_EEEPSB_jDpOT_.isra.0": {"via _ZN2tr3mem13block_array_tINS0_12sorted_map_tINS_3net16can_reassembly_t10slice_id_tENS_4view6view_tESt4lessIvEE7entry_tEE8relocateEPSB_SD_SD_": 2},
           "_ZN2tr3mem13block_array_tINS0_12sorted_map_tINS_3net16can_reassembly_t10slice_id_tENS_4view6view_tESt4lessIvEE7entry_tEE8relocateEPSB_SD_SD_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net15can_transport_t12process_dataERKNS0_16can_frame_data_tE": {"via _ZN2tr3net15can_transport_t7deliverEtNS_4view6rope_tE": 1, "via _ZN2tr3net16can_reassembly_t10drop_groupERKNS0_16reassembly_key_tE": 1, "via _ZN2tr3net16can_reassembly_t7discardERKNS0_16reassembly_key_tE.isra.0": 3, "via _ZN2tr3net16can_reassembly_t9add_sliceERKNS0_16reassembly_key_tEmNS_4view6view_tE": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 7, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 2, "via _ZN2tr4view6rope_tD1Ev": 3},
           "_ZN2tr3net15can_transport_t15learn_advertiseERKNS0_3can11advertise_tE": {"via _ZN2tr3net15can_transport_t12process_dataERKNS0_16can_frame_data_tE": 1, "via _ZN2tr3net15can_transport_t22invalidate_overlappingERKNS0_3can15can_id_fields_tEt": 1, "via _ZN2tr3net16can_reassembly_t10drop_groupERKNS0_16reassembly_key_tE": 1, "via _ZN2tr3net16can_reassembly_t11touch_groupERKNS0_16reassembly_key_tE": 1},
           "_ZN2tr3net15can_transport_t15peer_endpoint_t4sendESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net15can_transport_t9send_implESt4spanIKSt4byteLj4294967295EEt": 1},
-          "_ZN2tr3net15can_transport_t15peer_endpoint_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net15can_transport_t22invalidate_overlappingERKNS0_3can15can_id_fields_tEt": {"via _ZN2tr3net16can_reassembly_t7discardERKNS0_16reassembly_key_tE.isra.0": 1},
           "_ZN2tr3net15can_transport_t4sendESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net15can_transport_t9send_implESt4spanIKSt4byteLj4294967295EEt": 1},
           "_ZN2tr3net15can_transport_t5on_rxERKNS0_16can_frame_data_tE": {"via _ZN2tr3net15can_transport_t12process_dataERKNS0_16can_frame_data_tE": 1, "via _ZN2tr3net15can_transport_t15learn_advertiseERKNS0_3can11advertise_tE": 1},
           "_ZN2tr3net15can_transport_t7deliverEtNS_4view6rope_tE": {"via _ZN2tr4view6rope_tD1Ev": 1, "via _ZNK2tr3net15receiver_slot_tIJEE12deliver_ropeENS_4view6rope_tERNS_3mem13mem_backend_tE": 1, "via _ZNK2tr3net15receiver_slot_tIJNS0_13peer_handle_tEEE12deliver_ropeES2_NS_4view6rope_tERNS_3mem13mem_backend_tE": 1},
           "_ZN2tr3net15can_transport_t9send_implESt4spanIKSt4byteLj4294967295EEt": {"via _ZN2tr4view13segment_ptr_t5resetEv": 6},
           "_ZN2tr3net15can_transport_tC2ENS_3mem10poly_ptr_tINS0_10can_link_tEEERKNS0_22transport_can_config_tE": {"via _ZN2tr11inline_fn_tIFvRKNS_3net16can_frame_data_tEELj8EE11invoke_implIZNS1_15can_transport_tC4ENS_3mem10poly_ptr_tINS1_10can_link_tEEERKNS1_22transport_can_config_tEEUlS4_E_EEvPKvS4_": 2},
-          "_ZN2tr3net15can_transport_tD0Ev": {"operator delete": 1, "via _ZN2tr3net15can_transport_tD1Ev": 1},
           "_ZN2tr3net15can_transport_tD2Ev": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "_ZN2tr3net16can_reassembly_t10drop_groupERKNS0_16reassembly_key_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr4view6view_taSEOS1_.isra.0": 1},
           "_ZN2tr3net16can_reassembly_t11touch_groupERKNS0_16reassembly_key_tE": {"via _ZN2tr3net16can_reassembly_t10drop_groupERKNS0_16reassembly_key_tE": 1},
@@ -676,13 +562,13 @@
           "_ZN2tr4view6rope_t6appendENS0_6view_tE": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr4view6view_taSEOS1_.isra.0": 2, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 3},
           "_ZN2tr4view6rope_tD2Ev": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3},
           "_ZN2tr4view6view_taSEOS1_.isra.0": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZNK2tr3net15receiver_slot_tIJEE12deliver_ropeENS_4view6rope_tERNS_3mem13mem_backend_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr4view6rope_tD1Ev": 1, "via _ZNK2tr4view6rope_t15try_materializeERNS_3mem13mem_backend_tE": 1},
           "_ZNK2tr3net15receiver_slot_tIJNS0_13peer_handle_tEEE12deliver_ropeES2_NS_4view6rope_tERNS_3mem13mem_backend_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1, "via _ZN2tr4view6rope_tD1Ev": 1, "via _ZNK2tr4view6rope_t15try_materializeERNS_3mem13mem_backend_tE": 1},
           "_ZNK2tr4view6rope_t15try_materializeERNS_3mem13mem_backend_tE": {"via _ZNK2tr4view6rope_t11try_flattenERNS_3mem13mem_backend_tE": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": {"via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1},
-          "_ZZN2tr3net21can_transport_factoryEPNS_3mem14block_source_tEPNS1_13mem_backend_tEENKUlRKNS0_15conn_settings_tEPKNS_4wire10tlv_node_tERS2_E_clES8_SC_SD_.isra.0": {"via _ZN2tr3net15can_transport_tC1ENS_3mem10poly_ptr_tINS0_10can_link_tEEERKNS0_22transport_can_config_tE": 1}
+          "_ZZN2tr3mem9make_polyINS_3net15can_transport_tEJNS0_10poly_ptr_tINS2_10can_link_tEEERNS2_22transport_can_config_tEEEENS4_IT_EERNS0_14block_source_tEDpOT0_ENUlPvE_4_FUNESG_": {"via _ZN2tr3net15can_transport_tD1Ev": 1},
+          "_ZZN2tr3net21can_transport_factoryEPNS_3mem14block_source_tEPNS1_13mem_backend_tEENKUlRKNS0_15conn_settings_tEPKNS_4wire10tlv_node_tERS2_E_clES8_SC_SD_.isra.0": {"via _ZN2tr3net15can_transport_tC1ENS_3mem10poly_ptr_tINS0_10can_link_tEEERKNS0_22transport_can_config_tE": 1, "via _ZZN2tr3mem9make_polyINS_3net15can_transport_tEJNS0_10poly_ptr_tINS2_10can_link_tEEERNS2_22transport_can_config_tEEEENS4_IT_EERNS0_14block_source_tEDpOT0_ENUlPvE_4_FUNESG_": 2}
         },
         "transport_tcp.cpp.obj": {
           "_ZN2tr11inline_fn_tIFvvELj8EE11invoke_implIZNS_3net15tcp_transport_t15start_receivingEvEUlvE_EEvPKv": {"via _ZN2tr3net15tcp_transport_t5serveEi": 1},
@@ -691,56 +577,46 @@
           "_ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE12grow_emplaceIJRNS0_14block_source_tEEEEPS4_jDpOT_": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE8relocateEPS4_S6_S6_": 2},
           "_ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE6regrowEj": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE8relocateEPS4_S6_S6_": 1},
           "_ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE8relocateEPS4_S6_S6_": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net12tx_handoff_t4nextEv": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 2},
           "_ZN2tr3net12tx_handoff_tC2EjRNS_3mem14block_source_tEj": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE12grow_emplaceIJRNS0_14block_source_tEEEEPS4_jDpOT_": 1, "via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE6regrowEj": 1},
-          "_ZN2tr3net13slot_server_t14session_base_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net15tcp_transport_t10run_listenEv": {"via _ZN2tr14function_ref_tIFviEE11call_objectIZNS_3net15tcp_transport_t10run_listenEvEUliE0_EEvNS2_7bound_tEOi": 2},
           "_ZN2tr3net15tcp_transport_t15start_receivingEv": {"via _ZN2tr11inline_fn_tIFvvELj8EE11invoke_implIZNS_3net15tcp_transport_t15start_receivingEvEUlvE_EEvPKv": 2, "via _ZN2tr3net16posix_endpoint_t5startENS_11inline_fn_tIFvvELj8EEEj": 1},
           "_ZN2tr3net15tcp_transport_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": {"via _ZN2tr3net12tx_handoff_t4nextEv": 2},
           "_ZN2tr3net15tcp_transport_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EERKNS_5graph7value_tE": {"via _ZN2tr3net12tx_handoff_t4nextEv": 2, "via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
+          "_ZN2tr3net15tcp_transport_t4sendESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net15tcp_transport_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": 1},
           "_ZN2tr3net15tcp_transport_t5serveEi": {"via _ZN2tr3net22length_prefix_framer_t9on_prefixERNS_3mem13mem_backend_tEjjj": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3, "via _ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": 1},
           "_ZN2tr3net15tcp_transport_tC2ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_12tcp_config_tE": {"via _ZN2tr3net15tcp_transport_t15start_receivingEv": 1, "via _ZN2tr3net17stream_endpoint_tC2Ev": 1},
           "_ZN2tr3net15tcp_transport_tC2EtRKNS0_12tcp_config_tE": {"via _ZN2tr11inline_fn_tIFvvELj8EE11invoke_implIZNS_3net15tcp_transport_tC4EtRKNS4_12tcp_config_tEEUlvE_EEvPKv": 2, "via _ZN2tr3net16posix_endpoint_t5startENS_11inline_fn_tIFvvELj8EEEj": 1, "via _ZN2tr3net17stream_endpoint_tC2Ev": 1},
-          "_ZN2tr3net15tcp_transport_tD0Ev": {"operator delete": 1, "via _ZN2tr3net15tcp_transport_tD1Ev": 1},
           "_ZN2tr3net15tcp_transport_tD2Ev": {"via _ZN2tr3net17stream_endpoint_tD2Ev": 1},
           "_ZN2tr3net17stream_endpoint_tC2Ev": {"via _ZN2tr3net12tx_handoff_tC1EjRNS_3mem14block_source_tEj": 1},
           "_ZN2tr3net22length_prefix_framer_t9on_prefixERNS_3mem13mem_backend_tEjjj": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "_ZN2tr3net22tcp_server_transport_t11on_readableERNS0_13slot_server_t14session_base_tEPKSt4bytej": {"via _ZN2tr3net22length_prefix_framer_t9on_prefixERNS_3mem13mem_backend_tEjjj": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 10, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 1, "via _ZN2tr4view6rope_tD1Ev": 1, "via _ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": 1},
+          "_ZN2tr3net22tcp_server_transport_t12make_sessionEv": {"via _ZZN2tr3mem9make_polyINS_3net22tcp_server_transport_t9session_tEJEEENS0_10poly_ptr_tIT_EERNS0_14block_source_tEDpOT0_ENUlPvE_4_FUNESD_": 2},
           "_ZN2tr3net22tcp_server_transport_t13on_slot_resetERNS0_13slot_server_t14session_base_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
-          "_ZN2tr3net22tcp_server_transport_t15peer_endpoint_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net22tcp_server_transport_t9on_acceptERNS0_13slot_server_t14session_base_tEi": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
-          "_ZN2tr3net22tcp_server_transport_t9session_tD0Ev": {"operator delete": 1, "via _ZN2tr3net22tcp_server_transport_t9session_tD1Ev": 1},
-          "_ZN2tr3net22tcp_server_transport_t9session_tD2Ev": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "_ZN2tr3net22tcp_server_transport_tC2EtRKNS0_19tcp_server_config_tE": {"via _ZN2tr3net12tx_handoff_tC1EjRNS_3mem14block_source_tEj": 1, "via _ZN2tr3net16posix_endpoint_t5startENS_11inline_fn_tIFvvELj8EEEj": 1},
-          "_ZN2tr3net22tcp_server_transport_tD0Ev": {"operator delete": 1, "via _ZN2tr3net22tcp_server_transport_tD1Ev": 1},
           "_ZN2tr3net22tcp_server_transport_tD2Ev": {"via _ZN2tr3net13slot_server_tD2Ev": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZN2tr4view6rope_t6appendENS0_6view_tE": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 3},
           "_ZN2tr4view6rope_tD2Ev": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3},
-          "_ZN2tr5graph16rx_loan_source_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph7value_t7releaseEPKS1_": {"via _ZN2tr5graph7value_t7destroyEPS1_": 1},
           "_ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 1, "via _ZN2tr4view6rope_tD1Ev": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": {"via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1},
+          "_ZZN2tr3mem9make_polyINS_3net22tcp_server_transport_t9session_tEJEEENS0_10poly_ptr_tIT_EERNS0_14block_source_tEDpOT0_ENUlPvE_4_FUNESD_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "unlikely._ZN2tr5graph7value_t7destroyEPS1_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3}
         },
         "transport_udp.cpp.obj": {
           "_ZN2tr11inline_fn_tIFvvELj8EE11invoke_implIZNS_3net15udp_transport_tC4EtSt17basic_string_viewIcSt11char_traitsIcEEtRKNS4_12udp_config_tEEUlvE_EEvPKv": {"via _ZN2tr3net15udp_transport_t3runEv": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net15udp_transport_t3runEv": {"via _ZN2tr4view13segment_ptr_t5resetEv": 4, "via _ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": 2},
           "_ZN2tr3net15udp_transport_tC2EtSt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_12udp_config_tE": {"via _ZN2tr11inline_fn_tIFvvELj8EE11invoke_implIZNS_3net15udp_transport_tC4EtSt17basic_string_viewIcSt11char_traitsIcEEtRKNS4_12udp_config_tEEUlvE_EEvPKv": 2, "via _ZN2tr3net16posix_endpoint_t5startENS_11inline_fn_tIFvvELj8EEEj": 1},
-          "_ZN2tr3net15udp_transport_tD0Ev": {"operator delete": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 6},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": {"via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1}
         },
         "transport_vertex.cpp.obj": {
           "_ZN2tr11inline_fn_tIFvNS_3net12link_state_tEELj8EE11invoke_implIZNS1_18transport_vertex_t22make_connection_lockedERNS6_9ctl_txn_tESt17basic_string_viewIcSt11char_traitsIcEESC_PKNS_4wire10tlv_node_tENS_3mem13block_array_tISt4byteEENS1_15conn_settings_tEEUlS2_E_EEvPKvOS2_": {"via _ZN2tr3net12_GLOBAL__N_1L16link_state_valueENS0_12link_state_tERNS_3mem13mem_backend_tE": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 1, "via _ZN2tr4view6rope_tD1Ev": 1, "via _ZN2tr5graph7graph_t5writeENS0_15vertex_handle_tENS_4view6rope_tESt17basic_string_viewIcSt11char_traitsIcEEPKNS_3net11link_kind_tE": 1},
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net12_GLOBAL__N_1L12bus_childrenEPv": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "_ZN2tr3net12_GLOBAL__N_1L16link_state_valueENS0_12link_state_tERNS_3mem13mem_backend_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2},
           "_ZN2tr3net18transport_vertex_t12acquire_linkESt17basic_string_viewIcSt11char_traitsIcEE": {"via _ZN2tr3net16self_heal_link_t7acquireEv": 1, "via _ZN2tr3net18transport_vertex_t9ctl_txn_tD1Ev": 1},
@@ -764,7 +640,6 @@
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZN2tr4view6rope_t6appendENS0_6view_tE": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3, "via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": 3},
           "_ZN2tr4view6rope_tD2Ev": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 3},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr5graph6path_tD2Ev": {"operator delete": 2, "via _ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": 2, "via _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_disposeEv": 1},
           "_ZNK2tr3net18transport_vertex_t10module_forESt17basic_string_viewIcSt11char_traitsIcEENS0_11conn_role_tE": {"via _ZN2tr3net18transport_vertex_t9ctl_txn_tD1Ev": 1},
           "_ZNK2tr3net18transport_vertex_t11settings_ofESt17basic_string_viewIcSt11char_traitsIcEE": {"via _ZN2tr3net18transport_vertex_t9ctl_txn_tD1Ev": 1},
@@ -778,11 +653,8 @@
           "_ZZN2tr3net18transport_vertex_t18mint_module_lockedESt17basic_string_viewIcSt11char_traitsIcEENS0_14conn_catalog_tEENUlPvRKNS_5graph7value_tERKNS8_11write_ctx_tEE_4_FUNES7_SB_SE_": {"via _ZN2tr3net18transport_vertex_t14endpoint_writeESt17basic_string_viewIcSt11char_traitsIcEENS0_14conn_catalog_tERKNS_5graph7value_tE": 1}
         },
         "twai_link.cpp.obj": {
-          "_ZN2tr3mem13mem_backend_tD0Ev": {"operator delete": 1},
           "_ZN2tr3net11twai_link_t5startEv": {"via _ZNSt6threadC1IZN2tr3net11twai_link_t5startEvEUlvE_JEvEEOT_DpOT0_": 2},
           "_ZN2tr3net11twai_link_tC2ERKNS0_18twai_link_config_tE": {"xQueueGenericCreate": 1},
-          "_ZN2tr3net11twai_link_tD0Ev": {"operator delete": 1},
-          "_ZN2tr5graph22inline_value_backend_tD0Ev": {"operator delete": 1},
           "_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN2tr3net11twai_link_t5startEvEUlvE_EEEEED0Ev": {"operator delete": 1},
           "_ZNSt6threadC2IZN2tr3net11twai_link_t5startEvEUlvE_JEvEEOT_DpOT0_": {"_ZNSt6thread15_M_start_threadESt10unique_ptrINS_6_StateESt14default_deleteIS1_EEPFvvE": 1, "operator new": 1}
         }

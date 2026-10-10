@@ -908,8 +908,6 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     struct session_base_t {
         /** @brief Constructs a free slot (no fd, not open, unnamed). */
         session_base_t() = default;
-        /** @brief Virtual: the base owns the slot vector and deletes derived slots. */
-        virtual ~session_base_t() = default;
         session_base_t(const session_base_t&) = delete;
         session_base_t& operator=(const session_base_t&) = delete;
 
@@ -946,6 +944,12 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         that hold it. Cleared as the slot is recycled, so a stalled peer's
          *         strikes can never be inherited by its successor in the slot. */
         std::uint8_t tx_stall_streak = 0;
+
+       protected:
+        /** @brief Destroyed only as the derived slot it is: the slot table's
+         *         `%tr::mem::poly_ptr_t` records that slot's destructor (#2022), so the base
+         *         carries no vtable and no deleting destructor. */
+        ~session_base_t() = default;
     };
 
     /**
@@ -1223,6 +1227,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
 class flat_slot_server_t : public slot_server_t {
    protected:
     using slot_server_t::slot_server_t;
+    /** @brief Destroyed only as the concrete server it is, never through this base (#2022):
+     *         the derived destructor's `stop_and_join` must run first. */
+    ~flat_slot_server_t() = default;
 
     /**
      * @name The per-frame peer-delivery seam, inert (see @ref bus_slot_server_t for the live
@@ -1315,6 +1322,9 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
 
    protected:
     using slot_server_t::slot_server_t;
+    /** @brief Destroyed only as the concrete server it is, never through this base (#2022):
+     *         the derived destructor's `stop_and_join` must run first. */
+    ~bus_slot_server_t() = default;
 
     /** @brief Arrival: fire the facet's peer-up notifier (#1223 step 2). */
     void announce_peer_up(peer_handle_t handle, std::string_view peer) override {

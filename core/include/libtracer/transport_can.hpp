@@ -211,8 +211,6 @@ class can_link_t {
      */
     using rx_fn_t = tr::inline_fn_t<void(const can_frame_data_t&)>;
 
-    virtual ~can_link_t() = default;
-
     /**
      * @brief Emit one raw CAN frame onto the bus.
      *
@@ -243,6 +241,11 @@ class can_link_t {
      * holds them until the first read.
      */
     virtual void start() = 0;
+
+   protected:
+    /** @brief Destroyed only as the class it is; `%tr::mem::poly_ptr_t` records the concrete
+     *         destructor (#2022, as for `%tr::net::transport_t`). */
+    ~can_link_t() = default;
 };
 
 /**
@@ -260,7 +263,7 @@ class can_link_t {
  * `MSG_NOSIGNAL`-equivalent (a raw CAN write cannot SIGPIPE) and serialized; the fd is reset under
  * the write lock before close on shutdown.
  */
-class socketcan_link_t : public can_link_t {
+class socketcan_link_t final : public can_link_t {
    public:
     /**
      * @brief Open + bind a `CAN_RAW` socket on interface @p ifname — no reading yet.
@@ -276,7 +279,7 @@ class socketcan_link_t : public can_link_t {
     explicit socketcan_link_t(std::string_view ifname, std::size_t recv_stack = 0);
 
     /** @brief Stop the receive thread and close the socket. */
-    ~socketcan_link_t() override;
+    ~socketcan_link_t();
 
     socketcan_link_t(const socketcan_link_t&) = delete;
     socketcan_link_t& operator=(const socketcan_link_t&) = delete;
@@ -416,7 +419,7 @@ struct transport_can_config_t {
  *    inbound NAME — replies route back per-peer with no per-request state.
  * No peer ever creates a vertex or any other graph state (ADR-0044 §1).
  */
-class can_transport_t : public transport_t, public bus_link_t {
+class can_transport_t final : public transport_t, public bus_link_t {
    public:
     /**
      * @brief Bind this transport to raw link @p link with node identity @p config.
@@ -434,7 +437,7 @@ class can_transport_t : public transport_t, public bus_link_t {
     can_transport_t(mem::poly_ptr_t<can_link_t> link, const transport_can_config_t& config);
 
     /** @brief Detach the receiver and release the link (stopping its receive thread). */
-    ~can_transport_t() override;
+    ~can_transport_t();
 
     can_transport_t(const can_transport_t&) = delete;
     can_transport_t& operator=(const can_transport_t&) = delete;

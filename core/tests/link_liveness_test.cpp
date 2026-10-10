@@ -67,7 +67,7 @@ struct fake_sock_t final : tr::net::transport_t {
     std::atomic<std::size_t> sent{0};
 
     fake_sock_t() { g_socks_alive.fetch_add(1); }
-    ~fake_sock_t() override { g_socks_alive.fetch_sub(1); }
+    ~fake_sock_t() { g_socks_alive.fetch_sub(1); }
     fake_sock_t(const fake_sock_t&) = delete;
     fake_sock_t& operator=(const fake_sock_t&) = delete;
 

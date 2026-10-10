@@ -106,7 +106,7 @@ std::atomic<int> g_socks_alive{0};
 /** @brief A minimal transport: it carries nothing and can report itself down on demand. */
 struct fake_sock_t final : tr::net::transport_t {
     fake_sock_t() { g_socks_alive.fetch_add(1); }
-    ~fake_sock_t() override { g_socks_alive.fetch_sub(1); }
+    ~fake_sock_t() { g_socks_alive.fetch_sub(1); }
     fake_sock_t(const fake_sock_t&) = delete;
     fake_sock_t& operator=(const fake_sock_t&) = delete;
 

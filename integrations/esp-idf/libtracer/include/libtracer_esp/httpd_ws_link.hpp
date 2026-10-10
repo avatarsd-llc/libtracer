@@ -292,7 +292,7 @@ struct httpd_ws_config_t {
  * delivery (not ropes): each frame is delivered borrowed and the router services
  * it in-call, so nothing outlives the callback (@ref delivers_ropes is false).
  */
-class httpd_ws_link_t : public transport_t, public bus_link_t {
+class httpd_ws_link_t final : public transport_t, public bus_link_t {
    public:
     /**
      * @brief Task stack the `esp_http_server` task must have for this link's in-call
@@ -438,7 +438,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * costs memory, never a use-after-free; the handler join is unbounded because there
      * is no safe way to free the link out from under a handler that is reading it.
      */
-    ~httpd_ws_link_t() override;
+    ~httpd_ws_link_t();
 
     httpd_ws_link_t(const httpd_ws_link_t&) = delete;
     httpd_ws_link_t& operator=(const httpd_ws_link_t&) = delete;

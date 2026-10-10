@@ -74,6 +74,28 @@
 
 namespace {
 
+/**
+ * @brief Names the stream servers' protected session slot, so its destructor rule can be
+ *        asserted (#2022). Never instantiated.
+ */
+struct session_probe_t : tr::net::stream_server_base_t {
+    /** @brief Whether anything outside the hierarchy can destroy a session slot. */
+    static constexpr bool kSessionDestructible = std::is_destructible_v<session_base_t>;
+};
+
+// #2022: no link, server base or session slot can be destroyed through its base, in either
+// bus arm, so `delete` / `std::unique_ptr` through one fails to compile instead of skipping
+// the concrete destructor (a server's `stop_and_join`). The concrete links still can.
+static_assert(!std::is_destructible_v<tr::net::transport_t>);
+static_assert(!std::is_destructible_v<tr::net::slot_server_t>);
+static_assert(!std::is_destructible_v<tr::net::flat_slot_server_t>);
+static_assert(!std::is_destructible_v<tr::net::bus_slot_server_t>);
+static_assert(!std::is_destructible_v<tr::net::stream_server_base_t>);
+static_assert(!session_probe_t::kSessionDestructible);
+static_assert(std::is_destructible_v<tr::net::tcp_server_transport_t>);
+static_assert(std::is_destructible_v<tr::net::ws_server_transport_t>);
+static_assert(std::is_destructible_v<tr::net::tcp_transport_t>);
+
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::net::bus_of;

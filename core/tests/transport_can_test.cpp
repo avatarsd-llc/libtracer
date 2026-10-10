@@ -41,6 +41,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "libtracer/can.hpp"
@@ -48,6 +49,11 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "test_support.hpp"
+
+// #2022: a raw CAN link is destroyed as the class it is (or through `poly_ptr_t`), never
+// through `can_link_t`.
+static_assert(!std::is_destructible_v<tr::net::can_link_t>);
+static_assert(std::is_destructible_v<tr::net::can_transport_t>);
 
 namespace {
 
@@ -109,7 +115,7 @@ class fake_can_bus_t {
 class fake_link_t : public tr::net::can_link_t {
    public:
     explicit fake_link_t(fake_can_bus_t& bus) : bus_(bus) { bus_.attach(this); }
-    ~fake_link_t() override {
+    ~fake_link_t() {
         bus_.detach(this);
         {
             const std::lock_guard lock(m_);

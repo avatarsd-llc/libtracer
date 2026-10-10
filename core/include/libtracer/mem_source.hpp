@@ -184,9 +184,6 @@ class block_source_t {
    public:
     /** @brief Construct a source with a stable, human-readable @p name (e.g. `"heap"`). */
     explicit constexpr block_source_t(const char* name) noexcept : name_(name) {}
-    /** @brief Sources are held by pointer and outlive their users; virtual teardown. */
-    virtual ~block_source_t() = default;
-
     /** @brief Non-copyable — a source is an identity, not a value. */
     block_source_t(const block_source_t&) = delete;
     /** @brief Non-assignable. */
@@ -238,6 +235,17 @@ class block_source_t {
      * standing referees).
      */
     [[nodiscard]] virtual source_stats_t stats() const noexcept { return {}; }
+
+   protected:
+    /**
+     * @brief Destroyed only as the class it is, never through this base.
+     *
+     * Protected and non-virtual (#2022): a source is held by pointer and outlives its users,
+     * and the one owner of an object through a base, @ref poly_ptr_t, records the derived
+     * destructor. A virtual one would emit a deleting destructor naming `operator delete` in
+     * every object that emits a source's vtable, on a build that must name no heap.
+     */
+    ~block_source_t() = default;
 
    private:
     const char* name_; /**< @brief Borrowed literal; never owned. */

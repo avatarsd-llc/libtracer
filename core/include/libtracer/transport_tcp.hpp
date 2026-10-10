@@ -170,7 +170,7 @@ struct tcp_server_config_t {
  * segment). With a view receiver installed the frame is handed up OWNING; the
  * span receiver otherwise gets a borrowed span over the same segment bytes.
  */
-class tcp_transport_t : public transport_t, private stream_endpoint_t {
+class tcp_transport_t final : public transport_t, private stream_endpoint_t {
    public:
     /** @brief The largest frame the length prefix may announce — the shared
      *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings
@@ -211,7 +211,7 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
     explicit tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& config = {});
 
     /** @brief Stop the receive thread and close all sockets. */
-    ~tcp_transport_t() override;
+    ~tcp_transport_t();
 
     tcp_transport_t(const tcp_transport_t&) = delete;
     tcp_transport_t& operator=(const tcp_transport_t&) = delete;
@@ -382,7 +382,7 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
  * leaner than WS packaging (no HTTP upgrade, no frame masking) with the same
  * per-peer return-route identity when @p peer_named.
  */
-class tcp_server_transport_t : public stream_server_base_t {
+class tcp_server_transport_t final : public stream_server_base_t {
    public:
     /**
      * @brief Bind+listen on @p bind_port (0 = ephemeral; see local_port()).
@@ -398,7 +398,7 @@ class tcp_server_transport_t : public stream_server_base_t {
                                     const tcp_server_config_t& config = {});
 
     /** @brief Stop the poll thread and close all sockets. */
-    ~tcp_server_transport_t() override;
+    ~tcp_server_transport_t();
 
     tcp_server_transport_t(const tcp_server_transport_t&) = delete;
     tcp_server_transport_t& operator=(const tcp_server_transport_t&) = delete;

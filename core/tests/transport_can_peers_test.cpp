@@ -112,7 +112,7 @@ class fake_can_bus_t {
 class fake_link_t : public tr::net::can_link_t {
    public:
     explicit fake_link_t(fake_can_bus_t& bus) : bus_(bus) { bus_.attach(this); }
-    ~fake_link_t() override {
+    ~fake_link_t() {
         bus_.detach(this);
         {
             const std::lock_guard lock(m_);

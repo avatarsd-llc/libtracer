@@ -491,8 +491,6 @@ class transport_t {
      *         §ingress rope delivery). */
     using rope_receiver_fn_t = receiver_slot_t<>::rope_fn_t;
 
-    virtual ~transport_t() = default;
-
     /**
      * @brief Emit one frame (a complete TLV's bytes) onto the wire.
      *
@@ -864,6 +862,18 @@ class transport_t {
     }
 
    protected:
+    /**
+     * @brief Destroyed only as the class it is, never through this base.
+     *
+     * Protected and non-virtual (#2022). The one owner of a link through this base is
+     * `%tr::mem::poly_ptr_t` (a factory's `transport_ptr_t`), and it records the concrete
+     * destructor, so nothing here needs a virtual one. A virtual one would emit a deleting
+     * destructor naming `operator delete` in every object that emits a link's vtable, on a
+     * build that must name no heap. Own a link as its concrete type, or through
+     * `%tr::mem::make_poly`; `std::unique_ptr<transport_t>` no longer compiles.
+     */
+    ~transport_t() = default;
+
     /** @brief Fire the link-down notifier (no-op when none installed) — see
      *         @ref set_down_notifier for the calling discipline. */
     void notify_down() const {

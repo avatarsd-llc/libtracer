@@ -34,6 +34,7 @@
 
 #include "bench_common.hpp"
 #include "bench_net.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
@@ -44,18 +45,23 @@ using namespace bench;
 
 namespace {
 
-/** @brief The subscriber binds/listens on `port`; the publisher's own UDP bind is port+1. */
-std::unique_ptr<transport_t> make_endpoint(std::string_view proto, bool sub, std::uint16_t port) {
+/** @brief The subscriber binds/listens on `port`; the publisher's own UDP bind is port+1.
+ *         Owned through `poly_ptr_t`, the one owner of a link through its base (#2022). */
+tr::mem::poly_ptr_t<transport_t> make_endpoint(std::string_view proto, bool sub,
+                                               std::uint16_t port) {
+    tr::mem::block_source_t& src = tr::mem::heap_source();
     if (proto == "udp")
-        return sub ? std::make_unique<tr::net::udp_transport_t>(port, "127.0.0.1", port + 1)
-                   : std::make_unique<tr::net::udp_transport_t>(port + 1, "127.0.0.1", port);
+        return sub ? tr::mem::make_poly<tr::net::udp_transport_t>(src, port, "127.0.0.1", port + 1)
+                   : tr::mem::make_poly<tr::net::udp_transport_t>(src, port + 1, "127.0.0.1", port);
     if (proto == "tcp")
-        return sub ? std::make_unique<tr::net::tcp_transport_t>(port)
-                   : std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port);
+        return sub ? tr::mem::make_poly<tr::net::tcp_transport_t>(src, port)
+                   : tr::mem::make_poly<tr::net::tcp_transport_t>(src, "127.0.0.1", port);
     if (proto == "ws")
-        return sub ? std::unique_ptr<transport_t>(new tr::net::ws_server_transport_t(port))
-                   : std::unique_ptr<transport_t>(
-                         new tr::net::ws_client_transport_t("127.0.0.1", port));
+        return sub ? tr::mem::poly_ptr_t<transport_t>(
+                         tr::mem::make_poly<tr::net::ws_server_transport_t>(src, port))
+                   : tr::mem::poly_ptr_t<transport_t>(
+                         tr::mem::make_poly<tr::net::ws_client_transport_t>(src, "127.0.0.1",
+                                                                            port));
     return nullptr;
 }
 

@@ -195,7 +195,7 @@ class slab_pool_t final : public block_source_t {
     }
 
     /** @brief Returns every slab to the root, live blocks or not: the pool's blocks die with it. */
-    ~slab_pool_t() override {
+    ~slab_pool_t() {
         for (std::size_t i = 0; i < N; ++i) {
             while (slab_t* s = cls_[i].all) {
                 unlink_all(cls_[i], s);

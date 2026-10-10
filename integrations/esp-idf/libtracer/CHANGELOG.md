@@ -10,6 +10,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`httpd_ws_link_t`, `esp_ws_client_link_t` and `twai_link_t` are `final`, and their
+  destructors are no longer virtual
+  ([#2022](https://github.com/avatarsd-llc/libtracer/issues/2022)).** The core seam bases
+  (`transport_t`, `can_link_t`) now have protected, non-virtual destructors, so the component
+  archive no longer names `operator delete` from a deleting destructor in every object that
+  emits a link's or a source's vtable. Own a link as its concrete type or through
+  `tr::mem::make_poly`, as the component already does; see the core CHANGELOG for the
+  migration.
+
 ## [0.19.0] — 2026-10-09
 
 ### Added

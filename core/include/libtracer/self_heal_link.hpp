@@ -133,7 +133,7 @@ class self_heal_link_t final : public transport_t {
                      mem::block_source_t& src);
 
     /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. */
-    ~self_heal_link_t() override;
+    ~self_heal_link_t();
 
     self_heal_link_t(const self_heal_link_t&) = delete;
     self_heal_link_t& operator=(const self_heal_link_t&) = delete;

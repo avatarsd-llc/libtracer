@@ -52,6 +52,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING: the seam bases have protected, non-virtual destructors
+  ([#2022](https://github.com/avatarsd-llc/libtracer/issues/2022)).** `mem::block_source_t`,
+  `mem::mem_backend_t`, `net::transport_t`, `net::can_link_t` and
+  `net::slot_server_t::session_base_t` no longer have a virtual destructor, and theirs is
+  protected; so is the destructor of the stream servers' base `net::stream_server_base_t`
+  (`flat_slot_server_t` / `bus_slot_server_t`) and of `net::slot_server_t`. A class with a
+  virtual destructor emits a deleting destructor that names `operator delete` in every object
+  that emits its vtable, whether or not anything deletes one; that was the largest group of
+  heap references in an MCU `libtracer.a` (9 of the 21 pinned functions on Cortex-M0, 104 of
+  the 666 on ESP32-C6). Nothing in the library deletes these through a base: `mem::poly_ptr_t`
+  was the one owner through a base, and it now records the destructor of the class
+  `mem::make_poly` built, so its `T` needs no virtual destructor (it grows from four words to
+  five, and its converting constructor no longer requires one). The concrete links
+  (`udp_transport_t`, `tcp_transport_t`, `tcp_server_transport_t`, `ws_server_transport_t`,
+  `ws_client_transport_t`, `quic_transport_t`, `webtransport_transport_t`, `can_transport_t`,
+  `socketcan_link_t`) are now `final`. Migration:
+  - own a link or a source as its concrete type, or through `mem::make_poly` /
+    `mem::poly_ptr_t<transport_t>` (`mem::heap_source()` keeps it on the heap);
+    `std::unique_ptr<transport_t>` (or of any base above) and `delete` through any of these
+    bases no longer compile;
+  - a subclass of `transport_t`, `can_link_t`, `block_source_t`, `mem_backend_t`,
+    `slot_server_t::session_base_t` or `stream_server_base_t` drops `override` from its
+    destructor;
+  - a class that derived from one of the concrete links derives from `transport_t` instead.
 - **Docs: `heap_backend()` and a null `memory.io` no longer promise "the heap"
   ([#2051](https://github.com/avatarsd-llc/libtracer/issues/2051)).** On a build with
   `kSlabPool = false` they draw from the static arena, not the platform heap. No behaviour

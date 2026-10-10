@@ -103,7 +103,7 @@ struct webtransport_config_t {
  * delivery); TX copies each frame once into the buffer msquic owns until
  * SEND_COMPLETE — exactly the quic_transport_t contracts.
  */
-class webtransport_transport_t : public transport_t {
+class webtransport_transport_t final : public transport_t {
    public:
     /** @brief The largest frame the length prefix may announce — the shared
      *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings
@@ -201,7 +201,7 @@ class webtransport_transport_t : public transport_t {
 
     /** @brief Shut the session down, drain msquic callbacks, and release the
      *         msquic API (listener → streams → connection → registration order). */
-    ~webtransport_transport_t() override;
+    ~webtransport_transport_t();
 
     webtransport_transport_t(const webtransport_transport_t&) = delete;
     webtransport_transport_t& operator=(const webtransport_transport_t&) = delete;

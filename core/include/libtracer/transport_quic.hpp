@@ -84,7 +84,7 @@ struct quic_config_t {
  * buffer-lifetime contract) — the only library-held buffer, and only for the
  * duration of the in-flight send.
  */
-class quic_transport_t : public transport_t {
+class quic_transport_t final : public transport_t {
    public:
     /** @brief The largest frame the length prefix may announce — the shared
      *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings
@@ -133,7 +133,7 @@ class quic_transport_t : public transport_t {
 
     /** @brief Shut the connection down, drain msquic callbacks, and release the
      *         msquic API (listener → stream → connection → registration order). */
-    ~quic_transport_t() override;
+    ~quic_transport_t();
 
     quic_transport_t(const quic_transport_t&) = delete;
     quic_transport_t& operator=(const quic_transport_t&) = delete;
