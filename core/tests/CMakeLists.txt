@@ -2036,6 +2036,14 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP)
     target_compile_definitions(udp_test PRIVATE
         LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME udp COMMAND udp_test)
+    # The Noise link (#2073): one request and reply over a Noise session, in memory and over
+    # UDP between two graph nodes, on the backend LIBTRACER_NOISE_CRYPTO names.
+    if(TARGET libtracer_noise)
+        add_executable(noise_link_test noise_link_test.cpp)
+        target_link_libraries(noise_link_test PRIVATE libtracer libtracer_noise)
+        libtracer_test_warnings(noise_link_test)
+        add_test(NAME noise_link COMMAND noise_link_test)
+    endif()
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)

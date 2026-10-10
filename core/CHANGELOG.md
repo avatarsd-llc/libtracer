@@ -16,6 +16,35 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **The Noise link: one request and its reply over a Noise session, on a host
+  ([#2073](https://github.com/avatarsd-llc/libtracer/issues/2073)).** The link half of the
+  RFC-0033 binding (reference/23), in the new header `transport_noise.hpp`.
+  - `tr::net::noise_link_t<B, Host, Carrier>` is a `transport_t` whose frames travel inside a
+    `Noise_NNpsk0_25519_ChaChaPoly_SHA256` session over a datagram carrier it owns
+    (`udp_transport_t` on a host). DIAL initiates and LISTEN answers. `Host` is a compile-time
+    policy (`noise::link_host`): the key store that resolves the PSK reference
+    (`noise_config_t::psk_ref`), the random source of the ephemeral keys, and the initiator
+    counter. The library holds no key, no entropy and no clock of its own.
+  - A send with no session fails at once (`dropped_tx`) and, on DIAL, starts a handshake;
+    `dial()` demands without a frame. The request sent once `poll` reports a session is the
+    confirmation, and the reply is the acknowledgement: two round trips, `UP` only after the
+    reply. `poll(now)` runs the retry, attempt and pending deadlines on the application's clock
+    and returns the next one (`noise_poll_t`); a deadline of 0 is never due.
+  - A wrong PSK is refused at the tag check and counted, and nothing is sent back. All session
+    state is one block from the link's `memory.state`, drawn when the link is built, so nothing
+    is allocated before the PSK is proven; each send seals into one block from `memory.io`.
+  - The ten `noise_*` nouns of reference/23 §11 are readable as `:stats.link.<child>`, through
+    the new virtual `transport_t::kind_stats`. `graph::stats_block_t::kMaxMembers` is 16 (was
+    12) to hold them.
+  - `udp_transport_t` gains `send_to(address, iov)`, `inbound_source()` and `peer_address()`, so
+    an owner decides where each datagram goes. `noise::transport_cipher_t::clear()` drops a
+    discarded session's keys.
+  - Not yet: rekey, `rekey_after` / `reject_after` and the generation rule
+    ([#2074](https://github.com/avatarsd-llc/libtracer/issues/2074)), persisted counter and mark
+    ([#2075](https://github.com/avatarsd-llc/libtracer/issues/2075)), ESP-IDF
+    ([#2076](https://github.com/avatarsd-llc/libtracer/issues/2076)). This build keeps no
+    previous session (optional, reference/23 §6).
+  - `bench_noise_link`'s `noise` arm is on with `-DLIBTRACER_BENCH_NOISE_LINK=ON` and a backend.
 - **The Noise link's crypto backend, chosen at compile time
   ([#2072](https://github.com/avatarsd-llc/libtracer/issues/2072)).** The first slice of the
   RFC-0033 Noise link ([#2064](https://github.com/avatarsd-llc/libtracer/issues/2064)): the

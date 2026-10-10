@@ -118,6 +118,11 @@ void udp_transport_t::send(std::span<const std::byte> frame) {
 }
 
 void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
+    send_to(peer(), iov);
+}
+
+void udp_transport_t::send_to(std::uint64_t address,
+                              std::span<const std::span<const std::byte>> iov) {
     if (fd_ < 0) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // no socket => a counted drop
         return;
@@ -147,7 +152,7 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     }
     for (std::size_t i = 0; i < n; ++i)
         vec[i] = ::iovec{const_cast<std::byte*>(iov[i].data()), iov[i].size()};
-    const std::uint64_t p = peer();
+    const std::uint64_t p = address;
     if (p == 0) {  // no peer (learned or configured) => nobody to send to
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -224,9 +229,8 @@ void udp_transport_t::run() {
             const ssize_t n =
                 ::recvfrom(fd_, dst, cap, 0, reinterpret_cast<sockaddr*>(&from), &flen);
             if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_ (rx_seg kept)
-            if (learn_peer_)
-                peer_.store(pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port)),
-                            std::memory_order_relaxed);
+            source_ = pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port));
+            if (learn_peer_) peer_.store(source_, std::memory_order_relaxed);
             if (!rx_seg) {
                 dropped_rx_.fetch_add(1, std::memory_order_relaxed);
                 continue;
@@ -258,9 +262,8 @@ void udp_transport_t::run() {
         if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_
         // Listener mode: the latest datagram's source IS the peer (single-peer
         // UDP-server shape) — replies/sends target it from now on.
-        if (learn_peer_)
-            peer_.store(pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port)),
-                        std::memory_order_relaxed);
+        source_ = pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port));
+        if (learn_peer_) peer_.store(source_, std::memory_order_relaxed);
         if (buf == scratch.drain) {  // the scratch was refused: drained, dropped, counted
             dropped_rx_.fetch_add(1, std::memory_order_relaxed);
             continue;

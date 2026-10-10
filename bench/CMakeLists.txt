@@ -324,11 +324,17 @@ target_compile_options(bench_tcp_baseline PRIVATE -Wall -Wextra)
 #    is left out, never fetched;
 #  - bench_zenoh_link (in the Zenoh block below): Zenoh over UDP, TLS and QUIC, the same rows.
 # malloc_probe.cpp interposes malloc for the whole executable, so it is linked only here.
-option(LIBTRACER_BENCH_NOISE_LINK "Compile bench_noise_link's Noise arm (needs #2064)" OFF)
+option(LIBTRACER_BENCH_NOISE_LINK
+    "Compile bench_noise_link's Noise arm (#2073; needs LIBTRACER_NOISE_CRYPTO set)" OFF)
 add_executable(bench_noise_link bench_noise_link.cpp malloc_probe.cpp)
 target_link_libraries(bench_noise_link PRIVATE libtracer)
 target_compile_options(bench_noise_link PRIVATE -Wall -Wextra)
 if(LIBTRACER_BENCH_NOISE_LINK)
+    if(NOT TARGET libtracer_noise)
+        message(FATAL_ERROR "LIBTRACER_BENCH_NOISE_LINK needs a crypto backend: "
+                            "-DLIBTRACER_NOISE_CRYPTO=openssl|sodium|psa")
+    endif()
+    target_link_libraries(bench_noise_link PRIVATE libtracer_noise)
     target_compile_definitions(bench_noise_link PRIVATE LIBTRACER_BENCH_NOISE_LINK=1)
 endif()
 
