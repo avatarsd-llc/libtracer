@@ -7,12 +7,6 @@
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },
-    "tr::graph::graph_t::admit_subscriber": {
-      "ccn": [
-        16
-      ],
-      "file": "core/src/graph.cpp"
-    },
     "tr::graph::graph_t::propagate_folded_impl": {
       "ccn": [
         29

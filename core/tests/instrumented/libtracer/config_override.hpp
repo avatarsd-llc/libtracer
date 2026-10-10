@@ -28,7 +28,9 @@
  *
  * **Creation hooks.** `kCreationHooks` defaults to `false` on every profile (RFC-0030 §18 Q5):
  * a miss refuses and no vertex has a hook slot. The test build opts in so the opt-in creation
- * path is exercised; the refusal path is the same answer either way.
+ * path is exercised; the refusal path is the same answer either way. `kSessionAdmission` (#1841)
+ * is opted in for the same reason: the session-admission seam is exercised, and a build without
+ * it has no seam to test.
  *
  * **It yields to a fragment the build already supplies.** A CI leg that binds its own
  * configuration (a reclamation policy, the bus module closed, ...) lists its fragment later on
@@ -52,13 +54,14 @@
 namespace tr::graph {
 
 /** @brief The defaults, with the instrumentation counters, both link modules, the
- *         fault-injection hooks and creation hooks compiled in. */
+ *         fault-injection hooks, creation hooks and the session-admission seam compiled in. */
 struct instrumented_config_t : default_config_t {
     static constexpr bool kInstrumentCounters = true;
     static constexpr bool kBusLinks = true;
     static constexpr bool kSelfHealLinks = true;
     static constexpr bool kFaultInjection = true;
     static constexpr bool kCreationHooks = true;
+    static constexpr bool kSessionAdmission = true;
 };
 
 using config_t = instrumented_config_t;
