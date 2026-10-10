@@ -472,6 +472,7 @@ void check_noise_transcript(const fs::path& dir, const std::string& label) {
 
     // The symmetric state token by token (Appendix A.3), on one chain both sides share.
     noise::symmetric_state_t<B> s;
+    typename B::aead_t hc;  // the link's handshake cipher
     B::dh_key_t ei;
     B::dh_key_t er;
     noise::key32_t pub_i{};
@@ -493,7 +494,7 @@ void check_noise_transcript(const fs::path& dir, const std::string& label) {
               is(s.handshake_hash(), "initiator_e_h") && s.mix_key(pub_i) && ck_h_k("initiator_e"),
           at + "-> e: e.pub, MixHash(e.pub), MixKey(e.pub)");
     std::array<std::byte, 9 + noise::kTagLen> ct1{};
-    check(s.encrypt_and_hash(bytes("msg1_payload"), ct1.data()) &&
+    check(s.encrypt_and_hash(hc, bytes("msg1_payload"), ct1.data()) &&
               is(s.handshake_hash(), "msg1_payload_h"),
           at + "-> payload: EncryptAndHash");
     check(er.set(key32("responder_ephemeral_private"), pub_r) &&
@@ -505,7 +506,7 @@ void check_noise_transcript(const fs::path& dir, const std::string& label) {
               s.mix_key(dh) && is(s.chaining_key(), "ee_ck") && is(s.cipher_key(), "ee_k"),
           at + "<- ee: DH(e, re) from both sides, MixKey");
     std::array<std::byte, 1 + noise::kTagLen> ct2{};
-    check(s.encrypt_and_hash(bytes("msg2_payload"), ct2.data()) &&
+    check(s.encrypt_and_hash(hc, bytes("msg2_payload"), ct2.data()) &&
               is(s.handshake_hash(), "msg2_payload_h") && is(s.handshake_hash(), "handshake_hash"),
           at + "<- payload: EncryptAndHash, and h is the handshake hash");
     noise::key32_t k1{};
@@ -517,8 +518,8 @@ void check_noise_transcript(const fs::path& dir, const std::string& label) {
     check(noise::psk_state(key32("psk"), base) && is(base.chaining_key(), "psk_ck") &&
               is(base.handshake_hash(), "psk_h"),
           at + "psk_state is the state after the psk token");
-    noise::handshake_t<B> i(noise::role_t::INITIATOR, base);
-    noise::handshake_t<B> r(noise::role_t::RESPONDER, base);
+    noise::handshake_t<B> i(noise::role_t::INITIATOR, base, hc);
+    noise::handshake_t<B> r(noise::role_t::RESPONDER, base, hc);
     std::array<std::byte, noise::kFirstMessageBytes> m1{};
     std::array<std::byte, noise::kSecondMessageBytes> m2{};
     check(
@@ -540,9 +541,9 @@ void check_noise_transcript(const fs::path& dir, const std::string& label) {
     noise::transport_cipher_t<B> tr_;
     check(i.split(ti).has_value() && r.split(tr_).has_value(), at + "both sides split");
 
-    const auto transport = [&](const noise::transport_cipher_t<B>& from,
-                               const noise::transport_cipher_t<B>& to, std::string_view nonce,
-                               std::string_view frame, std::string_view want) {
+    const auto transport = [&](noise::transport_cipher_t<B>& from, noise::transport_cipher_t<B>& to,
+                               std::string_view nonce, std::string_view frame,
+                               std::string_view want) {
         const std::vector<std::byte> pt = bytes(frame);
         std::vector<std::byte> d(pt.size() + noise::kTransportOverhead);
         const auto n = from.seal(0, number(nonce), pt, d);

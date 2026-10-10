@@ -288,6 +288,20 @@ menu "libtracer"
             so a frame costs no allocation. Every chip build already has mbedtls; an
             app built for the linux target adds REQUIRES mbedtls to its own component.
 
+            The app must also give mbedTLS static key slots, or security_noise_psa.hpp
+            refuses to build: without them every key import allocates, and a first
+            message imports its handshake key before its PSK tag is checked (RFC-0033
+            5.8). ESP-IDF has no option for it. Put these two lines in a header and pass
+            it as MBEDTLS_USER_CONFIG_FILE, for example with
+            idf_build_set_property(COMPILE_DEFINITIONS "MBEDTLS_USER_CONFIG_FILE=..."
+            APPEND) in the project CMakeLists.txt:
+                #define MBEDTLS_PSA_STATIC_KEY_SLOTS
+                #undef MBEDTLS_PSA_KEY_STORE_DYNAMIC
+            It costs MBEDTLS_PSA_KEY_SLOT_COUNT x MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE
+            of .bss, which IDF's defaults (32 slots sized for an RSA key pair) make
+            76,616 B on an ESP32-C6. The same header can lower either value: Noise keys
+            are 32 B, but TLS needs room for its largest key.
+
             OFF by default: the module is header-only, so an image that does not turn
             this on compiles none of it and links no crypto for it (#2072).
 

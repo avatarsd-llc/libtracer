@@ -6,9 +6,9 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * Meets @ref tr::net::noise::crypto_backend over libsodium's stateless calls on caller
- * memory: a cipher is its 32-byte key, a key pair its private scalar, and HKDF is built from
- * `crypto_auth_hmacsha256` (1.0.18, the version Ubuntu 24.04 ships, has no HKDF call). Nothing
- * allocates, in the handshake or per frame.
+ * memory: a cipher is its 32-byte key, a key pair its private scalar, and HKDF is built over
+ * `crypto_hash_sha256` with the shared stack HMAC (1.0.18, the version Ubuntu 24.04 ships, has
+ * no HKDF call). Nothing allocates, in the handshake or per frame.
  */
 #pragma once
 
@@ -37,24 +37,12 @@ struct sodium_crypto_t {
                                   in.size()) == 0;
     }
 
-    /** @brief HMAC-SHA-256 with a 32-byte key. */
-    [[nodiscard]] static bool hmac(const key32_t& key, std::span<const std::byte> data,
-                                   key32_t& out) {
-        crypto_auth_hmacsha256_state st;
-        const bool ok =
-            crypto_auth_hmacsha256_init(&st, reinterpret_cast<const unsigned char*>(key.data()),
-                                        key.size()) == 0 &&
-            crypto_auth_hmacsha256_update(&st, reinterpret_cast<const unsigned char*>(data.data()),
-                                          data.size()) == 0 &&
-            crypto_auth_hmacsha256_final(&st, reinterpret_cast<unsigned char*>(out.data())) == 0;
-        sodium_memzero(&st, sizeof(st));
-        return ok;
-    }
-
-    /** @brief Noise HKDF over @ref hmac. */
+    /** @brief Noise HKDF over @ref hash, through the shared stack HMAC. */
     [[nodiscard]] static bool hkdf(const key32_t& ck, std::span<const std::byte> ikm,
                                    std::span<std::byte> out) {
-        return hkdf_from_hmac(&hmac, ck, ikm, out);
+        return hkdf_from_hmac([](const key32_t& k, std::span<const std::byte> d,
+                                 key32_t& o) { return hmac_from_hash(&hash, k, d, o); },
+                              ck, ikm, out);
     }
 
     /** @brief An X25519 key pair: the private scalar. */
@@ -98,7 +86,7 @@ struct sodium_crypto_t {
 
         /** @brief Seal @p pt under nonce @p n; @p out takes `pt.size() + kTagLen` bytes. */
         [[nodiscard]] bool seal(std::uint64_t n, std::span<const std::byte> ad,
-                                std::span<const std::byte> pt, std::byte* out) const {
+                                std::span<const std::byte> pt, std::byte* out) {
             const auto nonce = chachapoly_nonce(n);
             unsigned long long len = 0;
             return crypto_aead_chacha20poly1305_ietf_encrypt(
@@ -111,7 +99,7 @@ struct sodium_crypto_t {
 
         /** @brief Open @p ct under nonce @p n into @p out; false on a bad tag. */
         [[nodiscard]] bool open(std::uint64_t n, std::span<const std::byte> ad,
-                                std::span<const std::byte> ct, std::byte* out) const {
+                                std::span<const std::byte> ct, std::byte* out) {
             const auto nonce = chachapoly_nonce(n);
             unsigned long long len = 0;
             return crypto_aead_chacha20poly1305_ietf_decrypt(

@@ -1020,9 +1020,18 @@ jobs:
               "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$v/mbedtls-$v.tar.bz2"
             echo "4a11f1777bb95bf4ad96721cac945a26e04bf19f57d905f241fe77ebeddf46d8  $RUNNER_TEMP/mbedtls.tar.bz2" | sha256sum -c -
             tar -xjf "$RUNNER_TEMP/mbedtls.tar.bz2" -C "$RUNNER_TEMP"
+            # The installed config header carries what the backend needs (#2072): exclusive
+            # buffers (no copy per call) and static key slots (no allocation per key import,
+            # which the dynamic key store excludes). security_noise_psa.hpp refuses without them.
+            cfg="$RUNNER_TEMP/mbedtls-$v/include/mbedtls/mbedtls_config.h"
+            for o in MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS MBEDTLS_PSA_STATIC_KEY_SLOTS; do
+              sed -i "s|^//#define $o\$|#define $o|" "$cfg"
+              grep -q "^#define $o\$" "$cfg"
+            done
+            sed -i 's|^#define MBEDTLS_PSA_KEY_STORE_DYNAMIC$|//#define MBEDTLS_PSA_KEY_STORE_DYNAMIC|' "$cfg"
+            if grep -q '^#define MBEDTLS_PSA_KEY_STORE_DYNAMIC' "$cfg"; then exit 1; fi
             cmake -S "$RUNNER_TEMP/mbedtls-$v" -B "$RUNNER_TEMP/mbedtls-build" -DCMAKE_BUILD_TYPE=Release \
               -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
-              -DCMAKE_C_FLAGS=-DMBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS \
               -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/mbedtls"
             cmake --build "$RUNNER_TEMP/mbedtls-build" --parallel "$BUILD_JOBS"
             cmake --install "$RUNNER_TEMP/mbedtls-build" > /dev/null

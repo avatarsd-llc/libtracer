@@ -11,16 +11,31 @@
  * imported and agreed with `psa_raw_key_agreement`, and HKDF is the library's own
  * `PSA_ALG_HKDF(PSA_ALG_SHA_256)` derivation.
  *
- * Two build settings matter, and both are the integrator's (#2065):
+ * Three build settings matter, and all are the integrator's (#2065):
  *
  *  - **`MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS`.** Without it, every PSA call copies its buffers
  *    through the heap, which costs allocations per frame. ESP-IDF's mbedTLS port sets it.
+ *  - **`MBEDTLS_PSA_STATIC_KEY_SLOTS`** (mbedTLS 3.6.1 and later). Without it, every key
+ *    import callocs the key's buffer, and a first message imports its handshake key before
+ *    the tag is checked, which RFC-0033 §5.8 forbids. This header refuses to build without it.
+ *    It costs `MBEDTLS_PSA_KEY_SLOT_COUNT * MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE` bytes of
+ *    static RAM, and the buffer size follows the largest key type the build enables: an RSA
+ *    key pair makes it kilobytes (76,616 B of `.bss` at ESP-IDF's defaults on an ESP32-C6).
+ *    It excludes `MBEDTLS_PSA_KEY_STORE_DYNAMIC`, which mbedTLS enables by default. ESP-IDF
+ *    has no option for either: the app passes them in an `MBEDTLS_USER_CONFIG_FILE`.
  *  - **ChaCha20-Poly1305.** It is off by default in ESP-IDF: enable `CONFIG_MBEDTLS_CHACHA20_C`
  *    and `CONFIG_MBEDTLS_CHACHAPOLY_C`.
+ *
+ * Keys occupy the library's global key slots, which TLS shares: a session holds two, and a
+ * handshake one more while it runs.
  */
 #pragma once
 
 #include <psa/crypto.h>
+
+#if !defined(MBEDTLS_PSA_STATIC_KEY_SLOTS)
+#error "the PSA Noise backend needs MBEDTLS_PSA_STATIC_KEY_SLOTS: a key import must not allocate"
+#endif
 
 #include <cstddef>
 #include <cstdint>
@@ -127,7 +142,7 @@ struct psa_crypto_t {
 
         /** @brief Seal @p pt under nonce @p n; @p out takes `pt.size() + kTagLen` bytes. */
         [[nodiscard]] bool seal(std::uint64_t n, std::span<const std::byte> ad,
-                                std::span<const std::byte> pt, std::byte* out) const {
+                                std::span<const std::byte> pt, std::byte* out) {
             const auto nonce = chachapoly_nonce(n);
             std::size_t len = 0;
             return psa_aead_encrypt(id_, PSA_ALG_CHACHA20_POLY1305,
@@ -140,7 +155,7 @@ struct psa_crypto_t {
 
         /** @brief Open @p ct under nonce @p n into @p out; false on a bad tag. */
         [[nodiscard]] bool open(std::uint64_t n, std::span<const std::byte> ad,
-                                std::span<const std::byte> ct, std::byte* out) const {
+                                std::span<const std::byte> ct, std::byte* out) {
             if (ct.size() < kTagLen) return false;
             const auto nonce = chachapoly_nonce(n);
             std::size_t len = 0;

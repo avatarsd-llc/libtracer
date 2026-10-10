@@ -27,16 +27,27 @@
  *    writes its public key. `agree(peer_pub, out)` writes the raw X25519 output, and may
  *    answer false when the library refuses the point or the result is all zero. Its
  *    destructor wipes or releases the key.
- *  - `B::aead_t`: a ChaCha20-Poly1305 cipher keyed once with `set_key(k)`, then
- *    `seal(n, ad, pt, out)` (writes `pt.size() + 16` bytes) and `open(n, ad, ct, out)`
- *    (writes `ct.size() - 16` bytes, false on a bad tag). `n` is the 64-bit Noise nonce; the
- *    backend builds the 12-byte nonce with @ref tr::net::noise::chachapoly_nonce. Both
- *    accept `out` equal to the input pointer (in place); any other overlap is undefined.
+ *  - `B::aead_t`: a ChaCha20-Poly1305 cipher, keyed with `set_key(k)` and re-keyed in place
+ *    as often as the caller likes, then `seal(n, ad, pt, out)` (writes `pt.size() + 16`
+ *    bytes) and `open(n, ad, ct, out)` (writes `ct.size() - 16` bytes, false on a bad tag).
+ *    `n` is the 64-bit Noise nonce; the backend builds the 12-byte nonce with
+ *    @ref tr::net::noise::chachapoly_nonce. Both accept `out` equal to the input pointer (in
+ *    place); any other overlap is undefined.
  *
- * **Allocation.** `seal` and `open` MUST NOT allocate: a frame costs no allocation on any
- * backend (RFC-0033 §5.8). Key setup (`set`, `set_key`) and the handshake's `hash` and
- * `hkdf` may allocate inside the library on backends that do so. The figures are reported
- * per backend by `core/tests/security_noise_test.cpp`.
+ * **Allocation.** `hash`, `hkdf`, and an `aead_t`'s `set_key`, `seal` and `open` MUST NOT
+ * allocate. They are every call a first message makes before its PSK tag is proven, which
+ * costs no memory (RFC-0033 §5.8), and every call a frame makes. Constructing an `aead_t`
+ * may allocate: the link builds its handshake cipher once, beside its PSK state, and a
+ * session's two ciphers once per session. `init` and `dh_key_t` may allocate, because key
+ * generation and the Diffie-Hellman run only on a responder whose first message proved the
+ * PSK, and on an initiator that has a handshake in flight. `core/tests/security_noise_test.cpp`
+ * asserts the zero rows and reports the rest per backend.
+ *
+ * **One call at a time.** An `aead_t` holds per-call state on some backends (OpenSSL keeps
+ * one cipher context), so `set_key`, `seal` and `open` are non-const and take one call at a
+ * time per `aead_t`. A link serialises each direction of a session, or keeps one cipher per
+ * sending thread: two `seal` calls racing on one context would encrypt under each other's
+ * nonce.
  *
  * The protocol rules that do not depend on the library (the all-zero X25519 refusal, the
  * nonce bound, the datagram layout) live in `security_noise.hpp`, written once over `B`.
@@ -93,6 +104,42 @@ inline void wipe(std::span<std::byte> bytes) noexcept {
     return acc == std::byte{0};
 }
 
+/** @brief The longest message @ref hmac_from_hash takes: an HKDF block input is at most 33 bytes.
+ */
+inline constexpr std::size_t kMaxHmacData = 64;
+
+/**
+ * @brief HMAC-SHA-256 (RFC 2104) with a 32-byte key, over a one-shot SHA-256, on the stack.
+ *
+ * A backend whose library allocates inside its own HMAC call (OpenSSL's `HMAC()` fetches a
+ * context) builds its HKDF on this instead, so it needs only a hash that does not allocate.
+ *
+ * @param hash `bool(std::span<const std::byte> in, key32_t& out)`, SHA-256.
+ * @param key  The key.
+ * @param data The message, at most @ref kMaxHmacData bytes.
+ * @param out  The MAC.
+ * @return False if @p data is longer than @ref kMaxHmacData or a hash call failed.
+ */
+template <class Hash>
+[[nodiscard]] bool hmac_from_hash(Hash&& hash, const key32_t& key, std::span<const std::byte> data,
+                                  key32_t& out) {
+    constexpr std::size_t kBlock = 64;
+    std::array<std::byte, kBlock + kMaxHmacData> buf{};
+    key32_t inner{};
+    bool ok = data.size() <= kMaxHmacData;
+    for (std::size_t i = 0; ok && i < kBlock; ++i)
+        buf[i] = (i < key.size() ? key[i] : std::byte{0}) ^ std::byte{0x36};
+    if (ok && !data.empty()) std::memcpy(buf.data() + kBlock, data.data(), data.size());
+    ok = ok && hash(std::span<const std::byte>(buf.data(), kBlock + data.size()), inner);
+    for (std::size_t i = 0; ok && i < kBlock; ++i)
+        buf[i] = (i < key.size() ? key[i] : std::byte{0}) ^ std::byte{0x5c};
+    if (ok) std::memcpy(buf.data() + kBlock, inner.data(), kHashLen);
+    ok = ok && hash(std::span<const std::byte>(buf.data(), kBlock + kHashLen), out);
+    wipe(buf);
+    wipe(inner);
+    return ok;
+}
+
 /**
  * @brief Noise's `HKDF(ck, ikm, n)` built from one HMAC-SHA-256 primitive, for a backend whose
  *        library has HMAC but no HKDF call.
@@ -103,7 +150,7 @@ inline void wipe(std::span<std::byte> bytes) noexcept {
  * @param ck   The chaining key.
  * @param ikm  The input key material (empty for `Split`).
  * @param out  `32 * n` bytes, `n` in 1..3.
- * @return False if an HMAC call failed.
+ * @return False if @p out is not `32 * n` bytes for `n` in 1..3, or an HMAC call failed.
  */
 template <class Hmac>
 [[nodiscard]] bool hkdf_from_hmac(Hmac&& hmac, const key32_t& ck, std::span<const std::byte> ikm,
@@ -112,7 +159,8 @@ template <class Hmac>
     key32_t block{};
     std::array<std::byte, kHashLen + 1> in{};
     std::size_t in_len = 0;
-    bool ok = hmac(ck, ikm, temp);
+    bool ok = out.size() % kHashLen == 0 && !out.empty() && out.size() <= 3 * kHashLen &&
+              hmac(ck, ikm, temp);
     for (std::size_t i = 0; ok && i * kHashLen < out.size(); ++i) {
         in[in_len] = static_cast<std::byte>(i + 1);
         ok = hmac(temp, std::span<const std::byte>(in.data(), in_len + 1), block);
@@ -130,18 +178,18 @@ template <class Hmac>
  * @brief The compile-time contract of a Noise crypto backend, as this file's comment states it.
  */
 template <class B>
-concept crypto_backend = requires(std::span<const std::byte> in, std::span<std::byte> outs,
-                                  const key32_t& k, key32_t& out, typename B::dh_key_t& dh,
-                                  const typename B::dh_key_t& cdh, typename B::aead_t& aead,
-                                  const typename B::aead_t& caead, std::uint64_t n, std::byte* p) {
-    { B::init() } -> std::same_as<bool>;
-    { B::hash(in, out) } -> std::same_as<bool>;
-    { B::hkdf(k, in, outs) } -> std::same_as<bool>;
-    { dh.set(k, out) } -> std::same_as<bool>;
-    { cdh.agree(k, out) } -> std::same_as<bool>;
-    { aead.set_key(k) } -> std::same_as<bool>;
-    { caead.seal(n, in, in, p) } -> std::same_as<bool>;
-    { caead.open(n, in, in, p) } -> std::same_as<bool>;
-};
+concept crypto_backend =
+    requires(std::span<const std::byte> in, std::span<std::byte> outs, const key32_t& k,
+             key32_t& out, typename B::dh_key_t& dh, const typename B::dh_key_t& cdh,
+             typename B::aead_t& aead, std::uint64_t n, std::byte* p) {
+        { B::init() } -> std::same_as<bool>;
+        { B::hash(in, out) } -> std::same_as<bool>;
+        { B::hkdf(k, in, outs) } -> std::same_as<bool>;
+        { dh.set(k, out) } -> std::same_as<bool>;
+        { cdh.agree(k, out) } -> std::same_as<bool>;
+        { aead.set_key(k) } -> std::same_as<bool>;
+        { aead.seal(n, in, in, p) } -> std::same_as<bool>;
+        { aead.open(n, in, in, p) } -> std::same_as<bool>;
+    };
 
 }  // namespace tr::net::noise

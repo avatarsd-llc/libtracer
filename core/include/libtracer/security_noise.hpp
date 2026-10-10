@@ -10,9 +10,10 @@
  * handshake messages, `Split()` and the transport messages, with the datagram layout of
  * RFC-0033 §5.3. The link half (the slots, the counter and the mark, the replay window, the
  * key phase, the `now` deadlines and the counters) builds on it. Everything here works on
- * caller memory: no allocation, no buffer of its own, no clock and no randomness. The
- * ephemeral private keys come from the caller, who draws them from an injected random source
- * (§5.2).
+ * caller memory: no allocation of its own, no buffer of its own, no clock and no randomness.
+ * The backend allocates nothing before a first message's PSK tag is proven, nor per frame
+ * (the backend contract). The ephemeral private keys come from the caller, who draws them
+ * from an injected random source (§5.2).
  *
  * @section noise_pattern The pattern
  *
@@ -32,7 +33,8 @@
  * Diffie-Hellman and no key generation. Its caller then checks the counter against its mark
  * and only then calls @ref tr::net::noise::handshake_t::write_second, which draws on the
  * ephemeral key and runs `ee`. A message under the wrong PSK, or a replay, therefore costs one
- * `MixHash`, one HKDF and one tag check (§5.4, §5.8).
+ * `MixHash`, one HKDF and one tag check, and no memory: the tag is checked with the link's
+ * own handshake cipher, built once beside its PSK state and re-keyed per message (§5.4, §5.8).
  *
  * @section noise_backend The backend
  *
@@ -139,9 +141,9 @@ struct first_payload_t {
  * @brief Noise's SymmetricState (Noise §5.2): the chaining key, the handshake hash and the
  *        handshake cipher key with its nonce.
  *
- * The cipher key is held as bytes, and each `EncryptAndHash` / `DecryptAndHash` keys a
- * backend cipher for its one message, so the state is a plain value: it copies, and a copy
- * of the state after the PSK starts each handshake. Its destructor wipes it.
+ * The cipher key is held as bytes, and each `EncryptAndHash` / `DecryptAndHash` keys the
+ * caller's backend cipher for its one message, so the state is a plain value: it copies, and
+ * a copy of the state after the PSK starts each handshake. Its destructor wipes it.
  *
  * @tparam B The crypto backend.
  */
@@ -213,10 +215,12 @@ class symmetric_state_t {
      *
      * NNpsk0's first token is `psk`, so a key is always set before any payload: the unkeyed
      * pass-through Noise defines for other patterns is refused here instead of carried.
+     *
+     * @param aead The cipher to seal with, re-keyed here with `k`.
      */
-    [[nodiscard]] bool encrypt_and_hash(std::span<const std::byte> pt, std::byte* out) {
+    [[nodiscard]] bool encrypt_and_hash(typename B::aead_t& aead, std::span<const std::byte> pt,
+                                        std::byte* out) {
         const std::size_t ct_len = pt.size() + kTagLen;
-        typename B::aead_t aead;
         if (!has_key_ || ct_len > kMaxMixHash || !aead.set_key(k_) || !aead.seal(n_, h_, pt, out))
             return false;
         ++n_;
@@ -226,10 +230,11 @@ class symmetric_state_t {
     /**
      * @brief Noise `DecryptAndHash`: open @p ct with `h` as associated data into @p out
      *        (`ct.size() - kTagLen` bytes), then mix the ciphertext into `h`.
+     * @param aead The cipher to open with, re-keyed here with `k`.
      * @return False on a bad tag, or with no key set; `h` and the nonce are then unchanged.
      */
-    [[nodiscard]] bool decrypt_and_hash(std::span<const std::byte> ct, std::byte* out) {
-        typename B::aead_t aead;
+    [[nodiscard]] bool decrypt_and_hash(typename B::aead_t& aead, std::span<const std::byte> ct,
+                                        std::byte* out) {
         if (!has_key_ || ct.size() < kTagLen || ct.size() > kMaxMixHash || !aead.set_key(k_) ||
             !aead.open(n_, h_, ct, out))
             return false;
@@ -306,7 +311,9 @@ struct transport_header_t {
  *        seal toward the peer, open from it (Noise §11.4, explicit nonces).
  *
  * Nonce choice, the replay window and the key phase are the link's (RFC-0033 §5.5, §5.6);
- * this type applies a given nonce and phase. `seal` and `open` allocate nothing.
+ * this type applies a given nonce and phase. `seal` and `open` allocate nothing, and take one
+ * call at a time per direction: a link serialises its senders, or keeps one session cipher
+ * per sending thread (the backend contract).
  *
  * @tparam B The crypto backend.
  */
@@ -332,7 +339,7 @@ class transport_cipher_t {
      */
     [[nodiscard]] std::expected<std::size_t, refusal_t> seal(std::uint8_t phase, std::uint64_t n,
                                                              std::span<const std::byte> frame,
-                                                             std::span<std::byte> out) const {
+                                                             std::span<std::byte> out) {
         if (n >= kNonceLimit) return std::unexpected(refusal_t::NONCE_BOUND);
         if (phase > 1 || frame.size() > kMaxFrameBytes ||
             out.size() < frame.size() + kTransportOverhead)
@@ -353,7 +360,7 @@ class transport_cipher_t {
      * @retval AUTH The tag did not verify (the bytes are then unspecified).
      */
     [[nodiscard]] std::expected<std::span<std::byte>, refusal_t> open(
-        const transport_header_t& h, std::span<std::byte> datagram) const {
+        const transport_header_t& h, std::span<std::byte> datagram) {
         if (datagram.size() < kTransportOverhead) return std::unexpected(refusal_t::MALFORMED);
         const auto ct = datagram.subspan(kTransportHeaderBytes);
         if (!recv_.open(h.nonce, {}, ct, ct.data())) return std::unexpected(refusal_t::AUTH);
@@ -373,6 +380,11 @@ class transport_cipher_t {
  * leaves the state where it was, so a link can read a datagram into a scratch copy and keep
  * its handshake slot untouched when it is refused.
  *
+ * Each handshake message is sealed or opened with the link's handshake cipher, passed in and
+ * re-keyed per message. The link builds it once, beside its PSK state, so a first message
+ * allocates nothing. Each call re-keys it, so handshakes may share it while their calls do
+ * not overlap.
+ *
  * @tparam B The crypto backend.
  */
 template <crypto_backend B>
@@ -382,14 +394,18 @@ class handshake_t {
      * @brief Start a handshake from the link's PSK state (@ref psk_state).
      * @param role This side.
      * @param keyed The state after the prologue and the PSK; copied.
+     * @param cipher The link's handshake cipher; it must outlive this handshake.
      */
-    handshake_t(role_t role, const symmetric_state_t<B>& keyed) : role_(role), ss_(keyed) {}
+    handshake_t(role_t role, const symmetric_state_t<B>& keyed, typename B::aead_t& cipher)
+        : role_(role), ss_(keyed), cipher_(cipher) {}
     handshake_t(const handshake_t&) = delete;
     handshake_t& operator=(const handshake_t&) = delete;
 
     /**
      * @brief Initiator: write `-> psk, e` with @p payload into the 58-byte @p out.
-     * @param e_priv The ephemeral private key, from the application's random source.
+     * @param e_priv The ephemeral private key, from the application's random source: fresh
+     *               for each handshake, never reused, and wiped by the caller after this call
+     *               (RFC-0033 §6.8).
      */
     [[nodiscard]] std::expected<void, refusal_t> write_first(
         const key32_t& e_priv, first_payload_t payload,
@@ -401,7 +417,7 @@ class handshake_t {
         symmetric_state_t<B> next = ss_;
         const auto p = encode_first_payload(payload);
         if (!next.mix_hash(pub) || !next.mix_key(pub) ||
-            !next.encrypt_and_hash(p, out.data() + 1 + kDhLen))
+            !next.encrypt_and_hash(cipher_, p, out.data() + 1 + kDhLen))
             return std::unexpected(refusal_t::BACKEND);
         out[0] = static_cast<std::byte>(msg_type_t::FIRST);
         std::memcpy(out.data() + 1, pub.data(), kDhLen);
@@ -429,7 +445,7 @@ class handshake_t {
         key32_t re{};
         std::memcpy(re.data(), datagram.data() + 1, kDhLen);
         if (!next.mix_hash(re) || !next.mix_key(re)) return std::unexpected(refusal_t::BACKEND);
-        if (!next.decrypt_and_hash(datagram.subspan(1 + kDhLen), p.data()))
+        if (!next.decrypt_and_hash(cipher_, datagram.subspan(1 + kDhLen), p.data()))
             return std::unexpected(refusal_t::AUTH);
         first_payload_t out{.flags = std::uint8_t(p[0])};
         for (std::size_t i = 0; i < 8; ++i) out.counter |= std::uint64_t(p[1 + i]) << (8 * i);
@@ -442,7 +458,9 @@ class handshake_t {
 
     /**
      * @brief Responder: write `<- e, ee` with the @p flags byte into the 50-byte @p out.
-     * @param e_priv The ephemeral private key, from the application's random source.
+     * @param e_priv The ephemeral private key, from the application's random source: fresh
+     *               for each handshake, never reused, and wiped by the caller after this call
+     *               (RFC-0033 §6.8).
      * @retval LOW_ORDER `DH(e, re)` is all zero; nothing is written.
      */
     [[nodiscard]] std::expected<void, refusal_t> write_second(
@@ -456,7 +474,8 @@ class handshake_t {
         if (const auto r = mix_ee(next, re_); !r) return r;
         std::array<std::byte, 1 + kTagLen> ct{};
         const std::array p{static_cast<std::byte>(flags)};
-        if (!next.encrypt_and_hash(p, ct.data())) return std::unexpected(refusal_t::BACKEND);
+        if (!next.encrypt_and_hash(cipher_, p, ct.data()))
+            return std::unexpected(refusal_t::BACKEND);
         out[0] = static_cast<std::byte>(msg_type_t::SECOND);
         std::memcpy(out.data() + 1, pub.data(), kDhLen);
         std::memcpy(out.data() + 1 + kDhLen, ct.data(), ct.size());
@@ -486,7 +505,7 @@ class handshake_t {
         if (!next.mix_hash(re) || !next.mix_key(re)) return std::unexpected(refusal_t::BACKEND);
         if (const auto r = mix_ee(next, re); !r) return std::unexpected(r.error());
         std::array<std::byte, 1> p{};
-        if (!next.decrypt_and_hash(datagram.subspan(1 + kDhLen), p.data()))
+        if (!next.decrypt_and_hash(cipher_, datagram.subspan(1 + kDhLen), p.data()))
             return std::unexpected(refusal_t::AUTH);
         const auto flags = std::uint8_t(p[0]);
         if ((flags & 0xFC) != 0) return std::unexpected(refusal_t::PAYLOAD);
@@ -539,6 +558,7 @@ class handshake_t {
     symmetric_state_t<B> ss_;     /**< @brief The symmetric state. */
     typename B::dh_key_t e_{};    /**< @brief This side's ephemeral key pair. */
     key32_t re_{};                /**< @brief The peer's ephemeral public key. */
+    typename B::aead_t& cipher_;  /**< @brief The link's handshake cipher. */
 };
 
 #if defined(LIBTRACER_NOISE_CRYPTO_OPENSSL)

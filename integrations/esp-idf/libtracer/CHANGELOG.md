@@ -27,7 +27,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   defines `LIBTRACER_NOISE_CRYPTO_PSA` for every includer, so `security_noise.hpp`'s
   `default_crypto_t` is the PSA backend, passes mbedtls on as a public requirement, and selects
   `CONFIG_MBEDTLS_CHACHA20_C` and `CONFIG_MBEDTLS_CHACHAPOLY_C`, which ESP-IDF leaves off.
-  Default `n`: the module is header-only, so an image that leaves it off builds as before.
+  The app also gives mbedTLS static key slots through an `MBEDTLS_USER_CONFIG_FILE`, which
+  ESP-IDF has no option for; the Kconfig help shows the two lines and their RAM cost (76,616 B
+  of `.bss` at ESP-IDF's defaults on an ESP32-C6). Default `n`: the module is header-only, so
+  an image that leaves it off builds as before.
 
 ## [0.19.0] — 2026-10-09
 

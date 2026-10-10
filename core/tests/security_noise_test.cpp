@@ -2,7 +2,7 @@
  * @file
  * @brief The Noise link's crypto backend seam (#2072): the build's backend meets the
  *        contract, runs RFC-0033's NNpsk0 handshake and transport steps, refuses what the
- *        RFC says to refuse, and allocates nothing per frame.
+ *        RFC says to refuse, and allocates nothing before the PSK is proven nor per frame.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -160,8 +160,9 @@ void handshake(pair_t<B>& out) {
     noise::symmetric_state_t<B> base;
     const noise::key32_t psk = ramp(0);
     if (!noise::psk_state(psk, base)) return;
-    noise::handshake_t<B> i(noise::role_t::INITIATOR, base);
-    noise::handshake_t<B> r(noise::role_t::RESPONDER, base);
+    typename B::aead_t hc;  // the link's handshake cipher, built once beside its PSK state
+    noise::handshake_t<B> i(noise::role_t::INITIATOR, base, hc);
+    noise::handshake_t<B> r(noise::role_t::RESPONDER, base, hc);
     std::array<std::byte, noise::kFirstMessageBytes> m1{};
     std::array<std::byte, noise::kSecondMessageBytes> m2{};
     const noise::first_payload_t p1{.flags = 0x01, .counter = (1ULL << 32) | 1};
@@ -236,17 +237,18 @@ void test_no_dh_before_psk_proof() {
     noise::symmetric_state_t<counting_crypto_t> wrong;
     check(noise::psk_state(ramp(0), good) && noise::psk_state(ramp(1), wrong),
           "two PSK states build");
-    noise::handshake_t<counting_crypto_t> i(noise::role_t::INITIATOR, good);
+    crypto_t::aead_t hc;
+    noise::handshake_t<counting_crypto_t> i(noise::role_t::INITIATOR, good, hc);
     std::array<std::byte, noise::kFirstMessageBytes> m1{};
     check(i.write_first(ramp(32), {.flags = 1, .counter = 7}, m1).has_value(),
           "the initiator writes its first message");
 
     dh_census_t::sets = dh_census_t::agrees = 0;
-    noise::handshake_t<counting_crypto_t> r_wrong(noise::role_t::RESPONDER, wrong);
+    noise::handshake_t<counting_crypto_t> r_wrong(noise::role_t::RESPONDER, wrong, hc);
     const auto refused = r_wrong.read_first(m1);
     check(!refused && refused.error() == noise::refusal_t::AUTH,
           "a first message under another PSK is refused as AUTH");
-    noise::handshake_t<counting_crypto_t> r_good(noise::role_t::RESPONDER, good);
+    noise::handshake_t<counting_crypto_t> r_good(noise::role_t::RESPONDER, good, hc);
     const auto accepted = r_good.read_first(m1);
     check(accepted && accepted->counter == 7, "the same message under the right PSK is read");
     check(dh_census_t::sets == 0 && dh_census_t::agrees == 0,
@@ -262,13 +264,14 @@ void test_handshake_refusals() {
     std::printf("Handshake refusals:\n");
     noise::symmetric_state_t<crypto_t> base;
     check(noise::psk_state(ramp(0), base), "the PSK state builds");
-    noise::handshake_t<crypto_t> i(noise::role_t::INITIATOR, base);
+    crypto_t::aead_t hc;
+    noise::handshake_t<crypto_t> i(noise::role_t::INITIATOR, base, hc);
     std::array<std::byte, noise::kFirstMessageBytes> m1{};
     check(i.write_first(ramp(32), {.flags = 1, .counter = 1}, m1).has_value(),
           "a first message is written");
 
     const auto read1 = [&](std::span<const std::byte> d) {
-        noise::handshake_t<crypto_t> r(noise::role_t::RESPONDER, base);
+        noise::handshake_t<crypto_t> r(noise::role_t::RESPONDER, base, hc);
         return r.read_first(d);
     };
     std::vector<std::byte> longer(m1.begin(), m1.end());
@@ -288,7 +291,7 @@ void test_handshake_refusals() {
     }
     check(every_bit_refused, "a flipped bit in the key, payload or tag of msg1 is AUTH");
 
-    noise::handshake_t<crypto_t> bad_flags(noise::role_t::INITIATOR, base);
+    noise::handshake_t<crypto_t> bad_flags(noise::role_t::INITIATOR, base, hc);
     std::array<std::byte, noise::kFirstMessageBytes> mf{};
     check(bad_flags.write_first(ramp(32), {.flags = 0x02, .counter = 1}, mf).has_value() &&
               read1(mf).error() == noise::refusal_t::PAYLOAD,
@@ -302,9 +305,9 @@ void test_handshake_refusals() {
     const noise::key32_t zero{};
     const auto p = noise::encode_first_payload({.flags = 1, .counter = 9});
     check(forger.mix_hash(zero) && forger.mix_key(zero) &&
-              forger.encrypt_and_hash(p, low.data() + 1 + noise::kDhLen),
+              forger.encrypt_and_hash(hc, p, low.data() + 1 + noise::kDhLen),
           "a first message with a low-order ephemeral key is forged under the PSK");
-    noise::handshake_t<crypto_t> r(noise::role_t::RESPONDER, base);
+    noise::handshake_t<crypto_t> r(noise::role_t::RESPONDER, base, hc);
     std::array<std::byte, noise::kSecondMessageBytes> m2{};
     const auto read_low = r.read_first(low);
     const auto wrote = r.write_second(ramp(64), 0x02, m2);
@@ -314,13 +317,13 @@ void test_handshake_refusals() {
           "nothing is written for the refused answer");
 
     // The second message: a flipped bit anywhere is refused, and so are bad flags.
-    noise::handshake_t<crypto_t> r2(noise::role_t::RESPONDER, base);
+    noise::handshake_t<crypto_t> r2(noise::role_t::RESPONDER, base, hc);
     std::array<std::byte, noise::kSecondMessageBytes> good2{};
     check(r2.read_first(m1).has_value() && r2.write_second(ramp(64), 0x02, good2).has_value(),
           "an answer is written");
     bool every_bit_refused2 = true;
     for (std::size_t byte = 1; byte < good2.size(); ++byte) {
-        noise::handshake_t<crypto_t> i2(noise::role_t::INITIATOR, base);
+        noise::handshake_t<crypto_t> i2(noise::role_t::INITIATOR, base, hc);
         std::array<std::byte, noise::kFirstMessageBytes> again{};
         (void)i2.write_first(ramp(32), {.flags = 1, .counter = 1}, again);
         auto t = good2;
@@ -331,8 +334,8 @@ void test_handshake_refusals() {
             (got.error() == noise::refusal_t::AUTH || got.error() == noise::refusal_t::LOW_ORDER);
     }
     check(every_bit_refused2, "a flipped bit in the key, payload or tag of msg2 is refused");
-    noise::handshake_t<crypto_t> r3(noise::role_t::RESPONDER, base);
-    noise::handshake_t<crypto_t> i3(noise::role_t::INITIATOR, base);
+    noise::handshake_t<crypto_t> r3(noise::role_t::RESPONDER, base, hc);
+    noise::handshake_t<crypto_t> i3(noise::role_t::INITIATOR, base, hc);
     std::array<std::byte, noise::kFirstMessageBytes> m1b{};
     std::array<std::byte, noise::kSecondMessageBytes> m2b{};
     (void)i3.write_first(ramp(32), {.flags = 1, .counter = 1}, m1b);
@@ -341,7 +344,7 @@ void test_handshake_refusals() {
     check(i3.read_second(m2b).error() == noise::refusal_t::PAYLOAD,
           "an authentic second message with flag bits 7-2 set is PAYLOAD");
 
-    noise::handshake_t<crypto_t> out_of_order(noise::role_t::RESPONDER, base);
+    noise::handshake_t<crypto_t> out_of_order(noise::role_t::RESPONDER, base, hc);
     check(out_of_order.write_second(ramp(64), 0x02, m2).error() == noise::refusal_t::STATE,
           "answering before reading a first message is STATE");
     noise::transport_cipher_t<crypto_t> unused;
@@ -414,27 +417,34 @@ void test_transport() {
           "a destination below frame + 25 B is refused");
 }
 
-/** @brief Allocations: none per frame on any backend; the handshake's are reported. */
+/**
+ * @brief Allocations: none before a first message's PSK tag is proven and none per frame, on
+ *        every backend (RFC-0033 §5.8); the per-link and per-session costs are reported.
+ */
 void test_allocations() {
     std::printf("Allocations (process-wide malloc count):\n");
     if (!kCountsAllocations) {
         std::printf("  [SKIP] not counted on this build (sanitizer or non-glibc)\n");
         return;
     }
+    // Per link: the PSK state and the handshake cipher, built once.
     const std::size_t a0 = g_allocations;
     noise::symmetric_state_t<crypto_t> base;
     (void)noise::psk_state(ramp(0), base);
+    crypto_t::aead_t hc;
     const std::size_t a1 = g_allocations;
 
-    noise::handshake_t<crypto_t> i(noise::role_t::INITIATOR, base);
-    noise::handshake_t<crypto_t> r(noise::role_t::RESPONDER, base);
+    noise::handshake_t<crypto_t> i(noise::role_t::INITIATOR, base, hc);
+    noise::handshake_t<crypto_t> r(noise::role_t::RESPONDER, base, hc);
+    std::size_t mark = g_allocations;
     noise::transport_cipher_t<crypto_t> ti;
     noise::transport_cipher_t<crypto_t> tr_;
+    const std::size_t session_ciphers = (g_allocations - mark) / 2;
     std::array<std::byte, noise::kFirstMessageBytes> m1{};
     std::array<std::byte, noise::kSecondMessageBytes> m2{};
     std::size_t init_allocs = 0;
     std::size_t resp_allocs = 0;
-    std::size_t mark = g_allocations;
+    mark = g_allocations;
     (void)i.write_first(ramp(32), {.flags = 1, .counter = 1}, m1);
     init_allocs += g_allocations - mark;
     mark = g_allocations;
@@ -446,21 +456,36 @@ void test_allocations() {
     (void)i.read_second(m2);
     const bool split_ok = i.split(ti).has_value();
     init_allocs += g_allocations - mark;
-    std::printf("  [INFO] %s: PSK state %zu, initiator handshake %zu, responder handshake %zu\n",
-                crypto_t::kName, a1 - a0, init_allocs, resp_allocs);
+    std::printf(
+        "  [INFO] %s: per link (PSK state + handshake cipher) %zu, per session ciphers %zu, "
+        "initiator handshake %zu, responder handshake %zu\n",
+        crypto_t::kName, a1 - a0, session_ciphers, init_allocs, resp_allocs);
     check(split_ok, "the counted handshake completes");
 
-    // A first message under another PSK: what an unauthenticated datagram costs the
-    // responder before it is refused. Nothing is retained (RFC-0033 §5.8); a library that
-    // allocates inside its hash or HKDF calls allocates and frees here.
+    // What a first message costs the responder before its counter is checked: a handshake
+    // from the link's PSK state, and the tag check with a link's handshake cipher that has
+    // never been keyed (a link's first datagram). Under another PSK it is refused; under the
+    // right one (a replay) it stops at the counter.
     noise::symmetric_state_t<crypto_t> other;
     (void)noise::psk_state(ramp(1), other);
-    noise::handshake_t<crypto_t> r_other(noise::role_t::RESPONDER, other);
-    mark = g_allocations;
-    const bool refused = !r_other.read_first(m1);
-    std::printf("  [INFO] %s: a refused first message (wrong PSK): %zu transient allocations\n",
-                crypto_t::kName, g_allocations - mark);
-    check(refused, "the counted wrong-PSK first message is refused");
+    const auto read_cost = [&](const noise::symmetric_state_t<crypto_t>& keyed, bool& read) {
+        crypto_t::aead_t fresh;
+        const std::size_t before = g_allocations;
+        noise::handshake_t<crypto_t> h(noise::role_t::RESPONDER, keyed, fresh);
+        read = h.read_first(m1).has_value();
+        return g_allocations - before;
+    };
+    bool wrong_read = true;
+    bool replay_read = false;
+    const std::size_t wrong = read_cost(other, wrong_read);
+    const std::size_t replay = read_cost(base, replay_read);
+    std::printf(
+        "  [INFO] %s: a first message read: %zu allocations refused (wrong PSK), %zu "
+        "accepted (a replay)\n",
+        crypto_t::kName, wrong, replay);
+    check(!wrong_read && wrong == 0,
+          "a first message under another PSK is refused with no allocation");
+    check(replay_read && replay == 0, "a replayed first message is read with no allocation");
 
     bool zero_per_frame = true;
     for (const std::size_t size : {std::size_t{0}, std::size_t{64}, std::size_t{1024},

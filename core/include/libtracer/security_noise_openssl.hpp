@@ -5,18 +5,26 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Meets @ref tr::net::noise::crypto_backend over libcrypto. A cipher keeps one
- * `EVP_CIPHER_CTX`, keyed once and re-nonced per frame, so `seal` and `open` allocate
- * nothing. X25519 goes through `EVP_PKEY`, and HKDF is built from the one-shot `HMAC()`. Key
- * setup and the handshake's hashing allocate inside libcrypto; `security_noise_test` reports
- * how much. The fastest AEAD of the measured host backends at 1 KiB and above (#2065).
+ * Meets @ref tr::net::noise::crypto_backend over libcrypto. A cipher allocates one
+ * `EVP_CIPHER_CTX` when it is built, and `set_key`, `seal` and `open` re-key and re-nonce
+ * that context in place, so none of them allocates. The hash is the low-level `SHA256_*`
+ * calls on a stack context, because the one-shot `SHA256()` and `HMAC()` fetch and allocate
+ * a context per call; HMAC and HKDF are built over it. X25519 goes through `EVP_PKEY` and
+ * allocates, after the PSK is proven. The fastest AEAD of the measured host backends at
+ * 1 KiB and above (#2065).
+ *
+ * The `SHA256_*` calls are deprecated in OpenSSL 3 but present unless the library was built
+ * with `no-deprecated`, which this backend refuses.
  */
 #pragma once
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
-#include <openssl/hmac.h>
 #include <openssl/sha.h>
+
+#if defined(OPENSSL_NO_DEPRECATED_3_0)
+#error "the OpenSSL Noise backend needs SHA256_Init/Update/Final (no allocation per call)"
+#endif
 
 #include <cstddef>
 #include <cstdint>
@@ -34,26 +42,24 @@ struct openssl_crypto_t {
     /** @brief Nothing to set up in OpenSSL 3. */
     [[nodiscard]] static bool init() { return true; }
 
-    /** @brief SHA-256 of @p in, through the one-shot `SHA256()`. */
+    /** @brief SHA-256 of @p in, on a stack `SHA256_CTX` (no allocation). */
     [[nodiscard]] static bool hash(std::span<const std::byte> in, key32_t& out) {
-        return SHA256(reinterpret_cast<const unsigned char*>(in.data()), in.size(),
-                      reinterpret_cast<unsigned char*>(out.data())) != nullptr;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        SHA256_CTX c;
+        const bool ok = SHA256_Init(&c) == 1 && SHA256_Update(&c, in.data(), in.size()) == 1 &&
+                        SHA256_Final(reinterpret_cast<unsigned char*>(out.data()), &c) == 1;
+#pragma GCC diagnostic pop
+        OPENSSL_cleanse(&c, sizeof(c));
+        return ok;
     }
 
-    /** @brief HMAC-SHA-256 with a 32-byte key, through the one-shot `HMAC()`. */
-    [[nodiscard]] static bool hmac(const key32_t& key, std::span<const std::byte> data,
-                                   key32_t& out) {
-        unsigned int len = 0;
-        return HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
-                    reinterpret_cast<const unsigned char*>(data.data()), data.size(),
-                    reinterpret_cast<unsigned char*>(out.data()), &len) != nullptr &&
-               len == kHashLen;
-    }
-
-    /** @brief Noise HKDF over @ref hmac. */
+    /** @brief Noise HKDF over @ref hash, through the shared stack HMAC. */
     [[nodiscard]] static bool hkdf(const key32_t& ck, std::span<const std::byte> ikm,
                                    std::span<std::byte> out) {
-        return hkdf_from_hmac(&hmac, ck, ikm, out);
+        return hkdf_from_hmac([](const key32_t& k, std::span<const std::byte> d,
+                                 key32_t& o) { return hmac_from_hash(&hash, k, d, o); },
+                              ck, ikm, out);
     }
 
     /** @brief An X25519 key pair held as an `EVP_PKEY`. */
@@ -97,25 +103,31 @@ struct openssl_crypto_t {
         EVP_PKEY* key_ = nullptr; /**< @brief The private key, or null before @ref set. */
     };
 
-    /** @brief A ChaCha20-Poly1305 cipher: one `EVP_CIPHER_CTX`, keyed once. */
+    /** @brief A ChaCha20-Poly1305 cipher: one `EVP_CIPHER_CTX`, allocated when it is built. */
     struct aead_t {
-        aead_t() = default;
+        /** @brief Allocate the context and set its cipher; a failure shows at @ref set_key. */
+        aead_t() : ctx_(EVP_CIPHER_CTX_new()) {
+            if (ctx_ != nullptr && EVP_CipherInit_ex(ctx_, EVP_chacha20_poly1305(), nullptr,
+                                                     nullptr, nullptr, 1) != 1) {
+                EVP_CIPHER_CTX_free(ctx_);
+                ctx_ = nullptr;
+            }
+        }
         aead_t(const aead_t&) = delete;
         aead_t& operator=(const aead_t&) = delete;
         ~aead_t() { EVP_CIPHER_CTX_free(ctx_); }
 
-        /** @brief Allocate the context on first use and key it. */
+        /** @brief Key the context in place, replacing any previous key (no allocation). */
         [[nodiscard]] bool set_key(const key32_t& k) {
-            if (ctx_ == nullptr) ctx_ = EVP_CIPHER_CTX_new();
             return ctx_ != nullptr &&
-                   EVP_CipherInit_ex(ctx_, EVP_chacha20_poly1305(), nullptr,
+                   EVP_CipherInit_ex(ctx_, nullptr, nullptr,
                                      reinterpret_cast<const unsigned char*>(k.data()), nullptr,
                                      -1) == 1;
         }
 
         /** @brief Seal @p pt under nonce @p n; @p out takes `pt.size() + kTagLen` bytes. */
         [[nodiscard]] bool seal(std::uint64_t n, std::span<const std::byte> ad,
-                                std::span<const std::byte> pt, std::byte* out) const {
+                                std::span<const std::byte> pt, std::byte* out) {
             const auto nonce = chachapoly_nonce(n);
             auto* o = reinterpret_cast<unsigned char*>(out);
             int len = 0;
@@ -139,7 +151,7 @@ struct openssl_crypto_t {
 
         /** @brief Open @p ct under nonce @p n into @p out; false on a bad tag. */
         [[nodiscard]] bool open(std::uint64_t n, std::span<const std::byte> ad,
-                                std::span<const std::byte> ct, std::byte* out) const {
+                                std::span<const std::byte> ct, std::byte* out) {
             if (ctx_ == nullptr || ct.size() < kTagLen) return false;
             const auto nonce = chachapoly_nonce(n);
             const std::size_t body = ct.size() - kTagLen;
@@ -165,8 +177,7 @@ struct openssl_crypto_t {
         }
 
        private:
-        EVP_CIPHER_CTX* ctx_ =
-            nullptr; /**< @brief The keyed context, or null before @ref set_key. */
+        EVP_CIPHER_CTX* ctx_; /**< @brief The context, or null if building it failed. */
     };
 };
 
