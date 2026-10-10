@@ -377,8 +377,32 @@ menu "libtracer"
             a data write to a missing child is refused with not_found and creates
             nothing. This is a per-image choice.
 
+    config LIBTRACER_DEFAULT_ROOT_HEAP
+        bool "Default root: system heap, no static arena"
+        default n
+        help
+            Compile no static arena at all (libtracer #2090): no region, no
+            free-list heads and no root object, so the default root costs 0
+            bytes of static RAM (about 5.2 KB at a 4 KiB arena on esp32c6,
+            region included). The default root, the value, table and net
+            defaults and the default net backend then draw from the system
+            heap.
+
+            The trade-off: no static reservation, at the price of heap use,
+            unbounded, for every default the application has not redirected
+            (a graph_t built without a source, a link's null memory.io or
+            memory.state, a transport vertex's null egress source, and every
+            default backend that takes no graph). The no-heap
+            link check libtracer runs on its MCU archive does not hold for
+            this image, by design. Choose it when the application injects its
+            own block sources everywhere and wants the RAM back; keep an
+            arena when a default must stay bounded.
+
+            Binds tr::graph::config_t::kArenaBytes = 0.
+
     config LIBTRACER_ARENA_BYTES
         int "Default root: static arena size (bytes)"
+        depends on !LIBTRACER_DEFAULT_ROOT_HEAP
         range 1024 4194304
         default 262144 if IDF_TARGET_LINUX
         default 32768
@@ -407,6 +431,14 @@ menu "libtracer"
             a 32 KiB arena those draws are refused and every datagram is dropped,
             counted in the link's dropped_rx. The linux target, which runs the
             examples' host peers on those defaults, defaults to 256 KiB.
+
+            The free-list heads are sized from the arena: 3 sub-pools times
+            the size classes no larger than it, 4 bytes each on esp32c6 (576 B
+            at 4 KiB, 864 B at 32 KiB). To confirm at run time that every
+            default was redirected, read tr::mem::default_root().stats(): its
+            peak is the bytes ever carved, so 0 means nothing reached the
+            arena, and the arena can be lowered or, with
+            LIBTRACER_DEFAULT_ROOT_HEAP, removed.
 
             Binds tr::graph::config_t::kArenaBytes.
 

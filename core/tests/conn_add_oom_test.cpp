@@ -56,6 +56,7 @@
  * alive inside it — the ghost, described field by field.
  */
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -189,7 +190,13 @@ void test_refused_wiring_rolls_back() {
     g_links_built = 0;
     graph_t node{tr::mem::heap_source()};  // raw heap: the refusal sees each block (#1777)
     fwd_router_t router(node, {.label_src = &tr::mem::heap_source()});
-    transport_vertex_t net(node, router);
+    // The transport the factory builds draws from its own store, never the platform heap: on
+    // a heap-rooted build (#2090) the default egress store IS the heap, and the armed window
+    // would refuse the transport instead of the registry chunk under test.
+    std::array<std::byte, 8192> egress_slab{};
+    std::array<tr::mem::size_class_t, 8> egress_classes{};
+    tr::mem::pool_source_t egress(egress_slab, egress_classes);
+    transport_vertex_t net(node, router, "/net", &tr::mem::net_backend(), &egress);
     declare_fake_module(net);
 
     const view_t spec = conn_spec("a");  // built BEFORE the arming

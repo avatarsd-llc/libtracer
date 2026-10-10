@@ -16,6 +16,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`kArenaBytes = 0`: a build with no static arena, whose default root is the platform heap
+  ([#2090](https://github.com/avatarsd-llc/libtracer/issues/2090)).** Where `kSlabPool` is
+  `false`, binding `kArenaBytes = 0` compiles no arena region, no free-list heads and no root
+  object, so the default root costs no static byte. `tr::mem::default_root()`,
+  `value_source()`, `table_source()` and `net_source()` are then `tr::mem::heap_source()`, and
+  `heap_backend()` and `net_backend()` draw from the platform heap. The new constant
+  `tr::mem::kHeapRoot` (`config.hpp`) says whether a build is heap-rooted. The trade-off:
+  every default the application has not redirected draws from the heap, unbounded, and the
+  ADR-0083 no-heap link check does not hold for that image, by design. It is meant for an
+  application that injects its own sources everywhere. Measured on a downstream ESP32-C6
+  consumer: about 5.2 KB of static RAM at a 4 KiB arena. Nothing changes for a build that does
+  not bind 0; a nonzero `kArenaBytes` must now be at least the smallest size class (a
+  `static_assert`).
+- **The MCU arena's free-list heads are sized from the arena
+  ([#2090](https://github.com/avatarsd-llc/libtracer/issues/2090)).** `mcu_root_t` keeps only
+  the rows of `kSizeClasses` no larger than `kArenaBytes` (the new `tr::mem::kArenaClasses`),
+  since a larger class could never be carved. With the default table on a 32-bit target the
+  heads take 576 B at 4 KiB (was 972 B) and 864 B at 32 KiB. One behaviour moves, only in the
+  serving direction: a request above the last kept row and no larger than the arena is now
+  carved as an oversize block at its own size, where it was refused before (its class was too
+  big to carve). Nothing that was served before is refused.
 - **The Noise link's crypto backend, chosen at compile time
   ([#2072](https://github.com/avatarsd-llc/libtracer/issues/2072)).** The first slice of the
   RFC-0033 Noise link ([#2064](https://github.com/avatarsd-llc/libtracer/issues/2064)): the

@@ -345,15 +345,33 @@ class arena_root_t final : public block_source_t {
     arena_pool_t<Sync, N> net_;    /**< @brief The net sub-pool. */
 };
 
-/** @brief The MCU default root type: the build's guard, its size-class table (#1783). */
-using mcu_root_t = arena_root_t<graph::guard_t, std::size(graph::config_t::kSizeClasses)>;
+/**
+ * @brief Rows of `config_t::kSizeClasses` the MCU arena keeps: those no larger than
+ *        `config_t::kArenaBytes`, and at least one (#2090).
+ *
+ * A class whose block is larger than the region could never be carved, so its free-list heads
+ * would be dead `.bss`. With the default table that is 48 rows at 4 KiB (heads: 3 x 48
+ * pointers, 576 B on a 32-bit target) and 72 at 32 KiB (864 B), where all 81 rows cost 972 B. A
+ * request above the last kept row is carved as an oversize block at its own size, so the cut
+ * refuses nothing the full table served.
+ */
+inline constexpr std::size_t kArenaClasses = std::max<std::size_t>(
+    1, static_cast<std::size_t>(std::upper_bound(std::begin(graph::config_t::kSizeClasses),
+                                                 std::end(graph::config_t::kSizeClasses),
+                                                 graph::config_t::kArenaBytes) -
+                                std::begin(graph::config_t::kSizeClasses)));
+
+/** @brief The MCU default root type: the build's guard, the rows of its size-class table the
+ *         arena can carve (#1783, #2090). */
+using mcu_root_t = arena_root_t<graph::guard_t, kArenaClasses>;
 
 /**
  * @brief The process-wide MCU default root (@ref mcu_root_t), over a static array of
  *        `config_t::kArenaBytes`.
  *
  * Constant-initialized and never destroyed. Exists only on a build whose `kSlabPool` is
- * `false`; elsewhere calling it aborts, and nothing in the library does.
+ * `false` and whose `kArenaBytes` is not 0; elsewhere calling it aborts, and nothing in the
+ * library does.
  */
 [[nodiscard]] mcu_root_t& mcu_root() noexcept;
 

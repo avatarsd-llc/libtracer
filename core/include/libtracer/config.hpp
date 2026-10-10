@@ -427,9 +427,23 @@ struct default_config_t {
      * published UP and listed with two peers: 288 B carved before #2052, 0 B after, on
      * Cortex-M0 and on ESP32-C6.
      *
+     * **0 opts out of the arena (#2090): the platform heap becomes the default root.** No
+     * region, no free-list heads and no root object are compiled, so the default root costs
+     * no static byte, and `tr::mem::default_root()`, `value_source()`, `table_source()` and
+     * `net_source()` are `tr::mem::heap_source()`, `heap_backend()` and `net_backend()` the
+     * platform heap. The trade-off: every default the application has not redirected draws
+     * from the heap, unbounded, and the no-heap link check (ADR-0083 Decision 1) does not hold
+     * for that image; it is a deliberate exception for an application that injects its own
+     * sources everywhere. A nonzero value is at least the smallest row of @ref kSizeClasses.
+     *
+     * The free-list heads are sized from the region: one per sub-pool per row of
+     * @ref kSizeClasses no larger than this (`tr::mem::kArenaClasses`), since a larger class
+     * could never be carved.
+     *
      * Not read where @ref kSlabPool is `true`: no arena is compiled there.
      *
-     * Override fragment: `static constexpr std::size_t kArenaBytes = 65536;`.
+     * Override fragment: `static constexpr std::size_t kArenaBytes = 65536;`, or `= 0;` for
+     * the heap-rooted build.
      */
     static constexpr std::size_t kArenaBytes = 32768;
 
@@ -1185,6 +1199,12 @@ inline constexpr std::size_t kSlabBytes = tr::graph::config_t::kSlabBytes;
 inline constexpr std::size_t kSlabClassCap = tr::graph::config_t::kSlabClassCap;
 /** @brief @ref tr::graph::default_config_t::kArenaBytes for this build (#1783). */
 inline constexpr std::size_t kArenaBytes = tr::graph::config_t::kArenaBytes;
+/**
+ * @brief Whether this build's default root is the platform heap (#2090): `kSlabPool` is
+ *        `false` and `kArenaBytes` is 0, so no static arena is compiled and
+ *        `tr::mem::default_root()` is `tr::mem::heap_source()`.
+ */
+inline constexpr bool kHeapRoot = !kSlabPool && kArenaBytes == 0;
 
 }  // namespace tr::mem
 

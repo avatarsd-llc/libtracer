@@ -285,8 +285,11 @@ else()
 endif()
 # The default root's static arena (#1783, ADR-0083 Decision 4): `kSlabPool = false` below makes
 # the default root a static arena of this many bytes, so nothing the library draws by default
-# comes from the heap. Same two-pass fallback as the stripe count above.
-if(CONFIG_LIBTRACER_ARENA_BYTES)
+# comes from the heap. Same two-pass fallback as the stripe count above. The heap-rooted
+# opt-out (#2090) binds 0: no arena is compiled and the default root is the system heap.
+if(CONFIG_LIBTRACER_DEFAULT_ROOT_HEAP)
+    set(LIBTRACER_ARENA_BYTES 0)
+elseif(CONFIG_LIBTRACER_ARENA_BYTES)
     set(LIBTRACER_ARENA_BYTES ${CONFIG_LIBTRACER_ARENA_BYTES})
 else()
     set(LIBTRACER_ARENA_BYTES 32768)

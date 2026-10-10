@@ -310,6 +310,9 @@ void host_value_release(void* p, std::size_t bytes, std::size_t align) noexcept;
 /**
  * @brief One block of the VALUE sub-pool of the MCU static arena (`%mem_arena.hpp`, #1783);
  *        `nullptr` when the arena is spent. Called only where `tr::mem::kSlabPool` is `false`.
+ *
+ * Where `tr::mem::kArenaBytes` is also 0 there is no arena, and the block comes from the
+ * platform heap (`heap_source_t::acquire`, #2090).
  */
 [[nodiscard]] void* mcu_value_alloc(std::size_t bytes, std::size_t align) noexcept;
 
@@ -318,7 +321,8 @@ void mcu_value_release(void* p, std::size_t bytes, std::size_t align) noexcept;
 
 /**
  * @brief The per-value draw of this build: the host root's value sub-pool where
- *        `tr::mem::kSlabPool` is `true`, the MCU arena's otherwise. Never the platform heap.
+ *        `tr::mem::kSlabPool` is `true`, the MCU arena's otherwise. Never the platform heap,
+ *        except on the heap-rooted build (`kArenaBytes` 0, #2090), which asked for it.
  */
 [[nodiscard]] inline void* value_block_alloc(std::size_t bytes, std::size_t align) noexcept {
     if constexpr (kSlabPool) {
@@ -351,7 +355,8 @@ inline void value_block_release(void* p, std::size_t bytes, std::size_t align) n
  * Every block is drawn by `detail::value_block_alloc`: on a host build (`kSlabPool`), the value
  * sub-pool of the host root (`%mem_slab_pool.hpp`), from this thread's cache, so the platform
  * allocator is asked for whole slabs and never for a segment; elsewhere the value sub-pool of
- * the MCU static arena (`%mem_arena.hpp`), with no heap at all. Both are direct calls, not the
+ * the MCU static arena (`%mem_arena.hpp`), with no heap at all, or the platform heap where
+ * `kArenaBytes` is 0 (#2090). All are direct calls, not the
  * virtual draw #873 phase 2 measured at +22.7 % on the hazard domain: this backend is the process
  * default on the hottest allocation path in the library.
  *
@@ -420,7 +425,8 @@ class heap_backend_t final : public mem_backend_t {
  *          through `detail::value_block_alloc`, so it is the host root's value sub-pool
  *          when `config_t::kSlabPool` is `true` (a host build; the platform allocator is
  *          asked for whole slabs only) and the static ARENA's value sub-pool when it is
- *          `false` (an MCU build; no heap at all, and an exhausted arena refuses). An app on
+ *          `false` (an MCU build; no heap at all, and an exhausted arena refuses), unless
+ *          `kArenaBytes` is 0, where it is the platform heap (#2090). An app on
  *          an MCU that injects `heap_source()` and hands `heap_backend()` in as a fallback
  *          therefore fills the arena, not the heap. To send values to the platform heap on
  *          either build, wrap `heap_source()`:
@@ -434,6 +440,13 @@ class heap_backend_t final : public mem_backend_t {
  * @brief The default root a `graph_t` takes when it is handed no source (ADR-0083 Decision 4,
  *        #1777, #1783): the host root (`%mem_slab_pool.hpp`) where `kSlabPool` is `true`, the
  *        MCU static arena (`%mem_arena.hpp`) otherwise.
+ *
+ * Where `kSlabPool` is `false` and `kArenaBytes` is 0 it is @ref heap_source, and so are
+ * @ref value_source, @ref table_source and @ref net_source. The heap-rooted build (#2090)
+ * reserves no static byte for the default root, and every default the application has not
+ * redirected draws from the platform heap. On an arena build, `default_root().stats()` is the
+ * proof that every default was redirected: `in_use` and `peak` are the bytes ever carved, so
+ * a `peak` of 0 means nothing reached the arena.
  */
 [[nodiscard]] block_source_t& default_root() noexcept;
 
@@ -462,7 +475,8 @@ class heap_backend_t final : public mem_backend_t {
  *        backend of the router and the links when the application injects none (Q21).
  *
  * On the MCU arena (`kSlabPool` `false`) it is the same adapter over the arena's net
- * sub-pool.
+ * sub-pool. On the heap-rooted build (`kArenaBytes` 0 as well, #2090) it is
+ * @ref heap_backend, which there draws from the platform heap.
  */
 [[nodiscard]] mem_backend_t& net_backend() noexcept;
 
