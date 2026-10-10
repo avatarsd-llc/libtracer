@@ -131,7 +131,7 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
-            bench_compact_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
+            bench_chain_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
       # A hard, absolute gate (no baseline needed): the FWD forward hop MUST allocate
       # zero heap (ADR-0038 §16KB-RAM), measured by a global operator-new counter.
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
@@ -162,9 +162,17 @@ jobs:
           git worktree remove --force ../main-baseline 2>/dev/null || true
           rm -rf ../main-baseline; git worktree prune
           git worktree add --detach ../main-baseline "$base"
+          # A baseline that predates bench_chain_delivery (#1951) gets the candidate's copy: it
+          # builds against that baseline's library unchanged, so the stream-delivery pair is
+          # A/B-gated from its first run instead of reading "absent from one arm".
+          if ! grep -q bench_chain_delivery ../main-baseline/bench/CMakeLists.txt; then
+            cp bench/bench_chain_delivery.cpp ../main-baseline/bench/
+            printf '\nadd_executable(bench_chain_delivery bench_chain_delivery.cpp)\ntarget_link_libraries(bench_chain_delivery PRIVATE libtracer)\n' \
+              >>../main-baseline/bench/CMakeLists.txt
+          fi
           cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build ../main-baseline/bench/build --target bench_libtracer bench_forward_heap \
-            bench_compact_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
+            bench_chain_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
       # The gate's OWN decision rules, unit-tested before anything is timed: #763 was a
       # defect in the gate, not in what it measures, so the rules are regression-tested
       # against the recorded false-failure and true-regression sample sets.
@@ -402,7 +410,7 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
-            bench_forward_demux bench_compact_delivery bench_store_sweep --parallel "$BUILD_JOBS"
+            bench_forward_demux bench_chain_delivery bench_store_sweep --parallel "$BUILD_JOBS"
       # The zero-heap gate is deterministic (allocation counts, not time) — running it
       # per replica is a free consistency check; its transcript feeds the memory series.
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
@@ -437,11 +445,11 @@ jobs:
         run: |
           measure="python3 bench/bench_conditions.py run --record bench/conditions.jsonl"
           $measure --out bench/bench_forward_demux_raw.txt -- ./bench/build/bench_forward_demux || true
-          $measure --out bench/bench_compact_delivery_raw.txt -- ./bench/build/bench_compact_delivery || true
+          $measure --out bench/bench_chain_delivery_raw.txt -- ./bench/build/bench_chain_delivery || true
           # `|| true` keeps a crashing bench from costing this commit its whole history
           # point — but it also silently swallowed a MISSING BINARY once, producing a green
           # job that recorded nothing. Make an empty transcript visible in the log.
-          for f in bench/bench_forward_demux_raw.txt bench/bench_compact_delivery_raw.txt; do
+          for f in bench/bench_forward_demux_raw.txt bench/bench_chain_delivery_raw.txt; do
             [ -s "$f" ] || echo "::warning::$f is empty — its series will not be recorded"
           done
       # Zenoh, on the SAME runner and in the same pass. Its version is pinned, so its line
@@ -468,9 +476,16 @@ jobs:
         run: |
           if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
             git worktree add --detach ../parent-baseline HEAD^
+            # A parent that predates bench_chain_delivery (#1951) gets this commit's copy, as
+            # the gate's baseline build does.
+            if ! grep -q bench_chain_delivery ../parent-baseline/bench/CMakeLists.txt; then
+              cp bench/bench_chain_delivery.cpp ../parent-baseline/bench/
+              printf '\nadd_executable(bench_chain_delivery bench_chain_delivery.cpp)\ntarget_link_libraries(bench_chain_delivery PRIVATE libtracer)\n' \
+                >>../parent-baseline/bench/CMakeLists.txt
+            fi
             cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
             cmake --build ../parent-baseline/bench/build --target bench_libtracer \
-              bench_forward_heap bench_compact_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
+              bench_forward_heap bench_chain_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
           else
             echo "root commit — no parent to ratchet against"
           fi
@@ -511,7 +526,7 @@ jobs:
             bench/bench_libtracer_raw.txt
             bench/bench_forward_heap_raw.txt
             bench/bench_forward_demux_raw.txt
-            bench/bench_compact_delivery_raw.txt
+            bench/bench_chain_delivery_raw.txt
             bench/bench_zenoh_raw.txt
             bench/conditions.jsonl
           retention-days: 90
@@ -550,7 +565,7 @@ jobs:
           args=""
           for f in bench/raws/*/bench_libtracer_raw.txt \
                    bench/raws/*/bench_forward_demux_raw.txt \
-                   bench/raws/*/bench_compact_delivery_raw.txt \
+                   bench/raws/*/bench_chain_delivery_raw.txt \
                    bench/raws/*/bench_zenoh_raw.txt; do
             [ -s "$f" ] && args="$args --raw $f"
           done

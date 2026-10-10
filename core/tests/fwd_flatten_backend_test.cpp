@@ -7,13 +7,10 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The defect this file pins: the router's four `materialize()` call sites all took the
- * DEFAULT global-heap backend. The egress (per-delivery) one checked its result; the two
- * INGRESS ones did not, and nothing downstream catches an empty flatten —
- * `view::over_bytes` maps an empty span to an ENGAGED-empty optional by design, and
- * `graph_t::write` stores it and returns success. So a heap OOM during the ingress
- * `COMPACT` flatten REPLACED the subscriber's last-known value with nothing and called
- * that a delivery: silent corruption, not a dropped delivery.
+ * The defect this file pinned: the router's `materialize()` call sites all took the DEFAULT
+ * global-heap backend, and an ingress flatten that came back empty flowed on as a stored empty
+ * value. The ingress `COMPACT` site that made it a silent corruption is retired with COMPACT
+ * itself (#1951); the cold bus-name rejection site remains, and this file pins its seam.
  *
  * @section seam Why the seam had to come first
  *
@@ -35,14 +32,9 @@
  *
  * A drop is invisible by construction, so each case asserts something POSITIVE:
  *
- *   - the COMPACT case: the vertex still holds the PREVIOUS value, byte-exact — the
- *     assertion that fails loudly against the pre-guard code, which stored an empty rope;
- *   - the ADVERTISE case: the label stays UNBOUND, observable as the `HANDLE_NACK` a
- *     later COMPACT on it draws (RFC-0004 §E.1 self-heal);
- *   - the delivery case: NOTHING goes on the wire — no ADVERTISE, no COMPACT;
  *   - the bus-name rejection case: no reply is answered, and nothing is broadcast;
- *   - and each ends with the backend un-armed and the same flow succeeding, so a guard
- *     that over-rejects (or a seam that wedged the router) fails the control.
+ *   - and the backend un-armed, the same flow succeeds, so a guard that over-rejects (or a
+ *     seam that wedged the router) fails the control.
  */
 
 #include <algorithm>
@@ -61,10 +53,8 @@
 
 #include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
-#include "route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
@@ -177,18 +167,6 @@ class rec_link_t : public transport_t {
 
 // --- wire builders -----------------------------------------------------------------
 
-/** @brief Append @p src to @p dst. */
-void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
-    dst.insert(dst.end(), src.begin(), src.end());
-}
-
-/** @brief A `NAME` TLV. */
-std::vector<std::byte> b_name(std::string_view s) {
-    std::vector<std::byte> out;
-    tr::wire::emit_name(out, s);
-    return out;
-}
-
 /** @brief A `PATH` TLV over the given `/`-segments. */
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
@@ -204,40 +182,6 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
     tr::detail::store_le(std::span<std::byte>(raw), v, 4);
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, raw);
-    return out;
-}
-
-/** @brief An opaque `VALUE` TLV holding one byte. */
-std::vector<std::byte> b_value_u8(std::uint8_t v) {
-    const std::byte b{v};
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
-    return out;
-}
-
-/** @brief `FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT }` — the `:subscribers[]`
- *         append. */
-std::vector<std::byte> b_field_subscribers_append() {
-    std::vector<std::byte> body;
-    append(body, b_name("subscribers"));
-    append(body, b_value_u8(1));
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
-    return out;
-}
-
-/** @brief `SUBSCRIBER{ PATH target, SETTINGS qos{ NAME "delivery_compact" VALUE u8 } }`. */
-std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool compact) {
-    std::vector<std::byte> body;
-    append(body, target);
-    std::vector<std::byte> qos;
-    append(qos, b_name("delivery_compact"));
-    append(qos, b_value_u8(compact ? 1 : 0));
-    std::vector<std::byte> settings;
-    tr::wire::emit_tlv(settings, type_t::SETTINGS, opt_t{.pl = true}, qos);
-    append(body, settings);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -270,147 +214,6 @@ std::optional<std::uint32_t> stored_u32(const graph_t& g, vertex_handle_t v) {
     const auto tlv = tr::wire::decode((*ref)->only());
     if (!tlv || tlv->payload.size() != 4) return std::nullopt;
     return tr::detail::load_le<std::uint32_t>(tlv->payload);
-}
-
-/** @brief True when @p frames contains a `HANDLE_NACK` for @p label. */
-bool has_nack(const std::vector<std::vector<std::byte>>& frames, std::uint16_t label) {
-    const std::vector<std::byte> want = tr::net::encode_handle_nack(label);
-    return std::any_of(frames.begin(), frames.end(),
-                       [&](const std::vector<std::byte>& f) { return f == want; });
-}
-
-// --- the defect: an ingress COMPACT flatten that OOMs must not overwrite the LKV -----
-
-/**
- * @brief A refused `COMPACT` payload flatten leaves the previous value INTACT.
- *
- * This is the silent-corruption case. Pre-#730 the empty flatten flowed on into
- * `deliver_local` → `graph_t::write`, which stored it and returned success, so the
- * subscriber's last-known value became nothing and the delivery callback fired.
- */
-void test_compact_flatten_oom_preserves_last_known_value() {
-    std::printf("an ingress COMPACT whose payload flatten is refused keeps the stored value:\n");
-    graph_t g;
-    const vertex_handle_t sink = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
-    arming_backend_t fb;
-    fwd_router_t router(g, {.flat = &fb});
-    rec_link_t up(/*ropes=*/true);
-    (void)router.add_child("up", up);
-
-    constexpr std::uint16_t kLabel = 0x0444u;
-    constexpr std::uint32_t kFirst = 0x11223344u;
-    constexpr std::uint32_t kSecond = 0x55667788u;
-
-    up.inject(as_rope(tr::net::encode_advertise(kLabel, b_path({"sink"})), 3));
-    up.inject(as_rope(tr::net::encode_compact(kLabel, b_value_u32(kFirst)), 3));
-    check(stored_u32(g, sink) == kFirst, "the flow delivers its first value");
-    check(fb.served() > 0, "and the INJECTED backend served those flattens (the seam is live)");
-
-    // The exhaustion.
-    fb.arm();
-    up.sent.clear();
-    up.inject(as_rope(tr::net::encode_compact(kLabel, b_value_u32(kSecond)), 3));
-    check(fb.refusals() > 0,
-          "instrument: the injected backend was ASKED and refused (a flatten really happened)");
-    check(stored_u32(g, sink) == kFirst,
-          "the vertex still holds the PREVIOUS value — the refused flatten was not stored");
-
-    // The positive control: the guard drops one delivery, it does not wedge the flow.
-    fb.disarm();
-    up.inject(as_rope(tr::net::encode_compact(kLabel, b_value_u32(kSecond)), 3));
-    check(stored_u32(g, sink) == kSecond, "and the next delivery lands once memory returns");
-}
-
-// --- the ADVERTISE arm: same seam, and the binding must not happen -------------------
-
-/**
- * @brief A refused `ADVERTISE` route flatten binds NOTHING.
- *
- * The guard here is redundant with the decode below it (an empty span does not decode) —
- * which is exactly why this case pins the BEHAVIOUR and, more importantly, the SEAM: with
- * the site back on the global heap the flatten would SUCCEED under this injection, the
- * label WOULD bind, and the probe below would deliver instead of drawing a NACK.
- */
-void test_advertise_flatten_oom_binds_nothing() {
-    std::printf("an ingress ADVERTISE whose route flatten is refused binds no label:\n");
-    graph_t g;
-    const vertex_handle_t sink = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
-    arming_backend_t fb;
-    fwd_router_t router(g, {.flat = &fb});
-    rec_link_t up(/*ropes=*/true);
-    (void)router.add_child("up", up);
-
-    constexpr std::uint16_t kLabel = 0x0555u;
-    constexpr std::uint32_t kVal = 0x9ABCDEF0u;
-
-    fb.arm();
-    up.inject(as_rope(tr::net::encode_advertise(kLabel, b_path({"sink"})), 3));
-    check(fb.refusals() > 0,
-          "instrument: the injected backend was ASKED and refused the route flatten");
-
-    // Probe with memory back, so the probe's OWN payload flatten succeeds and the answer
-    // reports the label's state rather than a second exhaustion.
-    fb.disarm();
-    up.sent.clear();
-    up.inject(as_rope(tr::net::encode_compact(kLabel, b_value_u32(kVal)), 3));
-    check(has_nack(up.sent, kLabel), "the label is UNBOUND — a COMPACT on it draws a HANDLE_NACK");
-    check(!stored_u32(g, sink).has_value(), "and nothing was delivered into /sink");
-
-    // The positive control: the identical ADVERTISE binds once memory returns.
-    up.sent.clear();
-    up.inject(as_rope(tr::net::encode_advertise(kLabel, b_path({"sink"})), 3));
-    up.inject(as_rope(tr::net::encode_compact(kLabel, b_value_u32(kVal)), 3));
-    check(stored_u32(g, sink) == kVal, "the same flow binds and delivers with memory available");
-    check(!has_nack(up.sent, kLabel), "and no NACK was sent for a label that IS bound");
-}
-
-// --- the egress arm: the per-delivery flatten draws from the same injection ----------
-
-/**
- * @brief A refused per-delivery `COMPACT` flatten sends NOTHING and fails no write.
- *
- * The guard at this site predates #730; what is new is that the flatten draws from the
- * router's injection, so a bounded node's bound covers it. The assertion is what makes
- * that observable: with the site on the global heap this delivery would go out.
- */
-void test_delivery_flatten_oom_sends_nothing() {
-    std::printf("a per-delivery COMPACT whose flatten is refused puts nothing on the wire:\n");
-    graph_t g;
-    arming_backend_t fb;
-    fwd_router_t router(g, {.flat = &fb});
-    rec_link_t client;
-    (void)router.add_child("client", client);
-
-    const vertex_handle_t feed =
-        g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
-    router.on_frame("client",
-                    b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
-                          b_field_subscribers_append(), b_subscriber(b_path({"client"}), true)));
-    client.sent.clear();  // discard the subscribe REPLY
-
-    // A MULTI-link stored value: a single-link one materializes zero-copy and would never
-    // reach the seam (the vacuous shape this check exists to exclude).
-    fb.arm();
-    const std::vector<std::byte> v1 = b_value_u32(0xA1A1A1A1u);
-    check(g.write(feed, as_rope(v1, 2)).has_value(),
-          "the write itself SUCCEEDS — a fan-out leg is a separate obligation");
-    check(fb.refusals() > 0,
-          "instrument: the injected backend was ASKED and refused the delivery flatten");
-    check(client.sent.empty(), "and NOTHING went on the wire — no ADVERTISE, no COMPACT");
-
-    // The positive control: the same delivery goes out once memory returns. ONE frame, not
-    // two — `ensure_egress` runs BEFORE the flatten, so the dropped attempt above already
-    // spent the label's "fresh" edge. That is the documented shape (RFC-0004 §E.1): a
-    // dropped fresh ADVERTISE self-heals when the peer NACKs the unknown label, and the
-    // guard must not invent a re-advertise the pre-#730 code never made either.
-    fb.disarm();
-    const std::vector<std::byte> v2 = b_value_u32(0xB2B2B2B2u);
-    check(g.write(feed, as_rope(v2, 2)).has_value(), "the next write succeeds");
-    check(client.sent.size() == 1, "and delivers with memory available");
-    if (client.sent.size() == 1) {
-        const auto cmp = tr::wire::decode(client.sent[0]);
-        check(cmp && cmp->type == type_t::COMPACT, "the frame is the auto-promoted COMPACT");
-    }
 }
 
 // --- the fourth site: the COLD bus-name rejection flatten ----------------------------
@@ -492,18 +295,17 @@ void test_bus_name_reject_flatten_oom_drops_the_frame() {
 
 /** @brief The defaulted parameter keeps the global-heap behaviour byte for byte. */
 void test_default_backend_unchanged() {
-    std::printf("an un-injected router still flattens on the global heap:\n");
+    std::printf("an un-injected router still routes a multi-link frame:\n");
     graph_t g;
     const vertex_handle_t sink = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router(g);  // no backend argument at all
     rec_link_t up(/*ropes=*/true);
     (void)router.add_child("up", up);
 
-    constexpr std::uint16_t kLabel = 0x0666u;
     constexpr std::uint32_t kVal = 0x0BADF00Du;
-    up.inject(as_rope(tr::net::encode_advertise(kLabel, b_path({"sink"})), 3));
-    up.inject(as_rope(tr::net::encode_compact(kLabel, b_value_u32(kVal)), 3));
-    check(stored_u32(g, sink) == kVal, "a multi-link COMPACT delivers with no injection");
+    up.inject(
+        as_rope(b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({}), {}, b_value_u32(kVal)), 3));
+    check(stored_u32(g, sink) == kVal, "a multi-link FWD{WRITE} delivers with no injection");
 }
 
 }  // namespace
@@ -511,12 +313,6 @@ void test_default_backend_unchanged() {
 int main() {
     std::printf("fwd_router_t flatten backend seam (#730)\n\n");
 
-    test_compact_flatten_oom_preserves_last_known_value();
-    std::printf("\n");
-    test_advertise_flatten_oom_binds_nothing();
-    std::printf("\n");
-    test_delivery_flatten_oom_sends_nothing();
-    std::printf("\n");
     test_bus_name_reject_flatten_oom_drops_the_frame();
     std::printf("\n");
     test_default_backend_unchanged();

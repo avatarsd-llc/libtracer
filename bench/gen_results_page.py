@@ -206,11 +206,12 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "ns p50, batch-amortized",
         "recorded per `main` push"),
     instrument_t(
-        "bench_compact_delivery.cpp", "framed", ("routing",),
-        "Drives the Nth `COMPACT` frame on an already-advertised binding — the steady state of "
-        "an established flow — in both its forms: the label resolves locally (`terminus`) or "
-        "swaps and re-emits downstream (`forward`).",
-        "ns p50 · allocations per frame",
+        "bench_chain_delivery.cpp", "framed", ("routing",),
+        "Drives the Nth `FWD{WRITE}` of an established stream over its PAIR chain — the steady "
+        "state every stream delivery takes since COMPACT was retired (#1951) — resolved at its "
+        "terminus (`chain-terminus`) or forwarded one hop downstream (`chain-forward`), plus the "
+        "per-link state a hop keeps for it.",
+        "ns p50 · allocations per frame · RSS",
         "recorded per `main` push"),
     instrument_t(
         "bench_forward_heap.cpp", "counted", ("memory",),
@@ -285,22 +286,10 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "re-subscribe.",
         "ns per write · deliveries/s · ns per switch"),
     instrument_t(
-        "bench_originate.cpp", "framed", (),
-        "Drives the node that *starts* a remote operation: no inbound frame to read an address "
-        "out of, so it encodes the `dst` and `src` PATHs from scratch, measured against the "
-        "minted-label form of the same operation.",
-        "ns p50 · wire bytes per frame"),
-    instrument_t(
-        "bench_hop_chain.cpp", "framed", (),
-        "Five nodes and four hops: a full-path address against a minted label, and the cold "
-        "first operation against the warm steady state, recording the frame bytes each hop "
-        "actually carries so the address collapse is asserted rather than assumed.",
-        "ns p50 per hop · wire bytes per hop"),
-    instrument_t(
         "bench_chain_vs_compact.cpp", "framed", (),
-        "Stream delivery over the RFC-0029 PAIR chain against the RFC-0004 COMPACT handle at 1 "
-        "and 3 hops, 64 B to 16 KiB, unbatched and with BATCH, with the PAIR arm's reply leg "
-        "priced separately. A report for the stage-6 decision, not a gate.",
+        "Stream delivery over the RFC-0029 PAIR chain at 1 and 3 hops, 64 B to 16 KiB, "
+        "unbatched and with BATCH, with the reply leg priced separately. Its COMPACT arm "
+        "went with COMPACT (#1951). A report, not a gate.",
         "ns p50 per frame · wire bytes per hop"),
     instrument_t(
         "bench_path_label.cpp", "framed", (),
@@ -492,11 +481,6 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "One writer storms writes at a hot vertex while W threads each loop on `await` for it, "
         "as W scales 1 → 128.",
         "writes/s · wakeups/s"),
-    instrument_t(
-        "bench_route_handle_contention.cpp", "scaling", (),
-        "T threads hammer `ensure_egress` reuse-reads on one already-advertised `(link, route)` "
-        "flow — the steady-state read every remote delivery takes — as T scales 1 → 128.",
-        "ops/s, aggregate and per thread"),
     instrument_t(
         "bench_rx_source_topology.cpp", "scaling", (),
         "T receive threads forward rope frames with the RX block source shared across all "
@@ -783,13 +767,7 @@ same-named connections distinct, which is correctness, not lookup time (ADR-0061
 | path | registry work per frame |
 | --- | --- |
 | plain `FWD` write | mount descent + inbound lookup, **per frame** — the frame carries the full path, so there is nothing to cache against |
-| `COMPACT` on a bound label | one dereference of the cached registry slot, **first frame only** — resolved once, then memoized |
 | remote delivery to a subscriber | one lookup by link name, **per frame** — the subscriber record holds a name |
-
-A binding holds the resolved target rather than a name, and both cached forms self-invalidate
-without a callback: the terminus compares a retirement generation, and the forwarding hop
-reads the registry slot, whose `link` teardown nulls in place — so a departed link reads
-`nullptr`, the same clean miss an unresolved lookup gives (ADR-0062, ADR-0063).
 
 The dominant term in a hop is TLV header parsing — the FWD header, the op, the `dst` PATH and
 its segments, the selector peek and the `src` PATH on rebuild, each read exactly once — and it
@@ -797,9 +775,9 @@ sits at a local optimum for that structure. At `-O3` the parse inlines with valu
 registers into the narrow struct's stores, so there is no intermediate object to remove:
 forcing the inline, or narrowing the header struct, each *regress* the hop by about 10 %.
 
-A `COMPACT` re-emit builds no frame: the head goes to a 12-byte stack buffer and the payload
-is handed to the transport by reference as a scatter-gather list, which is why the forward
-charts are flat in payload size. Zero allocations **in the router** is not zero on the wire —
+A forwarded `FWD` builds no frame: the rebuilt head goes to a stack buffer and the payload is
+handed to the transport by reference as a scatter-gather list, which is why the forward charts
+are flat in payload size. Zero allocations **in the router** is not zero on the wire —
 a transport that does not override the gather form concatenates once in
 `transport_t::send(iov)`."""
 

@@ -1,0 +1,12 @@
+{
+  "name": "retired-route-handle-handle-nack",
+  "category": "tlv-types",
+  "hex": "13400600010002000100",
+  "total_bytes": 10,
+  "decoded": {
+    "type": "0x13 (retired, was HANDLE_NACK)",
+    "structured": true,
+    "meaning": "HANDLE_NACK{ VALUE label u16=1 } — one outer frame in the layout a pre-RFC-0032 peer emitted. The code is retired and not reassigned (RFC-0032 §6.1): a codec decodes it structurally as an unknown core-range code and skips it by its declared length.",
+    "note": "A receiving node answers one bare ERROR{tr::schema::type_mismatch} on the arrival link and counts it in :stats.router.drops retired_rx. That is behaviour, not codec, so a host test binds it (see description.md)."
+  }
+}

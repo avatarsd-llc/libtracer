@@ -74,7 +74,7 @@ jobs:
         if: steps.scope.outputs.run == 'true'
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_compact_delivery --parallel "$BUILD_JOBS"
+          cmake --build bench/build --target bench_libtracer bench_chain_delivery --parallel "$BUILD_JOBS"
       # Printed on every run, pass or fail: the measured sizes are the record, and a gate
       # whose numbers are only visible when it fails cannot be re-pinned from its own log.
       - name: Measured symbol sizes (the record, whatever the verdict)

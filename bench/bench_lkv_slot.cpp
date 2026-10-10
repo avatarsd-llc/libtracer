@@ -92,7 +92,7 @@
  *
  * DIAGNOSTIC, not a CI gate: thread-contention numbers are runner-dependent, so this is
  * deliberately not wired into perf.yml's regression gate — the same call
- * bench_rx_source_topology, bench_route_handle_contention and bench_fanout_clone_storm make.
+ * bench_rx_source_topology and bench_fanout_clone_storm make.
  *
  * Output: the shared bench RESULT contract (bench_common.hpp) —
  *   mode=lkv_<shape>_<arm> / lkvgraph_<topology>-fan<N>[-read], fanout=T,

@@ -72,8 +72,6 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [A mount run is consumed whole](route-qualified-mount.md) | L4 routing | RFC-0014 strip-K and its grow-K dual; longest prefix, per-slot width |
 | [Three nodes, and a forwarder that stores nothing](route-multi-hop.md) | L4 routing | the one-hop rule again; memory bounded by topology, not by traffic |
 | [The `src` you accumulated is the way home](route-reply-home.md) | L4 routing | the REPLY retraces per hop; no reply address, no correlation id |
-| [A repeating flow buys its route back](route-label-compact.md) | L4 routing | ADR-0035 `advertise` binds `label ↔ route` per link; the measured byte delta |
-| [A stale label is dropped and NACK'd](route-label-stale.md) | L4 routing | `clear_link`, `on_stale_label`, and why re-advertising IS the self-heal |
 | [One seam, every wire technology](net-transport-seam.md) | transport plane | the three calls a kind implements; the gathered iovec fallback; zero TLV semantics |
 | [A kind is a NAME, resolved twice](net-kind-catalog.md) | transport plane | `register_transport_type` + `register_module`; an unregistered kind is refused, not defaulted |
 | [DIAL and LISTEN are two constructors](net-dial-and-listen.md) | transport plane, `tcp` | the role is the constructor; `ok()` is came-up, `link_up()` is now |
@@ -136,7 +134,7 @@ their test registrations (`core/examples/CMakeLists.txt:if(BUILD_TESTING)`); the
 inside a third such block at the end of the file. The option defaults to
 `ON` (`core/CMakeLists.txt:option(LIBTRACER_NET_PLANE`), so the recipe above builds every example. Configured with
 `-DLIBTRACER_NET_PLANE=OFF`, those ten binaries are never produced. For the
-`route_*` group that absence is not a choice: `fwd_router_t`, `route_handle_t` and `op_resolve`
+`route_*` group that absence is not a choice: `fwd_router_t` and `op_resolve`
 are the net plane, so at `-DLIBTRACER_NET_PLANE=OFF` the types those examples name do not exist
 and there is nothing to compile, let alone to skip.
 
@@ -333,8 +331,6 @@ One NAME, one slot <route-child-table>
 A mount run is consumed whole <route-qualified-mount>
 Three nodes, and a forwarder that stores nothing <route-multi-hop>
 The src you accumulated is the way home <route-reply-home>
-A repeating flow buys its route back <route-label-compact>
-A stale label is dropped and NACK'd <route-label-stale>
 One seam, every wire technology <net-transport-seam>
 A kind is a NAME, resolved twice <net-kind-catalog>
 DIAL and LISTEN are two constructors <net-dial-and-listen>

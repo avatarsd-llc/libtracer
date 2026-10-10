@@ -22,12 +22,10 @@ namespace tr::wire {
  * 0x05 is retired (was LIST, ADR-0003). 0x0E SPEC is the in-band vertex-creation spec
  * (ADR-0017); 0x0F FWD and 0x10 FIELD are the remote-operation frames (RFC-0004 / ADR-0035,
  * the v1 fast-track range 0x0F-0x1F). All are structured (opt.PL=1) and handled generically
- * by the codec. Codes 0x11-0x13 are transport-plane route-handle control frames (RFC-0004
- * §E.1, ADR-0035 slice 4): they ride a full-TLV link (ws/UDP) ALONGSIDE FWD to compact an
- * established, `delivery_compact`-flagged flow into a per-link label. They are NOT part of
- * the FWD frame and NOT cross-core conformance TLVs — a peer that ignores them simply keeps
- * the full-route delivery path — but are self-describing (opt.PL=1) so the codec parses them
- * generically. 0x14 PATH_REF is the bound-path address form (RFC-0024 §4) and 0x15
+ * by the codec. Codes 0x11-0x13 were the route-handle control frames ADVERTISE, COMPACT and
+ * HANDLE_NACK (RFC-0004 §E.1), retired with the per-link label tables (#1951): a node no
+ * longer names them, and one an older peer still sends is an unknown type like any other.
+ * 0x14 PATH_REF is the bound-path address form (RFC-0024 §4) and 0x15
  * PATH_REF_REVERSE the reverse-direction list a mint-flagged request accumulates (§7.1
  * amendment 2): the two types whose body is NOT self-describing — a fixed-stride 8-byte
  * record array (opt.PL=0), whose shape the grammar therefore checks by type (path_ref.hpp,
@@ -61,12 +59,6 @@ enum class type_t : std::uint8_t {
     SPEC = 0x0E,   /**< @brief In-band vertex-creation spec (structured; ADR-0017). */
     FWD = 0x0F,    /**< @brief Remote-operation forward frame (RFC-0004 §B / ADR-0035). */
     FIELD = 0x10,  /**< @brief Control-plane `:field` selector (RFC-0004 §C / ADR-0035). */
-    /** @brief Route-handle: VALUE label(u16) + PATH route — bind label→route, swapped per hop. */
-    ADVERTISE = 0x11,
-    /** @brief Route-handle: VALUE label(u16) + payload TLV — a label-compacted delivery. */
-    COMPACT = 0x12,
-    /** @brief Route-handle: VALUE label(u16) — stale/unknown label seen; prompts re-advertise. */
-    HANDLE_NACK = 0x13,
     /** @brief Bound path: a bare array of 8-byte node-scoped vertex refs (RFC-0024 §4). */
     PATH_REF = 0x14,
     /**

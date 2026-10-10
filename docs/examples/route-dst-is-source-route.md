@@ -23,7 +23,7 @@ never of the rule.
 - **The assertion is byte-exact.** The frame the hop emits is compared against the frame a
   client one hop closer would have built from scratch, so the example says "forwarding produced
   the canonical bytes" rather than "forwarding produced something that decodes plausibly".
-- **Nothing was stored.** `handles()` reports zero bindings after the forward. A forwarder is
+- **Nothing was stored.** The router has no per-request store to write to. A forwarder is
   stateless because the route left with the frame — and so did the return route
   ([reply home](route-reply-home.md) is the other half of that sentence).
 - **The match is on whole route segments.** A `dst` whose first route segment merely *starts*

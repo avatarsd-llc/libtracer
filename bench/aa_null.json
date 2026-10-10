@@ -546,21 +546,6 @@
    "mean_ns": 0.04794,
    "p50_ns": 0.0266
   },
-  "compact-forward/16384/1/1": {
-   "deliv_s": 0.13045,
-   "mean_ns": 0.13068,
-   "p50_ns": 0.15501
-  },
-  "compact-forward/64/1/1": {
-   "deliv_s": 0.05442,
-   "mean_ns": 0.05444,
-   "p50_ns": 0.02737
-  },
-  "compact-terminus/64/1/1": {
-   "deliv_s": 0.03122,
-   "mean_ns": 0.03128,
-   "p50_ns": 0.02084
-  },
   "eptype-stream/16384/1/1": {
    "deliv_s": 0.10771,
    "mean_ns": 0.05354,

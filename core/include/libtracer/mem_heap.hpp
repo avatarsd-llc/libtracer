@@ -72,8 +72,7 @@ namespace tr::detail {
  * The failure mode is worse than a plain bug because it hides: under the default resource the
  * two allocators ARE the global heap, so the generalization looks correct in most tests. It
  * breaks only on a node whose resource is a slab with a null upstream — the configuration
- * `route_handle_test`'s "slab resource (null upstream — zero global heap)" case exists to
- * cover, and the one an MCU actually ships. The `probe_fail_hook` seam is equally misdirected
+ * an MCU actually ships. The `probe_fail_hook` seam is equally misdirected
  * there: it gates the global-heap probe, not the injected resource.
  *
  * A `std::pmr` container cannot be made failable this way at all: `polymorphic_allocator`

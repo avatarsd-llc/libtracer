@@ -128,37 +128,6 @@ export class FwdError extends Error {
   }
 }
 
-/** @brief ADVERTISE (`0x11`) — a route-handle label binding (RFC-0004 route handles). */
-const TYPE_ADVERTISE = 0x11;
-/** @brief COMPACT (`0x12`) — a label-compacted delivery (RFC-0004 route handles). */
-const TYPE_COMPACT = 0x12;
-
-/**
- * @brief An inbound ADVERTISE (`0x11`) / COMPACT (`0x12`) frame reached this
- * client, which does not implement the RFC-0004 compact (route-handle) delivery
- * flow yet.
- *
- * Routed to {@link LibtracerClient.onError} so the failure is diagnosable
- * instead of a silent drop; the sender should fall back to plain FWD delivery.
- */
-export class CompactFlowError extends Error {
-  /** @brief The offending wire type code (`0x11` ADVERTISE or `0x12` COMPACT). */
-  readonly frameType: number;
-  /**
-   * @brief Name the offending frame kind in the error message.
-   * @param frameType the inbound frame's wire type code
-   */
-  constructor(frameType: number) {
-    const kind = frameType === TYPE_ADVERTISE ? 'ADVERTISE' : 'COMPACT';
-    super(
-      `inbound ${kind} (0x${frameType.toString(16).padStart(2, '0')}) dropped: ` +
-        'compact (route-handle) delivery is not supported by this client yet',
-    );
-    this.name = 'CompactFlowError';
-    this.frameType = frameType;
-  }
-}
-
 /** @brief A pending one-shot request awaiting its FWD{REPLY}. */
 interface Pending {
   resolve(reply: ParsedFwd): void;
@@ -304,13 +273,6 @@ export class LibtracerClient {
       if (parsed.op === FWD_OP.WRITE && parsed.payload && parsed.payload.type === TYPE.VALUE) {
         this.deliver(parsed.payload);
       }
-      return;
-    }
-
-    // The compact (route-handle) flow is not implemented here: surface it loudly
-    // rather than silently dropping the delivery (v0.1 client limitation).
-    if (tlv.type === TYPE_ADVERTISE || tlv.type === TYPE_COMPACT) {
-      this.emitError(new CompactFlowError(tlv.type));
       return;
     }
 

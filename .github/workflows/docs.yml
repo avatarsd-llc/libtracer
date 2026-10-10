@@ -243,7 +243,7 @@ jobs:
           cmake --build core/build --parallel "$BUILD_JOBS"   # all test targets, for the live test report
           bash bench/fetch_zenoh.sh || echo "zenoh fetch failed — comparison will be omitted"
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports bench_forward_demux bench_compact_delivery --parallel "$BUILD_JOBS"
+          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports bench_forward_demux bench_chain_delivery --parallel "$BUILD_JOBS"
           # zenoh is optional: build it separately so a missing/failed vendor never breaks
           # the docs deploy (the comparison degrades to a note; libtracer numbers stand).
           cmake --build bench/build --target bench_zenoh bench_zenoh_net bench_zenoh_compose --parallel "$BUILD_JOBS" || echo "bench_zenoh unavailable — comparison omitted"

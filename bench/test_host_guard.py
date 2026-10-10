@@ -132,7 +132,7 @@ class Bracket(unittest.TestCase):
     """@brief The A/A null pair: same binary either side of the measured run."""
 
     def test_identical_pair_is_clean(self):
-        t = transcript([("inproc", 1.0e7, 100), ("compact-forward", 2.0e7, 43)])
+        t = transcript([("inproc", 1.0e7, 100), ("chain-forward", 2.0e7, 43)])
         clean, _, p75, pct = hg.bracket_verdict(t, t)
         self.assertTrue(clean)
         self.assertEqual((p75, pct), (0.0, 0.0))

@@ -361,8 +361,8 @@ class op_resolver_t {
      * A non-empty `inbound.link` makes an inbound `:subscribers[]` WRITE bind a
      * REMOTE subscriber (#136): the slot retains this request's accumulated return
      * route (`src`, copied once — trailer-sliced) and `inbound.link`, so the
-     * producer fan-out delivers a `FWD{WRITE}` / auto-promoted `COMPACT` back over
-     * that link (RFC-0004 §D/§E.1). An empty `inbound.link` is the local-only
+     * producer fan-out delivers a `FWD{WRITE}` back over that link (RFC-0004 §D).
+     * An empty `inbound.link` is the local-only
      * field-write — so `fwd_router_t`, which knows the link, passes it; a bare
      * local resolve does not.
      *

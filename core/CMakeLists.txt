@@ -86,14 +86,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 #   * The required core (below) ALWAYS compiles: the L2/L3 wire codec (frame +
 #     tlv_arena), the L0/L1 substrate (backends + view/rope), path, and the L4 graph
 #     runtime. A pure in-process node needs nothing more.
-#   * LIBTRACER_NET_PLANE adds the FWD routing plane (op_resolve, route_handle,
+#   * LIBTRACER_NET_PLANE adds the FWD routing plane (op_resolve,
 #     fwd_router, transport_vertex) — a node that forwards to other nodes.
 #   * LIBTRACER_TRANSPORT_{TCP,UDP,WS,CAN} each add their transport's TU(s), plus
 #     shared deps (posix_endpoint when any socket transport is on; socketcan_link when
 #     CAN is on). udp/tcp/ws are the net-plane builtins auto-registered on the
 #     transport vertex; can/quic/webtransport are opt-in external factories.
 option(LIBTRACER_NET_PLANE
-       "Build the FWD net/routing plane (op_resolve, route_handle, fwd_router, transport_vertex)"
+       "Build the FWD net/routing plane (op_resolve, fwd_router, transport_vertex)"
        ON)
 option(LIBTRACER_TRANSPORT_TCP "Build the TCP stream transport (tcp_transport_t)" ON)
 option(LIBTRACER_TRANSPORT_UDP "Build the UDP datagram transport (udp_transport_t)" ON)

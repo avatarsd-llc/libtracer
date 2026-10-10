@@ -739,6 +739,26 @@ void test_conformance_vectors() {
               "subscriber/policy-absent: admitted, and NO latch");
     }
     {
+        // RFC-0032 §6.2: the retired `delivery_compact = 1` key is ignored. The record is
+        // admitted with an all-zero policy, served like any plain subscriber, and stored as
+        // written.
+        graph_t g;
+        const auto src = g.register_vertex(path_t("/vec/src"), role_t::STORED_VALUE);
+        (void)g.write(src, byte_value(0x5A));
+        check(latches_for(g, path_t("/vec/src"), "subscriber/compact-key-retired") == 0,
+              "subscriber/compact-key-retired: admitted, and NO latch");
+        const std::vector<std::byte> want = vector_bytes("subscriber/compact-key-retired");
+        check(!policy_word_of(want).has_value(),
+              "... it names no delivery_policy, so the policy reads all-zero");
+        (void)g.write(src, byte_value(0x6B));
+        check(g_client_writes == 1,
+              "... and a later write is delivered once, as to any subscriber");
+        const std::optional<decoded_t> back =
+            decode_read(g.read(path_t("/vec/src:subscribers[0]")));
+        check(back.has_value() && back->bytes == want,
+              "... and `:subscribers[0]` serves the record back with the retired key as written");
+    }
+    {
         graph_t g;
         const auto src = g.register_vertex(path_t("/vec/src"), role_t::STORED_VALUE);
         (void)g.write(src, byte_value(0x5A));

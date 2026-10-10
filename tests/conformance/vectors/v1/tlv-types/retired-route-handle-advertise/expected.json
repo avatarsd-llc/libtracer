@@ -1,0 +1,12 @@
+{
+  "name": "retired-route-handle-advertise",
+  "category": "tlv-types",
+  "hex": "1140160001000200010006000C000673656E736F720474656D70",
+  "total_bytes": 26,
+  "decoded": {
+    "type": "0x11 (retired, was ADVERTISE)",
+    "structured": true,
+    "meaning": "ADVERTISE{ VALUE label u16=1, PATH{ NAME \"sensor\", NAME \"temp\" } } — one outer frame in the layout a pre-RFC-0032 peer emitted. The code is retired and not reassigned (RFC-0032 §6.1): a codec decodes it structurally as an unknown core-range code and skips it by its declared length.",
+    "note": "A receiving node answers one bare ERROR{tr::schema::type_mismatch} on the arrival link and counts it in :stats.router.drops retired_rx. That is behaviour, not codec, so a host test binds it (see description.md)."
+  }
+}

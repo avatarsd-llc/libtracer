@@ -32,7 +32,6 @@
 #include "libtracer/packed_path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/rope_decode.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/view.hpp"
 #include "route_frame_builder.hpp"  // host-only frame builders (#1779)
@@ -201,55 +200,7 @@ int main() {
               "op peek: an empty op VALUE yields nullopt");
     }
 
-    // 3. peek_control — ADVERTISE / COMPACT / HANDLE_NACK heads, span + rope.
-    {
-        const bytes_t route = b_path({"unit", "temp"});
-        const bytes_t adv = tr::net::encode_advertise(0xBEEF, route);
-        const auto head = tr::net::peek_control(span_cursor{adv});
-        check(head && head->type == type_t::ADVERTISE && head->label == 0xBEEF,
-              "control peek: ADVERTISE type + u16 label");
-        check(head && head->child1_total == route.size() &&
-                  std::memcmp(adv.data() + head->child1_off, route.data(), route.size()) == 0,
-              "control peek: child[1] window re-slices to the route TLV bytes");
-
-        const bytes_t cmp = tr::net::encode_compact(7, payload);
-        const auto chead = tr::net::peek_control(span_cursor{cmp});
-        check(chead && chead->type == type_t::COMPACT && chead->label == 7 &&
-                  chead->child1_total == payload.size(),
-              "control peek: COMPACT type + label + payload window");
-
-        const bytes_t nack = tr::net::encode_handle_nack(41);
-        const auto nhead = tr::net::peek_control(span_cursor{nack});
-        check(nhead && nhead->type == type_t::HANDLE_NACK && nhead->label == 41 &&
-                  nhead->child1_off == 0 && nhead->child1_total == 0,
-              "control peek: bare-label HANDLE_NACK has no child[1]");
-
-        // The u16 label straddling a link boundary must stitch identically.
-        bool all_equal = true;
-        for (std::size_t cut = 1; cut + 1 < adv.size() && all_equal; ++cut) {
-            const std::size_t cuts[] = {cut};
-            const tr::view::rope_t r = rope_split(adv, cuts);
-            const auto rh = tr::net::peek_control(rope_cursor{r});
-            all_equal = rh && rh->type == head->type && rh->label == head->label &&
-                        rh->child1_off == head->child1_off &&
-                        rh->child1_total == head->child1_total;
-        }
-        check(all_equal, "control peek: every rope split reads the same head as the span");
-
-        check(!tr::net::peek_control(span_cursor{b_fwd(fwd_op_t::READ, b_path({"a"}), b_path({}))})
-                   .has_value(),
-              "control peek: a FWD frame is not a control frame");
-        bytes_t short_label_body;  // label VALUE with only 1 byte — malformed
-        const std::byte one{0x01};
-        tr::wire::emit_tlv(short_label_body, type_t::VALUE, opt_t{},
-                           std::span<const std::byte>(&one, 1));
-        bytes_t bad;
-        tr::wire::emit_tlv(bad, type_t::HANDLE_NACK, opt_t{.pl = true}, short_label_body);
-        check(!tr::net::peek_control(span_cursor{bad}).has_value(),
-              "control peek: a 1-byte label VALUE is rejected");
-    }
-
-    // 4. Head rebuild — shrink dst, grow src: BYTE-EXACT vs a reference re-encode.
+    // 3. Head rebuild — shrink dst, grow src: BYTE-EXACT vs a reference re-encode.
     {
         const bytes_t frame =
             b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), {}, payload);
@@ -260,7 +211,7 @@ int main() {
         check(out == want, "rebuild: shrunk-dst + grown-src bytes == the reference re-encode");
     }
 
-    // 4b. REPLY does not grow src (a reply accumulates no return route, RFC-0004 §B).
+    // 3b. REPLY does not grow src (a reply accumulates no return route, RFC-0004 §B).
     {
         const bytes_t frame =
             b_fwd(fwd_op_t::REPLY, b_path({"back", "home"}), b_path({}), {}, payload);
@@ -269,7 +220,7 @@ int main() {
         check(out == want, "rebuild: a REPLY shrinks dst but does NOT grow src");
     }
 
-    // 4c. The optional FIELD selector rides through untouched, in position.
+    // 3c. The optional FIELD selector rides through untouched, in position.
     {
         bytes_t sel;
         tr::wire::emit_tlv(sel, type_t::FIELD, opt_t{.pl = true}, b_name("mode"));
@@ -281,7 +232,7 @@ int main() {
         check(out == want, "rebuild: the FIELD selector is carried byte-identically");
     }
 
-    // 4d. A single-segment dst shrinks to an empty PATH (the next hop is the terminus).
+    // 3d. A single-segment dst shrinks to an empty PATH (the next hop is the terminus).
     {
         const bytes_t frame = b_fwd(fwd_op_t::WRITE, b_path({"child"}), b_path({}), {}, payload);
         const auto out = forward_bytes(span_cursor{frame}, "in");
@@ -289,7 +240,7 @@ int main() {
         check(out == want, "rebuild: a single-segment dst shrinks to an empty PATH");
     }
 
-    // 4e. Rope cursor, split at EVERY byte: the gathered egress is byte-identical
+    // 3e. Rope cursor, split at EVERY byte: the gathered egress is byte-identical
     //     to the contiguous rebuild (the ADR-0053 ④b oracle, at the unit level).
     {
         bytes_t sel;
@@ -306,7 +257,7 @@ int main() {
         check(all_equal, "rebuild: every rope split gathers byte-identical egress");
     }
 
-    // 4f. #1109: an origin's TF=0 trailer stamp SURVIVES the forward hop — the TS/TF bits
+    // 3f. #1109: an origin's TF=0 trailer stamp SURVIVES the forward hop — the TS/TF bits
     //     stay on the rebuilt head and the 8 stamp bytes are re-emitted verbatim as the
     //     outgoing frame's last bytes. (Before this fix the fresh head hardcoded
     //     `opt{.pl = true}` and gather stopped at body_end: the stamp was silently dropped
@@ -347,7 +298,7 @@ int main() {
         check(all_equal, "rebuild: every rope split gathers the same stamped egress");
     }
 
-    // 4g. #1109: an inbound CRC does NOT cross the hop (the rebuilt body invalidates it),
+    // 3g. #1109: an inbound CRC does NOT cross the hop (the rebuilt body invalidates it),
     //     while the stamp riding beside it still does.
     {
         constexpr std::int64_t kNs = 777'000'111LL;
@@ -366,7 +317,7 @@ int main() {
         check(out == want, "rebuild: TS preserved, stale CRC dropped (CR never crosses)");
     }
 
-    // 5. Malformed rejects — each structural precondition fails to nullopt.
+    // 4. Malformed rejects — each structural precondition fails to nullopt.
     {
         const bytes_t good = b_fwd(fwd_op_t::WRITE, b_path({"a", "b"}), b_path({}), {}, payload);
         const bytes_t truncated(good.begin(), good.begin() + 3);
@@ -441,7 +392,7 @@ int main() {
               "reject: an empty dst PATH yields no segment window");
     }
 
-    // 6. read_fwd_header — absolute offsets; out-of-range position rejected.
+    // 5. read_fwd_header — absolute offsets; out-of-range position rejected.
     {
         const bytes_t frame = b_fwd(fwd_op_t::READ, b_path({"a"}), b_path({}));
         const auto h = tr::net::read_fwd_header(span_cursor{frame}, 0);
@@ -455,7 +406,7 @@ int main() {
               "read_fwd_header: a past-the-end position yields nullopt");
     }
 
-    // 7. stack_writer — clamp-to-empty overflow, never an overrun; ll auto-widening.
+    // 6. stack_writer — clamp-to-empty overflow, never an overrun; ll auto-widening.
     {
         tr::net::stack_writer<8> w;
         w.header(type_t::FWD, 4);  // 4 bytes — fits

@@ -35,7 +35,6 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -152,13 +151,13 @@ void test_router_seam_is_live() {
     const auto fresh = tr::wire::decode(fresh_bytes);
     check(fresh && fresh->type == type_t::SETTINGS && fresh->opt.pl,
           "the answer is ONE structured SETTINGS TLV, the Amendment 1 §D.3 shape");
-    check(fresh && fresh->children.size() == 14, "seven NAME/VALUE pairs — every per-cause noun");
+    check(fresh && fresh->children.size() == 16, "eight NAME/VALUE pairs — every per-cause noun");
     check(fresh && counter(*fresh, "malformed_rx") == 0 && counter(*fresh, "arena_dropped") == 0 &&
-              counter(*fresh, "flatten_dropped") == 0,
-          "…and all seven are zero on a router that has seen nothing");
+              counter(*fresh, "flatten_dropped") == 0 && counter(*fresh, "retired_rx") == 0,
+          "…and all eight are zero on a router that has seen nothing");
     // These bytes are the `settings/stats-seam-net-router` conformance vector.
     const std::string expect =
-        "0b40e000"                                          // SETTINGS PL=1, len=224
+        "0b40fa00"                                          // SETTINGS PL=1, len=250
         "02000f00666c617474656e5f64726f70706564"            // NAME "flatten_dropped"
         "010008000000000000000000"                          // VALUE u64 = 0
         "02001300666f72776172645f696f765f64726f70706564"    // "forward_iov_dropped"
@@ -172,6 +171,8 @@ void test_router_seam_is_live() {
         "0200140064656c69766572795f696f765f64726f70706564"  // "delivery_iov_dropped"
         "010008000000000000000000"                          // VALUE u64 = 0
         "02000c006d616c666f726d65645f7278"                  // NAME "malformed_rx"
+        "010008000000000000000000"                          // VALUE u64 = 0
+        "02000a00726574697265645f7278"                      // NAME "retired_rx"
         "010008000000000000000000";                         // VALUE u64 = 0
     check(hex(fresh_bytes) == expect, "the block is byte-exact (the stats-seam-net-router vector)");
     if (hex(fresh_bytes) != expect) std::printf("  actual: %s\n", hex(fresh_bytes).c_str());
@@ -200,8 +201,9 @@ void test_router_seam_is_live() {
  * @brief §D.4 — `:stats.labels` and `:stats.link.<child>`, including the per-link identity.
  *
  * Two links with DIFFERENT counters, so a seam that ignored the sub-key and answered for
- * "the links" would fail. `labels_used` appears only with label switching on, which is the
- * "a seam names only the nouns it has" rule (Amendment 1 §D.3) applied per node.
+ * "the links" would fail. The handle-table nouns (`labels_exhausted`, `refused_bindings`,
+ * `labels_used`) are gone with the tables (#1951), and a seam names only the nouns it has
+ * (Amendment 1 §D.3).
  */
 void test_link_and_label_seams() {
     std::printf("RFC-0010 Am.2 §D.4: :stats.link.<child> is PER LINK; :stats.labels.table:\n");
@@ -225,7 +227,7 @@ void test_link_and_label_seams() {
     check(down_block && counter(*down_block, "dropped_rx") == 11,
           "…and the OTHER child's sub-key answers for the other link");
     check(up_block && up_block->children.size() == 6,
-          "no labels_used noun with label switching off — a seam names only what it has");
+          "the link block carries its three nouns and nothing else");
 
     // The label plane. With a mint table installed the per-link occupancy noun appears.
     check(reads_ok(g, "/sink:stats.labels.table"),
@@ -234,14 +236,19 @@ void test_link_and_label_seams() {
     router.configure_path_labels(&labels);
     const auto lab_bytes = read_bytes(g, "/sink:stats.labels.table");
     const auto lab = tr::wire::decode(lab_bytes);
-    check(lab && counter(*lab, "labels_exhausted") == 0 && counter(*lab, "refused_bindings") == 0 &&
-              counter(*lab, "label_not_found") == 0 && counter(*lab, "label_resolves") == 0,
-          "the four label-plane nouns are present");
+    constexpr std::uint64_t kAbsent = static_cast<std::uint64_t>(-1);
+    check(lab && counter(*lab, "label_not_found") == 0 && counter(*lab, "label_resolves") == 0 &&
+              lab->children.size() == 4,
+          "the two label-plane nouns are present, and only those two");
+    check(lab && counter(*lab, "labels_exhausted") == kAbsent &&
+              counter(*lab, "refused_bindings") == kAbsent,
+          "labels_exhausted and refused_bindings are gone with the handle tables (#1951)");
     // The bytes must OUTLIVE the decode: a `tlv_t`'s children are spans INTO them.
     const auto relinked = read_bytes(g, "/sink:stats.link.up");
     const auto with_labels = tr::wire::decode(relinked);
-    check(with_labels && counter(with_labels.value(), "labels_used") == 0,
-          "…and the link block GREW its labels_used noun once switching is on");
+    check(with_labels && with_labels->children.size() == 6 &&
+              counter(with_labels.value(), "labels_used") == kAbsent,
+          "…and the link block names no labels_used with switching on either (#1951)");
 
     // A link that was never registered is not a seam; nor is one that has been removed.
     check(status_of(g, "/sink:stats.link.nosuch") == status_t::SCHEMA_NOT_FOUND,

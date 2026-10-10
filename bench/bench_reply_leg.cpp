@@ -13,7 +13,7 @@
  * ever have been argued from code reading — which is what this bench exists to stop.
  *
  * `bench_forward_demux` prices the registry scan on the FORWARD hop (one scan per inbound frame);
- * `bench_compact_delivery` prices a warm compacted delivery arriving from the wire. Neither drives
+ * `bench_chain_delivery` prices a warm stream delivery arriving from the wire. Neither drives
  * the PRODUCER leg, where the scan count is multiplied by the fan-out width rather than by the
  * frame rate.
  *

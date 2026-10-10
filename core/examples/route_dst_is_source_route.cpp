@@ -131,10 +131,8 @@ int main() {
     check(ok, to_b.sent[0] == next_hop_would_build,
           "dst shrank by this child's mount run and src grew by the inbound one — byte-exact");
 
-    // Nothing was remembered. The router holds no per-request state at all: the route left
+    // Nothing was remembered. The router has no per-request store at all: the route left
     // with the frame, and the return route left with it too.
-    check(ok, router.handles().ingress_count() == 0 && router.handles().egress_count() == 0,
-          "the hop stored NOTHING — a forwarder is stateless by construction");
 
     // The match is on whole route segments, not on a byte prefix: a `dst` whose first route
     // segment merely starts with a child's name is not that child's traffic.

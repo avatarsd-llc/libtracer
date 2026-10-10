@@ -129,7 +129,7 @@ inline constexpr arm_t kArms[] = {arm_t::H_BASELINE, arm_t::WIDE, arm_t::MID, ar
  * @brief Receive-thread counts the fan-out arm sweeps.
  *
  * Fixed rather than clamped to `hardware_concurrency`, exactly as `bench_rx_source_topology`
- * and `bench_route_handle_contention` do: ADR-0079 §Verification asks the sweep to "bracket
+ * does: ADR-0079 §Verification asks the sweep to "bracket
  * the thread counts that matter (single-thread MCU shape AND >= T where WIDE diverges)", and a
  * ladder that shrinks on a small runner brackets neither reproducibly.
  */
@@ -637,7 +637,7 @@ class node_t {
                 rx_src_ = egr_src_ = nullptr;  // per-lane; see build_lanes
                 break;
         }
-        // The undecorated store a NARROW node's node-wide wiring (the router's label table)
+        // The undecorated store a NARROW node's node-wide wiring (the router's link state)
         // falls back to, so no arm leaves an allocation on the process heap by accident.
         plane_fallback_ = arm_ == arm_t::H_BASELINE ? heap : ctl_src_;
 
@@ -665,8 +665,8 @@ class node_t {
         g_ = std::make_unique<graph_t>(*ctl_src_);
         // `label_src` and the DEFAULT `rx` both take the net-plane store, per ADR-0079's
         // composition table. NARROW has no node-wide net store — every child overrides `rx`
-        // through `add_child` — so its label table takes the GRAPH store rather than the heap:
-        // a NARROW node that fell back to `heap_source()` for its label bindings would not be
+        // through `add_child` — so its link state takes the GRAPH store rather than the heap:
+        // a NARROW node that fell back to `heap_source()` for its link state would not be
         // the bounded composition the arm is supposed to represent. Deliberately the
         // UNDECORATED store, so wiring-frequency label allocations do not land in the `ctl`
         // channel's per-frame draw count.

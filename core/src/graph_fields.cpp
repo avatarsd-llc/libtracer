@@ -362,11 +362,11 @@ namespace {
  *        (ADR-0049; the resolver's parallel subscriber_compact() parse is retired).
  *
  * Extracts the first PATH child's target key (may stay empty — the wire door ignores it) and,
- * from the SETTINGS child, the `delivery_compact` opt-in (NAME "delivery_compact" VALUE u8,
- * RFC-0004 §E.1 / docs/reference/05) and the packed `delivery_policy` (NAME "delivery_policy"
- * VALUE u16, RFC-0022 §3.A) — the SAME child, so the per-subscription policy introduced no new
- * wire structure. Back-compat: a SUBSCRIBER carrying neither (or an older parser) keeps the
- * full-route delivery path and the all-zero default policy — conformance vectors unaffected.
+ * from the SETTINGS child, the packed `delivery_policy` (NAME "delivery_policy" VALUE u16,
+ * RFC-0022 §3.A). A SUBSCRIBER carrying none keeps the all-zero default policy. Every other
+ * SETTINGS member is unknown here and skipped, and that includes the retired
+ * `delivery_compact` opt-in an older peer may still send (#1951): its deliveries ride the same
+ * `FWD{WRITE}` every subscription's do.
  * The SETTINGS walk IS `wire::config_reader_t` (#927, hoisted to L2/L3 by #985 so this file no
  * longer carries a hand-written copy of the rule): pair-consuming — a forward-compat pair whose
  * value reads `"delivery_policy"` must not bind the FOLLOWING child as the policy — and
@@ -390,11 +390,6 @@ namespace {
             if (k && !(s.target_key = try_make_target_key(src, *k)) && !k->empty()) return false;
         } else if (child.type() == type_t::SETTINGS) {
             const wire::config_reader_t qos(&child);
-            if (qos.flag("delivery_compact").value_or(false)) {
-                subscriber_remote_t* const r = s.ensure_remote(src);  // only when opted in
-                if (r == nullptr) return false;
-                r->delivery_compact = true;
-            }
             if (const std::optional<std::uint16_t> word = qos.u16("delivery_policy"))
                 s.policy.bits = *word;
         }

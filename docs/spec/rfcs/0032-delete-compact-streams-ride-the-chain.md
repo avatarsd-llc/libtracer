@@ -748,3 +748,21 @@ Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the comment window is waive
 the project is solo-maintained, and it was not invoked. Maintainer approval was given on 2026-10-09,
 in a comment on issue [#1950](https://github.com/avatarsd-llc/libtracer/issues/1950), and is recorded in the Status row. Sustained objections and their resolution are
 recorded in this section as they arrive.
+
+## Erratum (2026-10-10) — `router_planes_t::label_src` stays, and §12.2's vector is three ([#1951](https://github.com/avatarsd-llc/libtracer/issues/1951))
+
+**What the text said.** §10 row B6 lists `router_planes_t::label_src` among the removed C++
+surface, and §11 tells C++ embedders to remove "the `router_planes_t::label_src` source that
+sized the handle store". §12.2 names one vector, `tlv-types/retired-route-handle-codes`, holding
+one outer frame of each retired code.
+
+**What is agreed and shipped.** `label_src` is not only the handle store's source. The router's
+other long-lived link state (each child's receive context, the bus token caches, the NAME-to-link
+demux table) draws from it too, so #1951 keeps it, and an embedder that injected it keeps
+injecting it. Only `max_label_bindings_per_link` goes. A conformance vector is one frame
+([HARNESS.md](../../../tests/conformance/HARNESS.md)), so §12.2's frames are banked as three
+vectors: `tlv-types/retired-route-handle-advertise`, `-compact` and `-handle-nack`. Each core's
+suite asserts the unknown-code decode, the skip by declared length and the frame that follows.
+
+**Correction.** Read B6 and §11 without `label_src`, and §12.2's vector as those three. No wire
+byte, code or rule changes.

@@ -36,11 +36,9 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path_pair.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "pair_body.hpp"
-#include "route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "test_support.hpp"
 #include "test_values.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
@@ -61,11 +59,6 @@ using tr::testing::check;
 using tr::testing::make_value;
 
 // --- wire builders (canonical bytes via the production emit helpers) ----------
-std::vector<std::byte> b_name(std::string_view s) {
-    std::vector<std::byte> out;
-    tr::wire::emit_name(out, s);
-    return out;
-}
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (std::string_view s : segs) {
@@ -114,69 +107,6 @@ using tr::testing::b_fwd;
 using tr::testing::b_fwd_no_op;
 
 /**
- * @brief A backend whose bytes are ordinary host memory but whose segments are TAGGED
- *        `DEVICE` — the vehicle for driving `rope_t::materialize()` to refuse.
- *
- * `rope_t::flatten` returns an EMPTY view for a rope that is not `all_host()`, because a
- * CPU `memcpy` of device bytes would fault (ADR-0024). That refusal — not only a heap OOM
- * — is a way `materialize()` hands back nothing, and it is the one a test can trigger
- * deterministically: the COMPACT ingress arm materializes through the DEFAULT
- * `mem::heap_backend()`, so no failing backend can be injected there.
- *
- * The shape is the sanctioned one, not a contrivance. `mem_space_t`'s own contract says a
- * DEVICE segment "may back only an opaque VALUE payload, with the header/trailer kept in a
- * HOST segment (a heterogeneous host+device rope)" — which is exactly a COMPACT whose
- * payload VALUE body arrived in device memory. `peek_control` reads only headers, all of
- * which stay HOST here, so the frame parses normally and reaches the materialize.
- */
-class device_tag_backend_t final : public tr::mem::mem_backend_t {
-   public:
-    device_tag_backend_t() noexcept : mem_backend_t("test_device_tag") {}
-
-    tr::view::segment_t* alloc(std::size_t size,
-                               tr::mem::alloc_hint_t = tr::mem::alloc_hint_t::NONE) override {
-        auto* raw = static_cast<std::byte*>(::operator new(size, std::nothrow));
-        if (raw == nullptr) return nullptr;
-        auto* seg = new (std::nothrow) tr::view::segment_t(this, std::span<std::byte>(raw, size));
-        if (seg == nullptr) {
-            ::operator delete(raw);
-            return nullptr;
-        }
-        return seg;
-    }
-
-    void destroy(tr::view::segment_t* seg) noexcept override {
-        ::operator delete(seg->bytes.data());
-        delete seg;
-    }
-
-    [[nodiscard]] tr::mem::mem_space_t space() const noexcept override {
-        return tr::mem::mem_space_t::DEVICE;
-    }
-};
-
-device_tag_backend_t g_device_backend;
-
-/** @brief `make_value`'s twin over @ref device_tag_backend_t — a DEVICE-tagged link. */
-tr::view::view_t make_device_value(std::span<const std::byte> bytes) {
-    tr::view::segment_t* seg = g_device_backend.alloc(bytes.size());
-    if (seg == nullptr) return tr::view::view_t{};
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(tr::view::segment_ptr_t::adopt(seg));
-}
-
-/**
- * @brief `rope_split` with the FINAL link allocated DEVICE-tagged: header bytes stay
- *        CPU-addressable, the trailing payload body does not.
- */
-tr::view::rope_t rope_split_device_tail(std::span<const std::byte> bytes, std::size_t cut) {
-    tr::view::rope_t r;
-    if (cut > 0) r.append(make_value(bytes.subspan(0, cut)));
-    if (cut < bytes.size()) r.append(make_device_value(bytes.subspan(cut)));
-    return r;
-}
-
-/**
  * @brief Build a rope over `bytes` split at the given cut points (each cut is a link boundary).
  *
  * Every link owns its own heap segment — a genuine scatter-gather
@@ -195,19 +125,6 @@ tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const st
     }
     add(prev, bytes.size());
     return r;
-}
-
-/**
- * @brief The label carried by an ADVERTISE frame — its first child, a 2-byte opaque VALUE.
- *
- * Needed because labels are PER-LINK: when this node re-advertises downstream it allocates a
- * FRESH label for that link rather than reusing the inbound one, so a NACK fixture that reuses
- * the inbound label looks up a route that was never bound and gets the silent return.
- */
-[[nodiscard]] std::uint16_t advertise_label(std::span<const std::byte> frame) {
-    const auto dec = tr::wire::decode(frame);
-    if (!dec || dec->children.empty() || dec->children[0].payload.size() < 2) return 0;
-    return tr::detail::load_le<std::uint16_t>(dec->children[0].payload);
 }
 
 // --- fake transports ----------------------------------------------------------
@@ -230,13 +147,7 @@ class fake_link_t : public transport_t {
  */
 class fake_rope_link_t : public transport_t {
    public:
-    /**
-     * @brief Records every send, because a rope link is not always inbound-only.
-     *
-     * `on_nack` re-advertises back on the link the NACK ARRIVED on, so for the self-heal the
-     * inbound link is also the egress. Discarding sends here made that whole path unobservable
-     * — the test could not tell a served NACK from a dropped one.
-     */
+    /** @brief Records every send, because a rope link is not always inbound-only. */
     void send(std::span<const std::byte> frame) override {
         sent_.emplace_back(frame.begin(), frame.end());
     }
@@ -695,182 +606,6 @@ int main() {
         }
     }
 
-    // Control frame over a multi-link rope (ADR-0055 §2/§3): the on_frame_rope whole-frame
-    // flatten is gone — ADVERTISE / COMPACT are served rope-native by on_control_rope,
-    // which reads the label off the rope and materializes ONLY the child sub-rope it needs.
-    {
-        std::printf("ADVERTISE forward over a multi-link rope (rope-native control sink):\n");
-        // route /up/sensor: "up" names a child, so this node re-advertises downstream.
-        const std::vector<std::byte> adv =
-            tr::net::encode_advertise(0x1234u, b_path({"up", "sensor"}));
-        const auto oracle = forward_contiguous(adv);
-        check(oracle.size() == 1, "contiguous ADVERTISE re-advertises exactly one frame");
-        if (!oracle.empty()) {
-            const auto dec = tr::wire::decode(oracle[0]);
-            check(dec && dec->type == type_t::ADVERTISE, "oracle egress is an ADVERTISE");
-        }
-        int mismatches = 0, checked = 0;
-        for (std::size_t cut = 1; cut < adv.size(); ++cut) {
-            const std::array<std::size_t, 1> cuts{cut};
-            if (forward_as_rope(adv, cuts) != oracle) ++mismatches;
-            ++checked;
-        }
-        check(checked > 0 && mismatches == 0,
-              "every multi-link ADVERTISE split re-advertises byte-identically to the oracle");
-        std::vector<std::size_t> every_byte;
-        for (std::size_t i = 1; i < adv.size(); ++i) every_byte.push_back(i);
-        check(forward_as_rope(adv, every_byte) == oracle,
-              "one-link-per-byte ADVERTISE rope re-advertises byte-identically");
-    }
-
-    // COMPACT terminus over a multi-link rope: advertise a LOCAL route first (binds the
-    // label to this node), then deliver a label-compacted COMPACT as a scatter-gather
-    // rope — on_control_rope materializes ONLY the payload sub-rope and deliver_local
-    // applies the write to the LKV.
-    {
-        std::printf("COMPACT terminus over a multi-link rope (payload sub-rope materialize):\n");
-        graph_t g;
-        const auto sensor = path_t::parse("/sensor");
-        tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
-        fwd_router_t router(g);
-        fake_rope_link_t in;
-        (void)router.add_child("in", in);
-        // "sensor" names no child ⇒ a terminus binding for label 0x0042 on link "in".
-        const std::uint16_t kLabel = 0x0042u;
-        const std::vector<std::byte> adv = tr::net::encode_advertise(kLabel, b_path({"sensor"}));
-        in.inject(rope_split(adv, std::array<std::size_t, 0>{}));  // single link: binds the label
-        const std::uint32_t kVal = 0xFEEDBEEFu;
-        const std::vector<std::byte> comp = tr::net::encode_compact(kLabel, b_value_u32(kVal));
-        const std::array<std::size_t, 1> cuts{comp.size() / 2};
-        in.inject(rope_split(comp, cuts));  // multi-link: the path under test
-        const auto stored = g.read(v);
-        check(stored.has_value(), "/sensor written by a multi-link COMPACT terminus");
-        if (stored) {
-            const auto inner = tr::wire::decode((*stored)->only());
-            check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
-                      tr::detail::load_le<std::uint32_t>(inner->payload) == kVal,
-                  "LKV updated to the label-compacted value (payload sub-rope decoded)");
-        }
-    }
-
-    // `on_control_rope`'s `if (!frame.all_host()) return;` is LOAD-BEARING, and nothing
-    // asserted it. This pins it, and pins what it costs to lose.
-    //
-    // Downstream of that guard, nothing else stops a heterogeneous rope. `on_control_rope`
-    // materializes the COMPACT payload sub-rope and hands the result to `on_compact`
-    // WITHOUT checking it; `rope_t::flatten` returns an EMPTY view for a rope that is not
-    // `all_host()` (a CPU memcpy of device bytes would fault — ADR-0024); and
-    // `view::over_bytes` maps an empty span to an ENGAGED-empty optional by design ("a
-    // legitimately-empty input"), so `on_compact`'s `if (!payload_view) return;` does not
-    // fire either. The empty rope reaches `graph_.write`, which stores it and reports
-    // success — the subscriber's last-known value replaced by nothing.
-    //
-    // Verified by ablation, not by reading: deleting the `all_host` line makes the final
-    // check below fail with the LKV holding an empty value. Restoring it passes.
-    //
-    // The assertion is on the value SURVIVING, not on the absence of a write: asserting
-    // "nothing happened" would pass just as well if the frame never reached the arm at
-    // all. The preceding good delivery is what makes the survival meaningful.
-    {
-        std::printf("heterogeneous (host+device) COMPACT rope is dropped at the door:\n");
-        graph_t g;
-        const auto sensor = path_t::parse("/sensor");
-        tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
-        fwd_router_t router(g);
-        fake_rope_link_t in;
-        (void)router.add_child("in", in);
-        const std::uint16_t kLabel = 0x0044u;
-        in.inject(rope_split(tr::net::encode_advertise(kLabel, b_path({"sensor"})),
-                             std::array<std::size_t, 0>{}));
-
-        // A good all-HOST delivery first — proves the vehicle and seeds the value that the
-        // un-flattenable frame must not be able to erase.
-        const std::uint32_t kGood = 0xA5A5A5A5u;
-        in.inject(rope_split(tr::net::encode_compact(kLabel, b_value_u32(kGood)),
-                             std::array<std::size_t, 1>{4}));
-        {
-            const auto stored = g.read(v);
-            check(stored.has_value(), "the good COMPACT landed (vehicle works)");
-            if (stored) {
-                const auto inner = tr::wire::decode((*stored)->only());
-                check(inner && inner->payload.size() == 4 &&
-                          tr::detail::load_le<std::uint32_t>(inner->payload) == kGood,
-                      "LKV seeded with the good value");
-            }
-        }
-
-        // Now the same frame shape with the payload VALUE's 4 BODY bytes in a DEVICE
-        // segment: headers stay HOST so `peek_control` parses it, but the payload sub-rope
-        // is heterogeneous, so `materialize()` refuses and returns empty.
-        const std::uint32_t kPoison = 0xDEADBEEFu;
-        const std::vector<std::byte> comp = tr::net::encode_compact(kLabel, b_value_u32(kPoison));
-        const tr::view::rope_t het = rope_split_device_tail(comp, comp.size() - 4);
-        check(het.link_count() == 2 && !het.all_host(),
-              "the fixture really is a heterogeneous host+device rope");
-        check(het.subrope(0, comp.size()).materialize().empty(),
-              "materialize() really does refuse this rope — the empty view the arm would "
-              "otherwise apply");
-        in.inject(het);
-
-        const auto after = g.read(v);
-        check(after.has_value(), "the vertex still holds a value");
-        if (after) {
-            const auto inner = tr::wire::decode((*after)->only());
-            check(inner && inner->payload.size() == 4 &&
-                      tr::detail::load_le<std::uint32_t>(inner->payload) == kGood,
-                  "the heterogeneous COMPACT did NOT overwrite the LKV with an empty value");
-        }
-    }
-
-    // A corrupt-CRC COMPACT must be dropped on the ROPE control arm too. `compact_cache_test`
-    // pins this for the span arm and says in its own comment that "nothing else in the suite
-    // would notice if that argument were dropped" — which was exactly true of the rope arm,
-    // where VERIFY was never passed at all. Same frame, same corruption: fragmenting it must
-    // not change whether it is applied.
-    {
-        std::printf("corrupt-CRC COMPACT is dropped on the ROPE arm too (verify-before-apply):\n");
-        graph_t g;
-        const auto sensor = path_t::parse("/sensor");
-        tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
-        fwd_router_t router(g);
-        fake_rope_link_t in;
-        (void)router.add_child("in", in);
-        const std::uint16_t kLabel = 0x0043u;
-        in.inject(rope_split(tr::net::encode_advertise(kLabel, b_path({"sensor"})),
-                             std::array<std::size_t, 0>{}));
-
-        // Re-emit a COMPACT carrying a whole-frame CRC-32C trailer.
-        const std::uint32_t kGood = 0x0BADF00Du;
-        const std::vector<std::byte> plain = tr::net::encode_compact(kLabel, b_value_u32(kGood));
-        tr::wire::tlv_t crc_tlv = *tr::wire::decode(plain);
-        crc_tlv.opt.cr = true;
-        const std::vector<std::byte> crc_frame = tr::wire::encode(crc_tlv);
-        check(crc_frame.size() == plain.size() + 4, "the CRC frame carries a 4-byte trailer");
-
-        // Split so the corrupted byte and the trailer land in DIFFERENT links — the shape a
-        // contiguous arm cannot produce, and the one a stitching cursor has to get right.
-        const std::array<std::size_t, 1> cuts{crc_frame.size() - 2};
-
-        // Intact-with-CRC must deliver, or the drop below proves nothing.
-        in.inject(rope_split(crc_frame, cuts));
-        const auto good = g.read(v);
-        check(good.has_value(), "an intact CRC-carrying COMPACT still delivers as a rope");
-
-        // Now corrupt a BODY byte under that trailer: grammar stays valid, CRC breaks.
-        std::vector<std::byte> corrupt = crc_frame;
-        corrupt[corrupt.size() - 5] ^= std::byte{0xFF};
-        in.inject(rope_split(corrupt, cuts));
-        const auto after = g.read(v);
-        check(after.has_value(), "the LKV still holds a value");
-        if (after) {
-            const auto inner = tr::wire::decode((*after)->only());
-            check(inner && inner->payload.size() == 4 &&
-                      tr::detail::load_le<std::uint32_t>(inner->payload) == kGood,
-                  "a corrupt-CRC multi-link COMPACT is DROPPED — the LKV holds the last good "
-                  "value");
-        }
-    }
-
     // #596: the rope forward hop's egress iov is the one allocation on this path whose
     // ELEMENT COUNT a peer chooses — one sub-span per link crossed, per region. It used to
     // be a `std::pmr::vector`, so exhaustion threw, and on -fno-exceptions that is abort():
@@ -936,147 +671,6 @@ int main() {
         cli2.inject(rope_split(frame, every_byte));
         check(std::move(up2.sent()) == oracle, "a child with no source of its own still routes");
         check(only_default.served > 0, "drawing from the router's default, as before");
-    }
-
-    // HANDLE_NACK over a multi-link rope (#667). The gap this closes is not "one more opcode":
-    // a control frame misrouted into the FWD routing arm is SILENT — no error, no egress, no
-    // counter — so "nothing was sent" cannot tell correct handling from the bug. Ablating the
-    // rope routing gate was measured to take nack from 1 to 0 with the whole suite still green.
-    //
-    // The observable is an ADVERTISE back on the link the NACK ARRIVED on, not a stale-label
-    // callback: `on_nack` looks up `egress_route(inbound, label)` and returns SILENTLY when no
-    // route is bound. So the fixture must bind one first, which it does the way the wire does —
-    // an inbound ADVERTISE naming a child makes this node re-advertise downstream, and THAT is
-    // what records the egress route on the downstream link.
-    {
-        std::printf("HANDLE_NACK self-heal over a multi-link rope (#667):\n");
-        constexpr std::uint16_t kLabel = 0x2468u;
-
-        // The oracle: the same NACK routed contiguously, on a fixture built the same way.
-        const auto build = [](auto& router, auto& cli, auto& up) {
-            (void)router.add_child("cli", cli);
-            (void)router.add_child("up", up);
-            // Binds the egress route for ("up", kLabel) by making this node re-advertise.
-            cli.inject(tr::net::encode_advertise(kLabel, b_path({"up", "sensor"})));
-        };
-
-        std::vector<std::vector<std::byte>> oracle;
-        std::uint16_t down_label = 0;
-        {
-            graph_t g;
-            fwd_router_t router(g);
-            fake_link_t cli;
-            fake_link_t up;
-            build(router, cli, up);
-            check(up.sent().size() == 1, "the fixture's ADVERTISE bound an egress route on 'up'");
-            down_label = up.sent().empty() ? 0 : advertise_label(up.sent()[0]);
-            check(down_label != 0, "the downstream ADVERTISE carries the link's own label");
-            up.sent().clear();
-            up.inject(tr::net::encode_handle_nack(down_label));
-            oracle = std::move(up.sent());
-        }
-        check(oracle.size() == 1, "a contiguous HANDLE_NACK re-advertises exactly one frame");
-        if (!oracle.empty()) {
-            const auto dec = tr::wire::decode(oracle[0]);
-            check(dec && dec->type == type_t::ADVERTISE,
-                  "the self-heal emits an ADVERTISE, on the link the NACK arrived on");
-        }
-
-        // Every interior split of the NACK frame must reproduce it byte-for-byte.
-        const std::vector<std::byte> nack = tr::net::encode_handle_nack(down_label);
-        int checked = 0;
-        int mismatches = 0;
-        for (std::size_t cut = 1; cut < nack.size(); ++cut) {
-            graph_t g;
-            fwd_router_t router(g);
-            fake_link_t cli;
-            fake_rope_link_t up;  // rope-delivering AND recording — the NACK arrives here
-            (void)router.add_child("cli", cli);
-            (void)router.add_child("up", up);
-            cli.inject(tr::net::encode_advertise(kLabel, b_path({"up", "sensor"})));
-            up.sent().clear();
-            const std::size_t cuts[] = {cut};
-            up.inject(rope_split(nack, cuts));
-            ++checked;
-            if (up.sent() != oracle) ++mismatches;
-        }
-        check(checked > 0, "swept every interior split of the NACK frame");
-        check(mismatches == 0, "every 2-link NACK split self-heals byte-identically");
-
-        // And the adversarial extreme: one link per byte.
-        {
-            graph_t g;
-            fwd_router_t router(g);
-            fake_link_t cli;
-            fake_rope_link_t up;
-            (void)router.add_child("cli", cli);
-            (void)router.add_child("up", up);
-            cli.inject(tr::net::encode_advertise(kLabel, b_path({"up", "sensor"})));
-            up.sent().clear();
-            std::vector<std::size_t> every_byte;
-            for (std::size_t i = 1; i < nack.size(); ++i) every_byte.push_back(i);
-            up.inject(rope_split(nack, every_byte));
-            check(up.sent() == oracle, "one-link-per-byte NACK rope self-heals byte-identically");
-        }
-
-        // #667's unconfirmed rider, pinned by #715 and RULED by #716. `clear_link("up")` drops
-        // that link's whole table, and `on_nack` re-advertises from exactly the `egress_route`
-        // the table held — so a NACK arriving back on "up" after a (re)connect still has
-        // nothing to answer from, and sending nothing DOWNSTREAM remains correct. What #716
-        // changed is the other direction, which this fixture also holds: the ingress binding
-        // stored under "cli" pointed its downstream half at "up", so `clear_link` now sweeps it
-        // too. The recovery is therefore UPSTREAM — the client's next COMPACT misses and draws
-        // the ordinary stale-label HANDLE_NACK, which prompts it to re-advertise — rather than
-        // "only on a fresh advertise" someone else has to think to send. The end-to-end cascade
-        // is proven in `fwd_reconnect_selfheal_test`; both legs are pinned here.
-        {
-            graph_t g;
-            fwd_router_t router(g);
-            fake_link_t cli;
-            fake_rope_link_t up;
-            (void)router.add_child("cli", cli);
-            (void)router.add_child("up", up);
-            cli.inject(tr::net::encode_advertise(kLabel, b_path({"up", "sensor"})));
-            const std::uint16_t lbl = up.sent().empty() ? 0 : advertise_label(up.sent()[0]);
-            router.clear_link("up");  // what a transport calls on (re)connect
-            up.sent().clear();
-            cli.sent().clear();
-            std::vector<std::size_t> every_byte;
-            for (std::size_t i = 1; i < nack.size(); ++i) every_byte.push_back(i);
-            up.inject(rope_split(tr::net::encode_handle_nack(lbl), every_byte));
-            check(up.sent().empty(),
-                  "after clear_link a NACK arriving back on the cleared link still sends NOTHING "
-                  "downstream — the route it would re-advertise from is the one clear_link "
-                  "erased, and re-advertising into a link that just reconnected would be wrong");
-            // The #716 half: the cross-link binding went with it, so the UPSTREAM is told.
-            check(router.handles().ingress_count() == 0,
-                  "clear_link also swept the \"cli\" ingress binding whose downstream half "
-                  "crossed \"up\" (#716) — the stale out-label cannot be forwarded any more");
-            cli.inject(tr::net::encode_compact(kLabel, b_value_u32(0xFEEDBEEFu)));
-            const auto back = cli.sent().size() == 1 ? tr::wire::decode(cli.sent()[0])
-                                                     : decltype(tr::wire::decode(cli.sent()[0])){};
-            check(cli.sent().size() == 1 && back.has_value() && back->type == type_t::HANDLE_NACK,
-                  "and the client's next COMPACT draws a HANDLE_NACK upstream, which is what "
-                  "makes it re-advertise (the origin learns, instead of streaming into a hole)");
-        }
-
-        // The silent-return leg, asserted so it cannot be mistaken for the bug it resembles:
-        // with NO egress route bound, on_nack returns before sending, and that is CORRECT.
-        {
-            graph_t g;
-            fwd_router_t router(g);
-            fake_link_t cli;
-            fake_rope_link_t up;
-            (void)router.add_child("cli", cli);
-            (void)router.add_child("up", up);
-            std::vector<std::size_t> every_byte;
-            for (std::size_t i = 1; i < nack.size(); ++i) every_byte.push_back(i);
-            up.inject(rope_split(nack, every_byte));
-            check(up.sent().empty(),
-                  "a NACK for an unbound label sends nothing — the silent "
-                  "return is by design, and is why the bound case above is "
-                  "the assertion that has teeth");
-        }
     }
 
     return tr::testing::summary("fwd_rope_forward");

@@ -45,7 +45,6 @@
 #include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -1501,50 +1500,6 @@ void run_stream_cycles() {
     }
 }
 
-/**
- * @brief `route-handle-egress-mt<T>` (#1808, advisory): T producer threads on ONE advertised
- *        `(link, route)` flow of a `route_handle_t`, the steady-state reuse read a compacted
- *        delivery's egress takes per write.
- *
- * `bench_route_handle_contention` sweeps this to T=128 on a wall-clock window; this is its
- * T=1/2/4 slice in the default sweep, on fixed work per thread so every point runs the same
- * operations. One metric: aggregate reads per second. The per-op columns are 0, because one
- * read costs about what a clock read does and a mean derived from the rate is not a
- * measurement of its own (#1804). Charted, not gated.
- */
-void run_route_handle_mt(std::size_t T) {
-    constexpr std::size_t kOps = 500'000;  // per thread
-    constexpr std::size_t kRouteBytes = 32;
-    tr::net::route_handle_t h;
-    const std::vector<std::byte> route(kRouteBytes, std::byte{0x5A});
-    (void)h.ensure_egress("b", route);  // advertise once: every timed call is a reuse read
-    std::atomic<std::size_t> ready{0};
-    std::atomic<bool> go{false};
-    std::atomic<std::size_t> sink{0};
-    std::vector<std::thread> ts;
-    ts.reserve(T);
-    for (std::size_t t = 0; t < T; ++t) {
-        ts.emplace_back([&] {
-            ready.fetch_add(1, std::memory_order_acq_rel);
-            while (!go.load(std::memory_order_acquire)) { /* spin until released */
-            }
-            std::size_t acc = 0;
-            for (std::size_t i = 0; i < kOps; ++i) acc += h.ensure_egress("b", route).first;
-            sink.fetch_add(acc, std::memory_order_relaxed);
-        });
-    }
-    while (ready.load(std::memory_order_acquire) < T) { /* wait */
-    }
-    const auto t0 = now_ns();
-    go.store(true, std::memory_order_release);
-    for (std::thread& th : ts) th.join();
-    const double secs = (now_ns() - t0) / 1e9;
-    if (sink.load() == 0) std::fprintf(stderr, "WARN route-handle reads returned no label\n");
-    const double ops = static_cast<double>(T * kOps) / secs;
-    const std::string mode = "route-handle-egress-mt" + std::to_string(T);
-    emit("libtracer", mode.c_str(), kRouteBytes, 1, 1, ops, ops, 0.0, Latency::Summary{});
-}
-
 /** @brief The request sizes the host slab-pool seam rows time: the payload ladder, 65552 B
  *         (within the 64 KiB payload's segment class since #1990, past the last class before
  *         it), then the first request past the last class (the oversize fallback to the root). */
@@ -1670,13 +1625,6 @@ void family_stream_mt() {
     const std::size_t hw = bench::usable_cpus();
     for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}})
         if (T <= hw) run_stream_mt(T);
-}
-
-/** @brief `route-handle` family (#1808): T = 1, 2, 4, capped by the affinity mask. */
-void family_route_handle() {
-    const std::size_t hw = bench::usable_cpus();
-    for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}})
-        if (T <= hw) run_route_handle_mt(T);
 }
 
 /**
@@ -2115,8 +2063,8 @@ struct bench_family_t {
  *   - `cliff-heap` and `cliff-pool` (#1806) come after it: alloc-only rows over the
  *     allocator-cliff ladder (`bench::cliff_sizes`), one family per backend.
  *   - #1808's families come last: `stream` (the spill and deferral cycles), `stream-mt`
- *     (1, 2 and 4 writers on one STREAM vertex), `route-handle` (the egress reuse read at
- *     T = 1, 2, 4), `alloc-seam` (class selection and the upstream fallback) and
+ *     (1, 2 and 4 writers on one STREAM vertex), `alloc-seam` (class selection and the
+ *     upstream fallback) and
  *     `inproc-pool-batch` (the window-calibrated twin of the `inproc-pool` rows).
  *   - `dce-canary` (#1805) comes after them: two rows proving the sink clobber still keeps
  *     timed work.
@@ -2163,7 +2111,6 @@ constexpr bench_family_t kFamilies[] = {
     {"cliff-pool", family_cliff_pool, family_set_t::SINGLE},
     {"stream", run_stream_cycles, family_set_t::SINGLE},
     {"stream-mt", family_stream_mt, family_set_t::MULTI},
-    {"route-handle", family_route_handle, family_set_t::MULTI},
     {"alloc-seam", run_alloc_seam, family_set_t::SINGLE},
     {"inproc-pool-batch", family_inproc_pool_batch, family_set_t::SINGLE},
     {"dce-canary", family_dce_canary, family_set_t::SINGLE},

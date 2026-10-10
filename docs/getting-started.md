@@ -45,7 +45,7 @@ first build; the rest of the module set is enumerated in
 | --- | --- | --- |
 | `BUILD_TESTING` | unset (off) | compiles `core/tests` and registers the example programs as `example_*` smoke tests (`core/CMakeLists.txt:if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS`) |
 | `LIBTRACER_BUILD_EXAMPLES` | on when libtracer is the top-level project | compiles the seven programs under `core/examples/` (`core/CMakeLists.txt:option(LIBTRACER_BUILD_EXAMPLES`) |
-| `LIBTRACER_NET_PLANE` | `ON` | the FWD routing plane — `op_resolve`, `route_handle`, `fwd_router_t`, `transport_vertex` (`core/CMakeLists.txt:option(LIBTRACER_NET_PLANE`) |
+| `LIBTRACER_NET_PLANE` | `ON` | the FWD routing plane — `op_resolve`, `fwd_router_t`, `transport_vertex` (`core/CMakeLists.txt:option(LIBTRACER_NET_PLANE`) |
 | `LIBTRACER_WITH_QUIC` | `OFF` | configures the separate `libtracer_quic` target (QUIC and WebTransport); needs msquic installed (`core/CMakeLists.txt:option(LIBTRACER_WITH_QUIC`) |
 
 Two of the seven examples — `two_node_fwd` and `tree_of_ropes` — are built and
