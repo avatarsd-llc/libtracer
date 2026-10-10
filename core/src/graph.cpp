@@ -285,8 +285,13 @@ inline void retire_pair(const retired_callback_t& pair) {
 // Canonical-key NAME navigation (last segment, parent, ancestor/child, level
 // split) lives in one locus: tr::wire::key_view_t (key_view.hpp).
 
-/** @brief Absolute wall-clock ns since the UNIX epoch — the ACE `expires_ns` reference clock. */
-[[nodiscard]] std::uint64_t now_ns() {
+/**
+ * @brief Absolute wall-clock ns since the UNIX epoch — the ACE `expires_ns` reference clock.
+ *
+ * Cold and out of line (#1685): the ACL gate reads it only for a leased ACE, so a gate over
+ * standing grants carries none of it, and graph.cpp's inline budget is left as it was.
+ */
+[[nodiscard, gnu::noinline, gnu::cold]] std::uint64_t now_ns() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
                                           .count());
@@ -1753,10 +1758,6 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     while (bearer->parent() != nullptr && !bearer->has_own_aces()) bearer = bearer->parent();
     bool allowed = true;  // no ACL anywhere up the chain (root excluded): open by default
     if (bearer->parent() != nullptr) {
-        // The ACE-expiry reference clock is read only HERE, once an ACL will actually be
-        // evaluated (#1665): an attributed remote op on an unguarded subtree never pays a
-        // `system_clock::now()` — that open-by-default arm skips this block.
-        const std::uint64_t now = now_ns();
         const bool self = bearer == v;
 
         // The ADR-0050 cached effective-ACE merge, now held by the BEARER: the data-plane
@@ -1772,19 +1773,28 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
             [&](const std::vector<ace_t>& own) {
                 effective_acl_t eff;
                 eff.append_own(own);
-                for (vertex_t* ancestor = bearer->parent();
-                     ancestor != nullptr && ancestor->parent() != nullptr;
+                // `ancestor` is never null: it starts at the bearer's parent, non-null in this
+                // arm, and steps only to a non-null parent (#1685).
+                for (vertex_t* ancestor = bearer->parent(); ancestor->parent() != nullptr;
                      ancestor = ancestor->parent()) {
                     ancestor->with_aces(
                         [&](const std::vector<ace_t>& aces) { eff.append_ancestor(aces); });
                 }
                 return std::move(eff).release();
             },
-            [&](const std::vector<ace_t>& merged) {
+            // Inlined by attribute: with the expiry test below, GCC 13.3 would otherwise emit
+            // the evaluation out of line — one more call on every gate.
+            [&] [[gnu::always_inline]] (const std::vector<ace_t>& merged) {
+                // The ACE-expiry reference clock is read only when an ACE in the list can
+                // expire (#1685; the unguarded arm above never reads it, #1665):
+                // `expires_ns == 0` never compares against `now`, so a list of standing grants
+                // (every gated forward hop that carries no lease) is evaluated without a
+                // `system_clock::now()`, and `0` stands in for the clock it never asks.
+                const bool leased = std::ranges::any_of(merged, &ace_t::expires_ns);
                 // A bare descendant evaluates the INHERITABLE SUBSEQUENCE of the bearer's
                 // merge. Filtered in place (order-identical) rather than against a second,
                 // projected vector — see effective_acl_t::allows.
-                return effective_acl_t::allows(merged, subject, bit, now,
+                return effective_acl_t::allows(merged, subject, bit, leased ? now_ns() : 0,
                                                self ? std::uint8_t{0} : kAceInherit);
             });
     }
