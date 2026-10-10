@@ -125,8 +125,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - `child_registry_t::kNoConnSlot` is deleted, and `child_registry_t::child_t::conn_slot` is a
     plain `std::uint32_t`, written once before the entry is published. The late-registered
     vertex case of the #1939 entry below no longer exists.
-  - A mount whose connection vertex has saturated its generation (2^32 retirements) can no
-    longer be registered: it has no slot to record.
+  - A mount whose connection vertex has already saturated its generation (2^32 retirements)
+    is refused, because the slot lookup `add_child` uses refuses a saturated vertex. A vertex
+    that saturates after the link is attached keeps its door and keeps forwarding by NAME
+    (RFC-0029 §4.2); only the PAIR mint is refused for it. The two cases differ on purpose: an
+    index-only lookup to make them agree would add an accessor and branches for a case that
+    takes 2^32 retirements to reach.
 - **One walk, one gate: every address spelling reaches its link through the connection vertex
   ([#1939](https://github.com/avatarsd-llc/libtracer/issues/1939), RFC-0029 §13.2 S6).** The
   NAME descent, a PAIR hop and a PAIR naming a session anchor now end on the same door, the
