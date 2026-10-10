@@ -117,7 +117,7 @@
     },
     "tr::net::transport_vertex_t::make_connection_locked": {
       "ccn": [
-        26
+        25
       ],
       "file": "core/src/transport_vertex.cpp"
     },
