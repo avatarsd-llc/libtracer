@@ -180,10 +180,11 @@ class dispatch_scope_t {
         if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
             dispatch_state_t& s = dispatch_state();
             if constexpr (reclaim_policy_t::kGraceSpansThreads) {
-                // Only the OUTERMOST bracket announces. An inner one is already covered by the
+                // Only the OUTERMOST section announces (`enter` keeps the count, shared with
+                // the router's frame bracket). An inner one is already covered by the
                 // announcement the outer one made, and re-announcing at a NEWER epoch would let
                 // a scan conclude past a retirement the outer snapshot still names.
-                if (s.depth == 0) detail_qsbr::go_online();
+                detail_qsbr::enter();
             }
             ++s.depth;
         }
@@ -196,11 +197,13 @@ class dispatch_scope_t {
         if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
             dispatch_state_t& s = dispatch_state();
             if constexpr (reclaim_policy_t::kGraceSpansThreads) {
-                if (--s.depth != 0) return;
+                --s.depth;
                 // Go quiescent FIRST, so this thread's own announcement is already withdrawn
                 // when the drain scans — otherwise every drain would see itself as a reason to
                 // defer, and a node with one dispatching thread would reclaim nothing, ever.
-                detail_qsbr::go_offline();
+                // A dispatch inside a router frame is not the outermost section: the frame's
+                // own exit is the quiescent point.
+                if (!detail_qsbr::leave()) return;
                 pass_quiescent_state<reclaim_policy_t>();
             } else {
                 // Both fields live in the same thread-local object, so the common case — unwind
@@ -594,9 +597,7 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
       ctl_(&src),
       values_(sub_pool(src, mem::value_source())),
       tables_(&own_tables_.or_root(src)),
-      parked_releases_(own_tables_.or_root(src)),
-      aged_releases_(own_tables_.or_root(src)),
-      aged_seams_(own_tables_.or_root(src)) {
+      parked_releases_(own_tables_.or_root(src)) {
     // The process-default FOLD, resolved in the BODY: `&src_backend_` is only taken once its
     // lifetime has started. A few stores at construction, never read again.
     // On the host default root (#1777) values and rings draw from the value sub-pool and
@@ -934,7 +935,7 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
         // `retire` reserved, so neither step can fail mid-walk (#1778).
         mem::block_array_t<subscriber_t> table(*tables_);
         if (value_handlers_t* seam = x.revert_to_placeholder(table))
-            (void)retired_seams_.seams.push_back(seam);              // reserved: cannot fail
+            (void)retired_seams_.seams.push_back({seam});            // reserved: cannot fail
         if (!table.empty()) (void)gone.push_back(std::move(table));  // reserved: cannot fail
     };
     v->mark_unregistered();
@@ -1194,7 +1195,13 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         root->for_each_descendant([&n](vertex_t&) { ++n; });
         if (!gone.reserve(n) || !retired_seams_.seams.reserve(retired_seams_.seams.size() + n))
             return std::unexpected(status_t::BACKPRESSURE);
+        const std::size_t parked_before = retired_seams_.seams.size();
         retire_subtree(root, gone);
+        // Close the epoch AFTER every seam above is unpublished: a router frame that loaded
+        // one of them is online at this epoch or older, and collect() waits it out.
+        const std::uint64_t epoch = detail_qsbr::advance();
+        for (std::size_t i = parked_before; i < retired_seams_.seams.size(); ++i)
+            retired_seams_.seams[i].epoch = epoch;
     }
     // Each dropped routed edge gives its link hold back, outside every graph lock: an edge
     // is reported exactly twice over its life, and retirement is one of its ends (#1816).
@@ -1234,43 +1241,53 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
 }
 
 /**
- * @brief Free the value seams parked before the previous call, then run the releases parked
- *        before it — the embedder-called other end of retirement's park (#576). The whole
- *        point is WHERE the free happens, so read the two scopes below.
+ * @brief Free every parked value seam and run every parked release that no router frame can
+ *        still reach — the embedder-called other end of retirement's park (#576).
+ *
+ * Epochs grow in park order, so the ripe entries are a prefix of each park. They are taken in
+ * stack-sized batches under the map lock, which draws nothing, and freed outside it.
  */
 void graph_t::collect() {
-    mem::block_array_t<value_handlers_t*> dead(retired_seams_.seams.source());
-    mem::block_array_t<retired_callback_t> released(parked_releases_.releases.source());
-    {
-        // Under the map lock: nothing but the swap. The lock is what serialises us against
-        // retire_subtree's append, and it is all it is here for — a free under it would put
-        // arbitrary user-callback destructor code inside the graph's widest lock, which is
-        // the mutual-wait every earlier design round died on.
-        // Two generations: this call frees what was parked before the PREVIOUS call, and
-        // ages what was parked since. Four swaps, nothing drawn.
-        const std::unique_lock lock(map_mutex_);
-        std::swap(dead, aged_seams_.seams);
-        std::swap(aged_seams_.seams, retired_seams_.seams);
-        std::swap(released, aged_releases_.releases);
-        std::swap(aged_releases_.releases, parked_releases_.releases);
+    constexpr std::size_t kBatch = 16;
+    for (;;) {
+        std::array<value_handlers_t*, kBatch> seams{};
+        std::array<retired_callback_t, kBatch> releases{};
+        std::size_t ns = 0;
+        std::size_t nr = 0;
+        {
+            // Under the map lock: nothing but the take. The lock is what serialises us against
+            // retire_subtree's append; no user code runs under it.
+            const std::unique_lock lock(map_mutex_);
+            auto& s = retired_seams_.seams;
+            for (; ns < kBatch && ns < s.size() && detail_qsbr::all_quiescent_past(s[ns].epoch);
+                 ++ns)
+                seams[ns] = s[ns].seam;
+            s.erase_front(ns);
+            auto& r = parked_releases_.releases;
+            for (; nr < kBatch && nr < r.size() && detail_qsbr::all_quiescent_past(r[nr].epoch);
+                 ++nr)
+                releases[nr] = r[nr].release;
+            r.erase_front(nr);
+        }
+        // Freed HERE — outside every graph lock, on the caller's thread. So a release may
+        // re-enter the graph, and a slow one blocks no reader or writer.
+        for (std::size_t i = 0; i < ns; ++i) mem::drop_in(retired_seams_.seams.source(), seams[i]);
+        for (std::size_t i = 0; i < nr; ++i) releases[i].release(releases[i].ctx);
+        if (ns < kBatch && nr < kBatch) return;
     }
-    // Freed HERE — outside every graph lock, on the caller's thread, at a moment the
-    // embedder chose. So a seam callback's destructor may re-enter the graph, and a slow
-    // one blocks no reader or writer. Do not hoist this into the scope above.
-    seam_park_t::free_all(dead);
-    release_park_t::run_all(released);
 }
 
 result_t<void> graph_t::park_release(retired_callback_t release) {
     const std::unique_lock lock(map_mutex_);
-    if (!parked_releases_.releases.push_back(release))
+    // The caller has unpublished what @p release frees; this closes the epoch after it.
+    if (!parked_releases_.releases.push_back({release, detail_qsbr::advance()}))
         return std::unexpected(status_t::BACKPRESSURE);
     return {};
 }
 
 std::size_t graph_t::parked_seam_count() const {
     const std::shared_lock lock(map_mutex_);
-    return retired_seams_.seams.size() + aged_seams_.seams.size();
+    return retired_seams_.seams.size();
 }
 
 // ---- The per-link departure index's doors (#1071). The index itself — its slots, the

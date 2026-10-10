@@ -63,20 +63,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`graph_t::park_release`: free a retired seam's context once no reader can reach it.**
   Retiring a vertex stops new calls through its seam, but a call that loaded the seam just
   before the retire can still arrive. `park_release` takes the ADR-0080 `retired_callback_t`
-  and runs it once, at the second `graph_t::collect()` after it (or in the graph's teardown),
-  after the seams that call frees. It answers `BACKPRESSURE` when the park cannot grow, and then
+  and runs it once, at the first `graph_t::collect()` that no router frame open when it was
+  parked is still inside (or in the graph's teardown), after the seams that call frees. It
+  answers `BACKPRESSURE` when the park cannot grow, and then
   the context must stay valid for the graph's lifetime.
 
 ### Changed
 
-- **`graph_t::collect()` frees what was parked before the PREVIOUS call.** It keeps two
-  generations of retired value seams and parked releases: a call frees the older one and
-  ages the newer, so everything parked waits at least one whole interval between two calls,
-  however close to a call it was parked. A node that collects at a quiet point loses only
-  memory held one interval longer; two calls with nothing retired between them empty the
-  park, and `parked_seam_count()` counts both generations. No API change, and nothing on the
-  read, write or forward path changes. On a threaded node that cannot pause its receive
-  threads the interval is a bound, not a proof.
 - **Docs: `heap_backend()` and a null `memory.io` no longer promise "the heap"
   ([#2051](https://github.com/avatarsd-llc/libtracer/issues/2051)).** On a build with
   `kSlabPool = false` they draw from the static arena, not the platform heap. No behaviour
@@ -127,22 +120,34 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `graph_t::collect()`. Connection removal now needs a `collect()` point.** Removing a
   connection (or destroying the transport vertex) calls the link's `shut_down()` once it is
   un-routed and its vertex retired: no frame is delivered after that and its threads are
-  joined. The link object is then parked with `graph_t::park_release` and destroyed at the
-  second `collect()` after the removal, so a forward or a `:children[]` listing that reached
-  it just before the removal finds a valid object for at least one whole collect interval. If the retire or the park is refused (an exhausted table
-  source), the shut-down link is kept for the graph's lifetime. Each connection reserves its
-  park block from the graph's table source at creation.
+  joined. The link object is then parked with `graph_t::park_release` and destroyed by a
+  later `collect()`, never while a router frame is inside it (next entry). If the retire or
+  the park is refused (an exhausted table source), the shut-down link is kept for the
+  graph's lifetime. Each connection reserves its park block from the graph's table source at
+  creation.
   - **Action for embedders:** a node whose connections are removed, including by a peer
-    through `<module>/conn`, must call `graph_t::collect()` at a quiescent point (no call
-    still inside a removed link). Without it every removed link, and on lwIP its socket, is
-    kept until the graph is destroyed. The ESP-IDF `full_node` example now collects on its
-    publish tick. Its receive tasks keep running meanwhile, so there the two-generation
-    grace below is a bound (a call stalled inside a removed link for a whole tick), not a
-    proof.
-  - The injected `rx_backend` and `egress_src` must now outlive the graph's second
-    `collect()` after a removal (or the graph), not just the transport vertex. A link given
-    through `provide_link` or wired with `fwd_router_t::add_child` must likewise stay valid
-    until the second `collect()` after its removal; `shut_down()` stops it at once.
+    through `<module>/conn`, must call `graph_t::collect()` from time to time. Without it
+    every removed link, and on lwIP its socket, is kept until the graph is destroyed. The
+    ESP-IDF `full_node` example now collects on its publish tick.
+  - The injected `rx_backend` and `egress_src` must now outlive the `collect()` that frees a
+    removed link (or the graph), not just the transport vertex. A link given through
+    `provide_link` or wired with `fwd_router_t::add_child` must likewise stay valid while a
+    router frame may still be inside it after its removal: hand its destruction to
+    `graph_t::park_release`. `shut_down()` stops it at once.
+- **A removed link is never freed while a frame is inside it.** `fwd_router_t` brackets
+  every inbound frame (the child receivers, the bus notifiers, `on_frame`, `on_frame_rope`)
+  and every origination that can reach a child link (`originate`, `deliver_remote`,
+  `advertise`, `send_compact`, `link_down`, a fired AWAIT) with the read side of the ADR-0080
+  QSBR domain, in every build and under every reclamation policy. `graph_t::retire` and
+  `graph_t::park_release` close an epoch after their unpublish, and `graph_t::collect()`
+  frees a parked seam or release only once every bracket open at that epoch has closed; what
+  is not yet ripe stays parked for a later call. So `collect()` no longer needs a quiet point
+  for the transport plane's threads; in-process `read` / `write` / `:children[]` calls on
+  other application threads remain the caller's to settle. Cost, per inbound frame and per
+  origination, never per send: one store to the thread's own cache-line-isolated cell on
+  entry and one on exit (measured in the PR). `fan_out`'s `reclaim_qsbr` bracket now shares
+  the frame bracket's nesting depth, so a dispatch inside a frame neither re-announces nor
+  goes quiescent early. Each parked seam and release carries its 8 B epoch.
 - **`udp_transport_t`: an ephemeral bind owns its port
   ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
   set `SO_REUSEADDR`, which lets the kernel give a UDP socket a port another reuse-enabled

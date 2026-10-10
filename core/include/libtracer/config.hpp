@@ -628,10 +628,11 @@ struct default_config_t {
      * @ref tr::graph::graph_t::deferred_release_drops rising), never a use-after-free.
      *
      * Its `.bss` is `N * max(kCacheLineBytes, alignof(std::uint64_t))` bytes — at N = 32 that
-     * is 2,048 B on a host — plus the shared retired table. **It is emitted only in a build
-     * that actually binds `reclaim_qsbr_t`**: `%graph.cpp` reaches the domain exclusively from
-     * `if constexpr` branches a non-QSBR build discards, and GCC emits nothing at all for those
-     * — 0 symbols and 0 B of `.bss`, verified. Override fragment:
+     * is 2,048 B on a host — plus the shared retired table. The transport plane uses the same
+     * cells in every build (`fwd_router_t` brackets each inbound frame and origination with
+     * them), so a build with the router carries this `.bss` under any policy; a thread that
+     * finds every index taken still fails safe, deferring the free of a removed link.
+     * Override fragment:
      * `static constexpr std::size_t kQsbrParticipants = 64;`
      */
     static constexpr std::size_t kQsbrParticipants = kEdgePinSlots;

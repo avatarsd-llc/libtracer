@@ -284,9 +284,9 @@ class transport_vertex_t {
      *                   connection participates in owning delivery. Default: the
      *                   process net sub-pool; a bounded host injects its pool over its
      *                   static slab. Must outlive every owned transport, which
-     *                   a removal parks until the graph's second `graph_t::collect()`
-     *                   after it: so it must outlive this object AND that `collect()` (or
-     *                   the graph).
+     *                   a removal parks until a `graph_t::collect()` that no router frame
+     *                   can still be inside it: so it must outlive this object AND that
+     *                   `collect()` (or the graph).
      * @param egress_src The EGRESS twin of @p rx_backend (#873 family 1, ADR-0079's
      *                   net-plane failable store): the `block_source_t` every socket
      *                   these built-in factories construct draws its per-send gather
@@ -330,8 +330,7 @@ class transport_vertex_t {
      *                   heap on a slim node no matter what the composition root had chosen.
      *                   `nullptr` (and the default) means the process net sub-pool
      *                   (#1777). Must outlive this object and, like the default ctor's,
-     *                   the graph's second `graph_t::collect()` after a removal (or the
-     *                   graph).
+     *                   the `graph_t::collect()` that frees a removed link (or the graph).
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string_view net_root,
                        mem::mem_backend_t* rx_backend, slim_net_t,
@@ -568,11 +567,11 @@ class transport_vertex_t {
      * cover) and wired into the router when the matching creator-endpoint SPEC is created.
      * The caller keeps ownership. Call at setup, before the SPEC write.
      *
-     * Lifetime: once its connection is removed, the link must stay valid until the graph's
-     * second `graph_t::collect()` after the removal, because a forward or a `:children[]` listing
-     * that reached it just before the removal may still be inside it. The plane leaves a borrowed
-     * link alone, so the caller may call @ref transport_t::shut_down on it first, then destroy it
-     * after that `collect()`.
+     * Lifetime: once its connection is removed, the link must stay valid while a router frame
+     * that reached it just before the removal may still be inside it. The plane leaves a
+     * borrowed link alone, so the caller may call @ref transport_t::shut_down on it first and
+     * then hand its destruction to `graph_t::park_release`, which runs it at the first
+     * `graph_t::collect()` no such frame can still be inside.
      *
      * The staging key is `<module>/<name>` in BOTH halves (#883). A creating SPEC reaches
      * this staging when it resolves to the same module — i.e. it carries no `kind` (and no
@@ -624,16 +623,17 @@ class transport_vertex_t {
      * `fwd_router_t::remove_child` first (the name stops resolving, so no NEW forward
      * reaches the link), then `graph.retire()` on the identity vertex (RFC-0009 §B.6 —
      * the path re-virginizes), then the owned transport is shut down
-     * (@ref transport_t::shut_down, joining its recv thread) and parked: it is destroyed at
-     * the graph's second `graph_t::collect()` after the removal, so a forward or a listing
-     * that reached it just before the removal finds a valid object for at least one whole
-     * interval between two calls. If the retire or the park is refused, the
+     * (@ref transport_t::shut_down, joining its recv thread) and parked: it is destroyed by
+     * the first `graph_t::collect()` that no router frame open at the removal is still
+     * inside, so a frame (a forward, an origination, a wire listing) that reached it just
+     * before the removal always finds a valid object. If the retire or the park is refused, the
      * shut-down transport is kept for the graph's lifetime instead. A connection whose link
      * was staged via @ref provide_link leaves that borrowed link alone (see its lifetime
      * note); only the routing entry and the vertex go.
      *
-     * A node whose connections are removed must therefore call `graph_t::collect()` at a
-     * quiescent point, or every removed link is kept until the graph is destroyed.
+     * A node whose connections are removed must therefore call `graph_t::collect()` from time
+     * to time (any thread, any point: a frame still inside the link keeps it), or every
+     * removed link is kept until the graph is destroyed.
      *
      * This is the owner-internal operation the RFC-0014 `NAME`-write removal dispatch
      * (S2b) will call; it is not itself reachable from the wire.

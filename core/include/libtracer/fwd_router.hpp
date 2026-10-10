@@ -610,10 +610,10 @@ class fwd_router_t {
      *
      * **The link must outlive the call by a grace point.** A forward that resolved the child
      * just before this call may still be inside the link's `send` when it returns, so the
-     * caller must not destroy the link yet: keep it valid until the graph's second
-     * `graph_t::collect()` after this call (each call frees the older of two generations),
-     * the embedder's quiescent point, which on a threaded node must also be one where no
-     * forward is inside a link. @ref transport_t::shut_down stops the link
+     * caller must not destroy the link yet. Every way into a child link is bracketed
+     * (`frame_scope_t`), so the grace point is the graph's: hand the destruction to
+     * `graph_t::park_release` after this call, and the first `graph_t::collect()` that no
+     * frame open now is still inside runs it. @ref transport_t::shut_down stops the link
      * at once without destroying it. `tr::net::transport_vertex_t` does exactly this for the
      * links it owns; a link the app wired here itself is the app's to keep.
      *
@@ -1225,6 +1225,28 @@ class fwd_router_t {
     }
 
    private:
+    /**
+     * @brief Brackets one inbound frame, or one origination, on this thread.
+     *
+     * Every way into a child link goes through one of these: the child receivers, the bus
+     * notifiers, `on_frame`, `originate`, `deliver_remote`, `advertise`, `send_compact`,
+     * `link_down` and a fired AWAIT. A link the transport plane removes is parked on the graph
+     * at an epoch closed after it was unrouted (`graph_t::park_release`), and
+     * `graph_t::collect()` frees it only once every bracket open at that epoch has closed, so a
+     * removed link is never freed while a frame is inside it. In every build, under every
+     * ADR-0080 policy: the bracket is the QSBR domain's read side (`%detail_qsbr::enter` /
+     * `leave`), whose nesting depth `fan_out`'s own bracket shares. The outermost exit is a
+     * quiescent state (`graph_t::thread_quiescent`, a no-op unless `reclaim_qsbr` is bound).
+     */
+    struct frame_scope_t {
+        frame_scope_t() noexcept { graph::detail_qsbr::enter(); }
+        frame_scope_t(const frame_scope_t&) = delete;
+        frame_scope_t& operator=(const frame_scope_t&) = delete;
+        ~frame_scope_t() {
+            if (graph::detail_qsbr::leave()) graph::graph_t::thread_quiescent();
+        }
+    };
+
     /** @brief "This child has no connection vertex" — the unbindable child (RFC-0024 §5.1).
      *         A sentinel rather than an `optional` because it lives in the per-frame ctx and
      *         a `u32` compare is the whole test the bound hop performs against it. */
