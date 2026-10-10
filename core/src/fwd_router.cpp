@@ -2303,7 +2303,9 @@ bool fwd_router_t::door_allows(const child_registry_t::child_t* door, std::strin
     // does an op this build names no right for.
     const std::optional<graph::vertex_handle_t> v =
         right ? graph_.registered_vertex_at(door->conn_slot) : std::nullopt;
-    // THE `allows` of the router — every spelling's hop is decided here (RFC-0029 §6.4).
+    // THE `allows` of the router — every spelling's hop is decided here (RFC-0029 §6.4). It
+    // refuses a vertex that retired while the gate ran, so a door is never crossed
+    // mid-retire (#1940).
     return v && graph_.allows(*v, caller, *right);
 }
 
