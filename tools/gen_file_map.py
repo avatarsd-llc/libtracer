@@ -57,7 +57,7 @@ PAGES = {
     "security-acl.md": ["security_acl.hpp", "acl_ace.hpp"],
     "security-noise.md": [
         "security_noise.hpp", "security_noise_crypto.hpp", "security_noise_openssl.hpp",
-        "security_noise_sodium.hpp", "security_noise_psa.hpp",
+        "security_noise_sodium.hpp", "security_noise_psa.hpp", "transport_noise.hpp",
     ],
     "fwd-router.md": [
         "fwd_router.hpp", "fwd_frame_view.hpp", "op_resolve.hpp",

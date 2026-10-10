@@ -2126,6 +2126,7 @@ bool fwd_router_t::sample_stats(std::string_view seam_class, std::string_view se
     out->add("dropped_rx", d.dropped_rx);
     out->add("malformed_rx", d.malformed_rx);
     out->add("dropped_tx", d.dropped_tx);
+    link->kind_stats(*out);  // the kind's own nouns, if any (RFC-0033 §5.11)
     // No `labels_used`: it counted the per-link label table's spent space, and the table is
     // gone (#1951). A seam names only the nouns it HAS (RFC-0010 Am. 1 §D.3).
     return true;
