@@ -2412,6 +2412,12 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
     target_link_libraries(pair_hop_acl_test PRIVATE libtracer)
     libtracer_test_warnings(pair_hop_acl_test)
     add_test(NAME pair_hop_acl COMMAND pair_hop_acl_test)
+    # #1939: the PAIR arm takes no graph lock — a hop forwards while a registration holds the
+    # map lock, and stays correct (and race-free under TSan) while the vertex index grows.
+    add_executable(pair_hop_lock_free_test pair_hop_lock_free_test.cpp)
+    target_link_libraries(pair_hop_lock_free_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(pair_hop_lock_free_test)
+    add_test(NAME pair_hop_lock_free COMMAND pair_hop_lock_free_test)
 endif()
 
 # The #830 ablation: target_canonical_resolves() proves WHICH of dispatch_edge_target's two

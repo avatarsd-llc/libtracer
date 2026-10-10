@@ -130,6 +130,10 @@ class child_registry_t {
         }
     }
 
+    /** @brief "This mount has no connection vertex" — @ref child_t::conn_slot's empty value.
+     *         Out of every graph's slot range, so a lookup of it refuses by bounds alone. */
+    static constexpr std::uint32_t kNoConnSlot = 0xFFFFFFFFu;
+
     /**
      * @brief ONE read of a slot's egress: WHERE it sends, and WHAT SHAPE that link is.
      *
@@ -300,6 +304,24 @@ class child_registry_t {
          *         empty when a segment has no packed spelling, and the hop then encodes the
          *         name per frame. */
         std::span<const std::byte> mount_tlv;
+        /**
+         * @brief The graph slot of this mount's CONNECTION vertex — the vertex→link binding
+         *        the one walk ends on (RFC-0029 §13.2 S6) — or @ref kNoConnSlot.
+         *
+         * Every address spelling reaches a link through this word: the NAME descent's match
+         * reads it to find the door it gates at, and a PAIR naming a vertex finds the door by
+         * it (@ref by_conn_slot). The registry never interprets it; its owner
+         * (`fwd_router_t::add_child`) writes it once per registration, before it publishes
+         * the receiver, and leaves it alone on @ref erase, since a tombstone already stops
+         * the slot resolving. A stale read is harmless: a mount name's connection vertex,
+         * once it exists, keeps its graph slot for the graph's life (slots are immortal), so
+         * the only change a rebind can make is from "none" to that slot.
+         *
+         * In the tail padding the 16-byte slot alignment already leaves, so it costs the
+         * slot nothing on either ABI (@ref child_slot_layout_oracle_t pins that). Atomic and
+         * relaxed: the egress word's acquire orders it.
+         */
+        mutable std::atomic<std::uint32_t> conn_slot{kNoConnSlot};
 
        private:
         friend class child_registry_t;
@@ -320,8 +342,9 @@ class child_registry_t {
     };
 
     /**
-     * @brief @ref child_t's fields with @ref child_t::owner_hint taken back out — the layout
-     *        oracle for that word's "costs the slot nothing" claim.
+     * @brief @ref child_t's fields with @ref child_t::owner_hint and @ref child_t::conn_slot
+     *        taken back out — the layout oracle for those words' "costs the slot nothing"
+     *        claim.
      *
      * Spelled as a mirror rather than as an `offsetof`, which is only conditionally supported
      * on a type with mixed access control, and rather than as a literal `== 80`, which is a
@@ -339,7 +362,8 @@ class child_registry_t {
         std::atomic<std::uintptr_t> egress{0}; /**< @brief Mirrors `child_t`'s egress word. */
     };
     static_assert(sizeof(child_t) == sizeof(child_slot_layout_oracle_t),
-                  "child_t::owner_hint must ride in seg_count's existing padding — see its doc");
+                  "child_t::owner_hint and child_t::conn_slot must ride in existing padding — "
+                  "see their docs");
 
     /**
      * @brief Register the link addressed by qualified name @p name (`"<module>/<name>"`).
@@ -696,6 +720,26 @@ class child_registry_t {
         const child_t* hit = nullptr;
         for_each([&](const child_t& c) {
             if (c.live() && c.name == name) {
+                hit = &c;
+                return true;
+            }
+            return false;
+        });
+        return hit;
+    }
+
+    /**
+     * @brief The live slot whose connection vertex is graph slot @p index (nullptr if none) —
+     *        the door a PAIR names (RFC-0029 §6 step 3).
+     *
+     * Lock-free like @ref longest_prefix, and one `u32` compare per slot: the table is the
+     * node's link count, not its traffic. A bus mount answers too; the caller reads its
+     * shape from @ref child_t::egress and refuses it as an egress (§10).
+     */
+    [[nodiscard]] const child_t* by_conn_slot(std::uint32_t index) const {
+        const child_t* hit = nullptr;
+        for_each([&](const child_t& c) {
+            if (c.conn_slot.load(std::memory_order_relaxed) == index && c.live()) {
                 hit = &c;
                 return true;
             }

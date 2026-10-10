@@ -33,6 +33,11 @@
  *    the target's connection vertex carries an `:acl` granting the inbound link READ|WRITE.
  *    `acl(N) - fixed(N)` is what RFC-0029 §6.4's per-hop gate costs a NAME-spelled hop that
  *    is ALLOWED (the hop still forwards; a WARN row says so if it does not).
+ *  - `pair` / `pair-acl` — the SAME hop spelled as a PAIR naming the target's connection vertex
+ *    (RFC-0029 §6), with the target registered LAST, ungated and gated. Read against `scan`
+ *    and `acl` at the same N, they say whether the two spellings cost the same door step
+ *    (#1939: one walk, one gate). The `-value` ladders of both gated spellings carry the
+ *    payloads above 1 KiB.
  *
  * Emits one RESULT row per (mode, N) in bench_common's shared format, so collate.py and
  * the perf history pick it up unchanged. `fanout` carries N (registered children) and
@@ -64,6 +69,7 @@
 #include "bench_process.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -185,15 +191,24 @@ enum class path_form_t : std::uint8_t {
     LITERAL, /**< @brief The retired `NAME`-child body, for the comparison only. */
 };
 
-/** @brief FWD{ op=WRITE, dst, src, VALUE } — the frame a forward hop shrinks and grows. */
+/** @brief FWD{ op=WRITE, dst, src, VALUE } — the frame a forward hop shrinks and grows. A
+ *         @p head, when given, is the `dst`'s leading PAIR element (RFC-0029 §4.2). */
 std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src,
                                 std::span<const std::byte> payload,
-                                path_form_t form = path_form_t::PACKED) {
+                                path_form_t form = path_form_t::PACKED,
+                                std::optional<tr::wire::path_pair_t> head = std::nullopt) {
     std::vector<std::byte> body;
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    if (form == path_form_t::PACKED) {
+    if (head) {
+        std::vector<std::byte> dst_body(tr::wire::kPathPairRecordBytes);
+        tr::wire::path_pair_store(
+            std::span<std::byte>(dst_body).first<tr::wire::kPathPairRecordBytes>(), *head);
+        for (std::string_view seg : dst) (void)tr::wire::emit_path_segment(dst_body, seg);
+        tr::wire::emit_tlv(body, type_t::PATH, opt_t{}, dst_body);
+        emit_path(body, src);
+    } else if (form == path_form_t::PACKED) {
         emit_path(body, dst);
         emit_path(body, src);
     } else {
@@ -403,12 +418,17 @@ class legacy_dst_seg_walk_t {
  * @param acl        Make the graph ACL-enforcing, with the hop's connection vertex granting
  *                   the inbound link READ|WRITE — registered BEFORE the children, so every
  *                   build under comparison can bind it.
+ * @param pair       Spell the hop as a PAIR naming the target's connection vertex, which is
+ *                   then registered before the children whether or not @p acl is set.
  */
 double run_point(std::size_t links, std::size_t target_pos, const char* mode,
                  std::size_t payload_bytes = 4, bool by_payload = false,
-                 double budget = budget_seconds(), bool acl = false) {
+                 double budget = budget_seconds(), bool acl = false, bool pair = false) {
     graph_t graph;
     if (acl) grant_hop(graph, "/net/ws-client/out", "net/ws-server/in");
+    if (pair && !acl)
+        (void)graph.register_vertex(tr::graph::path_t("/net/ws-client/out"),
+                                    tr::graph::role_t::STORED_VALUE);
     fwd_router_t router(graph);
     capture_transport_t in_link;
     capture_transport_t out_link;
@@ -454,8 +474,16 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
                                                    std::byte{0xBE}, std::byte{0xEF}};
     std::vector<std::byte> payload(payload_bytes);
     for (std::size_t i = 0; i < payload_bytes; ++i) payload[i] = kPattern[i % kPattern.size()];
+    std::optional<tr::wire::path_pair_t> head;
+    if (pair) {
+        const auto v = graph.find(tr::graph::path_t("/net/ws-client/out").key());
+        const auto slot = v ? graph.vertex_slot(*v) : std::nullopt;
+        if (slot)
+            head = tr::wire::path_pair_t{.index = slot->index, .generation = slot->generation};
+    }
     const std::vector<std::byte> frame =
-        make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"}, payload);
+        pair ? make_fwd({"sensor", "temp"}, {"reply"}, payload, path_form_t::PACKED, head)
+             : make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"}, payload);
 
     // Drive the hop through the INBOUND LINK's receiver, not `router.on_frame` directly.
     // That is how a real transport delivers: `add_child` installs a receiver bound to a
@@ -614,6 +642,11 @@ int main(int /*argc*/, char** argv) {
     // gate on an allowed NAME-spelled hop, read against axis 1 at the same N.
     for (const std::size_t n : kLinkCounts)
         (void)run_point(n, 1, "fwd-demux-acl", 4, false, budget_seconds(), true);
+    // Axis 1c — the same hop spelled as a PAIR, target LAST, ungated then gated (#1939).
+    for (const std::size_t n : kLinkCounts)
+        (void)run_point(n, n, "fwd-demux-pair", 4, false, budget_seconds(), false, true);
+    for (const std::size_t n : kLinkCounts)
+        (void)run_point(n, n, "fwd-demux-pair-acl", 4, false, budget_seconds(), true, true);
 
     // The derived answer to ADR-0061's acceptance question, so it need not be
     // reconstructed by hand from the RESULT rows.
@@ -683,6 +716,13 @@ int main(int /*argc*/, char** argv) {
     std::printf("\n");
     for (const std::size_t p : bench::kPayloadLadder)
         (void)run_point(1, 1, "fwd-demux-value", p, true, budget_seconds() / 4);
+    // The two gated spellings over the same ladder (#1939), so the gate's cost above 1 KiB is
+    // read against the ungated `fwd-demux-value` row at the same payload.
+    for (const std::size_t p : bench::kPayloadLadder)
+        (void)run_point(1, 1, "fwd-demux-acl-value", p, true, budget_seconds() / 4, true);
+    for (const std::size_t p : bench::kPayloadLadder)
+        (void)run_point(1, 1, "fwd-demux-pair-acl-value", p, true, budget_seconds() / 4, true,
+                        true);
     bench::emit_family_rss("forward-demux", start_kb);  // after the last row (#1908)
     return 0;
 }
