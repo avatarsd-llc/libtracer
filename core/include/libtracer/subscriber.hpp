@@ -814,8 +814,11 @@ class edge_snapshot_t {
         ::new (static_cast<void*>(raw_ + n_ * sizeof(edge_view_t))) edge_view_t(std::move(v));
         ++n_;
     }
-    /** @brief Destroy every constructed view; the buffer is reusable afterwards. */
-    void clear() noexcept {
+    /** @brief Destroy every constructed view; the buffer is reusable afterwards.
+     *
+     *  Out of line, so the fan-out's frame keeps one call for the whole teardown and the
+     *  inliner's choice for this loop cannot move `graph_t::fan_out`'s code (#1622). */
+    [[gnu::noinline]] void clear() noexcept {
         for (std::size_t i = 0; i < n_; ++i) (*this)[i].~edge_view_t();
         n_ = 0;
     }
