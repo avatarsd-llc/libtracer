@@ -1494,16 +1494,19 @@ class graph_t {
      * nothing. Scoping a quiescent point by role excludes exactly the production case
      * below.
      *
-     * **The one peer-driven append site is conditional.**
+     * **The transport plane's append sites.**
      * `tr::net::transport_vertex_t::remove_connection` retires the `/net/<module>/<name>`
      * identity vertex, which is registered `role_t::STORED_VALUE` — and it bears a seam
      * only when its link exposes a bus facet (`transport_t::bus() != nullptr`): the CAN
      * binding, and a tcp/ws server wired `peer_named = true`, get an `on_children` that
-     * synthesizes the live peer listing (ADR-0044). A point-to-point deployment — every
-     * dial link, UDP, loopback, a default-wired server — parks **nothing** on teardown and
-     * needs no quiescent point at all. A bus node parks one `value_handlers_t` (~96 B of
-     * `std::function`, plus each callback's captures) per teardown; that node is the one
-     * this method exists for.
+     * synthesizes the live peer listing (ADR-0044). That one is peer-driven: a bus node
+     * parks one `value_handlers_t` per connection teardown, and a point-to-point teardown
+     * (a dial link, UDP, loopback, a default-wired server) parks nothing. Destroying a
+     * `tr::net::transport_vertex_t` parks on EVERY deployment: one seam per declared
+     * module's `<module>/conn` creator endpoint, plus one @ref park_release for that
+     * endpoint's context. So an embedder that destroys and re-creates transport vertices
+     * over one graph needs a quiescent point too, or the park grows by that much per
+     * destruction until the graph goes.
      *
      * @warning **The caller MUST call this from a point where no lock-free reader holds a
      *          value seam.** The library cannot know that moment — a reader holds the raw
@@ -1526,6 +1529,9 @@ class graph_t {
      * `find` a path, retire something else) without deadlocking, and an arbitrarily slow
      * destructor blocks no reader or writer.
      *
+     * Every release parked by @ref park_release runs here too, after the seams are freed and
+     * on the same thread, outside every graph lock.
+     *
      * Idempotent, and a no-op when nothing is parked. Not itself a reader-safety
      * mechanism: it neither waits for nor detects readers. An embedder that never calls it
      * keeps the pre-#576 behaviour — the park grows without bound — which @ref
@@ -1542,6 +1548,28 @@ class graph_t {
     void collect();
 
     /**
+     * @brief Hand the graph a retired seam's context to release at the next @ref collect.
+     *
+     * The other half of @ref retire for a seam owner that is going away. Retiring stops new
+     * calls through the seam, but a reader that loaded it before the retire may still be on
+     * its way into the callback, holding the context the owner would free — and only the
+     * point where @ref collect frees the parked seams is past every such reader. So an owner
+     * that retires its vertices and must then free their context parks the free here instead:
+     * @p release runs exactly once, `release.release(release.ctx)`, on the thread that calls
+     * @ref collect, outside every graph lock, after that call's parked seams are freed. A
+     * release still parked when the graph is destroyed runs in its teardown, with the same
+     * caveat as a parked seam there: it must not re-enter the graph.
+     *
+     * The callback is the ADR-0080 @ref retired_callback_t, the shape `unsubscribe` hands a
+     * retired subscription's context back through. Whatever reaches the context in the
+     * meantime is the owner's to answer; it stays valid until the release runs.
+     *
+     * @retval BACKPRESSURE The park could not grow; nothing is parked and @p release will
+     *         never run, so the context must stay valid for as long as the graph lives.
+     */
+    [[nodiscard]] result_t<void> park_release(retired_callback_t release);
+
+    /**
      * @brief How many retired value seams are currently parked, awaiting @ref collect.
      *
      * The observability half of the collector: an embedder that never calls @ref collect
@@ -1553,7 +1581,9 @@ class graph_t {
      * registered with an empty @ref handlers_t. On the transport plane that means one per
      * `/net/<module>/<name>` identity vertex whose link exposes a bus facet (CAN, or a
      * tcp/ws server wired `peer_named = true`) and **zero** for every point-to-point
-     * connection — so on a default deployment this legitimately never leaves 0.
+     * connection, plus one per creator endpoint of each `tr::net::transport_vertex_t`
+     * destroyed over this graph — so on a default deployment that never destroys its
+     * transport vertex this legitimately never leaves 0.
      */
     [[nodiscard]] std::size_t parked_seam_count() const;
 
@@ -3325,8 +3355,9 @@ class graph_t {
     // map_mutex_ and roots_, so it destructs LAST — a seam whose destructor re-enters the
     // graph finds a half-destroyed object. Until collect() runs the size is peer-driven (one
     // per BUS-link connection teardown; a point-to-point teardown parks nothing, because the
-    // identity vertex only gets an on_children when link->bus() != nullptr) — hence the
-    // public parked_seam_count().
+    // identity vertex only gets an on_children when link->bus() != nullptr), plus one per
+    // creator endpoint of every transport vertex destroyed — hence the public
+    // parked_seam_count().
     //
     // A table-source array of the parked blocks (#1778), which also served the seams: `retire`
     // reserves room for its whole subtree BEFORE it changes anything, so parking itself cannot
@@ -4003,6 +4034,31 @@ class graph_t {
      *         one flag test for the vertices without one, and always empty in a build without
      *         `config_t::kCreationHooks`. */
     [[nodiscard]] creation_hook_t creation_hook_for(const vertex_t* v) const noexcept;
+
+    /**
+     * @brief The releases @ref park_release parked: each runs once, when @ref collect frees
+     *        the parked seams, because that is the moment no reader can still be on its way
+     *        into one. Appended only under `map_mutex_` (unique).
+     *
+     * Declared LAST, away from `retired_seams_`, for two reasons. Its size moves no member the
+     * write and fan-out paths address. And it destructs FIRST, so a release still parked when
+     * the graph goes runs against a graph that is still whole.
+     */
+    struct release_park_t {
+        mem::block_array_t<retired_callback_t> releases; /**< @brief The parked releases. */
+        /** @brief An empty park drawing from @p src. */
+        explicit release_park_t(mem::block_source_t& src) noexcept : releases(src) {}
+        release_park_t(const release_park_t&) = delete;
+        release_park_t& operator=(const release_park_t&) = delete;
+        /** @brief Runs every release still parked. */
+        ~release_park_t() { run_all(releases); }
+        /** @brief Run and clear every release in @p r. */
+        static void run_all(mem::block_array_t<retired_callback_t>& r) noexcept {
+            for (const retired_callback_t& c : r) c.release(c.ctx);
+            r.clear();
+        }
+    };
+    release_park_t parked_releases_; /**< @brief See `release_park_t`. */
 };
 
 }  // namespace tr::graph

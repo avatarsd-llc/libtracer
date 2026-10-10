@@ -396,9 +396,42 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
 }
 
 transport_vertex_t::~transport_vertex_t() {
-    // FIRST, before `conns_` destructs: destroying an owned socket can fire its departure
-    // eviction, which gives back each evicted edge's hold through this seam. Cleared only if
-    // it is still this plane's, so a plane wired later onto the same graph keeps its own.
+    // Destroying the plane from inside a call through it (an endpoint write, or a liveness
+    // subscriber reached from a discharge) would wait below for a call that is this thread's
+    // own: fail loudly instead of hanging.
+    assert(!ops_held_by_this_thread() &&
+           "transport_vertex_t destroyed from inside its own control-plane operation");
+    // The creator endpoints first, so no connection can be created while the rest goes. Each
+    // context is cut loose from this object under its own lock, after every call already
+    // inside `endpoint_write` has returned; a call that comes in afterwards finds no plane and
+    // answers NOT_FOUND. Only then is the endpoint retired, so `<net_root>/<module>/conn`
+    // stops resolving, and its context handed to the graph to free once no reader can still
+    // reach it (`graph_t::park_release`). If either is refused, the context is left to the
+    // graph's lifetime rather than freed while the endpoint, or a reader, can still name it.
+    for (endpoint_ctx_t* const e : endpoints_) {
+        {
+            std::unique_lock lock(e->m);
+            e->self = nullptr;
+            e->cv.wait(lock, [e] { return e->calls == 0; });
+        }
+        if (!graph_.retire(*e->vertex)) continue;
+        (void)graph_.park_release({e, [](void* c) {
+                                       auto* const ctx = static_cast<endpoint_ctx_t*>(c);
+                                       mem::drop_in(*ctx->src, ctx);
+                                   }});
+    }
+    // Then every connection, through the same removal a peer's `remove` takes: un-routed
+    // from the router, its engine stopped, its identity vertex retired, and only then its
+    // socket closed — so neither a forward from a link that outlives this object nor a read
+    // of the connection vertex reaches a socket that is gone. One transaction per
+    // connection, because each collects one connection's phase 2.
+    for (bool more = true; more;) {
+        ctl_txn_t txn(*this, ctl_scope_t::OPERATION);
+        more = !conns_.empty() && remove_connection_locked(txn, conns_.at(0).key).has_value();
+    }
+    // Last: closing a socket above can fire its departure eviction, which gives back each
+    // evicted edge's hold through this seam. Cleared only if it is still this plane's, so a
+    // plane wired later onto the same graph keeps its own.
     if constexpr (kSelfHealLinks) {
         graph::graph_hooks_t hooks = graph_.hooks();
         if (hooks.link_hold.ctx != this) return;
@@ -600,23 +633,39 @@ result_t<void> transport_vertex_t::mint_module_locked(std::string_view module,
     // The seam's context holds the module by VALUE. The path is the module, so the dispatch
     // never re-derives it from a payload the peer wrote — a creator cannot address one module's
     // endpoint and have the connection mount under another. The context is a hook's `ctx`
-    // (RFC-0028 D10), so it must outlive the vertex: it lives in `endpoints_`, one heap node
-    // per minted module that never moves, for as long as this object — the lifetime every
-    // seam here has.
-    mem::string_t ctx_module(*egress_src_);
+    // (RFC-0028 D10), so it must outlive every call the graph can still make through the
+    // seam — which, for a write that loaded it just before the retire, is past this object's
+    // own lifetime. So it is drawn from the GRAPH's table source, one block per minted module
+    // that never moves, and the graph frees it (`endpoint_ctx_t` has the whole story).
+    mem::block_source_t& ctx_src = graph_.table_source();
+    mem::string_t ctx_module(ctx_src);
     if (!ctx_module.assign(module)) return std::unexpected(status_t::BACKPRESSURE);
-    mem::poly_ptr_t<endpoint_ctx_t> owned_ctx =
-        mem::make_poly<endpoint_ctx_t>(*egress_src_, this, std::move(ctx_module), catalog);
-    if (!owned_ctx || !endpoints_.push_back(std::move(owned_ctx)))
+    endpoint_ctx_t* const ctx =
+        mem::make_in<endpoint_ctx_t>(ctx_src, this, std::move(ctx_module), catalog, &ctx_src);
+    if (ctx == nullptr || !endpoints_.push_back(ctx)) {
+        mem::drop_in(ctx_src, ctx);
         return std::unexpected(status_t::BACKPRESSURE);
-    endpoint_ctx_t& ctx = *endpoints_.back();
+    }
     graph::handlers_t handlers;
+    // Every call is counted in and out under the context's own lock, and a call that finds
+    // the plane gone answers as the absent path the endpoint now is: see `~transport_vertex_t`.
     handlers.on_write = {
         [](void* c, const graph::value_t& value, const graph::write_ctx_t&) -> result_t<void> {
             auto* e = static_cast<endpoint_ctx_t*>(c);
-            return e->self->endpoint_write(e->module, e->catalog, value);
+            std::unique_lock lock(e->m);
+            transport_vertex_t* const self = e->self;
+            if (self == nullptr) return std::unexpected(status_t::NOT_FOUND);
+            ++e->calls;
+            lock.unlock();
+            const result_t<void> out = self->endpoint_write(e->module, e->catalog, value);
+            lock.lock();
+            // Signalled under the lock, so the destructor cannot see the count fall and let
+            // the plane go before this call is done with the context's lock.
+            --e->calls;
+            e->cv.notify_all();
+            return out;
         },
-        &ctx};
+        ctx};
     // RFC-0014 §5, discharged by the Amendment 2 general contract: the two control payloads
     // this endpoint accepts demand DIFFERENT rights, so the endpoint declares them rather
     // than having `graph_t` learn a transport concept. `SPEC` (create) demands `CREATE`, so
@@ -629,19 +678,22 @@ result_t<void> transport_vertex_t::mint_module_locked(std::string_view module,
         graph::payload_right_t{wire::type_t::NAME, graph::acl_right_t::WRITE},
     };
     // Empty for a catalog-less module, which then costs the graph nothing beyond the rows.
+    // A catalog that cannot be encoded is refused like a registration that cannot be made.
     mem::bytes_t encoded(*egress_src_);
-    if (!encode_catalog(encoded, catalog)) {
-        endpoints_.pop_back();
-        return std::unexpected(status_t::BACKPRESSURE);
-    }
-    auto endpoint = graph_.register_vertex_key(mem::as_span(endpoint_key), graph::role_t::HANDLER,
-                                               handlers, {}, kRights, mem::as_span(encoded));
+    auto endpoint =
+        encode_catalog(encoded, catalog)
+            ? graph_.register_vertex_key(mem::as_span(endpoint_key), graph::role_t::HANDLER,
+                                         handlers, {}, kRights, mem::as_span(encoded))
+            : std::unexpected(status_t::BACKPRESSURE);
     if (!endpoint) {
         // Nothing may answer for a module whose endpoint does not exist: the context pushed
-        // above would otherwise let a retried declaration's catalog check find it.
+        // above would otherwise let a retried declaration's catalog check find it. No seam
+        // was published, so nothing but this frame can reach it.
         endpoints_.pop_back();
+        mem::drop_in(ctx_src, ctx);
         return std::unexpected(endpoint.error());
     }
+    ctx->vertex = *endpoint;
     // RFC-0014 §3 (S4): `conn` is HIDDEN from `<net_root>/<module>:children[]`, which returns
     // the module's member CONNECTIONS. The endpoint is the control that creates them, not one
     // of them, so a peer walking the listing as a topology of links would descend into a
@@ -1001,8 +1053,8 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // peer — rejecting that hop is #741. See reference/14 §Forwarding. Kind-neutral in the one
     // sense that matters here: any transport whose
     // bus() is non-null gets this wiring; point-to-point links keep the plain
-    // vertex. The captured facet lives exactly as long as the link (the class's
-    // documented lifetime contract — the graph must not outlive this object).
+    // vertex. The captured facet lives exactly as long as the link, and the link outlives
+    // the connection vertex: removal, and this object's destructor, retire it first.
     graph::handlers_t handlers;
     // Asked through `bus_of` (#375 deliverable 3): on a target that closed the bus module out
     // every connection vertex is the plain one, and the synthesis below — with the TLV
@@ -1163,9 +1215,10 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     // BUS link. The identity vertex bears a value seam iff it was given one at creation, and
     // that happens only when `link->bus() != nullptr` (CAN; a tcp/ws server wired
     // `peer_named = true`). Tearing down a point-to-point connection — every dial link, UDP,
-    // loopback, a default-wired server — parks NOTHING, so a default deployment never needs
-    // a collect() point. A bus node parks one ~96 B value_handlers_t per teardown, which is
-    // the case #576 exists for. We do NOT collect here even then: this runs on whatever
+    // loopback, a default-wired server — parks NOTHING here; a bus node parks one ~96 B
+    // value_handlers_t per teardown, which is the case #576 exists for. (Destroying this
+    // object parks on every deployment, one per creator endpoint: see the destructor.) We
+    // do NOT collect here, nor there: this runs on whatever
     // thread the teardown arrived on, which is precisely the free location graph_t::collect()
     // exists to take out of the library's hands. The embedder calls collect() where it knows
     // no reader holds a seam.

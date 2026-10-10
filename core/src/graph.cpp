@@ -603,7 +603,8 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
       unconditional_(own_tables_.or_root(src)),
       ctl_(&src),
       values_(sub_pool(src, mem::value_source())),
-      tables_(&own_tables_.or_root(src)) {
+      tables_(&own_tables_.or_root(src)),
+      parked_releases_(own_tables_.or_root(src)) {
     // The process-default FOLD, resolved in the BODY: `&src_backend_` is only taken once its
     // lifetime has started. A few stores at construction, never read again.
     // On the host default root (#1777) values and rings draw from the value sub-pool and
@@ -1270,11 +1271,13 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
 }
 
 /**
- * @brief Free the parked value seams — the embedder-called other end of retirement's park
- *        (#576). The whole point is WHERE the free happens, so read the two scopes below.
+ * @brief Free the parked value seams, then run the parked releases — the embedder-called
+ *        other end of retirement's park (#576). The whole point is WHERE the free happens,
+ *        so read the two scopes below.
  */
 void graph_t::collect() {
     mem::block_array_t<value_handlers_t*> dead(retired_seams_.seams.source());
+    mem::block_array_t<retired_callback_t> released(parked_releases_.releases.source());
     {
         // Under the map lock: nothing but the swap. The lock is what serialises us against
         // retire_subtree's append, and it is all it is here for — a free under it would put
@@ -1282,11 +1285,20 @@ void graph_t::collect() {
         // the mutual-wait every earlier design round died on.
         const std::unique_lock lock(map_mutex_);
         std::swap(dead, retired_seams_.seams);
+        std::swap(released, parked_releases_.releases);
     }
-    // `dead` is freed HERE — outside every graph lock, on the caller's thread, at a moment
-    // the embedder chose. So a seam callback's destructor may re-enter the graph, and a slow
+    // Freed HERE — outside every graph lock, on the caller's thread, at a moment the
+    // embedder chose. So a seam callback's destructor may re-enter the graph, and a slow
     // one blocks no reader or writer. Do not hoist this into the scope above.
     seam_park_t::free_all(dead);
+    release_park_t::run_all(released);
+}
+
+result_t<void> graph_t::park_release(retired_callback_t release) {
+    const std::unique_lock lock(map_mutex_);
+    if (!parked_releases_.releases.push_back(release))
+        return std::unexpected(status_t::BACKPRESSURE);
+    return {};
 }
 
 std::size_t graph_t::parked_seam_count() const {

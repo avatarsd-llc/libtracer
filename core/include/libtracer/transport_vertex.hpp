@@ -31,6 +31,7 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -42,7 +43,6 @@
 #include "libtracer/key_view.hpp"
 #include "libtracer/link_kind.hpp"
 #include "libtracer/mem_heap.hpp"
-#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_string.hpp"
@@ -262,11 +262,11 @@ struct listing_t {
  * A staging under some OTHER module that happens to share the leaf NAME is a different
  * connection: it is neither used nor consumed here.
  *
- * Destruction semantics (honest): there is no child-removal / connection-teardown
- * model yet (#66), so an owned transport lives as long as this `transport_vertex_t` —
- * its recv thread is joined when this object destructs. Declare the
- * `transport_vertex_t` AFTER the graph and router it binds (the usual stack order), so
- * owned transports stop delivering frames before the router they feed is gone.
+ * Destruction semantics: an owned transport lives until its connection is removed or this
+ * `transport_vertex_t` destructs. The destructor detaches its connections from the router
+ * and graph before closing them, in the order @ref remove_connection uses, so its recv
+ * thread is joined after its name has stopped resolving. Declare the `transport_vertex_t`
+ * AFTER the graph and router it binds (the usual stack order): both must outlive it.
  */
 class transport_vertex_t {
    public:
@@ -348,9 +348,19 @@ class transport_vertex_t {
                        mem::block_source_t* egress_src = &mem::net_source());
 
     /**
-     * @brief Uninstall the routed-subscription hold seam (#1816) before any connection is
-     *        torn down, so a departure eviction during member destruction never calls back
-     *        into a half-destroyed plane.
+     * @brief Retire the connection handlers and drain in-flight calls, then detach every
+     *        connection from the router and graph before closing it.
+     *
+     * In order: each creator endpoint this plane minted is retired once the calls already
+     * inside it have returned, and answers any later write as an absent path; then each
+     * connection is removed exactly as @ref remove_connection removes it (un-routed, its
+     * engine stopped, its vertex retired, then its socket closed); last, the routed-
+     * subscription hold seam (#1816) is uninstalled, so a departure eviction fired by a
+     * closing socket still finds it. The graph and the router must outlive this object, and
+     * the embedder's next @ref graph::graph_t::collect frees what the endpoints parked.
+     *
+     * Must not run from inside a call through this object (an endpoint write, or a
+     * liveness subscriber reached from one of its operations): that is asserted.
      */
     ~transport_vertex_t();
 
@@ -1037,17 +1047,33 @@ class transport_vertex_t {
     // on the forward path.
     mem::block_array_t<module_decl_t> modules_;
 
-    /** @brief The creator endpoint's `on_write` context — the hook's `ctx` (RFC-0028 D10). */
+    /**
+     * @brief The creator endpoint's `on_write` context — the hook's `ctx` (RFC-0028 D10).
+     *
+     * It outlives this object. A retired value seam is freed only at `graph_t::collect`
+     * (ADR-0072), so the context the seam names lives as long: it is drawn from the graph's
+     * table source and freed by the graph, through `graph_t::park_release`, at that same
+     * point. Until then a write that arrives finds `self` null and answers `NOT_FOUND`, as
+     * the absent path the endpoint now is. `calls` is what the destructor drains before it
+     * lets anything go.
+     */
     struct endpoint_ctx_t {
-        transport_vertex_t* self; /**< @brief The owning transport vertex. */
+        transport_vertex_t* self; /**< @brief The owning transport vertex; null once it is gone.
+                                   *          Guarded by `m`. */
         mem::string_t module;     /**< @brief The module the endpoint creates under. */
         conn_catalog_t catalog;   /**< @brief The module's creation catalog (borrowed; empty ⇒
                                    *          none declared, nothing validated). */
+        mem::block_source_t* src; /**< @brief The source this context was drawn from. */
+        /** @brief The endpoint vertex the destructor retires; engaged once it is registered,
+         *         which every entry of `endpoints_` is. */
+        std::optional<graph::vertex_handle_t> vertex{};
+        std::mutex m{};               /**< @brief Guards `self` and `calls`. */
+        std::condition_variable cv{}; /**< @brief Signalled when `calls` returns to zero. */
+        std::size_t calls = 0;        /**< @brief Calls inside `endpoint_write` right now. */
     };
-    /** @brief One context per minted creator endpoint, each in its own block that never moves,
-     *         so a hook's `ctx` stays valid for this object's lifetime. Appended under
-     *         `ctl_m_`. */
-    mem::block_array_t<mem::poly_ptr_t<endpoint_ctx_t>> endpoints_;
+    /** @brief One context per minted creator endpoint, each in its own block that never moves.
+     *         Appended under `ctl_m_`; handed to the graph to free by the destructor. */
+    mem::block_array_t<endpoint_ctx_t*> endpoints_;
 };
 
 }  // namespace tr::net

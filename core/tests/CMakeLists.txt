@@ -1233,6 +1233,14 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(net_control_plane_race_test)
     add_test(NAME net_control_plane_race COMMAND net_control_plane_race_test)
     set_tests_properties(net_control_plane_race PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+    # A transport vertex retires its connection handler and drains in-flight calls on
+    # destruction, while an app-owned listener keeps dialling it. Read by the asan and tsan
+    # lanes; without a sanitizer it still checks the endpoint is gone afterwards.
+    add_executable(transport_vertex_teardown_test transport_vertex_teardown_test.cpp)
+    target_link_libraries(transport_vertex_teardown_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(transport_vertex_teardown_test)
+    add_test(NAME transport_vertex_teardown COMMAND transport_vertex_teardown_test)
+    set_tests_properties(transport_vertex_teardown PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
 endif()
 
 # The published edge array + its edge pin (#635): a snapshot sees the old or the new edge
