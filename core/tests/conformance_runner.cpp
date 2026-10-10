@@ -556,6 +556,8 @@ void check_noise_transcript(const fs::path& dir, const std::string& label) {
           at + "the empty confirmation, i->r (25 B), sealed and opened");
     check(transport(ti, tr_, "frame_i2r_nonce_decimal", "frame_i2r", "datagram_i2r"),
           at + "frame i->r (33 B), sealed and opened");
+    check(transport(tr_, ti, "acknowledgement_nonce_decimal", "", "acknowledgement"),
+          at + "the empty acknowledgement, r->i (25 B), sealed and opened");
     check(transport(tr_, ti, "frame_r2i_nonce_decimal", "frame_r2i", "datagram_r2i"),
           at + "frame r->i (33 B), sealed and opened");
 }
