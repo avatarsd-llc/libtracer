@@ -184,7 +184,7 @@ struct mount_hit_t {
 
     /**
      * @brief Make the mount a REPLY's `dst` names exactly its egress, `dst` consumed to empty
-     *        (#2042).
+     *        (#2042); a no-op for a REPLY whose `dst` names no mount exactly.
      *
      * A REPLY's `dst` is the request's accumulated `src` — a return route, never the address
      * of a vertex here — so a run naming a point-to-point mount exactly means the originator
@@ -196,6 +196,7 @@ struct mount_hit_t {
      * `src`, the terminus builds no RESULT for it, and this case no longer arises.
      */
     void take_reply_egress() noexcept {
+        if (exact == nullptr) return;  // the descent did not stop exactly on a mount
         const child_registry_t::egress_t eg = exact->egress();
         if (eg.multi_peer) return;
         link = eg.link;
@@ -2414,14 +2415,14 @@ bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor
         // routable ⇒ fall to the terminus.
         mount_hit_t hit = kind == fwd_dst_kind_t::PATH ? resolve_mount_at(registry_, cur, rd, pre)
                                                        : mount_hit_t{};
-        // A REPLY whose `dst` names a mount exactly leaves over it (#2042). Read only when the
-        // descent stopped exactly on a mount, so a forward hop pays one not-taken compare.
-        if (hit.exact != nullptr && op == fwd_op_t::REPLY) hit.take_reply_egress();
-        // The hop's authorization at the door the descent reached, through the ONE gate every
-        // spelling runs (`door_allows`), so a hop's verdict never depends on how it was
-        // spelled. A REPLY is routed, never authorized: it answers an operation every gate
-        // passed on the way in (RFC-0004 §B). A refused hop leaves as a rejected hit.
-        if (op != fwd_op_t::REPLY)
+        // A REPLY is routed, never authorized: it answers an operation every gate passed on
+        // the way in (RFC-0004 §B), and one whose `dst` names a mount exactly leaves over it
+        // (#2042). Any other hop is authorized at the door the descent reached, through the ONE
+        // gate every spelling runs (`door_allows`), so a hop's verdict never depends on how it
+        // was spelled. A refused hop leaves as a rejected hit.
+        if (op == fwd_op_t::REPLY)
+            hit.take_reply_egress();
+        else
             hit.refuse_unless(door_allows(hit.mount, inbound_name, fwd_op_right(op_byte)));
         if (hit.link != nullptr) {
             // §11.2, and §6.1's mint decision, made HERE rather than inside the hop. The
