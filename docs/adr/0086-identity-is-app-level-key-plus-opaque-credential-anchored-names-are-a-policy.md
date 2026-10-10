@@ -1,8 +1,8 @@
 # Identity is app level: the node key is the only identity the protocol knows, an optional opaque credential rides beside it, and anchored names are a verifier policy in an integration module
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: RFC-0033 -->
 
-Status: **accepted** (maintainer-ratified 2026-10-07, identity grill held during the IETF publication rollout). Amends [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md): its Decisions 1, 2 and 5 stand; its Decision 3 (raw ed25519 keys, trust on first use) stands as the default and gains an optional credential and a verifier policy; its Decision 4 ("the path is a Noise-pattern channel") becomes a normative link binding. Builds on the subject seam of [ADR-0018](0018-access-control-authorization-pluggable-subject-token.md), the `:identity` facet of [RFC-0011](../spec/rfcs/0011-node-identity-facet.md), and the subject/addressing split of [ADR-0082](0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md). The wire part lands later, through its own RFC (Decision 9).
+Status: **accepted** (maintainer-ratified 2026-10-07, identity grill held during the IETF publication rollout). Amends [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md): its Decisions 1, 2 and 5 stand; its Decision 3 (raw ed25519 keys, trust on first use) stands as the default and gains an optional credential and a verifier policy; its Decision 4 ("the path is a Noise-pattern channel") becomes a normative link binding. Builds on the subject seam of [ADR-0018](0018-access-control-authorization-pluggable-subject-token.md), the `:identity` facet of [RFC-0011](../spec/rfcs/0011-node-identity-facet.md), and the subject/addressing split of [ADR-0082](0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md). The wire part lands later, through its own RFC (Decision 9). **Amended 2026-10-10 by [RFC-0033](../spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md)** (a minimal Noise link binding, NNpsk0 over a datagram carrier): Decision 8's pattern list gains NNpsk0 for links that carry a PSK only.
 
 ## Context
 
@@ -53,6 +53,8 @@ An application that wants expiry checks it in its own verifier policy against it
 - the credential, when present, rides in the **handshake payload**.
 
 A Noise link that does not follow the binding is not a conforming Tracer link. The binding fixes interop; the module catalog's `security_noise` slot remains the implementation.
+
+> **Amendment (2026-10-10), [RFC-0033](../spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) §10.4, maintainer-ruled (§15 Q2).** The pattern list reads: **XX or IK when the link carries identity** (the static key and credential rules above, specified by #1993), **NNpsk0 when it carries a PSK only** (`Noise_NNpsk0_25519_ChaChaPoly_SHA256` with an application-supplied pre-shared key, RFC-0033). All of them share one framing: RFC-0033's datagram types, nonce, replay window, key phase and counters, with each pattern taking its own handshake type codes. A Noise link that follows none of them is still not a conforming Tracer link.
 
 **9. Wire timing.** The wire part (the credential member of `:identity` and the Tracer over Noise binding) lands **before the v1.0 freeze**, through one RFC: an amendment of [RFC-0011](../spec/rfcs/0011-node-identity-facet.md) plus the binding. This ADR records the rulings; it does not change the spec.
 
