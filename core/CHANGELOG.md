@@ -75,6 +75,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `kSlabPool = false` they draw from the static arena, not the platform heap. No behaviour
   change and no rename; the declaration, the allocation reference and the transport comments
   now say so, and show `source_backend_t` over `heap_source()` as the way to reach the real heap.
+- **BREAKING: `fwd_router_t::bound_dispatch` and `label_dispatch` become `bound_send` and
+  `label_send`, and `bound_egress` is private.** The two dispatch calls returned the egress
+  link for the app to send on later, outside any frame bracket, so a link removed in between
+  could be freed under that send (next section). `bound_send(path, right, send, ctx)` and
+  `label_send(path, send, ctx)` instead call `send(ctx, link, dst)` on the calling thread,
+  inside the router's frame bracket, and return `false` without calling it where the old calls
+  returned `nullopt`. The link and `dst` are valid only until the callback returns.
+  `bound_dispatch_t` and `label_dispatch_t` are removed. `bound_egress` answered a raw link
+  the same way, so it is now private; both send calls still run it.
 
 ### Fixed
 
@@ -137,17 +146,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **A removed link is never freed while a frame is inside it.** `fwd_router_t` brackets
   every inbound frame (the child receivers, the bus notifiers, `on_frame`, `on_frame_rope`)
   and every origination that can reach a child link (`originate`, `deliver_remote`,
-  `advertise`, `send_compact`, `link_down`, a fired AWAIT) with the read side of the ADR-0080
+  `advertise`, `send_compact`, `link_down`, `bound_send`, `label_send`, a fired AWAIT) with the read side of the ADR-0080
   QSBR domain, in every build and under every reclamation policy. `graph_t::retire` and
   `graph_t::park_release` close an epoch after their unpublish, and `graph_t::collect()`
   frees a parked seam or release only once every bracket open at that epoch has closed; what
   is not yet ripe stays parked for a later call. So `collect()` no longer needs a quiet point
   for the transport plane's threads; in-process `read` / `write` / `:children[]` calls on
-  other application threads remain the caller's to settle. Cost, per inbound frame and per
-  origination, never per send: one store to the thread's own cache-line-isolated cell on
-  entry and one on exit (measured in the PR). `fan_out`'s `reclaim_qsbr` bracket now shares
-  the frame bracket's nesting depth, so a dispatch inside a frame neither re-announces nor
-  goes quiescent early. Each parked seam and release carries its 8 B epoch.
+  other application threads remain the caller's to settle. Cost: a thread's outermost
+  bracket loads the global epoch and makes one sequentially consistent store to the thread's
+  own cache-line-isolated cell on entry, and one release store on exit; a nested bracket is a
+  thread-local counter increment and decrement. An inbound frame pays one outermost bracket,
+  and the router's sends inside it nest. An application thread pays one per origination call
+  (`originate`, `bound_send`, `label_send`, `advertise`, `send_compact`, `link_down`) and, on
+  a publish, one per remote subscriber edge: each `deliver_remote` opens its own unless the
+  writer is already inside a bracket (under `reclaim_qsbr`, `fan_out`'s bracket covers the
+  whole publish and the edges nest). The epoch is 64-bit, so on a 32-bit target without
+  64-bit atomics, such as ESP32-C6, its load and both stores are `libatomic` calls that each
+  mask interrupts. Measured in the PR. `fan_out`'s `reclaim_qsbr` bracket now shares the frame
+  bracket's nesting depth, so a dispatch inside a frame neither re-announces nor goes
+  quiescent early. Each parked seam and release carries its 8 B epoch.
 - **`udp_transport_t`: an ephemeral bind owns its port
   ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
   set `SO_REUSEADDR`, which lets the kernel give a UDP socket a port another reuse-enabled

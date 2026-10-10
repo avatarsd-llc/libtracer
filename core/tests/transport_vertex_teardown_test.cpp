@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -107,6 +108,20 @@ struct owned_link_t final : tr::net::transport_t, tr::net::bus_link_t {
     [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t peer,
                                              std::span<char>) const override {
         return peer.valid() ? "p0" : std::string_view{};
+    }
+};
+
+/** @brief A point-to-point link the plane constructs and owns: the egress a bound path names.
+ *         It reads its probe through `this` after a held call, so a call that outlived the
+ *         link's destruction touches freed memory. */
+struct p2p_link_t final : tr::net::transport_t {
+    probe_t& p;
+    explicit p2p_link_t(probe_t& probe) noexcept : p(probe) {}
+    ~p2p_link_t() override { p.closed.store(true); }
+    void shut_down() override { p.shut.store(true); }
+    void send(std::span<const std::byte>) override {
+        p.hold_inside();
+        p.reached.fetch_add(1);
     }
 };
 
@@ -221,6 +236,28 @@ std::unique_ptr<transport_vertex_t> plane_owning_x(graph_t& g, fwd_router_t& rou
     return net;
 }
 
+/**
+ * @brief A plane whose module `q` constructs point-to-point links (kind `p2p`), with one
+ *        connection, `/net/q/y`, made through the endpoint and owned by the plane.
+ */
+std::unique_ptr<transport_vertex_t> plane_owning_y(graph_t& g, fwd_router_t& router,
+                                                   probe_t& probe) {
+    auto net = std::make_unique<transport_vertex_t>(g, router);
+    probe_t* const r = &probe;
+    net->register_transport_type(
+        "p2p",
+        [r](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+            tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+            return tr::mem::make_poly<p2p_link_t>(src, *r);
+        });
+    check(net->register_module("q", "p2p", conn_role_t::DIAL).has_value(), "module q is declared");
+    tr::net::conn_spec_t spec("y");
+    spec.kind("p2p");
+    check(g.write(path_t("/net/q/conn"), spec.view()).has_value(),
+          "the plane constructs and owns /net/q/y");
+    return net;
+}
+
 /** @brief A link that outlives the plane forwards to its connection after it is destroyed. */
 void surviving_link_forwards_after_destruction() {
     graph_t g;
@@ -298,16 +335,17 @@ void remove_with_call_inside(graph_t& g, transport_vertex_t& net, probe_t& p, Ca
 }
 
 /**
- * @brief Remove `/net/m/x` while a router frame @p call is held inside its link, and collect
+ * @brief Remove @p conn while a router frame @p call is held inside its link, and collect
  *        repeatedly before letting it go: the link must outlive every one of those calls.
  */
 template <class Call>
-void collect_with_frame_inside(graph_t& g, transport_vertex_t& net, probe_t& p, Call call) {
+void collect_with_frame_inside(graph_t& g, transport_vertex_t& net, probe_t& p, Call call,
+                               std::string_view conn = "net/m/x") {
     p.stay.store(true);
     p.hold.store(true);
     std::thread inside(call);
     while (!p.entered.load()) std::this_thread::yield();
-    (void)net.remove_connection("net/m/x");
+    (void)net.remove_connection(conn);
     for (int i = 0; i < 3; ++i) g.collect();
     check(p.shut.load() && !p.closed.load(),
           "three collect() calls with a frame still inside the removed link keep it");
@@ -344,6 +382,34 @@ void origination_held_across_collects() {
     collect_with_frame_inside(
         g, *net, p, [&] { (void)router.originate(slot, tr::graph::fwd_op_t::READ, dst, {}); });
     (void)router.cancel(slot);
+}
+
+/** @brief An app thread's bound send, held inside the removed link by its callback. */
+void bound_send_held_across_collects() {
+    graph_t g;
+    fwd_router_t router(g);
+    probe_t p;
+    auto net = plane_owning_y(g, router, p);
+    const std::optional<tr::wire::path_ref_element_t> e = router.connection_ref("net/q/y");
+    check(e.has_value(), "the plane's point-to-point connection is bindable");
+    path_t dst("/net/q/y/p0");
+    check(e && dst.bind(std::span<const tr::wire::path_ref_element_t>(&*e, 1)),
+          "an app path binds to it");
+    std::vector<std::byte> frame = tr::testing::b_fwd(
+        tr::graph::fwd_op_t::READ, tr::testing::b_path({"p0"}), tr::testing::b_path({"reply"}));
+    bool sent = false;
+    collect_with_frame_inside(
+        g, *net, p,
+        [&] {
+            sent = router.bound_send(
+                dst, tr::graph::acl_right_t::READ,
+                [](void* c, tr::net::transport_t& link, std::span<const std::byte>) {
+                    link.send(*static_cast<const std::vector<std::byte>*>(c));
+                },
+                &frame);
+        },
+        "net/q/y");
+    check(sent && p.reached.load() == 1, "the bound send reached the link once");
 }
 
 /** @brief A forward that looked the link up before its removal is still inside it. */
@@ -406,6 +472,7 @@ int main() {
     surviving_link_forwards_after_destruction();
     forward_in_flight_across_removal();
     bus_children_read_after_destruction();
+    bound_send_held_across_collects();
     if constexpr (tr::net::kBusLinks) {
         forward_held_across_collects();
         origination_held_across_collects();

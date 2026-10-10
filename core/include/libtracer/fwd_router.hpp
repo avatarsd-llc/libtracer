@@ -700,28 +700,6 @@ class fwd_router_t {
         std::string_view link_name) const;
 
     /**
-     * @brief The egress link a bound element names, after the full §5.1 check.
-     *
-     * The forwarder's hop and the origin's first hop are the same act — consume element 0,
-     * dereference it, egress — so they are the same function. It bounds-checks the index,
-     * compares the generation, refuses a saturated one, and evaluates the ACL at the
-     * dereferenced vertex for @p right (§6.2: a generation match authorizes nothing).
-     *
-     * @param e      The element to consume.
-     * @param caller The subject context — the inbound link's name at a forwarder, empty for
-     *               this node's own local caller at an origin.
-     * @param right  The right the operation carries.
-     * @retval nullptr Any part of the check failed, or the vertex is not a connection vertex
-     *         of a live point-to-point child of this node. The caller MUST then drop —
-     *         never repair, never fall through to a different route (§5.3). A bus PEER is
-     *         among the refusals and not by omission: a peer has no vertex, so no element
-     *         can name one, and egressing over the bus link itself would BROADCAST a
-     *         directed operation (ADR-0073 §3 / RFC-0020).
-     */
-    [[nodiscard]] transport_t* bound_egress(wire::path_ref_element_t e, std::string_view caller,
-                                            graph::acl_right_t right) const;
-
-    /**
      * @brief Install the bound form on @p path from the mint answer on a reply (RFC-0024 §7.4).
      *
      * The origin's side of the exchange, and the reason `path_t::bind` had no production
@@ -742,16 +720,18 @@ class fwd_router_t {
     bool adopt_binding(graph::path_t& path, std::string_view link_name,
                        const wire::tlv_node_t& reply);
 
-    /** @brief What the origin sends a bound operation as: the link, and the `dst` on the wire. */
-    struct bound_dispatch_t {
-        transport_t* link = nullptr; /**< @brief The egress link element 0 named. */
-        /** @brief The `PATH` TLV carrying the RESIDUAL as PAIR elements (RFC-0029 §4.2),
-         *         drawn from the label plane's source (#1779). */
-        mem::block_array_t<std::byte> dst;
-    };
+    /**
+     * @brief What a bracketed send hands the app: the egress link and the `dst` to put on the
+     *        wire, both valid only until the callback returns.
+     *
+     * The link is not the app's to keep. The call runs the callback inside the router's frame
+     * bracket, so a link removed meanwhile is not freed until the callback has returned (see
+     * `graph_t::collect`); a pointer kept past the callback has no such guarantee.
+     */
+    using egress_fn_t = void (*)(void* ctx, transport_t& link, std::span<const std::byte> dst);
 
     /**
-     * @brief Spell the next operation over @p path's binding — the origin's own hop (§4.1).
+     * @brief Send the next operation over @p path's binding — the origin's own hop (§4.1).
      *
      * The origin consumes element 0 exactly as every forwarder consumes its own: it is this
      * node's reference to its first-hop connection vertex, so it selects the link and does
@@ -760,16 +740,19 @@ class fwd_router_t {
      * address), and the host that receives it consumes ITS element in turn — the monotone
      * shrink that makes a bound path loop-free for the same reason a canonical `dst` is.
      *
+     * @p send composes the frame around `dst` and sends it on `link`, on this thread, inside
+     * the router's frame bracket (@ref egress_fn_t).
+     *
      * @param right The right the operation carries, evaluated at the dereferenced connection
      *              vertex like any other hop's (§6.2).
-     * @retval std::nullopt @p path is unbound, or element 0 no longer validates — a link
-     *         removed, a connection vertex retired, an ACL revoked — or the label plane's
-     *         source refused the `dst` bytes. The caller's recovery is the one that always
-     *         works: `clear_binding()` and send the canonical path it still holds, which may
-     *         then re-mint (§5.3).
+     * @return false, with @p send not called, when @p path is unbound, or element 0 no longer
+     *         validates — a link removed, a connection vertex retired, an ACL revoked — or the
+     *         label plane's source refused the `dst` bytes. The caller's recovery is the one
+     *         that always works: `clear_binding()` and send the canonical path it still holds,
+     *         which may then re-mint (§5.3).
      */
-    [[nodiscard]] std::optional<bound_dispatch_t> bound_dispatch(const graph::path_t& path,
-                                                                 graph::acl_right_t right) const;
+    [[nodiscard]] bool bound_send(const graph::path_t& path, graph::acl_right_t right,
+                                  egress_fn_t send, void* ctx) const;
 
     // -- path labels, the ORIGIN's half (RFC-0027 §6.1 point 4, §7.2) ------------------
     // The forwarder's half — mint on the reply leg, deref on receipt — is a branch inside the
@@ -809,17 +792,8 @@ class fwd_router_t {
     bool adopt_path_label(graph::path_t& path, std::string_view link_name,
                           const wire::tlv_node_t& reply);
 
-    /** @brief What the origin sends a labelled operation as: the link, and the `dst` on the wire.
-     */
-    struct label_dispatch_t {
-        transport_t* link = nullptr; /**< @brief The egress link the literal head resolved to. */
-        /** @brief The `PATH` TLV carrying the labelled RESIDUAL, drawn from the label plane's
-         *         source (#1779). */
-        mem::block_array_t<std::byte> dst;
-    };
-
     /**
-     * @brief Spell the next operation over @p path's cached label spelling — the origin's own hop.
+     * @brief Send the next operation over @p path's cached label spelling — the origin's own hop.
      *
      * The origin consumes its own first-hop local part exactly as a forwarder consumes its own,
      * and for the same reason: it selects the link and does NOT go on the wire. Here that part is
@@ -829,19 +803,22 @@ class fwd_router_t {
      * reachable in a deployment at all; until this existed, every minted label was cached and
      * then thrown away.
      *
-     * No ACL right is taken, and the asymmetry with @ref bound_dispatch is deliberate: element 0
+     * No ACL right is taken, and the asymmetry with @ref bound_send is deliberate: element 0
      * of a binding is a peer-visible *reference* that must be dereferenced and re-checked (§6.2),
      * whereas the head consumed here is a NAME this node resolves locally, exactly as it resolves
      * the same name in the canonical spelling. Every hop that reads a label re-checks the ACL at
      * the vertex it dereferences (§8.2), which is where a labelled operation's authorization is
      * decided.
      *
-     * @retval std::nullopt @p path carries no cached spelling, its head names no mount of this
-     *         node (or a bus mount, which is never labelled), or the residual has no spelling.
-     *         The caller's recovery is the one that always works: send the canonical path @p path
-     *         still holds.
+     * @p send composes the frame around `dst` and sends it on `link`, on this thread, inside
+     * the router's frame bracket (@ref egress_fn_t).
+     *
+     * @return false, with @p send not called, when @p path carries no cached spelling, its head
+     *         names no mount of this node (or a bus mount, which is never labelled), or the
+     *         residual has no spelling. The caller's recovery is the one that always works: send
+     *         the canonical path @p path still holds.
      */
-    [[nodiscard]] std::optional<label_dispatch_t> label_dispatch(const graph::path_t& path) const;
+    [[nodiscard]] bool label_send(const graph::path_t& path, egress_fn_t send, void* ctx) const;
 
     /**
      * @brief §7.2's fallback: on a `NOT_FOUND`-class refusal, drop @p path's labelled spelling.
@@ -1203,7 +1180,9 @@ class fwd_router_t {
      */
     bool cancel(origin_t& slot) noexcept;
 
-    /** @brief The connection registry (test introspection — the shared demux table). */
+    /** @brief The connection registry (test introspection — the shared demux table). A link
+     *         it names is for identity checks: nothing here brackets a send on it, so send
+     *         through @ref bound_send or @ref label_send instead. */
     [[nodiscard]] const child_registry_t& registry() const noexcept { return registry_; }
 
     /**
@@ -1230,13 +1209,14 @@ class fwd_router_t {
      *
      * Every way into a child link goes through one of these: the child receivers, the bus
      * notifiers, `on_frame`, `originate`, `deliver_remote`, `advertise`, `send_compact`,
-     * `link_down` and a fired AWAIT. A link the transport plane removes is parked on the graph
-     * at an epoch closed after it was unrouted (`graph_t::park_release`), and
-     * `graph_t::collect()` frees it only once every bracket open at that epoch has closed, so a
-     * removed link is never freed while a frame is inside it. In every build, under every
-     * ADR-0080 policy: the bracket is the QSBR domain's read side (`%detail_qsbr::enter` /
-     * `leave`), whose nesting depth `fan_out`'s own bracket shares. The outermost exit is a
-     * quiescent state (`graph_t::thread_quiescent`, a no-op unless `reclaim_qsbr` is bound).
+     * `link_down`, @ref bound_send, @ref label_send and a fired AWAIT. A link the transport plane
+     * removes is parked on the graph at an epoch closed after it was unrouted
+     * (`graph_t::park_release`), and `graph_t::collect()` frees it only once every bracket open at
+     * that epoch has closed, so a removed link is never freed while a frame is inside it. In every
+     * build, under every ADR-0080 policy: the bracket is the QSBR domain's read side
+     * (`%detail_qsbr::enter` / `leave`), whose nesting depth `fan_out`'s own bracket shares. The
+     * outermost exit is a quiescent state (`graph_t::thread_quiescent`, a no-op unless
+     * `reclaim_qsbr` is bound).
      */
     struct frame_scope_t {
         frame_scope_t() noexcept { graph::detail_qsbr::enter(); }
@@ -1246,6 +1226,31 @@ class fwd_router_t {
             if (graph::detail_qsbr::leave()) graph::graph_t::thread_quiescent();
         }
     };
+
+    /**
+     * @brief The egress link a bound element names, after the full §5.1 check.
+     *
+     * The forwarder's hop and the origin's first hop are the same act — consume element 0,
+     * dereference it, egress — so they are the same function. It bounds-checks the index,
+     * compares the generation, refuses a saturated one, and evaluates the ACL at the
+     * dereferenced vertex for @p right (§6.2: a generation match authorizes nothing).
+     *
+     * @param e      The element to consume.
+     * @param caller The subject context — the inbound link's name at a forwarder, empty for
+     *               this node's own local caller at an origin.
+     * @param right  The right the operation carries.
+     * @retval nullptr Any part of the check failed, or the vertex is not a connection vertex
+     *         of a live point-to-point child of this node. The caller MUST then drop —
+     *         never repair, never fall through to a different route (§5.3). A bus PEER is
+     *         among the refusals and not by omission: a peer has no vertex, so no element
+     *         can name one, and egressing over the bus link itself would BROADCAST a
+     *         directed operation (ADR-0073 §3 / RFC-0020).
+     *
+     * Private because the link it answers is valid only inside the frame bracket its caller
+     * holds (`frame_scope_t`); the app reaches it through @ref bound_send, which holds one.
+     */
+    [[nodiscard]] transport_t* bound_egress(wire::path_ref_element_t e, std::string_view caller,
+                                            graph::acl_right_t right) const;
 
     /** @brief "This child has no connection vertex" — the unbindable child (RFC-0024 §5.1).
      *         A sentinel rather than an `optional` because it lives in the per-frame ctx and
@@ -1955,7 +1960,7 @@ class fwd_router_t {
      * the entire validation, and what the vertex IS decides the rest:
      *
      * - a point-to-point child's **connection vertex with a tail** — a hop: §6.4's gate and the
-     *   egress through @ref bound_egress, the element consumed, `src` grown canonically;
+     *   egress through `bound_egress`, the element consumed, `src` grown canonically;
      * - the **last** element — the terminus (`head_dst_t::TERMINUS`), including a
      *   connection vertex named last, which addresses its own `:`-facets; a WRITE whose last
      *   element names an accepted session's anchor is the reverse-list delivery's last hop;
@@ -1997,7 +2002,7 @@ class fwd_router_t {
      * replaces is the whole descent and not one segment of it.
      *
      * The resolution it yields is a `path_label_target_t`, which IS a
-     * @ref wire::path_ref_element_t, so the deref hands straight to @ref bound_egress — the
+     * @ref wire::path_ref_element_t, so the deref hands straight to `bound_egress` — the
      * same shipped bounds/generation/ACL sequence a bound hop runs. That reuse is the point
      * rather than a convenience: §8.2 requires a labelled operation to evaluate `acl_allows`
      * at the dereferenced vertex *exactly as the string form does*, and one shared
@@ -2015,7 +2020,7 @@ class fwd_router_t {
      * still holds, re-minted from the next reply.
      *
      * **A label whose target is a LOCAL vertex is this node's TERMINUS residual** (§6.1 point
-     * 3's own mint, presented back). It cannot go through @ref bound_egress, which answers
+     * 3's own mint, presented back). It cannot go through `bound_egress`, which answers
      * only for connection vertices — until this arm existed such a frame took §7.2's counted
      * `NOT_FOUND`, and §12.4 axis 2 had nothing to time. The deref is made here, where the
      * table and the peer identity live, and the RESULT travels to the terminus in @p
@@ -2039,7 +2044,7 @@ class fwd_router_t {
      *        anchor hangs off?
      *
      * The vertex is found by the entry's own mount key — one keyed find — and asked
-     * `graph_t::allows(vertex, caller, right)`: the check @ref bound_egress runs for the PAIR
+     * `graph_t::allows(vertex, caller, right)`: the check `bound_egress` runs for the PAIR
      * hop and label spellings, so the verdict cannot depend on how the hop was spelled. A REPLY
      * passes (nothing to authorize), and so does every hop on a graph that enforces no ACL (one
      * relaxed load) or a hop with no matched mount

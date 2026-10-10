@@ -1819,35 +1819,39 @@ bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name
     return path.bind(std::span<const wire::path_ref_element_t>(elements.data(), elements.size()));
 }
 
-std::optional<fwd_router_t::bound_dispatch_t> fwd_router_t::bound_dispatch(
-    const graph::path_t& path, graph::acl_right_t right) const {
+bool fwd_router_t::bound_send(const graph::path_t& path, graph::acl_right_t right, egress_fn_t send,
+                              void* ctx) const {
     const graph::path_binding_t& b = path.binding();
-    if (!b.bound || b.elements.empty()) return std::nullopt;
+    if (!b.bound || b.elements.empty()) return false;
+    // Opened before the link is looked up and held until `send` returns, so a link removed
+    // meanwhile outlives the call (see `frame_scope_t`).
+    const frame_scope_t scope;
     // The origin's caller is local, so the subject context is empty — the trusted-caller
     // convention every other local API here uses. The check still runs: it is the same one
     // line a forwarder runs, and having ONE of them is what keeps the two from drifting.
     transport_t* const link = bound_egress(b.elements.front(), {}, right);
-    if (link == nullptr) return std::nullopt;
+    if (link == nullptr) return false;
     // The residual as a `PATH` of PAIR elements (RFC-0029 §4.2) — the one address spelling;
     // the bare `PATH_REF` array is refused as a `dst` everywhere (§5.3). Written straight into
     // a block of exactly its size from the label plane's source (#1779); a refusal is the same
-    // `nullopt` a stale element is. The element cap keeps the body far below a 16-bit length.
+    // `false` a stale element is. The element cap keeps the body far below a 16-bit length.
     const auto residual = std::span<const wire::path_pair_t>(b.elements).subspan(1);
-    if (residual.size() > wire::kMaxPathRefElements) return std::nullopt;
+    if (residual.size() > wire::kMaxPathRefElements) return false;
     static_assert(wire::kMaxPathRefElements * wire::kPathPairRecordBytes <= 0xFFFFu);
-    bound_dispatch_t out{.link = link, .dst = mem::block_array_t<std::byte>(*label_src_)};
+    mem::block_array_t<std::byte> dst(*label_src_);
     const std::size_t body = residual.size() * wire::kPathPairRecordBytes;
     const std::size_t bytes = wire::header_bytes(wire::opt_t{}) + body;
-    if (!out.dst.reserve(bytes)) return std::nullopt;
-    for (std::size_t i = 0; i < bytes; ++i) (void)out.dst.push_slot();  // reserved: cannot grow
-    const std::span<std::byte> w(out.dst.data(), bytes);
+    if (!dst.reserve(bytes)) return false;
+    for (std::size_t i = 0; i < bytes; ++i) (void)dst.push_slot();  // reserved: cannot grow
+    const std::span<std::byte> w(dst.data(), bytes);
     wire::store_header(w, wire::type_t::PATH, wire::opt_t{}, body);
     for (std::size_t i = 0; i < residual.size(); ++i)
         wire::path_pair_store(
             w.subspan(wire::header_bytes(wire::opt_t{}) + i * wire::kPathPairRecordBytes)
                 .first<wire::kPathPairRecordBytes>(),
             residual[i]);
-    return out;
+    send(ctx, *link, w);
+    return true;
 }
 
 namespace {
@@ -1918,12 +1922,15 @@ namespace {
     return path.cache_path_label(std::span<const std::byte>(body.data(), body.size()));
 }
 
-[[gnu::cold]] std::optional<fwd_router_t::label_dispatch_t> fwd_router_t::label_dispatch(
-    const graph::path_t& path) const {
+[[gnu::cold]] bool fwd_router_t::label_send(const graph::path_t& path, egress_fn_t send,
+                                            void* ctx) const {
     const graph::path_label_cache_t& c = path.path_label();
     // An empty body needs no test of its own: its head is the sentinel alone, which no mount
     // matches, so the descent below answers "no mount".
-    if (!c.cached) return std::nullopt;
+    if (!c.cached) return false;
+    // Opened before the mount descent reads the link and held until `send` returns, so a link
+    // removed meanwhile outlives the call (see `frame_scope_t`).
+    const frame_scope_t scope;
     const std::span<const std::byte> body{c.body.data(), c.body.size()};
 
     // The LITERAL head is the only part this node resolves: everything from the first label
@@ -1949,8 +1956,7 @@ namespace {
     // with a residual below it, and a bus PEER are the same answer: no directed labelled egress
     // from here. A bus child is never labelled at all — one label per child would stand for a
     // different address per peer.
-    if (hit.link == nullptr || hit.rejected || !hit.peer.empty() || hit.strip_k == 0)
-        return std::nullopt;
+    if (hit.link == nullptr || hit.rejected || !hit.peer.empty() || hit.strip_k == 0) return false;
 
     // Where the consumed run ends in the CACHED bytes — walked again rather than remembered,
     // because the run is a count of elements and the residual is a byte offset. The descent
@@ -1960,13 +1966,13 @@ namespace {
     std::size_t consumed = 0;
     wire::path_element_cursor_t cut(body);
     while (const std::optional<wire::path_element_t> el = cut.next()) {
-        if (!el->ok()) return std::nullopt;
+        if (!el->ok()) return false;
         residual_at = el->at + el->bytes;
         if (++consumed == hit.strip_k) break;
     }
-    if (consumed != hit.strip_k || residual_at >= body.size()) return std::nullopt;
+    if (consumed != hit.strip_k || residual_at >= body.size()) return false;
 
-    label_dispatch_t out{.link = hit.link, .dst = mem::block_array_t<std::byte>(*label_src_)};
+    mem::block_array_t<std::byte> dst(*label_src_);
     // The 4-byte `PATH` header, then the residual bytes, into one block of exactly that size
     // from the label plane's source (#1779). Spelled as `store_header` + append rather than
     // `emit_tlv`, and the reason is measured, not stylistic: one more inlinable `emit_tlv` call
@@ -1978,10 +1984,11 @@ namespace {
     const std::span<const std::byte> residual = body.subspan(residual_at);
     std::array<std::byte, 4> header{};
     wire::store_header(header, wire::type_t::PATH, wire::opt_t{}, residual.size());
-    if (!out.dst.reserve(header.size() + residual.size())) return std::nullopt;
-    (void)out.dst.append(header.data(), header.size());  // reserved above: cannot grow
-    (void)out.dst.append(residual.data(), residual.size());
-    return out;
+    if (!dst.reserve(header.size() + residual.size())) return false;
+    (void)dst.append(header.data(), header.size());  // reserved above: cannot grow
+    (void)dst.append(residual.data(), residual.size());
+    send(ctx, *hit.link, std::span<const std::byte>(dst.data(), dst.size()));
+    return true;
 }
 
 [[gnu::cold]] bool fwd_router_t::fall_back_on_label_refusal(graph::path_t& path,
