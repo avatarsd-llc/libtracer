@@ -573,7 +573,9 @@ vertex is permanently unbindable and every element for it stays a NAME. The gene
   the same socket and re-issue the same small pairs;
 - on a transport that cannot report a session boundary (UDP, CAN), a changed **per-boot epoch**,
   which such a link carries **once per session or advertise, never per frame**, and which counts as
-  a session boundary. The epoch is not part of the pair.
+  a session boundary. The epoch is not part of the pair. A Noise link (RFC-0033) reports one
+  whenever a session whose peer started fresh becomes current, or its session is discarded, so it
+  carries no per-boot epoch. A routine rekey is not a boundary ([23](23-noise-link-binding.md) §10).
 
 The tenancy and link bumps advance the generation **only** — they do not empty the vertex's `:acl`,
 `:settings` or app fields the way retirement does.
@@ -1120,7 +1122,7 @@ And the NET-PLANE seams ([RFC-0010](https://github.com/avatarsd-llc/libtracer/bl
 | ---- | ---- | ---- |
 | `:stats.router.drops` | the node's forwarder's counted cold-path drops | `flatten_dropped`, `forward_iov_dropped`, `arena_dropped`, `assemble_dropped`, `reply_iov_dropped`, `delivery_iov_dropped`, `malformed_rx` |
 | `:stats.labels.table` | the label planes: the `COMPACT` handle store's refusals (`labels_exhausted`, `refused_bindings`, deleted with the handle store by [RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §6.3) beside the RFC-0027 label table's dereference tallies (`label_not_found`, `label_resolves`, deleted with that table by [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) slice S3). Erratum 2026-10-09 ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Erratum (2026-10-09)): this row used to credit all four to the RFC-0027 table. | `labels_exhausted`, `refused_bindings`, `label_not_found`, `label_resolves` |
-| `:stats.link.<child>` | ONE registered transport child, by the NAME its `/net/<module>/<name>` connection vertex carries | `dropped_rx`, `malformed_rx`, `dropped_tx`, and `labels_used` (the `COMPACT` handle store's per-link label occupancy, deleted with it by RFC-0032 §6.3) where the node has path-label switching configured |
+| `:stats.link.<child>` | ONE registered transport child, by the NAME its `/net/<module>/<name>` connection vertex carries | `dropped_rx`, `malformed_rx`, `dropped_tx`, and `labels_used` (the `COMPACT` handle store's per-link label occupancy, deleted with it by RFC-0032 §6.3) where the node has path-label switching configured; and, on a Noise link ([RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) §5.11), `noise_handshake_failed`, `noise_handshake_replayed`, `noise_pending_superseded`, `noise_pending_expired`, `noise_retransmits`, `noise_decrypt_failed`, `noise_replayed`, `noise_stale`, `noise_expired` and `noise_oversize` ([23](23-noise-link-binding.md) §11) |
 
 A node that constructed no router publishes none of the three, and a `link` sub-key naming no registered child — or a removed one — is not a seam: all of these answer `ERROR{tr::schema::not_found}` (`0x0031`), which a monitor reads as "not published here". A link's `rx_capacity` / `tx_capacity` ceilings are deliberately absent: they are per-kind and in per-kind units (buffer bytes on a WebSocket link, TX-pool slots on CAN), so there is no unit-safe ceiling to publish at the interface.
 

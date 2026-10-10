@@ -175,7 +175,7 @@ That last one is not a gap in the module; it is a property of the formation flow
 | `security_dtls` | security | `transport_udp` | post-MVP |
 | `security_psk` | security | `transport_uart`, `transport_can`, `transport_spi`, `transport_i2c` | post-MVP |
 | `security_acl` | security | any transport | post-MVP |
-| `security_noise` | security | any transport | future |
+| `security_noise` | security | any datagram carrier (UDP first): it wraps the carrier link in a Noise session, per the [Noise link binding](23-noise-link-binding.md) | specified (RFC-0033) |
 
 ### Executors
 

@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0033 |
 | **Title** | A minimal Noise link binding: NNpsk0 over a datagram carrier |
-| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. |
+| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. **The binding's normative text lives in [reference/23](../../reference/23-noise-link-binding.md)** (slice S1, [#2071](https://github.com/avatarsd-llc/libtracer/issues/2071)), which `docs/spec/v1.md` §3 incorporates as an annex for a link that uses the binding (§10.1). Where that page and this record disagree, the page wins. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |

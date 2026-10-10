@@ -306,6 +306,17 @@ application: it registers a table of named `tls_profile_t` with the factory, and
 can only select one of those by name. An unregistered name is refused with
 `TYPE_MISMATCH` before any file is opened.
 
+**A wrapping link.** A Noise link ([23 — The Noise link binding](23-noise-link-binding.md),
+[RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md)) wraps an inner carrier link, UDP first, and the router sees an ordinary link.
+The connection vertex is the Noise link's, not the carrier's, and its value is the liveness of
+the binding's §10: the RFC-0014 liveness byte with no new state, `up` on a DIAL link only once
+the responder has acknowledged the session, and `listening` on a LISTEN link. The pre-shared key
+follows the same rule as a TLS profile: the creating `SPEC` names it by **reference**, a
+key-store name the application resolves locally, and the key bytes never travel in a `SPEC`,
+a `SETTINGS` record or a `:` field. That reference and the binding's deadlines are kind-private
+config, parsed by the kind's factory under the lean rule; none of them is a field of the shared
+record.
+
 ### Why the rule exists
 
 - **Optionality.** QUIC is a separate link target that the core never references; a device
