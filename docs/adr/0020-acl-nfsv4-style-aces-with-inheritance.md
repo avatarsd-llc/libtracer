@@ -2,7 +2,7 @@
 
 <!-- status: accepted; superseded-in-part-by: RFC-0036 -->
 
-Status: accepted
+Status: accepted **Superseded in part by [RFC-0036](../spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md)** (accepted 2026-10-10). The `access_mask` is READ|WRITE only. `admin`/`WRITE_ACL`, `SUBSCRIBE`, `CREATE`, `DELETE`, `READ_ACL` and `WRITE_OWNER` are retired. `:acl` is written by the owner (the empty local caller) only. NFSv4-style ACEs, ALLOW/DENY, `INHERIT`, the MCU subset and `EVERYONE@` stand.
 
 [ADR-0018](0018-access-control-authorization-pluggable-subject-token.md) established that access control is *authorization over a pluggable subject-token*, but left the **rights model** open and used a flat `READ/WRITE/SUBSCRIBE` bitfield ([reference 05](../reference/05-protocol-tlvs.md) §`0x0A` ACL). Designing the byte layout for in-band creation ([ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md)) exposed two gaps: there is no `create` or `admin` right, and there is no way to apply an ACL to a **composite** (a subtree) without writing it on every leaf. This ADR adopts the **NFSv4 ACL model** to fill both.
 
@@ -84,3 +84,5 @@ identity the graph does not hold, and they change how a *stored* ACE evaluates �
 `OWNER@` ACE that matches nobody today would start matching somebody. That needs an RFC, and it
 would reserve the token the way #908 reserved `EVERYONE@`. `WRITE_OWNER` stays declared in the
 mask against that day. ([#1033](https://github.com/avatarsd-llc/libtracer/issues/1033).)
+
+**Closed by RFC-0036 (2026-10-10).** Owner semantics are settled without a reserved token. The owner is node-scoped: it is the empty local caller, which no ACE can spell and no remote operation can carry. `WRITE_OWNER` is retired, and `OWNER@` stays an ordinary opaque token ([RFC-0036](../spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md) §3.3).
