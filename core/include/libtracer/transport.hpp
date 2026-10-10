@@ -28,6 +28,7 @@
 #include "libtracer/config.hpp"
 #include "libtracer/function_ref.hpp"
 #include "libtracer/iov_table.hpp"
+#include "libtracer/link_kind.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/peer_handle.hpp"
@@ -679,6 +680,54 @@ class transport_t {
     void set_egress_source(mem::block_source_t& src) noexcept { egress_src_ = &src; }
 
     /**
+     * @brief The block source the routing plane decodes this link's inbound frames through
+     *        (ADR-0067 §3) — null ⇒ the router's own default.
+     *
+     * The link's state, not the router's (#1941): a link has its own receive thread, so a
+     * source recorded here is touched by exactly one thread, which is the per-thread shape
+     * ADR-0067 §3 obtains by ownership rather than by a lock. A bounded node gives each link
+     * its own slab, and the bound is then per-peer: one noisy link cannot starve another's
+     * decode. `fwd_router_t::add_child` records the source it is given here.
+     *
+     * Atomic and relaxed on both sides: a re-registration of this link may store while its
+     * receive thread reads, and the value names an object that outlives the link either way.
+     */
+    [[nodiscard]] mem::block_source_t* rx_source() const noexcept {
+        return rx_src_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Record the source @ref rx_source answers; null restores the router's default.
+     * @param src Must outlive every frame this link delivers, and be safe for its receive
+     *            thread to draw from (ADR-0067 §3).
+     */
+    void set_rx_source(mem::block_source_t* src) noexcept {
+        rx_src_.store(src, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief This link's transport-catalog `(kind, role)` (#1650) — null when it was
+     *        registered without one.
+     *
+     * The admission context's LINK claim: every write the link carries hands this pointer to
+     * the target's admission filter and handler (`graph::write_ctx_t::link`). It lives on the
+     * link it describes (#1941), so a frame reads the claim of the link that is delivering it.
+     * `fwd_router_t::add_child` records the router's interned record for the kind it is
+     * given, which outlives every link the router holds.
+     */
+    [[nodiscard]] const link_kind_t* kind() const noexcept {
+        return kind_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Record the record @ref kind answers.
+     * @param kind Must outlive every frame this link delivers; null records "none".
+     */
+    void set_kind(const link_kind_t* kind) noexcept {
+        kind_.store(kind, std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Register the borrowed-span sink for inbound frames (the bridge's ingest).
      *
      * Must be set before frames flow; delivery may occur on an internal transport
@@ -898,6 +947,10 @@ class transport_t {
      *         once during bring-up, before any thread can send on this link, exactly as the
      *         receiver slots are. */
     mem::block_source_t* egress_src_ = &mem::net_source();
+    /** @brief The decode source — see @ref rx_source. */
+    std::atomic<mem::block_source_t*> rx_src_{nullptr};
+    /** @brief The catalog claim — see @ref kind. */
+    std::atomic<const link_kind_t*> kind_{nullptr};
 
    public:
     /**

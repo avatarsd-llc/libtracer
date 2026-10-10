@@ -1901,6 +1901,20 @@ void run_mode_fan_remote() {
 }
 
 /**
+ * @brief `fan-remote-size`: two `fan-remote` points over the payload ladder (#1941).
+ *
+ * `fan-remote` runs at the reference payload only. A remote edge's record holds no payload,
+ * since every edge shares the one published value, so the per-edge term should not move with
+ * the size. This arm checks that above 1 KiB, at a narrow and a wide fan-out.
+ */
+void run_mode_fan_remote_size() {
+    for (std::size_t F : {std::size_t{8}, std::size_t{1024}})
+        for (std::size_t S : bench::kPayloadLadder)
+            run_inproc_remote(S, F, "inproc-remote", bench::ladder_budget(S, kDeliveryBudget),
+                              bench::ladder_budget(S, kLatencyDeliveryBudget));
+}
+
+/**
  * @brief #1485 addendum C — the TOPIC-COUNT arm, in both address spellings (`topics`).
  *
  * `topics-bound` writes through a pre-bound @ref tr::graph::vertex_handle_t; `topics-addr` writes
@@ -1974,6 +1988,7 @@ constexpr bench_mode_t kModes[] = {
     {"fan", run_mode_fan, family_set_t::SINGLE},
     {"lkv", run_lkv_store_rows, family_set_t::SINGLE},
     {"fan-remote", run_mode_fan_remote, family_set_t::SINGLE},
+    {"fan-remote-size", run_mode_fan_remote_size, family_set_t::SINGLE},
     {"topics", run_mode_topics, family_set_t::SINGLE},
     {"topics-rev", run_mode_topics_rev, family_set_t::SINGLE},
 };

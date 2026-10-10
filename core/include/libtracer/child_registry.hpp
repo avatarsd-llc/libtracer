@@ -41,6 +41,8 @@
 
 namespace tr::net {
 
+class fwd_router_t;
+
 /**
  * @brief This node's `NAME → transport link` table (the compositor demux, ADR-0037).
  *
@@ -66,15 +68,17 @@ namespace tr::net {
  *
  * **Mutation model (#494).** The table was add-only, which left a retired link's
  * `name → transport_t*` resident and dangling. @ref erase closes that, and it does so by
- * **tombstoning in place** — the slot's link pointer is nulled and its NAME kept — never by
- * erasing from `children_`. That is deliberate: shifting the vector under a concurrent
- * lock-free reader is a hard use-after-free, whereas a tombstone leaves the slot in place
- * and a racing reader sees either the old pointer or `nullptr`. A
- * later @ref add of the SAME name reuses its tombstone, so create/remove churn on a stable
- * name set does not grow the table; a genuinely new name still appends, so the table's high
- * -water mark is the count of DISTINCT names ever registered. Compaction (and the full
- * mutation-vs-forward concurrency contract) lands with the RFC-0014 S5 liveness engine,
- * where the TSan gate and a safe reclamation scheme arrive together — see ADR-0061
+ * **tombstoning in place** — the slot's link stops resolving and its NAME is kept — never by
+ * erasing from `children_`. (Since #1941 the tombstone is a bit in the egress word rather
+ * than a null pointer: every resolver still reads a null link, and the router's receive path
+ * can still name the link a frame is already inside, through `child_t::bound`.) That is deliberate:
+ * shifting the vector under a concurrent lock-free reader is a hard use-after-free, whereas a
+ * tombstone leaves the slot in place and a racing reader sees either the old pointer or `nullptr`.
+ * A later @ref add of the SAME name reuses its tombstone, so create/remove churn on a stable name
+ * set does not grow the table; a genuinely new name still appends, so the table's high -water mark
+ * is the count of DISTINCT names ever registered. Compaction (and the full mutation-vs-forward
+ * concurrency contract) lands with the RFC-0014 S5 liveness engine, where the TSan gate and a safe
+ * reclamation scheme arrive together — see ADR-0061
  * (`docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md`).
  *
  * **Slots ARE address-stable (#521, ADR-0063).** The tombstone alone bought stability against
@@ -152,8 +156,22 @@ class child_registry_t {
      * changed (#882) is that it is captured IN the same word as the pointer it describes.
      */
     static constexpr std::uintptr_t kBusShapeBit = 1;
-    static_assert(alignof(transport_t) >= 2,
-                  "the egress word carries the shape in the link pointer's low bit");
+    /**
+     * @brief The TOMBSTONE bit an egress word carries in the link pointer's second low bit.
+     *
+     * Set by @ref erase. Every registry reader sees a tombstoned slot exactly as it did when
+     * erase nulled the pointer (#494): @ref child_t::egress answers a null link, so nothing
+     * resolves through a removed slot. What the bit adds is that the pointer itself is KEPT,
+     * so the router's receive path can still name the link a frame is already inside — the
+     * one reader that is standing in that link's own receive callback (#1941). That pointer
+     * is the link's last binding, and it is valid for exactly as long as that callback runs.
+     */
+    static constexpr std::uintptr_t kRetiredBit = 2;
+    /** @brief Both flag bits — what is not the link pointer. */
+    static constexpr std::uintptr_t kWordBits = kBusShapeBit | kRetiredBit;
+    static_assert(alignof(transport_t) >= 4,
+                  "the egress word carries the shape and the tombstone in the link pointer's "
+                  "two low bits");
 
     /**
      * @brief One registered child: its qualified mount name, and its egress word.
@@ -229,7 +247,7 @@ class child_registry_t {
          *
          * A pure function of the slot's own name, so it has NO invalidation contract: a name
          * has exactly one slot and @ref add writes the name only on the append path, before
-         * the slot is published. Tombstoning nulls the link in `egress_` and leaves this
+         * the slot is published. Tombstoning marks `egress_` dead and leaves this
          * untouched, which is what lets the scan test it BEFORE the acquire-load — a
          * stale-looking hash can only ever cause an extra @ref live check, never a wrong
          * answer.
@@ -263,20 +281,13 @@ class child_registry_t {
          */
         [[nodiscard]] egress_t egress() const noexcept {
             const std::uintptr_t w = egress_.load(std::memory_order_acquire);
-            // On a target that closed the bus module out, the shape is a CONSTANT false —
-            // @ref add never stamps the bit, so reading it would be reading a bit nothing
-            // sets. Folding it here rather than trusting the optimizer is what lets every
-            // `multi_peer` test below become a compile-time false, so the bus arm of each
-            // one — the peer resolution, the peer fallback, the peer-named wiring — is
-            // discarded rather than branched over (#375 deliverable 3). It does NOT delete
-            // the descent's rejected-hit REPLY: `reject_bus_name_hop` answers six other
-            // refusals (`INVALID_PATH`, `NOT_FOUND`) and is emitted byte-identically under
-            // both bindings — measured, not assumed. At the default binding the
-            // `if constexpr` is discarded and this is the load and mask it always was.
-            if constexpr (!kBusLinks)
-                return egress_t{reinterpret_cast<transport_t*>(w & ~kBusShapeBit), false};
-            return egress_t{reinterpret_cast<transport_t*>(w & ~kBusShapeBit),
-                            (w & kBusShapeBit) != 0};
+            // A tombstone answers a null link and keeps its shape (#494, ADR-0073 §3). Spelled
+            // as a mask rather than a branch: this load is on every descent's confirm.
+            const std::uintptr_t live = ((w & kRetiredBit) >> 1) - 1;  // all ones ⇔ live
+            const egress_t bound = bound_egress(w);
+            return egress_t{
+                reinterpret_cast<transport_t*>(reinterpret_cast<std::uintptr_t>(bound.link) & live),
+                bound.multi_peer};
         }
         /** @brief This slot's link alone (nullptr ⇒ TOMBSTONE) — for the shape-agnostic
          *         callers (identity lookups, teardown sweeps). */
@@ -322,18 +333,53 @@ class child_registry_t {
 
        private:
         friend class child_registry_t;
+        friend class fwd_router_t;
+
+        /**
+         * @brief The link this slot last bound and its shape, tombstone or not — the
+         *        router's RECEIVE path's read (#1941).
+         *
+         * A frame that arrived through a link's own receive callback is inside that link, so
+         * the link is alive for as long as the callback runs, whether or not its slot has
+         * been tombstoned meanwhile. This is how such a frame names the link it came from
+         * (its decode source, its catalog claim, its writer's subject) without the router
+         * keeping a second copy of the pointer. It answers nothing about routing: every
+         * resolver reads @ref egress, which a tombstone nulls. Only the router reads this,
+         * and only for a frame its receiver was handed.
+         */
+        [[nodiscard]] egress_t bound() const noexcept {
+            return bound_egress(egress_.load(std::memory_order_acquire));
+        }
+
+        /** @brief @p w's link pointer and shape, the tombstone bit ignored. */
+        [[nodiscard]] static egress_t bound_egress(std::uintptr_t w) noexcept {
+            // On a target that closed the bus module out, the shape is a CONSTANT false —
+            // @ref add never stamps the bit, so reading it would be reading a bit nothing
+            // sets. Folding it here rather than trusting the optimizer is what lets every
+            // `multi_peer` test become a compile-time false, so the bus arm of each one — the
+            // peer resolution, the peer fallback, the peer-named wiring — is discarded rather
+            // than branched over (#375 deliverable 3). It does NOT delete the descent's
+            // rejected-hit REPLY: `reject_bus_name_hop` answers six other refusals
+            // (`INVALID_PATH`, `NOT_FOUND`) and is emitted byte-identically under both
+            // bindings — measured, not assumed.
+            transport_t* const link = reinterpret_cast<transport_t*>(w & ~kWordBits);
+            if constexpr (!kBusLinks) return egress_t{link, false};
+            return egress_t{link, (w & kBusShapeBit) != 0};
+        }
+
         /**
          * @brief The egress WORD: the link pointer with @ref kBusShapeBit in its low bit.
          *
-         * ATOMIC because teardown nulls it in place while a lock-free forward read may be
+         * ATOMIC because teardown tombstones it in place while a lock-free forward read may be
          * dereferencing the slot (ADR-0063): the reader sees the old word or the tombstoned
          * one, never a tear. ONE word rather than a pointer beside a bool because the two
          * facts are only correct TOGETHER — see @ref egress, and ADR-0063 erratum 6, which
          * supersedes decision 4's separate `std::atomic<bool> multi_peer` (#882).
          *
-         * A tombstone clears the pointer and KEEPS the shape bit: a dead bus mount must
+         * A tombstone sets @ref kRetiredBit and KEEPS the shape bit: a dead bus mount must
          * still reject a residual segment rather than fall through to the local terminus
-         * (ADR-0073 §3), which is what it did while the shape lived in its own field.
+         * (ADR-0073 §3), which is what it did while the shape lived in its own field. It
+         * keeps the pointer too, for `bound()` alone; @ref egress masks it out.
          */
         std::atomic<std::uintptr_t> egress_{0};
     };
@@ -699,14 +745,13 @@ class child_registry_t {
         bool erased = false;
         for_each([&](const child_t& c) {
             if (c.live() && c.name == name) {
-                // Clear the pointer, KEEP the shape bit: a tombstoned BUS mount must still
-                // reject a residual segment rather than fall through to the local terminus
-                // (ADR-0073 §3). Writers are serialized by the caller, so the load/store
-                // pair needs no RMW.
+                // Mark it dead, KEEP the shape bit: a tombstoned BUS mount must still reject a
+                // residual segment rather than fall through to the local terminus (ADR-0073
+                // §3). The pointer stays for `child_t::bound` alone. Writers are serialized by
+                // the caller, so the load/store pair needs no RMW.
                 child_t& slot = const_cast<child_t&>(c);
-                const std::uintptr_t shape =
-                    slot.egress_.load(std::memory_order_relaxed) & kBusShapeBit;
-                slot.egress_.store(shape, std::memory_order_release);
+                slot.egress_.store(slot.egress_.load(std::memory_order_relaxed) | kRetiredBit,
+                                   std::memory_order_release);
                 erased = true;  // keep going: belt-and-braces against any shadow slot
             }
             return false;

@@ -105,6 +105,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `kSlabPool = false` they draw from the static arena, not the platform heap. No behaviour
   change and no rename; the declaration, the allocation reference and the transport comments
   now say so, and show `source_backend_t` over `heap_source()` as the way to reach the real heap.
+- **A link's receive source and catalog kind live on the link
+  ([#1941](https://github.com/avatarsd-llc/libtracer/issues/1941), stage 3 of spec
+  [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938)).** `transport_t` gains
+  `rx_source()` / `set_rx_source()` and `kind()` / `set_kind()`. `fwd_router_t::add_child`
+  records its `rx` argument and its interned `kind` record there instead of on its own
+  per-link receive context, and a frame reads them, and the link's bus facet and its writer's
+  subject, through the link it arrived in. The router's per-link context no longer holds a copy
+  of the link pointer, the source, the kind or the bus facet; the registry slot's binding is
+  the one pointer to the link. `add_child`'s signature and behaviour are unchanged.
+  - A registry tombstone is now a bit in the slot's egress word
+    (`child_registry_t::kRetiredBit`) rather than a null pointer. Every public reader is
+    unchanged: `child_t::egress()`, `link()` and `live()` answer a tombstoned slot exactly as
+    before. The router alone reads the kept pointer, for a frame its receiver was handed.
+  - A deferred AWAIT's reply gathers through the waiter's own block source rather than its
+    link's, so a reply that fires after its link was removed reads nothing through the link.
 - **Breaking: a link cannot exist without its connection vertex
   ([#1940](https://github.com/avatarsd-llc/libtracer/issues/1940), stage 2 of spec
   [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938)).** `fwd_router_t::add_child`

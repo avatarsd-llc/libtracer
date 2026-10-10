@@ -570,14 +570,16 @@ class fwd_router_t {
      * @param link The transport carrying the next/previous hop.
      * @param rx   Optional per-child failable-block source; null uses the router's. Give
      *             each child its OWN when injecting a bounded one — see ADR-0067 3
-     *             for why sharing one across receive threads is the wrong shape.
+     *             for why sharing one across receive threads is the wrong shape. Recorded
+     *             ON THE LINK (`transport_t::set_rx_source`, #1941), whose state it is.
      * @param kind The link's transport-catalog `(kind, role)` (#1650), which every write this
      *             child carries presents to the target's admission filter and handler as
      *             `graph::write_ctx_t::link`. Copied and interned here, ONCE per
-     *             registration, so a frame carries a pointer and pays no lookup; an empty
-     *             `kind.kind` (the default) registers a link with no catalog identity, whose
-     *             writes present a null `link`. `transport_vertex_t` passes its connection's
-     *             declared pair.
+     *             registration, and the interned record recorded on the link
+     *             (`transport_t::set_kind`), so a frame carries a pointer and pays no lookup;
+     *             an empty `kind.kind` (the default) registers a link with no catalog
+     *             identity, whose writes present a null `link`. `transport_vertex_t` passes
+     *             its connection's declared pair.
      * @return false ⇔ @p name is unaddressable, has no connection vertex, or the registry
      *         could not grow — in every case NOTHING was registered.
      *
@@ -1397,68 +1399,6 @@ class fwd_router_t {
         /** @brief The child's mount run — a view of the same slot's text (#1779). */
         std::span<const std::byte> mount_tlv;
         /**
-         * @brief This child's OWN failable-block source; null falls back to the router's.
-         *
-         * ADR-0067 §3: a `pool_source_t` shared across receive threads is measured-worse
-         * than the heap it replaces (ADR-0060 erratum 1 — ~1/15 of its single-thread rate
-         * on 12 cores). Each transport has its own receive thread, so a source parked here
-         * is touched by exactly one — the per-thread shape, obtained by ownership rather
-         * than by a lock. A bounded node gives each child its own slab, which also makes
-         * the bound per-peer: one noisy link cannot starve another's decode.
-         *
-         * Atomic because a re-add REBINDS this ctx (#884) — the store runs on the control
-         * thread while the departing transport's receive thread may still be reading it.
-         * Relaxed on both sides: the value names an object that outlives the router either
-         * way, and the ordering edge for the rebind as a whole is `retired`.
-         */
-        std::atomic<mem::block_source_t*> rx{nullptr};
-        /**
-         * @brief The bus facet this ctx's frames arrive through — null for a
-         *        point-to-point child (#1294).
-         *
-         * The inbound seam tags each frame with a `peer_handle_t`, and the NAME the routing
-         * plane grows into `src` is resolved from it by `bus_link_t::peer_name`. That
-         * resolution needs the link, and the receiver callback is a `{fn, ctx}` pair with no
-         * other capture, so the link is recorded here — once per registration, beside the
-         * child's other resolved-once facts.
-         *
-         * Atomic and relaxed for the same reason `rx` is: a re-add REBINDS this ctx
-         * (#884) from the control thread while the departing transport's receive thread may
-         * still read it, and `retired` carries the ordering edge for the rebind as a whole.
-         */
-        std::atomic<bus_link_t*> bus{nullptr};
-        /**
-         * @brief The registered transport itself — the door the TERMINUS asks for the
-         *        writer's SUBJECT (#375 Part 2).
-         *
-         * `bus` above is the ADDRESSING facet and is null on a FLAT child by construction;
-         * ADR-0082 rules that the subject is the OTHER claim and must be reachable at
-         * `peer_named=false`, so it cannot be asked through that facet. This is the same
-         * object, unfacetted: the terminus asks it which peer the in-flight frame came from
-         * (`transport_t::inbound_peer`) and what subject that peer writes under
-         * (`transport_t::peer_subject`). Both default to "none", so a kind that mints no
-         * per-peer identity leaves the subject at the inbound link's own name.
-         *
-         * Atomic and relaxed for the reason `rx` and `bus` are: a re-add REBINDS this ctx
-         * (#884) from the control thread while the departing transport's receive thread may
-         * still read it, and `retired` carries the ordering edge for the rebind as a whole.
-         */
-        std::atomic<transport_t*> link{nullptr};
-        /**
-         * @brief This child's interned transport-catalog `(kind, role)` — null when it was
-         *        registered without one (#1650).
-         *
-         * The admission context's LINK claim, resolved once per registration beside `link`:
-         * the terminus hands this pointer on with each write it carries, so a filter can tell a
-         * session a `ws` listener accepted from a link this node dialled at the cost of one
-         * relaxed load per frame. It points into `kinds_`, which never frees a record before
-         * the router, so a reader holding it across a re-add reads a live record.
-         *
-         * Atomic and relaxed for the reason `rx`, `bus` and `link` are: a re-add REBINDS this
-         * ctx (#884), and `retired` carries the ordering edge for the rebind as a whole.
-         */
-        std::atomic<const link_kind_t*> kind{nullptr};
-        /**
          * @brief The FLAT tier's resolved-once LINK TOKEN, as `link_id_t::bits()`; `0` ⇒ not
          *        minted yet (#1266 / #1417).
          *
@@ -1474,8 +1414,8 @@ class fwd_router_t {
          *
          * `mutable` and atomic because it is a CACHE written from the frame path through the
          * `const` context the subject seam already hands around, and cleared from the control
-         * thread on a re-add (#884) — the same relaxed discipline `rx`, `bus` and `link` use,
-         * with `retired` carrying the ordering edge for the rebind as a whole.
+         * thread on a re-add (#884) — relaxed, with `retired` carrying the ordering edge for
+         * the rebind as a whole.
          */
         mutable std::atomic<std::uint64_t> link_token{0};
         /**
@@ -1484,9 +1424,8 @@ class fwd_router_t {
          * Allocated once, on the first registration of this name as a bus mount, and never
          * freed before the ctx: a re-add CLEARS it rather than replacing it, so a lock-free
          * reader on the receive thread can never hold a pointer to a freed table. Cleared to
-         * null (not destroyed) when the same name is re-added as a FLAT child, for the reason
-         * `bus` is — a name that used to be a bus mount must not keep answering with the
-         * facet it no longer has.
+         * null (not destroyed) when the same name is re-added as a FLAT child: a name that
+         * used to be a bus mount must not keep answering with the facet it no longer has.
          *
          * OWNED: drawn from the label plane's source and returned by the router's destructor
          * (#1779). A refused table refuses the bus registration, with nothing registered.
@@ -1505,8 +1444,11 @@ class fwd_router_t {
          * sound. (The `mount_tlv` member doc's older aside about an append invalidating a slot
          * pointer describes a shape the registry has not had since it became chunked.)
          *
-         * Written ONCE and never rewritten, which is why it alone stays non-atomic while its
-         * neighbours became atomics for the rebind (#884). A registry slot is keyed by NAME
+         * Written ONCE and never rewritten, which is why it stays non-atomic while the
+         * per-tenancy words around it are atomics for the rebind (#884). It is also how the
+         * receive path reaches the link a frame is inside (`inbound_link`): the link's own
+         * state lives on the link (#1941), and this slot is the binding to it. A registry slot
+         * is keyed by NAME
          * and reused for that name forever — `erase` tombstones the slot in place and `add`
          * rebinds the tombstone rather than appending — so a re-add of this ctx's name always
          * yields the pointer already stored here. `acquire_ctx` asserts exactly that, which is
@@ -1524,9 +1466,9 @@ class fwd_router_t {
          * one layer out: retire in place, skip on read, revive on re-add.
          *
          * **This is the publication edge for a REVIVED node**, the role `next`'s release-store
-         * plays for a fresh one: `acquire_ctx` hides the node, rewrites `rx`, and
-         * `publish_ctx` release-stores `false`; a reader acquire-loads it before reading either
-         * field, so it sees a whole tenancy or skips the node. The narrow window in between is
+         * plays for a fresh one: `acquire_ctx` hides the node, rewrites its per-tenancy words,
+         * and `publish_ctx` release-stores `false`; a reader acquire-loads it before reading
+         * them, so it sees a whole tenancy or skips the node. The narrow window in between is
          * the same one `child_registry_t::add`'s rebind has, and lands in the same place: a
          * mint that straddles it resolves against a vertex whose registration state
          * `graph_t::vertex_slot_at` re-checks, so the answer is `nullopt` and the caller stays
@@ -1567,7 +1509,7 @@ class fwd_router_t {
          * departed VERTEX, this one catches a departed TENANCY.
          *
          * Control-plane written (under `ctl_m_`), frame-path read; relaxed, because `retired`
-         * carries the ordering edge for a rebind as a whole exactly as it does for `rx`.
+         * carries the ordering edge for a rebind as a whole.
          */
         std::atomic<std::uint64_t> label_peer{0};
         /**
@@ -1728,7 +1670,21 @@ class fwd_router_t {
      * write is handed to the graph, never on a forwarding hop.
      */
     [[nodiscard]] static const link_kind_t* terminus_kind(const child_rx_ctx_t* ctx) noexcept {
-        return ctx != nullptr ? ctx->kind.load(std::memory_order_relaxed) : nullptr;
+        transport_t* const link = inbound_link(ctx);
+        return link != nullptr ? link->kind() : nullptr;
+    }
+    /**
+     * @brief The link a frame handed up through @p ctx's receiver is inside — null when there
+     *        is no receive context (the public `on_frame` entries).
+     *
+     * The link's own state (its decode source, its catalog claim, its writer's subject, its
+     * bus facet) is reached through it (#1941); the router keeps no copy. Read off the
+     * registry slot's binding, tombstoned or not (`child_registry_t::child_t::bound`): the
+     * frame is inside the link's receive callback, so the link is alive while it is read.
+     * Only ever called for a ctx a receiver handed in, never for one found by name.
+     */
+    [[nodiscard]] static transport_t* inbound_link(const child_rx_ctx_t* ctx) noexcept {
+        return ctx != nullptr ? ctx->entry->bound().link : nullptr;
     }
     /**
      * @brief Derive the SUBJECT a locally-terminating write is gated under, from the peer
@@ -2166,14 +2122,14 @@ class fwd_router_t {
      * The one-ctx-per-NAME rule, enforced where it can be: an existing ctx for @p name (live
      * or tombstoned) is HIDDEN and rebound; only a name this router has never seen appends,
      * linked onto the chain already retired. The returned ctx is not visible to a reader
-     * until `publish_ctx`, so the caller may finish filling it (`rx`) first.
+     * until `publish_ctx`, so the caller may finish filling it first.
      *
      * Control plane, under `ctl_m_`, after `registry_.add(name)` succeeded: a fresh ctx
      * views that slot's name and mount run.
      *
      * @retval nullptr The label plane's source refused a fresh node — nothing was linked.
      */
-    child_rx_ctx_t* acquire_ctx(std::string_view name, mem::block_source_t* rx);
+    child_rx_ctx_t* acquire_ctx(std::string_view name);
     /**
      * @brief Publish @p ctx to the lock-free readers. Control plane, under `ctl_m_`.
      *
@@ -2305,8 +2261,8 @@ class fwd_router_t {
      * pointer, which is the wrong trade under latency-first.
      */
     [[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {
-        if (ctx == nullptr) return *rx_;
-        mem::block_source_t* const own = ctx->rx.load(std::memory_order_relaxed);
+        transport_t* const link = inbound_link(ctx);
+        mem::block_source_t* const own = link != nullptr ? link->rx_source() : nullptr;
         return own != nullptr ? *own : *rx_;
     }
 
