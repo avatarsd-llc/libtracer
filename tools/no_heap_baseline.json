@@ -6,7 +6,8 @@
     "naming an entry point or by calling, within libtracer.a, one that does (to a fixpoint). A pin",
     "may only be lowered (--repin); a function not pinned here, or one that gained a path or a",
     "count, fails CI. Empty targets are the goal. Most pins are deleting destructors and std",
-    "containers not yet on the seam, and everything that calls them; the PR for #1783 lists them."
+    "containers not yet on the seam, and everything that calls them; the PR for #1783 lists them.",
+    "One-time exception (#2022 slice 1, PR #2077): 14 esp32c6 pins were ADDED by hand, none a new heap call; every added edge ends at a function already pinned on main, directly or through a new destructor stub/lambda thunk: 7 calls the closure could not see through a vtable before (make_poly's recorded ~X for tcp, tcp_server, can, tcp session; send(span)->send(iov) devirtualized by final x3), 4 address references to those thunks, and main's 2 invoke_impl->ctor edges now appear as 3 entries after the factory lambda went out of line. Not a precedent: every other change to this file only lowers pins."
   ],
   "targets": {
     "cortex-m0": {
