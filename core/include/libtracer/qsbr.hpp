@@ -64,6 +64,26 @@
  * - **retire**: bump the epoch (one RMW, control plane only) and scan. A pair retired at
  *   epoch `E` is free once every participant is either offline or online at an epoch `> E`.
  *
+ * @section qsbr_wrap The 31-bit epoch, and why a wrap only delays a free
+ *
+ * The epoch and the online flag share one 32-bit word, so the announce and the exit are plain
+ * 32-bit stores on every target, rv32 included: a 64-bit atomic there is a `libatomic` call
+ * that masks interrupts, three of them per bracket. The epoch therefore wraps, after 2^31
+ * advances, and "after" is decided by serial-number arithmetic (`%epoch_after`): `a` is after
+ * `b` when `(a - b) mod 2^31` is in `[1, 2^30)`. That reads correctly as long as the epochs
+ * compared are less than 2^30 apart.
+ *
+ * The only epochs that can drift that far apart are an open bracket's and the counter's: the
+ * counter advances once per retirement (`graph_t::retire`, `park_release`, an unsubscribe under
+ * `reclaim_qsbr`), never per frame, so the bound is a bracket held open across 2^30 removals.
+ * The writer keeps it from being reached: `%advance` does not bump the epoch while any open
+ * bracket is already `%kStallLag` (2^29) behind it, so the counter stops at most 2^29 plus
+ * the concurrent writers ahead of the oldest open bracket. A stalled counter only DELAYS frees
+ * — a pair retired at the stalled epoch waits for every bracket, the old one included — and
+ * the first advance after that bracket closes moves on. So a bracket held open however long
+ * never makes a pair look free while it is open. A thread counted in `overflow_online` has no
+ * epoch at all, and already blocks every free while it is online.
+ *
  * The scan is `O(kQsbrParticipants)` and lives on the RECLAIM path only. That is the precise
  * difference from the shape #635 rejected, which put a hazard scan on the READ path.
  *
@@ -102,18 +122,49 @@ namespace tr::graph::detail_qsbr {
  * single-core target sets the knob to 0 and the cell collapses onto its payload, because there
  * is no second core for a scan to false-share against.
  */
-inline constexpr std::size_t kCellAlign = kCacheLineBytes > alignof(std::atomic<std::uint64_t>)
+inline constexpr std::size_t kCellAlign = kCacheLineBytes > alignof(std::atomic<std::uint32_t>)
                                               ? kCacheLineBytes
-                                              : alignof(std::atomic<std::uint64_t>);
+                                              : alignof(std::atomic<std::uint32_t>);
 
 /**
  * @brief The flag distinguishing "online at epoch 0" from "offline".
  *
  * The state word is `epoch | kOnlineBit` while dispatching and exactly `0` while quiescent, so
- * a scan tests one word per participant. The bit is the TOP one, leaving 63 bits of epoch —
- * enough that wrap is not a scenario a comment needs to reason about.
+ * a scan tests one word per participant. The bit is the TOP one, leaving 31 bits of epoch,
+ * which wraps; see @ref qsbr_wrap.
  */
-inline constexpr std::uint64_t kOnlineBit = std::uint64_t{1} << 63;
+inline constexpr std::uint32_t kOnlineBit = std::uint32_t{1} << 31;
+
+/** @brief The epoch's 31 bits within the state word and the counter. */
+inline constexpr std::uint32_t kEpochMask = kOnlineBit - 1;
+
+/** @brief Half the epoch space: two epochs this far apart or more have no order. */
+inline constexpr std::uint32_t kEpochWindow = std::uint32_t{1} << 30;
+
+/** @brief How far the counter may run ahead of an open bracket before @ref advance stalls. */
+inline constexpr std::uint32_t kStallLag = std::uint32_t{1} << 29;
+
+/**
+ * @brief Is epoch @p a strictly after epoch @p b, modulo 2^31 (see @ref qsbr_wrap)?
+ *
+ * Two epochs @ref kEpochWindow or more apart compare as NOT after in both directions, so a
+ * reader the counter has lapped is never read as past a retirement: the free waits.
+ */
+[[nodiscard]] constexpr bool epoch_after(std::uint32_t a, std::uint32_t b) noexcept {
+    const std::uint32_t d = (a - b) & kEpochMask;
+    return d != 0 && d < kEpochWindow;
+}
+
+static_assert(epoch_after(1, 0) && !epoch_after(0, 0) && !epoch_after(0, 1),
+              "epoch_after is a strict order on nearby epochs");
+static_assert(epoch_after(0, kEpochMask) && !epoch_after(kEpochMask, 0),
+              "across the wrap, 0 follows 2^31 - 1");
+static_assert(epoch_after(kEpochWindow - 1, 0) && !epoch_after(kEpochWindow, 0) &&
+                  !epoch_after(0, kEpochWindow),
+              "epochs half the space apart have no order, so neither reads as past the other");
+static_assert(epoch_after(kOnlineBit | 5, 4) == epoch_after(5, 4),
+              "the online bit and the counter's 32nd bit are outside the compare");
+static_assert(kStallLag < kEpochWindow, "the stall must engage before the compare window ends");
 
 /** @brief "This thread has not claimed a participant index." */
 inline constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
@@ -126,11 +177,9 @@ inline constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
  * a line against a sibling that is also dispatching.
  */
 struct alignas(kCellAlign) cell_t {
-    /** @brief `epoch | kOnlineBit`, or 0 when quiescent. 64-bit with @ref control_t::epoch,
-     *         whose width it carries (#1697) — a store per dispatch, never an RMW. On rv32
-     *         that store is an `__atomic_store_8` call; `reclaim_qsbr_t` is the many-core
-     *         host policy, and an MCU keeps the default `reclaim_local_t`. */
-    std::atomic<std::uint64_t> state{0};
+    /** @brief `epoch | kOnlineBit` (31 bits of epoch), or 0 when quiescent — a plain 32-bit
+     *         store per bracket, never an RMW, on every target. */
+    std::atomic<std::uint32_t> state{0};
     std::atomic<bool> claimed{false}; /**< @brief Whether a live thread owns this index. */
 };
 
@@ -157,7 +206,7 @@ struct retired_slot_t {
     std::atomic<slot_state_t> state{slot_state_t::EMPTY}; /**< @brief The handoff. */
     void* ctx = nullptr;                                  /**< @brief The subscriber's context. */
     void (*release)(void*) = nullptr;                     /**< @brief Its release hook. */
-    std::uint64_t epoch = 0;                              /**< @brief The epoch it retired at. */
+    std::uint32_t epoch = 0;                              /**< @brief The epoch it retired at. */
 };
 
 /**
@@ -179,11 +228,12 @@ struct alignas(kCellAlign) control_t {
      * state word being exactly 0, and an online participant always sets @ref kOnlineBit, so
      * online-at-epoch-0 is already distinct from offline.
      *
-     * 64-bit ON PURPOSE (#1697): the grace period compares epochs by ORDER, so a wrap would
-     * free a pair a reader still holds; 2^64 advances cannot happen, 2^32 can. The advance is
+     * 32-bit and wrapping; only its low 31 bits are compared, by @ref epoch_after. #1697 made
+     * it 64-bit because an ORDER compare would read a wrapped epoch as old; the serial compare
+     * and @ref advance's stall make a wrap delay a free instead (@ref qsbr_wrap). The advance is
      * a control-plane RMW (once per retirement), not a per-dispatch one.
      */
-    std::atomic<std::uint64_t> epoch{0};
+    std::atomic<std::uint32_t> epoch{0};
     /** @brief How many @ref retired_slot_t entries are occupied — the drain path's early-out. */
     std::atomic<std::uint32_t> live{0};
     /** @brief Dispatching threads that could not claim a cell; see @ref participant_t::index. */
@@ -291,8 +341,8 @@ inline void go_online() noexcept {
     // direction — it can only make a scan decide this thread is not yet past a retirement it
     // is in fact past, which defers a free rather than permitting one. The store is seq_cst
     // for the Dekker argument in this file's header.
-    const std::uint64_t e = r.ctl.epoch.load(std::memory_order_relaxed);
-    r.cells[idx].state.store(e | kOnlineBit, std::memory_order_seq_cst);
+    const std::uint32_t e = r.ctl.epoch.load(std::memory_order_relaxed);
+    r.cells[idx].state.store((e & kEpochMask) | kOnlineBit, std::memory_order_seq_cst);
 }
 
 /**
@@ -335,11 +385,28 @@ inline void enter() noexcept {
  * @brief Close the epoch after a writer's unpublish: what the writer parks now is free once
  *        @ref all_quiescent_past answers true for the value returned.
  *
- * `seq_cst`, and load-bearing for the same reason @ref retire's bump is: this RMW is the full
- * barrier between the caller's unpublish and any later scan.
+ * `seq_cst`, and load-bearing for the same reason @ref retire's bump is: this RMW (or, when
+ * stalled, the fence) is the full barrier between the caller's unpublish and any later scan.
+ *
+ * Does not bump while an open bracket is @ref kStallLag or more behind the counter, and
+ * answers the current epoch instead: what is parked then waits for that bracket too
+ * (@ref qsbr_wrap). The check is one relaxed load per participant, on the control plane.
  */
-[[nodiscard]] inline std::uint64_t advance() noexcept {
-    return registry().ctl.epoch.fetch_add(1, std::memory_order_seq_cst);
+[[nodiscard]] inline std::uint32_t advance() noexcept {
+    registry_t& r = registry();
+    const std::uint32_t now = r.ctl.epoch.load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < kQsbrParticipants; ++i) {
+        const std::uint32_t s = r.cells[i].state.load(std::memory_order_relaxed);
+        // A cell AHEAD of `now` (a concurrent bump landed after the load) reads as a lag past
+        // the window and is not a stall; a cell really behind is never more than kStallLag
+        // plus the concurrent writers behind, far inside it.
+        const std::uint32_t lag = (now - s) & kEpochMask;
+        if (s != 0 && lag >= kStallLag && lag < kEpochWindow) {
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            return now;
+        }
+    }
+    return r.ctl.epoch.fetch_add(1, std::memory_order_seq_cst);
 }
 
 /**
@@ -349,13 +416,13 @@ inline void enter() noexcept {
  * opening fence is what makes this sound for a caller that did NOT just bump the epoch (a
  * drainer at a quiescent point); it is below every early-out on the dispatch path.
  */
-[[nodiscard]] [[gnu::noinline]] inline bool all_quiescent_past(std::uint64_t e) noexcept {
+[[nodiscard]] [[gnu::noinline]] inline bool all_quiescent_past(std::uint32_t e) noexcept {
     std::atomic_thread_fence(std::memory_order_seq_cst);
     registry_t& r = registry();
     if (r.ctl.overflow_online.load(std::memory_order_seq_cst) != 0) return false;
     for (std::size_t i = 0; i < kQsbrParticipants; ++i) {
-        const std::uint64_t s = r.cells[i].state.load(std::memory_order_seq_cst);
-        if (s != 0 && (s & ~kOnlineBit) <= e) return false;
+        const std::uint32_t s = r.cells[i].state.load(std::memory_order_seq_cst);
+        if (s != 0 && !epoch_after(s, e)) return false;
     }
     return true;
 }
@@ -423,7 +490,7 @@ inline bool retire(void* ctx, void (*release)(void*)) noexcept {
     registry_t& r = registry();
     // seq_cst, and load-bearing: this RMW is the full barrier standing between the caller's
     // `clear_edge` and the scan below, which is the writer half of the Dekker pairing.
-    const std::uint64_t e = r.ctl.epoch.fetch_add(1, std::memory_order_seq_cst);
+    const std::uint32_t e = advance();
     if (all_quiescent_past(e)) {
         release(ctx);
         return true;
