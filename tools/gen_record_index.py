@@ -36,8 +36,6 @@ REF_RE = re.compile(r"^(ADR|RFC)-(\d{4})$")
 GAPS = {
     ("RFC", 12): "Used by the dtype/direction draft of PR #416, which was closed unmerged.",
     ("RFC", 15): "Used by PR #446, withdrawn under the type-agnosticism gate.",
-    ("RFC", 35): "Held for RFC-0035 (`:subscribers[N]` as one surface), open in PR #2086, which "
-    "stacks on RFC-0036. The entry goes when that record merges.",
 }
 GAP_NOTE = (
     "The RFC-0012 and RFC-0015 gaps are not reusable: each number carries history in a "
