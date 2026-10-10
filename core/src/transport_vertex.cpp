@@ -237,9 +237,11 @@ void parse_config(const tlv_node_t* config, conn_settings_t& s) {
  * shut-down object. If the retire or the park is refused, the block and the link stay for the
  * graph's lifetime rather than being freed under such a call.
  *
- * Drawn from the graph's table source with the connection, so removal allocates nothing. For
- * a bus link it is also the `:children[]` hook's context (RFC-0028 D10 `{fn, ctx}`): it lives
- * exactly as long as the link, and names the graph whose sources a listing draws (#2052).
+ * Reserved from the graph's table source when the connection is created, so a removal never
+ * needs to allocate one; its other draws (the retire's key, the release park) degrade to
+ * keeping the link if refused.
+ * For a bus link it is also the `:children[]` hook's context (RFC-0028 D10 `{fn, ctx}`): it
+ * lives exactly as long as the link, and names the graph whose sources a listing draws (#2052).
  */
 struct transport_vertex_t::conn_park_t {
     const graph::graph_t* graph;              // the owning graph: this block's source
@@ -945,8 +947,8 @@ void transport_vertex_t::provide_link(std::string_view module, std::string_view 
 
 namespace {
 /**
- * @brief A BUS connection vertex's `:children[]` answer, read through its listing context
- *        (`bus_listing_t::children`): @p bus's currently-audible peers as a POINT of
+ * @brief A BUS connection vertex's `:children[]` answer, read through its connection's park
+ *        (`conn_park_t::children`): @p bus's currently-audible peers as a POINT of
  *        POINT{NAME <peer>} members, built on every read.
  *
  * Drawn as the graph's own `:children[]` door draws (#2052): the scratch for one read from the
