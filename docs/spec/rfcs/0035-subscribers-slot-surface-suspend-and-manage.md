@@ -236,6 +236,10 @@ once the first edge is resumed. Leaving the state alone keeps the duplicate chec
 a resume that bypasses §7's rule for someone else's edge. The appender learns the identity and
 can read `[N]` and toggle it, if §7 lets it.
 
+Across holders this means: when B appends a duplicate of A's suspended edge, B gets A's identity
+and receives nothing, and B cannot resume an edge it does not hold. B sees why by reading `[N]`,
+which shows bit 9 set.
+
 The mask is bit 9 alone. `one_shot` (bit 8) and every other bit still take part in the
 comparison, so a one-shot append beside a standing edge to the same target is not a duplicate.
 
@@ -249,12 +253,10 @@ the **owner** is the node's local host, the empty caller context (RFC-0036 §3.3
 
 ### 7.1 Who holds an edge
 
-A slot's **holder** is the subject its admission was made under: the writer of the append (RFC-0021
-§E, "the gate is the writer's"), not necessarily the target. A replace makes the replacer the
-holder. An edge admitted by a local host call is held by the owner. Two holders are compared by
-the node's identity lookup, resolving both caller contexts at check time, or byte for byte when
-no resolver is installed (RFC-0036 §12 Q1). An edge whose stored context no longer resolves is
-managed by the owner only.
+A slot's **holder**, and the test that decides whether a caller is it, are defined by
+[RFC-0036](0036-two-rights-fields-are-paths-under-their-vertex.md) §3.4 ("The holder test"),
+which is the normative home of the rule. This RFC adds nothing to it. The toggle arm of §4.4 runs
+the same test as the clear and the replace arms.
 
 ### 7.2 The gate per operation
 
