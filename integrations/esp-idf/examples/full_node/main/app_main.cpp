@@ -526,9 +526,18 @@ extern "C" void app_main(void) {
 
     // Real device: park in the publish loop — every write fans out to whatever
     // remote subscribers are bound (a LAN host can dial the same listener).
+    //
+    // The same loop is this node's `collect()` point. A peer can create and remove connections
+    // through `/net/<module>/conn`, and each removal shuts the link down and parks it (with its
+    // socket, on lwIP) until the graph's next `collect()`: a node that never collects keeps
+    // every removed link, and lwIP's few sockets run out. `collect()` must run where no call is
+    // still inside a removed link. Here that is between ticks: this loop's own write has
+    // returned, and the only other callers, the receive threads, reach a removed link only in
+    // a forward that resolved it before its removal, which is one bounded send, not a wait.
     std::uint32_t v = 23;
     while (true) {
         (void)dev.write_sensor(v++);
         std::this_thread::sleep_for(1s);
+        dev.graph.collect();
     }
 }

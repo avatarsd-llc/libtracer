@@ -763,10 +763,12 @@ class transport_t {
      *        @ref start_receiving.
      *
      * When this returns, no inbound frame is delivered any more and the link's own threads
-     * have been joined; its connections are closed, so a later send is shed (counted where
-     * the link counts sheds) rather than reaching a peer. The object itself stays valid, and
-     * every call on it stays safe, until it is destroyed. That is the point: an owner that
-     * removes a link while a forward that looked it up may still be on its way into it shuts
+     * have been joined. The object itself stays valid, and every call on it stays safe, until
+     * it is destroyed. What a later send does is the link's: the stream links (TCP,
+     * WebSocket) have closed their connections and shed it; UDP on a POSIX host has released
+     * its socket and the send fails; UDP over lwIP, and CAN, keep their socket or bus until
+     * destruction, so a send there still leaves (see each override). That is the point: an owner
+     * that removes a link while a forward that looked it up may still be on its way into it shuts
      * it down at removal and destroys it later, where no such call can remain.
      * `%transport_vertex_t` does that, destroying an owned link at the graph's next
      * `collect()`.

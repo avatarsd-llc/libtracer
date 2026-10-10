@@ -22,6 +22,13 @@
 namespace tr::net {
 
 namespace {
+/** @brief A send to a shut socket must not raise SIGPIPE (platforms without the flag use 0). */
+#ifndef MSG_NOSIGNAL
+constexpr int MSG_NOSIGNAL = 0;
+#endif
+}  // namespace
+
+namespace {
 /** @brief Pack a peer endpoint as (ip << 16) | port; 0 means "no peer known yet". */
 [[nodiscard]] std::uint64_t pack_peer(std::uint32_t ip_net, std::uint16_t port_host) noexcept {
     return (static_cast<std::uint64_t>(ip_net) << 16) | port_host;
@@ -106,10 +113,25 @@ udp_transport_t::~udp_transport_t() {
 
 void udp_transport_t::shut_down() {
     stop_and_join();
-    // Shut, not closed: `send` reads `fd_` without a lock, so closing it here could let its
-    // number be reused under a send still in flight. Shut, the socket refuses every later
-    // send (EPIPE, counted as a drop) and the descriptor goes with the object.
-    if (fd_ >= 0) (void)::shutdown(fd_, SHUT_RDWR);
+    if (fd_ < 0) return;
+        // `send` reads `fd_` without a lock, so the descriptor NUMBER must stay occupied until the
+        // object goes; only the socket behind it is released here.
+#if defined(ESP_PLATFORM)
+    // lwIP has no `dup2`, and `shutdown` of a UDP socket is EOPNOTSUPP there: the socket, and
+    // its port, stay until the object is destroyed, and a send that reaches it still leaves.
+    (void)::shutdown(fd_, SHUT_RDWR);
+#else
+    // `dup2` swaps a socket that can send nothing (an unbound AF_UNIX datagram socket, which
+    // refuses an AF_INET destination) in over the UDP one, closing it in the same step: its
+    // port is free at once, and a send still in flight gets an error, never another socket.
+    const int dead = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (dead >= 0 && ::dup2(dead, fd_) >= 0) {
+        ::close(dead);
+        return;
+    }
+    if (dead >= 0) ::close(dead);
+    (void)::shutdown(fd_, SHUT_RDWR);  // no spare descriptor: shut, and close at destruction
+#endif
 }
 
 void udp_transport_t::send(std::span<const std::byte> frame) {
@@ -122,7 +144,8 @@ void udp_transport_t::send(std::span<const std::byte> frame) {
     peer.sin_family = AF_INET;
     peer.sin_addr.s_addr = static_cast<std::uint32_t>(p >> 16);
     peer.sin_port = htons(static_cast<std::uint16_t>(p & 0xFFFF));
-    ::sendto(fd_, frame.data(), frame.size(), 0, reinterpret_cast<sockaddr*>(&peer), sizeof(peer));
+    ::sendto(fd_, frame.data(), frame.size(), MSG_NOSIGNAL, reinterpret_cast<sockaddr*>(&peer),
+             sizeof(peer));
 }
 
 void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
@@ -169,7 +192,7 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     msg.msg_namelen = sizeof(peer);
     msg.msg_iov = vec;
     msg.msg_iovlen = n;
-    ::sendmsg(fd_, &msg, 0);
+    ::sendmsg(fd_, &msg, MSG_NOSIGNAL);
 }
 
 void udp_transport_t::run() {

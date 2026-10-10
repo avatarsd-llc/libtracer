@@ -27,7 +27,8 @@ notification).
   stale grant cannot outlive the retirement.
 - **`collect()` is the embedder's, and is not needed here.** A retired vertex parks its
   detached value seam iff a handler was installed at registration; these vertices carry none,
-  so nothing is parked. A bus node with peer churn must call `graph_t::collect()`, and
+  so nothing is parked. A bus node with peer churn must call `graph_t::collect()`, so must a
+  node whose transport connections are removed (each removal parks its link), and
   `graph_t::parked_seam_count()` makes an uncollected park observable
   ([reference 02](../reference/02-graph-model.md) §Vertex lifecycle).
 

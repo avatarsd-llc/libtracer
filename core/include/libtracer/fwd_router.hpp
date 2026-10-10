@@ -606,7 +606,15 @@ class fwd_router_t {
      * *socket* and self-heals, so evicting its registry entry on a down notification
      * would permanently unroute a link that is only reconnecting. Call this one when the
      * connection itself is gone — and call it BEFORE destroying the `transport_t`, so no
-     * forward can resolve a freed object.
+     * NEW forward resolves it.
+     *
+     * **The link must outlive the call by a grace point.** A forward that resolved the child
+     * just before this call may still be inside the link's `send` when it returns, so the
+     * caller must not destroy the link yet: keep it valid until the graph's next
+     * `graph_t::collect()`, the embedder's quiescent point, which on a threaded node must also
+     * be one where no forward is inside a link. @ref transport_t::shut_down stops the link
+     * at once without destroying it. `tr::net::transport_vertex_t` does exactly this for the
+     * links it owns; a link the app wired here itself is the app's to keep.
      *
      * The child's receiver ctx is TOMBSTONED, not unlinked (#884): it stays on the published
      * chain — a lock-free reader may be walking it right now — but stops answering every

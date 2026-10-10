@@ -484,6 +484,41 @@ void test_ephemeral_bind_owns_its_port() {
     ::close(intruder);
 }
 
+/** @brief `shut_down()` frees the port at once and leaves a valid object a send cannot reach. */
+void test_shut_down_frees_the_port() {
+    std::printf("UDP transport — shut_down() releases the socket and keeps the object:\n");
+    std::atomic<int> got{0};
+    tr::net::udp_transport_t d(0, "", 0);
+    check(d.ok(), "the receiver bound an ephemeral port");
+    auto rx = [&](std::span<const std::byte>) { got.fetch_add(1); };
+    d.set_receiver(rx);
+    const std::uint16_t port = d.local_port();
+    d.shut_down();
+    d.shut_down();  // idempotent
+
+    // The port is free: a plain socket (no SO_REUSEADDR) binds it while `d` still exists.
+    const int fresh = ::socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in at{};
+    at.sin_family = AF_INET;
+    at.sin_addr.s_addr = htonl(INADDR_ANY);
+    at.sin_port = htons(port);
+    check(::bind(fresh, reinterpret_cast<sockaddr*>(&at), sizeof(at)) == 0,
+          "the shut-down link's port can be bound again before it is destroyed");
+    // A send through the shut-down object goes nowhere, and nothing is delivered to it.
+    const std::vector<std::byte> frame(32, std::byte{0x5A});
+    d.send(std::span<const std::byte>(frame));
+    const int s = ::socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in to = at;
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    (void)::sendto(s, frame.data(), frame.size(), 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
+    std::array<std::byte, 64> buf{};
+    check(wait_until([&] { return ::recv(fresh, buf.data(), buf.size(), MSG_DONTWAIT) > 0; }, 10s),
+          "a datagram to the port reaches the new socket, not the shut-down link");
+    check(got.load() == 0, "and the shut-down link delivers nothing");
+    ::close(s);
+    ::close(fresh);
+}
+
 /**
  * @brief ADR-0042 end to end: two nodes over real UDP with owning view delivery and a share
  *        threshold the payload clears (RFC-0028 §5.3) — the WRITE lands ZERO-copy (the graph's
@@ -626,6 +661,7 @@ int main() {
     test_settings_max_frame();
     test_span_scratch_bounded_by_backend();
     test_ephemeral_bind_owns_its_port();
+    test_shut_down_frees_the_port();
     test_two_nodes_zero_copy_store();
     test_tx_drop_counted();
     return tr::testing::summary("udp");
