@@ -594,7 +594,9 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
       ctl_(&src),
       values_(sub_pool(src, mem::value_source())),
       tables_(&own_tables_.or_root(src)),
-      parked_releases_(own_tables_.or_root(src)) {
+      parked_releases_(own_tables_.or_root(src)),
+      aged_releases_(own_tables_.or_root(src)),
+      aged_seams_(own_tables_.or_root(src)) {
     // The process-default FOLD, resolved in the BODY: `&src_backend_` is only taken once its
     // lifetime has started. A few stores at construction, never read again.
     // On the host default root (#1777) values and rings draw from the value sub-pool and
@@ -1232,9 +1234,9 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
 }
 
 /**
- * @brief Free the parked value seams, then run the parked releases — the embedder-called
- *        other end of retirement's park (#576). The whole point is WHERE the free happens,
- *        so read the two scopes below.
+ * @brief Free the value seams parked before the previous call, then run the releases parked
+ *        before it — the embedder-called other end of retirement's park (#576). The whole
+ *        point is WHERE the free happens, so read the two scopes below.
  */
 void graph_t::collect() {
     mem::block_array_t<value_handlers_t*> dead(retired_seams_.seams.source());
@@ -1244,9 +1246,13 @@ void graph_t::collect() {
         // retire_subtree's append, and it is all it is here for — a free under it would put
         // arbitrary user-callback destructor code inside the graph's widest lock, which is
         // the mutual-wait every earlier design round died on.
+        // Two generations: this call frees what was parked before the PREVIOUS call, and
+        // ages what was parked since. Four swaps, nothing drawn.
         const std::unique_lock lock(map_mutex_);
-        std::swap(dead, retired_seams_.seams);
-        std::swap(released, parked_releases_.releases);
+        std::swap(dead, aged_seams_.seams);
+        std::swap(aged_seams_.seams, retired_seams_.seams);
+        std::swap(released, aged_releases_.releases);
+        std::swap(aged_releases_.releases, parked_releases_.releases);
     }
     // Freed HERE — outside every graph lock, on the caller's thread, at a moment the
     // embedder chose. So a seam callback's destructor may re-enter the graph, and a slow
@@ -1264,7 +1270,7 @@ result_t<void> graph_t::park_release(retired_callback_t release) {
 
 std::size_t graph_t::parked_seam_count() const {
     const std::shared_lock lock(map_mutex_);
-    return retired_seams_.seams.size();
+    return retired_seams_.seams.size() + aged_seams_.seams.size();
 }
 
 // ---- The per-link departure index's doors (#1071). The index itself — its slots, the

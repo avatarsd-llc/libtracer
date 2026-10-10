@@ -1263,8 +1263,8 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     //     reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
     //     half-built connection tears down cleanly too.
     //  4. Shut the owned socket down, which joins its recv thread — the second join, and the
-    //     second reason phase 2 exists — and park it until the graph's next collect(), so a
-    //     forward or a listing already on its way into it finds a valid object. A provided
+    //     second reason phase 2 exists — and park it until the graph's second collect() after this,
+    //     so a forward or a listing already on its way into it finds a valid object. A provided
     //     link is borrowed and left untouched.
     //
     // #576: step 3 is the peer-driven append site of the value-seam park — but only for a

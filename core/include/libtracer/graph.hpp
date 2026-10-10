@@ -1350,13 +1350,24 @@ class graph_t {
     [[nodiscard]] bool acl_enforced() const noexcept { return subject_lookup_.installed(); }
 
     /**
-     * @brief Free every value seam @ref retire parked — the EXPLICIT collector (#576).
+     * @brief Free the value seams @ref retire parked before the PREVIOUS call — the EXPLICIT
+     *        collector (#576).
      *
      * @ref retire detaches a vertex's value seam and **parks** it: the seam is read
      * lock-free, so the retiring thread cannot free the block a concurrent reader may
      * still be dereferencing. Parking alone has no other end, so a node that retires
      * seam-bearing vertices repeatedly grows the park forever. This is that other end, and
      * it is the embedder's call, not the library's.
+     *
+     * **Two generations: at least one interval of grace.** A call frees only what was parked
+     * before the previous call, and ages what was parked since. So every retired seam and
+     * every @ref park_release waits at least one whole interval between two calls, however
+     * close to a call its retire landed. A node that calls this from a quiet point (below)
+     * loses nothing but memory held one interval longer. On a threaded node that cannot
+     * pause its receive threads, it is a BOUND, not a proof: a call that entered a seam or a
+     * removed link before its removal and is still inside it when the second call after the
+     * removal runs (a send stalled for a whole interval) still finds its context freed. Pick
+     * the interval with that in mind; the cost is one interval of retained memory.
      *
      * **Which vertices park — handler PRESENCE, never role.** `vertex_t::adopt_identity`
      * allocates the `value_handlers_t` iff at least one of `on_read`, `on_write`,
@@ -1378,16 +1389,17 @@ class graph_t {
      * call destroys. Destroying a `tr::net::transport_vertex_t` also parks one seam per
      * declared module's `<module>/conn` creator endpoint, plus one release for that
      * endpoint's context. So a node whose connections come and go needs a quiescent point,
-     * or the park grows by that much per teardown until the graph goes; until this call, a
-     * removed link holds its object (and, for UDP, its descriptor).
+     * or the park grows by that much per teardown until the graph goes; until the second
+     * call after its removal, a removed link holds its object (and, over lwIP, its socket).
      *
      * The same quiescent point covers the router: on a threaded node it must also be one
      * where no forward is inside a link, which the points below already are.
      *
      * @warning **The caller MUST call this from a point where no lock-free reader holds a
-     *          value seam.** The library cannot know that moment — a reader holds the raw
-     *          seam pointer across the user callback it invokes — so naming it is an API
-     *          obligation this method hands to the embedder. On a single-threaded node any
+     *          value seam it entered before the previous call.** The library cannot know
+     *          that moment — a reader holds the raw seam pointer across the user callback
+     *          it invokes — so naming it is an API obligation this method hands to the
+     *          embedder (the two generations above only widen it). On a single-threaded node any
      *          point between operations qualifies. On a threaded node, a point where the
      *          graph is quiescent for reads does: after the transport plane's receive
      *          threads are joined or paused, or on the one thread that runs every graph
@@ -1408,7 +1420,8 @@ class graph_t {
      * Every release parked by @ref park_release runs here too, after the seams are freed and
      * on the same thread, outside every graph lock.
      *
-     * Idempotent, and a no-op when nothing is parked. Not itself a reader-safety
+     * A no-op when nothing is parked; two calls with nothing retired between them empty
+     * the park. Not itself a reader-safety
      * mechanism: it neither waits for nor detects readers. An embedder that never calls it
      * keeps the pre-#576 behaviour — the park grows without bound — which @ref
      * parked_seam_count makes observable.
@@ -1424,15 +1437,17 @@ class graph_t {
     void collect();
 
     /**
-     * @brief Hand the graph a retired seam's context to release at the next @ref collect.
+     * @brief Hand the graph a retired seam's context to release at the second @ref collect
+     *        after this call.
      *
      * The other half of @ref retire for a seam owner that is going away. Retiring stops new
      * calls through the seam, but a reader that loaded it before the retire may still be on
      * its way into the callback, holding the context the owner would free — and only the
-     * point where @ref collect frees the parked seams is past every such reader. So an owner
+     * point where @ref collect frees the parked seams is past such a reader. So an owner
      * that retires its vertices and must then free their context parks the free here instead:
-     * @p release runs exactly once, `release.release(release.ctx)`, on the thread that calls
-     * @ref collect, outside every graph lock, after that call's parked seams are freed. A
+     * @p release runs exactly once, `release.release(release.ctx)`, on the thread that makes
+     * the second @ref collect call after this one, outside every graph lock, after the seams
+     * that call frees. A
      * release still parked when the graph is destroyed runs in its teardown, with the same
      * caveat as a parked seam there: it must not re-enter the graph.
      *
@@ -1452,7 +1467,8 @@ class graph_t {
      * has a number it can watch (a health field, an assert in a soak test) instead of a
      * silent, peer-driven leak. Grows by one per retired vertex that BORE a value seam —
      * i.e. one that had any of `on_read` / `on_write` / `on_children` installed at
-     * registration, whatever its `role_t` — and drops to zero on @ref collect. A
+     * registration, whatever its `role_t` — and drops to zero after two @ref collect calls
+     * with nothing retired between them (each call frees the older of two generations). A
      * retired vertex with no value seam parks nothing, including a `role_t::HANDLER` one
      * registered with an empty @ref handlers_t. On the transport plane that means one per
      * `/net/<module>/<name>` identity vertex whose link exposes a bus facet (CAN, or a
@@ -3840,6 +3856,12 @@ class graph_t {
         }
     };
     release_park_t parked_releases_; /**< @brief See `release_park_t`. */
+    // The older generation (#576): what was parked before the previous collect(). collect()
+    // frees these and ages the current two into them, so everything parked waits at least
+    // one full interval between two calls. Declared last, so the older generation is freed
+    // first when the graph goes.
+    release_park_t aged_releases_; /**< @brief Releases parked before the previous collect. */
+    seam_park_t aged_seams_;       /**< @brief Seams parked before the previous collect. */
 };
 
 }  // namespace tr::graph

@@ -63,12 +63,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`graph_t::park_release`: free a retired seam's context once no reader can reach it.**
   Retiring a vertex stops new calls through its seam, but a call that loaded the seam just
   before the retire can still arrive. `park_release` takes the ADR-0080 `retired_callback_t`
-  and runs it once, at the next `graph_t::collect()` (or in the graph's teardown), after that
-  call's parked seams are freed. It answers `BACKPRESSURE` when the park cannot grow, and then
+  and runs it once, at the second `graph_t::collect()` after it (or in the graph's teardown),
+  after the seams that call frees. It answers `BACKPRESSURE` when the park cannot grow, and then
   the context must stay valid for the graph's lifetime.
 
 ### Changed
 
+- **`graph_t::collect()` frees what was parked before the PREVIOUS call.** It keeps two
+  generations of retired value seams and parked releases: a call frees the older one and
+  ages the newer, so everything parked waits at least one whole interval between two calls,
+  however close to a call it was parked. A node that collects at a quiet point loses only
+  memory held one interval longer; two calls with nothing retired between them empty the
+  park, and `parked_seam_count()` counts both generations. No API change, and nothing on the
+  read, write or forward path changes. On a threaded node that cannot pause its receive
+  threads the interval is a bound, not a proof.
 - **Docs: `heap_backend()` and a null `memory.io` no longer promise "the heap"
   ([#2051](https://github.com/avatarsd-llc/libtracer/issues/2051)).** On a build with
   `kSlabPool = false` they draw from the static arena, not the platform heap. No behaviour
@@ -120,19 +128,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   connection (or destroying the transport vertex) calls the link's `shut_down()` once it is
   un-routed and its vertex retired: no frame is delivered after that and its threads are
   joined. The link object is then parked with `graph_t::park_release` and destroyed at the
-  next `collect()`, so a forward or a `:children[]` listing that reached it just before the
-  removal finds a valid object. If the retire or the park is refused (an exhausted table
+  second `collect()` after the removal, so a forward or a `:children[]` listing that reached
+  it just before the removal finds a valid object for at least one whole collect interval. If the retire or the park is refused (an exhausted table
   source), the shut-down link is kept for the graph's lifetime. Each connection reserves its
   park block from the graph's table source at creation.
   - **Action for embedders:** a node whose connections are removed, including by a peer
     through `<module>/conn`, must call `graph_t::collect()` at a quiescent point (no call
     still inside a removed link). Without it every removed link, and on lwIP its socket, is
     kept until the graph is destroyed. The ESP-IDF `full_node` example now collects on its
-    publish tick.
-  - The injected `rx_backend` and `egress_src` must now outlive the graph's next
+    publish tick. Its receive tasks keep running meanwhile, so there the two-generation
+    grace below is a bound (a call stalled inside a removed link for a whole tick), not a
+    proof.
+  - The injected `rx_backend` and `egress_src` must now outlive the graph's second
     `collect()` after a removal (or the graph), not just the transport vertex. A link given
     through `provide_link` or wired with `fwd_router_t::add_child` must likewise stay valid
-    until the `collect()` after its removal; `shut_down()` stops it at once.
+    until the second `collect()` after its removal; `shut_down()` stops it at once.
 - **`udp_transport_t`: an ephemeral bind owns its port
   ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
   set `SO_REUSEADDR`, which lets the kernel give a UDP socket a port another reuse-enabled

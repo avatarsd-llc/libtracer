@@ -610,9 +610,10 @@ class fwd_router_t {
      *
      * **The link must outlive the call by a grace point.** A forward that resolved the child
      * just before this call may still be inside the link's `send` when it returns, so the
-     * caller must not destroy the link yet: keep it valid until the graph's next
-     * `graph_t::collect()`, the embedder's quiescent point, which on a threaded node must also
-     * be one where no forward is inside a link. @ref transport_t::shut_down stops the link
+     * caller must not destroy the link yet: keep it valid until the graph's second
+     * `graph_t::collect()` after this call (each call frees the older of two generations),
+     * the embedder's quiescent point, which on a threaded node must also be one where no
+     * forward is inside a link. @ref transport_t::shut_down stops the link
      * at once without destroying it. `tr::net::transport_vertex_t` does exactly this for the
      * links it owns; a link the app wired here itself is the app's to keep.
      *
