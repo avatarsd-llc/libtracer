@@ -134,6 +134,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [RFC-0031](spec/rfcs/0031-bus-session-anchors-are-children-of-their-door.md) | Bus-session anchors are child vertices under their door: one walk and one gate reach a session, send-through is directed | accepted |  | [RFC-0020](spec/rfcs/0020-bus-name-not-a-routable-next-hop.md) (part), [RFC-0029](spec/rfcs/0029-one-path-primitive.md) (part) |
 | [RFC-0032](spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) | Delete `COMPACT` and the per-link handle tables: every stream rides the chain, and no hop holds state for it | accepted |  | [ADR-0035](adr/0035-implementing-rfc-0004-remote-operation-addressing.md) (part), [ADR-0038](adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) (part), [ADR-0062](adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md), [RFC-0002](spec/rfcs/0002-protocol-error-model.md) (part), [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part), [RFC-0010](spec/rfcs/0010-owner-app-fields-and-schema.md) (part), [RFC-0029](spec/rfcs/0029-one-path-primitive.md) (part) |
 | [RFC-0033](spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) | A minimal Noise link binding: NNpsk0 over a datagram carrier | accepted |  | [ADR-0086](adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) (part) |
+| [RFC-0036](spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md) | Two rights, and `:` fields are paths under their vertex | proposed |  |  |
 
 ## Numbering gaps
 
