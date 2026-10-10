@@ -179,17 +179,18 @@ void test_remote_ancestor_subscriber() {
     std::vector<std::byte> route{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},
                                  std::byte{0x00}};
     std::size_t deliveries = 0;
-    std::string seen_link;
+    tr::graph::link_pair_t seen_link{};
     std::vector<std::byte> seen_value;
     std::vector<std::byte> seen_route;
     const tr::testing::remote_sink_guard_t sink_guard(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t& v) {
             ++deliveries;
-            seen_link.assign(d.link);
+            seen_link = d.link;
             seen_value.assign(v.only().bytes().begin(), v.only().bytes().end());
             seen_route.assign(d.return_route.bytes().begin(), d.return_route.bytes().end());
         });
-    check(g.subscribe_wire(a, make_value({0x04, 0x40, 0x00, 0x00}), make_value(route), "lnk0")
+    check(g.subscribe_wire(a, make_value({0x04, 0x40, 0x00, 0x00}), make_value(route), "lnk0", {},
+                           {}, {}, tr::testing::test_link("lnk0"))
               .has_value(),
           "bind a REMOTE subscriber at the ancestor /a");
 
@@ -197,7 +198,7 @@ void test_remote_ancestor_subscriber() {
                                          std::byte{0x00}, std::byte{0x7F}};
     check(g.write(ab, make_value(written)).has_value(), "write at the descendant /a/b");
     check(deliveries == 1, "remote sink fired once (bubbled to /a's remote edge)");
-    check(seen_link == "lnk0", "delivery carries the subscriber's link");
+    check(seen_link == tr::testing::test_link("lnk0"), "delivery carries the subscriber's link");
     check(std::ranges::equal(seen_value, written), "delivery payload is the written TLV as-is");
     check(std::ranges::equal(seen_route, route), "delivery retraces the stored return_route");
 }

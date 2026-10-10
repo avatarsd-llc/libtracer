@@ -640,7 +640,7 @@ void test_subscribe_wire() {
         const std::string link(64, 'l');  // names longer than any inline buffer
         const std::string caller(64, 'c');
         return verdict(g.subscribe_wire(v, make_value(rec), make_value({0x06, 0x00, 0x00, 0x00}),
-                                        link, {}, caller));
+                                        link, {}, caller, {}, tr::testing::test_link(link)));
     };
     const auto untouched = [](graph_t& g, vertex_handle_t& v) { return g.own_subs(v) == 0; };
     report(drive<vertex_handle_t>(setup, op, untouched), "subscribe_wire");

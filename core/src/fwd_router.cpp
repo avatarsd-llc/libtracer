@@ -1026,10 +1026,13 @@ template <class Cursor>
 }  // namespace
 
 void fwd_router_t::reclaim_refused_route(std::string_view inbound_name,
+                                         const child_rx_ctx_t* inbound_ctx, peer_handle_t peer,
                                          std::span<const std::byte> route) {
     // COLD by construction: only an addressed refusal reaches the walk. The count is not
     // surfaced, matching the link_down seam — eviction seams report nothing.
-    (void)graph_.evict_route_edges(inbound_name, route);
+    (void)graph_.evict_route_edges(
+        inbound_name, link_pair_of(inbound_ctx != nullptr ? inbound_ctx->entry : nullptr, peer),
+        route);
 }
 
 bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::block_source_t* rx,
@@ -1216,7 +1219,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     link.set_down_notifier(
         [](void* c) {
             auto* const cc = static_cast<child_rx_ctx_t*>(c);
-            cc->self->link_down(cc->name);
+            cc->self->link_gone(cc->name, cc->self->link_pair_of(cc->entry, {}));
             // The eviction released this child's index slot, so the cached token is spent
             // (#1417). Dropped here rather than inside `link_down`, which is also a public
             // by-NAME door with no ctx in hand; a reconnect over the same registration mints
@@ -1254,6 +1257,7 @@ bool fwd_router_t::remove_child(std::string_view name) {
     // which the declared order puts ABOVE this one (#1816). The cost: a direct embedder that
     // races `add_child(name)` against this call can see the departing eviction reach the
     // re-added child's edges. `transport_vertex_t` serializes both under its `ops_m_`.
+    graph::link_pair_t gone{};  // the departing link's pairs, read off its kept slot below
     {
         const std::lock_guard ctl(ctl_m_);  // pairs with add_child (ADR-0063 §3)
         if (!registry_.erase(name)) return false;
@@ -1278,9 +1282,10 @@ bool fwd_router_t::remove_child(std::string_view name) {
             // releases the index slot it names, so a copy left here would outlive its stamp.
             ctx->link_token.store(0, std::memory_order_relaxed);
             if (ctx->peer_tokens_own != nullptr) ctx->peer_tokens_own->clear();
+            gone = link_pair_of(ctx->entry, {});
         }
     }
-    link_down(name);
+    link_gone(name, gone);
     return true;
 }
 
@@ -1386,7 +1391,11 @@ void fwd_router_t::clear_link(std::string_view link_name) { handles_.clear_link(
  *        for the seam and threading contract.
  */
 void fwd_router_t::link_down(std::string_view link_name) {
-    graph_.evict_link_edges(link_name);
+    link_gone(link_name, link_pair_of(registry_.entry_by_name(link_name), {}));
+}
+
+void fwd_router_t::link_gone(std::string_view link_name, graph::link_pair_t link) {
+    graph_.evict_link_edges(link_name, link);
     clear_link(link_name);
     // A deferred AWAIT's reply has nowhere to go once its link is down: release its waiter
     // (ADR-0084). The receiver holds no deadline, so this is how an unanswered one ends.
@@ -1439,7 +1448,7 @@ void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle
     if (const std::optional<graph::vertex_handle_t> anchor =
             graph_.find_session_anchor(session_anchor_id(ctx.name, peer)))
         (void)graph_.retire(*anchor);
-    link_down(peer);
+    link_gone(peer, link_pair_of(ctx.entry, handle));
     // The eviction inside `link_down` RELEASED this peer's index slot, so the token cached
     // for it names a stamp that can never validate again (#1417). Dropping it is what lets
     // the next session in this slot mint a fresh one on its first subscribe instead of
@@ -2142,12 +2151,11 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
 
 std::string_view fwd_router_t::resolve_peer_name(const child_rx_ctx_t& ctx, peer_handle_t peer,
                                                  std::span<char> scratch) {
-    // The bus facet is the link's (#1941), asked only of a slot whose shape says it has one —
-    // the shape `add` captured from the same `bus_of` answer, in the same word as the link.
-    const child_registry_t::egress_t eg = ctx.entry->bound();
-    bus_link_t* const bus = eg.multi_peer ? bus_of(*eg.link) : nullptr;
-    if (bus == nullptr) return {};
-    return bus->peer_name(peer, scratch);
+    // The bus facet is the link's (#1941). Only a bus mount's ctx is wired to the peer
+    // receivers that call this, so the slot's link is that bus; a build with the bus module
+    // closed out wires none and answers nothing.
+    bus_link_t* const bus = bus_of(*ctx.entry->bound().link);
+    return bus != nullptr ? bus->peer_name(peer, scratch) : std::string_view{};
 }
 
 peer_handle_t fwd_router_t::terminus_peer(const child_rx_ctx_t* ctx, peer_handle_t peer) noexcept {
@@ -2193,11 +2201,50 @@ graph::link_id_t fwd_router_t::link_id_of(const child_rx_ctx_t* ctx, peer_handle
     return fresh;
 }
 
-graph::link_id_t fwd_router_t::link_id_thunk(void* ctx, const graph::inbound_ref_t& inbound) {
+graph::link_pair_t fwd_router_t::link_pair_of(const child_registry_t::child_t* door,
+                                              peer_handle_t peer) const {
+    if (door == nullptr) return {};
+    // The connection vertex's PAIR, minted the way `hop_mint` mints one (#1941). The vertex is
+    // keyed by the mount and never retired while the node lives (#1940), so these are the
+    // same bytes for every tenancy of the name — what the name itself used to promise.
+    // No PAIR to give (a saturated slot) is the invalid pair, which admits and matches nothing.
+    const graph::vertex_slot_t conn =
+        graph_.vertex_slot_at(door->conn_slot)
+            .value_or(graph::vertex_slot_t{.index = graph::link_pair_t::kNoConn});
+    // The peer is part of the address only where the door has peers to address: on a FLAT
+    // link a valid handle is the writer's subject (ADR-0082), not a place to deliver to.
+    const wire::pair_t to = door->bound().multi_peer ? wire::pair_t{peer} : wire::pair_t{};
+    return graph::link_pair_t{.conn = conn, .peer = to};
+}
+
+fwd_router_t::delivery_leg_t fwd_router_t::delivery_egress(graph::link_pair_t to) const {
+    // A pair deref, not a name scan (#1941, #1622 L6): the connection vertex's PAIR, then the
+    // registry slot bound to it — one `u32` compare per link — and, for a bus peer, the peer
+    // its handle names. A link removed since the subscribe has no live slot, and a door whose
+    // shape no longer matches the edge resolves nothing, which drops the delivery exactly as
+    // the name lookup did.
+    if (!graph_.deref_vertex_slot(to.conn.index, to.conn.generation)) return {};
+    const child_registry_t::child_t* const door = registry_.by_conn_slot(to.conn.index);
+    if (door == nullptr) return {};
+    const child_registry_t::egress_t eg = door->egress();
+    if (!to.has_peer()) return {.link = eg.link, .name = door->name, .bus = nullptr};
+    bus_link_t* const bus = eg.multi_peer && eg.link != nullptr ? bus_of(*eg.link) : nullptr;
+    return {.link = bus != nullptr ? bus->peer_link_of(peer_handle_t{to.peer}) : nullptr,
+            .name = {},
+            .bus = bus};
+}
+
+graph::carried_link_t fwd_router_t::link_id_thunk(void* ctx, const graph::inbound_ref_t& inbound) {
     // Unlike `peer_subject_thunk`, this supplier DOES need the router: the lazy mint calls
     // `graph_t::intern_link`, and the graph is the router's, not the receive context's.
-    return static_cast<fwd_router_t*>(ctx)->link_id_of(
-        static_cast<const child_rx_ctx_t*>(inbound.origin), inbound.peer, inbound.link);
+    auto* const self = static_cast<fwd_router_t*>(ctx);
+    const auto* const origin = static_cast<const child_rx_ctx_t*>(inbound.origin);
+    // A frame handed to the public by-NAME `on_frame` carries no receive context, so its
+    // door is found by that name — once, on the subscribe path, never per frame.
+    const child_registry_t::child_t* const door =
+        origin != nullptr ? origin->entry : self->registry_.entry_by_name(inbound.link);
+    return graph::carried_link_t{.token = self->link_id_of(origin, inbound.peer, inbound.link),
+                                 .link = self->link_pair_of(door, inbound.peer)};
 }
 
 std::string_view fwd_router_t::peer_subject_thunk(void* ctx, const graph::inbound_ref_t& inbound,
@@ -2499,7 +2546,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                         const std::expected<view_t, view::flatten_err_t> flat =
                             frame.subrope(0, frame.total_length()).try_materialize(*flat_);
                         if (flat)
-                            reclaim_refused_route(inbound_name,
+                            reclaim_refused_route(inbound_name, inbound_ctx, peer,
                                                   flat->bytes().subspan(ref->off, ref->len));
                     }
                     // A REPLY that reaches its originator here is handed to the sink
@@ -2560,7 +2607,8 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
                 // whether or not anything else is listening for replies. Not a refusal ⇒
                 // the peek bails allocation-free.
                 if (const std::optional<refused_src_t> ref = peek_refused_route(cur, pre))
-                    reclaim_refused_route(inbound_name, frame.subspan(ref->off, ref->len));
+                    reclaim_refused_route(inbound_name, inbound_ctx, peer,
+                                          frame.subspan(ref->off, ref->len));
                 // Hand the FWD{REPLY} to the sink rope-native (ADR-0055): NO decode. A
                 // view-delivered frame ropes zero-copy off its owning view; a borrowed span is
                 // copied once into an owned segment (the copy the old decode-then-consumer-
@@ -3720,7 +3768,8 @@ graph::wire_target_split_t fwd_router_t::split_subscriber_target(
     // The residual packed records are reused verbatim: the key suffix IS the route payload.
     return graph::wire_target_split_t{.link = hit.link_name,
                                       .residual = key.subspan(walk.end_of(hit.strip_k)),
-                                      .token = mount_token(graph_, hit)};
+                                      .token = mount_token(graph_, hit),
+                                      .pair = link_pair_of(hit.entry, {})};
 }
 
 graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& producer,
@@ -3766,11 +3815,13 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     // itself: the link handed over IS the mount, and the token beside it is the mount's, so
     // the index insert is a subscript rather than the name door's scan of the live slots.
     // Un-carried, this was the ONE caller paying that scan per subscribe in steady state.
-    return graph_.subscribe_wire(*v, sub_view, route_view, split.link, {}, {}, split.token);
+    return graph_.subscribe_wire(*v, sub_view, route_view, split.link, {}, {}, split.token,
+                                 split.pair);
 }
 
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const graph::value_t& val) {
-    transport_t* const link = registry_.by_name(sub.link);
+    const delivery_leg_t leg = delivery_egress(sub.link);
+    transport_t* const link = leg.link;
     if (link == nullptr) return;  // link torn down between subscribe and this write
     const std::span<const std::byte> route = sub.return_route.bytes();  // the stored PATH TLV
 
@@ -3793,7 +3844,13 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
         // Resolve the label BEFORE flattening: an exhausted label space (#603) falls
         // through to the full-route form below, which gathers the rope's links and needs
         // no flatten at all — so the wasted materialize is skipped rather than discarded.
-        const auto [label, fresh] = handles_.ensure_egress(sub.link, route);
+        // The label plane's key is the NAME the edge stored before it stored pairs (#1941),
+        // so `clear_link` on a departure still finds the labels this flow advertised.
+        std::array<char, kPeerNameChars> scratch{};
+        const std::string_view key = leg.bus != nullptr
+                                         ? leg.bus->peer_name(peer_handle_t{sub.link.peer}, scratch)
+                                         : leg.name;
+        const auto [label, fresh] = handles_.ensure_egress(key, route);
         if (label != 0) {
             // Through the injected byte backend (#730): this egress flatten is the writer
             // thread's, but it is the same store the ingress ones draw from, so one

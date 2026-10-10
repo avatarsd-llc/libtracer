@@ -206,7 +206,12 @@ bool ram_edges_on(bool per_object) {
         const auto link = [](std::size_t i) {
             return "192.168." + std::to_string(i / 250) + "." + std::to_string(i % 250) + ":9000";
         };
-        if (!g.subscribe_wire(v, sub_v, route_v, link(kRamN)).has_value()) return false;
+        // Each edge's link pairs, one distinct connection per link, as the router mints them.
+        const auto pair = [](std::size_t i) {
+            return tr::graph::link_pair_t{.conn = {static_cast<std::uint32_t>(i), 1}};
+        };
+        if (!g.subscribe_wire(v, sub_v, route_v, link(kRamN), {}, {}, {}, pair(kRamN)).has_value())
+            return false;
         // The link names are built OUTSIDE the window (#1781): `subscribe_wire` takes the link
         // as a view, so a name the caller builds per call is the caller's block, not the edge's.
         std::vector<std::string> links;
@@ -215,7 +220,8 @@ bool ram_edges_on(bool per_object) {
         bool ok = true;
         probe::window_t win;
         for (std::size_t i = 0; i < kRamN; ++i)
-            ok = g.subscribe_wire(v, sub_v, route_v, links[i]).has_value() && ok;
+            ok = g.subscribe_wire(v, sub_v, route_v, links[i], {}, {}, {}, pair(i)).has_value() &&
+                 ok;
         const probe::counts_t c = win.result();
         if (!ok) return false;
         print_ram("edge_wire", c, kRamN, per_object);

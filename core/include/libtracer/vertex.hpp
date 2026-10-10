@@ -2288,9 +2288,10 @@ class vertex_t {
      *        §D, extended to link teardown).
      *
      * Matches each active slot on the link it was ADMITTED over: the cold half's
-     * `subscriber_remote_t::link` when it carries one, and otherwise its
-     * `subscriber_remote_t::caller` — the two spellings the two admission doors
-     * leave behind for the SAME fact. `subscribe_wire` (the `SUBSCRIBE` op and the
+     * `subscriber_remote_t::link` when it carries one (compared to @p pair by
+     * `same_link`, #1941), and otherwise its `subscriber_remote_t::caller` (compared to
+     * @p link) — the two spellings the two admission doors leave behind for the SAME
+     * fact. `subscribe_wire` (the `SUBSCRIBE` op and the
      * wire `:subscribers[]` append) stores both; `graph_t::field_write`'s
      * `:subscribers[]` / `:subscribers[N]` arms store ONLY the context, because
      * those edges deliver to a LOCAL target and have no return route to send over.
@@ -2313,6 +2314,9 @@ class vertex_t {
      * @ref edge_view_t snapshot HOLDS the target key and the whole `subscriber_remote_t`
      * by refcount (ADR-0041 §2, #1448), so releasing the slot's pin here never dangles a
      * dispatch — the record it reads outlives this eviction by construction.
+     * @param link   This node's NAME for the departed link — what a field-write edge's
+     *        context is compared to.
+     * @param pair   The departed link's pairs — what a delivering edge's link is compared to.
      * @param routed Incremented once per evicted edge that was ROUTED through @p link —
      *        stored it as its delivery link rather than only as the gate context — which
      *        is the count of link holds the eviction gives back (#1816).
@@ -2321,8 +2325,8 @@ class vertex_t {
      * @return The number of edges evicted (the caller unwinds this many, less
      *         @p suspended, from the RFC-0005 listener bookkeeping).
      */
-    std::size_t evict_link_edges(std::string_view link, std::size_t& routed,
-                                 std::size_t& suspended) {
+    std::size_t evict_link_edges(std::string_view link, graph::link_pair_t pair,
+                                 std::size_t& routed, std::size_t& suspended) {
         // The EMPTY key matches NOTHING (#1056). Every local door leaves both spellings empty,
         // so without this an empty parameter compared EQUAL to a local edge's admitting link
         // and reclaimed it — reachable for the `delivery_compact` opt-in, the one local shape
@@ -2339,14 +2343,14 @@ class vertex_t {
             for (std::size_t i = 0; i < subs.size(); ++i) {
                 subscriber_t& s = subs[i];
                 if (!s.active || s.remote == nullptr) continue;
-                // The link this edge was ADMITTED over — see the declaration comment. Not
-                // `link` alone: a `graph_t::field_write` admission stores the inbound link
-                // ONLY as the gate context, so keying on the delivery link skipped it
-                // forever (#943). No copy: both members are `mem::string_t`.
-                const std::string_view admitted_over =
-                    s.remote->link.empty() ? s.remote->caller.view() : s.remote->link.view();
-                if (admitted_over != link) continue;
-                routed += static_cast<std::size_t>(!s.remote->link.empty());
+                // The link this edge was ADMITTED over — see the declaration comment. A
+                // delivering edge names it by pairs (#1941); a `graph_t::field_write`
+                // admission delivers nowhere and stores the inbound link ONLY as the gate
+                // context, so keying on the delivery link alone skipped it forever (#943).
+                const bool delivers = s.remote->link.valid();
+                if (delivers ? !same_link(s.remote->link, pair) : s.remote->caller.view() != link)
+                    continue;
+                routed += static_cast<std::size_t>(delivers);
                 suspended += static_cast<std::size_t>(s.suspended);
                 subscriber_t reclaimed;    // an inert shell: no view, no route, no cold half
                 reclaimed.active = false;  // the slot is free for add_edge reuse
@@ -2373,10 +2377,11 @@ class vertex_t {
      * is BYTE-equal on the stored PATH TLV (the same bytes `deliver_remote` emits as the
      * delivery `dst`, which are the bytes the refusing hop echoes back — see
      * `reject_bus_name_hop`'s swap). Only `subscribe_wire`-door edges qualify: a field-write
-     * edge stores no route, and `route` never compares equal to its empty view. An EMPTY
-     * @p link or @p route matches nothing, as in @ref evict_link_edges (#1056).
+     * edge stores no route, and `route` never compares equal to its empty view. A @p link
+     * that is not valid, or an EMPTY @p route, matches nothing, as in @ref evict_link_edges
+     * (#1056).
      *
-     * @param link  This node's NAME for the link the refusal arrived on (== the edge's
+     * @param link  The pairs of the link the refusal arrived on (`same_link` as the edge's
      *              delivery link).
      * @param route The refused route — the whole TLV bytes echoed by the rejecting hop: a
      *              canonical PATH, or (RFC-0024 §7.1 amendment 1) the PAIR-spelled `PATH` a
@@ -2390,9 +2395,9 @@ class vertex_t {
      * @return The number of edges evicted (the caller unwinds this many, less
      *         @p suspended, from the RFC-0005 listener bookkeeping).
      */
-    std::size_t evict_route_edges(std::string_view link, std::span<const std::byte> route,
+    std::size_t evict_route_edges(graph::link_pair_t link, std::span<const std::byte> route,
                                   bool bound_echo, std::size_t& suspended) {
-        if (link.empty() || route.empty()) return 0;
+        if (!link.valid() || route.empty()) return 0;
         edge_block_t* b = nullptr;
         std::size_t n = 0;
         {
@@ -2406,7 +2411,7 @@ class vertex_t {
                 // The delivery link, not the admission fallback: only a `subscribe_wire`
                 // edge has a route to be refused, and that door populates `link` and the
                 // route together (see subscriber_remote_t::return_route's invariant).
-                if (s.remote->link != link) continue;
+                if (!same_link(s.remote->link, link)) continue;
                 bool hit = false;
                 if (!bound_echo) {
                     const std::span<const std::byte> stored = s.remote->return_route.bytes();

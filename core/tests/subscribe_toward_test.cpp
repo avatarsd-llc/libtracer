@@ -7,10 +7,10 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * The gap this closes: the host surface offered only `subscribe(src, local-target)`
- * (drops for a `/net/...` target) and `subscribe_wire(v, source, return_route, link)`
- * (caller must pre-split) — so every embedder hand-derived the `(link, route)` split,
- * baking in a single-hop assumption and the `net/<module>/<name>` string shape. The
- * helper resolves ONE ordinary mount path through the SAME cached descent the forward
+ * (drops for a `/net/...` target) and `subscribe_wire(v, source, return_route, link, {}, {}, {},
+ * tr::testing::test_link(link))` (caller must pre-split) — so every embedder hand-derived the
+ * `(link, route)` split, baking in a single-hop assumption and the `net/<module>/<name>` string
+ * shape. The helper resolves ONE ordinary mount path through the SAME cached descent the forward
  * path uses, so a bound route and a routed frame cannot disagree about where a mount
  * ends.
  *
@@ -32,6 +32,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -245,9 +246,10 @@ void test_mount_carry_never_scans() {
     for (std::size_t i = 1; i < kLinks; ++i) {
         const std::vector<std::byte> sub =
             b_subscriber_toward({"net", "ws-client", "p" + std::to_string(i), "d", "v"});
-        admitted = admitted && g.subscribe_wire(*prod, owned_bytes(sub), owned_bytes(route),
-                                                names[0], view_t{}, {}, arrival)
-                                   .has_value();
+        admitted =
+            admitted && g.subscribe_wire(*prod, owned_bytes(sub), owned_bytes(route), names[0],
+                                         view_t{}, {}, arrival, tr::testing::test_link(names[0]))
+                            .has_value();
     }
     check(admitted, "every mount-routed wire subscribe is admitted");
     check(g.link_index_name_lookups() == before_wire,

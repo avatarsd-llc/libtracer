@@ -77,17 +77,17 @@ class graph_t;
  * @brief What the producer fan-out hands a remote subscriber's delivery sink (#136).
  *
  * A pure description of one remote subscription edge: the consumer's accumulated
- * return route and this node's NAME for the link it arrived on, both opaque to L4,
- * plus the `vertex_t::subscriber_t` delivery_compact opt-in. The injected sink
- * (a `tr::net` concern — @ref graph_hooks_t::remote_delivery) interprets these:
- * it maps @ref link to a transport child and emits a full-route `FWD{WRITE}` or,
- * when @ref delivery_compact, an auto-promoted label `COMPACT` (RFC-0004 §D/§E.1).
- * @ref link is borrowed for the sink call only; @ref return_route is a refcount
- * clone of the stored route segment (ADR-0041 §2) — the sink may rope it into an
- * egress frame, and it stays alive across a concurrent unsubscribe.
+ * return route and the pairs of the link it delivers over, both opaque to L4, plus
+ * the `vertex_t::subscriber_t` delivery_compact opt-in. The injected sink (a
+ * `tr::net` concern — @ref graph_hooks_t::remote_delivery) interprets these: it
+ * dereferences @ref link to a transport child (#1941: a pair deref, no name scan) and
+ * emits a full-route `FWD{WRITE}` or, when @ref delivery_compact, an auto-promoted label
+ * `COMPACT` (RFC-0004 §D/§E.1). @ref return_route is a refcount clone of the stored route
+ * segment (ADR-0041 §2) — the sink may rope it into an egress frame, and it stays alive
+ * across a concurrent unsubscribe.
  */
 struct remote_delivery_t {
-    std::string_view link;     /**< @brief This node's NAME for the consumer link. */
+    link_pair_t link;          /**< @brief The pairs of the link the edge delivers over. */
     view::view_t return_route; /**< @brief Consumer return route (PATH TLV view, refcount clone). */
     /** @brief Completed reverse bound route (`PATH_REF` view, refcount clone; empty ⇒
      *         canonical-only). Element 0 is this node's own reference, consumed locally by
@@ -374,6 +374,11 @@ struct wire_target_split_t {
      */
     link_id_t token{};
     /**
+     * @brief The matched mount's PAIR — its connection vertex — which the edge stores and
+     *        delivers over (#1941). Not valid exactly when @ref link is empty.
+     */
+    link_pair_t pair{};
+    /**
      * @brief A mount WAS named, but it cannot carry a directed delivery — the target named
      *        the mount exactly (nothing below it), or its first hop landed on a bus link's
      *        own NAME (ADR-0073 §3 / RFC-0020). RFC-0021 §B.3: the subscribe-write is
@@ -481,8 +486,8 @@ using stats_sampler_fn_t = bool (*)(void* ctx, std::string_view seam_class,
  * replaced, or evicted — so the receiver can keep a plain reference count and nothing else.
  *
  * @param ctx  The caller-owned context installed beside the function.
- * @param link This node's NAME for the link — the router's registry name. Borrowed for the
- *             call only.
+ * @param link The pairs of the link (@ref link_pair_t) — the connection vertex the edge
+ *             delivers over, and the bus peer under it when it delivers to one.
  * @param held `true` on establishment, `false` on teardown.
  *
  * @note Called on the subscribing or unsubscribing thread, OUTSIDE every graph lock, after
@@ -490,7 +495,7 @@ using stats_sampler_fn_t = bool (*)(void* ctx, std::string_view seam_class,
  *       briefly on the receiver's own control-plane lock; it MUST NOT re-enter `graph_t`.
  *       @p ctx must outlive every subscribe the graph can still admit.
  */
-using link_hold_fn_t = void (*)(void* ctx, std::string_view link, bool held);
+using link_hold_fn_t = void (*)(void* ctx, link_pair_t link, bool held);
 
 /**
  * @brief One `{fn, ctx}` graph seam: a captureless function pointer and the context handed
@@ -1451,10 +1456,13 @@ class graph_t {
      * @brief Evict every subscriber edge a departed link left behind — the graph half
      *        of link-teardown eviction (RFC-0009 §D, extended to peer departure).
      *
-     * Walks the whole graph and deactivates + RECLAIMS each active subscriber edge
-     * whose stored link NAME equals @p link_name (the NAME this node addressed the
-     * link by — a bus peer's tag, or a point-to-point child's registered NAME),
-     * unwinding the RFC-0005 listener bookkeeping for each. Local edges and edges of
+     * Walks the vertices @p link_name ever subscribed on and deactivates + RECLAIMS each
+     * active subscriber edge the link admitted, unwinding the RFC-0005 listener bookkeeping
+     * for each. "Admitted" has two spellings, and both keys are needed for them: a delivering
+     * edge matches by its pairs (@ref link_pair_t's `same_link` against @p link, #1941), and a
+     * `:subscribers[]` field-write edge, which delivers nowhere and stores no pairs, matches
+     * by its stored caller context equalling @p link_name (#943). @p link_name also keys the
+     * index lookup that finds the candidate vertices. Local edges and edges of
      * other links are untouched; slot indices of surviving edges never renumber
      * (§D.2), and the freed slots are reused by later appends (@ref vertex_t's
      * add_edge reuse) — so a redialing peer's re-subscriptions reoccupy the memory
@@ -1475,10 +1483,12 @@ class graph_t {
      * coincidence of the comparison — a LOCAL admission stores the empty caller
      * context, so before #1056 an empty key compared equal to every local edge that
      * carried a cold half (the `delivery_compact` opt-in) and reclaimed it graph-wide.
-     * @param link_name This node's NAME for the departed link; empty ⇒ no-op, 0.
+     * @param link_name This node's NAME for the departed link (a bus peer's tag, or a
+     *                  point-to-point child's registered NAME); empty ⇒ no-op, 0.
+     * @param link      The departed link's pairs; not valid ⇒ only field-write edges match.
      * @return The number of edges evicted, summed over the graph.
      */
-    std::size_t evict_link_edges(std::string_view link_name);
+    std::size_t evict_link_edges(std::string_view link_name, link_pair_t link);
 
     /**
      * @brief How many vertices a @ref evict_link_edges for @p link_name would EXAMINE — the
@@ -1618,14 +1628,15 @@ class graph_t {
      * observe an error — RFC-0020 (which postdates §D.4) made the observation normative,
      * and this reclaim acts only on it.
      *
-     * @param link_name  This node's NAME for the link the refusal arrived on.
+     * @param link_name  This node's NAME for the link the refusal arrived on (the index key).
+     * @param link       That link's pairs — what the edge's delivery link is compared to.
      * @param route_wire The refused route — whole TLV bytes echoed by the rejecting hop: a
      *                   canonical PATH, or (RFC-0024 §7.1 amendment 1) the bound `PATH_REF`
      *                   a reverse-list delivery was refused as. This door classifies the
      *                   type byte; the per-vertex half stays wire-type-agnostic.
      * @return The number of edges evicted, summed over the graph.
      */
-    std::size_t evict_route_edges(std::string_view link_name,
+    std::size_t evict_route_edges(std::string_view link_name, link_pair_t link,
                                   std::span<const std::byte> route_wire);
 
     /**
@@ -2501,12 +2512,22 @@ class graph_t {
      * target rebinds it to the mount's, and a `field_write` admission has only its `caller`,
      * #943), and a token silently indexing under the wrong link is exactly the leaked
      * subscriber edge #1071 exists to prevent.
+     *
+     * @p link_pair is where the edge DELIVERS (#1941, #1622 L6): the pairs of the connection
+     * vertex @p link names, and of the bus peer under it when the subscribe came from one.
+     * The edge stores these and not @p link, so a delivery dereferences them instead of
+     * looking a name up. They are the edge's only record of where to deliver, so a call that
+     * carries none is refused as `INVALID_PATH` — the same door, and the same reason, as an
+     * empty @p return_route: an edge with nowhere to deliver buys one wasted sink call per
+     * publish. A mount-routed target replaces them with the mount's
+     * (`wire_target_split_t::pair`), as it replaces @p link_token.
      */
     [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view::view_t source_view,
                                                 view::view_t return_route, std::string_view link,
                                                 view::view_t reverse_route = {},
                                                 std::string_view caller = {},
-                                                link_id_t link_token = {});
+                                                link_id_t link_token = {},
+                                                link_pair_t link_pair = {});
 
     /**
      * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.
@@ -3045,10 +3066,13 @@ class graph_t {
     // `link_token` is the carried interned identity (#1417), forwarded verbatim to
     // `link_index_t::index_vertex` — which ignores it unless it names a live slot spelling the key
     // this admission actually indexes under. Defaulted, so the three local doors that carry
-    // none are unchanged.
+    // none are unchanged. `link_name` is the NAME a delivering edge was admitted over, the key
+    // the departure index files it under now that the edge itself stores pairs (#1941); empty
+    // — every door but `subscribe_wire` — keys on the edge's caller context instead (#943).
     [[nodiscard]] result_t<subscription_t> admit_subscriber(
         vertex_t* v, subscriber_t s, std::string_view caller,
-        std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {});
+        std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {},
+        std::string_view link_name = {});
     // Fire the external-subscription observer for ONE slot mutation
     // (graph_hooks_t::subscription_observer). Returns immediately when no observer is installed or
     // `caller` is EMPTY — the latter is the whole external/local discrimination, in one place.
@@ -3059,12 +3083,12 @@ class graph_t {
     void notify_subscription(sub_event_t::kind_t kind, const vertex_t* v, std::string_view caller,
                              const view::view_t& sub_tlv, std::size_t slot) const;
     // Report @p n routed edges over `link` established or torn down through the
-    // `link_hold` seam (#1816). An empty `link` — a local edge, a field-write edge, or no
-    // edge at all — reports nothing. Called with NO graph lock held.
+    // `link_hold` seam (#1816). A link that is not valid — a local edge, a field-write edge,
+    // or no edge at all — reports nothing. Called with NO graph lock held.
     // Out of line and cold on purpose: it runs on subscribe and teardown only, and letting it
     // inline at its six call sites re-partitioned this TU's budget onto the fan-out copy
     // loop (`vertex_t::copy_published` +277 B on the symbol ratchet).
-    [[gnu::noinline, gnu::cold]] void hold_link(std::string_view link, bool held,
+    [[gnu::noinline, gnu::cold]] void hold_link(link_pair_t link, bool held,
                                                 std::size_t n = 1) const;
     // True iff a subscription event is worth building at all — an installed observer AND an
     // external (non-empty) caller context. Guards the pre-reads the observer needs (the

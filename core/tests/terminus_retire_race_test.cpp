@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/path.hpp"
@@ -222,7 +223,7 @@ void bracketed_terminus_ops() {
         bracket(n.g, n.park, [&] {
             r = n.g.subscribe_wire(*n.h, tr::testing::make_value({0x04, 0x40, 0x00, 0x00}),
                                    tr::testing::make_value({0x06, 0x00, 0x00, 0x00}), "p0",
-                                   tr::view::view_t{}, "p0");
+                                   tr::view::view_t{}, "p0", {}, tr::testing::test_link("p0"));
         });
         check(!r && r.error() == status_t::PERMISSION_DENIED, "a SUBSCRIBE is refused");
     }

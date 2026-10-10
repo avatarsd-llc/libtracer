@@ -155,6 +155,16 @@ view_t borrowed(std::span<const std::byte> bytes) {
     return view_t::over(tr::view::borrow_const(bytes));
 }
 
+/** @brief The pairs @p router gives an edge admitted over child @p child — plus @p peer on a
+ *         bus — which is what the edge stores and the delivery dereferences (#1941). */
+tr::graph::link_pair_t pair_of(const graph_t& g, const fwd_router_t& router, std::string_view child,
+                               tr::net::peer_handle_t peer = {}) {
+    const auto* const door = router.registry().entry_by_name(child);
+    const auto conn = door != nullptr ? g.vertex_slot_at(door->conn_slot) : std::nullopt;
+    if (!conn) return {};
+    return {.conn = {conn->index, conn->generation}, .peer = peer};
+}
+
 /** @brief How the subscribers' link sits in the registry the scan walks. */
 enum class pos_t {
     FIRST,  /**< @brief Registered at slot 0 — the scan stops immediately. */
@@ -210,6 +220,7 @@ void run_point(std::size_t fanout, std::size_t width, pos_t pos) {
     peer_bus_t bus;
     std::vector<sink_link_t> targets(kSpreadLinks);
     std::vector<std::string> link_names;
+    std::vector<tr::graph::link_pair_t> link_pairs;
 
     const auto add_decoys = [&](std::size_t from, std::size_t to) {
         for (std::size_t i = from; i < to; ++i)
@@ -219,6 +230,7 @@ void run_point(std::size_t fanout, std::size_t width, pos_t pos) {
         for (std::size_t i = 0; i < count; ++i) {
             link_names.push_back("net/tgt/t" + std::to_string(i));
             (void)router.attach_link(link_names.back(), targets[i]);
+            link_pairs.push_back(pair_of(g, router, link_names.back()));
         }
     };
     switch (pos) {
@@ -228,6 +240,7 @@ void run_point(std::size_t fanout, std::size_t width, pos_t pos) {
             add_decoys(0, width);
             (void)router.attach_link("net/bus/b", bus);
             link_names.emplace_back("p0");
+            link_pairs.push_back(pair_of(g, router, "net/bus/b", {0, 1}));
             break;
         case pos_t::FIRST:
             add_targets(1);
@@ -268,7 +281,8 @@ void run_point(std::size_t fanout, std::size_t width, pos_t pos) {
     std::size_t admitted = 0;
     for (std::size_t i = 0; i < fanout; ++i)
         if (g.subscribe_wire(prod, borrowed(sub_tlv), borrowed(route),
-                             link_names[i % link_names.size()])
+                             link_names[i % link_names.size()], {}, {}, {},
+                             link_pairs[i % link_pairs.size()])
                 .has_value())
             ++admitted;
     if (admitted != fanout) {

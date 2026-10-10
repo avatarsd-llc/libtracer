@@ -27,6 +27,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <span>
 #include <string_view>
@@ -34,9 +35,47 @@
 #include <vector>
 
 #include "libtracer/graph.hpp"
+#include "libtracer/op_resolve.hpp"
 #include "libtracer/view.hpp"
 
 namespace tr::testing {
+
+/**
+ * @brief The pairs a test with no transport plane admits a remote edge over @p name with
+ *        (#1941) — what the router would mint, without the router.
+ *
+ * The graph stores a remote edge's link as pairs and never dereferences them, so any value
+ * works as long as two names get two links and one name always gets the same: the index is
+ * the name's FNV-1a hash (top bit clear, so it is never `link_pair_t::kNoConn`), the
+ * generation 1. A sink compares `d.link == test_link("a")`, and
+ * an eviction passes the same value beside the name.
+ */
+constexpr tr::graph::link_pair_t test_link(std::string_view name) noexcept {
+    std::uint32_t h = 2166136261u;
+    for (const char c : name) h = (h ^ static_cast<unsigned char>(c)) * 16777619u;
+    return tr::graph::link_pair_t{.conn = {h & 0x7FFFFFFFu, 1}, .peer = {}};
+}
+
+/** @brief `g.evict_link_edges(name, test_link(name))` — a departure in a router-less test. */
+inline std::size_t evict_test_link(tr::graph::graph_t& g, std::string_view name) {
+    return g.evict_link_edges(name, test_link(name));
+}
+
+/**
+ * @brief Install on @p r the link supplier a transport plane would (#1941): every inbound link
+ *        NAME answers its @ref test_link pairs, and no index token.
+ *
+ * A resolver with no supplier admits no remote subscriber, because the edge would have nowhere
+ * to deliver; a router-less test that drives remote subscribes through the resolver installs
+ * this instead of a router.
+ */
+inline void carry_test_links(tr::graph::op_resolver_t& r) {
+    r.on_link_id(
+        [](void*, const tr::graph::inbound_ref_t& inbound) {
+            return tr::graph::carried_link_t{.link = test_link(inbound.link)};
+        },
+        nullptr);
+}
 
 /** @brief Owns a capturing remote-delivery sink and keeps it installed for its own lifetime. */
 template <typename F>

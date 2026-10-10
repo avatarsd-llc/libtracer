@@ -291,6 +291,7 @@ void test_await_field_selector_is_enotty() {
     std::printf("AWAIT + :field -> ERROR(SCHEMA_NOT_FOUND), never a silent vertex await:\n");
     graph_t g;
     op_resolver_t resolver(g);
+    tr::testing::carry_test_links(resolver);  // a remote subscribe needs its link's pairs (#1941)
     const auto path = path_t::parse("/sensor/temp");
     (void)g.register_vertex(*path, role_t::STORED_VALUE);
 
@@ -435,6 +436,7 @@ void test_subscribers_field() {
     std::printf(":subscribers[] — WRITE a SUBSCRIBER, then READ the array (rope of slot views):\n");
     graph_t g;
     op_resolver_t resolver(g);
+    tr::testing::carry_test_links(resolver);  // a remote subscribe needs its link's pairs (#1941)
     const auto path = path_t::parse("/sensor/temp");
     tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
 
@@ -1060,6 +1062,7 @@ void test_denied_creator_draws_nothing() {
     counting_source_t src;
     graph_t g{src};
     op_resolver_t resolver(g);
+    tr::testing::carry_test_links(resolver);  // a remote subscribe needs its link's pairs (#1941)
     const auto dev = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     creation_seen_t seen{.g = &g};
     check(g.set_creation_hook(dev, {&create_stored, &seen}).has_value(), "hook on /dev");
@@ -1228,6 +1231,7 @@ void test_subscription_observer() {
     std::printf("subscription observer — EXTERNAL :subscribers[] mutations only:\n");
     graph_t g;
     op_resolver_t resolver(g);
+    tr::testing::carry_test_links(resolver);  // a remote subscribe needs its link's pairs (#1941)
     std::vector<seen_event_t> seen;
     const tr::testing::sub_observer_guard_t observer_guard(
         g, [&seen](const tr::graph::sub_event_t& e) {
@@ -1349,7 +1353,7 @@ void test_subscription_observer() {
     // `link-b`'s slot is the one an APPEND made — that is the door (subscribe_wire) that stores
     // the edge's link NAME; a `[N]` replace stores only the gate context, so its edge carries no
     // link and eviction never matches it (pre-existing, unrelated to this observer).
-    const std::size_t evicted = g.evict_link_edges("link-b");
+    const std::size_t evicted = g.evict_link_edges("link-b", tr::testing::test_link("link-b"));
     check(evicted > 0 && seen.size() == before_evict,
           "evict_link_edges (link teardown) is SILENT by design — the app's link-down is the "
           "removal signal for the whole link");
@@ -1369,15 +1373,16 @@ void test_routed_append_needs_no_target() {
     std::printf("#2016 subscriber/no-target — a routed append needs no target_path:\n");
     graph_t g;
     op_resolver_t resolver(g);
+    tr::testing::carry_test_links(resolver);  // a remote subscribe needs its link's pairs (#1941)
     const tr::graph::vertex_handle_t v =
         g.register_vertex(*path_t::parse("/nt/src"), role_t::STORED_VALUE);
     std::size_t deliveries = 0;
-    std::string seen_link;
+    tr::graph::link_pair_t seen_link{};
     std::vector<std::byte> seen_route;
     const tr::testing::remote_sink_guard_t sink(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
             ++deliveries;
-            seen_link.assign(d.link);
+            seen_link = d.link;
             seen_route.assign(d.return_route.bytes().begin(), d.return_route.bytes().end());
         });
     const std::filesystem::path vroot{LIBTRACER_VECTORS_DIR};
@@ -1401,7 +1406,8 @@ void test_routed_append_needs_no_target() {
     check(g.write(v, make_value({0x01, 0x00, 0x01, 0x00, 0x42})).has_value(),
           "the producer writes");
     check(deliveries == 1, "... and the write is delivered once, to the remote sink");
-    check(seen_link == "link-a", "... over the link the subscribe arrived on");
+    check(seen_link == tr::testing::test_link("link-a"),
+          "... over the link the subscribe arrived on");
     check(seen_route == return_route, "... along the subscribe's src: the return route");
 
     // The ablation: the local field door delivers to a local target, and the record names none.

@@ -133,7 +133,7 @@ class bus_link_t {
      * never dangles; it silently changes who it means. A caller that re-resolves before
      * each send is unexposed, which is why no production caller is affected today —
      * `child_registry_t` resolves and sends in one expression, and a remote subscriber
-     * edge stores the peer NAME rather than this pointer.
+     * edge stores the peer's handle rather than this pointer (@ref peer_link_of).
      *
      * Which kinds are exposed follows from the naming regime alone:
      *  - IDENTITY-derived names are immune — @ref can_transport_t names a peer `n<node-id>`
@@ -145,6 +145,26 @@ class bus_link_t {
      * @retval nullptr @p peer names no currently-known bus peer.
      */
     [[nodiscard]] virtual transport_t* peer_link(std::string_view peer) = 0;
+
+    /**
+     * @brief Resolve a peer HANDLE to a directed sending endpoint on this bus — the
+     *        @ref peer_link a remote subscriber's delivery asks, with the name taken out
+     *        (#1941).
+     *
+     * Answers exactly what @ref peer_link answers for `peer_name(peer)`, and is scoped the
+     * same way: to the SLOT the handle's index names, whatever session occupies it now, the
+     * same contract the name always gave a stored edge. The same resolve-per-use rule holds.
+     *
+     * The default IS that composition, so a kind that overrides nothing behaves exactly as
+     * before. A kind whose table is indexed by the handle overrides it to skip the name.
+     *
+     * @retval nullptr @p peer names no currently-known bus peer.
+     */
+    [[nodiscard]] virtual transport_t* peer_link_of(peer_handle_t peer) {
+        std::array<char, kPeerNameChars> scratch{};
+        const std::string_view name = peer_name(peer, scratch);
+        return name.empty() ? nullptr : peer_link(name);
+    }
 
     /**
      * @brief Close one peer's connection by NAME, freeing its slot for reuse.

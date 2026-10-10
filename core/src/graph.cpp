@@ -55,11 +55,12 @@ inline constexpr std::size_t kNameHeaderBytes = 4;
 inline constexpr std::size_t kFanoutFrameBytes = 8 * vertex_t::kInlineFanout * sizeof(edge_view_t);
 
 /**
- * @brief The link an edge's cold half DELIVERS over — the one it holds (#1816); empty for an
- *        edge with no cold half or a `:subscribers[]` field-write edge, which delivers locally.
+ * @brief The link an edge's cold half DELIVERS over — the one it holds (#1816); not valid for
+ *        an edge with no cold half or a `:subscribers[]` field-write edge, which delivers
+ *        locally.
  */
-std::string_view delivery_link(const remote_ptr_t& remote) noexcept {
-    return remote ? std::string_view(remote->link) : std::string_view{};
+link_pair_t delivery_link(const remote_ptr_t& remote) noexcept {
+    return remote ? remote->link : link_pair_t{};
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1226,8 +1227,7 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     // The tables themselves are destroyed when `gone` leaves scope — outside the locks too.
     for (const mem::block_array_t<subscriber_t>& table : gone)
         for (const subscriber_t& e : table)
-            if (e.active && e.remote != nullptr && !e.remote->link.empty())
-                hold_link(delivery_link(e.remote), false);
+            if (e.active) hold_link(delivery_link(e.remote), false);
     // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so the
     // sweep lock is not held across the retire walk. A stale entry would otherwise (a) leak, and
     // worse (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the leaked
@@ -1301,7 +1301,7 @@ std::size_t graph_t::link_edge_candidates(std::string_view link_name) const {
     return link_index_.candidate_count(link_name);
 }
 
-std::size_t graph_t::evict_link_edges(std::string_view link_name) {
+std::size_t graph_t::evict_link_edges(std::string_view link_name, link_pair_t link) {
     // Two-phase, per the graph.hpp lock-order docs — but the first phase is now an INDEX
     // LOOKUP rather than a walk of the whole vertex tree (#1071). What it replaced collected
     // every vertex in the graph holding any subscriber edge, into a global-heap vector sized
@@ -1327,11 +1327,11 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
     const mem::block_array_t<vertex_t*> candidates =
         link_index_.candidates(link_name, /*take=*/true);
     std::size_t total = 0;
-    std::size_t routed = 0;  // the edges that held `link_name` (#1816), given back below
+    std::size_t routed = 0;  // the edges that held `link` (#1816), given back below
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
         std::size_t quiet = 0;  // suspended edges were never counted (#1533)
-        const std::size_t k = v->evict_link_edges(link_name, routed, quiet);
+        const std::size_t k = v->evict_link_edges(link_name, link, routed, quiet);
         if (k == 0) continue;  // a stale index entry: the vertex's edges went individually
         // The k-fold mirror of note_subscriber_removed, under the same shared hold as
         // the clear (RFC-0005 bookkeeping: descendants' writes stop bubbling here).
@@ -1340,11 +1340,11 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
         total += k;
     }
     // Outside every graph lock: the receiver takes its own control-plane lock (#1816).
-    hold_link(link_name, false, routed);
+    hold_link(link, false, routed);
     return total;
 }
 
-std::size_t graph_t::evict_route_edges(std::string_view link_name,
+std::size_t graph_t::evict_route_edges(std::string_view link_name, link_pair_t link,
                                        std::span<const std::byte> route_wire) {
     // Byte-for-byte the evict_link_edges discipline (see its comment): snapshot under one
     // shared hold, evict per vertex under a fresh shared hold + the vertex's stripe lock,
@@ -1370,14 +1370,14 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
         std::size_t quiet = 0;
-        const std::size_t k = v->evict_route_edges(link_name, route_wire, bound_echo, quiet);
+        const std::size_t k = v->evict_route_edges(link, route_wire, bound_echo, quiet);
         if (k == 0) continue;
         v->bump_own_subs(-static_cast<std::int32_t>(k - quiet));
         bump_subtree_listeners(v, -static_cast<std::int32_t>(k - quiet));
         total += k;
     }
-    // Every match was keyed on its delivery link, so every one held `link_name` (#1816).
-    hold_link(link_name, false, total);
+    // Every match was keyed on its delivery link, so every one held `link` (#1816).
+    hold_link(link, false, total);
     return total;
 }
 
@@ -2002,7 +2002,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     if (sink.fn == nullptr) return;
     // The five wire fields are read straight off the SHARED cold half (#1448) rather than
     // out of five members the snapshot had copied for us. The snapshot holds a reference to
-    // this record, so the two `string_view`s below are valid for the whole sink call and the
+    // this record, so the caller `string_view` below is valid for the whole sink call and the
     // two route clones are the same refcount bumps `remote_delivery_t` always took — what
     // disappeared is the pair of `std::string` copies and the pair of `view_t` clones the
     // SNAPSHOT paid, per remote edge, per delivery. `has_remote_leg()` gated this call, so
@@ -3133,7 +3133,8 @@ result_t<void> graph_t::mark_flushed(vertex_handle_t vh) {
 result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
                                                    std::string_view caller,
                                                    std::optional<std::size_t> slot,
-                                                   link_id_t link_token) {
+                                                   link_id_t link_token,
+                                                   std::string_view link_name) {
     // The single admission step (ADR-0049): every door lands here, so the SUBSCRIBE gate
     // and the transient-local durability latch apply UNIFORMLY — which invariants fire no
     // longer depends on which door an edge entered through.
@@ -3189,9 +3190,10 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // nothing). vertex_t::own_subs_ordered carries the ordering argument.
     // Index this vertex under the link the edge is admitted OVER, before `s` is moved into
     // the slot below and while its cold half is still readable (#1071). The spelling is
-    // `vertex_t::evict_link_edges`'s, not a paraphrase of it: `link` first, `caller` when
-    // that is empty, because a field_write admission stores the inbound link only as the
-    // gate context (#943) and keying on the delivery link alone un-indexes it forever.
+    // `vertex_t::evict_link_edges`'s, not a paraphrase of it: the delivery link's NAME first
+    // (`link_name` — the edge itself keeps only its pairs, #1941), `caller` when that is
+    // empty, because a field_write admission stores the inbound link only as the gate
+    // context (#943) and keying on the delivery link alone un-indexes it forever.
     //
     // Deliberately BEFORE the append and not conditional on it succeeding. The index is a
     // superset (see link_index_t): an admission that then fails BACKPRESSURE or OUT_OF_RANGE
@@ -3208,8 +3210,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // A refused entry (#1778: the table source is exhausted) refuses the ADMISSION, for the
     // same reason: an edge that no departure can find is a leak, not a degraded delivery.
     if (s.remote && !link_index_.index_vertex(
-                        s.remote->link.empty() ? s.remote->caller.view() : s.remote->link.view(),
-                        link_token, v))
+                        link_name.empty() ? s.remote->caller.view() : link_name, link_token, v))
         return std::unexpected(status_t::BACKPRESSURE);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     // The hold is taken BEFORE the edge can be seen, for the reason the index entry above is:
@@ -3507,10 +3508,10 @@ graph_hooks_t graph_t::hooks() const noexcept {
                          .subject_lookup = {sl.fn, sl.ctx}};
 }
 
-void graph_t::hold_link(std::string_view link, bool held, std::size_t n) const {
+void graph_t::hold_link(link_pair_t link, bool held, std::size_t n) const {
     // One call per edge, never a batched delta: the receiver's reference count is the whole
     // of the hold (#1816), so it is told exactly what an edge-by-edge walk would tell it.
-    if (link.empty()) return;
+    if (!link.valid()) return;
     const auto hook = link_hold_.get();
     if (hook.fn == nullptr) return;
     for (std::size_t i = 0; i < n; ++i) hook.fn(hook.ctx, link, held);
@@ -3529,7 +3530,7 @@ bool graph_t::sample_stats(std::string_view seam_class, std::string_view seam_na
 result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_view,
                                        view::view_t return_route, std::string_view link,
                                        view::view_t reverse_route, std::string_view caller,
-                                       link_id_t link_token) {
+                                       link_id_t link_token, link_pair_t link_pair) {
     vertex_t* v = vh.get();
     // The route is this door's precondition, not an optional extra (#1055). Every edge this
     // door admits carries a link, and `dispatch_edge` gates its remote leg on that link while
@@ -3540,7 +3541,11 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // once, here, rather than re-checked on every delivery. INVALID_PATH because that is what
     // an empty PATH TLV is, and what `fwd_router_t::subscribe_toward` already answers for the
     // empty residual it refuses to build a route from.
-    if (return_route.empty()) return std::unexpected(status_t::INVALID_PATH);
+    //
+    // The link's pairs are the same precondition for the same reason (#1941): they are the
+    // edge's only record of where to deliver, so an edge admitted without them would take its
+    // remote leg into a sink that has nothing to resolve.
+    if (return_route.empty() || !link_pair.valid()) return std::unexpected(status_t::INVALID_PATH);
     // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) through the door parse every subscriber
     // door shares (#869): decode, type check, parse, and the zero-copy retain the slot keeps.
     // delivery_compact comes from this parse (the resolver's parallel subscriber_compact() is
@@ -3588,6 +3593,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
                 if (!route_view) return std::unexpected(status_t::BACKPRESSURE);
                 return_route = *std::move(route_view);
                 delivery_link = split.link;
+                link_pair = split.pair;
                 // The carried token moves with the key it names (#1437). The arrival's token
                 // spells the arrival link, and the index is about to be keyed on the MOUNT —
                 // so from here it is the wrong token, correctly rejected by the name compare
@@ -3618,8 +3624,8 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // A wire subscriber always carries the cold half; it and both names draw from the table
     // source (#1885), and a refusal there is BACKPRESSURE before anything was admitted.
     subscriber_remote_t* const r = s.ensure_remote(*tables_);
-    if (r == nullptr || !r->caller.assign(gate_ctx) || !r->link.assign(delivery_link))
-        return std::unexpected(status_t::BACKPRESSURE);
+    if (r == nullptr || !r->caller.assign(gate_ctx)) return std::unexpected(status_t::BACKPRESSURE);
+    r->link = link_pair;
     r->return_route = std::move(return_route);
     // The completed reverse bound route (RFC-0024 §7.1 amendment 1) — empty for every
     // canonical-only subscribe, and stored WITHOUT validation beyond what the resolver
@@ -3627,7 +3633,9 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     r->reverse_route = std::move(reverse_route);
     // A wire subscribe carries no host handle back — discard the slot (unsubscribe is the
     // wire :subscribers[N] clear, not this door's return).
-    if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx, std::nullopt, link_token); !r2)
+    if (const auto r2 =
+            admit_subscriber(v, std::move(s), gate_ctx, std::nullopt, link_token, delivery_link);
+        !r2)
         return std::unexpected(r2.error());
     return {};
 }

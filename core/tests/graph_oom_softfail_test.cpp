@@ -397,17 +397,18 @@ void test_remote_edge_snapshot_is_allocation_free() {
     graph_t g;
     auto v = g.register_vertex(path_t("/s/remote"), role_t::STORED_VALUE);
     int deliveries = 0;
-    std::size_t seen_link_len = 0;
+    bool seen_link = false;
     const tr::testing::remote_sink_guard_t sink_guard(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
             ++deliveries;
-            seen_link_len = d.link.size();
+            seen_link = d.link.valid();
         });
     for (int i = 0; i < kSubs; ++i) {
         std::string link = "lnk" + std::to_string(i);
         link.append(kLinkLen - link.size(), 'x');
         check(g.subscribe_wire(v, make_value({0x04, 0x40, 0x00, 0x00}),
-                               make_value({0x06, 0x00, 0x00, 0x00}), std::move(link))
+                               make_value({0x06, 0x00, 0x00, 0x00}), link, {}, {}, {},
+                               tr::testing::test_link(link))
                   .has_value(),
               "bind a remote subscriber over a long-named link");
     }
@@ -427,8 +428,7 @@ void test_remote_edge_snapshot_is_allocation_free() {
     check(g.read(v).has_value(), "the LKV landed");
     check(deliveries == kSubs,
           "EVERY remote edge delivered under the refusal — the snapshot copies no bytes");
-    check(seen_link_len == kLinkLen,
-          "and the sink saw the WHOLE link name, borrowed from the shared record");
+    check(seen_link, "and the sink saw the edge's link, read off the shared record");
     const auto d = g.delivery_drops();
     check(d.out_of_memory == before.out_of_memory,
           "no OOM drop was counted: the per-edge snapshot has no allocation left to fail");

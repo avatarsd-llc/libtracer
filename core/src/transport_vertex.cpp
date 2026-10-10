@@ -407,12 +407,20 @@ transport_vertex_t::~transport_vertex_t() {
     }
 }
 
-void transport_vertex_t::link_hold_thunk(void* ctx, std::string_view link, bool held) {
+void transport_vertex_t::link_hold_thunk(void* ctx, graph::link_pair_t link, bool held) {
     auto* const self = static_cast<transport_vertex_t*>(ctx);
+    // A bus peer has no count to move: only a connection holds one. The connection is named
+    // by its vertex's PAIR (#1941), and the router's slot bound to that vertex carries the
+    // name `conns_` is keyed by; a removed link has no live slot, so its edges' holds go
+    // nowhere, exactly as its name found no connection.
+    if (link.has_peer()) return;
+    const child_registry_t::child_t* const door =
+        self->router_.registry().by_conn_slot(link.conn.index);
+    if (door == nullptr) return;
     // Phase 1 only (a `LOOKUP` transaction), so this is safe from inside a fan-out and from
-    // a teardown's phase 2. NOT_FOUND — a bus peer, a provided child, a connection whose
-    // removal is evicting this very edge — has no count to move.
-    (void)(held ? self->acquire_link(link) : self->release_link(link));
+    // a teardown's phase 2. NOT_FOUND — a provided child, a connection whose removal is
+    // evicting this very edge — has no count to move.
+    (void)(held ? self->acquire_link(door->name) : self->release_link(door->name));
 }
 
 // FULL (default) ctor: the slim wiring PLUS the built-in transport-factory catalog
