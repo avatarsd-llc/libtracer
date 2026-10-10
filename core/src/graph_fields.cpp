@@ -866,9 +866,10 @@ struct graph_t::field_surface_t {
         // cannot disagree about who wrote, and it sees the arrival link the value plane's
         // `on_admit` sees.
         view::view_t admitted = value;
-        const admission_node_t* adm = g.admission_for(v);
-        if (adm != nullptr && adm->on_app_field_admit) {
-            result_t<view::view_t> decided = adm->on_app_field_admit(key, value, ctx);
+        if (const app_field_admit_hook_t on_admit =
+                g.admission_hook(v, &graph_t::admission_node_t::side_t::on_app_field_admit);
+            on_admit) {
+            result_t<view::view_t> decided = on_admit(key, value, ctx);
             if (!decided) return std::unexpected(decided.error());
             admitted = std::move(*decided);
         }
@@ -1077,8 +1078,9 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     // content of this `SETTINGS`, served verbatim. The graph owns the frame, the declarer owns
     // what is inside it. Behind the same flag bit as the payload-right rows, so a vertex that
     // declared neither does not walk.
-    const std::span<const std::byte> settings_children =
-        v->has_payload_rights() ? declared_catalog(v) : std::span<const std::byte>{};
+    mem::bytes_t declared(*tables_);
+    if (!declared_catalog(v, declared)) return std::unexpected(status_t::BACKPRESSURE);
+    const std::span<const std::byte> settings_children = mem::as_span(declared);
 
     // Staged on the table source (#1885); a refusal anywhere is BACKPRESSURE.
     mem::bytes_t point_body(*tables_);
@@ -1273,8 +1275,7 @@ result_t<view::view_t> graph_t::read_settings_app(vertex_t* v) const {
 }
 
 app_field_read_hook_t graph_t::app_field_reader(const vertex_t* v) const noexcept {
-    const admission_node_t* adm = admission_for(v);
-    return adm != nullptr ? adm->on_app_field_read : app_field_read_hook_t{};
+    return admission_hook(v, &admission_node_t::side_t::on_app_field_read);
 }
 
 result_t<view::view_t> graph_t::read_acl(vertex_t* v) const {

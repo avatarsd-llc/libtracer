@@ -297,6 +297,12 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "actually carries so the address collapse is asserted rather than assumed.",
         "ns p50 per hop · wire bytes per hop"),
     instrument_t(
+        "bench_admission_gate.cpp", "inproc", (),
+        "Times a write through an `on_admit` filter and through a payload-right table, 64 B "
+        "to 16 KiB, with and without re-registration churn at a sibling address: the "
+        "declaration gate's walk stays flat under churn. A diagnostic, not a gate.",
+        "ns/op · ns p50 / p99 · churn bytes"),
+    instrument_t(
         "bench_chain_vs_compact.cpp", "framed", (),
         "Stream delivery over the RFC-0029 PAIR chain against the RFC-0004 COMPACT handle at 1 "
         "and 3 hops, 64 B to 16 KiB, unbatched and with BATCH, with the PAIR arm's reply leg "

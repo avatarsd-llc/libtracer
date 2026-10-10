@@ -50,6 +50,7 @@
 #include "libtracer/mem_string.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/reclaim.hpp"
+#include "libtracer/seq_latch.hpp"
 #include "libtracer/sink_slot.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/vertex.hpp"
@@ -978,8 +979,8 @@ class graph_t {
      *        creator endpoint's `POINT{NAME, SETTINGS{…catalog…}}`). The bytes are a sequence of
      *        encoded TLVs, served VERBATIM and never parsed here; the declaring caller owns their
      *        vocabulary and validates writes against it itself. BORROWED for the call: copied
-     *        onto the graph beside @p rights, under the same lock and in the same immortal node,
-     *        so it is in force before the vertex is reachable. Empty (the default) ⇒ the
+     *        onto the graph beside @p rights, under the same lock and in the same record, so it
+     *        is in force before the vertex is reachable. Empty (the default) ⇒ the
      *        ordinary empty `SETTINGS`, and a vertex that declares no catalog carries nothing.
      * @return The pinned @ref vertex_handle_t, or `PATH_IN_USE` if the key is already registered.
      */
@@ -3613,57 +3614,26 @@ class graph_t {
     link_index_t link_index_{*tables_};
 
     /**
-     * @brief One vertex's declared payload-type → required-ACL-right rows (RFC-0014 Am. 2),
-     *        as a node of the graph's insert-only, immortal declaration list.
-     */
-    struct payload_right_node_t {
-        /** @brief An empty node drawing from @p src. */
-        explicit payload_right_node_t(mem::block_source_t& src) noexcept
-            : rows(src), catalog(src) {}
-        const vertex_t* v = nullptr;              /**< @brief The declaring vertex. */
-        mem::block_array_t<payload_right_t> rows; /**< @brief Its table, in declaration order. */
-        /** @brief Its declared `:schema` catalog (RFC-0014 Amendment 3) — the encoded content
-         *         of the schema's `SETTINGS`, served verbatim; empty when it declared none. It
-         *         rides this node because it is the same kind of declaration (what a CONTROL
-         *         vertex's writes accept), made at the same moment by the same caller. */
-        mem::bytes_t catalog;
-        payload_right_node_t* next = nullptr; /**< @brief The previously declared node. */
-    };
-
-    /**
-     * @brief Head of the payload-right declaration list — the RFC-0014 Amendment 2 rows for
-     *        every vertex that declared any, NEWEST FIRST.
+     * @brief An insert-only, immortal declaration list that OWNS its nodes (#1778): ONE node
+     *        per vertex address that ever declared (#2032), the atomic head readers walk, and
+     *        the source every node came from.
      *
-     * **Why the rows are here and not on the vertex.** The declaration is control-plane data
-     * on a handful of control vertices, and every candidate per-vertex home charges the
-     * vertices that declare nothing: the value-seam block is allocated for any vertex with a
-     * seam (a bus link's `on_children` identity vertex, every handler), the app-field group
-     * for every owner-declared field table, and `vertex_ext_t` for all of them. Measured, a
-     * `std::vector` on the seam block is **+16 B on every handler-bearing vertex** — the
-     * `reg_escape` memory probe catches it — for a feature those vertices do not use. That is
-     * exactly the trade ADR-0058 made when it split the seam block out of `vertex_t`, applied
-     * one level further, so it is made the same way.
+     * **One node per address, so the list is bounded by population.** The vertex map is
+     * insert-only and pointer-stable (ADR-0057), so a node is keyed by its vertex address. A
+     * re-registration at an address that already has a node republishes INTO that node — each
+     * node type says how its readers stay untorn — rather than prepending another. (Before
+     * #2032 every declaring registration prepended one: churn at one path grew the list, and the
+     * gate's walk, without limit while the vertex count stayed flat.)
      *
-     * **Insert-only and immortal, so the read is lock-free.** Nodes are PREPENDED under the
-     * unique map lock at registration and are never removed or freed until the graph itself is
-     * destroyed: the
-     * write gate walks the list with no lock, and a node it is reading can never be recycled
-     * under it. Retirement does not unlink — it clears the vertex's `PAYLOAD_RIGHTS` flag,
-     * which is what stops the gate looking at all, and a re-registration that declares again
-     * prepends NEWER rows that the walk therefore finds first (ADR-0057's insert-only
-     * discipline, the same one the seam park keeps).
-     *
-     * **What it costs the rest of the graph:** two members here, and one relaxed flag-bit test
-     * on the write path. A node that declares nothing allocates nothing and never walks.
-     */
-    /**
-     * @brief An insert-only, immortal declaration list that OWNS its nodes (#1778): the atomic
-     *        head readers walk, plus the source every node came from.
+     * **Never unlinked, so the walk is lock-free.** Nodes are linked in under the unique map lock
+     * and freed only by this list's destructor: a reader walks with no lock, and a node it is
+     * reading is never recycled under it. Retirement does not unlink either — it clears the
+     * vertex's flag bit, which is what stops a reader looking at all.
      *
      * Owning through its own destructor is what keeps `graph_t` without a user-provided one.
      * (It measured: an out-of-line `~graph_t` re-partitioned GCC's inline budget in this TU and
      * grew `dispatch_edge_remote` by 32 B — the #1223/#1250 hazard, caught by the symbol
-     * ratchet.) Nodes are prepended under the unique map lock and freed only here.
+     * ratchet.)
      */
     template <class N>
     struct immortal_list_t {
@@ -3677,72 +3647,223 @@ class graph_t {
         ~immortal_list_t() {
             for (N* n = head.load(std::memory_order_relaxed); n != nullptr;) {
                 N* const next = n->next;
+                if constexpr (requires { n->release_storage(*src); }) n->release_storage(*src);
                 mem::drop_in(*src, n);
                 n = next;
             }
         }
-        /** @brief Publish @p n as the newest node. Under the unique map lock. */
-        void prepend(N* n) noexcept {
+        /** @brief @p v's node, or null when it never declared. Lock-free. */
+        [[nodiscard]] N* find(const vertex_t* v) const noexcept {
+            for (N* n = head.load(std::memory_order_acquire); n != nullptr; n = n->next)
+                if (n->v == v) return n;
+            return nullptr;
+        }
+        /** @brief @p v's node, made empty and linked in when it has none. Under the unique map
+         *         lock. A whole-list walk, so a registration costs O(declaring addresses) — the
+         *         same walk a gated write makes, over the handful of addresses that declare.
+         *         @retval nullptr The source refused the node; nothing was linked. */
+        [[nodiscard]] N* find_or_make(const vertex_t* v) noexcept {
+            if (N* const n = find(v)) return n;
+            N* const n = mem::make_in<N>(*src);
+            if (n == nullptr) return nullptr;
+            n->v = v;
             n->next = head.load(std::memory_order_relaxed);
             head.store(n, std::memory_order_release);
+            return n;
         }
     };
+
+    /**
+     * @brief One grow-only table-source block a payload-right latch side points at: one
+     *        declaration encoded as 32-bit words, rewritten in place while it is big enough.
+     *
+     * The words: the row count, the catalog length in bytes, two words per row (its type, its
+     * right), then the catalog packed four bytes to a word. Every word is an atomic, written
+     * and read relaxed under the node's latch. A block too small for a new declaration is
+     * SUPERSEDED rather than freed, since a reader may still hold it: it stays on its
+     * successor's chain until the node is destroyed. A successor is at least twice its
+     * predecessor's size, so a side's chain holds fewer words than its live block — bounded by
+     * the largest declaration the address ever made, never by how often it made one.
+     */
+    struct payload_block_t {
+        std::size_t words = 0;                      /**< @brief Its capacity, fixed at birth. */
+        std::atomic<std::uint32_t>* word = nullptr; /**< @brief The words, after this header. */
+        payload_block_t* superseded = nullptr;      /**< @brief The block this one replaced. */
+    };
+
+    /** @brief One side of a payload-right latch: the block it reads. Stored with release once
+     *         the block is built and loaded with acquire, so a reader that meets a new block
+     *         also meets its construction, whichever side it is reading. */
+    struct payload_side_t {
+        std::atomic<payload_block_t*> block{nullptr}; /**< @brief The side's block, or null. */
+    };
+
+    /**
+     * @brief One vertex address's declared payload-type → required-ACL-right rows (RFC-0014
+     *        Am. 2) and `:schema` catalog (Am. 3), as a node of `%payload_rights_`.
+     *
+     * Published through the same two-sided `tr::seq_latch_t` as the admission hooks (#2032):
+     * a re-registration rewrites the inactive side's block in place, or grows it, and points
+     * readers at it. A reader scans the rows, or copies the catalog out, inside one latch read,
+     * so it sees one declaration whole and never a mix of two — lock-free under every slot and
+     * guard binding, with no reference count and nothing freed while the graph lives.
+     */
+    struct payload_right_node_t {
+        const vertex_t* v = nullptr;          /**< @brief The declaring vertex. */
+        tr::seq_latch_t<payload_side_t> decl; /**< @brief Its current declaration. */
+        payload_right_node_t* next = nullptr; /**< @brief The previously linked node. */
+
+        /** @brief Publish @p rows and @p catalog, growing the inactive side's block from @p src
+         *         when it is too small. Under the unique map lock.
+         *         @retval false @p src refused a larger block; the declaration is unchanged. */
+        [[nodiscard]] bool publish(mem::block_source_t& src, std::span<const payload_right_t> rows,
+                                   std::span<const std::byte> catalog);
+        /** @brief The right the current declaration demands for @p type — `WRITE` when it has
+         *         no row for it. Lock-free. */
+        [[nodiscard]] acl_right_t right_for(wire::type_t type) const noexcept;
+        /** @brief Copy the current declaration's catalog into @p out, replacing its contents.
+         *         Lock-free. @retval false @p out's source refused the bytes. */
+        [[nodiscard]] bool copy_catalog(mem::bytes_t& out) const noexcept;
+        /** @brief Return every block either side ever held to @p src. Only when no reader can
+         *         remain: the owning list's destructor. */
+        void release_storage(mem::block_source_t& src) noexcept;
+    };
+
+    /**
+     * @brief The payload-right declarations — the RFC-0014 Amendment 2 rows and Amendment 3
+     *        catalog of every vertex address that ever declared any.
+     *
+     * **Why the rows are here and not on the vertex.** The declaration is control-plane data
+     * on a handful of control vertices, and every candidate per-vertex home charges the
+     * vertices that declare nothing: the value-seam block is allocated for any vertex with a
+     * seam (a bus link's `on_children` identity vertex, every handler), the app-field group
+     * for every owner-declared field table, and `vertex_ext_t` for all of them. Measured, a
+     * `std::vector` on the seam block is **+16 B on every handler-bearing vertex** — the
+     * `reg_escape` memory probe catches it — for a feature those vertices do not use. That is
+     * exactly the trade ADR-0058 made when it split the seam block out of `vertex_t`, applied
+     * one level further, so it is made the same way.
+     *
+     * **What it costs the rest of the graph:** two members here, and one relaxed flag-bit test
+     * on the write path. A node that declares nothing allocates nothing and never walks.
+     */
     immortal_list_t<payload_right_node_t> payload_rights_;
 
     /** @brief Publish @p rows and @p catalog as @p v's declaration and set its flag. Call with
      *         `map_mutex_` held UNIQUE (the registration hold). A declaration with neither is
-     *         ignored. @retval false The table source refused the node; nothing published. */
+     *         ignored. @retval false The table source refused a block or the node; the
+     *         previous declaration, if any, still stands. */
     [[nodiscard]] bool declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
                                               std::span<const std::byte> catalog);
 
-    /** @brief @p v's declared `:schema` catalog bytes — empty unless it declared one.
-     *         Lock-free; the caller has already tested the flag. */
-    [[nodiscard]] std::span<const std::byte> declared_catalog(const vertex_t* v) const noexcept;
+    /** @brief Copy @p v's declared `:schema` catalog into @p out (empty unless it declared
+     *         one). Lock-free, and behind the flag bit: a vertex that declared nothing, or a
+     *         previous occupant's node, answers empty.
+     *         @retval false @p out's source refused the bytes. */
+    [[nodiscard]] bool declared_catalog(const vertex_t* v, mem::bytes_t& out) const noexcept;
 
     /** @brief The right @p v demands for a written TLV of @p type — `WRITE` unless @p v
      *         declared a row for it. Lock-free; the caller has already tested the flag. */
     [[nodiscard]] acl_right_t declared_write_right(const vertex_t* v, wire::type_t type) const;
 
+    /**
+     * @brief A @ref hook_t held as two atomic words, so a reader can copy it out while the
+     *        writer republishes the node it lives in (#2032).
+     *
+     * Every access is RELAXED: the ordering is the owning node's latch, never the words'.
+     */
+    template <class H>
+    struct atomic_hook_t {
+        std::atomic<typename H::fn_t> fn{nullptr}; /**< @brief The function half. */
+        std::atomic<void*> ctx{nullptr};           /**< @brief The context half. */
+        /** @brief The hook, copied out. */
+        [[nodiscard]] H load() const noexcept {
+            return H{fn.load(std::memory_order_relaxed), ctx.load(std::memory_order_relaxed)};
+        }
+        /** @brief Overwrite the hook. Only the latch's writer calls this. */
+        void store(const H& h) noexcept {
+            fn.store(h.fn, std::memory_order_relaxed);
+            ctx.store(h.ctx, std::memory_order_relaxed);
+        }
+    };
+
     /** @brief The creation-hook slot of a build without `config_t::kCreationHooks`: it holds
-     *         nothing, an install stores nothing, and it reads back as the empty hook. */
+     *         nothing, a store stores nothing, and it loads as the empty hook. */
     struct no_creation_hook_t {
+        /** @brief Load as the empty hook. */
+        [[nodiscard]] static creation_hook_t load() noexcept { return {}; }
         /** @brief Store nothing. */
-        no_creation_hook_t& operator=(const creation_hook_t& /*hook*/) noexcept { return *this; }
-        /** @brief Read back as the empty hook. */
-        operator creation_hook_t() const noexcept {
-            return {};
-        }  // NOLINT(google-explicit-constructor)
+        static void store(const creation_hook_t& /*hook*/) noexcept {}
     };
     /** @brief What an admission node holds for the creation hook: the hook itself when the
      *         build allows one, else an empty type that costs the node no bytes. */
-    using creation_slot_t =
-        std::conditional_t<config_t::kCreationHooks, creation_hook_t, no_creation_hook_t>;
+    using creation_slot_t = std::conditional_t<config_t::kCreationHooks,
+                                               atomic_hook_t<creation_hook_t>, no_creation_hook_t>;
 
-    /**
-     * @brief One vertex's ADMISSION filters (`handlers_t::on_admit` and
-     *        `handlers_t::on_app_field_admit`), as a node of the graph's insert-only, immortal
-     *        declaration list.
-     */
-    struct admission_node_t {
-        const vertex_t* v = nullptr; /**< @brief The declaring vertex. */
-        /** @brief The value plane's pre-store filter, or empty. */
-        admit_hook_t on_admit;
-        /** @brief The app-field plane's pre-store filter, or empty. */
-        app_field_admit_hook_t on_app_field_admit;
-        /** @brief The app-field plane's on-demand read seam (#1878), or empty. Not a filter,
-         *         but owner control-plane data on the few vertices that install it, so it
-         *         rides this node for the reason `%admissions_` states. */
-        app_field_read_hook_t on_app_field_read;
-        /** @brief The creation hook (RFC-0030 §7.2), or empty. Not a filter either, and it
-         *         rides this node for the same reason. Zero bytes in a build without
-         *         `config_t::kCreationHooks`. */
-        [[no_unique_address]] creation_slot_t on_create{};
-        admission_node_t* next = nullptr; /**< @brief The previously declared node. */
+    /** @brief One vertex's owner hooks that ride an admission node, as plain values — what a
+     *         writer publishes into one. */
+    struct admission_hooks_t {
+        admit_hook_t on_admit;                     /**< @brief Value-plane pre-store filter. */
+        app_field_admit_hook_t on_app_field_admit; /**< @brief App-field pre-store filter. */
+        app_field_read_hook_t on_app_field_read;   /**< @brief App-field read seam (#1878). */
+        creation_hook_t on_create;                 /**< @brief Creation hook (RFC-0030). */
     };
 
     /**
-     * @brief Head of the ADMISSION declaration list — the pre-store filters of every vertex
-     *        that installed one, NEWEST FIRST.
+     * @brief One vertex address's ADMISSION filters (`handlers_t::on_admit` and
+     *        `handlers_t::on_app_field_admit`), as a node of `%admissions_`, published
+     *        through a two-sided `tr::seq_latch_t` (#2032).
+     *
+     * The hooks are fixed-size two-word values, so a re-registration rewrites them IN PLACE
+     * and nothing is ever reclaimed — the ADR-0063 discipline. The latch is what stops a reader
+     * copying a hook's `fn` from one registration and its `ctx` from the next, and its two
+     * sides are what keep that read lock-free: see `seq_latch.hpp`.
+     */
+    struct admission_node_t {
+        /** @brief One side of the latch: every hook the node carries. */
+        struct side_t {
+            atomic_hook_t<admit_hook_t> on_admit; /**< @brief The value plane's pre-store filter. */
+            /** @brief The app-field plane's pre-store filter. */
+            atomic_hook_t<app_field_admit_hook_t> on_app_field_admit;
+            /** @brief The app-field plane's on-demand read seam (#1878). Not a filter, but owner
+             *         control-plane data on the few vertices that install it, so it rides this
+             *         node for the reason `%admissions_` states. */
+            atomic_hook_t<app_field_read_hook_t> on_app_field_read;
+            /** @brief The creation hook (RFC-0030 §7.2). Not a filter either, and it rides this
+             *         node for the same reason. Zero bytes in a build without
+             *         `config_t::kCreationHooks`. */
+            [[no_unique_address]] creation_slot_t on_create{};
+        };
+        const vertex_t* v = nullptr;      /**< @brief The declaring vertex. */
+        tr::seq_latch_t<side_t> hooks;    /**< @brief The current registration's hooks. */
+        admission_node_t* next = nullptr; /**< @brief The previously linked node. */
+
+        /** @brief Copy out the current registration's hook @p m — one untorn latch read. */
+        template <class M>
+        [[nodiscard]] auto read(M side_t::*m) const noexcept {
+            return hooks.read([m](const side_t& side) { return (side.*m).load(); });
+        }
+        /** @brief Every hook of the current registration, plainly. Writer side only: under the
+         *         unique map lock nothing else publishes, so no latch read is needed. */
+        [[nodiscard]] admission_hooks_t current() noexcept {
+            const side_t& c = hooks.current();
+            return {c.on_admit.load(), c.on_app_field_admit.load(), c.on_app_field_read.load(),
+                    c.on_create.load()};
+        }
+        /** @brief Publish @p h as the current registration's hooks. Under the unique map lock. */
+        void publish(const admission_hooks_t& h) noexcept {
+            (void)hooks.publish([&h](side_t& side) {
+                side.on_admit.store(h.on_admit);
+                side.on_app_field_admit.store(h.on_app_field_admit);
+                side.on_app_field_read.store(h.on_app_field_read);
+                side.on_create.store(h.on_create);
+                return true;
+            });
+        }
+    };
+
+    /**
+     * @brief The ADMISSION declarations — the pre-store filters of every vertex address that
+     *        ever installed one.
      *
      * **Why the filters are here and not on the vertex**, which is the same question
      * `%payload_rights_` answers and the same answer, measured the same way. A filter is
@@ -3753,16 +3874,11 @@ class graph_t {
      * (the `vertex_app5` probes caught that); as @ref hook_t pairs since RFC-0028 slice 7 it
      * would be half that, and half is still not nothing. Neither population is the one using the
      * feature. Off-vertex, a vertex that installs no filter pays one flag bit and nothing else, and
-     * a vertex that installs one pays a single node here.
-     *
-     * **Insert-only and immortal, so the read is lock-free** — node lifetime, retirement and
-     * re-registration all work exactly as `%payload_rights_` describes: prepended under the
-     * unique map lock, never unlinked, and retirement clears the vertex's `ADMISSION` flag
-     * rather than removing anything, so a newer declaration is simply found first.
+     * a vertex address that installs one pays a single node here, however often it re-registers.
      */
     immortal_list_t<admission_node_t> admissions_;
 
-    /** @brief Publish @p h's two admission filters and its app-field read seam as @p v's node
+    /** @brief Publish @p h's two admission filters and its app-field read seam as @p v's hooks
      *         and set its flag. Call with `map_mutex_` held UNIQUE (the registration hold). A
      *         declaration with none of the three set is ignored.
      *         @retval false The table source refused the node. */
@@ -3771,6 +3887,15 @@ class graph_t {
     /** @brief @p v's admission node, or null when it has none. Lock-free; one flag test for
      *         the vertices without one. */
     [[nodiscard]] const admission_node_t* admission_for(const vertex_t* v) const noexcept;
+
+    /** @brief @p v's admission hook @p m, or the empty hook when it installed no admission
+     *         hook — one flag test for the vertices without one, else one latch read. */
+    template <class M>
+    [[nodiscard]] auto admission_hook(const vertex_t* v,
+                                      M admission_node_t::side_t::*m) const noexcept {
+        const admission_node_t* const n = admission_for(v);
+        return n != nullptr ? n->read(m) : decltype(n->read(m)){};
+    }
 
     /** @brief @p v's app-field read seam (`handlers_t::on_app_field_read`, #1878), or an empty
      *         hook when it installed none — one flag test for the vertices without one. */

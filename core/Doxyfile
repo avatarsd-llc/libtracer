@@ -116,7 +116,8 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/pin_instrument.hpp \
                          core/include/libtracer/posix_endpoint.hpp \
                          core/include/libtracer/receiver_slot.hpp \
-                         core/include/libtracer/sink_slot.hpp
+                         core/include/libtracer/sink_slot.hpp \
+                         core/include/libtracer/seq_latch.hpp
 RECURSIVE              = NO
 
 # Document only what is explicitly commented; internal `detail` helpers are not
