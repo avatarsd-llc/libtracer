@@ -79,7 +79,7 @@
       ],
       "file": "core/src/fwd_router.cpp"
     },
-    "tr::net::fwd_router_t::label_dispatch": {
+    "tr::net::fwd_router_t::label_send": {
       "ccn": [
         16
       ],

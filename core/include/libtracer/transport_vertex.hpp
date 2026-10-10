@@ -284,9 +284,9 @@ class transport_vertex_t {
      *                   connection participates in owning delivery. Default: the
      *                   process net sub-pool; a bounded host injects its pool over its
      *                   static slab. Must outlive every owned transport, which
-     *                   a removal parks until the graph's second `graph_t::collect()`
-     *                   after it: so it must outlive this object AND that `collect()` (or
-     *                   the graph).
+     *                   a removal parks until a `graph_t::collect()` that no router frame
+     *                   can still be inside it: so it must outlive this object AND that
+     *                   `collect()` (or the graph).
      * @param egress_src The EGRESS twin of @p rx_backend (#873 family 1, ADR-0079's
      *                   net-plane failable store): the `block_source_t` every socket
      *                   these built-in factories construct draws its per-send gather
@@ -330,8 +330,7 @@ class transport_vertex_t {
      *                   heap on a slim node no matter what the composition root had chosen.
      *                   `nullptr` (and the default) means the process net sub-pool
      *                   (#1777). Must outlive this object and, like the default ctor's,
-     *                   the graph's second `graph_t::collect()` after a removal (or the
-     *                   graph).
+     *                   the `graph_t::collect()` that frees a removed link (or the graph).
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string_view net_root,
                        mem::mem_backend_t* rx_backend, slim_net_t,
@@ -568,11 +567,11 @@ class transport_vertex_t {
      * cover) and wired into the router when the matching creator-endpoint SPEC is created.
      * The caller keeps ownership. Call at setup, before the SPEC write.
      *
-     * Lifetime: once its connection is removed, the link must stay valid until the graph's
-     * second `graph_t::collect()` after the removal, because a forward or a `:children[]` listing
-     * that reached it just before the removal may still be inside it. The plane leaves a borrowed
-     * link alone, so the caller may call @ref transport_t::shut_down on it first, then destroy it
-     * after that `collect()`.
+     * Lifetime: once its connection is removed, the link must stay valid while a router frame
+     * that reached it just before the removal may still be inside it. The plane leaves a
+     * borrowed link alone, so the caller may call @ref transport_t::shut_down on it first and
+     * then hand its destruction to `graph_t::park_release`, which runs it at the first
+     * `graph_t::collect()` no such frame can still be inside.
      *
      * The staging key is `<module>/<name>` in BOTH halves (#883). A creating SPEC reaches
      * this staging when it resolves to the same module — i.e. it carries no `kind` (and no
@@ -624,16 +623,17 @@ class transport_vertex_t {
      * `fwd_router_t::remove_child` first (the name stops resolving, so no NEW forward
      * reaches the link), then `graph.retire()` on the identity vertex (RFC-0009 §B.6 —
      * the path re-virginizes), then the owned transport is shut down
-     * (@ref transport_t::shut_down, joining its recv thread) and parked: it is destroyed at
-     * the graph's second `graph_t::collect()` after the removal, so a forward or a listing
-     * that reached it just before the removal finds a valid object for at least one whole
-     * interval between two calls. If the retire or the park is refused, the
+     * (@ref transport_t::shut_down, joining its recv thread) and parked: it is destroyed by
+     * the first `graph_t::collect()` that no router frame open at the removal is still
+     * inside, so a frame (a forward, an origination, a wire listing) that reached it just
+     * before the removal always finds a valid object. If the retire or the park is refused, the
      * shut-down transport is kept for the graph's lifetime instead. A connection whose link
      * was staged via @ref provide_link leaves that borrowed link alone (see its lifetime
      * note); only the routing entry and the vertex go.
      *
-     * A node whose connections are removed must therefore call `graph_t::collect()` at a
-     * quiescent point, or every removed link is kept until the graph is destroyed.
+     * A node whose connections are removed must therefore call `graph_t::collect()` from time
+     * to time (any thread, any point: a frame still inside the link keeps it), or every
+     * removed link is kept until the graph is destroyed.
      *
      * This is the owner-internal operation the RFC-0014 `NAME`-write removal dispatch
      * (S2b) will call; it is not itself reachable from the wire.
@@ -657,23 +657,39 @@ class transport_vertex_t {
      */
     [[nodiscard]] const conn_settings_t* settings_of(std::string_view name) const;
 
+    /** @brief What @ref with_link calls: the connection's owned link, valid until it returns. */
+    using link_fn_t = void (*)(void* ctx, transport_t& link);
+
     /**
-     * @brief The OWNED transport of connection @p name — the config-constructed socket.
+     * @brief Call @p fn with the OWNED transport of connection @p name — the config-constructed
+     *        socket — on this thread, inside one router frame bracket.
      *
-     * The seam for reaching a SPEC-constructed listener/server after creation (e.g.
-     * to enumerate its peers via `link_of(name)->bus()` or close one via
-     * `link_of(name)->bus()->close_peer(peer)`). Returns nullptr for a connection
-     * whose link was staged with @ref provide_link (the caller already owns that
-     * link) and for an unknown NAME.
+     * The seam for reaching a SPEC-constructed listener/server after creation, e.g. to
+     * enumerate its peers through `link.bus()` or close one with `link.bus()->close_peer(peer)`.
+     * The link is valid until @p fn returns, even if the connection is removed meanwhile: a
+     * removed link is freed only by a `graph_t::collect()` that no bracket open at its removal
+     * is still inside. A pointer kept past @p fn has no such guarantee. @p fn runs without the
+     * transport vertex's locks, so it may call back into it.
      * @param name The connection's **qualified** key `net/<module>/<name>` — NOT the bare
      *             connection NAME. RFC-0014 S2a re-keyed `conns_` to the qualified form so
      *             the routing address equals the vertex path; these lookups moved with it
      *             and the doc did not, so a caller following the old wording got a silent
      *             `NOT_FOUND` / `nullptr` (#605).
+     * @return false, with @p fn not called, for a connection whose link was staged with
+     *         @ref provide_link (the caller already owns that link) and for an unknown NAME.
+     */
+    [[nodiscard]] bool with_link(std::string_view name, link_fn_t fn, void* ctx) const;
+
+   private:
+    /** @brief Test access to %link_of; defined only by the tests. */
+    friend struct transport_vertex_test_access;
+
+    /**
+     * @brief The OWNED transport of connection @p name, or nullptr — unbracketed, so test-only
+     *        (`transport_vertex_test_access`); the app reaches the link through @ref with_link.
      */
     [[nodiscard]] transport_t* link_of(std::string_view name) const;
 
-   private:
     // One connection leaf: the graph identity vertex, its transport-private config, and —
     // when config-constructed — the OWNED transport (`owned` empty for a provided link).
     // The NAME→link routing table is NOT duplicated here — it has one owner, the router's
@@ -754,7 +770,7 @@ class transport_vertex_t {
          * @brief Phase 1 begins: take the locks @p scope asks for and claim them for this
          *        thread.
          *
-         * `const`, because the pure readers (`settings_of` / `link_of` / `module_for` /
+         * `const`, because the pure readers (`settings_of` / `with_link` / `module_for` /
          * `is_structural`) take `ctl_m_` too — it is `mutable`, as are `ops_m_` and both
          * ownership stamps. Phase 2 still reaches the graph and the router: those are
          * REFERENCE members, so const on the owner does not propagate to them.
@@ -951,7 +967,7 @@ class transport_vertex_t {
      * @brief Serializes every CONTROL-PLANE mutation here (ADR-0063 §3).
      *
      * This class had no synchronization at all, yet a creation writes `conns_` and
-     * `pending_links_` while `settings_of` / `link_of` / `remove_connection` traverse `conns_`
+     * `pending_links_` while `settings_of` / `with_link` / `remove_connection` traverse `conns_`
      * — and the graph invokes the connection factory OUTSIDE `map_mutex_`, on whichever
      * transport's receive thread delivered the CREATE. Two transports means two such threads,
      * so concurrent `std::map` inserts (and the readers racing their rebalance) were reachable
@@ -1003,7 +1019,7 @@ class transport_vertex_t {
      * It is therefore held across the fan-out and the joins — and that is safe for exactly
      * one reason, which is the reason it exists as a second mutex rather than as `ctl_m_`
      * held longer: **no door a fan-out can reach takes it.** @ref acquire_link,
-     * @ref release_link, @ref link_of, @ref settings_of, @ref module_for and
+     * @ref release_link, @ref with_link, @ref settings_of, @ref module_for and
      * `is_structural` are `LOOKUP` scope. A callback that instead MUTATES the control plane
      * re-entrantly — a liveness subscriber calling @ref remove_connection — is refused by
      * assertion rather than deadlock; that is a restriction, and a deliberate one: a

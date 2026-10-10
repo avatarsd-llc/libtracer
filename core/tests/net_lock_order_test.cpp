@@ -63,6 +63,7 @@
 #include "libtracer/self_heal_link.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
+#include "transport_vertex_test_access.hpp"
 
 namespace {
 
@@ -264,7 +265,7 @@ struct standing_binding_t {
         } else {
             (void)net.acquire_link(qualified);
         }
-        (void)net.link_of(qualified);
+        (void)tr::testing::link_of(net, qualified);
         (void)net.settings_of(qualified);
         reentries.fetch_add(1);
     }

@@ -17,7 +17,7 @@
  * that an origin caches the handed spelling and stands up no mint table of its own, so its own
  * first-hop local part is prepended as LITERAL segments and the cached spelling is mixed by
  * design (§5.2, §6.3). Every claim below is asserted through the public origin surface —
- * `adopt_path_label`, `label_dispatch`, `fall_back_on_label_refusal` — and the frames it produces
+ * `adopt_path_label`, `label_send`, `fall_back_on_label_refusal` — and the frames it produces
  * are fed to a real minting hop, so what is bound here is what a deployment does.
  *
  * `tests/conformance/vectors/v1/fwd/fwd-label-stale/description.md` says of its bytes: *"these
@@ -58,6 +58,27 @@ using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::net::fwd_router_t;
 using tr::net::path_label_table_t;
+
+/** @brief What `bound_send` handed its callback, copied out for the test's checks. The links
+ *         here are the test's own and outlive every check, so keeping one is safe. */
+struct dispatched_t {
+    tr::net::transport_t* link = nullptr;
+    std::vector<std::byte> dst;
+};
+
+/** @brief The callback a test hands a bracketed send: copy the link and the `dst` out. */
+void keep_dispatch(void* ctx, tr::net::transport_t& link, std::span<const std::byte> dst) {
+    auto& out = *static_cast<dispatched_t*>(ctx);
+    out.link = &link;
+    out.dst.assign(dst.begin(), dst.end());
+}
+
+/** @brief `label_send` through @ref keep_dispatch: the dispatch, or nullopt on a refusal. */
+std::optional<dispatched_t> label_dispatch(const fwd_router_t& r, const path_t& path) {
+    dispatched_t out;
+    if (!r.label_send(path, &keep_dispatch, &out)) return std::nullopt;
+    return out;
+}
 using tr::testing::b_fwd_raw_op;
 using tr::testing::b_fwd_reply;
 using tr::testing::bytes_t;
@@ -371,7 +392,7 @@ int main() {
         const auto dec = tr::wire::tlv_node_t::over(*minted);
         check(dec.has_value() && o.r.adopt_path_label(target, kOriginLink, *dec), "adopted");
 
-        const auto dispatch = o.r.label_dispatch(target);
+        const auto dispatch = label_dispatch(o.r, target);
         check(dispatch.has_value(), "the origin resolves its OWN literal head to the link out");
         check(dispatch && dispatch->link == &o.uplink, "…and it is the child that head names");
         check(dispatch &&
@@ -416,7 +437,7 @@ int main() {
         path_t target = origin_target();
         const auto dec = tr::wire::tlv_node_t::over(*minted);
         check(dec.has_value() && o.r.adopt_path_label(target, kOriginLink, *dec), "adopted");
-        const auto dispatch = o.r.label_dispatch(target);
+        const auto dispatch = label_dispatch(o.r, target);
         check(dispatch.has_value(), "and spendable");
 
         // §7.1's departure. Nothing is told — there is no withdraw frame, no unbind, no lease
@@ -437,7 +458,7 @@ int main() {
         check(!target.path_label().cached, "…the spelling is forgotten");
         check(key_intact(target),
               "…the full-string path the origin still holds is the fallback, unchanged");
-        check(!o.r.label_dispatch(target).has_value(),
+        check(!label_dispatch(o.r, target).has_value(),
               "…and there is nothing labelled left to spend: the next operation goes canonical");
         check(!target.binding().bound, "…nothing else on the path was touched");
         check(o.uplink.sent.empty(),
@@ -450,7 +471,7 @@ int main() {
         const auto rdec = tr::wire::tlv_node_t::over(*reminted);
         check(rdec.has_value() && o.r.adopt_path_label(target, kOriginLink, *rdec),
               "the next reply re-mints and the origin adopts it (§6.1)");
-        check(o.r.label_dispatch(target).has_value(), "…and the path is spendable again");
+        check(label_dispatch(o.r, target).has_value(), "…and the path is spendable again");
     }
 
     // ===== 5) O-3 — the refusal is NARROW: only NOT_FOUND drops the spelling ===============
@@ -514,11 +535,11 @@ int main() {
         check(dec.has_value() && o.r.adopt_path_label(target, kOriginLink, *dec),
               "the same reply adopts once the source serves again");
         o.label_src.closed = true;
-        check(!o.r.label_dispatch(target).has_value(),
+        check(!label_dispatch(o.r, target).has_value(),
               "a refused `dst` block is no dispatch — the caller sends the canonical spelling");
         check(target.path_label().cached, "…and the cached spelling is kept for the next try");
         o.label_src.closed = false;
-        check(o.r.label_dispatch(target).has_value(), "…which succeeds once the source serves");
+        check(label_dispatch(o.r, target).has_value(), "…which succeeds once the source serves");
     }
 
     return tr::testing::summary("path_label_origin");

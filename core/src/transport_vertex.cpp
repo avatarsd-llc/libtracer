@@ -1263,9 +1263,9 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     //     reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
     //     half-built connection tears down cleanly too.
     //  4. Shut the owned socket down, which joins its recv thread — the second join, and the
-    //     second reason phase 2 exists — and park it until the graph's second collect() after this,
-    //     so a forward or a listing already on its way into it finds a valid object. A provided
-    //     link is borrowed and left untouched.
+    //     second reason phase 2 exists — and park it until a collect() that no router frame
+    //     open now is still inside, so a frame already on its way into it finds a valid object.
+    //     A provided link is borrowed and left untouched.
     //
     // #576: step 3 is the peer-driven append site of the value-seam park — but only for a
     // BUS link. The identity vertex bears a value seam iff it was given one at creation, and
@@ -1353,6 +1353,16 @@ const conn_settings_t* transport_vertex_t::settings_of(std::string_view name) co
     const ctl_txn_t txn(*this);
     const conn_t* const it = conns_.find(name);
     return it == nullptr ? nullptr : &it->settings;
+}
+
+bool transport_vertex_t::with_link(std::string_view name, link_fn_t fn, void* ctx) const {
+    // Opened before the lookup and held until `fn` returns: a removal that lands after the
+    // lookup parks the link at an epoch this bracket holds back (see `frame_scope_t`).
+    const graph::detail_qsbr::frame_scope_t scope;
+    transport_t* const link = link_of(name);  // the table lock is dropped before `fn`
+    if (link == nullptr) return false;
+    fn(ctx, *link);
+    return true;
 }
 
 transport_t* transport_vertex_t::link_of(std::string_view name) const {

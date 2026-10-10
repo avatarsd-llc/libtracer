@@ -61,6 +61,7 @@
 #include "libtracer/transport_vertex.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
+#include "transport_vertex_test_access.hpp"
 
 namespace {
 
@@ -318,8 +319,8 @@ int main() {
             static_cast<mailbox_t*>(ctx)->push(std::move(b));
         },
         &a_rx);
-    auto* const srv_a =
-        static_cast<transport_ws_server*>(net_a.link_of("net/ws-server/l"));  // kind=ws LISTEN
+    auto* const srv_a = static_cast<transport_ws_server*>(
+        tr::testing::link_of(net_a, "net/ws-server/l"));  // kind=ws LISTEN
     check(srv_a != nullptr, "A: the SPEC-constructed listener is reachable via link_of");
     if (srv_a == nullptr) return 1;
     const std::uint16_t a_port = srv_a->local_port();
@@ -345,7 +346,8 @@ int main() {
                                                     /*peer_named=*/true, /*max_peers=*/8));
         check(w.has_value(), "B: ctrl listener /net/ws-server/ctrl created from a SPEC");
     }
-    auto* const srv_b = static_cast<transport_ws_server*>(net_b.link_of("net/ws-server/ctrl"));
+    auto* const srv_b =
+        static_cast<transport_ws_server*>(tr::testing::link_of(net_b, "net/ws-server/ctrl"));
     check(srv_b != nullptr, "B: the SPEC-constructed ctrl listener is reachable via link_of");
     if (srv_b == nullptr) return 1;
     const std::uint16_t b_port = srv_b->local_port();
@@ -382,7 +384,7 @@ int main() {
                                          conn_spec_view("b", b_port, "ws", "127.0.0.1"));
             check(w.has_value(), "C: connection to B /net/ws-client/b created from a SPEC");
         }
-        tr::net::transport_t* const c_to_b = net_c.link_of("net/ws-client/b");
+        tr::net::transport_t* const c_to_b = tr::testing::link_of(net_c, "net/ws-client/b");
         check(c_to_b != nullptr, "C: the dialed link to B is live");
         if (c_to_b == nullptr) return 1;
 
@@ -408,7 +410,7 @@ int main() {
             check(r && reply_kind(*r) == static_cast<int>(reply_kind_t::RESULT),
                   "creator write answered kind == RESULT");
         }
-        check(net_b.link_of("net/ws-client/a-link") != nullptr,
+        check(tr::testing::link_of(net_b, "net/ws-client/a-link") != nullptr,
               "B now owns a live dial toward A at /net/ws-client/a-link (C's name)");
 
         // ----- recipe step 2: the subscription, target composed OFFLINE -------------

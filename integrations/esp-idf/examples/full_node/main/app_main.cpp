@@ -529,14 +529,11 @@ extern "C" void app_main(void) {
     //
     // The same loop is this node's `collect()` point. A peer can create and remove connections
     // through `/net/<module>/conn`, and each removal shuts the link down and parks it (with its
-    // socket, on lwIP) until the graph's second `collect()` after it: a node that never collects
-    // keeps every removed link, and lwIP's few sockets run out. This loop's own write has
-    // returned by each call, but the receive tasks keep running, so this is NOT a quiet point:
-    // a forward that resolved a link just before its removal may still be inside its send.
-    // What makes it acceptable is the two-generation grace: a parked link is freed only after
-    // at least one whole tick (1 s), so such a forward would have to stay inside lwIP's send
-    // for that long. That is a bound, not a proof; a node that must be exact pauses its
-    // receive tasks around the call.
+    // socket, on lwIP) until a `collect()` runs: a node that never collects keeps every removed
+    // link, and lwIP's few sockets run out. The receive tasks keep running meanwhile, and that
+    // is fine: the router brackets every frame they hand it, and `collect()` frees a parked
+    // link only once no frame that could reach it is still inside. This loop's own graph
+    // operations have returned by each call, which settles the in-process readers.
     std::uint32_t v = 23;
     while (true) {
         (void)dev.write_sensor(v++);
