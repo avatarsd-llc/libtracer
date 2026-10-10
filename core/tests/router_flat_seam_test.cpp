@@ -177,7 +177,7 @@ void compact_deliveries_charge_their_seams() {
     counting_backend_t flat("flat");
     fwd_router_t router(g, {.flat = &flat});
     rec_link_t up;
-    (void)router.add_child("net/ws-client/up", up);
+    (void)router.attach_link("net/ws-client/up", up);
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(5, path_tlv({"sink"})));
     check(flat.allocs == 0, "binding a label copies no payload — nothing charged yet");
 
@@ -205,7 +205,7 @@ void a_refused_warm_compact_is_a_counted_drop() {
     counting_backend_t flat("flat");
     fwd_router_t router(g, {.flat = &flat});
     rec_link_t up;
-    (void)router.add_child("net/ws-client/up", up);
+    (void)router.attach_link("net/ws-client/up", up);
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(5, path_tlv({"sink"})));
     router.on_frame("net/ws-client/up", tr::net::encode_compact(5, value_tlv(1)));
     check(stored_byte(g, "/sink") == 1, "precondition: the binding is warm");
@@ -233,7 +233,7 @@ void a_refused_cold_compact_is_a_counted_drop() {
     counting_backend_t flat("flat");
     fwd_router_t router(g, {.flat = &flat});
     rec_link_t up;
-    (void)router.add_child("net/ws-client/up", up);
+    (void)router.attach_link("net/ws-client/up", up);
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(5, path_tlv({"sink"})));
 
     flat.refuse = true;
@@ -253,7 +253,7 @@ void subscribe_toward_charges_flat() {
     counting_backend_t flat("flat");
     fwd_router_t router(g, {.flat = &flat});
     rec_link_t b;
-    (void)router.add_child("net/ws-client/b", b);
+    (void)router.attach_link("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/light/rgb"), role_t::STORED_VALUE);
 
     const auto s =
@@ -272,7 +272,7 @@ void a_refused_subscribe_toward_answers_backpressure() {
     counting_backend_t flat("flat");
     fwd_router_t router(g, {.flat = &flat});
     rec_link_t b;
-    (void)router.add_child("net/ws-client/b", b);
+    (void)router.attach_link("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/light/rgb"), role_t::STORED_VALUE);
 
     flat.refuse = true;

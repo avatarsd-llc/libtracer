@@ -69,10 +69,11 @@ nothing, and it measured a bound terminus slower than the canonical terminus it 
 The element→link join is one integer per child, recorded at `add_child`: a child's mount run **is**
 its connection vertex's canonical key, so the router resolves that vertex once and remembers its
 slot index. It is not a route table — one entry per link, sized by the graph and never by the
-traffic — and a child registered before its connection vertex exists simply has none, which makes
-every bound route through it fall back to canonical rather than misroute. A **bus** child never
-records one, deliberately: a bus mount's own `send()` broadcasts and a bus peer has no vertex, so
-no element can name either.
+traffic. **A link cannot exist without its connection vertex** (#1940): `add_child` refuses a
+mount whose vertex is not registered, so "no connection vertex" always means "no route", and
+`attach_link` registers the two together for a link wired by hand. A **bus** child records its
+door too, where the NAME `<mount>/<peer>` and a PAIR-named session anchor are gated, but it is
+never an egress: a bus mount's own `send()` broadcasts.
 
 An opcode the build cannot name is dropped rather than forwarded: §6.2 evaluates the ACL for the
 operation's **own** right, and a hop that does not know an opcode does not know its right, so
@@ -135,9 +136,12 @@ class fwd_router_t {
     // through it, and the run prepended to src on the way back. ANY width (#523) -- the
     // descent makes one registry pass and matches each slot against the prefix of its own
     // width, so the only bound is the path-depth budget. Returns false, always (not only in
-    // debug), for a name no address could ever name: empty, with an empty segment, or wider
-    // than kMaxSegments. Optional per-child failable source; null falls back to the router's.
+    // debug), for a name no address could ever name: empty, with an empty or over-long
+    // segment, or wider than kMaxSegments, and for a mount whose connection vertex is not
+    // registered (#1940). Optional per-child failable source; null falls back to the router's.
     bool add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
+    // add_child, after registering the connection vertex keyed by `name` if there is none.
+    bool attach_link(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
     bool remove_child(std::string_view name);   // removal, not departure
     void link_down(std::string_view link_name); // departure: evict edges + drop label state
 
@@ -453,8 +457,9 @@ Inside the process a link is addressed by its connection vertex's handle (the ro
   resolves ([#523](https://github.com/avatarsd-llc/libtracer/issues/523)) — the descent makes one
   registry pass and matches each slot against the prefix of that slot's own `seg_count` — so there
   is no width pitfall left. What `add_child` does refuse, always and not only in debug, is a name
-  no address could ever name: empty, containing an empty segment, or wider than
-  `graph::kMaxSegments`; it also refuses when the registry cannot grow. `false` means **nothing**
+  no address could ever name: empty, containing an empty or over-long segment, or wider than
+  `graph::kMaxSegments`; it also refuses a mount with no connection vertex (#1940), and refuses
+  when the registry cannot grow. `false` means **nothing**
   was registered, so a caller that ignores it wires a link that is audible on its transport and
   resolvable by no `dst`, while `size()` and `live_size()` report the registry as healthy.
 - **`remove_child` is removal; `link_down` is departure.** A link that merely dropped must take
@@ -467,9 +472,8 @@ Inside the process a link is addressed by its connection vertex's handle (the ro
   because a receive thread may be walking it, but it answers no lookup — and `add_child` of that
   same NAME revives it rather than appending a second. Two consequences callers rely on: a
   re-added child resolves to its *current* tenancy on the bound path (`connection_ref` /
-  `hop_mint` read the registry slot's `conn_slot`, which `add_child` re-resolves per
-  registration, so a child that gained a connection vertex between registrations becomes
-  bindable, and one re-added as a bus mount stops being), and
+  `hop_mint` read the registry slot's `conn_slot`, the same immortal slot on every registration
+  of the name, and one re-added as a bus mount stops being bindable), and
   create/remove churn on a stable name set neither leaks a context nor lengthens the chain the
   bound hop walks. `receiver_ctx_count()` is the assertable form of the second, the twin of
   `child_registry_t::size()` — which has had this rule since #494/#521.

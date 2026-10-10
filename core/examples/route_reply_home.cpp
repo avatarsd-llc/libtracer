@@ -131,7 +131,7 @@ int main() {
     tr::net::fwd_router_t router_b(graph_b);
     recording_link_t b_to_o;
 
-    if (!router_o.add_child("a", o_to_a) || !router_b.add_child("o", b_to_o)) {
+    if (!router_o.attach_link("a", o_to_a) || !router_b.attach_link("o", b_to_o)) {
         std::fprintf(stderr, "route_reply_home: add_child failed — nothing registered\n");
         return 1;
     }

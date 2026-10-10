@@ -438,7 +438,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
     std::size_t next_filler = 0;
     for (std::size_t i = 1; i <= links; ++i) {
         if (i == target_pos) {
-            router.add_child("net/ws-client/out", out_link);
+            router.attach_link("net/ws-client/out", out_link);
         } else {
             // Zero-padded so every filler is the SAME LENGTH AS THE TARGET ("out", giving a
             // 17-byte qualified name). Two separate things were wrong before. Unpadded,
@@ -451,7 +451,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
             // honest worst case the row claims to report.
             char fname[32];
             std::snprintf(fname, sizeof fname, "net/ws-client/l%02zu", next_filler);
-            router.add_child(fname, filler[next_filler]);
+            router.attach_link(fname, filler[next_filler]);
             ++next_filler;
         }
     }
@@ -467,7 +467,7 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode,
     // as the revision this comment was written to fix. Worse, the duplicate registration was
     // itself a live registry bug (a shadow slot that survives `erase`), which is how it was
     // finally caught. Keep this to ONE call.
-    router.add_child("net/ws-server/in", in_link);
+    router.attach_link("net/ws-server/in", in_link);
 
     // DE AD BE EF repeated: at 4 B this is the exact payload the axes always carried.
     constexpr std::array<std::byte, 4> kPattern = {std::byte{0xDE}, std::byte{0xAD},

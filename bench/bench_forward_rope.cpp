@@ -152,8 +152,8 @@ void run_point(std::size_t links) {
     // A small, fixed registry. The scan is NOT the axis here — bench_forward_demux owns that —
     // so the target is registered first and the descent hits on its first candidate. What
     // varies is only the rope's shape.
-    router.add_child("net/ws-client/out", out_link);
-    router.add_child("net/ws-server/in", in_link);
+    router.attach_link("net/ws-client/out", out_link);
+    router.attach_link("net/ws-server/in", in_link);
 
     const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
                                   std::byte{0xEF}};

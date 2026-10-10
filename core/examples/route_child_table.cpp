@@ -77,21 +77,21 @@ int main() {
     // Every mutation is its own statement, and every observation is a separate one. Mixing
     // them into one printf() argument list would leave the order unspecified — this example
     // is about counters that a call CHANGES, so the sequencing has to be explicit.
-    const bool added = router.add_child("up", first);
+    const bool added = router.attach_link("up", first);
     check(ok, added, "add_child returns true and the child is registered");
     check(ok, router.registry().live_size() == 1 && router.registry().size() == 1,
           "one live slot, one slot walked");
 
     // A name no `dst` could ever spell is refused ALWAYS (not just in debug builds), and the
     // table is exactly as it was.
-    const bool empty_name = router.add_child("", second);
-    const bool empty_segment = router.add_child("a//b", second);
+    const bool empty_name = router.attach_link("", second);
+    const bool empty_segment = router.attach_link("a//b", second);
     check(ok, !empty_name && !empty_segment, "an unaddressable name is refused, both spellings");
     check(ok, router.registry().size() == 1, "and a refusal registered NOTHING — no ghost slot");
 
     // Re-adding a LIVE name rebinds its one slot. The link the name resolves to changes; the
     // number of slots does not.
-    const bool rebound = router.add_child("up", second);
+    const bool rebound = router.attach_link("up", second);
     check(ok, rebound, "re-adding a live name succeeds");
     check(ok, router.registry().by_name("up") == &second,
           "and it REBINDS: the name now resolves to the new link");
@@ -109,7 +109,7 @@ int main() {
 
     // The re-add revives the tombstone in place. This is the churn bound: N add/remove cycles
     // on a stable name set leave the chain at the number of distinct NAMES, not of calls.
-    const bool revived = router.add_child("up", first);
+    const bool revived = router.attach_link("up", first);
     check(ok, revived, "a re-add after removal succeeds");
     check(ok, router.registry().live_size() == 1 && router.registry().size() == 1,
           "and revives the SAME slot — churn on a stable name set grows nothing");

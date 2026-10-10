@@ -210,8 +210,8 @@ void run_point(std::size_t payload, bool terminus, double budget) {
     fwd_router_t router(g);
     sink_link_t up;
     sink_link_t down;
-    router.add_child("net/ws-client/up", up);
-    router.add_child("net/ws-server/down", down);
+    router.attach_link("net/ws-client/up", up);
+    router.attach_link("net/ws-server/down", down);
 
     // A terminus route resolves locally; a forwarding route sits BELOW the down mount.
     const std::vector<std::byte> route =

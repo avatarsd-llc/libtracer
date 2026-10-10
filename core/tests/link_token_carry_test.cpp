@@ -431,7 +431,7 @@ void test_a_census_bus_peer_is_indexed_and_evicts() {
     graph_t g;
     fwd_router_t router(g);
     census_bus_t bus;
-    check(router.add_child("can", bus), "the census bus mounts");
+    check(router.attach_link("can", bus), "the census bus mounts");
     vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     (void)s;
 
@@ -497,7 +497,7 @@ void test_a_flat_child_carries_its_token() {
     graph_t g;
     fwd_router_t router(g);
     flat_link_t cli;
-    check(router.add_child("cli", cli), "the child registers");
+    check(router.attach_link("cli", cli), "the child registers");
     vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     (void)s;
     vertex_handle_t t = g.register_vertex(path_t("/t"), role_t::STORED_VALUE);

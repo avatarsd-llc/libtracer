@@ -29,6 +29,17 @@
  *   this holds lock-free too; what the case pins is that the mint's shared hold keeps it
  *   true if the bump ever moves first again (ADR-0062's order). Measured: it fails with the
  *   hold removed and the bump moved first, and passes with either one kept.
+ * - **No door mid-retire.** A NAME hop through a connection vertex whose `:acl` admits only
+ *   `admin` is refused for `p0`. One thread retires and revives that vertex, rewriting its
+ *   `:acl` before each retire; another sends `p0`'s WRITE through the mount the whole time. A
+ *   retire clears the vertex's own ACEs while reverting it, and with nothing else bearing an
+ *   `:acl` the graph is then open by default, so a door still flagged registered at that point
+ *   would admit `p0`. A retire clears the whole subtree's registration flags FIRST, and the
+ *   access check behind `graph_t::allows` tests the flag again after the gate (#2061), so a
+ *   hop made entirely inside one `retire` call must never forward (#1940). Each half alone
+ *   fails this case: without the reorder the recheck still sees the flag up (13 runs of 13),
+ *   and without the recheck a hop that passed the test before the retire began reads the ACEs
+ *   it cleared (3 runs of 13; that window is narrower). With both, 0 runs of 13.
  */
 
 #include <atomic>
@@ -37,10 +48,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <expected>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -50,10 +63,12 @@
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/path_pair.hpp"
+#include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport.hpp"
 #include "pair_body.hpp"
 #include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -134,8 +149,8 @@ bytes_t pair_write(path_pair_t head) {
 struct node_t {
     explicit node_t(tr::mem::block_source_t& src) : g(src) {
         (void)g.register_vertex(path_t("/net/tcp/out"), role_t::STORED_VALUE);
-        check(router.add_child("net/tcp/out", out), "out mounted");
-        check(router.add_child("net/tcp/in", in), "in mounted");
+        check(router.attach_link("net/tcp/out", out), "out mounted");
+        check(router.attach_link("net/tcp/in", in), "in mounted");
         const auto v = g.find(path_t("/net/tcp/out").key());
         const auto slot = v ? g.vertex_slot(*v) : std::nullopt;
         check(slot.has_value(), "the out connection vertex has a slot");
@@ -246,11 +261,93 @@ void mint_never_carries_successor() {
     check(bad.load() == 0, "no mint inside a retire carried the successor's generation");
 }
 
+/** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
+std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(void*,
+                                                                             std::string_view c) {
+    const auto* p = reinterpret_cast<const std::byte*>(c.data());
+    return tr::graph::subject_token_t(p, p + c.size());
+}
+
+/** @brief An `:acl` that admits `admin` to everything and nobody else. */
+bytes_t admin_only_acl() {
+    const auto* p = reinterpret_cast<const std::byte*>("admin");
+    const tr::graph::ace_t ace{
+        .type = tr::graph::ace_type_t::ALLOW,
+        .flags = tr::graph::kAceInherit,
+        .subject = bytes_t(p, p + 5),
+        .access_mask = 0xFFFFFFFFu,
+        .expires_ns = 0,
+    };
+    return tr::graph::encode_acl(std::span<const tr::graph::ace_t>(&ace, 1));
+}
+
+/** @brief A `VALUE` TLV carrying one byte. */
+bytes_t value_byte() {
+    const std::byte b{0x5A};
+    bytes_t out;
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
+    return out;
+}
+
+/** @brief A hop made inside a retire never crosses the door with its ACEs already cleared. */
+void no_door_mid_retire() {
+    std::printf("a hop inside a retire never crosses a door whose ACEs are already gone:\n");
+    graph_t g;
+    auto hooks = g.hooks();
+    hooks.subject_resolver = {caller_is_subject, nullptr};
+    g.set_hooks(hooks);
+    fwd_router_t router{g};
+    link_t out;
+    const path_t at("/net/tcp/out");
+    const path_t acl_at("/net/tcp/out:acl");
+    const bytes_t acl = admin_only_acl();
+    check(router.attach_link("net/tcp/out", out), "out mounted with its connection vertex");
+    check(g.write(acl_at, tr::testing::make_value(acl)).has_value(), ":acl written");
+    const bytes_t frame =
+        tr::testing::b_fwd(fwd_op_t::WRITE, tr::testing::b_path({"net", "tcp", "out", "leaf"}),
+                           tr::testing::b_path({}), {}, value_byte());
+    router.on_frame("p0", frame);
+    check(out.n.load() == 0, "p0 is refused at the door (the control)");
+    // `seq` is odd while a `retire` call is in progress.
+    std::atomic<std::uint32_t> seq{0};
+    std::atomic<bool> stop{false};
+    std::atomic<std::size_t> bad{0};
+    std::atomic<std::size_t> inside{0};
+    std::thread sender([&] {
+        while (!stop.load(std::memory_order_acquire)) {
+            const std::uint32_t s0 = seq.load(std::memory_order_acquire);
+            const std::size_t n0 = out.n.load(std::memory_order_acquire);
+            router.on_frame("p0", frame);
+            const std::size_t n1 = out.n.load(std::memory_order_acquire);
+            const std::uint32_t s1 = seq.load(std::memory_order_acquire);
+            if (s0 != s1 || (s0 & 1u) == 0) continue;
+            inside.fetch_add(1, std::memory_order_relaxed);
+            if (n1 != n0) bad.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    constexpr int kCycles = 20000;
+    for (int i = 0; i < kCycles; ++i) {
+        const auto h = g.find(at.key());
+        if (!h) break;
+        seq.fetch_add(1, std::memory_order_acq_rel);  // odd: a retire is in progress
+        (void)g.retire(*h);
+        seq.fetch_add(1, std::memory_order_acq_rel);  // even: it has returned
+        (void)g.register_vertex(at, role_t::STORED_VALUE);
+        (void)g.write(acl_at, tr::testing::make_value(acl));
+    }
+    stop.store(true, std::memory_order_release);
+    sender.join();
+    std::printf("  (%zu hops made inside a retire)\n", inside.load());
+    check(bad.load() == 0, "no hop inside a retire crossed the door");
+    (void)router.remove_child("net/tcp/out");
+}
+
 }  // namespace
 
 int main() {
     hop_takes_no_lock();
     hops_during_growth();
     mint_never_carries_successor();
+    no_door_mid_retire();
     return tr::testing::summary("pair_hop_lock_free");
 }

@@ -111,7 +111,7 @@ int sweep_add_child(const char* what, tr::net::link_kind_t kind) {
             tr::graph::graph_t graph{tr::mem::heap_source()};
             tr::net::fwd_router_t router{graph, {.label_src = &src}};
             Link link;
-            added = router.add_child("net/ws/a", link, nullptr, kind);
+            added = router.attach_link("net/ws/a", link, nullptr, kind);
             if (src.refused_ == 0) {
                 check(added, "with nothing refused, the registration succeeds");
                 check(link.wired() && router.registry().live_size() == 1,
@@ -123,7 +123,7 @@ int sweep_add_child(const char* what, tr::net::link_kind_t kind) {
                 check(router.registry().live_size() == 0, "…and nothing registered");
                 // The refusal is not sticky: the next attempt on a healthy source succeeds and
                 // reuses whatever the refused one kept (a slot, a ctx, a kind record).
-                check(router.add_child("net/ws/a", link, nullptr, kind),
+                check(router.attach_link("net/ws/a", link, nullptr, kind),
                       "…and the same registration succeeds once the source serves again");
             }
         }

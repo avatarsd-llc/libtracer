@@ -337,8 +337,8 @@ void test_flatten_refusal_is_counted() {
     p2p_link_t alice;
     bus.peers.emplace_back("alice", &alice);
     rec_link_t in(/*ropes=*/true);
-    (void)router.add_child("net/ws-server/srv", bus);
-    (void)router.add_child("net/ws-client/in", in);
+    (void)router.attach_link("net/ws-server/srv", bus);
+    (void)router.attach_link("net/ws-client/in", in);
 
     const std::vector<std::byte> misroute =
         b_fwd(fwd_op_t::WRITE, b_path({"net", "ws-server", "srv", "sensor", "temp"}),
@@ -382,7 +382,7 @@ void test_arena_refusal_counts_apart_from_malformed() {
     arming_source_t rx;
     fwd_router_t router(g, {.rx = &rx});
     rec_link_t up;
-    (void)router.add_child("up", up);
+    (void)router.attach_link("up", up);
 
     const std::vector<std::byte> write =
         b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({"origin"}), {}, b_value_u32(0x1234u));
@@ -426,8 +426,8 @@ void test_malformed_frames_land_in_one_bucket() {
     fwd_router_t router(g);
     rec_link_t up;
     rec_link_t rope_up(/*ropes=*/true);
-    (void)router.add_child("up", up);
-    (void)router.add_child("rope", rope_up);
+    (void)router.attach_link("up", up);
+    (void)router.attach_link("rope", rope_up);
 
     // A FWD envelope with `.pl` cleared: a FWD body is a child list, never an opaque
     // payload, so the decode refuses it as FRAME_INVALID.
@@ -489,7 +489,7 @@ void test_delivery_draws_nothing_from_the_source() {
     graph_t g(ctl);
     fwd_router_t router(g);
     rec_link_t client;
-    (void)router.add_child("client", client);
+    (void)router.attach_link("client", client);
 
     const vertex_handle_t feed =
         g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);

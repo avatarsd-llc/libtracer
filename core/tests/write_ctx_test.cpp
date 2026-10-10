@@ -245,8 +245,8 @@ void test_two_links_are_distinguishable() {
     fwd_router_t router(g);
     sink_link_t a;
     sink_link_t b;
-    (void)router.add_child("peer-a", a);
-    (void)router.add_child("peer-b", b);
+    (void)router.attach_link("peer-a", a);
+    (void)router.attach_link("peer-b", b);
 
     router.on_frame("peer-a",
                     b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({"origin"}), {}, b_payload()));
@@ -279,7 +279,7 @@ void test_two_bus_peers_on_one_link_are_distinguishable() {
 
     fwd_router_t router(g);
     bus_link_impl_t bus;
-    (void)router.add_child("net/ws-server/srv", bus);
+    (void)router.attach_link("net/ws-server/srv", bus);
 
     bus.deliver("alice",
                 b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({"origin"}), {}, b_payload()));
@@ -319,7 +319,7 @@ void test_flat_link_peers_are_distinguishable_at_peer_named_false() {
 
     fwd_router_t router(g);
     flat_link_impl_t flat;
-    (void)router.add_child("net/ws-server/srv", flat);
+    (void)router.attach_link("net/ws-server/srv", flat);
     check(flat.bus() == nullptr, "the link really is FLAT — no bus facet to fall back on");
 
     flat.deliver("p0",
@@ -357,7 +357,7 @@ void test_a_link_with_no_per_peer_subject_keeps_the_link_name() {
 
     fwd_router_t router(g);
     sink_link_t plain;  // neither door overridden — the transport_t defaults
-    (void)router.add_child("up", plain);
+    (void)router.attach_link("up", plain);
     router.on_frame("up",
                     b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({"origin"}), {}, b_payload()));
 
@@ -387,7 +387,7 @@ void test_subscription_delivery_presents_the_edge_subject() {
 
     fwd_router_t router(g);
     sink_link_t a;
-    (void)router.add_child("peer-a", a);
+    (void)router.attach_link("peer-a", a);
     router.on_frame("peer-a",
                     b_fwd(fwd_op_t::WRITE, b_path({"src"}), b_path({"origin"}), {}, b_payload()));
 

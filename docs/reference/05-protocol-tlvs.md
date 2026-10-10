@@ -482,15 +482,17 @@ shrink the canonical `dst` performs.
 **One element per node's whole local part; mixed paths are legal and expected.** A node's local
 part is its entire mount run (`net/<module>/<name>`, however many segments) and one PAIR stands for
 all of it. A `PATH` MAY carry any mixture of NAME and PAIR elements, in any order: a node that cannot
-issue a PAIR for its part — a shared (bus) mount, a saturated slot, a connection vertex that does not
-exist yet — leaves that part as NAMEs and every other node's part still compacts. Because each
+issue a PAIR for its part — a shared (bus) mount, a saturated slot, a connection vertex retired under
+its link — leaves that part as NAMEs and every other node's part still compacts. Because each
 element self-describes by its kind and is read by exactly one node, **skipping is not expressible**.
 
 #### The per-hop algorithm
 
 A host receiving `FWD{op, dst, src, …}` reads the head element of `dst`:
 
-1. **NAME head** — resolve as for any canonical path (the mount descent, else the local tree walk).
+1. **NAME head** — resolve as for any canonical path (the descent to the connection vertex the
+   leading run names, else the local tree walk). A link is reached only through its connection
+   vertex: a run that names none names no link (RFC-0029 erratum of 2026-10-09).
 2. **PAIR head** — bounds-check the index, compare the generation (a saturated element never
    matches), check the vertex is registered. Any refusal is **`tr::path::not_found`**, answered to
    the request's `src` when it is non-empty; the host **MUST NOT** forward, **MUST NOT** apply the

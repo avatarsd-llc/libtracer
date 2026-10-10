@@ -492,7 +492,7 @@ void test_terminus_read_draws_from_the_injected_seam() {
         node_t n;
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
         fwd_router_t router(n.g, raw_planes(&seam));
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         tr::view::rope_t rope = as_rope(frame, 4);  // built OUTSIDE the window
         g_allocs = 0;
         g_bytes = 0;
@@ -515,7 +515,7 @@ void test_terminus_read_draws_from_the_injected_seam() {
         node_t n;
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
         fwd_router_t router(n.g, raw_planes());  // flat on the raw heap
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         tr::view::rope_t rope = as_rope(frame, 4);
         g_allocs = 0;
         g_bytes = 0;
@@ -547,7 +547,7 @@ void test_terminus_read_refusal_is_answered() {
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x33333333u))));
     arming_backend_t seam;
     fwd_router_t router(n.g, raw_planes(&seam));
-    (void)router.add_child("in", n.in);
+    (void)router.attach_link("in", n.in);
 
     seam.arm();
     n.in.inject(as_rope(read_frame(), 4));
@@ -591,7 +591,7 @@ void test_terminus_write_refusal_stores_nothing() {
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(kFirst))));
     arming_backend_t seam;
     fwd_router_t router(n.g, raw_planes(&seam));
-    (void)router.add_child("in", n.in);
+    (void)router.attach_link("in", n.in);
 
     const std::vector<std::byte> write = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}),
                                                b_path({"origin"}), {}, b_value_u32(kSecond));
@@ -637,7 +637,7 @@ void test_terminus_refusal_sweep() {
         node_t n;
         arming_backend_t seam;
         fwd_router_t router(n.g, raw_planes(&seam));
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x66666666u))));
         n.in.inject(as_rope(frame, 4));
         total = seam.served();
@@ -651,7 +651,7 @@ void test_terminus_refusal_sweep() {
         node_t n;
         arming_backend_t seam;
         fwd_router_t router(n.g, raw_planes(&seam));
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x66666666u))));
         seam.refuse_after(k);
         n.in.inject(as_rope(frame, 4));
@@ -837,7 +837,7 @@ void test_ownership_copy_draws_from_the_graph_source(tier_t t) {
         arming_source_t src(bump);
         src_node_t n(src);
         fwd_router_t router(n.g, raw_planes());
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         src.reset_counts();
         g_allocs = 0;
         g_arm = true;
@@ -858,7 +858,7 @@ void test_ownership_copy_draws_from_the_graph_source(tier_t t) {
         arming_source_t src;  // upstream: the heap source
         src_node_t n(src);
         fwd_router_t router(n.g, raw_planes());
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         g_allocs = 0;
         g_arm = true;
         deliver(t, n, router);
@@ -885,7 +885,7 @@ void test_ownership_copy_refusal_is_answered(tier_t t) {
     src_node_t n(src);
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
     fwd_router_t router(n.g, raw_planes());
-    (void)router.add_child("in", n.in);
+    (void)router.attach_link("in", n.in);
 
     // Serve everything up to (but not including) the inline block, then refuse: the refusal
     // lands ON the copy rather than on anything ahead of it.
@@ -894,7 +894,7 @@ void test_ownership_copy_refusal_is_answered(tier_t t) {
         arming_source_t probe_src;
         src_node_t probe(probe_src);
         fwd_router_t probe_router(probe.g);
-        (void)probe_router.add_child("in", probe.in);
+        (void)probe_router.attach_link("in", probe.in);
         probe_src.reset_counts();
         deliver(t, probe, probe_router);
         for (const std::size_t s : probe_src.sizes()) {
@@ -942,7 +942,7 @@ void test_ownership_copy_sweep(tier_t t) {
         arming_source_t src;
         src_node_t n(src);
         fwd_router_t router(n.g, raw_planes());
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         src.reset_counts();
         deliver(t, n, router);
         total = src.served();
@@ -956,7 +956,7 @@ void test_ownership_copy_sweep(tier_t t) {
         arming_source_t src;
         src_node_t n(src);
         fwd_router_t router(n.g, raw_planes());
-        (void)router.add_child("in", n.in);
+        (void)router.attach_link("in", n.in);
         (void)n.g.write(n.temp,
                         tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
         src.reset_counts();
@@ -1005,7 +1005,7 @@ void test_span_tier_asks_flat_for_nothing() {
     arming_backend_t seam;
     node_t n;
     fwd_router_t router(n.g, raw_planes(&seam));
-    (void)router.add_child("in", n.in);
+    (void)router.attach_link("in", n.in);
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x88888888u))));
     router.on_frame("in", read_frame());
     check(n.in.sent.size() == 1, "control: a span-delivered READ is answered");
@@ -1030,7 +1030,7 @@ void test_default_backend_unchanged() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x77777777u))));
     fwd_router_t router(n.g);  // no backend argument at all
-    (void)router.add_child("in", n.in);
+    (void)router.attach_link("in", n.in);
 
     const std::vector<std::byte> frame = read_frame();
     router.on_frame("in", frame);  // the SPAN (arena) tier

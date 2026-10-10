@@ -48,6 +48,11 @@ using tr::net::transport_vertex_t;
 
 using tr::testing::check;
 
+/** @brief A registry tested on its own has no graph: every mount's connection vertex is slot 0. */
+constexpr auto any_vertex = [](std::span<const std::byte>) {
+    return std::optional<std::uint32_t>(0);
+};
+
 /** @brief A transport that only records what it was handed — no socket, no thread. */
 class sink_link_t : public tr::net::transport_t {
    public:
@@ -122,8 +127,8 @@ void test_tombstone_not_erase() {
     child_registry_t reg;
     sink_link_t a;
     sink_link_t b;
-    (void)reg.add("a", a);
-    (void)reg.add("b", b);
+    (void)reg.add("a", a, any_vertex);
+    (void)reg.add("b", b, any_vertex);
     check(reg.size() == 2 && reg.live_size() == 2, "two live children");
 
     check(reg.erase("a"), "erase reports it removed a live child");
@@ -141,18 +146,18 @@ void test_churn_reuses_tombstones() {
     child_registry_t reg;
     sink_link_t a;
     sink_link_t b;
-    (void)reg.add("conn", a);
+    (void)reg.add("conn", a, any_vertex);
     for (int i = 0; i < 50; ++i) {
         reg.erase("conn");
-        (void)reg.add("conn", (i % 2 == 0) ? b : a);
+        (void)reg.add("conn", (i % 2 == 0) ? b : a, any_vertex);
     }
     reg.erase("conn");
-    (void)reg.add("conn", b);
+    (void)reg.add("conn", b, any_vertex);
     check(reg.size() == 1, "51 create/remove rounds on one NAME still occupy ONE slot");
     check(reg.by_name("conn") == &b, "and the NAME resolves to the CURRENT link");
 
     sink_link_t c;
-    (void)reg.add("other", c);
+    (void)reg.add("other", c, any_vertex);
     check(reg.size() == 2, "a genuinely new NAME appends");
 }
 
@@ -205,8 +210,8 @@ void test_duplicate_add_rebinds() {
     child_registry_t reg;
     sink_link_t a;
     sink_link_t b;
-    (void)reg.add("net/ws-client/x", a);
-    (void)reg.add("net/ws-client/x", a);
+    (void)reg.add("net/ws-client/x", a, any_vertex);
+    (void)reg.add("net/ws-client/x", a, any_vertex);
     check(reg.size() == 1, "a repeated add does not grow the table");
     check(reg.live_size() == 1, "and leaves exactly one live child");
 
@@ -215,8 +220,8 @@ void test_duplicate_add_rebinds() {
           "and NOTHING resolves afterwards — no shadow slot keeps the freed link reachable");
 
     // Rebinding to a different link must take effect, not resolve the stale one.
-    (void)reg.add("net/ws-client/x", a);
-    (void)reg.add("net/ws-client/x", b);
+    (void)reg.add("net/ws-client/x", a, any_vertex);
+    (void)reg.add("net/ws-client/x", b, any_vertex);
     check(reg.by_name("net/ws-client/x") == &b, "a re-add rebinds the name to the NEW link");
     check(reg.live_size() == 1, "still one slot for the name");
 }
@@ -278,7 +283,8 @@ void test_chunks_draw_from_the_injected_source() {
         bool added = true;
         for (std::size_t i = 0; i < kN; ++i) {
             links.push_back(std::make_unique<sink_link_t>());
-            added = added && reg.add("net/ws-client/c" + std::to_string(i), *links.back());
+            added =
+                added && reg.add("net/ws-client/c" + std::to_string(i), *links.back(), any_vertex);
         }
         check(added && reg.live_size() == kN, "every child registered through the seam");
         check(src.served >= 2, "the INJECTED source served the chunks (more than one of them)");
@@ -293,7 +299,8 @@ void test_chunks_draw_from_the_injected_source() {
         refusing.refuse = true;
         child_registry_t reg(refusing);
         sink_link_t link;
-        check(!reg.add("net/ws-client/x", link), "a refused chunk makes add() report failure");
+        check(!reg.add("net/ws-client/x", link, any_vertex),
+              "a refused chunk makes add() report failure");
         check(reg.size() == 0, "and registers nothing at all");
         check(refusing.served == 0, "nothing was served, so nothing escaped to the heap either");
     }
@@ -310,7 +317,7 @@ void test_slot_addresses_are_stable() {
     for (std::size_t i = 0; i < kN; ++i) {
         links.push_back(std::make_unique<sink_link_t>());
         const std::string name = "net/ws-client/l" + std::to_string(i);
-        (void)reg.add(name, *links.back());
+        (void)reg.add(name, *links.back(), any_vertex);
         slots.push_back(reg.entry_by_name(name));
     }
     check(slots.size() == kN && slots[0] != nullptr, "every child registered");

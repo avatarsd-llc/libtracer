@@ -213,12 +213,12 @@ void run_point(std::size_t fanout, std::size_t width, pos_t pos) {
 
     const auto add_decoys = [&](std::size_t from, std::size_t to) {
         for (std::size_t i = from; i < to; ++i)
-            (void)router.add_child("net/decoy/d" + std::to_string(i), decoys[i]);
+            (void)router.attach_link("net/decoy/d" + std::to_string(i), decoys[i]);
     };
     const auto add_targets = [&](std::size_t count) {
         for (std::size_t i = 0; i < count; ++i) {
             link_names.push_back("net/tgt/t" + std::to_string(i));
-            (void)router.add_child(link_names.back(), targets[i]);
+            (void)router.attach_link(link_names.back(), targets[i]);
         }
     };
     switch (pos) {
@@ -226,7 +226,7 @@ void run_point(std::size_t fanout, std::size_t width, pos_t pos) {
             // The bus sits LAST, so an exact-name miss walks the whole table before the peer tier
             // — the shape the counter is placed in, and the most expensive real resolution.
             add_decoys(0, width);
-            (void)router.add_child("net/bus/b", bus);
+            (void)router.attach_link("net/bus/b", bus);
             link_names.emplace_back("p0");
             break;
         case pos_t::FIRST:

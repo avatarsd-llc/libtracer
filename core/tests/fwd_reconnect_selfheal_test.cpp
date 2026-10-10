@@ -204,10 +204,10 @@ struct chain_t {
     tr::graph::vertex_handle_t sensor;
 
     chain_t() : sensor(gc.register_vertex(*path_t::parse("/sensor"), role_t::STORED_VALUE)) {
-        (void)a.add_child("down", a_down);
-        (void)m.add_child("up", m_up);
-        (void)m.add_child("down", m_down);
-        (void)c.add_child("up", c_up);
+        (void)a.attach_link("down", a_down);
+        (void)m.attach_link("up", m_up);
+        (void)m.attach_link("down", m_down);
+        (void)c.attach_link("up", c_up);
     }
 
     traffic_t settle() { return pump({wire_pair_t{&a_down, &m_up}, wire_pair_t{&m_down, &c_up}}); }
@@ -282,8 +282,8 @@ void test_terminus_binding_is_not_swept() {
     fwd_router_t node(g);
     relay_link_t up;
     relay_link_t other;
-    (void)node.add_child("up", up);
-    (void)node.add_child("other", other);
+    (void)node.attach_link("up", up);
+    (void)node.attach_link("other", other);
 
     constexpr std::uint16_t kLabel = 7;
     up.inject(tr::net::encode_advertise(kLabel, b_path({"sensor"})));
@@ -307,9 +307,9 @@ void test_sweep_is_scoped_to_the_cleared_link() {
     relay_link_t up;
     relay_link_t left;
     relay_link_t right;
-    (void)node.add_child("up", up);
-    (void)node.add_child("left", left);
-    (void)node.add_child("right", right);
+    (void)node.attach_link("up", up);
+    (void)node.attach_link("left", left);
+    (void)node.attach_link("right", right);
 
     up.inject(tr::net::encode_advertise(1, b_path({"left", "sensor"})));
     up.inject(tr::net::encode_advertise(2, b_path({"right", "sensor"})));

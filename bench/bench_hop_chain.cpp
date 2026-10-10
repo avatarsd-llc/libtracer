@@ -216,11 +216,11 @@ struct chain_t {
         for (std::size_t i = 0; i + 1 < kNodes; ++i) {
             down[i].peer = &up[i + 1];
             up[i + 1].peer = &down[i];
-            routers[i]->add_child(down_name(i), down[i]);
-            routers[i + 1]->add_child(up_name(i + 1), up[i + 1]);
+            routers[i]->attach_link(down_name(i), down[i]);
+            routers[i + 1]->attach_link(up_name(i + 1), up[i + 1]);
         }
         // Node 0's application injects here; nothing is on the far side.
-        routers[0]->add_child("net/ws-server/app", origin);
+        routers[0]->attach_link("net/ws-server/app", origin);
     }
 
     /** @brief The full-path address of `/sink` from node 0: three segments per hop, then the leaf.

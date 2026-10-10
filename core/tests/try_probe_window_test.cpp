@@ -303,7 +303,7 @@ void test_delivery_iov_on_the_seam() {
     graph_t g(src);
     fwd_router_t router(g);
     counting_link_t link;
-    (void)router.add_child("client", link);
+    (void)router.attach_link("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
     auto v = g.register_vertex(*p, role_t::STORED_VALUE);
@@ -374,7 +374,7 @@ void test_reply_iov_on_the_seam() {
     // default heap so a label allocation cannot be mistaken for this table's.
     fwd_router_t router(g, {.rx = &rx});
     counting_link_t link;
-    (void)router.add_child("client", link);
+    (void)router.attach_link("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
     const auto v = g.register_vertex(*p, role_t::STORED_VALUE);

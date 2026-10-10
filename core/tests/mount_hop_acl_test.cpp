@@ -23,9 +23,9 @@
  * RFC-0029 S1 retired the `PATH_REF` address; `pair_hop_acl_test` drives it, with every other
  * spelling, against the same `:acl`.
  *
- * A last case needs no bus and no listener: a point-to-point child mounted with NO connection
- * vertex in the graph. Enforcing, it has nothing to grant a right, so a NAME-spelled hop
- * through it is refused; the same graph without a subject resolver forwards it (the control).
+ * A last case needs no bus and no listener: a point-to-point child with NO connection vertex in
+ * the graph cannot be mounted at all (#1940), enforcing or not, so a NAME-spelled hop has no
+ * link to cross; the same mount with its vertex registered forwards it (the control).
  *
  * The upgrade layout (#2003) pins the ACL layout the 0.18.1 upgrade note recommends, end to
  * end: an inheritable READ and SUBSCRIBE grant on `/net`, READ, WRITE and SUBSCRIBE on each
@@ -234,8 +234,8 @@ struct node_t {
         check(server->ok(), "listener bound");
         (void)g.register_vertex(path_t("/net/tcp-server/srv"), role_t::STORED_VALUE);
         (void)g.register_vertex(path_t("/net/tcp/x"), role_t::STORED_VALUE);
-        check(router.add_child(std::string(kMount), *server), "bus listener mounted");
-        check(router.add_child("net/tcp/x", p2p), "point-to-point child mounted");
+        check(router.attach_link(std::string(kMount), *server), "bus listener mounted");
+        check(router.attach_link("net/tcp/x", p2p), "point-to-point child mounted");
         const bytes_t acl = mount_acl();
         check(g.write(path_t("/net/tcp-server/srv:acl"), make_value(acl)).has_value() &&
                   g.write(path_t("/net/tcp/x:acl"), make_value(acl)).has_value(),
@@ -297,15 +297,16 @@ void name_spelling() {
 }
 
 void vertexless_mount() {
-    std::printf("a mount with no connection vertex refuses a NAME hop under enforcement:\n");
-    const auto forwards = [](bool enforcing) {
+    std::printf("a mount with no connection vertex is refused, so a NAME hop crosses nothing:\n");
+    const auto forwards = [](bool enforcing, bool with_vertex) {
         graph_t g;
         if (enforcing) enforce(g);
         fwd_router_t router{g};
         recorder_t bare;
-        check(router.add_child("net/tcp/bare", bare), "vertex-less child mounted");
-        check(!g.find(path_t("/net/tcp/bare").key()).has_value(),
-              "the mount has no connection vertex");
+        if (with_vertex) (void)g.register_vertex(path_t("/net/tcp/bare"), role_t::STORED_VALUE);
+        check(router.add_child("net/tcp/bare", bare) == with_vertex,
+              with_vertex ? "the child mounts at its connection vertex"
+                          : "add_child refuses the child with no connection vertex");
         router.on_frame(
             "admin",
             tr::testing::b_fwd(fwd_op_t::WRITE, tr::testing::b_path({"net", "tcp", "bare", "foo"}),
@@ -314,8 +315,9 @@ void vertexless_mount() {
         (void)router.remove_child("net/tcp/bare");
         return out;
     };
-    check(!forwards(true), "enforcing: a WRITE by NAME through a vertex-less mount is refused");
-    check(forwards(false), "not enforcing: the same WRITE is forwarded (the control)");
+    check(!forwards(true, false), "enforcing: nothing crosses a mount refused for no vertex");
+    check(!forwards(false, false), "not enforcing: nor does it there");
+    check(forwards(false, true), "with its vertex the same WRITE is forwarded (the control)");
 }
 
 /** @brief FIELD{ NAME "subscribers", VALUE u8 ELEMENT }: the `:subscribers[]` append. */
@@ -352,7 +354,7 @@ void upgrade_layout() {
           "the dial module is declared");
     net.provide_link("up", "b", ch.a());
     net.provide_link("up", "b2", b2);
-    check(r_b.add_child("net/down/a", ch.b()), "the producer node mounts its link to N");
+    check(r_b.attach_link("net/down/a", ch.b()), "the producer node mounts its link to N");
     check(n.g.write(path_t("/net/up/conn"), tr::net::conn_spec_t("b").view()).has_value(),
           "the application creates the dial net/up/b");
 

@@ -130,10 +130,6 @@ class child_registry_t {
         }
     }
 
-    /** @brief "This mount has no connection vertex" — @ref child_t::conn_slot's empty value.
-     *         Out of every graph's slot range, so a lookup of it refuses by bounds alone. */
-    static constexpr std::uint32_t kNoConnSlot = 0xFFFFFFFFu;
-
     /**
      * @brief ONE read of a slot's egress: WHERE it sends, and WHAT SHAPE that link is.
      *
@@ -306,22 +302,23 @@ class child_registry_t {
         std::span<const std::byte> mount_tlv;
         /**
          * @brief The graph slot of this mount's CONNECTION vertex — the vertex→link binding
-         *        the one walk ends on (RFC-0029 §13.2 S6) — or @ref kNoConnSlot.
+         *        the one walk ends on (RFC-0029 §13.2 S6).
          *
          * Every address spelling reaches a link through this word: the NAME descent's match
          * reads it to find the door it gates at, and a PAIR naming a vertex finds the door by
-         * it (@ref by_conn_slot). The registry never interprets it; its owner
-         * (`fwd_router_t::add_child`) writes it once per registration, before it publishes
-         * the receiver, and leaves it alone on @ref erase, since a tombstone already stops
-         * the slot resolving. A stale read is harmless: a mount name's connection vertex,
-         * once it exists, keeps its graph slot for the graph's life (slots are immortal), so
-         * the only change a rebind can make is from "none" to that slot.
+         * it (@ref by_conn_slot). There is no "none": @ref add refuses a mount whose
+         * connection vertex does not exist (#1940), so every published slot has one.
+         *
+         * IMMUTABLE AFTER PUBLISH, like @ref mount_tlv and for the same reason: @ref add writes
+         * it before the slot is published and never again. A rebind cannot change it — the
+         * slot is matched by name, the vertex is keyed by the same bytes, and a vertex keeps
+         * its graph slot for the graph's life (slots are immortal, a retired vertex revives in
+         * place) — so a lock-free reader needs no atomic to read it.
          *
          * In the tail padding the 16-byte slot alignment already leaves, so it costs the
-         * slot nothing on either ABI (@ref child_slot_layout_oracle_t pins that). Atomic and
-         * relaxed: the egress word's acquire orders it.
+         * slot nothing on either ABI (@ref child_slot_layout_oracle_t pins that).
          */
-        mutable std::atomic<std::uint32_t> conn_slot{kNoConnSlot};
+        std::uint32_t conn_slot = 0;
 
        private:
         friend class child_registry_t;
@@ -366,7 +363,15 @@ class child_registry_t {
                   "see their docs");
 
     /**
-     * @brief Register the link addressed by qualified name @p name (`"<module>/<name>"`).
+     * @brief Register the link addressed by qualified name @p name (`"<module>/<name>"`) at
+     *        its connection vertex.
+     *
+     * @p conn_slot_of is asked, once, for the graph slot of the vertex keyed by the mount's
+     * packed run — `std::optional<std::uint32_t>(std::span<const std::byte>)`. A mount whose
+     * vertex does not exist answers `nullopt`, and the registration is refused with NOTHING
+     * changed (#1940): a link cannot exist without its connection vertex, so "no vertex"
+     * always means "no route". A name with no packed spelling (an empty or over-long segment)
+     * can key no vertex and is refused before it is asked.
      *
      * REBINDS @p name's existing slot when it has one — live or tombstoned — and only
      * appends for a name the table has never held. Captures the link's SHAPE here, once, so
@@ -397,7 +402,8 @@ class child_registry_t {
      * A fresh slot copies @p name and its mount run into ONE block from the registry's
      * source (#1779); a refused block is the same `false` a refused chunk is.
      */
-    [[nodiscard]] bool add(std::string_view name, transport_t& link) {
+    template <class ConnSlotOf>
+    [[nodiscard]] bool add(std::string_view name, transport_t& link, ConnSlotOf&& conn_slot_of) {
         // Shape and link become ONE word here, so no reader can ever see one without the
         // other (#882). `bus()` is probed exactly once, on this control-plane call.
         //
@@ -423,27 +429,39 @@ class child_registry_t {
             // receive thread may hold it as a span right now, and the bytes a rebind
             // would write are identical anyway — `encode_mount_name` is pure and the
             // slot was matched by name. The assert pins that purity invariant.
+            // `conn_slot` is just as immutable: the same bytes key the same immortal vertex
+            // slot, so the only thing the rebind asks is whether that vertex exists NOW.
             assert(hit->mount_tlv.size() == encode_mount_name(name, nullptr));
+            if (!conn_slot_of(hit->mount_tlv)) return false;
             hit->egress_.store(egress, std::memory_order_release);
             // A tombstone coming back to life changes what a `dst` prefix resolves to, so it
             // moves the mount shape exactly as a fresh append does (#765).
             bump_generation();
             return true;
         }
+        // A name with no packed spelling keys no vertex, so it can have no connection vertex.
+        const std::size_t mount_bytes = encode_mount_name(name, nullptr);
+        if (mount_bytes == 0) return false;
         child_t* const slot = append();
         if (slot == nullptr) return false;  // no chunk — NOTHING is registered; see the docs
-        // The name and its mount run, in ONE block. A routable name is never empty, so the
-        // block is never zero-sized. Refused ⇒ the appended slot stays unpublished and is
-        // reused by the next append: NOTHING is registered, as for a refused chunk.
-        const std::size_t mount_bytes = encode_mount_name(name, nullptr);
+        // The name and its mount run, in ONE block. Refused ⇒ the appended slot stays
+        // unpublished and is reused by the next append: NOTHING is registered, as for a
+        // refused chunk — and so for a mount whose connection vertex does not exist.
         auto* const text = static_cast<std::byte*>(src_->try_alloc(name.size() + mount_bytes, 1));
         if (text == nullptr) return false;
         std::memcpy(text, name.data(), name.size());
         (void)encode_mount_name(name, text + name.size());
+        const std::span<const std::byte> run(text + name.size(), mount_bytes);
+        const std::optional<std::uint32_t> conn = conn_slot_of(run);
+        if (!conn) {
+            src_->release(text, name.size() + mount_bytes, 1);
+            return false;
+        }
+        slot->conn_slot = *conn;
         slot->name = std::string_view(reinterpret_cast<const char*>(text), name.size());
         slot->name_digest = digest_name(slot->name);
         slot->seg_count = static_cast<std::uint32_t>(segment_count(slot->name));
-        slot->mount_tlv = std::span<const std::byte>(text + name.size(), mount_bytes);
+        slot->mount_tlv = run;
         slot->egress_.store(egress, std::memory_order_release);
         publish(slot);
         bump_generation();
@@ -739,7 +757,7 @@ class child_registry_t {
     [[nodiscard]] const child_t* by_conn_slot(std::uint32_t index) const {
         const child_t* hit = nullptr;
         for_each([&](const child_t& c) {
-            if (c.conn_slot.load(std::memory_order_relaxed) == index && c.live()) {
+            if (c.conn_slot == index && c.live()) {
                 hit = &c;
                 return true;
             }

@@ -107,6 +107,11 @@ using tr::net::kBusLinks;
 using tr::net::transport_vertex_t;
 using tr::testing::check;
 
+/** @brief A registry tested on its own has no graph: every mount's connection vertex is slot 0. */
+constexpr auto any_vertex = [](std::span<const std::byte>) {
+    return std::optional<std::uint32_t>(0);
+};
+
 /** @brief The ephemeral-port request every listener here makes — the OS picks a free one. */
 constexpr std::uint16_t kEphemeral = 0;
 
@@ -184,7 +189,7 @@ void test_the_registry_follows_the_gate() {
     std::printf("(b) child_registry_t resolves peers iff the module is present:\n");
     child_registry_t registry;
     fake_bus_t bus;
-    check(registry.add("can/bus0", bus), "the bus link registers as a child");
+    check(registry.add("can/bus0", bus, any_vertex), "the bus link registers as a child");
 
     const std::string_view segs[] = {"can", "bus0"};
     const child_registry_t::child_t* const mount =
@@ -213,7 +218,7 @@ void test_a_flat_listener_is_untouched() {
     check(!flat.peer_named(), "its mode authority answers FLAT");
 
     child_registry_t registry;
-    check(registry.add("ws-server/flat", flat), "it registers as an ordinary child");
+    check(registry.add("ws-server/flat", flat, any_vertex), "it registers as an ordinary child");
     const std::string_view segs[] = {"ws-server", "flat"};
     const child_registry_t::child_t* const mount =
         registry.longest_prefix(std::span<const std::string_view>(segs));
