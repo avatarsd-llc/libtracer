@@ -469,9 +469,16 @@ void subject_resolver_flip_race() {
         while (!armed.load(std::memory_order_acquire)) {
         }
         // A NON-EMPTY caller is what reaches the resolver at all: the empty (local) context
-        // is settled as trusted before it runs (#905). No ACE bears on /v, so every op is
-        // allowed whichever resolver answered — the assertion is about WHOSE context each
-        // was handed, not about the verdict.
+        // is settled as trusted before it runs (#905). No ACE bears on /v, so every op that
+        // reaches a resolver is allowed whichever one answered — the assertion is about WHOSE
+        // context each was handed, not about the verdict.
+        //
+        // An op is NOT promised to reach one. The gate waits a republish out for a bounded
+        // number of reads and refuses the caller when the slot has not settled by then — a
+        // flipper preempted INSIDE a publish, which a loaded host under a sanitizer does often
+        // enough to redden an occasional run. So the verdict asserted below is the gate's
+        // actual contract: an op that consulted a resolver succeeded, and an op that consulted
+        // none was refused, never waved through.
         int i = 0;
         for (; keep_storming(i, kWrites, 10 * kWrites, cycles, 1); ++i) {
             if (g.write(v, make_value({0x42}), "peer-a").has_value()) ok_ops.fetch_add(1);
@@ -487,7 +494,8 @@ void subject_resolver_flip_race() {
     const long hits = a.hits.load() + b.hits.load();
     std::printf("    (%ld of %d gated ops consulted a resolver; %ld publishes, %ld handshakes)\n",
                 hits, 2 * issued.load(), publishes.load(), cycles.load());
-    check(ok_ops.load() == 2 * issued.load(), "every gated op still succeeded under the storm");
+    check(ok_ops.load() == hits,
+          "every gated op that consulted a resolver succeeded, and no other op did");
     check(publishes.load() >= kPublishFloor, "the flipper published inside the storm");
     check(cycles.load() > 0, "flipper and storm interleaved (>=1 publish/dispatch handshake)");
     check(hits > 0, "the resolver was reachable DURING the storm (the torn check is not vacuous)");
@@ -898,9 +906,13 @@ void identity_flip_race() {
     check(absent.load() > 0, "the clear WAS observed during the rotation storm");
 }
 
+/** @brief How many times @ref resolver_identity resolved `peer-y` — the reads that reached it. */
+std::atomic<long> g_y_resolved{0};
+
 /** @brief Resolves a caller to its own bytes — the subject the ACEs below name. */
 std::expected<tr::graph::subject_token_t, tr::wire::err_t> resolver_identity(
     void*, std::string_view caller) {
+    if (caller == "peer-y") g_y_resolved.fetch_add(1, std::memory_order_relaxed);
     return tr::graph::subject_token_t(
         reinterpret_cast<const std::byte*>(caller.data()),
         reinterpret_cast<const std::byte*>(caller.data()) + caller.size());
@@ -911,7 +923,10 @@ std::expected<tr::graph::subject_token_t, tr::wire::err_t> resolver_identity(
  *
  * An ordered list — `DENY "peer-x"`, then `ALLOW EVERYONE@` — and a flipper republishing the
  * hooks without pause. Every verdict must be the one the settled hooks give: `peer-x` is
- * refused on every read, `peer-y` allowed on every read. Needs the full ACL policy (DENY).
+ * refused on every read, and `peer-y` is allowed on every read that reached the resolver. A
+ * read the gate refused because the slot did not settle within its bound (a flipper preempted
+ * inside a publish) reaches no resolver and is refused, which is the contract. Needs the full
+ * ACL policy (DENY).
  */
 void settled_hook_slot_storm() {
     std::printf("settled hook slot, verdicts under a republish storm:\n");
@@ -952,17 +967,21 @@ void settled_hook_slot_storm() {
             }
         });
         long x_mismatch = 0;
-        long y_mismatch = 0;
+        long y_allowed = 0;
+        const long y_resolved_before = g_y_resolved.load();
         for (int i = 0; i < kWrites; ++i) {
             if (g.read(v, "peer-x").has_value()) ++x_mismatch;
-            if (!g.read(v, "peer-y").has_value()) ++y_mismatch;
+            if (g.read(v, "peer-y").has_value()) ++y_allowed;
         }
+        const long y_resolved = g_y_resolved.load() - y_resolved_before;
         stop.store(true, std::memory_order_relaxed);
         flipper.join();
-        std::printf("    (%d reads per caller; %ld publishes)\n", kWrites, publishes.load());
+        std::printf("    (%d reads per caller, %ld of peer-y's resolved; %ld publishes)\n", kWrites,
+                    y_resolved, publishes.load());
         check(publishes.load() >= kPublishFloor, "the flipper published inside the storm");
         check(x_mismatch == 0, "peer-x: verdict matches the installed hooks");
-        check(y_mismatch == 0, "peer-y: verdict matches the installed hooks");
+        check(y_resolved > 0, "peer-y: reads reached the resolver during the storm");
+        check(y_allowed == y_resolved, "peer-y: every resolved read was allowed, no other was");
     }
 }
 
