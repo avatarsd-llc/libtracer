@@ -22,6 +22,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   migration.
 ### Added
 
+- **`CONFIG_LIBTRACER_DEFAULT_ROOT_HEAP`: no static arena, the system heap as the default
+  root ([#2090](https://github.com/avatarsd-llc/libtracer/issues/2090)).** Off by default.
+  On, it binds `kArenaBytes = 0`: no arena region, heads table or root object is linked, which
+  gives back about 5.2 KB of static RAM at a 4 KiB arena on esp32c6, and every default the
+  application has not redirected draws from the heap instead. `CONFIG_LIBTRACER_ARENA_BYTES`
+  is hidden while it is on. With it off nothing changes, except that the arena's free-list
+  heads now scale with `CONFIG_LIBTRACER_ARENA_BYTES`; the 32 KiB and 256 KiB defaults
+  otherwise behave as before (see the core CHANGELOG).
 - **`CONFIG_LIBTRACER_NOISE_CRYPTO_PSA`: the Noise link's crypto over ESP-IDF's mbedTLS
   ([#2072](https://github.com/avatarsd-llc/libtracer/issues/2072)).** On, the component
   defines `LIBTRACER_NOISE_CRYPTO_PSA` for every includer, so `security_noise.hpp`'s

@@ -355,7 +355,15 @@ void test_sub_pool_seams() {
     std::printf("RFC-0010 Am.3: the derived sub-pools are three seams:\n");
     constexpr std::array<const char*, 3> kNames{"/n:stats.mem.values", "/n:stats.mem.tables",
                                                 "/n:stats.mem.net"};
-    {
+    if constexpr (tr::mem::kHeapRoot) {
+        graph_t g;  // the heap root (#2090) is one source, so it derives no sub-pool either
+        (void)g.register_vertex(path_t("/n"), role_t::STORED_VALUE);
+        for (const char* name : kNames) {
+            const auto r = read_as(g, name, {});
+            check(!r && r.error() == status_t::SCHEMA_NOT_FOUND,
+                  "the heap root derives no sub-pool: each name answers SCHEMA_NOT_FOUND");
+        }
+    } else {
         graph_t g;  // the host default root
         const auto n = g.register_vertex(path_t("/n"), role_t::STORED_VALUE);
         (void)g.write(n, make_value({0x01, 0x02, 0x03}));

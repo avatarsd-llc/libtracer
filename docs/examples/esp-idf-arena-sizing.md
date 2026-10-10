@@ -35,6 +35,12 @@ at run time and by a sizing message at init
   console.
 - **The numbers to size by are on the node.** [`:stats.mem.*`](esp-idf-stats-subpools.md)
   reports each sub-pool's `peak`, so a running node can tell you the arena it needs.
+- **No arena at all is a build choice.** An app that injects its own source into every
+  graph, router, link and transport vertex can set `CONFIG_LIBTRACER_DEFAULT_ROOT_HEAP=y`: no
+  arena region, heads table or root object is linked (about 5.2 KB of static RAM at a 4 KiB
+  arena), and any default it missed draws from the system heap instead, unbounded. With an
+  arena, a root census `peak` of 0 is the sign that nothing reached it
+  ([#2090](https://github.com/avatarsd-llc/libtracer/issues/2090)).
 
 ## Source
 

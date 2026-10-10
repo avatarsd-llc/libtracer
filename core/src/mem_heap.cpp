@@ -6,8 +6,9 @@
 /**
  * @file
  * @brief The process-default per-value backend, the host default root (#1777) with the value
- *        sub-pool's per-thread cache, the MCU static-arena root (#1783), and the L1 allocation
- *        helpers over them.
+ *        sub-pool's per-thread cache, the MCU static-arena root (#1783) or, where
+ *        `kArenaBytes` is 0, the platform heap as the MCU default root (#2090), and the L1
+ *        allocation helpers over them.
  */
 
 #include "libtracer/mem_heap.hpp"
@@ -35,6 +36,19 @@ mem_backend_t& heap_backend() noexcept {
     static heap_backend_t backend;
     return backend;
 }
+
+namespace {
+
+/** @brief Whether this build has the MCU static arena (#1783): not on a host, and not on the
+ *         heap-rooted build (`kHeapRoot`, #2090), where no region, heads table or root object
+ *         is compiled. */
+constexpr bool kMcuArena = !kSlabPool && !kHeapRoot;
+
+static_assert(!kMcuArena || kArenaBytes >= graph::config_t::kSizeClasses[0],
+              "kArenaBytes is 0 (no arena, the heap is the default root) or holds the smallest "
+              "size class");
+
+}  // namespace
 
 namespace detail {
 
@@ -73,15 +87,13 @@ struct mcu_storage_t {
 
 namespace {
 
-/** @brief Bytes of the MCU arena on this build: none where the host root serves. */
-constexpr std::size_t kMcuArenaBytes = kSlabPool ? 0 : kArenaBytes;
-
 /** @brief The MCU arena's region (#1783): zero-initialized, so it sits in `.bss` and the
  *         linker map shows it whole. */
-alignas(64) constinit std::array<std::byte, kMcuArenaBytes> g_mcu_region{};
+alignas(64) constinit std::array<std::byte, kMcuArena ? kArenaBytes : 0> g_mcu_region{};
 
-/** @brief The MCU arena sub-pools' free-list heads, in `.bss` beside the region. */
-constinit std::array<void*, kSlabPool ? 0 : mcu_root_t::kHeads> g_mcu_heads{};
+/** @brief The MCU arena sub-pools' free-list heads, in `.bss` beside the region: one per kept
+ *         class (@ref kArenaClasses) per sub-pool. */
+constinit std::array<void*, kMcuArena ? mcu_root_t::kHeads : 0> g_mcu_heads{};
 
 }  // namespace
 
@@ -98,8 +110,8 @@ struct mcu_storage_t<true> {
     /** @brief Constant-initializes the root. */
     constexpr mcu_storage_t() noexcept
         : root_(std::span<std::byte>(g_mcu_region),
-                std::span<const std::size_t, std::size(graph::config_t::kSizeClasses)>(
-                    graph::config_t::kSizeClasses),
+                std::span<const std::size_t, kArenaClasses>(
+                    std::data(graph::config_t::kSizeClasses), kArenaClasses),
                 std::span<void*, mcu_root_t::kHeads>(g_mcu_heads.data(), mcu_root_t::kHeads)) {}
     /** @brief Deliberately does not destroy the root. */
     ~mcu_storage_t() {}
@@ -117,7 +129,7 @@ namespace {
 constinit detail::host_storage_t<kSlabPool> g_host{};
 
 /** @brief The MCU arena root, where the build has one (#1783). */
-constinit detail::mcu_storage_t<!kSlabPool> g_mcu{};
+constinit detail::mcu_storage_t<kMcuArena> g_mcu{};
 
 /** @brief Rows of the host size-class table. */
 constexpr std::size_t kClasses = host_pool_t::classes();
@@ -264,10 +276,12 @@ void* host_value_alloc(std::size_t bytes, std::size_t align) noexcept {
 }
 
 void* mcu_value_alloc(std::size_t bytes, std::size_t align) noexcept {
+    if constexpr (kHeapRoot) return heap_source_t::acquire(bytes, align);
     return g_mcu.root().values().try_alloc(bytes, align);
 }
 
 void mcu_value_release(void* p, std::size_t bytes, std::size_t align) noexcept {
+    if constexpr (kHeapRoot) return heap_source_t::reclaim(p, bytes, align);
     g_mcu.root().values().release(p, bytes, align);
 }
 
@@ -328,6 +342,8 @@ host_root_t& host_root() noexcept { return g_host.root(); }
 block_source_t& default_root() noexcept {
     if constexpr (kSlabPool) {
         return g_host.root();
+    } else if constexpr (kHeapRoot) {
+        return heap_source();
     } else {
         return g_mcu.root();
     }
@@ -336,6 +352,8 @@ block_source_t& default_root() noexcept {
 block_source_t& value_source() noexcept {
     if constexpr (kSlabPool) {
         return g_host.root().values();
+    } else if constexpr (kHeapRoot) {
+        return heap_source();
     } else {
         return g_mcu.root().values();
     }
@@ -344,6 +362,8 @@ block_source_t& value_source() noexcept {
 block_source_t& table_source() noexcept {
     if constexpr (kSlabPool) {
         return g_host.root().tables();
+    } else if constexpr (kHeapRoot) {
+        return heap_source();
     } else {
         return g_mcu.root().tables();
     }
@@ -352,12 +372,17 @@ block_source_t& table_source() noexcept {
 block_source_t& net_source() noexcept {
     if constexpr (kSlabPool) {
         return g_host.root().net();
+    } else if constexpr (kHeapRoot) {
+        return heap_source();
     } else {
         return g_mcu.root().net();
     }
 }
 
 mem_backend_t& net_backend() noexcept {
+    // On the heap root the net default is the heap, which the process-default backend already
+    // draws from: no second adapter, no storage (#2090).
+    if constexpr (kHeapRoot) return heap_backend();
     // Never destroyed, for the reason the root is not: a segment can be released after every
     // static destructor has run.
     alignas(source_backend_t) static std::byte storage[sizeof(source_backend_t)];
