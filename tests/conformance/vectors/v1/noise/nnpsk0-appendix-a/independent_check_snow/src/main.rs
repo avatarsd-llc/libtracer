@@ -9,7 +9,7 @@
  *
  * From transcript.json's inputs alone it runs both sides, then compares both handshake
  * messages, the ephemeral public keys, both payloads, the handshake hash, the two transport
- * keys (`dangerously_get_raw_split`) and the three transport datagrams, sealed at the
+ * keys (`dangerously_get_raw_split`) and the four transport datagrams, sealed at the
  * transcript's explicit nonces (Noise §11.4) and framed as RFC-0033 §5.3. snow does not
  * expose its symmetric state between tokens, so the per-token ck/h/k rows are checked by
  * `independent_check_noiseprotocol.py` and by the C++ conformance runner.
@@ -118,14 +118,18 @@ fn main() {
     );
     let conf = datagram(&it, nonce("confirmation_nonce_decimal"), &[]);
     let ping = datagram(&it, nonce("frame_i2r_nonce_decimal"), &unhex(&field(inp, "frame_i2r")));
+    let ack = datagram(&rt, nonce("acknowledgement_nonce_decimal"), &[]);
     let pang = datagram(&rt, nonce("frame_r2i_nonce_decimal"), &unhex(&field(inp, "frame_r2i")));
     check("confirmation datagram", Some(&conf), &field(out, "confirmation"));
     check("frame i->r datagram", Some(&ping), &field(out, "datagram_i2r"));
+    check("acknowledgement datagram", Some(&ack), &field(out, "acknowledgement"));
     check("frame r->i datagram", Some(&pang), &field(out, "datagram_r2i"));
     let o = opened(&rt, &unhex(&field(out, "confirmation")));
     check("responder opens the confirmation", o.as_deref(), "");
     let o = opened(&rt, &unhex(&field(out, "datagram_i2r")));
     check("responder opens frame i->r", o.as_deref(), &field(inp, "frame_i2r"));
+    let o = opened(&it, &unhex(&field(out, "acknowledgement")));
+    check("initiator opens the acknowledgement", o.as_deref(), "");
     let o = opened(&it, &unhex(&field(out, "datagram_r2i")));
     check("initiator opens frame r->i", o.as_deref(), &field(inp, "frame_r2i"));
 

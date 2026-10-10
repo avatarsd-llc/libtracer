@@ -14,9 +14,11 @@ it.
 - **derived:** both ephemeral public keys and `DH(e_i, e_r)`;
 - **steps:** `ck`, `h` and `k` after each token (Appendix A.3);
 - **outputs:** both handshake datagrams (58 B and 50 B, type byte first), the handshake hash,
-  the two transport keys after `Split()`, and the three transport datagrams: the empty
-  confirmation (initiator, n = 0, 25 B), `VALUE "ping"` (initiator, n = 1, 33 B) and
-  `VALUE "pang"` (responder, n = 0, 33 B).
+  the two transport keys after `Split()`, and the four transport datagrams: the empty
+  confirmation (initiator, n = 0, 25 B), `VALUE "ping"` (initiator, n = 1, 33 B), the empty
+  acknowledgement (responder, n = 0, 25 B) and `VALUE "pang"` (responder, n = 1, 33 B). The
+  responder answers the empty confirmation first (reference/23 §4 responder step 7), so `pang`
+  goes at n = 1 (RFC-0033 erratum 2026-10-11).
 
 Every value is copied from the RFC's text, and every value is reproduced by:
 

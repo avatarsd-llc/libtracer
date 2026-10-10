@@ -15,7 +15,8 @@
     "frame_r2i": "0100040070616e67",
     "confirmation_nonce_decimal": "0",
     "frame_i2r_nonce_decimal": "1",
-    "frame_r2i_nonce_decimal": "0"
+    "acknowledgement_nonce_decimal": "0",
+    "frame_r2i_nonce_decimal": "1"
   },
   "derived": {
     "initiator_ephemeral_public": "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254",
@@ -49,6 +50,7 @@
     "k_r2i": "f8ca9cf382ec15ac3609fa976595baafec96af6729b05edab8e41839ed09f6cd",
     "confirmation": "040000000000000000b215c81b607068db3638292cc0825965",
     "datagram_i2r": "040100000000000000843c7ef02f4b31848add30c2b08aa1eef0985b2201f08621",
-    "datagram_r2i": "0400000000000000008402810c9207079d65de2bc6ba0de7827759a468234362ac"
+    "acknowledgement": "0400000000000000004a986111144b7702d0a867a37da80f23",
+    "datagram_r2i": "040100000000000000d4df8a687acd1ca414ed6223ec12519b15a8e6edc0328c18"
   }
 }
