@@ -657,23 +657,39 @@ class transport_vertex_t {
      */
     [[nodiscard]] const conn_settings_t* settings_of(std::string_view name) const;
 
+    /** @brief What @ref with_link calls: the connection's owned link, valid until it returns. */
+    using link_fn_t = void (*)(void* ctx, transport_t& link);
+
     /**
-     * @brief The OWNED transport of connection @p name — the config-constructed socket.
+     * @brief Call @p fn with the OWNED transport of connection @p name — the config-constructed
+     *        socket — on this thread, inside one router frame bracket.
      *
-     * The seam for reaching a SPEC-constructed listener/server after creation (e.g.
-     * to enumerate its peers via `link_of(name)->bus()` or close one via
-     * `link_of(name)->bus()->close_peer(peer)`). Returns nullptr for a connection
-     * whose link was staged with @ref provide_link (the caller already owns that
-     * link) and for an unknown NAME.
+     * The seam for reaching a SPEC-constructed listener/server after creation, e.g. to
+     * enumerate its peers through `link.bus()` or close one with `link.bus()->close_peer(peer)`.
+     * The link is valid until @p fn returns, even if the connection is removed meanwhile: a
+     * removed link is freed only by a `graph_t::collect()` that no bracket open at its removal
+     * is still inside. A pointer kept past @p fn has no such guarantee. @p fn runs without the
+     * transport vertex's locks, so it may call back into it.
      * @param name The connection's **qualified** key `net/<module>/<name>` — NOT the bare
      *             connection NAME. RFC-0014 S2a re-keyed `conns_` to the qualified form so
      *             the routing address equals the vertex path; these lookups moved with it
      *             and the doc did not, so a caller following the old wording got a silent
      *             `NOT_FOUND` / `nullptr` (#605).
+     * @return false, with @p fn not called, for a connection whose link was staged with
+     *         @ref provide_link (the caller already owns that link) and for an unknown NAME.
+     */
+    [[nodiscard]] bool with_link(std::string_view name, link_fn_t fn, void* ctx) const;
+
+   private:
+    /** @brief Test access to %link_of; defined only by the tests. */
+    friend struct transport_vertex_test_access;
+
+    /**
+     * @brief The OWNED transport of connection @p name, or nullptr — unbracketed, so test-only
+     *        (`transport_vertex_test_access`); the app reaches the link through @ref with_link.
      */
     [[nodiscard]] transport_t* link_of(std::string_view name) const;
 
-   private:
     // One connection leaf: the graph identity vertex, its transport-private config, and —
     // when config-constructed — the OWNED transport (`owned` empty for a provided link).
     // The NAME→link routing table is NOT duplicated here — it has one owner, the router's
@@ -754,7 +770,7 @@ class transport_vertex_t {
          * @brief Phase 1 begins: take the locks @p scope asks for and claim them for this
          *        thread.
          *
-         * `const`, because the pure readers (`settings_of` / `link_of` / `module_for` /
+         * `const`, because the pure readers (`settings_of` / `with_link` / `module_for` /
          * `is_structural`) take `ctl_m_` too — it is `mutable`, as are `ops_m_` and both
          * ownership stamps. Phase 2 still reaches the graph and the router: those are
          * REFERENCE members, so const on the owner does not propagate to them.
@@ -951,7 +967,7 @@ class transport_vertex_t {
      * @brief Serializes every CONTROL-PLANE mutation here (ADR-0063 §3).
      *
      * This class had no synchronization at all, yet a creation writes `conns_` and
-     * `pending_links_` while `settings_of` / `link_of` / `remove_connection` traverse `conns_`
+     * `pending_links_` while `settings_of` / `with_link` / `remove_connection` traverse `conns_`
      * — and the graph invokes the connection factory OUTSIDE `map_mutex_`, on whichever
      * transport's receive thread delivered the CREATE. Two transports means two such threads,
      * so concurrent `std::map` inserts (and the readers racing their rebalance) were reachable
@@ -1003,7 +1019,7 @@ class transport_vertex_t {
      * It is therefore held across the fan-out and the joins — and that is safe for exactly
      * one reason, which is the reason it exists as a second mutex rather than as `ctl_m_`
      * held longer: **no door a fan-out can reach takes it.** @ref acquire_link,
-     * @ref release_link, @ref link_of, @ref settings_of, @ref module_for and
+     * @ref release_link, @ref with_link, @ref settings_of, @ref module_for and
      * `is_structural` are `LOOKUP` scope. A callback that instead MUTATES the control plane
      * re-entrantly — a liveness subscriber calling @ref remove_connection — is refused by
      * assertion rather than deadlock; that is a restriction, and a deliberate one: a

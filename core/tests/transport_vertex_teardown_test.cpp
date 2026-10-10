@@ -412,6 +412,31 @@ void bound_send_held_across_collects() {
     check(sent && p.reached.load() == 1, "the bound send reached the link once");
 }
 
+/** @brief An app thread's `with_link` call, held inside the removed link by its callback. */
+void with_link_held_across_collects() {
+    graph_t g;
+    fwd_router_t router(g);
+    probe_t p;
+    auto net = plane_owning_y(g, router, p);
+    const std::vector<std::byte> frame(4, std::byte{0x5a});
+    bool found = false;
+    collect_with_frame_inside(
+        g, *net, p,
+        [&] {
+            found = net->with_link(
+                "net/q/y",
+                [](void* c, tr::net::transport_t& link) {
+                    link.send(*static_cast<const std::vector<std::byte>*>(c));
+                },
+                const_cast<std::vector<std::byte>*>(&frame));
+        },
+        "net/q/y");
+    check(found && p.reached.load() == 1, "with_link called back once on the live link");
+    check(!net->with_link(
+              "net/q/y", [](void*, tr::net::transport_t&) {}, nullptr),
+          "with_link of a removed connection does not call back");
+}
+
 /** @brief A forward that looked the link up before its removal is still inside it. */
 void forward_in_flight_across_removal() {
     graph_t g;
@@ -473,6 +498,7 @@ int main() {
     forward_in_flight_across_removal();
     bus_children_read_after_destruction();
     bound_send_held_across_collects();
+    with_link_held_across_collects();
     if constexpr (tr::net::kBusLinks) {
         forward_held_across_collects();
         origination_held_across_collects();
