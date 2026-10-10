@@ -7,19 +7,18 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * `register_module` mints the `<net_root>/<module>/conn` creator endpoint, a HANDLER vertex
- * whose `on_write` context belongs to the `transport_vertex_t`. The graph outlives the plane,
- * and so can a link the plane does not own: an app-owned listener wired straight into the
- * router keeps delivering creation writes to that endpoint for as long as its receive thread
- * runs. So the plane's destructor owes the graph two things before its state goes: the
- * endpoint must stop resolving (a write that arrives afterwards answers like any other absent
- * path), and a write already inside the endpoint must finish first.
+ * whose `on_write` context belongs to the `transport_vertex_t`, and every connection it makes
+ * is a graph vertex and a router child. The graph and the router outlive the plane, so its
+ * destructor retires the endpoint once the calls already inside it have returned, and
+ * detaches each connection from the router and the graph before closing it.
  *
- * Each round builds a plane, lets two app-owned listener threads dial its endpoint through
- * the router, and destroys the plane while they are still dialling — then lets them keep
- * dialling the now-plane-less graph. Built for the sanitizer lanes (`-fsanitize=address` and
- * `-fsanitize=thread`, the latter under `setarch $(uname -m) -R` here), where a write that
- * reached the endpoint's context after the plane was gone is reported. Without a sanitizer
- * the post-destruction checks still hold: the endpoint is absent, and a dial answers false.
+ * The rounds below build a plane, let two app-owned listener threads dial its endpoint
+ * through the router, destroy the plane while they are still dialling, and keep dialling.
+ * They check that the endpoint is gone and that a write to it is refused; under the
+ * sanitizer lanes (`-fsanitize=address`, and `-fsanitize=thread` under
+ * `setarch $(uname -m) -R` here) they also check the drain. The connection checks then
+ * forward through a surviving link, and read a bus connection's `:children[]`, after the
+ * plane is gone, and expect neither to reach the closed link.
  */
 
 #include <atomic>
@@ -36,6 +35,7 @@
 #include "libtracer/conn_spec.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/transport_vertex.hpp"
 #include "test_support.hpp"
@@ -49,6 +49,26 @@ using tr::net::fwd_router_t;
 using tr::net::transport_vertex_t;
 
 using tr::testing::check;
+
+/** @brief A link the plane constructs and owns. It counts every call that reaches it, and it
+ *         is a bus, so its connection vertex lists its one peer under `:children[]`. */
+struct owned_link_t final : tr::net::transport_t, tr::net::bus_link_t {
+    std::atomic<int>& reached;
+    explicit owned_link_t(std::atomic<int>& r) noexcept : reached(r) {}
+    void send(std::span<const std::byte>) override { reached.fetch_add(1); }
+    [[nodiscard]] tr::net::bus_link_t* bus() override { return this; }
+    void enumerate_peers(const peer_visitor_t& visit) const override {
+        reached.fetch_add(1);
+        visit("p0");
+    }
+    [[nodiscard]] tr::net::transport_t* peer_link(std::string_view peer) override {
+        return peer == "p0" ? this : nullptr;
+    }
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t peer,
+                                             std::span<char>) const override {
+        return peer.valid() ? "p0" : std::string_view{};
+    }
+};
 
 /** @brief The app-owned listener: registered on the router by the app, never by the plane. */
 struct listener_t : tr::net::transport_t {
@@ -137,11 +157,76 @@ void destruction_under_live_dial() {
     check(answered_after == 0, "a write to the retired endpoint is refused as an absent path");
 }
 
+/**
+ * @brief A plane whose module `m` constructs its links (kind `own`), with one connection,
+ *        `/net/m/x`, made through the endpoint and owned by the plane.
+ */
+std::unique_ptr<transport_vertex_t> plane_owning_x(graph_t& g, fwd_router_t& router,
+                                                   std::atomic<int>& reached) {
+    auto net = std::make_unique<transport_vertex_t>(g, router);
+    std::atomic<int>* const r = &reached;
+    net->register_transport_type(
+        "own",
+        [r](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+            tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+            return tr::mem::make_poly<owned_link_t>(src, *r);
+        });
+    check(net->register_module("m", "own", conn_role_t::DIAL).has_value(), "module m is declared");
+    tr::net::conn_spec_t spec("x");
+    spec.kind("own");
+    check(g.write(path_t("/net/m/conn"), spec.view()).has_value(),
+          "the plane constructs and owns /net/m/x");
+    return net;
+}
+
+/** @brief A link that outlives the plane forwards to its connection after it is destroyed. */
+void surviving_link_forwards_after_destruction() {
+    graph_t g;
+    fwd_router_t router(g);
+    listener_t up;
+    (void)router.add_child(kListener, up);
+    std::atomic<int> reached{0};
+    auto net = plane_owning_x(g, router, reached);
+    const std::vector<std::byte> frame =
+        tr::testing::b_fwd(tr::graph::fwd_op_t::READ, tr::testing::b_path({"net", "m", "x", "p0"}),
+                           tr::testing::b_path({"reply"}));
+    router.on_frame(kListener, frame);
+    check(reached.load() > 0, "a forward from the surviving link reaches the owned connection");
+    net.reset();
+    const int at_reset = reached.load();
+    router.on_frame(kListener, frame);
+    check(reached.load() == at_reset,
+          "after destruction the same forward no longer reaches the closed link");
+    check(!g.find(path_t("/net/m/x").key()), "and the connection vertex is retired");
+    (void)router.remove_child(kListener);
+}
+
+/** @brief A bus connection's `:children[]` read after the plane is destroyed. */
+void bus_children_read_after_destruction() {
+    graph_t g;
+    fwd_router_t router(g);
+    std::atomic<int> reached{0};
+    auto net = plane_owning_x(g, router, reached);
+    const path_t children = *path_t::parse("/net/m/x:children[]");
+    if constexpr (tr::net::kBusLinks) {
+        check(g.read(children).has_value(), "the bus connection lists its peers while it lives");
+        check(reached.load() > 0, "and the listing asks the link");
+    }
+    net.reset();
+    const int at_reset = reached.load();
+    const auto after = g.read(children);
+    check(!after && after.error() == tr::graph::status_t::NOT_FOUND,
+          "after destruction its :children[] answers NOT_FOUND");
+    check(reached.load() == at_reset, "without asking the closed link");
+}
+
 }  // namespace
 
 int main() {
     std::printf("transport_vertex_t destruction retires its connection handler and drains\n");
     routed_dial_reaches_the_endpoint();
     destruction_under_live_dial();
+    surviving_link_forwards_after_destruction();
+    bus_children_read_after_destruction();
     return tr::testing::summary("transport_vertex_teardown");
 }
