@@ -7,8 +7,12 @@
  *
  * `graph_t::acl_allows` used to read `system_clock::now()` on every op that carried a caller,
  * before its bearing-ancestor walk found out whether any ACL applied at all. The open-by-default
- * arm (resolver installed, no ACE anywhere up the chain) now returns without a clock read; a
- * guarded vertex still reads it, where an ACE's `expires_ns` may need it.
+ * arm (resolver installed, no ACE anywhere up the chain) now returns without a clock read.
+ *
+ * #1685 narrows the guarded arm the same way: the clock is read only when an ACE in the
+ * evaluated list carries an `expires_ns`, the one field that compares against it. A vertex
+ * guarded by standing grants (every gated forward hop without a lease) reads no clock; a
+ * leased grant still does, and still expires.
  *
  * The count comes from interposing libstdc++'s out-of-line `system_clock::now()` in this test
  * executable — the one clock the library reads (`now_ns()` in graph.cpp). Where that symbol is
@@ -74,12 +78,15 @@ std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::st
     return as_bytes(caller);
 }
 
-/** @brief An `:acl` value of one ALLOW ACE granting @p subject READ and WRITE. */
-std::vector<std::byte> allow_all(std::string_view subject) {
+/**
+ * @brief An `:acl` value of one ALLOW ACE granting @p subject READ and WRITE.
+ * @param expires_ns The ACE's lease, absolute ns since the UNIX epoch; `0` is a standing grant.
+ */
+std::vector<std::byte> allow_all(std::string_view subject, std::uint64_t expires_ns = 0) {
     const auto mask = static_cast<std::uint32_t>(tr::graph::acl_right_t::READ) |
                       static_cast<std::uint32_t>(tr::graph::acl_right_t::WRITE);
-    const std::vector<tr::graph::ace_t> aces{
-        tr::graph::ace_t{.subject = as_bytes(subject), .access_mask = mask}};
+    const std::vector<tr::graph::ace_t> aces{tr::graph::ace_t{
+        .subject = as_bytes(subject), .access_mask = mask, .expires_ns = expires_ns}};
     return tr::graph::encode_acl(aces);
 }
 
@@ -93,18 +100,36 @@ int main() {
         g.set_hooks(hooks);
     }
     const vertex_handle_t open = g.register_vertex(path_t("/open"), role_t::STORED_VALUE);
-    const vertex_handle_t guarded = g.register_vertex(path_t("/guarded"), role_t::STORED_VALUE);
-    check(g.write(path_t("/guarded:acl"), make_value(allow_all("peer-a"))).has_value(),
-          "trusted local caller installs the :acl");
+    const vertex_handle_t standing = g.register_vertex(path_t("/standing"), role_t::STORED_VALUE);
+    const vertex_handle_t leased = g.register_vertex(path_t("/leased"), role_t::STORED_VALUE);
+    const vertex_handle_t lapsed = g.register_vertex(path_t("/lapsed"), role_t::STORED_VALUE);
+    check(g.write(path_t("/standing:acl"), make_value(allow_all("peer-a"))).has_value(),
+          "trusted local caller installs the standing :acl");
+    check(g.write(path_t("/leased:acl"), make_value(allow_all("peer-a", ~std::uint64_t{0})))
+              .has_value(),
+          "trusted local caller installs the leased :acl");
+    check(g.write(path_t("/lapsed:acl"), make_value(allow_all("peer-a", 1))).has_value(),
+          "trusted local caller installs the lapsed :acl");
 
-    // Self-check: a guarded op must reach the interposer, or this platform cannot observe it.
-    const unsigned before_guarded = g_clock_reads.load();
-    check(g.write(guarded, make_value(as_bytes("v")), "peer-a").has_value(),
-          "guarded WRITE by a granted caller is allowed");
-    if (g_clock_reads.load() == before_guarded) {
+    // Self-check: a leased grant must reach the interposer, or this platform cannot observe it.
+    const unsigned before_leased = g_clock_reads.load();
+    check(g.write(leased, make_value(as_bytes("v")), "peer-a").has_value(),
+          "leased WRITE by a granted caller is allowed");
+    if (g_clock_reads.load() == before_leased) {
         std::printf("SKIP: system_clock::now() is not interposable here\n");
         return 77;
     }
+    check(!g.write(lapsed, make_value(as_bytes("v")), "peer-a").has_value(),
+          "a lapsed lease still expires: WRITE refused");
+
+    std::printf("a guarded vertex with only standing grants reads no clock (#1685):\n");
+    const unsigned before_standing = g_clock_reads.load();
+    check(g.write(standing, make_value(as_bytes("v")), "peer-a").has_value(),
+          "standing grant => WRITE allowed");
+    check(!g.write(standing, make_value(as_bytes("v")), "peer-b").has_value(),
+          "standing grant, other subject => WRITE refused");
+    check(g_clock_reads.load() == before_standing,
+          "no system_clock::now() when no ACE in the list carries an expiry");
 
     std::printf("attributed ops on an unguarded subtree read no clock (#1665):\n");
     const unsigned before_open = g_clock_reads.load();
