@@ -179,16 +179,38 @@ append (RFC-0021 §E, "the gate is the writer's"), and not necessarily the targe
 the replacer the holder. An edge admitted by a local host call is held by the owner. The core
 already stores the context per edge (`subscriber_remote_t::caller`,
 `core/include/libtracer/subscriber.hpp:subscriber_remote_t`), so the holder costs no new state.
-Two holders are compared as RFC-0035 §7.1 compares them: both contexts are resolved through the
-node's subject lookup at check time, so a peer that comes back over a new link under the same key
-still holds its entry. A node with no resolver installed compares the two stored contexts byte for
-byte (§12 Q1).
+**The holder test.** This RFC is the normative home of the rule. RFC-0035 §7.1 cites it. A caller
+is an entry's holder if and only if all of the following hold:
+
+1. **The entry's stored context is non-empty.** An entry with an empty stored context was made by
+   the owner, and it is **held by the owner alone**. It MUST NOT match any remote caller, whatever
+   the resolver maps either side to. The subject lookup MUST NOT be run on an empty context, just as
+   ACL evaluation never runs it there (#905).
+2. **The caller's context is non-empty.** The owner needs no holder test, because it passes as the
+   owner.
+3. **With a resolver installed, both contexts resolve, and to the same token.** The lookup runs at
+   check time on both stored contexts. If the lookup fails on either side, or either side returns
+   a reserved token such as `EVERYONE@`, the caller is **not** the holder. So an entry whose stored
+   context no longer resolves is owner-only. Two callers that resolve to the same token are the
+   same holder. This is what keeps a peer's entry its own when it comes back over a new link under
+   the same key (§12 Q1).
+4. **With no resolver installed, the two stored contexts are equal byte for byte** (§12 Q1).
+
+Rule 1 is what keeps READ from turning into authority over the owner's subscriptions. Take a
+resolver that maps every unauthenticated link to one token, `guest`. If the owner's empty context
+were resolved too, it could come out as `guest`. A peer holding only READ would then count as the
+holder of every edge the owner wired, and could clear, retarget or suspend them. Rule 1 refuses
+that, and so does rule 3 for any edge whose creator is gone.
+
+A shared token does make its callers one holder. That is intended: a deployment that maps many
+links to one token has said they are one principal. They can manage each other's entries, never
+the owner's.
 
 | Write | The caller holds the entry | The caller does not |
 | ---- | ---- | ---- |
 | `:subscribers[]` append (create) | READ. The new entry is the caller's own | — |
 | `[N]` clear (empty `STATUS`) | READ | owner only |
-| `[N]` toggle (RFC-0035, if accepted) | READ | owner only |
+| `[N]` toggle (RFC-0035) | READ | owner only |
 | `[N]` replace (a `SUBSCRIBER`) | READ. The new edge is the caller's own too | owner only |
 
 - **Why READ is enough for the caller's own entry.** A subscription delivers what a read of `v`
@@ -238,7 +260,13 @@ Found with `git grep` on `origin/main` (`f3001401`) for `acl_right_t::SUBSCRIBE`
 (`allow_only_policy_t`, `kAcceptsDeny`). Outside `core/src` the hits are tests and examples
 (`core/tests/acl_test.cpp`, `mount_hop_acl_test.cpp`, `payload_right_table_test.cpp`,
 `read_back_backend_test.cpp`, `security_acl_test.cpp`, `core/examples/acl_right_bits.cpp`), the
-CHANGELOG, and one ESP-IDF README sentence.
+CHANGELOG, and one ESP-IDF README sentence. Four more places change with row 7 or row 5 without
+naming a retired right:
+- `core/tests/subtree_test.cpp`: its WRITE-without-CREATE case expects creation to be denied, and
+  that expectation inverts.
+- `core/tests/graph_seam_refusal_test.cpp`: it uses `payload_right_t`.
+- `core/tests/CMakeLists.txt`: it lists `payload_right_table_test`.
+- `tools/no_heap_baseline.json`: it lists the deleted functions' symbols.
 
 | # | Site | Today | After |
 | ---- | ---- | ---- | ---- |
@@ -359,7 +387,8 @@ RFC-0035 ([PR #2086](https://github.com/avatarsd-llc/libtracer/pull/2086)) is re
 this RFC, and it lands after it (#2088 blocks #2019):
 
 - **§7.1** renames the edge's "owner" to **holder**, the term of §3.4, so that "owner" means only
-  the node's owner. "Only the local caller and `WRITE_ACL` holders can manage it" becomes "only the
+  the node's owner. Its comparison rule is replaced by a citation of §3.4's holder test, which is
+  normative here. "Only the local caller and `WRITE_ACL` holders can manage it" becomes "only the
   owner can manage it".
 - **§7.2's table** becomes §3.4's table. The create and the caller's own `[N]` clear, toggle and
   replace need READ, where RFC-0035 proposed SUBSCRIBE. Another party's slot is owner-only, where
@@ -468,7 +497,11 @@ text above already states each ruling, and this section records the question and
 1. **Core.** Apply the gates of §4, the install refusal of §3.1, the deletion of the payload-right
    table, and the holder test. Rewrite `acl_right_bits` and the affected tests. Add a CHANGELOG
    entry with the upgrade table. Build the CI matrix, including `acl_full` ON and OFF, and record
-   the ESP32 size delta.
+   the ESP32 size delta. Add a host test for each holder-test rule of §3.4, run under a resolver
+   that maps every link to one token. Rule 1: an owner-wired edge refuses a READ-only remote clear,
+   replace and toggle. Rule 3: an edge whose stored context no longer resolves is owner-only. The
+   same token is the same holder. This is a behavioural clause with no new bytes, so the conformance
+   instrument is a bound host test (`tests/conformance/HARNESS.md`) rather than a codec vector.
 2. **Vectors and Rust.** Repair `acl/ace-duplicate-key` and add `acl/ace-retired-bit`, both bound by
    `core/tests/acl_test.cpp` and `bindings/rust/tests/conformance_vectors.rs`. Change the Rust
    reader and its CHANGELOG.
@@ -477,7 +510,7 @@ text above already states each ruling, and this section records the question and
    recipe of §12 Q7),
    reference/18 and reference/19 (the CREATE gate), CONTEXT.md, a forward
    note on RFC-0014 Amendment 2, and the ESP-IDF README sentence.
-4. **RFC-0035** is revised per §8 before it is accepted.
+4. **RFC-0035** is revised per §8, and its §7.1 cites §3.4 as the holder rule.
 
 ## Discussion
 
