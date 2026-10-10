@@ -52,6 +52,11 @@ deletes one, and the linker cannot tell the difference either.
 * ZERO is the end state: an empty target in the baseline, and then this check is the plain
   "no heap symbol at all" gate ADR-0083 §Consequences names. ``--strict`` runs that gate now.
 
+A heap-rooted build (``kSlabPool`` false and ``kArenaBytes`` 0, ``CONFIG_LIBTRACER_DEFAULT_ROOT_HEAP``
+on ESP-IDF, #2090) is the one deliberate exception: its default root IS the platform heap, so
+``mem_heap`` reaches ``operator new`` and ``operator delete`` there by design. This check runs on
+the arena-rooted archives only; it is not a gate for that image.
+
 The objects and sections are named as the toolchain names them, so a baseline is per toolchain
 and per build configuration. CI pins two: ``cortex-m0`` (the required-module archive
 ``tools/cortexm0_footprint.py --archive-out`` writes) and ``esp32c6`` (the ESP-IDF component

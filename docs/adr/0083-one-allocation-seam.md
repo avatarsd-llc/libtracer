@@ -86,6 +86,10 @@ On an MCU, `std::vector`, `malloc` and global `new` are not usable allocation so
 - **[RFC-0028](../spec/rfcs/0028-lean-value-path.md), amended** (§4.9 and §5.6): placement moves into the placement module, and the block-source contract widens to every core allocation. D10 is not amended (Decision 9).
 - **[RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md), amended** (§D.4): `:stats.mem.values`, `:stats.mem.tables` and `:stats.mem.net` are registered. This is introspection naming only, with no frame change.
 
+## Amendment (2026-10-10): the heap-rooted MCU build is a deliberate exception ([#2090](https://github.com/avatarsd-llc/libtracer/issues/2090))
+
+Decision 4 and the link check of Decision 1 gain one opt-out. Where `kSlabPool` is `false`, `kArenaBytes = 0` compiles no arena: no region, no free-list heads and no root object. The default root, its three sub-pool defaults and the two default backends are then the platform heap (`tr::mem::heap_source()`, `tr::mem::kHeapRoot`). It exists for an application that injects its own sources everywhere and wants the arena's static RAM back (about 5.2 KB at a 4 KiB arena on an ESP32-C6). The price is heap use, unbounded, for every default it has not redirected. The opt-out is an explicit build choice (`CONFIG_LIBTRACER_DEFAULT_ROOT_HEAP` on ESP-IDF), never a fallback, so no silent heap path exists. The link check runs on the arena-rooted archive and does not apply to a heap-rooted image. The arena's free-list heads are now sized from the region: one per sub-pool per size class no larger than `kArenaBytes`, since a larger class could never be carved.
+
 ## Verification
 
 - **The link check.** A CI job inspects the MCU `libtracer.a` (`nm` over the archive) and fails when it finds an undefined reference to `malloc`, `calloc`, `realloc`, `free`, `operator new` or `operator delete`, in any variant. It turns on with migration step 6 and stays on.
