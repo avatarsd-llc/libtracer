@@ -20,7 +20,7 @@
  * forward through a surviving link, and read a bus connection's `:children[]`, after the
  * plane is gone, and expect neither to reach the closed link. Last, a forward and a listing
  * are each held inside a connection's link while it is removed: the removal shuts the link
- * down and parks it, and only the graph's next `collect()` destroys it.
+ * down and parks it, and only the graph's second `collect()` after that destroys it.
  */
 
 #include <atomic>
@@ -289,7 +289,9 @@ void remove_with_call_inside(graph_t& g, transport_vertex_t& net, probe_t& p, Ca
     check(!p.closed_inside.load(), "the link is not destroyed under a call still inside it");
     check(p.shut.load() && !p.closed.load(), "removal shut it down and kept it");
     g.collect();
-    check(p.closed.load(), "and the graph's next collect() destroys it");
+    check(!p.closed.load(), "the next collect() keeps it: it was parked since the previous one");
+    g.collect();
+    check(p.closed.load(), "and the second collect() destroys it");
 }
 
 /** @brief A forward that looked the link up before its removal is still inside it. */
@@ -336,6 +338,7 @@ void refused_retire_keeps_the_link() {
     gate.closed = false;
     check(g.find(x.key()).has_value(), "the retire was refused (the vertex is still registered)");
     check(p.shut.load(), "the removal shut the link down anyway");
+    g.collect();
     g.collect();
     check(!p.closed.load(), "and collect() keeps it, since the vertex still names it");
     check(g.read(*path_t::parse("/net/m/x:children[]")).has_value(),

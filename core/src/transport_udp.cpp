@@ -113,9 +113,9 @@ udp_transport_t::~udp_transport_t() {
 
 void udp_transport_t::shut_down() {
     stop_and_join();
+    // `send` reads `fd_` without a lock, so the descriptor NUMBER must stay occupied until the
+    // object goes; only the socket behind it is released here.
     if (fd_ < 0) return;
-        // `send` reads `fd_` without a lock, so the descriptor NUMBER must stay occupied until the
-        // object goes; only the socket behind it is released here.
 #if defined(ESP_PLATFORM)
     // lwIP has no `dup2`, and `shutdown` of a UDP socket is EOPNOTSUPP there: the socket, and
     // its port, stay until the object is destroyed, and a send that reaches it still leaves.
