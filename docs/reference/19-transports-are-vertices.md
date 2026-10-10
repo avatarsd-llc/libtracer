@@ -188,7 +188,7 @@ engine (`kSelfHealLinks = true`, opt-in since v0.17.0,
 engine-managed, so creation does not fail when the peer is down. Everywhere
 else the value is still written by whoever knows: an eagerly-constructed socket (every LISTEN
 link, every bus kind, a stock `kSelfHealLinks = false` build) publishes `UP` or `LISTENING` at
-creation (`core/src/transport_vertex.cpp:if (constructed)`, `core/src/transport_vertex.cpp:effective_role == conn_role_t::LISTEN`), and a provided link reports through
+creation (`core/src/transport_vertex.cpp:else if (conn->owned)`, `core/src/transport_vertex.cpp:effective_role == conn_role_t::LISTEN`), and a provided link reports through
 `set_link_state`.
 
 ### 3. Structural vertices nobody declared
