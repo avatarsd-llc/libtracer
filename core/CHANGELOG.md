@@ -33,7 +33,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   ([#2090](https://github.com/avatarsd-llc/libtracer/issues/2090)).** `mcu_root_t` keeps only
   the rows of `kSizeClasses` no larger than `kArenaBytes` (the new `tr::mem::kArenaClasses`),
   since a larger class could never be carved. With the default table on a 32-bit target the
-  heads take 576 B at 4 KiB (was 972 B) and 864 B at 32 KiB. One behaviour moves, only in the
+  heads take 576 B at 4 KiB (was 972 B) and 864 B at 32 KiB. The 32 KiB (chip) and 256 KiB
+  (`linux`) ESP-IDF defaults are otherwise unaffected, as is any arena whose size is itself a
+  size class. Only an arena whose size is not a class sees one behaviour move, and only in the
   serving direction: a request above the last kept row and no larger than the arena is now
   carved as an oversize block at its own size, where it was refused before (its class was too
   big to carve). Nothing that was served before is refused.

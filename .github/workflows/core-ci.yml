@@ -272,7 +272,11 @@ jobs:
             lkv_slot: single_writer_slot_t
           - acl_full: OFF
             lkv_slot: hazard_slot_t
-    name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})
+          # The heap-rooted MCU default (#2090): no slab pool, no arena, the heap as the root.
+          - acl_full: OFF
+            lkv_slot: single_writer_slot_t
+            root: heap
+    name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})${{ matrix.root && format(' root={0}', matrix.root) || '' }}
     steps:
       # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
       # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
@@ -316,6 +320,7 @@ jobs:
           preset=""
           if [ "${{ matrix.acl_full }}" = "ON" ]; then preset="-I$PWD/core/tests/presets/acl-full"; fi
           if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
+          if [ "${{ matrix.root }}" = "heap" ]; then preset="-I$PWD/core/tests/presets/heap-root"; fi
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="$preset"
           cmake --build core/build --parallel "$BUILD_JOBS"
           ctest --test-dir core/build --output-on-failure
