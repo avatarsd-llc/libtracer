@@ -222,32 +222,47 @@ struct client_t {
 struct node_t {
     graph_t g;
     fwd_router_t router{g};
-    tr::net::tcp_server_transport_t server{0, {.max_peers = 4, .peer_named = true}};
+    std::unique_ptr<tr::net::tcp_server_transport_t> server =
+        std::make_unique<tr::net::tcp_server_transport_t>(
+            0, tr::net::tcp_server_config_t{.max_peers = 4, .peer_named = true});
     recorder_t p2p;
     std::unique_ptr<client_t> p0;
     std::unique_ptr<client_t> p1;
 
     node_t() {
         enforce(g);
-        check(server.ok(), "listener bound");
+        check(server->ok(), "listener bound");
         (void)g.register_vertex(path_t("/net/tcp-server/srv"), role_t::STORED_VALUE);
         (void)g.register_vertex(path_t("/net/tcp/x"), role_t::STORED_VALUE);
-        check(router.add_child(std::string(kMount), server), "bus listener mounted");
+        check(router.add_child(std::string(kMount), *server), "bus listener mounted");
         check(router.add_child("net/tcp/x", p2p), "point-to-point child mounted");
         const bytes_t acl = mount_acl();
         check(g.write(path_t("/net/tcp-server/srv:acl"), make_value(acl)).has_value() &&
                   g.write(path_t("/net/tcp/x:acl"), make_value(acl)).has_value(),
               ":acl written on both connection vertices");
-        p0 = std::make_unique<client_t>(server.local_port());
+        p0 = std::make_unique<client_t>(server->local_port());
         check(wait_until([&] { return anchor("p0").has_value(); }), "session p0 accepted");
-        p1 = std::make_unique<client_t>(server.local_port());
+        p1 = std::make_unique<client_t>(server->local_port());
         check(wait_until([&] { return anchor("p1").has_value(); }), "session p1 accepted");
     }
-    ~node_t() {
+    ~node_t() { quiesce(); }
+
+    /**
+     * @brief Join the listener's receive thread, so no delivery is in flight afterwards.
+     *
+     * A session's frame is handled on the listener's receive thread, so a dial or write it
+     * started can still be running when the case body returns. `remove_child` only stops new
+     * forwards; the thread is joined by destroying the listener, so this closes the sessions,
+     * unmounts, then resets @ref server. A case that owns state the handler reaches (a
+     * `transport_vertex_t`, a link) calls this before that state goes out of scope (#2057).
+     * Idempotent.
+     */
+    void quiesce() {
         p1.reset();
         p0.reset();
         (void)router.remove_child(kMount);
         (void)router.remove_child("net/tcp/x");
+        server.reset();
     }
 
     /** @brief The session anchor of bus peer @p peer, if it is accepted. */
@@ -398,6 +413,9 @@ void upgrade_layout() {
     check(!root.has_value() && root.error() == tr::graph::status_t::NOT_FOUND,
           "a write to /:acl answers NOT_FOUND");
 
+    // The last dial may still be running on the listener's receive thread: destroying the
+    // listener joins it, before `net`, `b2` and the channel it reaches go out of scope.
+    n.quiesce();
     ch.shutdown();
     (void)r_b.remove_child("net/down/a");
 }
