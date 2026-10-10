@@ -1,6 +1,6 @@
 # Reference 23 — The Noise link binding
 
-> **Status**: normative, v1, 2026-10-10. Incorporated by [docs/spec/v1.md](../spec/v1.md) §3 as an annex that applies **to a link that uses the binding**; a link that does not use it is unaffected. The authorising instrument is [RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md), an **amendment**, accepted 2026-10-10 (maintainer ruling "all rec" on its §15; comment window waived by default and not invoked). Its §15 Q1 ruled that the binding's normative text lives on this page and not in the RFC, which stays the change record. §Terms is RFC-0033 §4, §1–§11 below are its §5.1–§5.11, §12 is its §6 and Appendix A is its Appendix A, carried over unchanged except for section cross-references. §2 also carries [RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) Amendment 1 (accepted 2026-10-10), which made the implementation hazards of §12.8 normative.
+> **Status**: normative, v1, 2026-10-10. Incorporated by [docs/spec/v1.md](../spec/v1.md) §3 as an annex that applies **to a link that uses the binding**; a link that does not use it is unaffected. The authorising instrument is [RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md), an **amendment**, accepted 2026-10-10 (maintainer ruling "all rec" on its §15; comment window waived by default and not invoked). Its §15 Q1 ruled that the binding's normative text lives on this page and not in the RFC, which stays the change record. §Terms is RFC-0033 §4, §1–§11 below are its §5.1–§5.11, §12 is its §6 and Appendix A is its Appendix A, carried over unchanged except for section cross-references. Appendix A.3 and A.4 carry the RFC's erratum of 2026-10-11: the responder answers the empty confirmation with an empty acknowledgement at n = 0, so `pang` goes at n = 1 (§4 responder step 7). §2 also carries [RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) Amendment 1 (accepted 2026-10-10), which made the implementation hazards of §12.8 normative.
 > **Numbering**: a bare section sign (§1–§12) on this page names a section of this page. A section of another document is always prefixed with its name (RFC-0014 §4, Noise §9, RFC-0033 §15 Q3).
 > **See also**: [RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) for the motivation, the cost analysis across NARROW, MID and WIDE, the alternatives considered and the rulings; [ADR-0086](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8 as amended 2026-10-10 (NNpsk0 when a link carries a PSK only; XX or IK when it carries identity, specified by [#1993](https://github.com/avatarsd-llc/libtracer/issues/1993), which extends this page); [ADR-0045](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) Decisions 4 and 5; [19 — Transports are vertices](19-transports-are-vertices.md) for the connection vertex a Noise link has.
 
@@ -628,7 +628,7 @@ the application owns it. Key material in released slots should be wiped.
 
 ## Appendix A — Test vectors (informative worked example)
 
-Appendix A is the worked example of §2–§5: one complete handshake and three transport messages, byte for byte. A conforming Noise link reproduces every datagram from the inputs.
+Appendix A is the worked example of §2–§5: one complete handshake and four transport messages, byte for byte. A conforming Noise link reproduces every datagram from the inputs.
 
 ### A.1 How they were produced
 
@@ -732,8 +732,10 @@ k_r2i           f8ca9cf382ec15ac3609fa976595baafec96af6729b05edab8e41839ed09f6cd
 ```
 
 Transport messages (type `04` = key phase 0, then the nonce, the ciphertext and the tag). In this
-transcript the initiator confirms with an empty message and then sends its request. The responder's
-reply is its first message on the session, so the reply is also the acknowledgement:
+transcript the initiator confirms with an empty message and then sends its request. The responder
+answers the empty confirmation with an empty message (§4 responder step 7; erratum
+2026-10-11), which is its first message on the session and so the acknowledgement. Its reply to
+the request follows at the next nonce:
 
 ```
 confirmation, initiator -> responder, n = 0, empty plaintext (25 B)
@@ -742,14 +744,17 @@ confirmation, initiator -> responder, n = 0, empty plaintext (25 B)
 frame "ping", initiator -> responder, n = 1 (33 B)
   04 0100000000000000 843c7ef02f4b3184 8add30c2b08aa1eef0985b2201f08621
 
-frame "pang", responder -> initiator, n = 0 (33 B)
-  04 0000000000000000 8402810c9207079d 65de2bc6ba0de7827759a468234362ac
+acknowledgement, responder -> initiator, n = 0, empty plaintext (25 B)
+  04 0000000000000000 4a986111144b7702d0a867a37da80f23
+
+frame "pang", responder -> initiator, n = 1 (33 B)
+  04 0100000000000000 d4df8a687acd1ca4 14ed6223ec12519b15a8e6edc0328c18
 ```
 
 ### A.4 The generator
 
 Run with Python 3 and the `cryptography` package. It prints the two handshake datagrams, the
-handshake hash, the two transport keys and the three transport messages of A.3, each as one hex
+handshake hash, the two transport keys and the four transport messages of A.3, each as one hex
 line. It does not print the step-by-step symmetric states. It fails if the two sides disagree.
 
 ```python
@@ -807,9 +812,11 @@ r.e(pub(E_R)); r.mix_key(dh(E_R, m1[1:33])); m2 = b"\x02" + pub(E_R) + r.enc(b"\
 i.e(m2[1:33]); i.mix_key(dh(E_I, m2[1:33])); assert i.dec(m2[33:]) == b"\x02"
 (k1, k2), (r1, r2) = hkdf(i.ck, b"", 2), hkdf(r.ck, b"", 2)
 assert (k1, k2, i.h) == (r1, r2, r.h) and (len(m1), len(m2)) == (58, 50)
-c, f, g = seal(k1, 0, b""), seal(k1, 1, PING), seal(k2, 0, PANG)
-assert unseal(r1, c) == (0, b"") and unseal(r1, f) == (1, PING) and unseal(r2, g) == (0, PANG)
+c, f = seal(k1, 0, b""), seal(k1, 1, PING)
+a, g = seal(k2, 0, b""), seal(k2, 1, PANG)  # the empty confirmation is answered first (§4 step 7)
+assert unseal(r1, c) == (0, b"") and unseal(r1, f) == (1, PING)
+assert unseal(r2, a) == (0, b"") and unseal(r2, g) == (1, PANG)
 for name, v in (("msg1", m1), ("msg2", m2), ("hash", i.h), ("k_i2r", k1), ("k_r2i", k2),
-                ("confirm", c), ("ping", f), ("pang", g)):
+                ("confirm", c), ("ping", f), ("ack", a), ("pang", g)):
     print(name, v.hex())
 ```

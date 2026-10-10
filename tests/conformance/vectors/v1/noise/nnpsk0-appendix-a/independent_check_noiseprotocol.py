@@ -11,7 +11,7 @@ value the transcript records is then compared with what that library produced:
   by wrapping its methods (they are observed, not reimplemented);
 - the ephemeral public keys, the ee Diffie-Hellman input and both handshake messages;
 - the handshake hash and the two transport keys after Split();
-- the three transport datagrams, sealed by the library's CipherState at the transcript's
+- the four transport datagrams, sealed by the library's CipherState at the transcript's
   explicit nonces (Noise §11.4) and framed as RFC-0033 §5.3 (type byte, u64 LE nonce).
 
 Run (the result is recorded next to this script, in independent_check_noiseprotocol.txt):
@@ -163,13 +163,17 @@ def main(argv):
 
     conf = datagram(ie, int(inp["confirmation_nonce_decimal"]), b"")
     ping = datagram(ie, int(inp["frame_i2r_nonce_decimal"]), bytes.fromhex(inp["frame_i2r"]))
+    ack = datagram(re_, int(inp["acknowledgement_nonce_decimal"]), b"")
     pang = datagram(re_, int(inp["frame_r2i_nonce_decimal"]), bytes.fromhex(inp["frame_r2i"]))
     check("confirmation datagram", conf, out["confirmation"])
     check("frame i->r datagram", ping, out["datagram_i2r"])
+    check("acknowledgement datagram", ack, out["acknowledgement"])
     check("frame r->i datagram", pang, out["datagram_r2i"])
     check("responder opens the confirmation", opened(rd, bytes.fromhex(out["confirmation"])), "")
     check("responder opens frame i->r", opened(rd, bytes.fromhex(out["datagram_i2r"])),
           inp["frame_i2r"])
+    check("initiator opens the acknowledgement", opened(idd, bytes.fromhex(out["acknowledgement"])),
+          "")
     check("initiator opens frame r->i", opened(idd, bytes.fromhex(out["datagram_r2i"])),
           inp["frame_r2i"])
 
