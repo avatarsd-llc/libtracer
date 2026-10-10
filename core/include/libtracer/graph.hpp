@@ -3857,4 +3857,24 @@ class graph_t {
     release_park_t parked_releases_; /**< @brief See `release_park_t`. */
 };
 
+namespace detail_qsbr {
+
+/**
+ * @brief One read-side bracket of the QSBR domain on this thread: `fwd_router_t`'s frame
+ *        bracket, and `transport_vertex_t::with_link`'s.
+ *
+ * Nests; only the outermost announces, and its exit is a quiescent state
+ * (`graph_t::thread_quiescent`, a no-op unless `reclaim_qsbr` is bound).
+ */
+struct frame_scope_t {
+    frame_scope_t() noexcept { enter(); }
+    frame_scope_t(const frame_scope_t&) = delete;
+    frame_scope_t& operator=(const frame_scope_t&) = delete;
+    ~frame_scope_t() {
+        if (leave()) graph_t::thread_quiescent();
+    }
+};
+
+}  // namespace detail_qsbr
+
 }  // namespace tr::graph

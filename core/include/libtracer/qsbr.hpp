@@ -389,8 +389,9 @@ inline void enter() noexcept {
  * stalled, the fence) is the full barrier between the caller's unpublish and any later scan.
  *
  * Does not bump while an open bracket is @ref kStallLag or more behind the counter, and
- * answers the current epoch instead: what is parked then waits for that bracket too
- * (@ref qsbr_wrap). The check is one relaxed load per participant, on the control plane.
+ * answers the current epoch instead, re-read `seq_cst` after the fence: what is parked then
+ * waits for that bracket too (@ref qsbr_wrap). The check is one relaxed load per
+ * participant, on the control plane.
  */
 [[nodiscard]] inline std::uint32_t advance() noexcept {
     registry_t& r = registry();
@@ -402,8 +403,10 @@ inline void enter() noexcept {
         // plus the concurrent writers behind, far inside it.
         const std::uint32_t lag = (now - s) & kEpochMask;
         if (s != 0 && lag >= kStallLag && lag < kEpochWindow) {
+            // Re-read after the fence: a concurrent bump since `now` is then in the answer,
+            // and a later epoch only makes what the caller parks wait longer.
             std::atomic_thread_fence(std::memory_order_seq_cst);
-            return now;
+            return r.ctl.epoch.load(std::memory_order_seq_cst);
         }
     }
     return r.ctl.epoch.fetch_add(1, std::memory_order_seq_cst);

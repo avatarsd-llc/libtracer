@@ -1212,20 +1212,14 @@ class fwd_router_t {
      * `link_down`, @ref bound_send, @ref label_send and a fired AWAIT. A link the transport plane
      * removes is parked on the graph at an epoch closed after it was unrouted
      * (`graph_t::park_release`), and `graph_t::collect()` frees it only once every bracket open at
-     * that epoch has closed, so a removed link is never freed while a frame is inside it. In every
+     * that epoch has closed, so a removed link is never freed while a frame is inside it
+     * (`transport_vertex_t::with_link` opens the same bracket). In every
      * build, under every ADR-0080 policy: the bracket is the QSBR domain's read side
      * (`%detail_qsbr::enter` / `leave`), whose nesting depth `fan_out`'s own bracket shares. The
      * outermost exit is a quiescent state (`graph_t::thread_quiescent`, a no-op unless
      * `reclaim_qsbr` is bound).
      */
-    struct frame_scope_t {
-        frame_scope_t() noexcept { graph::detail_qsbr::enter(); }
-        frame_scope_t(const frame_scope_t&) = delete;
-        frame_scope_t& operator=(const frame_scope_t&) = delete;
-        ~frame_scope_t() {
-            if (graph::detail_qsbr::leave()) graph::graph_t::thread_quiescent();
-        }
-    };
+    using frame_scope_t = graph::detail_qsbr::frame_scope_t;
 
     /**
      * @brief The egress link a bound element names, after the full §5.1 check.

@@ -770,6 +770,7 @@
           "_ZNK2tr3net18transport_vertex_t11settings_ofESt17basic_string_viewIcSt11char_traitsIcEE": {"via _ZN2tr3net18transport_vertex_t9ctl_txn_tD1Ev": 1},
           "_ZNK2tr3net18transport_vertex_t13is_structuralENS_4wire10key_view_tE": {"via _ZN2tr3net18transport_vertex_t9ctl_txn_tD1Ev": 1},
           "_ZNK2tr3net18transport_vertex_t7link_ofESt17basic_string_viewIcSt11char_traitsIcEE": {"via _ZN2tr3net18transport_vertex_t9ctl_txn_tD1Ev": 1},
+          "_ZNK2tr3net18transport_vertex_t9with_linkESt17basic_string_viewIcSt11char_traitsIcEEPFvPvRNS0_11transport_tEES6_": {"via _ZNK2tr3net18transport_vertex_t7link_ofESt17basic_string_viewIcSt11char_traitsIcEE": 1},
           "_ZNSt12_Vector_baseISt4byteSaIS0_EED2Ev": {"operator delete": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": {"via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1},

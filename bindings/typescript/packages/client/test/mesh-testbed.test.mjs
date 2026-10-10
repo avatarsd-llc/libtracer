@@ -386,8 +386,8 @@ test('xfail: killing a node does not drive its peers\' link state down (#407, #6
 });
 
 test('xfail: close_peer cannot evict a peer from a SPEC-created listener (#407)', { todo: true }, () => {
-  // The documented eviction path is link_of(name)->bus()->close_peer(peer). Before #418 it
-  // was dead for every builtin: link_of() resolves only config-constructed links, and a
+  // The documented eviction path is with_link(name, fn) → link.bus()->close_peer(peer). Before #418
+  // it was dead for every builtin: the lookup resolves only config-constructed links, and a
   // config-constructed ws was never peer_named, so bus() was null. #418 makes the bus's
   // listener both config-constructed AND peer_named, so the path is now REACHABLE — but
   // there is still no in-band surface to invoke it: eviction needs the removal model #407

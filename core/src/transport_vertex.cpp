@@ -1355,6 +1355,16 @@ const conn_settings_t* transport_vertex_t::settings_of(std::string_view name) co
     return it == nullptr ? nullptr : &it->settings;
 }
 
+bool transport_vertex_t::with_link(std::string_view name, link_fn_t fn, void* ctx) const {
+    // Opened before the lookup and held until `fn` returns: a removal that lands after the
+    // lookup parks the link at an epoch this bracket holds back (see `frame_scope_t`).
+    const graph::detail_qsbr::frame_scope_t scope;
+    transport_t* const link = link_of(name);  // the table lock is dropped before `fn`
+    if (link == nullptr) return false;
+    fn(ctx, *link);
+    return true;
+}
+
 transport_t* transport_vertex_t::link_of(std::string_view name) const {
     // ADR-0063 §3 — readers of conns_ race the insert's rebalance
     const ctl_txn_t txn(*this);

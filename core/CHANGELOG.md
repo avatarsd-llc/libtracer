@@ -84,6 +84,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   returned `nullopt`. The link and `dst` are valid only until the callback returns.
   `bound_dispatch_t` and `label_dispatch_t` are removed. `bound_egress` answered a raw link
   the same way, so it is now private; both send calls still run it.
+- **BREAKING: `transport_vertex_t::link_of` becomes `with_link`.** `link_of(name)` returned
+  an owned link with no frame bracket, so a link whose connection was removed could be freed by
+  a later `collect()` while an app thread still held it (for example on the way to
+  `bus()->close_peer()`). `with_link(name, fn, ctx)` instead calls `fn(ctx, link)` on the
+  calling thread inside one frame bracket, and returns `false` without calling it for an unknown
+  name. The link is valid only until `fn` returns, and `fn` runs with no plane lock held.
 
 ### Fixed
 

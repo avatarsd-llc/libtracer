@@ -71,6 +71,7 @@
 #include "libtracer/transport_vertex.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "test_support.hpp"
+#include "transport_vertex_test_access.hpp"
 
 namespace {
 
@@ -235,7 +236,7 @@ void test_the_spec_factory_refuses_the_key_when_closed() {
           "SPEC{kind=ws, peer_named=1} is served iff this build carries the bus module");
     check(ws_named.has_value() || ws_named.error() == tr::graph::status_t::TYPE_MISMATCH,
           "and its refusal is TYPE_MISMATCH — permanent, not the transient TRANSPORT_DOWN");
-    check((net.link_of("net/ws-server/bus-ws") != nullptr) == kBusLinks,
+    check((tr::testing::link_of(net, "net/ws-server/bus-ws") != nullptr) == kBusLinks,
           "a refused SPEC leaves NO connection behind");
 
     const auto tcp_named =
