@@ -104,6 +104,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   vertex's egress source. Each destruction parks one value seam and one release per declared
   module, so an embedder that destroys and re-creates transport vertices over one graph calls
   `graph_t::collect()` at a quiescent point, as a bus node already does.
+- **`transport_vertex_t` closes a bus connection's peer listing before its link.** A bus
+  connection's `:children[]` hook now names a small context rather than the link's bus facet.
+  Removing the connection (or destroying the transport vertex) waits for a listing already
+  inside the link to return, clears the context, and only then closes the link; a listing
+  after that answers `NOT_FOUND`. This also holds when the identity vertex's retire is
+  refused because the graph's table source is exhausted, in which case the context stays
+  allocated for the graph's lifetime. Otherwise it is freed through `graph_t::park_release`,
+  so a bus node's `graph_t::collect()` now also runs one release per connection teardown. The
+  context is drawn from the graph's table source.
 - **`udp_transport_t`: an ephemeral bind owns its port
   ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
   set `SO_REUSEADDR`, which lets the kernel give a UDP socket a port another reuse-enabled

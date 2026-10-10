@@ -22,6 +22,7 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <memory>
@@ -36,9 +37,19 @@
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/transport_vertex.hpp"
 #include "test_support.hpp"
+
+#if defined(__SANITIZE_ADDRESS__)
+#include <sanitizer/lsan_interface.h>
+/** @brief While alive, allocations are not reported as leaks. */
+using lsan_scope_t = __lsan::ScopedDisabler;
+#else
+/** @brief No leak checker in this build: nothing to disable. */
+struct lsan_scope_t {};
+#endif
 
 namespace {
 
@@ -50,15 +61,31 @@ using tr::net::transport_vertex_t;
 
 using tr::testing::check;
 
+/** @brief What an `owned_link_t` reports, held outside it so it can be read after it closes. */
+struct probe_t {
+    std::atomic<int> reached{0};            /**< @brief Calls that reached the link. */
+    std::atomic<bool> closed{false};        /**< @brief The link's destructor has run. */
+    std::atomic<bool> hold{false};          /**< @brief Park the next listing inside the link. */
+    std::atomic<bool> entered{false};       /**< @brief A held listing is inside the link. */
+    std::atomic<bool> go{false};            /**< @brief Let the held listing return. */
+    std::atomic<bool> closed_inside{false}; /**< @brief It saw the link closed while inside. */
+};
+
 /** @brief A link the plane constructs and owns. It counts every call that reaches it, and it
  *         is a bus, so its connection vertex lists its one peer under `:children[]`. */
 struct owned_link_t final : tr::net::transport_t, tr::net::bus_link_t {
-    std::atomic<int>& reached;
-    explicit owned_link_t(std::atomic<int>& r) noexcept : reached(r) {}
-    void send(std::span<const std::byte>) override { reached.fetch_add(1); }
+    probe_t& p;
+    explicit owned_link_t(probe_t& probe) noexcept : p(probe) {}
+    ~owned_link_t() override { p.closed.store(true); }
+    void send(std::span<const std::byte>) override { p.reached.fetch_add(1); }
     [[nodiscard]] tr::net::bus_link_t* bus() override { return this; }
     void enumerate_peers(const peer_visitor_t& visit) const override {
-        reached.fetch_add(1);
+        p.reached.fetch_add(1);
+        if (p.hold.load()) {
+            p.entered.store(true);
+            while (!p.go.load()) std::this_thread::yield();
+            if (p.closed.load()) p.closed_inside.store(true);
+        }
         visit("p0");
     }
     [[nodiscard]] tr::net::transport_t* peer_link(std::string_view peer) override {
@@ -162,9 +189,9 @@ void destruction_under_live_dial() {
  *        `/net/m/x`, made through the endpoint and owned by the plane.
  */
 std::unique_ptr<transport_vertex_t> plane_owning_x(graph_t& g, fwd_router_t& router,
-                                                   std::atomic<int>& reached) {
+                                                   probe_t& probe) {
     auto net = std::make_unique<transport_vertex_t>(g, router);
-    std::atomic<int>* const r = &reached;
+    probe_t* const r = &probe;
     net->register_transport_type(
         "own",
         [r](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
@@ -185,17 +212,17 @@ void surviving_link_forwards_after_destruction() {
     fwd_router_t router(g);
     listener_t up;
     (void)router.add_child(kListener, up);
-    std::atomic<int> reached{0};
-    auto net = plane_owning_x(g, router, reached);
+    probe_t p;
+    auto net = plane_owning_x(g, router, p);
     const std::vector<std::byte> frame =
         tr::testing::b_fwd(tr::graph::fwd_op_t::READ, tr::testing::b_path({"net", "m", "x", "p0"}),
                            tr::testing::b_path({"reply"}));
     router.on_frame(kListener, frame);
-    check(reached.load() > 0, "a forward from the surviving link reaches the owned connection");
+    check(p.reached.load() > 0, "a forward from the surviving link reaches the owned connection");
     net.reset();
-    const int at_reset = reached.load();
+    const int at_reset = p.reached.load();
     router.on_frame(kListener, frame);
-    check(reached.load() == at_reset,
+    check(p.reached.load() == at_reset,
           "after destruction the same forward no longer reaches the closed link");
     check(!g.find(path_t("/net/m/x").key()), "and the connection vertex is retired");
     (void)router.remove_child(kListener);
@@ -205,19 +232,81 @@ void surviving_link_forwards_after_destruction() {
 void bus_children_read_after_destruction() {
     graph_t g;
     fwd_router_t router(g);
-    std::atomic<int> reached{0};
-    auto net = plane_owning_x(g, router, reached);
+    probe_t p;
+    auto net = plane_owning_x(g, router, p);
     const path_t children = *path_t::parse("/net/m/x:children[]");
     if constexpr (tr::net::kBusLinks) {
         check(g.read(children).has_value(), "the bus connection lists its peers while it lives");
-        check(reached.load() > 0, "and the listing asks the link");
+        check(p.reached.load() > 0, "and the listing asks the link");
     }
     net.reset();
-    const int at_reset = reached.load();
+    const int at_reset = p.reached.load();
     const auto after = g.read(children);
     check(!after && after.error() == tr::graph::status_t::NOT_FOUND,
           "after destruction its :children[] answers NOT_FOUND");
-    check(reached.load() == at_reset, "without asking the closed link");
+    check(p.reached.load() == at_reset, "without asking the closed link");
+}
+
+/** @brief A heap-backed source a test can close, so the graph's table draws are refused. */
+class gate_source_t final : public tr::mem::block_source_t {
+   public:
+    gate_source_t() noexcept : tr::mem::block_source_t("gate") {}
+    /** @brief Serve from the heap unless closed. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        return closed ? nullptr : tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    /** @brief Return to the heap. */
+    void release(void* ptr, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(ptr, bytes, align);
+    }
+    bool closed = false; /**< @brief Refuse every request while set. */
+};
+
+/** @brief A `:children[]` listing already inside the link holds its removal until it returns. */
+void listing_in_flight_across_removal() {
+    graph_t g;
+    fwd_router_t router(g);
+    probe_t p;
+    auto net = plane_owning_x(g, router, p);
+    const path_t children = *path_t::parse("/net/m/x:children[]");
+    p.hold.store(true);
+    std::thread reader([&] { (void)g.read(children); });
+    while (!p.entered.load()) std::this_thread::yield();
+    std::thread remover([&] { (void)net->remove_connection("net/m/x"); });
+    // Room for a removal that does not wait to close the link under the listing. A removal
+    // that waits is held regardless of how long this is.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    p.go.store(true);
+    reader.join();
+    remover.join();
+    check(!p.closed_inside, "the link stays open while a :children[] listing is inside it");
+    check(p.closed.load(), "and is closed once the listing has returned");
+}
+
+/** @brief A removal whose retire is refused still closes the link behind a closed listing. */
+void refused_retire_keeps_the_listing_closed() {
+    gate_source_t gate;
+    graph_t g(gate);
+    fwd_router_t router(g);
+    probe_t p;
+    std::unique_ptr<transport_vertex_t> net;
+    {
+        // The listing outlives a refused retire on purpose, for the graph's lifetime: it is not
+        // a leak this test should report.
+        [[maybe_unused]] const lsan_scope_t ignore;
+        net = plane_owning_x(g, router, p);
+    }
+    const path_t x("/net/m/x");
+    gate.closed = true;
+    (void)net->remove_connection("net/m/x");
+    gate.closed = false;
+    check(g.find(x.key()).has_value(), "the retire was refused (the vertex is still registered)");
+    check(p.closed.load(), "the removal closed the link anyway");
+    const int at_close = p.reached.load();
+    const auto after = g.read(*path_t::parse("/net/m/x:children[]"));
+    check(!after && after.error() == tr::graph::status_t::NOT_FOUND,
+          "and the vertex's :children[] answers NOT_FOUND");
+    check(p.reached.load() == at_close, "without reaching the closed link");
 }
 
 }  // namespace
@@ -228,5 +317,9 @@ int main() {
     destruction_under_live_dial();
     surviving_link_forwards_after_destruction();
     bus_children_read_after_destruction();
+    if constexpr (tr::net::kBusLinks) {
+        listing_in_flight_across_removal();
+        refused_retire_keeps_the_listing_closed();
+    }
     return tr::testing::summary("transport_vertex_teardown");
 }

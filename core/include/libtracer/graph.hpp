@@ -1372,7 +1372,8 @@ class graph_t {
      * only when its link exposes a bus facet (`transport_t::bus() != nullptr`): the CAN
      * binding, and a tcp/ws server wired `peer_named = true`, get an `on_children` that
      * synthesizes the live peer listing (ADR-0044). That one is peer-driven: a bus node
-     * parks one `value_handlers_t` per connection teardown, and a point-to-point teardown
+     * parks one `value_handlers_t`, plus one @ref park_release for the listing's context,
+     * per connection teardown, and a point-to-point teardown
      * (a dial link, UDP, loopback, a default-wired server) parks nothing. Destroying a
      * `tr::net::transport_vertex_t` parks on EVERY deployment: one seam per declared
      * module's `<module>/conn` creator endpoint, plus one @ref park_release for that
