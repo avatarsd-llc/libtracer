@@ -32,9 +32,11 @@
  *    bytes) and `open(n, ad, ct, out)` (writes `ct.size() - 16` bytes, false on a bad tag).
  *    `n` is the 64-bit Noise nonce; the backend builds the 12-byte nonce with
  *    @ref tr::net::noise::chachapoly_nonce. Both accept `out` equal to the input pointer (in
- *    place); any other overlap is undefined.
+ *    place); any other overlap is undefined. `clear()` drops the key: it wipes it, or frees
+ *    the library's key slot, and the cipher can be keyed again. The handshake cipher is
+ *    cleared after every message.
  *
- * **Allocation.** `hash`, `hkdf`, and an `aead_t`'s `set_key`, `seal` and `open` MUST NOT
+ * **Allocation.** `hash`, `hkdf`, and an `aead_t`'s `set_key`, `seal`, `open` and `clear` MUST NOT
  * allocate. They are every call a first message makes before its PSK tag is proven, which
  * costs no memory (RFC-0033 §5.8), and every call a frame makes. Constructing an `aead_t`
  * may allocate: the link builds its handshake cipher once, beside its PSK state, and a
@@ -188,6 +190,7 @@ concept crypto_backend =
         { dh.set(k, out) } -> std::same_as<bool>;
         { cdh.agree(k, out) } -> std::same_as<bool>;
         { aead.set_key(k) } -> std::same_as<bool>;
+        { aead.clear() } -> std::same_as<void>;
         { aead.seal(n, in, in, p) } -> std::same_as<bool>;
         { aead.open(n, in, in, p) } -> std::same_as<bool>;
     };

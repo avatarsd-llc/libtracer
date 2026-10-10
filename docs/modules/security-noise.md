@@ -55,7 +55,7 @@ alias `tr::net::noise::default_crypto_t`. There is no runtime switch.
 | `none` (default) | — | — | the module is not compiled |
 | `openssl` | `openssl_crypto_t` | libcrypto 3 | the fastest AEAD on a host at 1 KiB and above; needs the deprecated `SHA256_*` calls (not a `no-deprecated` build) |
 | `sodium` | `sodium_crypto_t` | libsodium | no allocation at all, handshake included |
-| `psa` | `psa_crypto_t` | mbedTLS 3.6 or 4.x through PSA | the ESP-IDF backend |
+| `psa` | `psa_crypto_t` | mbedTLS 3.6.1+ or 4.x through PSA | the ESP-IDF backend; needs a sized static key-slot table (below) |
 
 A backend is a type that meets the `crypto_backend` concept (`security_noise_crypto.hpp`):
 SHA-256, Noise's HKDF, an X25519 key pair and a ChaCha20-Poly1305 cipher. `hash`, `hkdf` and
@@ -69,12 +69,28 @@ The PSA backend needs three things from the mbedTLS build:
   heap. ESP-IDF's port sets it.
 - `MBEDTLS_PSA_STATIC_KEY_SLOTS` without `MBEDTLS_PSA_KEY_STORE_DYNAMIC` (mbedTLS 3.6.1 and
   later), or every key import allocates, a first message's handshake key included.
-  `security_noise_psa.hpp` refuses to build without it. ESP-IDF has no option for it: the
-  app passes both lines in an `MBEDTLS_USER_CONFIG_FILE`, as the Kconfig help of
-  `CONFIG_LIBTRACER_NOISE_CRYPTO_PSA` shows. It costs
-  `MBEDTLS_PSA_KEY_SLOT_COUNT * MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE` of static RAM:
-  76,616 B of `.bss` at ESP-IDF's defaults on an ESP32-C6, where the slots are sized for an
-  RSA key pair. The same header can lower either value.
+  `security_noise_psa.hpp` refuses to build without it.
+- A slot table sized by the app, because every PSA user in the image shares it. The rule:
+
+  | setting | at least |
+  | --- | --- |
+  | `MBEDTLS_PSA_KEY_SLOT_COUNT` | 6 per Noise link (two sessions of two keys during a rekey, the handshake cipher, the ephemeral key), plus the peak of the image's other PSA users |
+  | `MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE` | the largest key any of them imports; Noise's keys are all 32 B |
+
+  A Noise-only image needs 8 slots of 32 B: 360 B of `.bss` on an ESP32-C6, and the
+  configuration the CI psa leg tests (8 is the fewest the two suites pass with, holding both
+  ends of a session in one process). Rough figures for a mixed image at 16 slots: about 2 KB
+  with TLS that verifies only ECDSA P-256 or X25519 peers, about 5 KB with RSA-2048 server
+  certificates, about 20 KB if the image holds its own RSA-2048 private key. Left unsized,
+  mbedTLS sizes 32 slots for the largest key type enabled: 76,616 B at ESP-IDF's defaults,
+  which enable RSA-4096 key pairs. That figure is the unsized default, not the cost of Noise.
+  A table that is too small fails at run time, when an import is refused, not at build.
+  ESP-IDF has no option for any of this: the Kconfig help of
+  `CONFIG_LIBTRACER_NOISE_CRYPTO_PSA` shows the header an app passes as
+  `MBEDTLS_USER_CONFIG_FILE`.
+- **A NARROW image that needs PSA for nothing else should use libsodium** (ESP-IDF's
+  component registry has a port). It allocates nothing, has no global table, and needs no
+  mbedTLS change. The backend is a compile-time choice, so the swap is one define.
 - On ESP-IDF, `CONFIG_MBEDTLS_CHACHA20_C` and `CONFIG_MBEDTLS_CHACHAPOLY_C`, which are off by
   default. The Kconfig option selects them.
 
@@ -88,7 +104,7 @@ asserted.
 | --- | --- | --- | --- | --- |
 | per link: PSK state and handshake cipher | 3 | 0 | 0 | 0 |
 | per session: the two transport ciphers | 6 | 0 | 0 | 0 |
-| handshake, initiator | 34 | 0 | 6200 | 6245 |
+| handshake, initiator | 34 | 0 | 6200 | 6244 |
 | handshake, responder | 34 | 0 | 6200 | 6244 |
 | a first message read, refused (wrong PSK) or accepted (a replay) | 0 | 0 | 0 | 0 |
 | per frame (seal + open), 0 B to 65519 B | 0 | 0 | 0 | 0 |

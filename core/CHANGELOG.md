@@ -33,9 +33,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - No backend allocates before a first message's PSK tag is proven, nor per frame
     (RFC-0033 §5.8), and `security_noise_test` asserts both. The tag is checked with the
     link's handshake cipher, passed to `handshake_t`. The PSA backend requires mbedTLS's
-    static key slots and refuses to build without them. Handshake allocations are reported
-    per backend.
-  - A backend cipher takes one call at a time: `seal` and `open` are non-const.
+    static key slots and refuses to build without them; the app sizes the slot table, and
+    the module page gives the rule. Handshake allocations are reported per backend.
+  - A backend cipher takes one call at a time: `seal` and `open` are non-const. `clear()`
+    drops its key, and the handshake cipher is cleared after every message.
   - `conformance_runner` replays the new `noise/` transcripts on the build's backend. The first
     is RFC-0033 Appendix A, which `noiseprotocol` and `snow` also reproduce.
 

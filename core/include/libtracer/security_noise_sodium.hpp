@@ -84,6 +84,9 @@ struct sodium_crypto_t {
             return true;
         }
 
+        /** @brief Wipe the key. */
+        void clear() { sodium_memzero(key_.data(), key_.size()); }
+
         /** @brief Seal @p pt under nonce @p n; @p out takes `pt.size() + kTagLen` bytes. */
         [[nodiscard]] bool seal(std::uint64_t n, std::span<const std::byte> ad,
                                 std::span<const std::byte> pt, std::byte* out) {

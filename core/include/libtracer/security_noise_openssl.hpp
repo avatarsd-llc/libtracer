@@ -125,6 +125,12 @@ struct openssl_crypto_t {
                                      -1) == 1;
         }
 
+        /** @brief Overwrite the key in the context with zeros (no allocation). */
+        void clear() {
+            const key32_t zero{};
+            if (ctx_ != nullptr) (void)set_key(zero);
+        }
+
         /** @brief Seal @p pt under nonce @p n; @p out takes `pt.size() + kTagLen` bytes. */
         [[nodiscard]] bool seal(std::uint64_t n, std::span<const std::byte> ad,
                                 std::span<const std::byte> pt, std::byte* out) {

@@ -18,16 +18,22 @@
  *  - **`MBEDTLS_PSA_STATIC_KEY_SLOTS`** (mbedTLS 3.6.1 and later). Without it, every key
  *    import callocs the key's buffer, and a first message imports its handshake key before
  *    the tag is checked, which RFC-0033 §5.8 forbids. This header refuses to build without it.
- *    It costs `MBEDTLS_PSA_KEY_SLOT_COUNT * MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE` bytes of
- *    static RAM, and the buffer size follows the largest key type the build enables: an RSA
- *    key pair makes it kilobytes (76,616 B of `.bss` at ESP-IDF's defaults on an ESP32-C6).
- *    It excludes `MBEDTLS_PSA_KEY_STORE_DYNAMIC`, which mbedTLS enables by default. ESP-IDF
- *    has no option for either: the app passes them in an `MBEDTLS_USER_CONFIG_FILE`.
+ *    It excludes `MBEDTLS_PSA_KEY_STORE_DYNAMIC`, which mbedTLS enables by default.
+ *  - **The slot table's size**, which every PSA user in the image shares, so the app sets it:
+ *    `MBEDTLS_PSA_KEY_SLOT_COUNT` at least 6 per Noise link (two sessions of two keys during
+ *    a rekey, the handshake cipher and the ephemeral key) plus the image's other PSA users,
+ *    and `MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE` at least the largest key any of them
+ *    imports (Noise's are 32 B). A Noise-only image needs 8 slots of 32 B: 360 B of `.bss` on
+ *    an ESP32-C6, and the CI psa leg's configuration. Left unsized, mbedTLS sizes 32 slots
+ *    for the largest key type enabled: 76,616 B at ESP-IDF's defaults (an RSA-4096 key pair).
+ *    ESP-IDF has no option for any of these; the Kconfig help of
+ *    `CONFIG_LIBTRACER_NOISE_CRYPTO_PSA` shows the header an app passes. A NARROW image that
+ *    needs PSA for nothing else is better served by libsodium, which has no table at all.
  *  - **ChaCha20-Poly1305.** It is off by default in ESP-IDF: enable `CONFIG_MBEDTLS_CHACHA20_C`
  *    and `CONFIG_MBEDTLS_CHACHAPOLY_C`.
  *
- * Keys occupy the library's global key slots, which TLS shares: a session holds two, and a
- * handshake one more while it runs.
+ * A session holds two key slots. A handshake holds one for its ephemeral key, and one more
+ * for the handshake cipher during each message only.
  */
 #pragma once
 
@@ -129,8 +135,7 @@ struct psa_crypto_t {
 
         /** @brief Import @p k, replacing any previous key. */
         [[nodiscard]] bool set_key(const key32_t& k) {
-            (void)psa_destroy_key(id_);
-            id_ = PSA_KEY_ID_NULL;
+            clear();
             psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
             psa_set_key_type(&a, PSA_KEY_TYPE_CHACHA20);
             psa_set_key_bits(&a, 256);
@@ -138,6 +143,12 @@ struct psa_crypto_t {
             psa_set_key_algorithm(&a, PSA_ALG_CHACHA20_POLY1305);
             return psa_import_key(&a, reinterpret_cast<const std::uint8_t*>(k.data()), k.size(),
                                   &id_) == PSA_SUCCESS;
+        }
+
+        /** @brief Destroy the key, which wipes it and frees its slot. */
+        void clear() {
+            (void)psa_destroy_key(id_);
+            id_ = PSA_KEY_ID_NULL;
         }
 
         /** @brief Seal @p pt under nonce @p n; @p out takes `pt.size() + kTagLen` bytes. */

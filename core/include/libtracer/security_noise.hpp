@@ -216,13 +216,15 @@ class symmetric_state_t {
      * NNpsk0's first token is `psk`, so a key is always set before any payload: the unkeyed
      * pass-through Noise defines for other patterns is refused here instead of carried.
      *
-     * @param aead The cipher to seal with, re-keyed here with `k`.
+     * @param aead The cipher to seal with, keyed here with `k` and cleared again after use.
      */
     [[nodiscard]] bool encrypt_and_hash(typename B::aead_t& aead, std::span<const std::byte> pt,
                                         std::byte* out) {
         const std::size_t ct_len = pt.size() + kTagLen;
-        if (!has_key_ || ct_len > kMaxMixHash || !aead.set_key(k_) || !aead.seal(n_, h_, pt, out))
-            return false;
+        const bool ok =
+            has_key_ && ct_len <= kMaxMixHash && aead.set_key(k_) && aead.seal(n_, h_, pt, out);
+        aead.clear();
+        if (!ok) return false;
         ++n_;
         return mix_hash(std::span<const std::byte>(out, ct_len));
     }
@@ -230,14 +232,15 @@ class symmetric_state_t {
     /**
      * @brief Noise `DecryptAndHash`: open @p ct with `h` as associated data into @p out
      *        (`ct.size() - kTagLen` bytes), then mix the ciphertext into `h`.
-     * @param aead The cipher to open with, re-keyed here with `k`.
+     * @param aead The cipher to open with, keyed here with `k` and cleared again after use.
      * @return False on a bad tag, or with no key set; `h` and the nonce are then unchanged.
      */
     [[nodiscard]] bool decrypt_and_hash(typename B::aead_t& aead, std::span<const std::byte> ct,
                                         std::byte* out) {
-        if (!has_key_ || ct.size() < kTagLen || ct.size() > kMaxMixHash || !aead.set_key(k_) ||
-            !aead.open(n_, h_, ct, out))
-            return false;
+        const bool ok = has_key_ && ct.size() >= kTagLen && ct.size() <= kMaxMixHash &&
+                        aead.set_key(k_) && aead.open(n_, h_, ct, out);
+        aead.clear();
+        if (!ok) return false;
         ++n_;
         return mix_hash(ct);
     }
@@ -381,9 +384,9 @@ class transport_cipher_t {
  * its handshake slot untouched when it is refused.
  *
  * Each handshake message is sealed or opened with the link's handshake cipher, passed in and
- * re-keyed per message. The link builds it once, beside its PSK state, so a first message
- * allocates nothing. Each call re-keys it, so handshakes may share it while their calls do
- * not overlap.
+ * keyed for each message and cleared after it, so it holds no key between messages (RFC-0033
+ * §6.8). The link builds it once, beside its PSK state, so a first message allocates nothing.
+ * Handshakes may share it while their calls do not overlap.
  *
  * @tparam B The crypto backend.
  */
