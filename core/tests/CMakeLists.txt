@@ -2882,3 +2882,10 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(injected_scratch_test)
     add_test(NAME injected_scratch COMMAND injected_scratch_test)
 endif()
+
+# #1622 (L7): the subscriber table is stored once: the published edge array carries the
+# dispatch fields and the slot table the cold remainder; a refused replace changes nothing.
+add_executable(edge_slot_table_test edge_slot_table_test.cpp)
+target_link_libraries(edge_slot_table_test PRIVATE libtracer)
+libtracer_test_warnings(edge_slot_table_test)
+add_test(NAME edge_slot_table COMMAND edge_slot_table_test)

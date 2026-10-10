@@ -940,10 +940,10 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
         // a seam that re-enters the graph must be collected explicitly. Under map_mutex_.
         // Parking links the seam into an intrusive chain, and the slot table moves into room
         // `retire` reserved, so neither step can fail mid-walk (#1778).
-        mem::block_array_t<subscriber_t> table(*tables_);
+        detached_edges_t table(*tables_);
         if (value_handlers_t* seam = x.revert_to_placeholder(table))
-            (void)retired_seams_.seams.push_back(seam);              // reserved: cannot fail
-        if (!table.empty()) (void)gone.push_back(std::move(table));  // reserved: cannot fail
+            (void)retired_seams_.seams.push_back(seam);  // reserved: cannot fail
+        (void)gone.push_back(std::move(table));          // reserved: cannot fail
     };
     v->mark_unregistered();
     v->for_each_descendant([](vertex_t& x) { x.mark_unregistered(); });
@@ -1237,9 +1237,10 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     // The tables themselves are destroyed when `gone` leaves scope — outside the locks too.
     // The session charge goes back with it (#1841); the producer has just retired, so the
     // event names none. An edge with no link or no session gives back nothing on that side.
-    for (const mem::block_array_t<subscriber_t>& table : gone)
-        for (const subscriber_t& e : table)
-            if (e.active) release_edges(delivery_link(e.remote), session_of(e.remote), nullptr);
+    for (const detached_edges_t& table : gone)
+        table.for_each_edge([this](const pub_edge_t& e) {
+            release_edges(delivery_link(e.remote), session_of(e.remote), nullptr);
+        });
     // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so the
     // sweep lock is not held across the retire walk. A stale entry would otherwise (a) leak, and
     // worse (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the leaked
@@ -3239,10 +3240,14 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // the right side to pay on: over-counting only ever buys a snapshot that finds
         // nothing, while under-counting drops a delivery.
         // A displaced SUSPENDED edge was never counted (#1533), so it is an add here too.
-        if (r == vertex_t::edge_replace_t::OUT_OF_RANGE) {
+        // A REFUSED replace changed nothing (#1622): the displaced edge still delivers, so the
+        // speculative bump and hold go back exactly as for an index no slot answers to. The two
+        // refusals lead the enumeration, so one test takes both and the table names the status.
+        if (r <= vertex_t::edge_replace_t::REFUSED) {
+            constexpr status_t kRefusal[] = {status_t::INVALID_PATH, status_t::BACKPRESSURE};
             note_subscriber_removed(v);
             release_edges(delivery_link(admitted), session_of(admitted), v);
-            return std::unexpected(status_t::INVALID_PATH);
+            return std::unexpected(kRefusal[std::to_underlying(r)]);
         }
         if (r == vertex_t::edge_replace_t::REPLACED_ACTIVE) note_subscriber_removed(v);
         // A replace that displaced an edge — delivering or suspended — is two events, in
@@ -3446,7 +3451,6 @@ result_t<void> graph_t::set_suspended(const subscription_t& sub, bool suspended)
         bump_subtree_listeners(v, -down);
     }
     if (r == vertex_t::edge_suspend_t::NOT_FOUND) return std::unexpected(status_t::NOT_FOUND);
-    if (r == vertex_t::edge_suspend_t::BACKPRESSURE) return std::unexpected(status_t::BACKPRESSURE);
     return {};  // no replay: a resume delivers from the next propagated value
 }
 
