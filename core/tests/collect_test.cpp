@@ -14,8 +14,7 @@
  * asserted here:
  *
  *   (a) the park is BOUNDED and OBSERVABLE — N retired seam-bearing vertices show as N
- *       parked seams; one `collect()` ages them (a seam parked just before a call
- *       survives it), and the second takes that to 0;
+ *       parked seams, and `collect()` takes that to 0;
  *   (b) the free runs NO user code. Three earlier design rounds each died on a free that put
  *       arbitrary user destructor code (a `std::function`'s captures) inside the graph's map
  *       lock; since RFC-0028 slice 7 a seam is a `{fn, ctx}` hook that owns nothing, so the
@@ -124,20 +123,15 @@ void test_parked_count_and_collect() {
           "N retired handler-bearing vertices == N parked seams (the leak, made observable)");
 
     g.collect();
-    check(g.parked_seam_count() == static_cast<std::size_t>(kN),
-          "one collect() only ages the park: a seam parked since the previous call survives");
-    g.collect();
-    check(g.parked_seam_count() == 0, "the second collect() drained the park to 0");
+    check(g.parked_seam_count() == 0, "collect() drained the park to 0");
 
     g.collect();
-    check(g.parked_seam_count() == 0, "collect() on an empty park is a no-op");
+    check(g.parked_seam_count() == 0, "collect() on an empty park is a no-op (idempotent)");
 
     // The cycle repeats — collect() does not disable parking, it empties it.
     const vertex_handle_t again = make_handler_vertex(g, "/dev/again");
     check(g.retire(again).has_value(), "retire a freshly registered handler vertex");
     check(g.parked_seam_count() == 1, "the park refills after a collect");
-    g.collect();
-    check(g.parked_seam_count() == 1, "it waits out one full interval");
     g.collect();
     check(g.parked_seam_count() == 0, "and drains again");
 
@@ -173,8 +167,7 @@ void test_free_runs_no_user_code() {
     check(g.retire(v).has_value(), "retire the vertex bearing the seam");
     check(g.parked_seam_count() == 1, "its seam block is parked, not yet freed");
     g.collect();
-    g.collect();
-    check(g.parked_seam_count() == 0, "two collect() calls freed it");
+    check(g.parked_seam_count() == 0, "collect() freed it");
     check(ctx.reads == 0, "and the caller's context was never called or touched by the free");
 }
 
@@ -196,7 +189,6 @@ void test_park_is_keyed_on_handler_presence_not_role() {
     check(g.retire(sv).has_value(), "retire a STORED_VALUE vertex carrying {on_read}");
     check(g.parked_seam_count() == 1, "STORED_VALUE + {on_read} PARKS ONE (role is not consulted)");
     g.collect();
-    g.collect();
 
     // HANDLER + an empty handlers_t: the role says "handler", no seam was ever allocated.
     const vertex_handle_t bare =
@@ -211,7 +203,6 @@ void test_park_is_keyed_on_handler_presence_not_role() {
     check(g.parked_seam_count() == 1,
           "STORED_VALUE + {on_children} PARKS ONE — the production identity-vertex shape");
     g.collect();
-    g.collect();
     check(g.parked_seam_count() == 0, "collect() drains the production shape too");
 
     // And the third seam, for completeness: presence of ANY of the three allocates.
@@ -225,7 +216,6 @@ void test_park_is_keyed_on_handler_presence_not_role() {
         g.register_vertex(path_t("/dev/sv_write"), role_t::STORED_VALUE, std::move(sv_write));
     check(g.retire(w).has_value(), "retire a STORED_VALUE vertex carrying {on_write}");
     check(g.parked_seam_count() == 1, "STORED_VALUE + {on_write} parks one as well");
-    g.collect();
     g.collect();
 }
 
@@ -322,9 +312,7 @@ void test_remove_connection_parks_only_over_a_bus_link() {
         check(g.parked_seam_count() == 1,
               "a BUS-link teardown parks ONE seam — the ~96 B that leaked before #576");
         g.collect();
-        check(g.parked_seam_count() == 1, "one collect() ages it");
-        g.collect();
-        check(g.parked_seam_count() == 0, "the second collect() drains it");
+        check(g.parked_seam_count() == 0, "collect() drains it");
 
         // Churn: the leak was unbounded growth, so prove the cycle is now bounded.
         std::size_t high_water = 0;
@@ -336,10 +324,8 @@ void test_remove_connection_parks_only_over_a_bus_link() {
             g.collect();
         }
         check(every_cycle_ok, "16 further bus connect/teardown cycles each completed");
-        check(high_water == 2,
-              "and never exceed 2 parked seams (two generations) with collect() in the loop");
-        g.collect();
-        check(g.parked_seam_count() == 0, "and end at 0 one collect() after the last");
+        check(high_water == 1, "and never exceed 1 parked seam with collect() in the loop");
+        check(g.parked_seam_count() == 0, "and end at 0");
     }
 }
 
@@ -363,9 +349,8 @@ void test_churn_is_bounded_by_collect() {
         g.collect();
     }
     check(every_retire_ok, "64 connect/teardown cycles each retired cleanly");
-    check(high_water <= 2, "with collect() in the teardown loop the park never exceeds 2");
-    g.collect();
-    check(g.parked_seam_count() == 0, "and ends empty one collect() after 64 cycles");
+    check(high_water <= 1, "with collect() in the teardown loop the park never exceeds 1");
+    check(g.parked_seam_count() == 0, "and ends empty after 64 connect/teardown cycles");
 }
 
 }  // namespace

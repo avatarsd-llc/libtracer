@@ -217,7 +217,9 @@ struct reclaim_local_t {
  * put a hazard scan on the READ path. Storage is
  * @ref tr::graph::default_config_t::kQsbrParticipants cache-line-isolated cells plus one
  * shared table of @ref tr::graph::default_config_t::kDeferredReleaseSlots retired pairs, all
- * `.bss`, and **none of it emitted into a build that binds a different policy**.
+ * `.bss`. The cells and the epoch are also the transport plane's grace in every build
+ * (`fwd_router_t`'s frame bracket), so a net-plane build carries them under any policy; the
+ * dispatch bracket's QSBR arm is still emitted only under this one.
  *
  * @section reclaim_qsbr_897 What it discharges for #897
  *

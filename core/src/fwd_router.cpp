@@ -1067,12 +1067,14 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         bus->set_peer_up_notifier(
             [](void* c, peer_handle_t handle, std::string_view peer) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                const frame_scope_t scope;
                 cc->self->bus_peer_up(*cc, handle, peer);
             },
             &bctx);
         bus->set_peer_down_notifier(
             [](void* c, peer_handle_t handle, std::string_view peer) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                const frame_scope_t scope;
                 cc->self->bus_peer_down(*cc, handle, peer);
             },
             &bctx);
@@ -1080,6 +1082,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
             bus->set_peer_rope_receiver(
                 [](void* c, peer_handle_t peer, view::rope_t frame) {
                     auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                    const frame_scope_t scope;
                     cc->self->on_frame_rope_bus(*cc, peer, std::move(frame));
                 },
                 &bctx);
@@ -1087,6 +1090,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
             bus->set_peer_receiver(
                 [](void* c, peer_handle_t peer, std::span<const std::byte> frame) {
                     auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                    const frame_scope_t scope;
                     cc->self->on_frame_bus(*cc, peer, frame);
                 },
                 &bctx);
@@ -1128,6 +1132,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         link.set_rope_receiver(
             [](void* c, view::rope_t frame) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                const frame_scope_t scope;
                 cc->self->on_frame_rope_impl(cc->name, std::move(frame), cc, false);
             },
             &ctx);
@@ -1135,6 +1140,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         link.set_receiver(
             [](void* c, std::span<const std::byte> frame) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                const frame_scope_t scope;
                 cc->self->on_frame_impl(cc->name, frame, nullptr, cc, false);
             },
             &ctx);
@@ -1273,6 +1279,7 @@ void fwd_router_t::on_raw(raw_fn_t fn, void* ctx) noexcept {
  *        the header doc for the seam and threading contract.
  */
 void fwd_router_t::link_down(std::string_view link_name) {
+    const frame_scope_t scope;
     graph_.evict_link_edges(link_name);
     // A deferred AWAIT's reply has nowhere to go once its link is down: release its waiter
     // (ADR-0084). The receiver holds no deadline, so this is how an unanswered one ends.
@@ -2002,6 +2009,7 @@ fwd_router_t::head_dst_t fwd_router_t::route_label_forward(std::string_view inbo
 }
 
 void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::byte> frame) {
+    const frame_scope_t scope;
     on_frame_impl(inbound_name, frame, nullptr);
 }
 
@@ -2133,6 +2141,7 @@ void fwd_router_t::on_frame_bus(const child_rx_ctx_t& ctx, peer_handle_t peer,
 }
 
 void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t frame) {
+    const frame_scope_t scope;
     on_frame_rope_impl(inbound_name, std::move(frame), nullptr, false);
 }
 
@@ -3074,6 +3083,7 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
 }
 
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const graph::value_t& val) {
+    const frame_scope_t scope;
     transport_t* const link = registry_.by_name(sub.link);
     if (link == nullptr) return;  // link torn down between subscribe and this write
     const std::span<const std::byte> route = sub.return_route.bytes();  // the stored PATH TLV
@@ -3253,6 +3263,7 @@ graph::result_t<void> fwd_router_t::defer_await_thunk(void* ctx,
 }
 
 void fwd_router_t::await_fired_thunk(void* ctx, graph::await_waiter_t& /*w*/) noexcept {
+    const frame_scope_t scope;
     auto* const p = static_cast<pending_await_t*>(ctx);  // the waiter's ctx is its own block
     fwd_router_t& r = *p->router;
     {

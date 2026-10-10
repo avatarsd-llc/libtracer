@@ -20,7 +20,8 @@
  * forward through a surviving link, and read a bus connection's `:children[]`, after the
  * plane is gone, and expect neither to reach the closed link. Last, a forward and a listing
  * are each held inside a connection's link while it is removed: the removal shuts the link
- * down and parks it, and only the graph's second `collect()` after that destroys it.
+ * down and parks it, and only a `collect()` after every router frame that could reach it has
+ * left destroys it.
  */
 
 #include <atomic>
@@ -70,12 +71,14 @@ struct probe_t {
     std::atomic<bool> hold{false};          /**< @brief Hold the next call inside the link. */
     std::atomic<bool> entered{false};       /**< @brief A held call is inside the link. */
     std::atomic<bool> closed_inside{false}; /**< @brief The held call saw the link destroyed. */
+    std::atomic<bool> stay{false};          /**< @brief Keep the held call inside past shut-down. */
 
-    /** @brief A held call: wait, inside the link, until the removal has dealt with it. */
+    /** @brief A held call: wait, inside the link, until the removal has dealt with it (and,
+     *         while @ref stay is set, until the test lets it go). */
     void hold_inside() {
         if (!hold.exchange(false)) return;
         entered.store(true);
-        while (!shut.load() && !closed.load()) std::this_thread::yield();
+        while (!closed.load() && (!shut.load() || stay.load())) std::this_thread::yield();
         if (closed.load()) closed_inside.store(true);
     }
 };
@@ -109,6 +112,8 @@ struct owned_link_t final : tr::net::transport_t, tr::net::bus_link_t {
 
 /** @brief The app-owned listener: registered on the router by the app, never by the plane. */
 struct listener_t : tr::net::transport_t {
+    /** @brief Hand @p f up this link's receiver, as its receive thread would. */
+    void deliver(std::span<const std::byte> f) { rx_.deliver_borrowed(f); }
     void send(std::span<const std::byte>) override {}
     void send(std::span<const std::span<const std::byte>>) override {}
 };
@@ -289,9 +294,56 @@ void remove_with_call_inside(graph_t& g, transport_vertex_t& net, probe_t& p, Ca
     check(!p.closed_inside.load(), "the link is not destroyed under a call still inside it");
     check(p.shut.load() && !p.closed.load(), "removal shut it down and kept it");
     g.collect();
-    check(!p.closed.load(), "the next collect() keeps it: it was parked since the previous one");
+    check(p.closed.load(), "and the first collect() after the call left destroys it");
+}
+
+/**
+ * @brief Remove `/net/m/x` while a router frame @p call is held inside its link, and collect
+ *        repeatedly before letting it go: the link must outlive every one of those calls.
+ */
+template <class Call>
+void collect_with_frame_inside(graph_t& g, transport_vertex_t& net, probe_t& p, Call call) {
+    p.stay.store(true);
+    p.hold.store(true);
+    std::thread inside(call);
+    while (!p.entered.load()) std::this_thread::yield();
+    (void)net.remove_connection("net/m/x");
+    for (int i = 0; i < 3; ++i) g.collect();
+    check(p.shut.load() && !p.closed.load(),
+          "three collect() calls with a frame still inside the removed link keep it");
+    p.stay.store(false);
+    inside.join();
+    check(!p.closed_inside.load(), "the link was never destroyed under the frame");
     g.collect();
-    check(p.closed.load(), "and the second collect() destroys it");
+    check(p.closed.load(), "the first collect() after the frame left destroys it");
+}
+
+/** @brief A forward a listener's receiver handed up, held inside the removed link. */
+void forward_held_across_collects() {
+    graph_t g;
+    fwd_router_t router(g);
+    listener_t up;
+    (void)router.add_child(kListener, up);
+    probe_t p;
+    auto net = plane_owning_x(g, router, p);
+    const std::vector<std::byte> frame =
+        tr::testing::b_fwd(tr::graph::fwd_op_t::READ, tr::testing::b_path({"net", "m", "x", "p0"}),
+                           tr::testing::b_path({"reply"}));
+    collect_with_frame_inside(g, *net, p, [&] { up.deliver(frame); });
+    (void)router.remove_child(kListener);
+}
+
+/** @brief An app thread's origination, held inside the removed link. */
+void origination_held_across_collects() {
+    graph_t g;
+    fwd_router_t router(g);
+    probe_t p;
+    auto net = plane_owning_x(g, router, p);
+    fwd_router_t::origin_t slot([](void*, const tr::view::rope_t&) {}, nullptr);
+    const path_t dst("/net/m/x/p0");
+    collect_with_frame_inside(
+        g, *net, p, [&] { (void)router.originate(slot, tr::graph::fwd_op_t::READ, dst, {}); });
+    (void)router.cancel(slot);
 }
 
 /** @brief A forward that looked the link up before its removal is still inside it. */
@@ -355,6 +407,8 @@ int main() {
     forward_in_flight_across_removal();
     bus_children_read_after_destruction();
     if constexpr (tr::net::kBusLinks) {
+        forward_held_across_collects();
+        origination_held_across_collects();
         listing_in_flight_across_removal();
         refused_retire_keeps_the_link();
     }

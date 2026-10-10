@@ -6,8 +6,9 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Quiescent-state-based reclamation in the URCU sense, applied to exactly ONE thing — the
- * `{fn, ctx}` leg of a retired subscription — and nothing else. The read-side announcement it
+ * Quiescent-state-based reclamation in the URCU sense, applied to two things: the `{fn, ctx}`
+ * leg of a retired subscription under `reclaim_qsbr`, and, in every build, what the transport
+ * plane parks on the graph (a removed link, a retired seam). The read-side announcement it
  * needs is ALREADY COMPUTED by the seam PR #1377 shipped: `graph.cpp`'s dispatch bracket keeps
  * a per-thread depth whose transition to 0 is the proof that this thread holds no
  * `edge_view_t` snapshot. That is `reclaim_local`'s entire grace-point argument, and this
@@ -17,12 +18,13 @@
  * The shape is modelled on `%edge_pin.hpp`, not on `%lkv_slot.hpp`: a bounded `constinit`
  * registry in `.bss`, a claimable per-thread cell, and no exit sweep to register.
  *
- * **Nothing here is emitted into a build that binds a different policy.** Every entity is
- * reached from `%graph.cpp` only through an `if constexpr` branch that a non-QSBR build
- * discards, and GCC emits zero bytes for such a branch — verified by `nm` at -O0, -O1 -g and
- * -O3 alike, which is why `%graph.cpp`'s dispatch trio did NOT have to become a template to get
- * this property. (Templatising it would have changed every mangled name in that block and cost
- * the default build its object-file identity against the tree before this policy existed.)
+ * **Two users, one domain.** `%graph.cpp`'s dispatch bracket reaches it only through an
+ * `if constexpr` branch a non-QSBR build discards, so under the other two policies `fan_out`
+ * emits nothing from here. The transport plane uses it in EVERY build: `fwd_router_t` brackets
+ * each inbound frame and each origination with `%enter` / `%leave`, and the graph frees a
+ * parked link or value seam only once every bracket open when it was parked has closed
+ * (`%advance`, `%all_quiescent_past`). Both share one per-thread nesting depth, so a
+ * dispatch nested in a frame neither re-announces nor goes quiescent early.
  *
  * @section qsbr_why_global Why the retired list is GLOBAL and the participant table is not
  *
@@ -264,6 +266,10 @@ class participant_t {
 
     std::size_t idx_ = kNoIndex;
     bool tried_ = false;
+
+   public:
+    /** @brief How many @ref enter calls this thread has not yet left; 0 ⇒ quiescent. */
+    unsigned depth = 0;
 };
 
 /** @brief This thread's participant. Function-local so nothing is emitted for a TU that never
@@ -305,6 +311,35 @@ inline void go_offline() noexcept {
         return;
     }
     r.cells[idx].state.store(0, std::memory_order_release);
+}
+
+/**
+ * @brief Enter a read-side section on this thread. Only the outermost one announces, so a
+ *        nested section never re-announces at a newer epoch than the one it is covered by.
+ */
+inline void enter() noexcept {
+    if (self().depth++ == 0) go_online();
+}
+
+/**
+ * @brief Leave one read-side section.
+ * @return True when it was the outermost: this thread is now quiescent.
+ */
+[[nodiscard]] inline bool leave() noexcept {
+    if (--self().depth != 0) return false;
+    go_offline();
+    return true;
+}
+
+/**
+ * @brief Close the epoch after a writer's unpublish: what the writer parks now is free once
+ *        @ref all_quiescent_past answers true for the value returned.
+ *
+ * `seq_cst`, and load-bearing for the same reason @ref retire's bump is: this RMW is the full
+ * barrier between the caller's unpublish and any later scan.
+ */
+[[nodiscard]] inline std::uint64_t advance() noexcept {
+    return registry().ctl.epoch.fetch_add(1, std::memory_order_seq_cst);
 }
 
 /**
