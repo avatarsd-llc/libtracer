@@ -437,7 +437,7 @@ struct default_config_t {
      * sources everywhere. A nonzero value is at least the smallest row of @ref kSizeClasses.
      *
      * The free-list heads are sized from the region: one per sub-pool per row of
-     * @ref kSizeClasses no larger than this (`tr::mem::kArenaClasses`), since a larger class
+     * @ref kSizeClasses no larger than this (`%tr::mem::kArenaClasses`), since a larger class
      * could never be carved.
      *
      * Not read where @ref kSlabPool is `true`: no arena is compiled there.
