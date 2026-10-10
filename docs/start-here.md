@@ -128,16 +128,17 @@ That is article 3 of [#1382](https://github.com/avatarsd-llc/libtracer/issues/13
 A second implementation, in any language, that interoperates byte-for-byte.
 
 1. **[The specification](spec/index.md)** — read this *before* `v1.md`. Normative
-   status is not a property of a directory: `v1.md` incorporates three reference
+   status is not a property of a directory: `v1.md` incorporates four reference
    documents as normative annexes, and a reader of `v1.md` alone never sees the frame
    layout.
 2. **[Protocol v1](spec/v1.md)** — scope, terminology, the conformance procedure, the
    static path-handle requirements (§3.1).
-3. The three annexes, in this order:
+3. The annexes, in this order:
    **[01 — data format](reference/01-data-format.md)** (frame layout, the `opt` bits,
    the trailer), **[05 — protocol-defined TLVs](reference/05-protocol-tlvs.md)** (the
    type-code registry and each payload layout),
-   **[03 — addressing](reference/03-addressing.md)** §path syntax.
+   **[03 — addressing](reference/03-addressing.md)** §path syntax; then, only if your
+   implementation offers a Noise link, **[23 — Noise link binding](reference/23-noise-link-binding.md)**.
 4. **[Conformance vectors](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/)**
    — the language-agnostic test vectors every core is gated against; the C++ core is
    golden
@@ -213,7 +214,7 @@ runs top to bottom.
 
 | Genre | Where | Answers | Status |
 | --- | --- | --- | --- |
-| Normative specification | [`docs/spec/v1.md`](spec/v1.md) + its three annexes | What a conforming implementation MUST do | Wins against every other document |
+| Normative specification | [`docs/spec/v1.md`](spec/v1.md) + its annexes | What a conforming implementation MUST do | Wins against every other document |
 | Descriptive reference | [`docs/reference/`](reference/README.md) | What the protocol *is*, implementation-independently | Canonical for that question; draft for v1 |
 | API reference | [`docs/modules/`](modules/index.md) | What the C++23 reference implementation exposes | One implementation, not the standard |
 | Measured evidence | [Performance](performance.md), [capability matrix](capability-matrix.md), [design notes](design/README.md) | What it costs, and what is verified | Generated from CI runs |
