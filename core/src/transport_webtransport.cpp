@@ -1087,6 +1087,10 @@ webtransport_transport_t::~webtransport_transport_t() = default;  // ~impl_t run
 // Every accessor below tolerates an absent impl_ (its store refused it at construction):
 // such a link is inert — never ok(), never up, sends nothing, counts nothing.
 
+void webtransport_transport_t::shut_down() {
+    if (impl_) impl_->teardown();  // idempotent; the destructor's own teardown is then a no-op
+}
+
 void webtransport_transport_t::start_receiving() {
     if (impl_) impl_->open_delivery_gate();
 }

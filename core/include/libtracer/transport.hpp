@@ -759,6 +759,25 @@ class transport_t {
     virtual void start_receiving() {}
 
     /**
+     * @brief Stop for good, short of being destroyed: the counterpart of
+     *        @ref start_receiving.
+     *
+     * When this returns, no inbound frame is delivered any more and the link's own threads
+     * have been joined; its connections are closed, so a later send is shed (counted where
+     * the link counts sheds) rather than reaching a peer. The object itself stays valid, and
+     * every call on it stays safe, until it is destroyed. That is the point: an owner that
+     * removes a link while a forward that looked it up may still be on its way into it shuts
+     * it down at removal and destroys it later, where no such call can remain.
+     * `%transport_vertex_t` does that, destroying an owned link at the graph's next
+     * `collect()`.
+     *
+     * IDEMPOTENT, and safe to follow with the destructor. The DEFAULT IS A NO-OP, which is
+     * right for a link with no thread and no descriptor of its own; a link that has either
+     * overrides it.
+     */
+    virtual void shut_down() {}
+
+    /**
      * @brief The owning-delivery capability (ADR-0042 §1): true iff this transport
      *        honors @ref set_rope_receiver by delivering refcounted rope frames.
      */

@@ -49,6 +49,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - In-process API only: the `:subscribers[N]` wire spelling is
     [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019). A `subscription_t` carries
     no generation (#1932), so a stale handle whose slot was reused names the new edge.
+- **`transport_t::shut_down()`: stop a link for good, short of destroying it.** No inbound
+  frame is delivered after it returns and the link's threads are joined; the object stays
+  valid until it is destroyed, and a send on it is shed. Idempotent; the default is a no-op.
+  Overridden by the UDP, TCP (client, listener and server), WebSocket (client and server),
+  QUIC, WebTransport, CAN and self-healing links. CAN drops its receivers here and joins its
+  link thread at destruction. A virtual added to `transport_t`, so a subclass compiled
+  against the previous header must be rebuilt.
 - **`graph_t::park_release`: free a retired seam's context once no reader can reach it.**
   Retiring a vertex stops new calls through its seam, but a call that loaded the seam just
   before the retire can still arrive. `park_release` takes the ADR-0080 `retired_callback_t`
@@ -104,15 +111,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   vertex's egress source. Each destruction parks one value seam and one release per declared
   module, so an embedder that destroys and re-creates transport vertices over one graph calls
   `graph_t::collect()` at a quiescent point, as a bus node already does.
-- **`transport_vertex_t` closes a bus connection's peer listing before its link.** A bus
-  connection's `:children[]` hook now names a small context rather than the link's bus facet.
-  Removing the connection (or destroying the transport vertex) waits for a listing already
-  inside the link to return, clears the context, and only then closes the link; a listing
-  after that answers `NOT_FOUND`. This also holds when the identity vertex's retire is
-  refused because the graph's table source is exhausted, in which case the context stays
-  allocated for the graph's lifetime. Otherwise it is freed through `graph_t::park_release`,
-  so a bus node's `graph_t::collect()` now also runs one release per connection teardown. The
-  context is drawn from the graph's table source.
+- **`transport_vertex_t` shuts a removed connection's link down and frees it at
+  `graph_t::collect()`.** Removing a connection (or destroying the transport vertex) now
+  calls the link's `shut_down()` once it is un-routed and its vertex retired: no frame is
+  delivered after that, its threads are joined, and a later send is shed. The link object is
+  then parked with `graph_t::park_release` and destroyed at the next `collect()`, so a forward
+  or a `:children[]` listing that reached it just before the removal finds a valid object.
+  If the retire or the park is refused (an exhausted table source), the shut-down link is
+  kept for the graph's lifetime. Every connection draws one small park block from the graph's
+  table source at creation, so removal allocates nothing. A node whose connections come and
+  go calls `collect()` at a quiescent point; until then a removed link holds its object, and
+  a UDP link its descriptor (shut, not closed, because its send path reads the descriptor
+  without a lock).
 - **`udp_transport_t`: an ephemeral bind owns its port
   ([#2027](https://github.com/avatarsd-llc/libtracer/issues/2027)).** A `bind_port` of 0 also
   set `SO_REUSEADDR`, which lets the kernel give a UDP socket a port another reuse-enabled

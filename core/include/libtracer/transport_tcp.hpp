@@ -213,6 +213,9 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
     /** @brief Stop the receive thread and close all sockets. */
     ~tcp_transport_t() override;
 
+    /** @brief See @ref transport_t::shut_down. */
+    void shut_down() override;
+
     tcp_transport_t(const tcp_transport_t&) = delete;
     tcp_transport_t& operator=(const tcp_transport_t&) = delete;
 
@@ -399,6 +402,9 @@ class tcp_server_transport_t : public stream_server_base_t {
 
     /** @brief Stop the poll thread and close all sockets. */
     ~tcp_server_transport_t() override;
+
+    /** @brief See @ref transport_t::shut_down. */
+    void shut_down() override;
 
     tcp_server_transport_t(const tcp_server_transport_t&) = delete;
     tcp_server_transport_t& operator=(const tcp_server_transport_t&) = delete;

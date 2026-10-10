@@ -203,6 +203,9 @@ class webtransport_transport_t : public transport_t {
      *         msquic API (listener → streams → connection → registration order). */
     ~webtransport_transport_t() override;
 
+    /** @brief See @ref transport_t::shut_down. */
+    void shut_down() override;
+
     webtransport_transport_t(const webtransport_transport_t&) = delete;
     webtransport_transport_t& operator=(const webtransport_transport_t&) = delete;
 

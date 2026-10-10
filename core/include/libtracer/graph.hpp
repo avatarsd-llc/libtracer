@@ -1371,15 +1371,18 @@ class graph_t {
      * identity vertex, which is registered `role_t::STORED_VALUE` — and it bears a seam
      * only when its link exposes a bus facet (`transport_t::bus() != nullptr`): the CAN
      * binding, and a tcp/ws server wired `peer_named = true`, get an `on_children` that
-     * synthesizes the live peer listing (ADR-0044). That one is peer-driven: a bus node
-     * parks one `value_handlers_t`, plus one @ref park_release for the listing's context,
-     * per connection teardown, and a point-to-point teardown
-     * (a dial link, UDP, loopback, a default-wired server) parks nothing. Destroying a
-     * `tr::net::transport_vertex_t` parks on EVERY deployment: one seam per declared
-     * module's `<module>/conn` creator endpoint, plus one @ref park_release for that
-     * endpoint's context. So an embedder that destroys and re-creates transport vertices
-     * over one graph needs a quiescent point too, or the park grows by that much per
-     * destruction until the graph goes.
+     * synthesizes the live peer listing (ADR-0044). That seam is peer-driven: a bus node
+     * parks one `value_handlers_t` per connection teardown, and a point-to-point teardown
+     * (a dial link, UDP, loopback, a default-wired server) parks no seam. EVERY connection
+     * teardown parks one @ref park_release, though: the removed link, shut down, which this
+     * call destroys. Destroying a `tr::net::transport_vertex_t` also parks one seam per
+     * declared module's `<module>/conn` creator endpoint, plus one release for that
+     * endpoint's context. So a node whose connections come and go needs a quiescent point,
+     * or the park grows by that much per teardown until the graph goes; until this call, a
+     * removed link holds its object (and, for UDP, its descriptor).
+     *
+     * The same quiescent point covers the router: on a threaded node it must also be one
+     * where no forward is inside a link, which the points below already are.
      *
      * @warning **The caller MUST call this from a point where no lock-free reader holds a
      *          value seam.** The library cannot know that moment — a reader holds the raw

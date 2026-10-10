@@ -436,6 +436,9 @@ class can_transport_t : public transport_t, public bus_link_t {
     /** @brief Detach the receiver and release the link (stopping its receive thread). */
     ~can_transport_t() override;
 
+    /** @brief See @ref transport_t::shut_down. */
+    void shut_down() override;
+
     can_transport_t(const can_transport_t&) = delete;
     can_transport_t& operator=(const can_transport_t&) = delete;
 

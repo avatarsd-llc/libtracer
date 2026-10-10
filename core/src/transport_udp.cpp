@@ -104,6 +104,14 @@ udp_transport_t::~udp_transport_t() {
     if (fd_ >= 0) ::close(fd_);
 }
 
+void udp_transport_t::shut_down() {
+    stop_and_join();
+    // Shut, not closed: `send` reads `fd_` without a lock, so closing it here could let its
+    // number be reused under a send still in flight. Shut, the socket refuses every later
+    // send (EPIPE, counted as a drop) and the descriptor goes with the object.
+    if (fd_ >= 0) (void)::shutdown(fd_, SHUT_RDWR);
+}
+
 void udp_transport_t::send(std::span<const std::byte> frame) {
     const std::uint64_t p = peer();
     if (fd_ < 0 || p == 0) {  // no peer (learned or configured) => nobody to send to
