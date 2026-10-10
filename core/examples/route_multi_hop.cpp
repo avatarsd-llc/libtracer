@@ -15,9 +15,9 @@
  * (RFC-0004 §B, ADR-0040).
  *
  * The check that matters is the negative one. After the write has crossed B, B's routing plane
- * holds exactly what it held before: zero label bindings, zero link shells, and the same
- * receiver-context count. That is the slice-3 stateless-forwarder property, and it is what
- * bounds a forwarder's memory by its TOPOLOGY (how many links it has) rather than by its
+ * holds exactly what it held before: the same receiver-context count, and no per-flow store
+ * exists for it to have written to. That is the slice-3 stateless-forwarder property, and it is
+ * what bounds a forwarder's memory by its TOPOLOGY (how many links it has) rather than by its
  * TRAFFIC (how many flows cross it) — the reason a 16 KB node can be a forwarder at all.
  *
  * Each hop is driven explicitly: the frame a node emits is handed to the next node's
@@ -114,9 +114,7 @@ int main() {
     }
     (void)graph_c.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
-    // Whatever B held before the flow — nothing, but read it rather than assume it.
-    const std::size_t b_ingress_before = router_b.handles().ingress_count();
-    const std::size_t b_links_before = router_b.handles().link_count();
+    // Whatever B held before the flow — read it rather than assume it.
     const std::size_t b_ctx_before = router_b.receiver_ctx_count();
 
     // Hop 1: A strips "b", grows src by "cli".
@@ -138,17 +136,12 @@ int main() {
     check(ok, graph_c.read(path_t("/sensor/temp")).has_value(),
           "C was the terminus and the write landed three hops from the client");
 
-    // The point of the example: B is exactly as it was.
-    check(ok,
-          router_b.handles().ingress_count() == b_ingress_before &&
-              router_b.handles().egress_count() == 0,
-          "the middle hop bound NO label state for the flow it just carried");
-    check(ok, router_b.handles().link_count() == b_links_before,
-          "and created no per-link shell — its memory is a function of topology, not traffic");
+    // The point of the example: B is exactly as it was. Its memory is a function of topology,
+    // not traffic.
     check(ok, router_b.receiver_ctx_count() == b_ctx_before,
-          "and its receiver-context chain did not grow");
+          "the middle hop's receiver-context chain did not grow for the flow it carried");
 
-    std::printf("3 hops, 1 rule, %zu per-flow binding(s) on the forwarder\n",
-                router_b.handles().ingress_count() + router_b.handles().egress_count());
+    std::printf("3 hops, 1 rule, %zu receiver context(s) on the forwarder before and after\n",
+                router_b.receiver_ctx_count());
     return ok ? 0 : 1;
 }

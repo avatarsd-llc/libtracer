@@ -113,6 +113,58 @@ test('encodeSubscriber emits the RFC-0022 delivery-policy vectors byte-for-byte'
 });
 
 /**
+ * @brief `subscriber/compact-key-retired` (RFC-0032 §6.2, §12.2): an older consumer's
+ * `delivery_compact = 1` opt-in. The key is retired: the record decodes, it names no
+ * `delivery_policy` (so the policy is all-zero), and this client exports no reader that could
+ * surface a compaction opt-in.
+ */
+test('the retired delivery_compact key decodes and surfaces no compaction opt-in', async () => {
+  const tlv = decode(vector('subscriber/compact-key-retired'));
+  assert.equal(tlv.type, TYPE.SUBSCRIBER);
+  assert.equal(tlv.children[0].type, TYPE.PATH, 'the target is still a PATH');
+  const settings = tlv.children.find((c) => c.type === TYPE.SETTINGS);
+  const keys = settings.children.filter((c) => c.type === TYPE.NAME).map((c) => new TextDecoder().decode(c.payload));
+  assert.deepEqual(keys, ['delivery_compact'], 'only the retired key: no delivery_policy, so all-zero');
+  const client = await import('../dist/index.js');
+  assert.deepEqual(
+    Object.keys(client).filter((k) => /compact/i.test(k)),
+    [],
+    'no export reads or raises a compaction opt-in',
+  );
+});
+
+/**
+ * @brief `tlv-types/retired-route-handle-*` (RFC-0032 §6.1, §12.2): the retired `0x11`,
+ * `0x12` and `0x13` codes. Each decodes structurally under a code `TYPE` does not name, a
+ * reader skips it by its declared length, and the frame that follows still parses.
+ */
+test('the retired route-handle codes are unknown and skip by their declared length', () => {
+  const after = encodeValue(new Uint8Array([0x0d, 0x0c, 0x0b, 0x0a]));
+  const named = new Set(Object.values(TYPE));
+  for (const [code, name] of [
+    [0x11, 'tlv-types/retired-route-handle-advertise'],
+    [0x12, 'tlv-types/retired-route-handle-compact'],
+    [0x13, 'tlv-types/retired-route-handle-handle-nack'],
+  ]) {
+    const frame = vector(name);
+    const tlv = decode(frame);
+    assert.equal(tlv.type, code, `${name}: keeps its type byte`);
+    assert.equal(named.has(code), false, `${name}: TYPE names no meaning for it`);
+    assert.ok(sameBytes(encode(tlv), frame), `${name}: re-encodes byte for byte`);
+
+    const buf = new Uint8Array(frame.length + after.length);
+    buf.set(frame, 0);
+    buf.set(after, frame.length);
+    assert.equal(buf[1] & 0x08, 0, `${name}: a plain 4-byte header`);
+    const declared = 4 + (buf[2] | (buf[3] << 8));
+    assert.equal(declared, frame.length, `${name}: the header declares exactly its own length`);
+    const next = decode(buf.subarray(declared));
+    assert.equal(next.type, TYPE.VALUE, `${name}: the frame after it still parses`);
+    assert.ok(sameBytes(next.payload, new Uint8Array([0x0d, 0x0c, 0x0b, 0x0a])));
+  }
+});
+
+/**
  * @brief `subscriber/target-as-value-refused`: a VALUE is never a path on the wire (#1987).
  * The record spells its target as `VALUE "/client"`, so it carries no PATH child and names no
  * target; `encodeSubscriber` only ever emits the PATH form.

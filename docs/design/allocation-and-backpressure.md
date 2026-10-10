@@ -157,7 +157,7 @@ answered rather than read short.
 **The bound covers the arena, and every rope flatten on the forward and terminus paths beside
 it.** Read the arena claim below as a claim about the arena only. An unguarded flatten is not a
 visibly-failed one: `view::over_bytes` maps an empty span to an ENGAGED-empty optional by design
-and `graph_t::write` stores it and reports success, so an ingress `COMPACT` flatten that OOMs
+and `graph_t::write` stores it and reports success, so an ingress flatten that OOMs
 would REPLACE the subscriber's last-known value with nothing. Both halves are closed at every one
 of the router's `materialize()` call sites — they draw from `flat`, and each answers a refusal by
 value (the rows in [Status legs](#status-legs) below). Read *that* literally too: the named sites
@@ -282,10 +282,7 @@ defines for "exceeds this receiver's decode resources".
 | Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:graph_t::write_branch` | `false` → `BACKPRESSURE` |
 | Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:graph_t::write_branch` | `false` → `BACKPRESSURE` |
 | Branch-write decode arena | `core/src/graph.cpp:graph_t::write_branch` | decode error → `TYPE_MISMATCH` |
-| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:fwd_router_t::deliver_remote` | the delivery is **dropped** |
-| Per-delivery frame build | *deleted* (#885) — the COMPACT leg gathers off a stack head (`core/src/fwd_router.cpp:fwd_router_t::deliver_remote`) instead of building a frame | n/a: there is nothing left to refuse |
-| Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:fwd_router_t::on_control_rope` (the make-contiguous seam the ADVERTISE arm asks at `core/src/fwd_router.cpp:const std::span<const std::byte> route = contig(head->child1_off`), answered at `core/src/fwd_router.cpp:if (route.empty() && head->child1_total != 0) return` | the empty flatten **fails `wire::tlv_node_t::over`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
-| Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:fwd_router_t::on_control_rope` (the same seam, asked at `core/src/fwd_router.cpp:const std::span<const std::byte> payload`), answered at `core/src/fwd_router.cpp:if (payload.empty() && head->child1_total != 0) return` | the delivery is **dropped**; the subscriber keeps its last-known value |
+| Per-delivery frame build | *deleted* (#885) — the delivery leg gathers off a stack head (`core/src/fwd_router.cpp:fwd_router_t::deliver_remote`) instead of building a frame | n/a: there is nothing left to refuse |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:fwd_router_t::adopt_binding`, answered by the `wire::tlv_node_t::over` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
 | Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:view_node::ensure_cache`, answered at `core/src/op_resolve_walk.hpp:if (!req.src.spans_intact()) return` / `core/src/op_resolve_walk.hpp:if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE)` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
 | Terminus ownership flatten (rope tier, ADR-0053 ⑤, MULTI-link) | flatten `core/src/op_resolve_view.cpp:view_node::own_wire`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:if (value.rope.total_length() ==`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
@@ -313,23 +310,17 @@ two-link `FWD{WRITE}` whose payload TLV is contiguous consulted the seam **zero*
 gained a `mem_backend_t&` overload for it (`core/include/libtracer/mem_heap.hpp`); the pre-existing
 one-argument form is untouched, which is how every other call site stays byte-identical.
 
-All three router-ingress rows draw from the router's injected `flat` backend, and all three are
-exercised by `core/tests/fwd_flatten_backend_test.cpp`, which injects a backend that refuses on
-command. Each of the three has its own case — a row nothing can fail is a row nothing pins, so
-reverting any one site's seam fails that site's case and no other.
+The router-ingress row draws from the router's injected `flat` backend and is exercised by
+`core/tests/fwd_flatten_backend_test.cpp`, which injects a backend that refuses on command. The
+retired `ADVERTISE` and `COMPACT` ingress flattens went with those codes (#1951): an old peer's
+frame is now an unknown type, answered before anything is flattened.
 
-**Two of those three rows are answered by a decode, not by a guard.** The refusal early-outs
-beside the `ADVERTISE` (`core/src/fwd_router.cpp:if (route.empty() && head->child1_total != 0) return`, still an `empty()` test — that arm reads a
-span through the make-contiguous seam) and bus-name (`core/src/fwd_router.cpp:fwd_router_t::on_frame_rope_impl`, since
-#917 a `!flat` test on the named refusal rather than an `empty()` guess) flattens are redundant
-with the `wire::tlv_node_t::over` that follows each — deleting either changes nothing observable, verified by
-ablation — and the code
-says so at both sites. They are kept so the *reason* the operation failed is the OOM rather than the
-codec's leniency, and nothing here cites them as proven guards. What the test pins at those two
-sites is the **seam**: with the site back on the default heap the flatten succeeds under the
-injection and the case fails. Only the ingress `COMPACT` row has a guard that is independently
-observable — remove it and the LKV-preservation assertion fails, because that is the site where an
-empty flatten was stored and reported as success.
+**The bus-name row is answered by a decode, not by a guard.** Its refusal early-out
+(`core/src/fwd_router.cpp:fwd_router_t::on_frame_rope_impl`, since #917 a `!flat` test on the
+named refusal rather than an `empty()` guess) is redundant with the `wire::tlv_node_t::over` that
+follows it. It is kept so the *reason* the operation failed is the OOM rather than the codec's
+leniency. What the test pins at that site is the **seam**: with the site back on the default heap
+the flatten succeeds under the injection and the case fails.
 
 That file is the reason these rows are worth writing down at all. Guards alone, without an
 injectable seam behind them, are not a design: nothing can make those flattens fail, and a guard
@@ -347,10 +338,10 @@ drops that one delivery (`core/src/fwd_router.cpp:fwd_router_t::deliver_remote`)
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:graph_t::delivery_drops`): four relaxed monotonic counters — `no_target`, `denied`,
 `out_of_memory`, `fan_out_truncated` (`graph.hpp:graph_t::delivery_drops_t`) — incremented only on a drop, so the
-delivering path is byte-identical while nothing drops. The net plane adds to the same four
-through one public door, `count_external_drop` (#1068), so a `COMPACT` delivery shed for want of
-memory is as visible as a local one; `denied` is not among that door's causes because a refusal
-is counted at the WRITE gate itself, on every plane. Nothing in the library reads them; a
+delivering path is byte-identical while nothing drops. `denied` is counted at the WRITE gate
+itself, on every plane; the net plane's own drops happen before the graph is involved and are
+counted by the router (`router_stats_t`). Its one public door into these four,
+`count_external_drop` (#1068), served only the COMPACT terminus and was deleted with it (#1951). Nothing in the library reads them; a
 deployment chooses whether to alarm. What they count is shed **deliveries**: the sharpest OOM shed
 is an `assign` whose pending mark cannot be allocated, which abandons the vertex's whole
 subscriber set and still returns success (`core/src/graph.cpp:graph_t::mark_pending`), so it moves the counter by
@@ -358,10 +349,9 @@ the fan-out width rather than by one (#896). The sharpest used to be a HANDLER w
 clone failed; #1505 deleted the clone — the handler's value is delivered without one — so that
 shed cannot occur at all, and the leg that counted it is gone rather than narrowed.
 
-A dropped fresh ADVERTISE on the COMPACT leg self-heals: the peer answers the unknown label with
-`HANDLE_NACK` and the next delivery re-advertises (`fwd_router.cpp:fwd_router_t::deliver_remote`). Since #885 the router
-itself no longer has a way to drop one for want of memory — the frame is gathered off a stack head
-— so the surviving drop is the transport's, not the label plane's.
+Since #885 the router itself has no way to drop a remote delivery for want of memory — the frame
+is gathered off a stack head (`fwd_router.cpp:fwd_router_t::deliver_remote`) — so the surviving
+drop is the transport's.
 
 ## Legs that throw, and their nothrow twins
 

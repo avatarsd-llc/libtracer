@@ -1,7 +1,6 @@
 /**
  * @file
- * @brief The mount WIDTH lift: a mount of any width registers, resolves, and resolves the
- *        SAME way on the FWD plane and the COMPACT plane (#523, #765).
+ * @brief The mount WIDTH lift: a mount of any width registers and resolves (#523).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -14,13 +13,6 @@
  * `assert`, so under `NDEBUG` — every release build — there was no bound at all, while the
  * descent could still only reach the widths a compile-time constant enumerated.
  *
- * **#765** — a label binding records where an address SPLIT into "local mount" and "remote
- * residual". Registering a deeper mount moves that split, and nothing noticed: a full `FWD`
- * resolved against the new mount while a `COMPACT` riding the old label still used the old
- * one. The two planes disagreed about the same address. Until the width bound was lifted that
- * was unreachable — but only because NEITHER plane could reach a deeper mount. Agreement by
- * mutual failure, not by construction.
- *
  * @section ablation What goes RED if a guard is ablated
  *
  * Every case here is tied to one mechanism, so the suite is a set of ablation probes rather
@@ -30,10 +22,9 @@
  *   - delete the `k <= best_k` longest-match filter → `longest_match_wins` fails;
  *   - delete the walker's backwards-restart → `narrow_after_wide` fails;
  *   - delete the `!next` exact-mount check → `exact_mount_terminates` fails;
- *   - delete `routable_mount_name` → `unaddressable_names_refused` fails;
- *   - delete the `mount_gen` stamp or its comparison → `shape_change_is_seen` fails.
+ *   - delete `routable_mount_name` → `unaddressable_names_refused` fails.
  *
- * The suite prints **63** assertions across those cases; the OOM half of `add_child`'s new
+ * The OOM half of `add_child`'s new
  * `bool` lives in `mount_add_oom_test.cpp`, which needs its own binary to replace the global
  * nothrow `operator new`.
  *
@@ -56,7 +47,6 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "route_frame_builder.hpp"  // host-only frame builders (#1779)
@@ -75,13 +65,6 @@ struct recording_link_t : tr::net::transport_t {
     std::vector<std::vector<std::byte>> sent; /**< @brief Frames handed to this endpoint. */
     void send(std::span<const std::byte> f) override { sent.emplace_back(f.begin(), f.end()); }
 };
-
-/** @brief `["a","b",…]` as a PATH TLV appended to @p out. */
-void emit_path(std::vector<std::byte>& out, std::span<const std::string> segs) {
-    std::vector<std::byte> body;
-    for (const std::string& s : segs) (void)tr::wire::emit_path_segment(body, s);
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
-}
 
 /** @brief A `FWD{WRITE, dst, src, payload}` frame over the given segment lists. */
 std::vector<std::byte> make_fwd(std::span<const std::string> dst,
@@ -270,33 +253,14 @@ void test_narrow_after_wide() {
     check(narrow.sent.size() == 1 && wide.sent.empty(), "the 1-segment mount resolves");
 }
 
-// --- #765: the FWD and COMPACT planes agree BY CONSTRUCTION --------------------
-
-/** @brief The label a stale-label observer last saw, and how many times it fired. */
-struct stale_log_t {
-    std::size_t hits = 0;    /**< @brief Observer invocations. */
-    std::uint16_t label = 0; /**< @brief The last stale label. */
-    std::string inbound;     /**< @brief The link it arrived on. */
-};
-
-/** @brief The stale-label observer, as a plain function pointer (ADR-0047). */
-void on_stale(void* ctx, std::string_view inbound, std::uint16_t label) {
-    auto* const log = static_cast<stale_log_t*>(ctx);
-    ++log->hits;
-    log->label = label;
-    log->inbound = std::string(inbound);
-}
-
 /**
- * @brief A >4-segment mount resolves IDENTICALLY through FWD and through COMPACT (#765).
+ * @brief A >4-segment mount forwards, and splits the address at the mount (#523).
  *
  * FAILS on the pre-lift code shape, and not by the assert: under `NDEBUG` the 5-segment mount
- * registers, the `FWD` falls through to the terminus (nothing is forwarded) and the ADVERTISE
- * is absorbed as a local binding. The two planes "agree" only in that both are wrong — which
- * is precisely what this issue called agreement by mutual failure.
+ * registers and the `FWD` falls through to the terminus, so nothing is forwarded.
  */
-void test_deep_mount_planes_agree() {
-    std::printf("deep mount: FWD and COMPACT resolve identically (#765)\n");
+void test_deep_mount_forwards() {
+    std::printf("deep mount: a 5-segment mount forwards the residual\n");
     tr::graph::graph_t graph;
     tr::net::fwd_router_t router{graph};
     recording_link_t down;
@@ -304,7 +268,6 @@ void test_deep_mount_planes_agree() {
     (void)router.add_child("net/ws/s/rack/slot", down);  // 5 segments — past the old window
     (void)router.add_child("in", in);
 
-    // Plane 1 — a full FWD.
     router.on_frame("in", make_fwd(std::vector<std::string>{"net", "ws", "s", "rack", "slot", "v"},
                                    std::vector<std::string>{"o"}));
     check(down.sent.size() == 1, "FWD: the deep mount forwards");
@@ -313,90 +276,9 @@ void test_deep_mount_planes_agree() {
         const auto paths = paths_of(down.sent[0]);
         if (paths.size() == 2) fwd_residual = paths[0];
     }
-
-    // Plane 2 — an ADVERTISE over the same address, then a COMPACT on the bound label.
-    std::vector<std::byte> route;
-    emit_path(route, std::vector<std::string>{"net", "ws", "s", "rack", "slot", "v"});
-    router.on_frame("in", tr::net::encode_advertise(11, route));
-    check(down.sent.size() == 2, "COMPACT plane: the advertise is RELAYED, not absorbed");
-    std::vector<std::string> adv_residual;
-    if (down.sent.size() == 2) {
-        const auto dec = tr::wire::decode(down.sent[1]);
-        if (dec && dec->children.size() >= 2) {
-            const std::span<const std::byte> body = dec->children[1].payload;
-            for (std::size_t at = 0; at < body.size();) {
-                const auto len = static_cast<std::size_t>(static_cast<std::uint8_t>(body[at]));
-                if (len == 0 || at + 1 + len > body.size()) break;
-                adv_residual.emplace_back(tr::detail::as_string_view(body.subspan(at + 1, len)));
-                at += 1 + len;
-            }
-        }
-    }
-    check(!fwd_residual.empty() && fwd_residual == adv_residual,
-          "the two planes split the SAME address at the SAME point");
-
-    const std::byte pl[2] = {std::byte{0xAA}, std::byte{0xBB}};
-    std::vector<std::byte> value;
-    tr::wire::emit_tlv(value, type_t::VALUE, opt_t{}, std::span<const std::byte>(pl, 2));
-    router.on_frame("in", tr::net::encode_compact(11, value));
-    check(down.sent.size() == 3, "and a COMPACT on that label relays downstream");
-    check(in.sent.empty(), "no NACK — the binding is valid against the current mount shape");
-}
-
-/**
- * @brief Registering a DEEPER mount restamps the label plane, so it cannot silently diverge.
- *
- * The exact scenario #765 describes: bind through `net/ws/s`, then register `net/ws/s/rack`.
- * The FWD plane now resolves the deeper mount. The COMPACT plane must NOT keep delivering
- * through the old split — it takes the RFC-0004 §E.1 self-heal (drop, observe, NACK).
- */
-void test_shape_change_is_seen() {
-    std::printf("a deeper registration restamps live label bindings (#765)\n");
-    tr::graph::graph_t graph;
-    tr::net::fwd_router_t router{graph};
-    recording_link_t shallow;
-    recording_link_t deeper;
-    recording_link_t in;
-    stale_log_t log;
-    router.on_stale_label(&on_stale, &log);
-    (void)router.add_child("net/ws/s", shallow);
-    (void)router.add_child("in", in);
-
-    std::vector<std::byte> route;
-    emit_path(route, std::vector<std::string>{"net", "ws", "s", "rack", "v"});
-    router.on_frame("in", tr::net::encode_advertise(21, route));
-    check(shallow.sent.size() == 1, "the label binds through the shallow mount");
-
-    const std::byte pl[2] = {std::byte{0x01}, std::byte{0x02}};
-    std::vector<std::byte> value;
-    tr::wire::emit_tlv(value, type_t::VALUE, opt_t{}, std::span<const std::byte>(pl, 2));
-    router.on_frame("in", tr::net::encode_compact(21, value));
-    check(shallow.sent.size() == 2 && log.hits == 0, "and relays while the shape holds");
-
-    // The move: a deeper mount under the same prefix. Both links are alive, both targets are
-    // what they always were — only the SPLIT moved.
-    (void)router.add_child("net/ws/s/rack", deeper);
-
-    // FWD plane: resolves the new, deeper mount.
-    router.on_frame("in", make_fwd(std::vector<std::string>{"net", "ws", "s", "rack", "v"},
-                                   std::vector<std::string>{"o"}));
-    check(deeper.sent.size() == 1, "FWD now takes the deeper mount");
-
-    // COMPACT plane: must NOT keep using the old split.
-    const std::size_t before = shallow.sent.size();
-    router.on_frame("in", tr::net::encode_compact(21, value));
-    check(shallow.sent.size() == before,
-          "the stale binding delivers NOTHING through the old split");
-    check(log.hits == 1 && log.label == 21, "the stale-label observer fires with that label");
-    check(log.inbound == "in", "and names the link the stale COMPACT arrived on");
-    check(!in.sent.empty(), "and a HANDLE_NACK goes back to prompt a re-advertise");
-
-    // Self-heal: the peer re-advertises, and the flow resumes against the NEW shape.
-    router.on_frame("in", tr::net::encode_advertise(21, route));
-    check(deeper.sent.size() == 2, "the re-advertise binds through the deeper mount");
-    const std::size_t deep_before = deeper.sent.size();
-    router.on_frame("in", tr::net::encode_compact(21, value));
-    check(deeper.sent.size() == deep_before + 1, "and COMPACT now agrees with FWD");
+    check(fwd_residual == std::vector<std::string>{"v"},
+          "the address splits at the mount: only the residual travels");
+    check(in.sent.empty(), "nothing goes back to the ingress link");
 }
 
 }  // namespace
@@ -410,7 +292,6 @@ int main() {
     test_segment_boundaries();
     test_exact_mount_terminates();
     test_narrow_after_wide();
-    test_deep_mount_planes_agree();
-    test_shape_change_is_seen();
+    test_deep_mount_forwards();
     return tr::testing::summary("mount_width");
 }

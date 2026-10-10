@@ -1562,6 +1562,82 @@ fn subscriber_policy_absent() {
 }
 
 /**
+ * @brief `subscriber/compact-key-retired` — an older consumer's `delivery_compact = 1` opt-in
+ * (RFC-0032 §6.2, §12.2).
+ *
+ * The key is retired: the record decodes, the absent `delivery_policy` reads as all-zero, and
+ * the target is still `/client`. This crate has no reader for the key at all, so no reader can
+ * surface a compaction opt-in.
+ */
+#[test]
+fn subscriber_compact_key_retired() {
+    let bin = assert_vector_consistent("subscriber/compact-key-retired");
+    let t = decode(&bin).unwrap();
+    assert_eq!(t.type_code, libtracer::type_code::SUBSCRIBER);
+    assert_eq!(
+        structured::subscriber_policy(&t).unwrap(),
+        DeliveryPolicy::default(),
+        "the retired key is NOT a policy"
+    );
+    assert_eq!(
+        structured::subscriber_target_path(&t).unwrap(),
+        Some("/client".to_string())
+    );
+    // The control: policy-absent is the same record with the key at 0, and reads the same.
+    let absent = decode(&assert_vector_consistent("subscriber/policy-absent")).unwrap();
+    assert_eq!(
+        structured::subscriber_policy(&absent).unwrap(),
+        structured::subscriber_policy(&t).unwrap()
+    );
+}
+
+/**
+ * @brief `tlv-types/retired-route-handle-*` — the retired `0x11`/`0x12`/`0x13` codes (RFC-0032
+ * §6.1, §12.2).
+ *
+ * Each frame decodes structurally under its own, unnamed, core-range code. A reader walking a
+ * buffer steps over it by its declared length, and the frame that follows still parses.
+ */
+#[test]
+fn retired_route_handle_codes_skip_by_length() {
+    let after = encode(&value(&[0x0D, 0x0C, 0x0B, 0x0A]));
+    for (code, name) in [
+        (0x11u8, "tlv-types/retired-route-handle-advertise"),
+        (0x12, "tlv-types/retired-route-handle-compact"),
+        (0x13, "tlv-types/retired-route-handle-handle-nack"),
+    ] {
+        let frame = assert_vector_consistent(name);
+        let t = decode(&frame).unwrap();
+        assert_eq!(t.type_code, code, "{name}: keeps its type byte");
+        assert!(
+            t.opt.pl && !t.children.is_empty(),
+            "{name}: decodes structurally"
+        );
+
+        let mut buf = frame.clone();
+        buf.extend_from_slice(&after);
+        let opt = Opt::decode(buf[1]);
+        assert!(
+            !opt.ll && !opt.ts && !opt.cr,
+            "{name}: a plain 4-byte header"
+        );
+        let declared = 4 + usize::from(u16::from_le_bytes([buf[2], buf[3]]));
+        assert_eq!(
+            declared,
+            frame.len(),
+            "{name}: the header declares exactly its own length"
+        );
+        let next = decode(&buf[declared..]).unwrap();
+        assert_eq!(
+            next.type_code,
+            libtracer::type_code::VALUE,
+            "{name}: the next frame parses"
+        );
+        assert_eq!(next.payload, vec![0x0D, 0x0C, 0x0B, 0x0A]);
+    }
+}
+
+/**
  * @brief `subscriber/target-as-value-refused` — a VALUE is never a path on the wire (#1987).
  *
  * The record spells its target as `VALUE "/client"`. The target reader finds no PATH child,

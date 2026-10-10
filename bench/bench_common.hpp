@@ -342,12 +342,12 @@ inline constexpr std::size_t kMaxBatch = 1U << 20;
  * smaller batch than a syscall-backed clock), so it is calibrated against the host's own
  * clock rather than hardcoded: double the batch until the per-op figure stops improving.
  *
- * Hoisted here from bench_compact_delivery.cpp (#553) so the in-process bench can use
- * the same calibrator the net-plane benches already do, and so there is ONE definition of
+ * Hoisted here from the compact-delivery bench (#553, retired by #1951) so the in-process bench can
+ * use the same calibrator the net-plane benches already do, and so there is ONE definition of
  * "large enough" across the harness.
  *
  * No gated row uses it any more (#1804): every batch row of `bench_libtracer`,
- * `bench_compact_delivery` and `bench_forward_demux` times through @ref time_batches, which
+ * `bench_chain_delivery` and `bench_forward_demux` times through @ref time_batches, which
  * sizes its batch by window. It stays for the ungated benches that still call it.
  *
  * @param op The operation to time; called (many) times, so it must be repeatable.

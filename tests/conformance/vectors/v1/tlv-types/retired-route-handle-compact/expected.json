@@ -1,0 +1,12 @@
+{
+  "name": "retired-route-handle-compact",
+  "category": "tlv-types",
+  "hex": "12400E0001000200010001000400EFBEADDE",
+  "total_bytes": 18,
+  "decoded": {
+    "type": "0x12 (retired, was COMPACT)",
+    "structured": true,
+    "meaning": "COMPACT{ VALUE label u16=1, VALUE u32=0xDEADBEEF } — one outer frame in the layout a pre-RFC-0032 peer emitted. The code is retired and not reassigned (RFC-0032 §6.1): a codec decodes it structurally as an unknown core-range code and skips it by its declared length.",
+    "note": "A receiving node answers one bare ERROR{tr::schema::type_mismatch} on the arrival link and counts it in :stats.router.drops retired_rx. That is behaviour, not codec, so a host test binds it (see description.md)."
+  }
+}

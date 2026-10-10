@@ -78,8 +78,8 @@
 #
 #   * the fan-out T-sweep (T >= 2). Thread-contention numbers are runner-dependent, and
 #     the standing in-tree call for exactly this shape is DIAGNOSTIC-not-gated —
-#     bench_rx_source_topology, bench_route_handle_contention and bench_fanout_clone_storm
-#     all decline the gate on that ground. Its own A/A null in the banked #941 run read
+#     bench_rx_source_topology and bench_fanout_clone_storm
+#     both decline the gate on that ground. Its own A/A null in the banked #941 run read
 #     58.9%; a gate with a 58.9% null is a flaky red, and a flaky red teaches everyone to
 #     ignore the gate.
 #   * the process-heap ESCAPE high-water. bench/ram_census_pins.json records a high-water
@@ -340,7 +340,7 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
-            bench_forward_demux bench_compact_delivery \
+            bench_forward_demux bench_chain_delivery \
             bench_conn_ram bench_ram_census_tcp bench_store_sweep -j "$(nproc)"
 
       # QUIESCENCE (#1236). The build above just ran `-j$(nproc)` and the 1-minute load
@@ -395,10 +395,10 @@ jobs:
             -- ./bench/build/bench_libtracer --family-set multi
           cat bench/bench_libtracer_st.txt bench/bench_libtracer_mt.txt >bench/bench_libtracer_raw.txt
           $measure --out bench/bench_forward_demux_raw.txt -- ./bench/build/bench_forward_demux || true
-          $measure --out bench/bench_compact_delivery_raw.txt -- ./bench/build/bench_compact_delivery || true
+          $measure --out bench/bench_chain_delivery_raw.txt -- ./bench/build/bench_chain_delivery || true
           # An empty transcript is a silent non-recording — say so (mirrors perf.yml,
           # where `|| true` once swallowed a missing binary into a green job).
-          for f in bench/bench_forward_demux_raw.txt bench/bench_compact_delivery_raw.txt; do
+          for f in bench/bench_forward_demux_raw.txt bench/bench_chain_delivery_raw.txt; do
             [ -s "$f" ] || echo "::warning::$f is empty — its series will not be recorded"
           done
 
@@ -596,7 +596,7 @@ jobs:
         run: |
           args=""
           for f in bench/bench_libtracer_raw.txt bench/bench_forward_demux_raw.txt \
-                   bench/bench_compact_delivery_raw.txt bench/bench_zenoh_raw.txt; do
+                   bench/bench_chain_delivery_raw.txt bench/bench_zenoh_raw.txt; do
             [ -s "$f" ] && args="$args --raw $f"
           done
           python3 bench/perf_emit_benchmark.py $args \
@@ -653,7 +653,7 @@ jobs:
             bench/bench_libtracer_raw.txt
             bench/bench_forward_heap_raw.txt
             bench/bench_forward_demux_raw.txt
-            bench/bench_compact_delivery_raw.txt
+            bench/bench_chain_delivery_raw.txt
             bench/bench_zenoh_raw.txt
             bench/bench_conn_ram_raw.txt
             bench/bench_ram_census_tcp_raw.txt

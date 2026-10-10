@@ -104,7 +104,6 @@
 #include "libtracer/iov_table.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
@@ -1346,17 +1345,14 @@ void test_can_send_advertise_allocates_nothing() {
 }
 
 // ---------------------------------------------------------------------------
-// #885 — the LABEL control plane's egress, on the same injector
+// #1951 — the answer to a retired type, on the same injector
 //
-// The label plane (ADVERTISE / COMPACT / HANDLE_NACK) is not a transport, but its emissions
-// run on the SAME transport receive threads and are entirely peer-provoked, and until #885
-// three of them built their frame with the throwing `tr::net::encode_*` family. The injector
-// this TU owns is the instrument that can see that, for the reason the file header gives:
-// those were unguarded `std::vector` growths, which `probe_fail_hook` never observes.
-//
-// These cases drive the ROUTER's own doors — `on_frame` for the two peer-provoked arms, the
-// public `advertise` for the producer one — never a re-spelled copy of the emitter, so a call
-// site that reverts to the built encoder reddens here even though the emitter itself is fine.
+// An outer frame of a retired type code — an older peer's ADVERTISE / COMPACT / HANDLE_NACK
+// (0x11-0x13) — is counted in `retired_rx` and answered with one bare
+// `ERROR{tr::schema::type_mismatch}` (RFC-0032 §6.1). Any other non-FWD outer frame is dropped,
+// as before. The answer is peer-provoked and runs on the transport receive threads, so the answer
+// is built on the stack; this case drives the ROUTER's own door (`on_frame`) and holds it to zero
+// allocations.
 // ---------------------------------------------------------------------------
 
 /**
@@ -1369,6 +1365,7 @@ void test_can_send_advertise_allocates_nothing() {
 class silent_link_t final : public tr::net::transport_t {
    public:
     void send(std::span<const std::byte> frame) override {
+        if (refuse_) return;  // the link's source refused the frame: nothing goes out
         n_ = 0;
         append(frame);
         ++spans_;
@@ -1390,6 +1387,8 @@ class silent_link_t final : public tr::net::transport_t {
         spans_ = 0;
         gathers_ = 0;
     }
+    /** @brief Refuse every contiguous send from now on, as an exhausted link source would. */
+    void refuse(bool on) noexcept { refuse_ = on; }
 
    private:
     /** @brief Copy @p s into the fixed buffer, clamped — never grows, never allocates. */
@@ -1402,122 +1401,49 @@ class silent_link_t final : public tr::net::transport_t {
     std::size_t n_ = 0;                 /**< @brief Bytes of the last send. */
     std::size_t spans_ = 0;             /**< @brief Contiguous-send count. */
     std::size_t gathers_ = 0;           /**< @brief Gather-send count. */
+    bool refuse_ = false;               /**< @brief Drop every contiguous send. */
 };
 
-/** @brief A `PATH{NAME ...}` TLV, built outside every armed window. */
-std::vector<std::byte> label_route(std::string_view seg) {
+/**
+ * @brief The retired-type answer costs the router ZERO allocations (#1951, RFC-0032 §6.1).
+ *
+ * The cheapest arm a hostile peer can reach after the length check: one retired type byte. It
+ * is counted, the inbound link is found, and a constant 10-byte bare `ERROR` goes out.
+ * Nothing on it is variable-length, so the budget is not derived — it is ZERO.
+ */
+void test_retired_type_answer_allocates_nothing() {
+    std::printf("retired type — the type_mismatch answer costs ZERO allocations (#1951):\n");
+    tr::graph::graph_t g;
+    tr::net::fwd_router_t router(g);
+    silent_link_t up;
+    (void)router.add_child("up", up);
+
+    // A retired COMPACT `{VALUE label(u16), VALUE payload}`, built OUTSIDE the armed window:
+    // the peer's allocation is not the node's.
     std::vector<std::byte> body;
-    (void)tr::wire::emit_path_segment(body, seg);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
-    return out;
-}
-
-/**
- * @brief The stale-label HANDLE_NACK costs the router ZERO allocations (#885).
- *
- * The cheapest arm a hostile peer can reach: a COMPACT naming a label this node never bound.
- * It consults a trivially-copyable resolution, misses, finds the inbound link by name, and
- * answers ten fixed bytes. Nothing on it is variable-length, so the budget is not derived —
- * it is ZERO, and that is the whole claim. Before #885 it built the frame with the throwing
- * `encode_handle_nack`, whose two `std::vector`s show up here as a non-zero count.
- */
-void test_stale_label_nack_allocates_nothing() {
-    std::printf("label plane — a stale-label HANDLE_NACK costs ZERO allocations (#885):\n");
-    tr::graph::graph_t g;
-    tr::net::fwd_router_t router(g);
-    silent_link_t up;
-    (void)router.add_child("up", up);
-
-    // Nothing is bound on this router, so every label is stale. The frame is built OUTSIDE
-    // the armed window — the peer's allocation is not the node's.
-    const std::vector<std::byte> stale =
-        tr::net::encode_compact(0x4242, label_route("ignored-payload-shape"));
-    router.on_frame("up", stale);  // warm-up: any lazy table creation happens here, unarmed
-    check(up.spans() == 1 && !up.last().empty(), "the stale COMPACT drew a NACK at all");
+    tr::wire::emit_tlv(body, tr::wire::type_t::VALUE, tr::wire::opt_t{},
+                       std::array<std::byte, 2>{std::byte{0x42}, std::byte{0x42}});
+    tr::wire::emit_tlv(body, tr::wire::type_t::VALUE, tr::wire::opt_t{},
+                       std::array<std::byte, 1>{std::byte{0x2A}});
+    std::vector<std::byte> retired;
+    tr::wire::emit_tlv(retired, static_cast<tr::wire::type_t>(0x12), tr::wire::opt_t{.pl = true},
+                       body);
+    router.on_frame("up", retired);  // warm-up: any lazy table creation happens here, unarmed
+    check(up.spans() == 1 && !up.last().empty(), "the retired COMPACT drew an answer at all");
 
     up.reset();
-    const std::size_t allocs = count_allocs([&] { router.on_frame("up", stale); });
-    check(allocs == 0, "an unbound label is answered without a single allocation");
+    const std::size_t allocs = count_allocs([&] { router.on_frame("up", retired); });
+    check(allocs == 0, "a retired type is answered without a single allocation");
     check(up.spans() == 1, "and it was answered — a silent drop would make the count vacuous");
-    check(up.last().size() == 10, "the answer is the fixed 10-byte HANDLE_NACK");
-}
+    check(up.last().size() == 10, "the answer is the fixed 10-byte bare type_mismatch ERROR");
+    check(router.drop_stats().retired_rx == 2, "and both frames were counted in retired_rx");
 
-/**
- * @brief The producer door's re-advertise costs ZERO allocations once the label exists (#885).
- *
- * `fwd_router_t::advertise` is documented as the self-heal door a producer calls on every
- * (re)connect, so it runs far more often than once per flow. The FIRST call mints the label
- * and records the egress binding — that allocates, and #603 owns it. Every call after it
- * reuses the binding, which is the steady state this measures: the only work left is putting
- * the frame on the link, and since #885 that is a stack head plus a reference to the caller's
- * route. The throwing `encode_advertise` it replaced shows up here as two allocations.
- */
-void test_warm_advertise_allocates_nothing() {
-    std::printf("label plane — a warm advertise costs ZERO allocations (#885):\n");
-    tr::graph::graph_t g;
-    tr::net::fwd_router_t router(g);
-    silent_link_t down;
-    (void)router.add_child("down", down);
-
-    const std::vector<std::byte> route = label_route("sensor");
-    const std::uint16_t first = router.advertise("down", route);  // mints + records, unarmed
-    check(first != 0, "the first advertise minted a label");
-
-    down.reset();
-    std::uint16_t again = 0;
-    const std::size_t allocs = count_allocs([&] { again = router.advertise("down", route); });
-    check(allocs == 0, "a re-advertise of an established route allocates nothing at all");
-    check(again == first, "and it reused the label rather than minting a second one");
-    check(down.gathers() == 1 && down.spans() == 0,
-          "the frame went out GATHERED — a contiguous send would mean it was built");
-}
-
-/**
- * @brief `on_nack`'s re-advertise allocates NOTHING AT ALL (#603 defect 1).
- *
- * This arm used to have an irreducible one: answering a peer's HANDLE_NACK meant reading the
- * stored egress route back out from under the table's lock, and `route_handle_t::egress_route`
- * returned it as an OWNING vector. That copy was nothrow but it got there by probing the global
- * heap, so the budget was derived from it rather than being zero. `copy_egress_route` puts the
- * bytes in the caller's frame instead, and #885 had already removed the frame build on top, so
- * the whole arm is now allocation-free for any route that fits the receive frame's buffer — and
- * a wider one draws from the INJECTED source, never the global heap.
- *
- * Zero is the assertion that separates: restoring either the owning read or the frame build
- * puts the count above it.
- */
-void test_nack_readvertise_adds_no_allocation() {
-    std::printf("label plane — on_nack allocates for its route copy and NOTHING else (#885):\n");
-    tr::graph::graph_t g;
-    tr::net::fwd_router_t router(g);
-    silent_link_t up;
-    (void)router.add_child("up", up);
-
-    const std::vector<std::byte> route = label_route("sensor");
-    const std::uint16_t label = router.advertise("up", route);
-    check(label != 0, "a label is bound on the link the NACK will arrive on");
-
-    // The read `on_nack` performs, run standalone on its own table: it costs no allocation
-    // and still produces the route. The buffer outlives the lambda so nothing is elided.
-    tr::net::route_handle_t rh;
-    (void)rh.record_egress("up", label, route);
-    std::array<std::byte, 512> owned{};
-    std::size_t owned_n = 0;
-    const std::size_t budget =
-        count_allocs([&] { owned_n = rh.copy_egress_route("up", label, owned); });
-    check(budget == 0, "the store's route read allocates nothing");
-    check(owned_n == route.size() && std::equal(route.begin(), route.end(), owned.begin()),
-          "and it copied the whole route into the caller's frame");
-
-    const std::vector<std::byte> nack = tr::net::encode_handle_nack(label);
-    router.on_frame("up", nack);  // warm-up, unarmed
+    // An answer the link refuses is not retried, and the frame still counts (RFC-0032 §6.1).
     up.reset();
-    const std::size_t allocs = count_allocs([&] { router.on_frame("up", nack); });
-    check(allocs == 0, "a NACK allocates NOTHING — no owning route copy, no frame build");
-    check(up.gathers() == 1, "and the re-advertise was actually emitted, gathered");
-    check(up.last().size() == 6 + route.size() + 4,
-          "carrying the whole stored route back: ADVERTISE hdr + label child + route");
+    up.refuse(true);
+    router.on_frame("up", retired);
+    check(up.spans() == 0, "a refused answer goes nowhere");
+    check(router.drop_stats().retired_rx == 3, "and the retired frame is still counted");
 }
 
 // ---------------------------------------------------------------------------
@@ -1929,9 +1855,7 @@ int main() {
     test_can_over_long_path_refused();
     test_can_emit_advertise_wire_identical();
     test_can_send_advertise_allocates_nothing();
-    test_stale_label_nack_allocates_nothing();
-    test_warm_advertise_allocates_nothing();
-    test_nack_readvertise_adds_no_allocation();
+    test_retired_type_answer_allocates_nothing();
     test_ws_ping_at_the_bound_is_answered();
     test_ws_oversized_ping_fails_the_connection();
     test_ws_fragmented_control_fails_the_connection();

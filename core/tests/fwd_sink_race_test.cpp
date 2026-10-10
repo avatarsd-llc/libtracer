@@ -21,11 +21,11 @@
  * publish shows up as a tag mismatch — a functional assertion on every build, not only a
  * TSan vehicle (the race itself is also reported directly under `-fsanitize=thread`).
  *
- * Two of the five sinks are driven, chosen because they sit on different frame paths: the
- * raw-frame observer (every inbound frame, before any parse) and the stale-label observer
- * (the RFC-0004 §E.1 self-heal, reached only by an unknown-label COMPACT). Each scenario
- * also carries a positive control, so a "fix" that quietly stopped dispatching would fail
- * rather than pass by silence.
+ * The raw-frame observer (every inbound frame, before any parse) is driven: all three sinks
+ * share one `sink_slot_t` publish discipline, so one is enough. (The stale-label observer,
+ * a second frame path, went with the label tables, #1951.) The scenario carries a positive
+ * control, so a "fix" that quietly stopped dispatching would fail rather than pass by
+ * silence.
  *
  * @par Why no SHARE of dispatches is asserted, only that some landed (#1380)
  * There used to be a `kFloor = kIters / 50` here and a "fired on a large share of frames"
@@ -39,9 +39,9 @@
  * branch between two of them. That ratio is a property of the MICROARCHITECTURE: on
  * x86-64's TSO the release fence inside `set` is free and the share is tens of percent; on
  * aarch64 it is a real `dmb ish` and the same code legitimately swallows fifty times more.
- * Asserting a majority made this test flaky at ~12 % on the stale path; asserting 2 % moved
- * the flake to the other leg. So the verdict is the torn-pair invariant alone, plus the two
- * DETERMINISTIC positive controls (every frame still forwarded / NACKed back) and a
+ * Asserting a majority made this test flaky at ~12 %; asserting 2 % moved the flake to the
+ * other leg. So the verdict is the torn-pair invariant alone, plus the DETERMINISTIC positive
+ * control (every frame still forwarded) and a
  * non-vacuity check that a sink was reached at all. The share itself is PRINTED, which is
  * the number a human reads when a host looks degenerate.
  *
@@ -64,10 +64,8 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
-#include "route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "test_support.hpp"
 
 namespace {
@@ -106,8 +104,6 @@ void score(void* ctx, char expected) {
 
 void raw_a(void* ctx, std::string_view, std::span<const std::byte>) { score(ctx, 'A'); }
 void raw_b(void* ctx, std::string_view, std::span<const std::byte>) { score(ctx, 'B'); }
-void stale_a(void* ctx, std::string_view, std::uint16_t) { score(ctx, 'A'); }
-void stale_b(void* ctx, std::string_view, std::uint16_t) { score(ctx, 'B'); }
 
 // --- wire builders (canonical bytes via the production emit helpers) ----------
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
@@ -192,63 +188,10 @@ void raw_sink_flip_race() {
     check(g_torn.load() == 0, "no sink was handed the other sink's context");
 }
 
-/**
- * @brief The stale-label observer: a different frame path, the same publish discipline.
- */
-void stale_sink_flip_race() {
-    std::printf("stale-label observer, flipped under an unknown-label COMPACT storm:\n");
-    graph_t g;
-    fwd_router_t router(g);
-    counting_link_t in;
-    (void)router.add_child("in", in);
-
-    probe_t a{'A'};
-    probe_t b{'B'};
-    const std::byte pl[2] = {std::byte{0xAA}, std::byte{0xBB}};
-    std::vector<std::byte> value;
-    tr::wire::emit_tlv(value, type_t::VALUE, opt_t{}, std::span<const std::byte>(pl, 2));
-    // Label 7 was never advertised on "in": every one of these takes the §E.1 self-heal.
-    const std::vector<std::byte> frame = tr::net::encode_compact(7, value);
-
-    const long torn_before = g_torn.load();
-    std::atomic<bool> go{false};
-    std::atomic<bool> armed{false};
-    std::atomic<bool> stop{false};
-    std::thread flipper([&] {
-        while (!go.load(std::memory_order_acquire)) {
-        }
-        router.on_stale_label(&stale_a, &a);
-        armed.store(true, std::memory_order_release);
-        while (!stop.load(std::memory_order_relaxed)) {
-            router.on_stale_label(&stale_a, &a);
-            router.on_stale_label(&stale_b, &b);
-        }
-    });
-    std::thread pump([&] {
-        while (!go.load(std::memory_order_acquire)) {
-        }
-        while (!armed.load(std::memory_order_acquire)) {
-        }
-        for (int i = 0; i < kIters; ++i) router.on_frame("in", frame);
-        stop.store(true, std::memory_order_relaxed);
-    });
-    go.store(true, std::memory_order_release);
-    flipper.join();
-    pump.join();
-
-    const long hits = a.hits.load() + b.hits.load();
-    std::printf("    (%ld of %d frames reached a sink)\n", hits, kIters);
-    check(in.sent() == static_cast<std::size_t>(kIters), "every stale label still NACKed back");
-    check(hits > 0,
-          "the stale observer was reached during the storm (the torn check is not vacuous)");
-    check(g_torn.load() == torn_before, "no sink was handed the other sink's context");
-}
-
 }  // namespace
 
 int main() {
     std::printf("router sink publish coherence (#914):\n");
     raw_sink_flip_race();
-    stale_sink_flip_race();
     return tr::testing::summary("fwd_sink_race");
 }

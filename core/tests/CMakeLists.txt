@@ -321,7 +321,7 @@ libtracer_test_warnings(ws_test)
 add_test(NAME ws COMMAND ws_test)
 
 # #55 — transport_can pure framing layer (29-bit ID codec, can_framing,
-# can_reassembly, advertise codec; no SocketCAN). Links libtracer for heap_alloc.
+# can_reassembly, the CAN transport's own advertise codec; no SocketCAN). Links libtracer for heap_alloc.
 add_executable(can_frames_test can_frames_test.cpp)
 target_link_libraries(can_frames_test PRIVATE libtracer)
 libtracer_test_warnings(can_frames_test)
@@ -1217,13 +1217,6 @@ if(LIBTRACER_NET_PLANE)
 endif()
 
 if(LIBTRACER_NET_PLANE)
-    add_executable(compact_cache_test compact_cache_test.cpp)
-    target_link_libraries(compact_cache_test PRIVATE libtracer)
-    libtracer_test_warnings(compact_cache_test)
-    add_test(NAME compact_cache COMMAND compact_cache_test)
-endif()
-
-if(LIBTRACER_NET_PLANE)
     # ADR-0063 §3: control-plane create/remove churn against a live forward reader. Its value is
     # under `-fsanitize=thread` (the tsan CI lane runs the whole suite), where it reports the
     # writer-vs-writer and rebind-vs-reader races; without TSan it still catches a lost or
@@ -1380,15 +1373,6 @@ add_executable(tlv_children_test tlv_children_test.cpp)
 target_link_libraries(tlv_children_test PRIVATE libtracer)
 libtracer_test_warnings(tlv_children_test)
 add_test(NAME tlv_children COMMAND tlv_children_test)
-
-if(LIBTRACER_NET_PLANE)
-    # Brick 4 (ADR-0038 §3 / ADR-0039) — per-connection pmr label tables incl. a
-    # zero-global-heap lifecycle over a slab resource with a null upstream.
-    add_executable(route_handle_test route_handle_test.cpp)
-    target_link_libraries(route_handle_test PRIVATE libtracer)
-    libtracer_test_warnings(route_handle_test)
-    add_test(NAME route_handle COMMAND route_handle_test)
-endif()
 
 if(LIBTRACER_NET_PLANE)
     # #739 — subscribe_toward: a local producer bound toward a mount-path target through
@@ -1834,26 +1818,6 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_WS)
     target_link_libraries(orchestrate_depart_test PRIVATE libtracer)
     libtracer_test_warnings(orchestrate_depart_test)
     add_test(NAME orchestrate_depart COMMAND orchestrate_depart_test)
-
-    # RFC-0004 / ADR-0035 slice 4 — the route-handle: ws delivery-compaction over LIVE
-    # transport_ws (producer B -> A forwarder -> consumer C). Proves the byte-delta of a
-    # label-compacted COMPACT vs a full-route FWD, byte-exact ordered delivery, the
-    # stale-label drop + re-advertise self-heal, and that a non-compact flow stays stateless.
-    add_executable(fwd_compact_test fwd_compact_test.cpp)
-    target_link_libraries(fwd_compact_test PRIVATE libtracer)
-    libtracer_test_warnings(fwd_compact_test)
-    add_test(NAME fwd_compact COMMAND fwd_compact_test)
-endif()
-
-if(LIBTRACER_NET_PLANE)
-    # RFC-0004 §E.1/§F (#974) — a COMPACT delivery is ACL-gated under the INBOUND LINK's name,
-    # like the full-route FWD{WRITE} it compacts. Both terminus write arms of on_compact (the
-    # cold deliver_local one and the memoized warm one) are proven separately, each paired with
-    # a positive control, plus the no-resolver default where nothing is enforced.
-    add_executable(fwd_compact_acl_test fwd_compact_acl_test.cpp)
-    target_link_libraries(fwd_compact_acl_test PRIVATE libtracer)
-    libtracer_test_warnings(fwd_compact_acl_test)
-    add_test(NAME fwd_compact_acl COMMAND fwd_compact_acl_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)
@@ -1868,53 +1832,22 @@ if(LIBTRACER_NET_PLANE)
 endif()
 
 if(LIBTRACER_NET_PLANE)
-    # RFC-0004 §E.1 (#716) — the MID-CHAIN reconnect self-heal: clear_link sweeps every ingress
-    # binding, on ANY link, whose downstream half crossed the cleared link, so an origin that never
-    # saw the reconnect stops streaming onto a dead out-label. Asserts RECOVERY end to end over a
-    # 3-node in-process chain, not merely the NACK.
-    add_executable(fwd_reconnect_selfheal_test fwd_reconnect_selfheal_test.cpp)
-    target_link_libraries(fwd_reconnect_selfheal_test PRIVATE libtracer)
-    libtracer_test_warnings(fwd_reconnect_selfheal_test)
-    add_test(NAME fwd_reconnect_selfheal COMMAND fwd_reconnect_selfheal_test)
-endif()
-
-if(LIBTRACER_NET_PLANE)
-    # #913 — a re-advertise cycle grows NOTHING: both ADVERTISE-emitting sites (the producer door
-    # and the mid-chain forwarding swap) reuse the label already bound to an identical route, so a
-    # reconnect loop cannot walk a link's 16-bit label space or its egress table. Counts distinct
-    # labels and table entries across 51 cycles at every node of a two-hop chain.
-    add_executable(fwd_readvertise_reuse_test fwd_readvertise_reuse_test.cpp)
-    target_link_libraries(fwd_readvertise_reuse_test PRIVATE libtracer)
-    libtracer_test_warnings(fwd_readvertise_reuse_test)
-    add_test(NAME fwd_readvertise_reuse COMMAND fwd_readvertise_reuse_test)
-endif()
-
-if(LIBTRACER_NET_PLANE)
-    # #833 — a REFUSED forwarding bind strands neither the out-label it took nor the egress route
-    # retained with it. Drives the ingress table to its injected bound so the BIND is the step that
-    # refuses, then asserts the downstream table returns to its pre-advertise census, the label
-    # itself comes back, nothing went on the wire, and the shared entry an established flow rides
-    # is left alone.
-    add_executable(fwd_bind_refusal_unwind_test fwd_bind_refusal_unwind_test.cpp)
-    target_link_libraries(fwd_bind_refusal_unwind_test PRIVATE libtracer)
-    libtracer_test_warnings(fwd_bind_refusal_unwind_test)
-    add_test(NAME fwd_bind_refusal_unwind COMMAND fwd_bind_refusal_unwind_test)
-endif()
-
-if(LIBTRACER_NET_PLANE)
     # RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER auto fan-out: a plain graph.write to a
-    # vertex with a remote subscriber delivers a full-route FWD{WRITE} (or auto-promoted COMPACT)
-    # with no explicit advertise/send. Covers the transient-local latch, the compact byte-delta,
-    # reconnect self-heal, and a concurrent writer x clear_link race (the TSan gate).
+    # vertex with a remote subscriber delivers a full-route FWD{WRITE} with no explicit send.
+    # Covers the transient-local latch, and an older peer's retired COMPACT opt-in and
+    # ADVERTISE / COMPACT / HANDLE_NACK frames meeting the unknown-member treatment (#1951).
     add_executable(fwd_fanout_test fwd_fanout_test.cpp)
     target_link_libraries(fwd_fanout_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_fanout_test)
+    # Feeds the RFC-0032 retired-code and retired-key vectors' own bytes to the router.
+    target_compile_definitions(fwd_fanout_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME fwd_fanout COMMAND fwd_fanout_test)
 endif()
 
 # RFC-0009 §D extended to peer departure — subscriber-edge eviction on link teardown:
 # evict_link_edges scoping + RFC-0005 counter unwind, §D.2 slot reuse/index stability,
-# fwd_router link_down (evict + clear_link), the add_child departure-notifier seam
+# fwd_router link_down (evict), the add_child departure-notifier seam
 # (p2p down / bus peer-down), and a concurrent writer x evict race (the TSan gate).
 # Per-cause delivery-drop counters: a path-target edge whose delivery cannot happen drops
 # it (specified) and now says so (graph_t::delivery_drops).
@@ -1948,13 +1881,6 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(fwd_terminus_reject_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_terminus_reject_test)
     add_test(NAME fwd_terminus_reject COMMAND fwd_terminus_reject_test)
-endif()
-
-if(LIBTRACER_NET_PLANE)
-    add_executable(fwd_malformed_control_test fwd_malformed_control_test.cpp)
-    target_link_libraries(fwd_malformed_control_test PRIVATE libtracer)
-    libtracer_test_warnings(fwd_malformed_control_test)
-    add_test(NAME fwd_malformed_control COMMAND fwd_malformed_control_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)
@@ -2758,10 +2684,10 @@ if(LIBTRACER_NET_PLANE)
     add_test(NAME retained_subscription_seam COMMAND retained_subscription_seam_test)
 endif()
 
-# #1582 — the router's four peer-reachable `view::over_bytes` ownership copies (the cold and
-# warm COMPACT payload, the host-local subscribe door's route + SUBSCRIBER TLVs) draw from the
-# injected `flat` seam; a refusal is a counted drop / BACKPRESSURE, never a heap fallback.
-# #1714 — the warm COMPACT arm no longer copies through `flat`: it draws ONE block in all.
+# #1582 — the router's peer-reachable `view::over_bytes` ownership copies (the host-local
+# subscribe door's route + SUBSCRIBER TLVs) draw from the injected `flat` seam; a refusal is a
+# counted drop / BACKPRESSURE, never a heap fallback. The COMPACT payload copies went with
+# COMPACT (#1951).
 if(LIBTRACER_NET_PLANE)
     add_executable(router_flat_seam_test router_flat_seam_test.cpp)
     target_link_libraries(router_flat_seam_test PRIVATE libtracer)

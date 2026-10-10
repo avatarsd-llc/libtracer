@@ -71,14 +71,13 @@ static tr::mem::pool_source_t<tr::mem::sync_mutex_t> label_blocks{label_region, 
 // ...               /*ctl=*/&blocks};
 // ... fwd_router_t router{graph, /*label_src=*/&label_blocks, /*rx=*/&blocks,
 // ...                     /*flat=*/&tr::mem::heap_backend(),
-// ...                     /*max_label_bindings_per_link=*/64,
 // ...                     /*egress=*/&tr::mem::heap_backend()};
 ```
 
 `integrations/esp-idf/examples/full_node` is this recipe as running code: three slab
 regions (RX pool / label source / pmr arena) and a self-proof that prints the label
 source's own census — `288/2048 B used, 0/12 size classes, 0 block(s) overflowed` for
-one link carrying one compact flow — so the sizing above is a number to check against
+one link carrying one compact flow before #1951 retired that form — so the sizing above is a number to check against
 your own node rather than one to copy.
 
 Those all reach the ONE injection point of `graph_t`'s constructor
@@ -87,20 +86,19 @@ Those all reach the ONE injection point of `graph_t`'s constructor
 `tr::mem::block_source_t` and builds the pmr resource and the value backend over it internally,
 so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
 **four** of
-`fwd_router_t`: the failable `label_src` source its label tables draw from, the
+`fwd_router_t`: the failable `label_src` source its long-lived link state draws from, the
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
 backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
 (`core/include/libtracer/fwd_router.hpp:router_planes_t`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
-`retained` is #1610 and defaults to `flat` when un-injected, and the
-`max_label_bindings_per_link` bound sits between `flat` and `egress`).
+`retained` is #1610 and defaults to `flat` when un-injected).
 Each is its own injection because each one's live set is governed by a different
 quantity — threads inside the router, replies in flight, flattens in flight, and
 the subscription population respectively — and a slab is sized against that
 quantity, so a shared seam silently re-scopes it.
 `label_src` was a `std::pmr::memory_resource` until #603 defect 1 — it could not
-stay one, because a peer's `ADVERTISE` reaches it and pmr reports exhaustion by
-throwing. The full set of
+stay one, because a peer's frame reached it (the since-retired `ADVERTISE`) and
+pmr reports exhaustion by throwing. The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure
 semantics of the third seam are in

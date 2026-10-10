@@ -19,7 +19,7 @@
 
 export const CLIENT_EXPERIMENTAL = true as const;
 
-export { LibtracerClient, FwdError, CompactFlowError, awaitDeadlineMs } from './client.js';
+export { LibtracerClient, FwdError, awaitDeadlineMs } from './client.js';
 export type {
   ClientTransport,
   ValueHandler,

@@ -305,8 +305,8 @@ endif()
 # flow uses to stop re-carrying it. Appended at EOF for the same reason every block above it
 # was: `docs/examples/index.md` pins line-numbered citations into the first block.
 #
-# These eight are the FIRST domain group that cannot be unconditional. `fwd_router_t`,
-# `route_handle_t` and `op_resolve` are the net plane, compiled only under
+# These are the FIRST domain group that cannot be unconditional. `fwd_router_t` and
+# `op_resolve` are the net plane, compiled only under
 # `if(LIBTRACER_NET_PLANE)` (`core/CMakeLists.txt:92`), so at `-DLIBTRACER_NET_PLANE=OFF` these
 # targets do not merely skip — the types they name do not exist. That is a BUILD-time absence,
 # and it is the honest one: the alternative, an unconditional target that returns early, would
@@ -326,8 +326,6 @@ set(LIBTRACER_ROUTING_EXAMPLES
     route_qualified_mount     # RFC-0014 strip-K: a mount name is any width, consumed in one step
     route_multi_hop           # a chain is the one-hop rule again; the middle hop stores nothing
     route_reply_home          # the accumulated src IS the return route — no correlation table
-    route_label_compact       # ADR-0035 — advertise binds label↔route per link; COMPACT elides it
-    route_label_stale         # an unknown label is dropped and NACK'd; the NACK re-advertises
 )
 
 if(LIBTRACER_NET_PLANE)

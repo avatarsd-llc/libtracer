@@ -108,11 +108,10 @@ struct field_path_t {
  * @brief A path's BOUND form: the stack of node-scoped vertex refs a mint answered with
  *        (RFC-0024 §7.4) — the opaque slot a @ref path_t carries beside its canonical bytes.
  *
- * Shaped on `tr::net::resolved_binding_t`, which has been the "a resolution plus its own
- * staleness signal" record since ADR-0062, and for the same two reasons: the answer is held
- * *with* the stamp that invalidates it, and "no resolution yet" is expressed OUTSIDE the
- * resolution (@ref bound) rather than as an invalid one. It is a separate type only because
- * that one lives in the transport plane, and an address must not depend downward on it.
+ * Two rules shape it: the answer is held *with* the stamp that invalidates it, and "no
+ * resolution yet" is expressed OUTSIDE the resolution (@ref bound) rather than as an invalid
+ * one. (They were first written down for the per-link label bindings of ADR-0062, which
+ * RFC-0032 supersedes wholly; those bindings were deleted with their tables in #1951.)
  *
  * The elements are **opaque here and everywhere but on the host that minted each one**: this
  * type carries them, compares them and hands them to an encoder, and never interprets one.
@@ -263,9 +262,9 @@ class path_t {
      * @brief This path's PATH-LABEL spelling, if a reply came back minted (RFC-0027 §6.1).
      *
      * Named for the qualified term throughout, never bare "label": §11.1 collision 1 was ruled
-     * **(a) qualify** at acceptance, so an unqualified "label" still means RFC-0004 §E.1's
-     * per-link `u16` and nothing else (`route_handle.hpp`'s is one), and this RFC's concept is
-     * always the **path label**.
+     * **(a) qualify** at acceptance, so an unqualified "label" meant RFC-0004 §E.1's per-link
+     * `u16` (retired with its tables, #1951), and this RFC's concept is always the **path
+     * label**.
      */
     [[nodiscard]] const path_label_cache_t& path_label() const noexcept { return labels_; }
 

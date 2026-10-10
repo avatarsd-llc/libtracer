@@ -1478,21 +1478,6 @@ void graph_t::count_drop(drop_reason_t why, std::uint64_t n) noexcept {
     }
 }
 
-void graph_t::count_external_drop(external_drop_t why, std::uint64_t n) noexcept {
-    // Translate the narrow public cause into the internal one and go through the SAME door
-    // every in-graph site uses (#1068). The mapping is total and the switch exhaustive, so a
-    // cause added to the public enum must choose an internal counter here rather than
-    // silently counting nothing — the failure mode this whole centralization exists against.
-    switch (why) {
-        case external_drop_t::NO_TARGET:
-            count_drop(drop_reason_t::NO_TARGET, n);
-            return;
-        case external_drop_t::OUT_OF_MEMORY:
-            count_drop(drop_reason_t::OUT_OF_MEMORY, n);
-            return;
-    }
-}
-
 void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noexcept {
     // ONE cause since #1448: the per-edge copy cannot fail any more (the cold half is a
     // refcount share, not an owning string copy), so the snapshot's only shed is the
@@ -1745,12 +1730,10 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
     // whose natural reading ("I cannot name this caller") meant "grant everything", WRITE_ACL
     // and CREATE included. A remote op carries the inbound link's NAME, so it cannot spell
-    // this arm: the full-route form through `ensure_remote(src)->caller`, and — since #974 — the
-    // COMPACT delivery fast path, whose two terminus write arms in `fwd_router_t::on_compact`
-    // pass `inbound_name` too. #974 was that second one missing: unattributed, it landed here
-    // and was waved through every ACE the first is checked against. Any further net-plane
-    // write path must carry a caller for the same reason — which is why
-    // `fwd_router_t::deliver_local` takes its own as a REQUIRED, undefaulted parameter.
+    // this arm: it carries its caller through `ensure_remote(src)->caller`. #974 was a second,
+    // since-deleted net-plane write path (the COMPACT terminus, #1951) that once carried none:
+    // unattributed, it landed here and was waved through every ACE. Any net-plane write path
+    // must carry a caller for that reason.
     if (caller.empty()) return true;
     // The token lands in a stack frame first (#1781): a subject is a short name or id, so a
     // gated operation allocates nothing for it, and a longer one spills to the table source.
@@ -1990,7 +1973,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
 
 [[gnu::noinline]] void graph_t::dispatch_edge_remote(const edge_view_t& e, const value_t& value) {
     // Remote delivery (#136): a write fans out to a remote subscriber as a
-    // FWD{WRITE} (or auto-promoted COMPACT) via the injected sink — outside the
+    // chain FWD{WRITE} via the injected sink — outside the
     // vertex lock, like every other dispatch leg, since the sink does transport I/O.
     //
     // The coherent slot read lives HERE, in the noinline leg, not in the always_inline
@@ -2013,8 +1996,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
             remote_delivery_t{.link = r->link,
                               .return_route = r->return_route,
                               .reverse_route = r->reverse_route,
-                              .caller = r->caller,
-                              .delivery_compact = r->delivery_compact},
+                              .caller = r->caller},
             value);
 }
 
@@ -2400,11 +2382,11 @@ namespace {
 result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_view caller,
                                    const net::link_kind_t* link) {
     // The ONE WRITE gate of the value-write path, so counting the refusal here counts it for
-    // every plane that enters through it: an API write, a FWD{WRITE} terminus, and both the
-    // warm and cold COMPACT terminus arms (#1068). The router discards this status — it has
-    // no caller to hand it to — so if the denial were not counted at the gate that produces
-    // it, a revoked peer streaming into a protected vertex would look exactly like a quiet
-    // link. Counting an API caller's own denial as well is deliberate (see delivery_drops_t
+    // every plane that enters through it: an API write and a FWD{WRITE} terminus (#1068).
+    // An unacknowledged delivery (an empty `src`) has no one to hand this status to, so if the
+    // denial were not counted at the gate that produces it, a revoked peer streaming into a
+    // protected vertex would look exactly like a quiet link. Counting an API caller's own denial as
+    // well is deliberate (see delivery_drops_t
     // ::denied): `denied` means refusals, not refusals-nobody-heard-about, and a counter
     // whose value depended on WHICH door a refusal came through could not be summed.
     //
@@ -3543,8 +3525,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     if (return_route.empty()) return std::unexpected(status_t::INVALID_PATH);
     // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) through the door parse every subscriber
     // door shares (#869): decode, type check, parse, and the zero-copy retain the slot keeps.
-    // delivery_compact comes from this parse (the resolver's parallel subscriber_compact() is
-    // retired).
+    // The delivery policy comes from this parse (the resolver's parallel parse is retired).
     subscriber_t s;
     if (const auto parsed = parse_wire_subscriber(source_view, s, *tables_); !parsed)
         return std::unexpected(parsed.error());

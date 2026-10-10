@@ -241,7 +241,7 @@ inline std::size_t rss_kb() {
  * @brief This process's resident high-water mark so far, in KiB (`getrusage`); 0 where it
  *        cannot be read (#1908).
  *
- * The start figure of a binary whose rows start right after it: `bench_compact_delivery`,
+ * The start figure of a binary whose rows start right after it: `bench_chain_delivery`,
  * `bench_forward_demux` and `bench_store_sweep latency` read it ahead of the first row and
  * print @ref emit_family_rss after the last one, so their delta is what the rows raised the
  * high-water mark by. One `getrusage` call: no heap operation, no file. A `fopen` read there

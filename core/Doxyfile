@@ -103,7 +103,6 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/tx_handoff.hpp \
                          core/include/libtracer/fwd_frame_view.hpp \
                          core/include/libtracer/grammar.hpp \
-                         core/include/libtracer/route_handle.hpp \
                          core/include/libtracer/path_label_table.hpp \
                          core/include/libtracer/ws.hpp \
                          core/include/libtracer/crc.hpp \

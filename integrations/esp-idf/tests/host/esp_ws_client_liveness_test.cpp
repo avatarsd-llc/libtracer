@@ -26,7 +26,7 @@
  *
  *   2. REPORTING. `transport_t::set_down_notifier` is the one departure seam a
  *      point-to-point link has (`fwd_router_t::add_child` wires it to the eviction of
- *      that child's subscriber edges and label bindings). This link used to fire it from
+ *      that child's subscriber edges). This link used to fire it from
  *      NOWHERE: peer CLOSE, a read error, a poll error and a failed write were all
  *      silent, so after a peer REBOOT the local node kept producing into a session that
  *      no longer existed. It now fires once per connection that was up.

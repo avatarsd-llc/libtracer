@@ -1,40 +1,39 @@
 /**
  * @file
- * @brief Stream delivery over the RFC-0029 PAIR chain against RFC-0004 §E.1 COMPACT, at 1 and
- *        3 hops — measured BEFORE COMPACT is deleted (stage 6, #1949).
+ * @brief Stream delivery over the RFC-0029 PAIR chain at 1 and 3 hops, with the reply leg
+ *        priced separately (#1949), and its frame census on the real CAN carriage (#2044).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * A REPORT, not a veto (maintainer ruling): it feeds the stage-6 RFC and never gates a build.
+ * A REPORT, not a veto (maintainer ruling): it never gates a build. It was written to price the
+ * PAIR chain against the RFC-0004 §E.1 COMPACT handle before COMPACT was deleted; that arm went
+ * with COMPACT (#1951), and its numbers are on record in #2037 (the chain-vs-compact bench) and
+ * #2046 (its CAN frame census).
  *
- * Two arms carry the SAME operation to the SAME `STREAM` vertex over the SAME production-wired
- * chain (every link a connection vertex made by `transport_vertex_t`, which is what a PAIR hop
- * dereferences):
+ * Every arm carries the same operation to the same `STREAM` vertex over the same
+ * production-wired chain (every link a connection vertex made by `transport_vertex_t`, which is
+ * what a PAIR hop dereferences):
  *
  *  - `pair`    — `FWD{op=WRITE, dst = PATH{PAIR x (H+1)}, src = empty}`. Element k is read by node
  *                k and consumed; the frame SHRINKS by 11 B per hop. No state is held at any hop.
- *  - `compact` — one `ADVERTISE` binds a label at every hop (untimed warm-up, reported as the
- *                cold cost), then every sample rides as `COMPACT{label, payload}`.
  *
- * The arms are NOT like-for-like on the reply leg. A forwarded PAIR write grows `src` at every
- * forwarder, so the terminus builds a RESULT and it is relayed back to the originator through
- * node 0 (#2042: H frames on the `up` links, 1 on the origin's link). So `pair` pays for an ack
- * that is built and carried H + 1 links; COMPACT emits none. The shape is asserted exactly so any
- * change is loud: RFC-0030 §8.5 (#1946) stops growing the empty `src`, and this RESULT is then
- * never built. To price it, `pair-norelay`
- * repeats the PAIR arm with the reply's relay cut (the terminus still builds and sends it):
- * `pair` minus `pair-norelay` is the relay cost, and `pair-norelay` vs `compact` is the nearest
- * like-for-like the library allows without a core change.
+ * A forwarded PAIR write grows `src` at every forwarder, so the terminus builds a RESULT and it
+ * is relayed back to the originator through node 0 (#2042: H frames on the `up` links, 1 on the
+ * origin's link). So `pair` pays for an ack that is built and carried H + 1 links. The shape is
+ * asserted exactly so any change is loud: RFC-0030 §8.5 (#1946) stops growing the empty `src`,
+ * and this RESULT is then never built. To price it, `pair-norelay` repeats the PAIR arm with the
+ * reply's relay cut (the terminus still builds and sends it): `pair` minus `pair-norelay` is the
+ * relay cost.
  *
  * Cells: hops {1,3} x payload {64, 1024, 16384} B x batch N {1, 8, 32}. N > 1 is the optional
  * BATCH arm: N sample frames composed into ONE `BATCH` value (`compose_batch`, composed
  * UNTIMED — the app's cost, not the library's forward path) and written once; per-sample figures
- * divide by N. The pair cost grows with N (the terminus walks the BATCH children), COMPACT's does
- * not. `tlv8`/`tlv64` cut the TLV bytes of each hop's frame into 8/64 B fields: arithmetic on the
- * ws-style frame, NOT the CAN carriage (which is header-elided and carries a FWD as a directed
- * group); it supports no CAN conclusion. Rows with `warm=NO-alloc-per-frame` allocate per frame
- * (16 KiB batches cross the pinned mmap threshold) and measure the allocator, not the protocol.
+ * divide by N; the cost grows with N (the terminus walks the BATCH children). `tlv8`/`tlv64` cut
+ * the TLV bytes of each hop's frame into 8/64 B fields: arithmetic on the ws-style frame, NOT
+ * the CAN carriage (which is header-elided and carries a FWD as a directed group); it supports
+ * no CAN conclusion. Rows with `warm=NO-alloc-per-frame` allocate per frame (16 KiB batches
+ * cross the pinned mmap threshold) and measure the allocator, not the protocol.
  *
  * Columns of the report (one `CELL` line each, plus the standard `RESULT` row):
  *   wire_B_per_hop  bytes the frame carries on each hop's link, origin to sink
@@ -107,7 +106,7 @@ void* counted_aligned(std::size_t n, std::size_t align) {
 }
 }  // namespace
 
-// The full allocating and deallocating set, as bench_compact_delivery does (#793, #801).
+// The full allocating and deallocating set, as bench_chain_delivery does (#793, #801).
 void* operator new(std::size_t n) {
     void* const p = counted(n);
     if (p == nullptr) throw std::bad_alloc();
@@ -282,17 +281,6 @@ struct chain_base_t {
         tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
         return out;
     }
-
-    [[nodiscard]] std::vector<std::byte> compact_route() const {
-        std::vector<std::string> segs;
-        for (std::size_t i = 0; i < hops; ++i) {
-            segs.push_back("net");
-            segs.push_back("dn");
-            segs.push_back("n" + std::to_string(i + 1));
-        }
-        segs.push_back("sink");
-        return path_tlv(segs);
-    }
 };
 
 /** @brief The base chain with every link an in-process `wire_link_t` (the timing arms). */
@@ -378,8 +366,7 @@ class can_end_t final : public tr::net::can_link_t {
  * in the route (`dst=/net/can/<bus>/n<node>/...`, `src` grows the sender's peer name, sends are
  * directed). This shim installs the flat single-peer sink and hides the bus facet, so every route
  * here is one peer element per hop SHORTER than production's: the PAIR forward and reply counts
- * and COMPACT's ADVERTISE cold cost are lower bounds. The verdict's direction survives (PAIR only
- * gets worse). Wiring the bus facet is left as a follow-up.
+ * are lower bounds. Wiring the bus facet is left as a follow-up.
  */
 struct can_p2p_t final : transport_t {
     tr::net::can_transport_t* c = nullptr;
@@ -463,7 +450,7 @@ struct can_cell_t {
     std::size_t logical_B = 0;          // the frame handed to each hop's send(), from the wire arm
     std::uint64_t refused = 0;          // group not representable (dropped_tx)
     std::size_t delivered = 0;
-    can_count_t cold;  // compact: the ADVERTISE walk only, all hops
+    can_count_t cold;  // what the chain set-up left on the bus before the first sample
 };
 
 /** @brief One steady-state delivery on the real CAN carriage; the census is exact, not timed. */
@@ -472,21 +459,15 @@ struct can_cell_t {
     char name[96];
     std::snprintf(name, sizeof name, "can-%s/%s/h%zu/p%zu/n%zu", fd ? "fd" : "cl", arm, hops,
                   payload, n);
-    const bool pair = std::strncmp(arm, "pair", 4) == 0;
     const bool norelay = std::strcmp(arm, "pair-norelay") == 0;
     can_cell_t c;
     // The logical frame per hop comes from the production wire-link chain (same builders).
     {
         chain_t w(hops);
         const std::vector<std::byte> body = payload_for(payload, n);
-        std::vector<std::byte> frame;
-        if (pair) {
-            frame = tr::testing::b_fwd_raw_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE),
-                                              w.pair_dst(), path_tlv({}), {}, body);
-        } else {
-            w.origin.inject(tr::net::encode_advertise(0x0042, w.compact_route()));
-            frame = tr::net::encode_compact(0x0042, body);
-        }
+        const std::vector<std::byte> frame =
+            tr::testing::b_fwd_raw_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE),
+                                      w.pair_dst(), path_tlv({}), {}, body);
         w.origin.inject(frame);
         w.clear();
         w.origin.inject(frame);
@@ -494,16 +475,10 @@ struct can_cell_t {
     }
     can_chain_t ch(hops, fd);
     const std::vector<std::byte> body = payload_for(payload, n);
-    std::vector<std::byte> frame;
     ch.clear();
-    if (pair) {
-        frame = tr::testing::b_fwd_raw_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE),
-                                          ch.pair_dst(), path_tlv({}), {}, body);
-    } else {
-        ch.origin.inject(tr::net::encode_advertise(0x0042, ch.compact_route()));
-        ch.pump();
-        frame = tr::net::encode_compact(0x0042, body);
-    }
+    const std::vector<std::byte> frame =
+        tr::testing::b_fwd_raw_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE),
+                                  ch.pair_dst(), path_tlv({}), {}, body);
     for (std::size_t i = 0; i < hops; ++i) {
         c.cold += ch.dn[i]->tx;
         c.cold += ch.upe[i + 1]->tx;
@@ -581,24 +556,16 @@ struct cell_t {
                               std::size_t n) {
     char name[96];
     std::snprintf(name, sizeof name, "%s/h%zu/p%zu/n%zu", arm, hops, payload, n);
-    const bool pair = std::strncmp(arm, "pair", 4) == 0;
     const bool norelay = std::strcmp(arm, "pair-norelay") == 0;
     const std::size_t rss0 = bench::peak_rss_kb();
     cell_t c;
     {
         chain_t ch(hops);
         const std::vector<std::byte> body = payload_for(payload, n);
-        std::vector<std::byte> frame;
-        std::uint16_t label = 0x0042;
         const std::uint64_t t0 = bench::now_ns();
-        if (pair) {
-            frame = tr::testing::b_fwd_raw_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE),
-                                              ch.pair_dst(), path_tlv({}), {}, body);
-        } else {
-            // The cold cost: ONE advertise walks the chain and leaves a binding at every hop.
-            ch.origin.inject(tr::net::encode_advertise(label, ch.compact_route()));
-            frame = tr::net::encode_compact(label, body);
-        }
+        const std::vector<std::byte> frame =
+            tr::testing::b_fwd_raw_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE),
+                                      ch.pair_dst(), path_tlv({}), {}, body);
         ch.origin.inject(frame);
         c.cold_ns = bench::now_ns() - t0;
         if (ch.delivered != 1) fail(name, "the first frame did not reach the sink");
@@ -616,15 +583,14 @@ struct cell_t {
         if (c.fwd != hops) fail(name, "not exactly one frame per hop");
         c.rev_B = ch.origin.bytes;
         for (const auto& l : ch.up) c.rev_B += l.bytes;
-        // The two spellings do NOT emit the same traffic: a PAIR write is relayed with `src`
-        // GROWN at every forwarder (RFC-0029 §6.1; the empty-`src` marker only survives on a
-        // directly attached origin), so the terminus builds a RESULT and it is relayed home: one
-        // frame on each of the H `up` links and one on the origin's link, which node 0 now
-        // delivers (#2042). A COMPACT emits no reply. The shape is asserted exactly so a change
+        // A PAIR write is relayed with `src` GROWN at every forwarder (RFC-0029 §6.1; the
+        // empty-`src` marker only survives on a directly attached origin), so the terminus builds
+        // a RESULT and it is relayed home: one frame on each of the H `up` links and one on the
+        // origin's link, which node 0 delivers (#2042). The shape is asserted exactly so a change
         // in either direction is loud (RFC-0030 §8.5, #1946, makes it zero), and the reply leg
         // has its own columns.
-        if (pair ? (c.rev != hops + 1 || ch.origin.frames != 1) : c.rev != 0)
-            fail(name, "the reply-leg census changed: pair must ack H + 1 frames, compact none");
+        if (c.rev != hops + 1 || ch.origin.frames != 1)
+            fail(name, "the reply-leg census changed: pair must ack H + 1 frames");
 
         // The relay ablation: the terminus still builds and sends its RESULT, no hop relays it.
         if (norelay)
@@ -677,12 +643,12 @@ void report(const char* arm, std::size_t hops, std::size_t payload, std::size_t 
 
 /** @brief `--can-frames`: the exact frame/byte census on the real CAN carriage. No timing. */
 void can_census() {
-    std::printf("# CAN frames per hop: PAIR chain vs COMPACT on can_transport_t (#2044)\n");
+    std::printf("# CAN frames per hop: PAIR chain on can_transport_t (#2044)\n");
     for (const bool fd : {false, true})
         for (const std::size_t h : kHops)
             for (const std::size_t p : kPayloads)
                 for (const std::size_t n : kBatches)
-                    for (const char* arm : {"pair", "pair-norelay", "compact"})
+                    for (const char* arm : {"pair", "pair-norelay"})
                         report_can(arm, fd, h, p, n, run_can_cell(arm, fd, h, p, n));
 }
 
@@ -695,17 +661,15 @@ int main(int argc, char** argv) {
     bench::emit_clock_floor();
     bench::emit_alloc_state();
     const std::size_t start_kb = bench::peak_rss_kb();
-    std::printf("# PAIR chain vs COMPACT, stream delivery, report only (#1949)\n");
+    std::printf("# PAIR chain, stream delivery, report only (#1949)\n");
     for (const std::size_t h : kHops)
         for (const std::size_t p : kPayloads)
             for (const std::size_t n : kBatches) {
                 // Alternate the arms inside one process and one cell, so drift is common-mode.
                 const cell_t a = run_cell("pair", h, p, n);
-                const cell_t b = run_cell("compact", h, p, n);
                 const cell_t a2 = run_cell("pair-norelay", h, p, n);
                 report("pair", h, p, n, a);
                 report("pair-norelay", h, p, n, a2);
-                report("compact", h, p, n, b);
             }
     bench::emit_family_rss("chain-vs-compact", start_kb);
     return 0;

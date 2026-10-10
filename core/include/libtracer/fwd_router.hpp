@@ -55,7 +55,6 @@
 #include "libtracer/path_label_table.hpp"
 #include "libtracer/path_pair.hpp"
 #include "libtracer/path_ref.hpp"
-#include "libtracer/route_handle.hpp"
 #include "libtracer/sink_slot.hpp"
 #include "libtracer/transport.hpp"
 
@@ -76,9 +75,9 @@ struct fwd_pre_t;
  *
  * Every field counts a **`dropped`**, not a `refused`: these sites lose a frame and tell
  * nobody, which is exactly why the doctrine requires them counted. They are ROUTER-LOCAL and
- * deliberately NOT folded through `graph_t::count_external_drop` — these frames die
- * before the graph is involved, and that door's exclusion rules exist to stop one refusal
- * being tallied on both sides of the net/graph seam (#1503 Q2).
+ * deliberately NOT folded into the graph's delivery-drop counters — these frames die before
+ * the graph is involved, and one refusal must not be tallied on both sides of the net/graph
+ * seam (#1503 Q2).
  *
  * The resource causes are split per-cause because a sizing operator grows a *different* seam
  * for each; the malformed/opcode drops are fused into @ref malformed_rx because they are one
@@ -116,6 +115,13 @@ struct router_stats_t {
      *         an operator reads every one of these as the same symptom ("a peer is speaking
      *         something this node cannot parse"), and nothing is sized against them. */
     std::size_t malformed_rx = 0;
+    /** @brief Outer frames of a RETIRED core type code — `0x11`, `0x12`, `0x13`, the
+     *         `ADVERTISE` / `COMPACT` / `HANDLE_NACK` an older peer still sends (RFC-0032
+     *         §6.1). Each one is also answered with a bare `ERROR{tr::schema::type_mismatch}`
+     *         on its arrival link, and counted here whether or not that answer could be
+     *         sent. A new node never sends these codes, so a non-zero count names an old peer
+     *         on some link. */
+    std::size_t retired_rx = 0;
 };
 
 /**
@@ -138,25 +144,26 @@ struct router_stats_t {
  */
 struct router_planes_t {
     /**
-     * @brief The nothrow source the `route_handle` LABEL TABLES draw from (#603 defect 1 / #873
-     * family 3, ADR-0065 / ADR-0079 §Decision 4) — the library holds no buffer of its own. A
-     * bounded node injects a @ref mem::pool_source_t over its static slab (one slab, whole stack —
-     * ADR-0039 §2); the default is the process net sub-pool (`mem::net_source()`; the static arena
-     * on an MCU build). Must outlive the router, and must be thread-safe: the label tables are
-     * written from `on_advertise`, which runs on a transport RECEIVE thread and is driven entirely
-     * by a remote peer.
+     * @brief The nothrow source the router's LONG-LIVED link state draws from (#603 defect 1 /
+     * #873 family 3, ADR-0065 / ADR-0079 §Decision 4): the NAME->link demux table, each child's
+     * receive context, the bus token caches and the bound-path scratch — the library holds no
+     * buffer of its own. A bounded node injects a @ref mem::pool_source_t over its static slab
+     * (one slab, whole stack — ADR-0039 §2); the default is the process net sub-pool
+     * (`mem::net_source()`; the static arena on an MCU build). Must outlive the router, and must be
+     * thread-safe: several transport receive threads reach it.
      *
-     * This plane used to be a `%std::pmr::memory_resource*`. It could not stay one: a pmr
-     * resource cannot report exhaustion by value, so on the shipping `-fno-exceptions` profile a
-     * peer's ADVERTISE storm against an aborting `heap_resource_t` rebooted the node. A call site
-     * that passed its OWN resource — a node whose graph and router historically shared one pmr
-     * arena — migrates by pointing @ref mem::pool_source_t's SPAN CONSTRUCTOR at the same storage
+     * The name is historical: until #1951 the per-link label tables lived here too. This plane
+     * used to be a `%std::pmr::memory_resource*`. It could not stay one: a pmr resource cannot
+     * report exhaustion by value, so on the shipping `-fno-exceptions` profile a peer-driven
+     * allocation against an aborting `heap_resource_t` rebooted the node. A call site that passed
+     * its OWN resource — a node whose graph and router historically shared one pmr arena —
+     * migrates by pointing @ref mem::pool_source_t's SPAN CONSTRUCTOR at the same storage
      * that resource was partitioning (#1493). It must NOT reach for the adapter that shape invites,
      * a `block_source_t` wrapping the pmr resource: that wrapper's `try_alloc` cannot answer
      * `nullptr`, so it reinstates the very abort this parameter change removed. @ref
      * mem::block_source_t's warning carries the full reasoning, including why a budget-tracking
      * variant is declined too. Split from @p rx deliberately (ADR-0079's per-plane default): @p rx
-     * is per-frame decode scratch and may legitimately be a `bump_source_t`, while label state is
+     * is per-frame decode scratch and may legitimately be a `bump_source_t`, while link state is
      * LONG-LIVED and would monotonically fill one.
      */
     mem::block_source_t* label_src = &mem::net_source();
@@ -175,9 +182,8 @@ struct router_planes_t {
 
     /**
      * @brief The byte backend EVERY rope flatten on the router's forward AND terminus paths draws
-     * its owned `segment` from — the router's own four (#730): the ingress control-frame sub-rope
-     * flattens (`ADVERTISE` route, `COMPACT` payload), the cold bus-name rejection flatten, and
-     * the per-delivery `COMPACT` egress flatten; PLUS the terminus resolver's rope-tier flattens
+     * its owned `segment` from — the router's own (#730): the cold bus-name rejection flatten and
+     * the refused-route reclaim flatten; PLUS the terminus resolver's rope-tier flattens
      * one call below `resolve_terminus_rope` (#766) — `view_node::ensure_cache` (the per-node
      * contiguous span every `wire()`/`body()` read of a multi-link TLV materializes) and
      * `view_node::own_wire` (the ADR-0053 ⑤ ownership flatten) — which the router reaches by
@@ -215,15 +221,6 @@ struct router_planes_t {
      * @p rx only through such a composition. Must outlive the router.
      */
     mem::mem_backend_t* flat = &mem::net_backend();
-
-    /**
-     * @brief Ceiling on one link's ingress table and, separately, its egress table (#603). `0` ⇒
-     * unbounded, the default and the prior behavior. Without it the tables are peer-driven and
-     * grow to the whole 16-bit label space — megabytes per link on a 16 KB node. A full table
-     * refuses NEW flows, which then deliver over the full-route `FWD{WRITE}` form; established
-     * flows are untouched. See @ref route_handle_t::refused_bindings for the counter.
-     */
-    std::size_t max_label_bindings_per_link = 0;
 
     /**
      * @brief The byte backend the terminus REPLY's egress-construction segments draw from (#795,
@@ -300,9 +297,9 @@ class fwd_router_t {
      * @brief Bind to the local @p graph; terminus ops resolve against it.
      *
      * Also installs the graph's remote-delivery sink (#136): a write to a vertex with a
-     * remote subscriber fans out a `FWD{WRITE}` (or auto-promoted `COMPACT`) back over the
-     * subscriber's link. The sink captures `this`, so the router must outlive @p graph's
-     * use — the same lifetime the held `graph_` reference already requires.
+     * remote subscriber fans out a `FWD{WRITE}` back over the subscriber's link. The sink captures
+     * `this`, so the router must outlive @p graph's use — the same lifetime the held `graph_`
+     * reference already requires.
      *
      * @param graph The node's local graph.
      * @param planes The router's allocation planes (@ref router_planes_t); every member
@@ -323,8 +320,7 @@ class fwd_router_t {
           // mark is the count of DISTINCT link names ever registered, so they take the LABEL
           // store rather than the per-frame `rx` one — which a `bump_source_t` may legitimately
           // be, and which would fill monotonically under them (#873 phase 1).
-          registry_(planes.label_src != nullptr ? *planes.label_src : mem::net_source()),
-          handles_(planes.label_src, planes.max_label_bindings_per_link) {
+          registry_(planes.label_src != nullptr ? *planes.label_src : mem::net_source()) {
         // The captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049) — the same
         // shape as `on_reverse_ref` below. The graph publishes it through a `sink_slot_t`,
         // so `this` must outlive every write that can still reach the producer fan-out;
@@ -484,7 +480,7 @@ class fwd_router_t {
      * @brief One snapshot of this router's counted cold-path drops (#1503 step 3).
      *
      * See @ref router_stats_t for what each field means and why the drops are counted HERE
-     * rather than through `graph_t::count_external_drop`. Snapshot coherence is the
+     * rather than in the graph's delivery-drop counters. Snapshot coherence is the
      * `core/STYLE.md` §Introspection clause: six relaxed loads, so use the difference
      * between two snapshots, never the instant.
      */
@@ -495,7 +491,8 @@ class fwd_router_t {
                 .assemble_dropped = assemble_dropped_.load(std::memory_order_relaxed),
                 .reply_iov_dropped = reply_iov_dropped_.load(std::memory_order_relaxed),
                 .delivery_iov_dropped = delivery_iov_dropped_.load(std::memory_order_relaxed),
-                .malformed_rx = malformed_rx_.load(std::memory_order_relaxed)};
+                .malformed_rx = malformed_rx_.load(std::memory_order_relaxed),
+                .retired_rx = retired_rx_.load(std::memory_order_relaxed)};
     }
 
     /**
@@ -510,7 +507,8 @@ class fwd_router_t {
      * Per-seam, never aggregated (ADR-0079): there is deliberately no combined census here.
      * @{
      */
-    /** @brief The source the `route_handle` label tables draw from. */
+    /** @brief The source the router's long-lived link state draws from (@ref
+     * router_planes_t::label_src). */
     [[nodiscard]] mem::block_source_t& label_source() const noexcept { return *label_src_; }
     /** @brief The DEFAULT terminus-arena / rx-scratch source. A child that carries its own
      *         (ADR-0067 §3) is not reported here — that one is the child's. */
@@ -873,12 +871,6 @@ class fwd_router_t {
     /** @brief Raw-frame observer (@ref on_raw): @p ctx, inbound child, the whole frame. */
     using raw_fn_t = void (*)(void* ctx, std::string_view inbound,
                               std::span<const std::byte> frame);
-    /** @brief Local COMPACT delivery sink (@ref on_compact_delivery): @p ctx, the bound
-     *         local route PATH bytes, the delivered payload TLV bytes. */
-    using compact_delivery_fn_t = void (*)(void* ctx, std::span<const std::byte> route,
-                                           std::span<const std::byte> payload);
-    /** @brief Stale-label observer (@ref on_stale_label): @p ctx, inbound child, label. */
-    using stale_label_fn_t = void (*)(void* ctx, std::string_view inbound, std::uint16_t label);
 
     /**
      * @brief Set the sink for a REPLY that terminates at this node's reply endpoint.
@@ -923,78 +915,12 @@ class fwd_router_t {
     /**
      * @brief Set a read-only observer of every inbound frame's RAW bytes (any type).
      *
-     * Fires before dispatch with the inbound link name and the complete frame span —
-     * used by tests to measure the on-wire byte-delta between a lean COMPACT delivery
-     * and the equivalent full-route FWD{WRITE} (the point of the route-handle).
+     * Fires before dispatch with the inbound link name and the complete frame span — used by
+     * tests to measure what a frame actually carried on the wire.
      * @param fn  Callback invoked on a transport receive thread.
      * @param ctx Opaque pointer handed back as @p fn's first argument.
      */
     void on_raw(raw_fn_t fn, void* ctx = nullptr) noexcept;
-
-    /**
-     * @brief Set the sink for a label-compacted delivery that terminates at this node.
-     *
-     * Invoked when a COMPACT's label resolves to a LOCAL terminus binding (the
-     * established route names a vertex here): the payload has already been written to
-     * that vertex (delivery-is-a-write, RFC-0004 §D). Carries the bound local route
-     * PATH bytes and the delivered payload TLV bytes (both borrowed for the call).
-     * @param fn  Callback invoked on a transport receive thread; keep it cheap.
-     * @param ctx Opaque pointer handed back as @p fn's first argument.
-     */
-    void on_compact_delivery(compact_delivery_fn_t fn, void* ctx = nullptr) noexcept;
-
-    /**
-     * @brief Set the observer for a dropped stale/unknown-label COMPACT (RFC-0004 §E.1).
-     *
-     * Invoked when a COMPACT bears a label with no ingress binding on its link — the
-     * frame is dropped and a HANDLE_NACK is sent back to prompt a re-advertise (never
-     * a crash). Carries the inbound link name and the stale label.
-     * @param fn  Callback invoked on a transport receive thread.
-     * @param ctx Opaque pointer handed back as @p fn's first argument.
-     */
-    void on_stale_label(stale_label_fn_t fn, void* ctx = nullptr) noexcept;
-
-    /**
-     * @brief Advertise a `label ↔ route` binding over link @p link_name (producer side).
-     *
-     * Sends an ADVERTISE carrying @p route and records the egress binding (so a NACK can
-     * re-advertise). Call when a compact-flagged flow starts or on (re)connect — re-advertising
-     * IS the self-heal, and the label is minted once per `(link, route)` then REUSED (#913): the
-     * frame goes out on every call, but a re-advertise loop grows no label or table state.
-     * @param link_name  This node's NAME for the downstream link to advertise over.
-     * @param route_path A complete PATH TLV's bytes — the delivery route to alias.
-     * @return The label to stamp on subsequent @ref send_compact, or 0 if @p link_name names no
-     *         child, or that link's label space is exhausted / its egress table full (#603 —
-     *         see `route_handle_t::ensure_egress`). No ADVERTISE is sent in either case.
-     */
-    std::uint16_t advertise(std::string_view link_name, std::span<const std::byte> route_path);
-
-    /**
-     * @brief Send a label-compacted delivery over link @p link_name (producer side).
-     *
-     * Emits `COMPACT{ label, payload }` — the route does NOT ride, only the label
-     * bound by a prior @ref advertise. No-op if @p link_name names no child.
-     * @param link_name This node's NAME for the downstream link.
-     * @param label     A label returned by @ref advertise for that link.
-     * @param payload   A complete payload TLV's bytes (the delivered VALUE).
-     */
-    void send_compact(std::string_view link_name, std::uint16_t label,
-                      std::span<const std::byte> payload);
-
-    /**
-     * @brief Forget all route-handle label state for link @p link_name (self-heal hook).
-     *
-     * A transport calls this on (re)connect/disconnect; a subsequent re-advertise
-     * rebinds cleanly and a delivery on a now-cleared label is NACK'd, not misrouted.
-     *
-     * On a MID-CHAIN node this also drops every ingress binding held on ANY link whose
-     * downstream half crossed @p link_name (#716) — see `tr::net::route_handle_t::clear_link`.
-     * Without it the upstream, which never saw the reconnect, keeps streaming COMPACTs onto a
-     * dead out-label and the flow drops silently forever; with it the upstream's next COMPACT
-     * draws the ordinary stale-label `HANDLE_NACK` and the flow re-advertises itself back up.
-     * @param link_name This node's NAME for the link whose label state to drop.
-     */
-    void clear_link(std::string_view link_name);
 
     /**
      * @brief The link-departure hook (RFC-0009 §D extended to peer departure): evict
@@ -1003,16 +929,16 @@ class fwd_router_t {
      * Two halves, in order: `graph_t::evict_link_edges(link_name)` deactivates and
      * reclaims every subscriber edge whose stored link is @p link_name (write fan-outs
      * stop addressing the dead session, and its ~90 B/edge of route/link/caller state is
-     * released — the C6's measured ~27 KB/browser-session leak), then @ref clear_link
-     * drops the link's route-handle label state (unchanged self-heal semantics).
+     * released — the C6's measured ~27 KB/browser-session leak), then every deferred AWAIT
+     * filed under it is released (ADR-0084).
      *
      * `add_child` installs this automatically behind every child's departure notifier
      * (`transport_t::set_down_notifier` with the child's registered NAME; the bus facet's
      * `bus_link_t::set_peer_down_notifier` with the departed PEER's name — the same name
      * inbound frames were tagged with, hence the name subscriber edges stored). A host
      * that learns of a departure out-of-band (its own session manager) may call it
-     * directly; calling it for a live or unknown link is safe (the next delivery-compact
-     * flow re-advertises; eviction of nothing is a no-op).
+     * directly; calling it for a live or unknown link is safe (eviction of nothing is a
+     * no-op).
      *
      * Runs on the calling thread (typically a transport receive/close thread) and takes
      * graph locks — callers must hold no transport-internal locks (the
@@ -1042,9 +968,6 @@ class fwd_router_t {
     [[nodiscard]] static session_anchor_id_t session_anchor_id(std::string_view mount,
                                                                std::string_view peer) noexcept;
 
-    /** @brief The route-handle label store (test introspection — assert statelessness). */
-    [[nodiscard]] const route_handle_t& handles() const noexcept { return handles_; }
-
     /**
      * @brief Sample one NET-PLANE `:stats` seam (RFC-0010 Amendment 2, #1503 residual).
      *
@@ -1055,12 +978,11 @@ class fwd_router_t {
      * The classes, and the nouns each publishes:
      *
      * - `router.drops` — @ref drop_stats, all seven per-cause counters.
-     * - `labels.table` — the RFC-0027 label plane: `labels_exhausted`, `refused_bindings`,
-     *   `label_not_found`, `label_resolves`.
+     * - `labels.table` — the RFC-0027 label plane: `label_not_found`, `label_resolves`.
      * - `link.<child>` — one registered child, by its `child_registry_t` NAME (the same key
      *   as its `/net/<module>/<name>` connection vertex): `dropped_rx`, `malformed_rx`,
-     *   `dropped_tx` from @ref transport_t::drop_stats, plus `labels_used` when label
-     *   switching is on for this node. A name that is not registered, or whose slot is a
+     *   `dropped_tx` from @ref transport_t::drop_stats. A name that is not registered, or
+     *   whose slot is a
      *   tombstone (a removed link), is NOT a seam — the caller gets `false`.
      *
      * @param seam_class The seam CLASS.
@@ -1253,8 +1175,8 @@ class fwd_router_t {
      * pointer would be a use-after-free."* That was true when written and is now the exact
      * OPPOSITE of the shipped invariant: ADR-0063 replaced the vector with a chunked list
      * precisely so slot addresses would become permanently stable, and calls that "a deliberate
-     * second effect, not a side effect". ADR-0062's forward cache DEPENDS on it — it holds a
-     * `const child_t*` and lets the teardown tombstone be the invalidation. Anyone reasoning
+     * second effect, not a side effect": a holder may keep a `const child_t*` and let the
+     * teardown tombstone be the invalidation. Anyone reasoning
      * about slot lifetime from the old sentence would reach the wrong conclusion, which is why
      * it is corrected rather than deleted.
      *
@@ -1668,8 +1590,8 @@ class fwd_router_t {
      * On a bus the seam already tagged the frame, and @p peer is simply handed back. On a
      * FLAT link there is no such tag — that is what `peer_named=false` MEANS — so the link
      * itself is asked which peer it is delivering right now (`transport_t::inbound_peer`).
-     * Called only where the answer is consumed (a terminus resolve, a local COMPACT
-     * delivery) and never on a forwarding hop, so a relayed frame pays nothing for it.
+     * Called only where the answer is consumed (a terminus resolve) and never on a forwarding
+     * hop, so a relayed frame pays nothing for it.
      * @return The frame's peer, or a handle that is not `valid()` when there is no receive
      *         context, no registered link, or the kind mints no per-peer identity — on which
      *         the subject stays the inbound link's own name.
@@ -1691,10 +1613,8 @@ class fwd_router_t {
      *        handle — the router's own use of the seam the resolver reaches through
      *        `graph::op_resolver_t::on_peer_subject`.
      *
-     * Shared by that supplier and by the label-switched COMPACT delivery, which resolves no
-     * FWD and so never passes through the resolver: two delivery shapes carrying the same
-     * peer's write MUST be gated under the same principal, or a deny on one is a bypass
-     * through the other.
+     * Every locally-terminating write a peer makes reaches it through that one supplier, so
+     * every spelling of the same peer's write is gated under the same principal.
      * @retval {} No per-peer subject is derivable — the caller keeps the inbound link name.
      */
     [[nodiscard]] static std::string_view peer_subject_of(const child_rx_ctx_t* ctx,
@@ -1804,6 +1724,16 @@ class fwd_router_t {
      */
     [[nodiscard]] transport_t* reply_link(std::string_view inbound_name,
                                           const child_rx_ctx_t* inbound_ctx) noexcept;
+    /**
+     * @brief The disposition of an outer frame that is not a `FWD`, by its type byte.
+     *
+     * A RETIRED code (`0x11`-`0x13`, RFC-0032 §6.1) is counted in `retired_rx` and answered
+     * with one bare `ERROR{tr::schema::type_mismatch}` on the link it arrived on, never
+     * dropped in silence. Any other type is dropped as before; a bare `ERROR` in particular
+     * is a report, not a request, so it is never answered and two nodes cannot loop.
+     */
+    [[gnu::cold]] void refuse_unserved_type(std::byte type, std::string_view inbound_name,
+                                            const child_rx_ctx_t* inbound_ctx) noexcept;
     /**
      * @brief Classify ONE inbound FWD frame and dispatch it — the ingress driver, once.
      *
@@ -2087,7 +2017,7 @@ class fwd_router_t {
      *        holder left, then give the session an identity anchor (#1223 step 2, #1609).
      *
      * An arrival is the RE-TENANT edge: the name has just changed hands and the new session
-     * has sent nothing, so every edge, label binding and await still filed under @p peer is a
+     * has sent nothing, so every edge and await still filed under @p peer is a
      * predecessor's whose departure never reached this router. The arrival runs that
      * departure (`bus_peer_down`) first, which makes "edges under a peer name belong to
      * its current holder" true by construction rather than by a sweeper's care; when the
@@ -2157,75 +2087,12 @@ class fwd_router_t {
     [[nodiscard]] std::optional<wire::path_ref_element_t> hop_mint(
         std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx) const;
     /**
-     * @brief The control switch (ADVERTISE / COMPACT / HANDLE_NACK), once, over either tier.
-     *
-     * Reads the outer type + `u16` label by OFFSET through @p cur — no owning decode of the
-     * frame on either tier — and routes the three control types to their handlers. The one
-     * thing the two tiers genuinely do differently is how they hand a handler the CHILD
-     * window it needs contiguous, so that is the parameter: @p contig maps
-     * `(off, total)` to a span, and owns whatever that costs on its tier for the duration
-     * of the call. A `HANDLE_NACK` acts on the label alone and never calls it.
-     *
-     * @tparam Cursor A grammar byte-source cursor (span or rope).
-     * @param  contig `std::span<const std::byte>(std::size_t off, std::size_t total)` — the
-     *                child window made contiguous, or EMPTY when that was not possible (a
-     *                rope materialize that OOM'd or hit a DEVICE link). A contiguous source
-     *                subspans, so it never answers empty for a non-empty window.
-     */
-    template <class Cursor, class Contig>
-    void dispatch_control(std::string_view inbound_name, const Cursor& cur, Contig&& contig,
-                          const child_rx_ctx_t* inbound_ctx = nullptr, peer_handle_t peer = {});
-    /**
-     * @brief Dispatch a multi-link control frame (ADVERTISE / COMPACT / HANDLE_NACK)
-     *        rope-native (ADR-0055 §2).
-     *
-     * Reads the outer type + `u16` label straight off the scatter-gather @p frame via a
-     * @ref wire::grammar::rope_cursor — NO whole-frame flatten. A `HANDLE_NACK` acts on the
-     * label alone (zero materialize); ADVERTISE / COMPACT materialize **only** the child
-     * sub-rope a handler genuinely needs contiguous (the route to strip+re-encode, the
-     * payload to store/forward — an ADR-0052 legitimate egress/store boundary), never the
-     * whole frame. A contiguous (single-link) control frame never reaches here — it decodes
-     * eagerly in `on_frame_impl`. This is the sink that let the interim
-     * `on_frame_rope` whole-frame flatten be deleted (ADR-0053 ⑥ / ADR-0055 §3).
-     */
-    void on_control_rope(std::string_view inbound_name, view::rope_t frame,
-                         const child_rx_ctx_t* inbound_ctx = nullptr, peer_handle_t peer = {});
-    /** @brief Learn (or re-advertise downstream) a `label ↔ route` binding (RFC-0004 §E.1). */
-    void on_advertise(std::string_view inbound_name, std::uint16_t label,
-                      const wire::tlv_node_t& route);
-    /** @brief Forward (swap label) or locally deliver a label-compacted COMPACT payload. */
-    void on_compact(std::string_view inbound_name, std::uint16_t label,
-                    std::span<const std::byte> payload_bytes,
-                    const child_rx_ctx_t* inbound_ctx = nullptr, peer_handle_t peer = {});
-    /** @brief Re-advertise an egress binding in response to a downstream HANDLE_NACK. */
-    void on_nack(std::string_view inbound_name, std::uint16_t label);
-    /** @brief The vertex a bound route names, or nullopt — the memoizable half of
-     *         `deliver_local`, shared so a cached handle cannot diverge from it. */
-    [[nodiscard]] std::optional<graph::vertex_handle_t> resolve_route_vertex(
-        std::span<const std::byte> route_path) const;
-    /**
-     * @brief Apply a bound route's delivery as a write under @p caller's ACL context.
-     *
-     * @param caller The ACL subject context — the inbound link's NAME for a COMPACT that
-     *               arrived on the wire, matching what the equivalent full-route
-     *               `FWD{WRITE}` presents (RFC-0004 §F gates the target vertex at the final
-     *               hop, and both spellings of one delivery must present one subject).
-     *               Required, not defaulted: an empty caller is the local-trusted
-     *               short-circuit in `graph_t::acl_allows`, and #974 was exactly a delivery
-     *               path inheriting it by omission.
-     * @param link   The inbound link's catalog `(kind, role)` (#1650), as the full-route
-     *               `FWD{WRITE}` presents it — required for the same reason @p caller is.
-     */
-    [[nodiscard]] bool deliver_local(std::span<const std::byte> route_path,
-                                     std::span<const std::byte> payload, std::string_view caller,
-                                     const link_kind_t* link);
-    /**
      * @brief The graph remote-delivery sink (#136): emit one producer delivery to @p sub.
      *
-     * Sends a full-route `FWD{WRITE, dst=return_route, payload}` by default, or — when
-     * `sub.delivery_compact` — lazily advertises a label once for the flow then streams a
-     * lean `COMPACT` (RFC-0004 §D/§E.1). Fires on the writer thread (outside the vertex
-     * lock); all label state is in the mutex-guarded @ref route_handle_t.
+     * Sends `FWD{WRITE, dst, src=<empty PATH>, payload}` over the stored PAIR chain when its
+     * first element still validates, else over the canonical full route (RFC-0004 §D, RFC-0024
+     * §7.1). No hop holds state for the flow (#1951). Fires on the writer thread, outside the
+     * vertex lock.
      */
     void deliver_remote(const graph::remote_delivery_t& sub, const graph::value_t& val);
 
@@ -2324,11 +2191,8 @@ class fwd_router_t {
      * Word-wide, so the native binding holds on rv32imac.
      */
     graph::bound_rmw_counter_t<std::size_t, std::memory_order_relaxed> label_resolves_;
-    // The label plane's substrate (#603 defect 1 / #873 family 3): the route-handle tables
-    // draw from it, and so do the ADVERTISE arm's route re-encodes and the two over-wide
-    // route reads on the COMPACT/NACK arms — every one of which was a throwing allocation on
-    // a peer-provoked receive thread before. Held here as well as inside `handles_` because
-    // those router-side reads are the store's callers, not the store.
+    // The long-lived link-state substrate (#603 defect 1 / #873 family 3): receive contexts,
+    // bus token caches, interned kinds and bound-path scratch draw from it.
     mem::block_source_t* label_src_;
     mem::block_source_t* rx_;     // DEFAULT terminus-arena source, NOTHROW (#588);
                                   // a child may carry its own (ADR-0067 §3)
@@ -2338,7 +2202,6 @@ class fwd_router_t {
                                   // a refusal degrades to addressed BACKPRESSURE
     child_registry_t registry_;   // the one NAME→link demux table (Brick 3a, ADR-0037);
                                   // its chunks draw from `label_src` (#873 phase 1)
-    route_handle_t handles_;      // per-link label tables (compact flows only)
     /**
      * @brief One interned link-kind record: the view a `child_rx_ctx_t::kind` points at,
      *        with the owned `kind` bytes right after it in the same block (#1779).
@@ -2377,17 +2240,17 @@ class fwd_router_t {
      */
     mutable std::mutex ctl_m_;
     /**
-     * @brief Serializes the five sink SETTERS — never taken by a reader (#914).
+     * @brief Serializes the three sink SETTERS — never taken by a reader (#914).
      *
      * A `sink_slot_t` publishes its pair for racing readers but does not serialize two
-     * concurrent publishes; one mutex here does that for all five, which is what keeps a
+     * concurrent publishes; one mutex here does that for all three, which is what keeps a
      * slot three words wide. Deliberately NOT `ctl_m_`: that one is held across socket
      * construction for milliseconds, and installing an observer has no business waiting
      * on a connect. The frame path takes neither.
      */
     mutable std::mutex sink_m_;
     /**
-     * @brief The five observer/terminus sinks, each a `sink_slot_t` (#914).
+     * @brief The three observer/terminus sinks, each a `sink_slot_t` (#914).
      *
      * They were ten plain members — `fn` and `ctx` stored separately by a setter that
      * takes no lock, read with check-then-call on every transport receive thread. That
@@ -2401,11 +2264,9 @@ class fwd_router_t {
      * line, which a 64-byte (per-slot-mutex) first cut did not, and `bench_forward_demux`
      * charged ~2% for at 64 registered links.
      */
-    sink_slot_t<reply_fn_t> reply_;               /**< @brief Reply-terminus sink. */
-    sink_slot_t<inbound_fn_t> inbound_;           /**< @brief Inbound-FWD observer. */
-    sink_slot_t<raw_fn_t> raw_;                   /**< @brief Raw-frame observer. */
-    sink_slot_t<compact_delivery_fn_t> delivery_; /**< @brief Local COMPACT delivery sink. */
-    sink_slot_t<stale_label_fn_t> stale_;         /**< @brief Stale-label observer. */
+    sink_slot_t<reply_fn_t> reply_;     /**< @brief Reply-terminus sink. */
+    sink_slot_t<inbound_fn_t> inbound_; /**< @brief Inbound-FWD observer. */
+    sink_slot_t<raw_fn_t> raw_;         /**< @brief Raw-frame observer. */
 
     /**
      * @name The counted cold-path drops behind @ref drop_stats (#1503 step 3)
@@ -2432,6 +2293,7 @@ class fwd_router_t {
     std::atomic<std::size_t> reply_iov_dropped_{0};
     std::atomic<std::size_t> delivery_iov_dropped_{0};
     std::atomic<std::size_t> malformed_rx_{0};
+    std::atomic<std::size_t> retired_rx_{0};
     /** @} */
     /** @brief @ref reply_name_lookups's counter: cold state, so it sits with the drops. Bumped
      *         only on the by-name arm of `reply_link`, never on a point-to-point reply. */

@@ -1,0 +1,12 @@
+{
+  "name": "compact-key-retired",
+  "category": "subscriber",
+  "hex": "044028000600070006636C69656E740B4019000200100064656C69766572795F636F6D706163740100010001",
+  "total_bytes": 44,
+  "decoded": {
+    "type": "0x04 SUBSCRIBER",
+    "structured": true,
+    "meaning": "SUBSCRIBER{ PATH{ NAME \"client\" }, SETTINGS{ NAME \"delivery_compact\" VALUE u8=1 } } — an older consumer's compaction opt-in. The key is RETIRED (RFC-0032 §6.2): a receiver ignores it, the absent delivery_policy reads as all-zero, and the subscription is served with ordinary chain FWD{WRITE} deliveries",
+    "note": "no reader surfaces a compaction opt-in; a :subscribers[N] read returns the record with the retired key as written"
+  }
+}

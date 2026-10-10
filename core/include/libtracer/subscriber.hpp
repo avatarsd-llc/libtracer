@@ -208,9 +208,8 @@ struct subscriber_remote_t {
      * @brief The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
      *        `src` the subscribe arrived with).
      *
-     * A write hands (@ref link, this route, @ref delivery_compact, value) to the graph's
-     * injected remote-delivery sink, which emits the `FWD{WRITE}` (or auto-promoted COMPACT)
-     * back over the link (RFC-0004 §D/§E.1, ADR-0035 slice 4 / #136).
+     * A write hands (@ref link, this route, value) to the graph's injected remote-delivery
+     * sink, which emits the `FWD{WRITE}` back over the link (RFC-0004 §D, #136).
      *
      * @ref link is the discriminator, not this field: `graph_t::dispatch_edge` takes its
      * remote leg on a non-empty link and reads this route without testing it. The two agree
@@ -252,23 +251,12 @@ struct subscriber_remote_t {
      */
     mem::string_t caller;
     /**
-     * @brief Route-handle opt-in (`SUBSCRIBER.qos_settings.delivery_compact`, RFC-0004
-     *        §E.1 / ADR-0035 slice 4).
-     *
-     * When true the consumer requests label-compacted deliveries: the producer MAY
-     * advertise a per-link label aliasing this subscriber's return route and thereafter
-     * stream lean COMPACT frames instead of full-route `FWD{WRITE}` deliveries. Default
-     * false ⇒ stateless full-route delivery, so a cold/one-shot flow allocates no label
-     * state.
-     */
-    bool delivery_compact = false;
-    /**
      * @brief Intrusive refcount (#1442): how many holders name this record — the slot, plus
      *        one per PUBLISHED edge array whose entry points at it.
      *
      * **Rides the record's existing TAIL PADDING and therefore costs zero bytes.**
-     * @ref delivery_compact ends at offset 113 and the record is 8-aligned, so a 4-byte
-     * counter lands at 116 and `sizeof` stays the pinned 120 B. That is why the shape is an
+     * @ref caller ends at offset 112 and the record is 8-aligned, so a 4-byte counter lands
+     * at 112 and `sizeof` stays the pinned 120 B. That is why the shape is an
      * intrusive count and not a `std::shared_ptr`: a 16-byte handle would have widened
      * @ref subscriber_t (pinned at 80 B) AND @ref pub_edge_t, whose width was measured at
      * **+23 %** on the fan-out-1024 publish the last time it grew — the fix would have been
@@ -326,8 +314,15 @@ class remote_ptr_t {
         std::swap(p_, other.p_);
         return *this;
     }
-    /** @brief Release this reference; the last one out frees the record. */
-    ~remote_ptr_t() { reset(); }
+    /**
+     * @brief Release this reference; the last one out frees the record.
+     *
+     * Always inlined for the same reason @ref reset is: the fan-out destroys one handle per
+     * edge per delivery. With only `reset` pinned, GCC 13.3 still outlined the destructor
+     * itself when graph.cpp's inline budget moved, which put a call back on every edge of the
+     * wide-fan-out teardown loop (+10 % p50 at `inproc/64/1024/1`, #1951).
+     */
+    [[gnu::always_inline]] ~remote_ptr_t() { reset(); }
 
     /**
      * @brief Drop this reference (acq_rel) and empty the handle; frees the record at zero.
@@ -556,7 +551,7 @@ struct subscriber_t {
      */
     view::view_t source_view{};
     /** @brief The cold wire/gate half (#380 §3) — null for the plain in-process edge;
-     *         allocated by @ref ensure_remote when a route/link/caller/compact-flag is
+     *         allocated by @ref ensure_remote when a route/link/caller is
      *         stored (pay-for-what-you-use, ADR-0021). SHARED with every published entry
      *         that names this slot (#1442), never copied into one. */
     remote_ptr_t remote;

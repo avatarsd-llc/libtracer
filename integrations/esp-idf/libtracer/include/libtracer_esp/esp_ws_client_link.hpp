@@ -148,9 +148,9 @@
  *     and the third of those three sites). It used to fire from nowhere, on
  *     the premise that a blip's subscriber edges should survive the reconnect; that
  *     premise only holds for a blip the far side also survives, and the link cannot tell
- *     one from a peer that rebooted and forgot every subscription and label it issued.
+ *     one from a peer that rebooted and forgot every subscription it issued.
  *     So a reconnect is a NEW session to the routing plane: the router evicts this
- *     child's edges and label bindings and both sides re-establish, instead of this node
+ *     child's edges and both sides re-establish, instead of this node
  *     producing into a session that no longer exists.
  *   - The link also has to NOTICE a peer that vanishes without a FIN (#957). Nothing in
  *     the loop does: `esp_transport_poll_read` reports "no data" forever, so `link_up()`
