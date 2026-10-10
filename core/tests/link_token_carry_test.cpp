@@ -63,6 +63,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/link_id.hpp"
@@ -155,7 +156,7 @@ bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_
     return g
         .subscribe_wire(v, make_value(b_subscriber_at({std::string(marker)})),
                         make_value(b_path_of({std::string(link)})), std::string(link), view_t{},
-                        std::string{}, token)
+                        std::string{}, token, tr::testing::test_link(std::string(link)))
         .has_value();
 }
 
@@ -236,6 +237,18 @@ class census_bus_t : public transport_t, public bus_link_t {
     std::vector<std::string> names_; /**< @brief index → peer name — the handle's meaning. */
 };
 
+/**
+ * @brief The pairs @p router stored for an edge admitted over the child @p mount — and, on a
+ *        bus, its peer @p peer (#1941): what a departure evicts by.
+ */
+tr::graph::link_pair_t router_link(const graph_t& g, const fwd_router_t& router,
+                                   std::string_view mount, peer_handle_t peer = {}) {
+    const auto* const door = router.registry().entry_by_name(mount);
+    const auto conn = door != nullptr ? g.vertex_slot_at(door->conn_slot) : std::nullopt;
+    if (!conn) return {};
+    return {.conn = {conn->index, conn->generation}, .peer = peer};
+}
+
 // ---------------------------------------------------------------------------
 
 /**
@@ -279,7 +292,8 @@ void test_same_name_redial_reuses_its_slot() {
     check(wire_sub(g, w, "p3", "b", again), "a redial subscribes on a second vertex");
     check(g.link_edge_candidates("p3") == 2,
           "both vertices are on ONE list — nothing was stranded behind a second slot");
-    check(g.evict_link_edges("p3") == 2, "and one departure reclaims both edges");
+    check(g.evict_link_edges("p3", tr::testing::test_link("p3")) == 2,
+          "and one departure reclaims both edges");
 }
 
 /**
@@ -345,8 +359,10 @@ void test_a_wrong_token_cannot_mis_index() {
     check(wire_sub(g, v, "link-b", "m", a), "the subscribe is admitted");
     check(g.link_edge_candidates("link-b") == 1, "it is indexed under the key, `link-b`");
     check(g.link_edge_candidates("link-a") == 0, "and NOT under the token's link");
-    check(g.evict_link_edges("link-a") == 0, "link-a's departure reclaims nothing of it");
-    check(g.evict_link_edges("link-b") == 1, "link-b's departure reclaims it — reachable");
+    check(g.evict_link_edges("link-a", tr::testing::test_link("link-a")) == 0,
+          "link-a's departure reclaims nothing of it");
+    check(g.evict_link_edges("link-b", tr::testing::test_link("link-b")) == 1,
+          "link-b's departure reclaims it — reachable");
 }
 
 /**
@@ -372,10 +388,11 @@ void test_the_token_seam_is_asked_only_at_a_subscribe() {
         std::string link;     /**< @brief The link the answer is for. */
     } counter{.g = &g, .link = "cli"};
     resolver.on_link_id(
-        [](void* c, const inbound_ref_t& inbound) -> link_id_t {
+        [](void* c, const inbound_ref_t& inbound) -> tr::graph::carried_link_t {
             auto* const cc = static_cast<counter_t*>(c);
             ++cc->asks;
-            return cc->g->intern_link(inbound.link);
+            return {.token = cc->g->intern_link(inbound.link),
+                    .link = tr::testing::test_link(inbound.link)};
         },
         &counter);
 
@@ -462,7 +479,8 @@ void test_a_census_bus_peer_is_indexed_and_evicts() {
     check(g.link_edge_candidates("n9") == 1, "a second census peer gets its own list");
     check(g.link_edge_candidates("n7") == 2, "and does not disturb the first's");
 
-    check(g.evict_link_edges("n7") == 2, "n7's departure reclaims exactly its two edges");
+    check(g.evict_link_edges("n7", router_link(g, router, "can", bus.mint("n7"))) == 2,
+          "n7's departure reclaims exactly its two edges");
     check(g.link_edge_candidates("n9") == 1, "n9's are untouched");
 
     // And the departure notifier drops the cached token, so a successor at the same peer
@@ -472,7 +490,8 @@ void test_a_census_bus_peer_is_indexed_and_evicts() {
     bus.inject_peer("n9", b_fwd(fwd_op_t::WRITE, b_path_of({"s"}), b_path_of({"n9"}),
                                 b_field_subscribers_append(), b_subscriber_at({"ui4"})));
     check(g.link_edge_candidates("n9") == 1, "a redial at the same peer index is indexed again");
-    check(g.evict_link_edges("n9") == 1, "and is evictable — the cache healed, not stranded");
+    check(g.evict_link_edges("n9", router_link(g, router, "can", bus.mint("n9"))) == 1,
+          "and is evictable — the cache healed, not stranded");
 }
 
 /**
@@ -518,7 +537,8 @@ void test_a_flat_child_carries_its_token() {
                      b_field_subscribers_append(), b_subscriber_at({"ui3"})));
     check(g.link_edge_candidates("cli") == 1,
           "a reconnect over the same registration is indexed again");
-    check(g.evict_link_edges("cli") == 1, "and evictable — the cached token was dropped, not kept");
+    check(g.evict_link_edges("cli", router_link(g, router, "cli")) == 1,
+          "and evictable — the cached token was dropped, not kept");
 }
 
 /**
@@ -543,7 +563,8 @@ void test_a_long_link_name_overflows_and_still_resolves() {
     check(wire_sub(g, v, longer, "m", a), "a subscribe over the long-named link");
     check(g.link_edge_candidates(longer) == 1, "the NAME door finds it");
     check(g.link_edge_candidates(shorter) == 0, "and does not confuse it with its prefix-sharer");
-    check(g.evict_link_edges(longer) == 1, "and its departure reclaims it");
+    check(g.evict_link_edges(longer, tr::testing::test_link(longer)) == 1,
+          "and its departure reclaims it");
 
     // Release must forget the overflow entry too, or the freed slot would keep answering to
     // a name no live link has.

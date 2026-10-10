@@ -266,10 +266,17 @@ void transport_can::enumerate_peers(const peer_visitor_t& visit) const {
  */
 transport_t* transport_can::peer_link(std::string_view peer) {
     const std::optional<std::uint16_t> node = parse_peer_name(peer);
-    if (!node) return nullptr;
+    return node ? peer_link_of(peer_handle_t{*node, kAnnouncedPeerGeneration}) : nullptr;
+}
+
+transport_t* transport_can::peer_link_of(peer_handle_t peer) {
+    // The handle's index is the node id (`peer_name` is its pure re-formatting), so this is
+    // `peer_link` with the name taken out — the same table, key and liveness check.
+    if (!peer.valid() || peer.index > can::kNodeMax) return nullptr;
+    const auto node = static_cast<std::uint16_t>(peer.index);
     const auto now = std::chrono::steady_clock::now();
     const std::lock_guard lock(peers_m_);
-    peer_entry_t* const* const e = peers_.find(*node);
+    peer_entry_t* const* const e = peers_.find(node);
     if (e == nullptr || now - (*e)->last_heard > cfg_.peer_ttl) return nullptr;
     return &(*e)->endpoint;
 }

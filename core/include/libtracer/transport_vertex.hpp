@@ -912,7 +912,7 @@ class transport_vertex_t {
      *        A link that names no connection (a bus peer, a provided child) answers
      *        `NOT_FOUND`, which is dropped: only a connection has a count to hold.
      */
-    static void link_hold_thunk(void* ctx, std::string_view link, bool held);
+    static void link_hold_thunk(void* ctx, graph::link_pair_t link, bool held);
 
     /**
      * @brief `set_link_state`'s body, for a caller that ALREADY holds `ctl_m_`.

@@ -81,11 +81,26 @@ std::vector<std::byte> b_subscriber(std::string_view marker) {
 }
 
 /** @brief Bind one remote subscriber at @p v admitted over @p link. */
-bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_view marker) {
+bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_view marker,
+              tr::graph::link_pair_t pair) {
     return g
         .subscribe_wire(v, make_value(b_subscriber(marker)),
-                        make_value(b_path({std::string(link)})), std::string(link))
+                        make_value(b_path({std::string(link)})), std::string(link), {}, {}, {},
+                        pair)
         .has_value();
+}
+
+/**
+ * @brief The pairs the router gives an edge admitted from peer slot @p slot of the bus child
+ *        @p mount (#1941): its connection vertex, and the peer's handle — what the hangup
+ *        evicts by.
+ */
+tr::graph::link_pair_t peer_link_pair(const graph_t& g, const fwd_router_t& router,
+                                      std::string_view mount, std::uint32_t slot) {
+    const auto* const door = router.registry().entry_by_name(mount);
+    const auto conn = door != nullptr ? g.vertex_slot_at(door->conn_slot) : std::nullopt;
+    if (!conn) return {};
+    return {.conn = {conn->index, conn->generation}, .peer = {slot, 1}};
 }
 
 /** @brief The fake server's handle, as the adopting constructor takes it. */
@@ -161,14 +176,15 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
 
     // The departing peer subscribes on ONE vertex.
     vertex_handle_t mine = g.register_vertex(path_t("/mine"), role_t::STORED_VALUE);
+    const tr::graph::link_pair_t p0 = peer_link_pair(g, router, "ws", 0);
     std::size_t mine_hits = 0, bystander_hits = 0;
     const tr::testing::remote_sink_guard_t sink_guard(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-            (d.link == "p0" ? mine_hits : bystander_hits) += 1;
+            (same_link(d.link, p0) ? mine_hits : bystander_hits) += 1;
         });
     claim_session(task, 700);  // lands in slot 0 ⇒ routable name "p0"
     claim_session(task, 701);  // a second live session, so the close is not the last one
-    check(wire_sub(g, mine, "p0", "m0"), "the peer that will depart subscribes on /mine");
+    check(wire_sub(g, mine, "p0", "m0", p0), "the peer that will depart subscribes on /mine");
     check(g.link_edge_candidates("p0") == 1, "its departure visits exactly one vertex");
 
     // Forty bystander vertices subscribed by OTHER peers — the graph the old walk charged
@@ -176,7 +192,9 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     for (int i = 0; i < 40; ++i) {
         const std::string p = "/bystander" + std::to_string(i);
         vertex_handle_t b = g.register_vertex(path_t(p.c_str()), role_t::STORED_VALUE);
-        check(wire_sub(g, b, "other" + std::to_string(i), "b"), "a bystander peer subscribes");
+        const std::string other = "other" + std::to_string(i);
+        check(wire_sub(g, b, other, "b", tr::testing::test_link(other)),
+              "a bystander peer subscribes");
     }
     check(g.link_edge_candidates("p0") == 1,
           "40 bystander subscriptions later, the departure STILL visits one vertex");

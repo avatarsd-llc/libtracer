@@ -602,6 +602,13 @@ class can_transport_t final : public transport_t, public bus_link_t {
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
     /**
+     * @brief Resolve a handle to the same endpoint @ref peer_link resolves its name to — the
+     *        handle's index IS the node id, so no name is formatted or parsed (#1941).
+     * @retval nullptr @p peer is not valid, names no node id, or the peer expired.
+     */
+    [[nodiscard]] transport_t* peer_link_of(peer_handle_t peer) override;
+
+    /**
      * @brief Resolve an inbound handle back to its `n<node-id>` peer name (#1294).
      *
      * The handle's index IS the bus node id and the name is a pure function of it, so this

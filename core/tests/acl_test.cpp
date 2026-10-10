@@ -1049,6 +1049,7 @@ void test_remote_path() {
         g.set_hooks(hooks);
     }
     op_resolver_t resolver(g);
+    tr::testing::carry_test_links(resolver);  // a remote subscribe needs its link's pairs (#1941)
     vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);
     (void)g.write(path_t("/x:acl"), make_value(make_acl({

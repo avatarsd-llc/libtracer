@@ -879,6 +879,13 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     [[nodiscard]] transport_t* peer_link(std::string_view peer);
 
     /**
+     * @brief The endpoint @ref peer_link resolves `p<index>` to, found by the handle's slot
+     *        index instead of by comparing names (#1941). Slot-scoped like @ref peer_link.
+     * @retval nullptr @p peer is not valid, or its slot holds no currently-open connection.
+     */
+    [[nodiscard]] transport_t* peer_link_of(peer_handle_t peer);
+
+    /**
      * @brief Close the open peer named @p peer, freeing its slot for reuse.
      *
      * Shuts the socket down (`SHUT_RDWR`) under the sender lock order
@@ -1313,6 +1320,11 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
     /** @brief The facet's spelling of @ref slot_server_t::peer_link. */
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override {
         return slot_server_t::peer_link(peer);
+    }
+
+    /** @brief The facet's spelling of @ref slot_server_t::peer_link_of. */
+    [[nodiscard]] transport_t* peer_link_of(peer_handle_t peer) override {
+        return slot_server_t::peer_link_of(peer);
     }
 
     /** @brief The facet's spelling of @ref slot_server_t::close_peer. */

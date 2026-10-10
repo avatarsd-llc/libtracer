@@ -157,10 +157,11 @@ void test_republish_allocation_is_flat() {
     for (std::size_t i = 0; i < kEdges; ++i) {
         const view_t sub = subscriber_tlv();  // built OUTSIDE the armed window
         const view_t route = route_tlv();
-        std::string link = long_link(i);
+        const std::string link = long_link(i);
         g_allocs = 0;
         g_arm = true;
-        const auto r = g.subscribe_wire(v, sub, route, std::move(link));
+        const auto r =
+            g.subscribe_wire(v, sub, route, link, {}, {}, {}, tr::testing::test_link(link));
         g_arm = false;
         per_admission[i] = g_allocs;
         check(r.has_value(), "every remote subscribe is admitted");
@@ -205,7 +206,7 @@ void test_reclaim_leaves_the_survivors_intact() {
     const path_t src = *path_t::parse("/t/share/live");
     const auto v = g.register_vertex(src, role_t::STORED_VALUE);
 
-    std::vector<std::string> seen_links;
+    std::vector<tr::graph::link_pair_t> seen_links;
     std::vector<std::string> seen_callers;
     std::size_t empty_routes = 0;
     const tr::testing::remote_sink_guard_t sink(
@@ -216,10 +217,11 @@ void test_reclaim_leaves_the_survivors_intact() {
         });
 
     for (std::size_t i = 0; i < 3; ++i)
-        check(g.subscribe_wire(v, subscriber_tlv(), route_tlv(), long_link(i), view_t{},
-                               "caller" + std::to_string(i))
-                  .has_value(),
-              "three remote subscribers are admitted");
+        check(
+            g.subscribe_wire(v, subscriber_tlv(), route_tlv(), long_link(i), view_t{},
+                             "caller" + std::to_string(i), {}, tr::testing::test_link(long_link(i)))
+                .has_value(),
+            "three remote subscribers are admitted");
 
     check(g.write(src, make_value({0x30, 0x00, 0x00, 0x00})).has_value(), "the first write lands");
     check(seen_links.size() == 3, "all three remote edges were delivered to");
@@ -239,9 +241,10 @@ void test_reclaim_leaves_the_survivors_intact() {
     check(empty_routes == 0, "every surviving delivery still carries its stored return route");
     bool zero = false, two = false, one = false;
     for (std::size_t i = 0; i < seen_links.size(); ++i) {
-        if (seen_links[i] == long_link(0) && seen_callers[i] == "caller0") zero = true;
-        if (seen_links[i] == long_link(2) && seen_callers[i] == "caller2") two = true;
-        if (seen_links[i] == long_link(1)) one = true;
+        using tr::testing::test_link;
+        if (seen_links[i] == test_link(long_link(0)) && seen_callers[i] == "caller0") zero = true;
+        if (seen_links[i] == test_link(long_link(2)) && seen_callers[i] == "caller2") two = true;
+        if (seen_links[i] == test_link(long_link(1))) one = true;
     }
     check(zero && two, "each survivor's own link and caller bytes came through unchanged");
     check(!one, "the reclaimed edge delivered nothing");
@@ -284,15 +287,16 @@ void test_delivery_allocation_is_flat() {
             // Touch the borrowed spellings: a snapshot that handed back a dangling view
             // rather than a held record is a read of freed bytes here, which is what the
             // ASan/TSan legs of this binary are for.
-            delivered += d.link.size() + d.caller.size();
+            delivered += d.link.conn.index + d.caller.size();
         });
 
     std::vector<std::size_t> per_write(kEdges, 0);
     for (std::size_t i = 0; i < kEdges; ++i) {
-        check(g.subscribe_wire(v, subscriber_tlv(), route_tlv(), long_link(i), view_t{},
-                               "caller" + std::to_string(i))
-                  .has_value(),
-              "every remote subscribe is admitted");
+        check(
+            g.subscribe_wire(v, subscriber_tlv(), route_tlv(), long_link(i), view_t{},
+                             "caller" + std::to_string(i), {}, tr::testing::test_link(long_link(i)))
+                .has_value(),
+            "every remote subscribe is admitted");
         const view_t warm = make_value({0x30, 0x00, 0x00, 0x00});
         const view_t armed = make_value({0x31, 0x00, 0x00, 0x00});
         check(g.write(src, warm).has_value(), "the un-armed settling write lands");

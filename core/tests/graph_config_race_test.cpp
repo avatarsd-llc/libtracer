@@ -94,6 +94,7 @@
 #include <thread>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -274,7 +275,7 @@ view_t b_spec(std::string_view type, std::string_view name) {
 bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_view marker) {
     return g
         .subscribe_wire(v, make_value(b_subscriber(marker)), make_value(b_path({link})),
-                        std::string(link))
+                        std::string(link), {}, {}, {}, tr::testing::test_link(std::string(link)))
         .has_value();
 }
 

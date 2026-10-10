@@ -1086,8 +1086,9 @@ class driver_t {
 
     /** @brief One live remote subscribe — the renewal a peer re-issues. */
     void live_step(std::size_t li, std::size_t vi) {
-        const auto r = graph_->subscribe_wire(vertices_[vi], make_value(subs_[li * verts_ + vi]),
-                                              make_value(routes_[li]), names_[li]);
+        const auto r = graph_->subscribe_wire(
+            vertices_[vi], make_value(subs_[li * verts_ + vi]), make_value(routes_[li]), names_[li],
+            {}, {}, {}, tr::graph::link_pair_t{.conn = {static_cast<std::uint32_t>(li), 1}});
         live_ok_ += r.has_value() ? 1u : 0u;
     }
 
