@@ -146,7 +146,8 @@ inline void pass_quiescent_state() noexcept {
  * @brief An opaque handle to ONE in-process subscription — the token @ref graph_t::unsubscribe
  *        removes it by (ADR-0049 host-SDK sugar for the wire `:subscribers[N]` clear).
  *
- * Returned by the callback-form @ref graph_t::subscribe overloads. It names a producer vertex and
+ * Returned by the callback-form @ref graph_t::subscribe overloads, and by
+ * @ref graph_t::subscription_at for any slot (#2024). It names a producer vertex and
  * one of that vertex's `:subscribers[]` slots; the vertex is pinned for the graph's lifetime
  * (ADR-0057 — vertices are never freed), so the handle stays valid until it is unsubscribed.
  * Trivially copyable and pointer-sized-plus-index — pass it by value.
@@ -156,8 +157,11 @@ inline void pass_quiescent_state() noexcept {
  * that can build one from a vertex and a slot, and the only code that can read either back — so a
  * caller can neither reach the `vertex_t` behind a live subscription (whose slot mutators are only
  * valid under the graph's locks) nor forge a handle from an arbitrary pointer and index and hand
- * it to @ref graph_t::unsubscribe. A default-constructed handle names no subscription and
- * unsubscribes to a `NOT_FOUND` no-op; @ref operator== is the only observation a caller has.
+ * it to @ref graph_t::unsubscribe (@ref graph_t::subscription_at pairs only a vertex handle the
+ * graph issued with a slot number). A default-constructed handle names no subscription and
+ * unsubscribes to a `NOT_FOUND` no-op, as does one naming a slot that holds no edge. A caller
+ * observes a handle through @ref operator== and through @ref graph_t::subscription_address,
+ * which reads back the wire address the pair stands for (`<producer>:subscribers[N]`).
  *
  * @section subscription_reclamation The reclamation guarantee this handle carries (ADR-0080)
  *
@@ -206,6 +210,15 @@ class subscription_t {
 
 // Pass-by-value, as the doc comment above promises: privatizing the pair costs no wrapper.
 static_assert(std::is_trivially_copyable_v<subscription_t>);
+
+/**
+ * @brief Where a subscription lives: the address `<producer>:subscribers[N]` a
+ *        @ref subscription_t stands for, as @ref graph_t::subscription_address reads it back.
+ */
+struct subscription_address_t {
+    vertex_handle_t producer; /**< @brief The producer vertex the edge lives on. */
+    std::size_t slot;         /**< @brief The `:subscribers[N]` slot index. */
+};
 
 /**
  * @brief An operation's subject token — opaque bytes matched against ACE subjects (ADR-0018).
@@ -2292,6 +2305,53 @@ class graph_t {
      *                      refused the draw; the edge stays suspended and a retry may succeed.
      */
     [[nodiscard]] result_t<void> set_suspended(const subscription_t& sub, bool suspended);
+
+    /**
+     * @brief The handle naming @p producer's `:subscribers[N]` slot @p slot, however its edge
+     *        was admitted (#2024).
+     *
+     * The handle a target-form, field-write or peer-made subscription otherwise has none of, so
+     * that @ref set_suspended and @ref is_suspended reach it: the owner names it by the address
+     * the wire uses, `<producer>:subscribers[N]`. Its slot number comes from the subscription
+     * observer (`graph_hooks_t::subscription_observer`) for a peer's subscribe, or from a read
+     * of `:subscribers[N]`. It only pairs the two: no lock, no draw, no check. A slot that holds
+     * no edge answers `NOT_FOUND` to every operation on the handle, as a default handle does.
+     *
+     * @warning A handle does not own its edge. @ref unsubscribe through one built here releases
+     *          no caller context (a target-form edge holds none), and the slot-reuse caveat of
+     *          @ref set_suspended applies: the handle names whatever edge holds the slot.
+     */
+    [[nodiscard]] subscription_t subscription_at(vertex_handle_t producer,
+                                                 std::size_t slot) const noexcept {
+        return {producer.get(), slot};
+    }
+
+    /**
+     * @brief The wire address @p sub stands for, `<producer>:subscribers[N]`, as its producer
+     *        vertex and its slot (#2024): @ref subscription_at read backwards.
+     *
+     * It reads the handle, not the slot, so it answers for a handle whose edge is gone as
+     * well; whether the edge is live is @ref is_suspended's `NOT_FOUND`. No lock, no draw;
+     * @ref key_of renders the producer's key.
+     * @retval NOT_FOUND @p sub is a default-constructed handle.
+     */
+    [[nodiscard]] result_t<subscription_address_t> subscription_address(
+        const subscription_t& sub) const noexcept {
+        if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
+        return subscription_address_t{vertex_handle_t{sub.vertex_}, sub.slot_};
+    }
+
+    /**
+     * @brief Render @p v's canonical PATH key into @p out (#2024).
+     *
+     * Control-plane cold: one walk up @p v's parents and one draw from @p out's own source.
+     * A retired vertex keeps its place in the tree, so it still has a key.
+     * @retval BACKPRESSURE @p out's source refused the key; @p out is left empty.
+     */
+    [[nodiscard]] result_t<void> key_of(vertex_handle_t v, mem::bytes_t& out) const {
+        if (!try_build_key(v.get(), out)) return std::unexpected(status_t::BACKPRESSURE);
+        return {};
+    }
 
     /**
      * @brief Is the in-process subscription @p sub suspended (#1533)?

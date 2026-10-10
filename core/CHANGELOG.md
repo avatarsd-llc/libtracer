@@ -49,6 +49,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - In-process API only: the `:subscribers[N]` wire spelling is
     [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019). A `subscription_t` carries
     no generation (#1932), so a stale handle whose slot was reused names the new edge.
+- **`subscription_selector_t`: a vertex that switches among named options of subscription refs
+  ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** A header-only adapter
+  beside the core (`libtracer/subscription_selector.hpp`): a build that does not include it
+  carries none of it. The owner lists existing subscriptions under named options with `add`,
+  drops one with `remove`, and switches with `select`, or with a write of `NAME <option>` to the
+  instance's `:settings.app.active` field (an empty `STATUS` selects none);
+  `:settings.app.options` reads back every option and ref as RFC-0034 spells it. A switch
+  suspends the refs only the old option lists, then resumes the ones only the new option lists,
+  through `graph_t::set_suspended`: no unsubscribe or re-subscribe, no frame, no draw, and no
+  double delivery among the refs it lists. The selector owns the suspend bit of those refs and
+  does not watch it: a peer's (re)subscribe is admitted delivering and delivers until the owner
+  lists it and switches (a remote "admit suspended" is #2019's). A resume that answers
+  `BACKPRESSURE` fails the switch with `BACKPRESSURE` and leaves it partly applied (the new
+  option active, `settled()` false); selecting it again retries. A ref whose subscription is
+  gone is listed `inert` and skipped until the owner removes it or adds the same address again,
+  which re-reads it. Operations that meet on one instance never wait: the later one answers
+  `BACKPRESSURE` and changes nothing. The selector never creates or deletes a subscription,
+  persists nothing and copies no option name (names are borrowed; a temporary owning string
+  does not compile, and a slot past 65,535 is refused with `INVALID_PATH`). A read of `active`
+  never refuses, so a `BACKPRESSURE` switch tells "busy" from "partly applied". Its tables are
+  fixed arrays sized by the template: `<8, 4>` by default, 176 B on LP64 and 100 B on ILP32; `<64, 16>` is
+  1,064 B and 680 B. An `options` read renders at most `kRefs × kOptions` ref records, each with
+  a key of up to 1 KiB, staged at about twice that on the graph's table source. An instance is
+  created through a creation hook with `attach(child_key)`.
+- **`graph_t::subscription_at` / `subscription_address` / `key_of`: a subscription by its wire
+  address ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** `subscription_at`
+  pairs a producer handle with a `:subscribers[N]` slot into a `subscription_t`, however the
+  edge was admitted (target-form, field write, a peer's subscribe), so `set_suspended` and a
+  selector reach it; a slot holding no edge answers `NOT_FOUND` to every operation on it.
+  `subscription_address` reads a handle back as a `subscription_address_t` (producer, slot),
+  and `key_of` renders a vertex's canonical PATH key. None takes a lock or draws from the heap
+  (`key_of` draws the key from the caller's own source); the slot-reuse caveat of
+  `set_suspended` (#1932) applies.
 
 ### Changed
 

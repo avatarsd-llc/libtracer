@@ -154,6 +154,12 @@ add_executable(bench_subscriber_suspend bench_subscriber_suspend.cpp)
 target_link_libraries(bench_subscriber_suspend PRIVATE libtracer)
 target_compile_options(bench_subscriber_suspend PRIVATE -Wall -Wextra)
 
+# #2024: a subscription-selector switch at fan 1 / 32 / 1024, and a fan-out write with a
+# selector's suspended edges standing beside the delivering ones.
+add_executable(bench_subscription_selector bench_subscription_selector.cpp)
+target_link_libraries(bench_subscription_selector PRIVATE libtracer)
+target_compile_options(bench_subscription_selector PRIVATE -Wall -Wextra)
+
 # Many-core contention microbenchmarks (Wave 0e; the ADR-0032 measurement-first
 # answer to the 128-core scaling question). bench_fanout_clone_storm measures
 # segment-refcount cacheline contention under wide fan-out; bench_await_wakeup_storm
