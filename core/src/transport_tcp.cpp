@@ -203,6 +203,13 @@ tcp_transport_t::~tcp_transport_t() {
     if (listen_fd_ >= 0) ::close(listen_fd_);
 }
 
+void tcp_transport_t::shut_down() {
+    shut_down_stream();
+    // Only the joined thread read the listen socket, so it can go now and free its port.
+    if (listen_fd_ >= 0) ::close(listen_fd_);
+    listen_fd_ = -1;
+}
+
 void tcp_transport_t::send(std::span<const std::byte> frame) {
     // One span, same wire bytes (an empty frame is a prefix-only record either
     // way) — the gathered path is the one implementation.
@@ -420,6 +427,8 @@ tcp_server_transport_t::~tcp_server_transport_t() {
     // socket and sweeps the slot fds after this body.
     stop_and_join();
 }
+
+void tcp_server_transport_t::shut_down() { shut_down_slots(); }
 
 mem::poly_ptr_t<slot_server_t::session_base_t> tcp_server_transport_t::make_session() {
     mem::poly_ptr_t<session_t> slot = mem::make_poly<session_t>(slots_.source());

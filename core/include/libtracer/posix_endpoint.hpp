@@ -664,6 +664,13 @@ class stream_endpoint_t : protected posix_endpoint_t {
     void teardown_peer(int fd);
 
     /**
+     * @brief The @ref transport_t::shut_down of a one-peer stream link: join the receive
+     *        thread, then tear the live peer down (@ref teardown_peer), so a later send reads
+     *        -1 and sheds. Idempotent.
+     */
+    void shut_down_stream();
+
+    /**
      * @brief The one-peer accept loop (tcp LISTEN / ws server shape).
      *
      * Until `stop_`: one poll-100ms-recheck accept pass (@ref poll_accept);
@@ -1026,6 +1033,13 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * @param s The slot to recycle.
      */
     void teardown_slot(session_base_t& s);
+
+    /**
+     * @brief The @ref transport_t::shut_down of a stream server: join the poll thread, tear
+     *        every session down exactly as a remote close does (@ref teardown_slot), and close
+     *        the listen socket. Idempotent.
+     */
+    void shut_down_slots();
 
     /**
      * @brief Fan one already-encoded gathered record to EVERY open peer.

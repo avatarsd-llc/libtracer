@@ -414,6 +414,13 @@ void stream_endpoint_t::teardown_peer(int fd) {
     ::close(fd);
 }
 
+void stream_endpoint_t::shut_down_stream() {
+    stop_and_join();
+    // Only the joined thread ever closed this fd, so nothing else can close it under us.
+    const int fd = conn_fd_.load(std::memory_order_relaxed);
+    if (fd >= 0) teardown_peer(fd);
+}
+
 void stream_endpoint_t::run_accept_loop(int listen_fd, function_ref_t<bool(int)> on_accept,
                                         function_ref_t<void(int)> serve_peer) {
     while (!stop_.load(std::memory_order_relaxed)) {
@@ -750,6 +757,15 @@ void slot_server_t::teardown_slot(session_base_t& s) {
         else if (!any_open_session())
             notify_down();
     }
+}
+
+void slot_server_t::shut_down_slots() {
+    // The poll thread first: it is the only other thread that tears a slot down or reads the
+    // listen socket, so after the join both are this call's alone.
+    stop_and_join();
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_) teardown_slot(*s);
+    if (listen_fd_ >= 0) ::close(listen_fd_);
+    listen_fd_ = -1;
 }
 
 bool slot_server_t::any_open_session() const {

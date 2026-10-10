@@ -759,6 +759,27 @@ class transport_t {
     virtual void start_receiving() {}
 
     /**
+     * @brief Stop for good, short of being destroyed: the counterpart of
+     *        @ref start_receiving.
+     *
+     * When this returns, no inbound frame is delivered any more and the link's own threads
+     * have been joined. The object itself stays valid, and every call on it stays safe, until
+     * it is destroyed. What a later send does is the link's: the stream links (TCP,
+     * WebSocket) have closed their connections and shed it; UDP on a POSIX host has released
+     * its socket and the send fails; UDP over lwIP, and CAN, keep their socket or bus until
+     * destruction, so a send there still leaves (see each override). That is the point: an owner
+     * that removes a link while a forward that looked it up may still be on its way into it shuts
+     * it down at removal and destroys it later, where no such call can remain.
+     * `%transport_vertex_t` does that, destroying an owned link at the graph's next
+     * `collect()`.
+     *
+     * IDEMPOTENT, and safe to follow with the destructor. The DEFAULT IS A NO-OP, which is
+     * right for a link with no thread and no descriptor of its own; a link that has either
+     * overrides it.
+     */
+    virtual void shut_down() {}
+
+    /**
      * @brief The owning-delivery capability (ADR-0042 §1): true iff this transport
      *        honors @ref set_rope_receiver by delivering refcounted rope frames.
      */

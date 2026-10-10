@@ -18,11 +18,12 @@
  * sanitizer lanes (`-fsanitize=address`, and `-fsanitize=thread` under
  * `setarch $(uname -m) -R` here) they also check the drain. The connection checks then
  * forward through a surviving link, and read a bus connection's `:children[]`, after the
- * plane is gone, and expect neither to reach the closed link.
+ * plane is gone, and expect neither to reach the closed link. Last, a forward and a listing
+ * are each held inside a connection's link while it is removed: the removal shuts the link
+ * down and parks it, and only the graph's second `collect()` after that destroys it.
  */
 
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <memory>
@@ -61,32 +62,41 @@ using tr::net::transport_vertex_t;
 
 using tr::testing::check;
 
-/** @brief What an `owned_link_t` reports, held outside it so it can be read after it closes. */
+/** @brief What an `owned_link_t` reports, held outside it so it can be read after it is gone. */
 struct probe_t {
     std::atomic<int> reached{0};            /**< @brief Calls that reached the link. */
+    std::atomic<bool> shut{false};          /**< @brief `shut_down()` has run. */
     std::atomic<bool> closed{false};        /**< @brief The link's destructor has run. */
-    std::atomic<bool> hold{false};          /**< @brief Park the next listing inside the link. */
-    std::atomic<bool> entered{false};       /**< @brief A held listing is inside the link. */
-    std::atomic<bool> go{false};            /**< @brief Let the held listing return. */
-    std::atomic<bool> closed_inside{false}; /**< @brief It saw the link closed while inside. */
+    std::atomic<bool> hold{false};          /**< @brief Hold the next call inside the link. */
+    std::atomic<bool> entered{false};       /**< @brief A held call is inside the link. */
+    std::atomic<bool> closed_inside{false}; /**< @brief The held call saw the link destroyed. */
+
+    /** @brief A held call: wait, inside the link, until the removal has dealt with it. */
+    void hold_inside() {
+        if (!hold.exchange(false)) return;
+        entered.store(true);
+        while (!shut.load() && !closed.load()) std::this_thread::yield();
+        if (closed.load()) closed_inside.store(true);
+    }
 };
 
 /** @brief A link the plane constructs and owns. It counts every call that reaches it, and it
- *         is a bus, so its connection vertex lists its one peer under `:children[]`. */
+ *         is a bus, so its connection vertex lists its one peer under `:children[]` until it
+ *         is shut down. */
 struct owned_link_t final : tr::net::transport_t, tr::net::bus_link_t {
     probe_t& p;
     explicit owned_link_t(probe_t& probe) noexcept : p(probe) {}
     ~owned_link_t() override { p.closed.store(true); }
-    void send(std::span<const std::byte>) override { p.reached.fetch_add(1); }
+    void shut_down() override { p.shut.store(true); }
+    void send(std::span<const std::byte>) override {
+        p.reached.fetch_add(1);
+        p.hold_inside();
+    }
     [[nodiscard]] tr::net::bus_link_t* bus() override { return this; }
     void enumerate_peers(const peer_visitor_t& visit) const override {
         p.reached.fetch_add(1);
-        if (p.hold.load()) {
-            p.entered.store(true);
-            while (!p.go.load()) std::this_thread::yield();
-            if (p.closed.load()) p.closed_inside.store(true);
-        }
-        visit("p0");
+        p.hold_inside();
+        if (!p.shut.load()) visit("p0");
     }
     [[nodiscard]] tr::net::transport_t* peer_link(std::string_view peer) override {
         return peer == "p0" ? this : nullptr;
@@ -262,36 +272,62 @@ class gate_source_t final : public tr::mem::block_source_t {
     bool closed = false; /**< @brief Refuse every request while set. */
 };
 
-/** @brief A `:children[]` listing already inside the link holds its removal until it returns. */
+/**
+ * @brief Remove `/net/m/x` while @p call is held inside its link, on another thread.
+ *
+ * The handshake is the link's own: the held call waits inside until the removal has either
+ * shut the link down or destroyed it, and records which. Shut down is the contract; destroyed
+ * under the call is what it must never be.
+ */
+template <class Call>
+void remove_with_call_inside(graph_t& g, transport_vertex_t& net, probe_t& p, Call call) {
+    p.hold.store(true);
+    std::thread inside(call);
+    while (!p.entered.load()) std::this_thread::yield();
+    (void)net.remove_connection("net/m/x");
+    inside.join();
+    check(!p.closed_inside.load(), "the link is not destroyed under a call still inside it");
+    check(p.shut.load() && !p.closed.load(), "removal shut it down and kept it");
+    g.collect();
+    check(!p.closed.load(), "the next collect() keeps it: it was parked since the previous one");
+    g.collect();
+    check(p.closed.load(), "and the second collect() destroys it");
+}
+
+/** @brief A forward that looked the link up before its removal is still inside it. */
+void forward_in_flight_across_removal() {
+    graph_t g;
+    fwd_router_t router(g);
+    listener_t up;
+    (void)router.add_child(kListener, up);
+    probe_t p;
+    auto net = plane_owning_x(g, router, p);
+    const std::vector<std::byte> frame =
+        tr::testing::b_fwd(tr::graph::fwd_op_t::READ, tr::testing::b_path({"net", "m", "x", "p0"}),
+                           tr::testing::b_path({"reply"}));
+    remove_with_call_inside(g, *net, p, [&] { router.on_frame(kListener, frame); });
+    (void)router.remove_child(kListener);
+}
+
+/** @brief A `:children[]` listing that loaded the seam before the retire is still inside. */
 void listing_in_flight_across_removal() {
     graph_t g;
     fwd_router_t router(g);
     probe_t p;
     auto net = plane_owning_x(g, router, p);
     const path_t children = *path_t::parse("/net/m/x:children[]");
-    p.hold.store(true);
-    std::thread reader([&] { (void)g.read(children); });
-    while (!p.entered.load()) std::this_thread::yield();
-    std::thread remover([&] { (void)net->remove_connection("net/m/x"); });
-    // Room for a removal that does not wait to close the link under the listing. A removal
-    // that waits is held regardless of how long this is.
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    p.go.store(true);
-    reader.join();
-    remover.join();
-    check(!p.closed_inside, "the link stays open while a :children[] listing is inside it");
-    check(p.closed.load(), "and is closed once the listing has returned");
+    remove_with_call_inside(g, *net, p, [&] { (void)g.read(children); });
 }
 
-/** @brief A removal whose retire is refused still closes the link behind a closed listing. */
-void refused_retire_keeps_the_listing_closed() {
+/** @brief A removal whose retire is refused keeps the shut-down link for the graph's life. */
+void refused_retire_keeps_the_link() {
     gate_source_t gate;
     graph_t g(gate);
     fwd_router_t router(g);
     probe_t p;
     std::unique_ptr<transport_vertex_t> net;
     {
-        // The listing outlives a refused retire on purpose, for the graph's lifetime: it is not
+        // The link outlives a refused retire on purpose, for the graph's lifetime: it is not
         // a leak this test should report.
         [[maybe_unused]] const lsan_scope_t ignore;
         net = plane_owning_x(g, router, p);
@@ -301,12 +337,12 @@ void refused_retire_keeps_the_listing_closed() {
     (void)net->remove_connection("net/m/x");
     gate.closed = false;
     check(g.find(x.key()).has_value(), "the retire was refused (the vertex is still registered)");
-    check(p.closed.load(), "the removal closed the link anyway");
-    const int at_close = p.reached.load();
-    const auto after = g.read(*path_t::parse("/net/m/x:children[]"));
-    check(!after && after.error() == tr::graph::status_t::NOT_FOUND,
-          "and the vertex's :children[] answers NOT_FOUND");
-    check(p.reached.load() == at_close, "without reaching the closed link");
+    check(p.shut.load(), "the removal shut the link down anyway");
+    g.collect();
+    g.collect();
+    check(!p.closed.load(), "and collect() keeps it, since the vertex still names it");
+    check(g.read(*path_t::parse("/net/m/x:children[]")).has_value(),
+          "so a :children[] read is still served, by the shut-down link");
 }
 
 }  // namespace
@@ -316,10 +352,11 @@ int main() {
     routed_dial_reaches_the_endpoint();
     destruction_under_live_dial();
     surviving_link_forwards_after_destruction();
+    forward_in_flight_across_removal();
     bus_children_read_after_destruction();
     if constexpr (tr::net::kBusLinks) {
         listing_in_flight_across_removal();
-        refused_retire_keeps_the_listing_closed();
+        refused_retire_keeps_the_link();
     }
     return tr::testing::summary("transport_vertex_teardown");
 }

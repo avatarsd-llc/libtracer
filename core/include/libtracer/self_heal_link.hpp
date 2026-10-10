@@ -135,6 +135,9 @@ class self_heal_link_t final : public transport_t {
     /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. */
     ~self_heal_link_t() override;
 
+    /** @brief See @ref transport_t::shut_down. */
+    void shut_down() override;
+
     self_heal_link_t(const self_heal_link_t&) = delete;
     self_heal_link_t& operator=(const self_heal_link_t&) = delete;
 
