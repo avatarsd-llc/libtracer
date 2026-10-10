@@ -660,10 +660,10 @@ class transport_vertex_t {
     // The NAME→link routing table is NOT duplicated here — it has one owner, the router's
     // child_registry_t (Brick 3a); `make_connection_locked` registers the link there.
     /**
-     * @brief A bus connection's `:children[]` hook context: the link's bus facet, cleared under
-     *        its own lock before the link is closed. Defined in `%transport_vertex.cpp`.
+     * @brief Where a removed connection's link waits, shut down, for the graph's next
+     *        `collect()`. Drawn with the connection; defined in `%transport_vertex.cpp`.
      */
-    struct bus_listing_t;
+    struct conn_park_t;
 
     struct conn_t {
         graph::vertex_handle_t vertex;  // the /net/<name> identity vertex (set on creation)
@@ -678,9 +678,8 @@ class transport_vertex_t {
         // a non-owning view of `owned` as its concrete type, so teardown can stop the
         // worker BEFORE the vertex retires and acquire/release can reach the refcount.
         self_heal_link_t* engine = nullptr;
-        // The `:children[]` hook context, iff the link is a bus. It outlives the link; see
-        // `bus_listing_t`.
-        bus_listing_t* listing = nullptr;
+        // The block the link is parked in when the connection goes; see `conn_park_t`.
+        conn_park_t* park = nullptr;
     };
 
     // One declared module: the segment it mounts under, the config `kind` it constructs, and
@@ -766,14 +765,14 @@ class transport_vertex_t {
         /** @brief Collect `graph_t::retire(vertex)` — the connection's identity goes. */
         void retire(graph::vertex_handle_t vertex);
 
-        /** @brief Collect the closing of @p listing — the bus `:children[]` context of the
-         *         vertex this transaction retires — before its link is destroyed. */
-        void close_listing(bus_listing_t* listing);
+        /** @brief Collect @p park: the collected link is shut down into it and it is handed
+         *         to the graph to free, instead of the link being destroyed. */
+        void park(conn_park_t* park);
 
         /**
          * @brief Phase 2: drop `ctl_m_`, then run the collected work in teardown order —
-         *        un-route, stop the engine, retire the vertex, close its bus listing,
-         *        destroy the socket, publish.
+         *        un-route, stop the engine, retire the vertex, shut the socket down and
+         *        park it, publish.
          *
          * `ops_m_`, if this is an `OPERATION`, is NOT dropped here: it is the destructor's,
          * so the whole mutation stays one serialized step.
@@ -804,8 +803,8 @@ class transport_vertex_t {
         // armed flag rather than riding beside a synthetic null handle.
         std::optional<graph::vertex_handle_t> retire_;  /**< @brief The vertex to retire. */
         std::optional<graph::vertex_handle_t> publish_; /**< @brief The vertex to write. */
-        bus_listing_t* listing_ = nullptr; /**< @brief Null = no bus listing to close. */
-        link_state_t publish_state_{};     /**< @brief The value to write. */
+        conn_park_t* park_ = nullptr;  /**< @brief Null = destroy the link here instead. */
+        link_state_t publish_state_{}; /**< @brief The value to write. */
     };
 
     /** @brief True iff THIS thread is inside a `%ctl_txn_t`'s phase 1 — the S6 lock-order

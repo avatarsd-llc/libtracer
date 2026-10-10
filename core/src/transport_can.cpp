@@ -170,6 +170,16 @@ can_transport_t::can_transport_t(mem::poly_ptr_t<can_link_t> link,
     emit_hello();
 }
 
+void can_transport_t::shut_down() {
+    // Delivery stops here: every receiver is dropped, so a frame the CAN link still reads is
+    // decoded into nothing. The link's own thread is joined when this object is destroyed —
+    // `can_link_t` has no stop short of that — and it touches only this valid object.
+    peer_rx_.set(nullptr, nullptr);
+    peer_rx_.set_rope(nullptr, nullptr);
+    rx_.set(nullptr, nullptr);
+    rx_.set_rope(nullptr, nullptr);
+}
+
 can_transport_t::~can_transport_t() {
     // Drop the receivers first (both the peer-named slot and the flat fallback);
     // then releasing the link stops its receive thread, which can no longer

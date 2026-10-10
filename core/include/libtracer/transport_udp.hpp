@@ -110,6 +110,9 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
                     const udp_config_t& config = {});
     ~udp_transport_t();
 
+    /** @brief See @ref transport_t::shut_down. */
+    void shut_down() override;
+
     udp_transport_t(const udp_transport_t&) = delete;
     udp_transport_t& operator=(const udp_transport_t&) = delete;
 

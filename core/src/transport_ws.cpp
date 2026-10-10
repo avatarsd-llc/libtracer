@@ -275,6 +275,8 @@ ws_server_transport_t::~ws_server_transport_t() {
     stop_and_join();
 }
 
+void ws_server_transport_t::shut_down() { shut_down_slots(); }
+
 mem::poly_ptr_t<slot_server_t::session_base_t> ws_server_transport_t::make_session() {
     mem::poly_ptr_t<session_t> slot = mem::make_poly<session_t>(slots_.source(), slots_.source());
     if (!slot) return nullptr;
@@ -698,6 +700,8 @@ ws_client_transport_t::~ws_client_transport_t() {
     // A leftover fd (never-spawned thread — handshake failed — leaves conn_fd_
     // at -1 anyway) is closed by ~stream_endpoint_t after this body.
 }
+
+void ws_client_transport_t::shut_down() { shut_down_stream(); }
 
 std::uint32_t ws_client_transport_t::next_mask_key() {
     // SplitMix64 step → a varied (non-crypto) 32-bit masking key per frame.

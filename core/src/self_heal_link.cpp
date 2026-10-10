@@ -52,6 +52,8 @@ self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t 
 
 self_heal_link_t::~self_heal_link_t() { stop(); }
 
+void self_heal_link_t::shut_down() { stop(); }
+
 void self_heal_link_t::set_liveness_publisher(liveness_publish_fn_t fn) {
     const std::lock_guard l(m_);
     publish_ = fn;
