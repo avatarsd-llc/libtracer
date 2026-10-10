@@ -5,8 +5,8 @@
 **`tr::mem::mem_backend_t`** is a small, user-implementable interface: subclass it
 to bind libtracer to *any* memory — a heap, a fixed arena, live registers, a DMA
 ring. libtracer never allocates *payload bytes* on its own; it asks a backend. (Its own
-bookkeeping — a rope's spilled link chain, the CAN splitter's window vector, the
-route-handle label tables — allocates from the global heap or from an injected
+bookkeeping — a rope's spilled link chain, the CAN splitter's window vector —
+allocates from the global heap or from an injected
 `std::pmr::memory_resource`; those seams are
 [failable allocation and backpressure](../design/allocation-and-backpressure.md).) Three backends are
 provided: **`mem_heap`** (owns malloc'd bytes), **`mem_borrowed`** (wraps your

@@ -59,7 +59,7 @@ The trailing `_t` is safe under `tr::`: C/POSIX reserves global trailing-`_t`, b
 
 ## Introspection — one vocabulary for every bounded resource
 
-Every bounded resource in the tree (a block source, a pool, a label table, a link's TX slots, a ring) answers the same questions, and before [#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) each answered them with its own spelling and its own polarity. These are the words. A new accessor or stats field uses them; an existing one that disagrees is renamed or aliased to them.
+Every bounded resource in the tree (a block source, a pool, a link's TX slots, a ring) answers the same questions, and before [#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) each answered them with its own spelling and its own polarity. These are the words. A new accessor or stats field uses them; an existing one that disagrees is renamed or aliased to them.
 
 | Noun | Meaning |
 | --- | --- |
