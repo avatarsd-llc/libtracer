@@ -340,7 +340,8 @@ menu "libtracer"
             the bytes it needed. Size it against the node's peak, which the
             :stats.mem.values, .tables and .net seams report per sub-pool. An
             application that injects its own block source into every graph_t
-            can lower it.
+            can lower it. With every source injected (graph, router planes,
+            transport vertex), nothing draws here (libtracer #2052).
 
             A UDP link's receive buffers are one byte past the smaller of its
             SPEC's max_frame and its rx backend's slot. A link given a bounded rx

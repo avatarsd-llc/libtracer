@@ -464,9 +464,10 @@ struct graph_t::field_surface_t {
      *        value, or the view's own failure. Every field but the folded `:children`
      *        listing crosses back this way.
      */
-    static result_t<value_ref_t> single_link(const result_t<view::view_t>& fv) noexcept {
+    static result_t<value_ref_t> single_link(const graph_t& g,
+                                             const result_t<view::view_t>& fv) noexcept {
         if (!fv) return std::unexpected(fv.error());
-        return composed_or_backpressure(view::rope_t{*fv});
+        return g.composed_or_backpressure(view::rope_t{*fv});
     }
 
     /** @brief One colon field: its NAME, its read, and its write (or none). */
@@ -498,7 +499,7 @@ struct graph_t::field_surface_t {
             return std::unexpected(status_t::PERMISSION_DENIED);
         if (sel != field_sel_t::SLOT) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (std::optional<view::view_t> sv = v->edge_source(field.steps[0].index))
-            return composed_or_backpressure(view::rope_t{*sv});  // clone, no byte copy
+            return g.composed_or_backpressure(view::rope_t{*sv});  // clone, no byte copy
         return std::unexpected(status_t::NOT_FOUND);
     }
 
@@ -634,7 +635,7 @@ struct graph_t::field_surface_t {
         if (!g.acl_allows(v, caller, whole ? acl_right_t::READ_ACL : acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
         if (!whole) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        return single_link(g.read_acl(v));
+        return single_link(g, g.read_acl(v));
     }
 
     /**
@@ -775,8 +776,8 @@ struct graph_t::field_surface_t {
         if (!g.acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
         if (!plain_step(field.steps[0])) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (app == app_sel_t::NONE) return single_link(g.read_settings(v));
-        if (app == app_sel_t::CONTAINER) return single_link(g.read_settings_app(v));
+        if (app == app_sel_t::NONE) return single_link(g, g.read_settings(v));
+        if (app == app_sel_t::CONTAINER) return single_link(g, g.read_settings_app(v));
         if (app != app_sel_t::NAMED) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // ONE locked lookup classifies the field and copies its stored bytes, as before: a
         // vertex without the owner's read seam pays nothing more for it.
@@ -801,7 +802,7 @@ struct graph_t::field_surface_t {
         // failure → BACKPRESSURE (the audited alloc/copy/over locus).
         const auto out = view::over_bytes(bytes, *g.value_backend_);
         if (!out) return std::unexpected(status_t::BACKPRESSURE);
-        return composed_or_backpressure(view::rope_t{*out});
+        return g.composed_or_backpressure(view::rope_t{*out});
     }
 
     /**
@@ -895,7 +896,7 @@ struct graph_t::field_surface_t {
         if (!g.acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
         if (!whole_field(field)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        return single_link(g.read_schema(v));
+        return single_link(g, g.read_schema(v));
     }
 
     /**
@@ -915,7 +916,7 @@ struct graph_t::field_surface_t {
                                                const field_path_t& field,
                                                std::string_view /*caller*/) {
         if (!whole_field(field)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        return single_link(g.read_identity());
+        return single_link(g, g.read_identity());
     }
 
     /**
@@ -954,7 +955,7 @@ struct graph_t::field_surface_t {
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!g.acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
-        return single_link(read_stats(g, field, seam));
+        return single_link(g, read_stats(g, field, seam));
     }
 
     /**

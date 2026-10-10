@@ -213,13 +213,14 @@ void parse_config(const tlv_node_t* config, conn_settings_t& s) {
     return true;
 }
 
-/** @brief A 1-byte link-liveness VALUE TLV (link_state_t) as an owned view. */
-[[nodiscard]] view_t link_state_value(link_state_t state) {
-    std::array<std::byte, 5> out{};  // a 4-byte header and the one state byte
-    wire::store_header(std::span<std::byte>(out).first(4), type_t::VALUE, wire::opt_t{}, 1);
-    out[4] = static_cast<std::byte>(state);
-    return view::over_bytes(out).value_or(
-        view_t{});  // empty view on alloc failure (caller-checked)
+/** @brief A 1-byte link-liveness VALUE TLV (link_state_t) as a view over a segment from
+ *         @p backend, the graph's value backend (#2052); empty when it refused (caller-checked). */
+[[nodiscard]] view_t link_state_value(link_state_t state, mem::mem_backend_t& backend) {
+    view::segment_ptr_t seg = view::segment_alloc(backend, 5);  // a 4-byte header, one state byte
+    if (!seg) return view_t{};
+    wire::store_header(seg->bytes.first(4), type_t::VALUE, wire::opt_t{}, 1);
+    seg->bytes[4] = static_cast<std::byte>(state);
+    return view_t::over(std::move(seg));
 }
 
 }  // namespace
@@ -282,9 +283,11 @@ void transport_vertex_t::ctl_txn_t::unroute(mem::string_t name) { unroute_ = std
 
 void transport_vertex_t::ctl_txn_t::stop_engine(self_heal_link_t* engine) { stop_ = engine; }
 
-void transport_vertex_t::ctl_txn_t::destroy_link(transport_ptr_t link, mem::bytes_t config) {
+void transport_vertex_t::ctl_txn_t::destroy_link(transport_ptr_t link, mem::bytes_t config,
+                                                 mem::block_ptr_t<detail_bus::listing_t> listing) {
     destroy_ = std::move(link);
     destroy_config_ = std::move(config);
+    destroy_listing_ = std::move(listing);
 }
 
 void transport_vertex_t::ctl_txn_t::retire(vertex_handle_t vertex) { retire_ = vertex; }
@@ -320,12 +323,14 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
     destroy_.reset();  // JOINS the receive thread — same reason
     // The config the socket (or its engine's settings) viewed goes only after the socket.
     destroy_config_ = mem::bytes_t(mem::null_source());
+    destroy_listing_.reset();  // the retired vertex's `:children[]` hook no longer names it
     if (publish_) {
         const vertex_handle_t vertex = *publish_;
         publish_.reset();
         // The fan-out: `write` delivers to this connection's subscribers, and a
         // routing-plane subscriber drives acquire_link/release_link straight back here.
-        out = owner_.graph_.write(vertex, link_state_value(publish_state_));
+        out = owner_.graph_.write(vertex,
+                                  link_state_value(publish_state_, owner_.graph_.value_backend()));
     }
     return out;
 }
@@ -849,26 +854,33 @@ void transport_vertex_t::provide_link(std::string_view module, std::string_view 
 namespace {
 /**
  * @brief A BUS connection vertex's `on_children` hook (RFC-0028 D10 `{fn, ctx}`, @p c the
- *        bus facet): its currently-audible peers as a POINT of POINT{NAME <peer>} members,
- *        built on every read.
+ *        connection's @ref detail_bus::listing_t): the bus's currently-audible peers as a
+ *        POINT of POINT{NAME <peer>} members, built on every read.
  *
- * Scratch for one read, from the net sub-pool: the hook's `ctx` is the bus facet alone, and
- * the answer is copied into an owned view before this returns. `ok` collects every refusal:
- * one refused record anywhere refuses the read as BACKPRESSURE.
+ * Drawn as the graph's own `:children[]` door draws (#2052): the scratch for one read from the
+ * graph's table source, the answer copied into a view from the graph's value backend, so a
+ * graph given its own source takes nothing from the default root here. `ok` collects every
+ * refusal: one refused record anywhere refuses the read as BACKPRESSURE.
  */
 result_t<view_t> bus_children(void* c) {
-    mem::bytes_t members(mem::net_source());
+    const auto& listing = *static_cast<const detail_bus::listing_t*>(c);
+    mem::bytes_t members(listing.graph->table_source());
     bool ok = true;
-    static_cast<bus_link_t*>(c)->enumerate_peers([&](std::string_view peer) {
+    listing.bus->enumerate_peers([&](std::string_view peer) {
         mem::bytes_t body(members.source());
         ok &= put_tlv(body, type_t::NAME, wire::opt_t{}, text_bytes(peer)) &&
               put_tlv(members, type_t::POINT, wire::opt_t{.pl = true}, mem::as_span(body));
     });
     mem::bytes_t out(members.source());
-    ok &= put_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, mem::as_span(members));
-    const auto res = view::over_bytes(mem::as_span(out));
-    if (!ok || !res) return std::unexpected(status_t::BACKPRESSURE);
-    return *res;
+    if (!ok || !put_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, mem::as_span(members)))
+        return std::unexpected(status_t::BACKPRESSURE);
+    // `out` is non-empty by construction; `nullopt` is exactly an alloc failure.
+    const std::span<const std::byte> bytes = mem::as_span(out);
+    view::segment_t* const seg =
+        listing.graph->value_backend().alloc(bytes.size(), mem::alloc_hint_t::NONE);
+    if (seg == nullptr) return std::unexpected(status_t::BACKPRESSURE);
+    std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
+    return view_t{view::segment_ptr_t::adopt(seg), 0, bytes.size()};
 }
 }  // namespace
 
@@ -905,13 +917,12 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
 
     // Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the
     // graph's `:children[]` machinery used to hand the retired door (the endpoint never had one).
-    // The `/net/<module>` structural vertex, created lazily on first use. graph_.find IS the
-    // dedupe — a separate seen-set would be a second source of truth (and another container
-    // instantiation) for something the graph already knows. Its key is the mount key's first
-    // two records, so it is read off that key's prefix rather than built twice.
-    const std::span<const std::byte> module_key = parent_key(mount_key, name);
-    if (!graph_.find(module_key))
-        (void)graph_.register_vertex_key(module_key, graph::role_t::STORED_VALUE, {});
+    // The `/net/<module>` structural vertex, created lazily on first use. The registration IS
+    // the dedupe: a second one answers PATH_IN_USE and changes nothing, so its result is
+    // dropped — a separate seen-set, or a `find` first, would be a second source of truth for
+    // something the graph already knows. Its key is the mount key's first two records, so it
+    // is read off that key's prefix rather than built twice.
+    (void)graph_.register_vertex_key(parent_key(mount_key, name), graph::role_t::STORED_VALUE, {});
 
     // Resolve the connection's link. Precedence, WITHIN the module resolved above: a
     // provide_link-staged transport wins (the test/manual seam); otherwise the config `kind`
@@ -995,10 +1006,15 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     graph::handlers_t handlers;
     // Asked through `bus_of` (#375 deliverable 3): on a target that closed the bus module out
     // every connection vertex is the plain one, and the synthesis below — with the TLV
-    // emission it performs — is never compiled. The hook's `ctx` is the bus facet itself,
-    // which lives exactly as long as the link (RFC-0028 D10: nothing captured, nothing owned).
+    // emission it performs — is never compiled. The hook's `ctx` pairs the bus facet, which
+    // lives exactly as long as the link, with the graph whose sources the listing draws
+    // (#2052). The hook owns nothing (RFC-0028 D10): the connection owns the pair, and phase 2
+    // frees it after the retire, next to the link.
+    mem::block_ptr_t<detail_bus::listing_t> listing;
     if (bus_link_t* const bus = bus_of(*link)) {
-        handlers.on_children = {&bus_children, bus};
+        listing = mem::make_block<detail_bus::listing_t>(*egress_src_, bus, &graph_);
+        if (!listing) return std::unexpected(status_t::BACKPRESSURE);
+        handlers.on_children = {&bus_children, listing.get()};
     }
 
     // Register the identity vertex at the composed /net/<name> key (graph owns addressing).
@@ -1016,8 +1032,9 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
         if (engine != nullptr) {
             graph::graph_t* const g = &graph_;
             const vertex_handle_t vh = *v;
-            engine->set_liveness_publisher(
-                [g, vh](link_state_t s) { (void)g->write(vh, link_state_value(s)); });
+            engine->set_liveness_publisher([g, vh](link_state_t s) {
+                (void)g->write(vh, link_state_value(s, g->value_backend()));
+            });
         }
     }
 
@@ -1027,14 +1044,15 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
                 .config = std::move(config_bytes),
                 .settings = settings,
                 .owned = std::move(owned),
-                .engine = engine};
+                .engine = engine,
+                .listing = std::move(listing)};
     conn_t* const conn = conns_.try_emplace(std::move(qualified), std::move(made)).value;
     if (conn == nullptr) {
         // The table could not grow: the rollback a refused `add_child` takes below, minus the
         // table entry. A refused emplace moves nothing out of its arguments, so `made` still
         // owns the socket, which goes to phase 2 like every other join.
         (void)graph_.retire(*v);
-        txn.destroy_link(std::move(made.owned), std::move(made.config));
+        txn.destroy_link(std::move(made.owned), std::move(made.config), std::move(made.listing));
         return std::unexpected(status_t::BACKPRESSURE);
     }
 
@@ -1070,7 +1088,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
         // handed to phase 2 like every other join (S6, #492) instead of running here under
         // `ctl_m_`; the map entry itself goes now, so nothing observes a half-built
         // connection once the lock drops.
-        txn.destroy_link(std::move(conn->owned), std::move(conn->config));
+        txn.destroy_link(std::move(conn->owned), std::move(conn->config), std::move(conn->listing));
         conns_.erase(qv);
         return std::unexpected(status_t::BACKPRESSURE);
     }
@@ -1156,7 +1174,8 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     txn.unroute(std::move(entry.key));
     txn.stop_engine(entry.value.engine);
     txn.retire(entry.value.vertex);
-    txn.destroy_link(std::move(entry.value.owned), std::move(entry.value.config));
+    txn.destroy_link(std::move(entry.value.owned), std::move(entry.value.config),
+                     std::move(entry.value.listing));
     // The map entry goes NOW, under the lock, while the identity vertex is still registered
     // — so a same-name creation racing this teardown is refused `PATH_IN_USE` by
     // `register_vertex_key` until phase 2's retire lands, and by then phase 2's un-route has

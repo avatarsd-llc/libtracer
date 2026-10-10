@@ -2915,3 +2915,11 @@ add_executable(subscriber_suspend_test subscriber_suspend_test.cpp)
 target_link_libraries(subscriber_suspend_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(subscriber_suspend_test)
 add_test(NAME subscriber_suspend COMMAND subscriber_suspend_test)
+# #2052 — with every source injected, the path_key_t spill and a bus link's :children[]
+# listing draw nothing from the default root (the MCU arena).
+if(LIBTRACER_NET_PLANE)
+    add_executable(injected_scratch_test injected_scratch_test.cpp)
+    target_link_libraries(injected_scratch_test PRIVATE libtracer)
+    libtracer_test_warnings(injected_scratch_test)
+    add_test(NAME injected_scratch COMMAND injected_scratch_test)
+endif()

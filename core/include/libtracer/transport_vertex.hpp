@@ -208,6 +208,21 @@ class conn_catalog_t {
  */
 inline constexpr std::string_view kConnEndpointName = "conn";
 
+namespace detail_bus {
+
+/**
+ * @brief A bus connection's `:children[]` hook context (RFC-0028 D10 `{fn, ctx}`, #2052): the
+ *        link's bus facet, and the graph whose table source stages the listing and whose value
+ *        backend answers it, as the graph's own `:children[]` door does. Owned by the
+ *        connection; not part of any interface.
+ */
+struct listing_t {
+    bus_link_t* bus;             /**< @brief The peers to list; lives as long as the link. */
+    const graph::graph_t* graph; /**< @brief The owning graph, whose sources the read draws. */
+};
+
+}  // namespace detail_bus
+
 /**
  * @brief Groups connection vertices under `/net` and makes each a `/` vertex (ADR-0027).
  *
@@ -662,6 +677,8 @@ class transport_vertex_t {
         // a non-owning view of `owned` as its concrete type, so teardown can stop the
         // worker BEFORE the vertex retires and acquire/release can reach the refcount.
         self_heal_link_t* engine = nullptr;
+        // A bus link's `:children[]` hook context, from `egress_src_`; empty for any other.
+        mem::block_ptr_t<detail_bus::listing_t> listing;
     };
 
     // One declared module: the segment it mounts under, the config `kind` it constructs, and
@@ -741,8 +758,10 @@ class transport_vertex_t {
         void stop_engine(self_heal_link_t* engine);
 
         /** @brief Collect the destruction of @p link — JOINS its receive thread — and then of
-         *         @p config, the connection's config copy the link's settings view. */
-        void destroy_link(transport_ptr_t link, mem::bytes_t config);
+         *         @p config, the connection's config copy the link's settings view, and of
+         *         @p listing, the hook context the retired vertex's `:children[]` named. */
+        void destroy_link(transport_ptr_t link, mem::bytes_t config,
+                          mem::block_ptr_t<detail_bus::listing_t> listing);
 
         /** @brief Collect `graph_t::retire(vertex)` — the connection's identity goes. */
         void retire(graph::vertex_handle_t vertex);
@@ -775,6 +794,8 @@ class transport_vertex_t {
         transport_ptr_t destroy_;                   /**< @brief Null = nothing to destroy. */
         /** @brief The destroyed connection's config bytes; released after `destroy_`. */
         mem::bytes_t destroy_config_{mem::null_source()};
+        /** @brief The destroyed connection's listing context; released after the retire. */
+        mem::block_ptr_t<detail_bus::listing_t> destroy_listing_;
         // Engaged = collected. `vertex_handle_t` has no default state to spell (ADR-0056 —
         // it is exactly a pointer, constructible only by the graph), so the optional IS the
         // armed flag rather than riding beside a synthetic null handle.
