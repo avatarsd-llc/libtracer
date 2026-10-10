@@ -1,6 +1,6 @@
 # Reference 23 — The Noise link binding
 
-> **Status**: normative, v1, 2026-10-10. Incorporated by [docs/spec/v1.md](../spec/v1.md) §3 as an annex that applies **to a link that uses the binding**; a link that does not use it is unaffected. The authorising instrument is [RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md), an **amendment**, accepted 2026-10-10 (maintainer ruling "all rec" on its §15; comment window waived by default and not invoked). Its §15 Q1 ruled that the binding's normative text lives on this page and not in the RFC, which stays the change record. §Terms is RFC-0033 §4, §1–§11 below are its §5.1–§5.11, §12 is its §6 and Appendix A is its Appendix A, carried over unchanged except for section cross-references.
+> **Status**: normative, v1, 2026-10-10. Incorporated by [docs/spec/v1.md](../spec/v1.md) §3 as an annex that applies **to a link that uses the binding**; a link that does not use it is unaffected. The authorising instrument is [RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md), an **amendment**, accepted 2026-10-10 (maintainer ruling "all rec" on its §15; comment window waived by default and not invoked). Its §15 Q1 ruled that the binding's normative text lives on this page and not in the RFC, which stays the change record. §Terms is RFC-0033 §4, §1–§11 below are its §5.1–§5.11, §12 is its §6 and Appendix A is its Appendix A, carried over unchanged except for section cross-references. §2 also carries [RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) Amendment 1 (accepted 2026-10-10), which made the implementation hazards of §12.8 normative.
 > **Numbering**: a bare section sign (§1–§12) on this page names a section of this page. A section of another document is always prefixed with its name (RFC-0014 §4, Noise §9, RFC-0033 §15 Q3).
 > **See also**: [RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) for the motivation, the cost analysis across NARROW, MID and WIDE, the alternatives considered and the rulings; [ADR-0086](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8 as amended 2026-10-10 (NNpsk0 when a link carries a PSK only; XX or IK when it carries identity, specified by [#1993](https://github.com/avatarsd-llc/libtracer/issues/1993), which extends this page); [ADR-0045](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) Decisions 4 and 5; [19 — Transports are vertices](19-transports-are-vertices.md) for the connection vertex a Noise link has.
 
@@ -134,6 +134,11 @@ follow §1–§11. A link that does not follow it is not a conforming Tracer Noi
   (32 zero bits, then the 64-bit counter little-endian), and SHA-256 with Noise's HMAC-based HKDF.
   The **ephemeral keys** MUST come from a cryptographic random source that the application
   injects. The library has no entropy source of its own.
+- **Implementation hazards** *(RFC-0033 Amendment 1, 2026-10-10)*. The primitives MUST be constant time where
+  the host library offers it. Ephemeral keys MUST NOT be reused, in either role: an initiator draws a fresh one for
+  every attempt, and a responder a fresh one for every second message it writes. Answering a
+  byte-identical first message with the stored second message (§4) is not a reuse. If both sides
+  reused theirs, the session keys would repeat.
 - **An all-zero X25519 result is refused.** If `DH(e, re)` is 32 zero bytes (the peer sent a
   low-order point), the side computing it MUST abort the handshake. It sends nothing, keeps no
   state from that message and counts it in `noise_handshake_failed`. Implementations differ on this
@@ -613,10 +618,11 @@ the transport message exactly a Noise transport message.
 
 ### 12.8 Implementation hazards
 
-The primitives MUST be constant time where the host library offers it. Ephemeral keys MUST NOT be
-reused across attempts: if both sides reused theirs, the session keys would repeat. A bad random
-source breaks every guarantee here, and the application injects it, so the application owns it.
-Key material in released slots SHOULD be wiped.
+Constant-time primitives where the host library offers them, and a fresh ephemeral key for
+every attempt and every second message, in both roles, are normative clauses of §2 since RFC-0033 Amendment 1; this
+section only explains them. If both sides reused their ephemeral keys, the session keys would
+repeat. A bad random source breaks every guarantee here, and the application injects it, so
+the application owns it. Key material in released slots should be wiped.
 
 ---
 

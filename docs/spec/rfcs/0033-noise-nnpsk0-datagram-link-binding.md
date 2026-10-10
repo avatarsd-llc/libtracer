@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0033 |
 | **Title** | A minimal Noise link binding: NNpsk0 over a datagram carrier |
-| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. **The binding's normative text lives in [reference/23](../../reference/23-noise-link-binding.md)** (slice S1, [#2071](https://github.com/avatarsd-llc/libtracer/issues/2071)), which `docs/spec/v1.md` §3 incorporates as an annex for a link that uses the binding (§10.1). Where that page and this record disagree, the page wins. |
+| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. **The binding's normative text lives in [reference/23](../../reference/23-noise-link-binding.md)** (slice S1, [#2071](https://github.com/avatarsd-llc/libtracer/issues/2071)), which `docs/spec/v1.md` §3 incorporates as an annex for a link that uses the binding (§10.1). Where that page and this record disagree, the page wins. **Amendment 1 (2026-10-10, ruled)** moves §6.8's two MUST clauses (constant-time primitives; no ephemeral key reuse, in either role) into §5.2, so that they bind an implementation ([#2084](https://github.com/avatarsd-llc/libtracer/issues/2084)). **Erratum (2026-10-10)**: Appendix A.4 no longer says the generator prints all of A.3. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -230,6 +230,11 @@ follow this section. A link that does not follow it is not a conforming Tracer N
   (32 zero bits, then the 64-bit counter little-endian), and SHA-256 with Noise's HMAC-based HKDF.
   The **ephemeral keys** MUST come from a cryptographic random source that the application
   injects. The library has no entropy source of its own.
+- **Implementation hazards** *(Amendment 1, 2026-10-10)*. The primitives MUST be constant time where
+  the host library offers it. Ephemeral keys MUST NOT be reused, in either role: an initiator draws a fresh one for
+  every attempt, and a responder a fresh one for every second message it writes. Answering a
+  byte-identical first message with the stored second message (§5.4) is not a reuse. If both sides
+  reused theirs, the session keys would repeat.
 - **An all-zero X25519 result is refused.** If `DH(e, re)` is 32 zero bytes (the peer sent a
   low-order point), the side computing it MUST abort the handshake. It sends nothing, keeps no
   state from that message and counts it in `noise_handshake_failed`. Implementations differ on this
@@ -707,10 +712,11 @@ the transport message exactly a Noise transport message.
 
 ### 6.8 Implementation hazards
 
-The primitives MUST be constant time where the host library offers it. Ephemeral keys MUST NOT be
-reused across attempts: if both sides reused theirs, the session keys would repeat. A bad random
-source breaks every guarantee here, and the application injects it, so the application owns it.
-Key material in released slots SHOULD be wiped.
+Constant-time primitives where the host library offers them, and a fresh ephemeral key for
+every attempt and every second message, in both roles, are normative clauses of §5.2 since Amendment 1; this
+section only explains them. If both sides reused their ephemeral keys, the session keys would
+repeat. A bad random source breaks every guarantee here, and the application injects it, so
+the application owns it. Key material in released slots should be wiped.
 
 ## 7. How KK and IK over the ADR-0045 identities follow
 
@@ -1064,6 +1070,44 @@ replay-window edge, first-message replay, a one-byte reflection gain and the Q5 
 each is fixed in this text. Sustained objections and their resolution are recorded in this
 section as they arrive.
 
+## Amendment 1 (2026-10-10, ruled) — the implementation hazards of §6.8 are normative
+
+**Instrument.** Amendment, not erratum. §6 is informative (§10.1), so §6.8's two MUST clauses —
+the primitives constant time where the host library offers it, and no ephemeral key reused
+across attempts — bound no implementation as written. Moving them into §5.2 adds normative
+obligations, which GOVERNANCE.md reserves for an amendment. **No wire byte moves**: no datagram,
+type code, payload, counter or conformance vector changes, and Appendix A is unchanged. Approved
+by the maintainer on 2026-10-10 ([#2084](https://github.com/avatarsd-llc/libtracer/issues/2084)).
+The comment window is **waived by default** under [GOVERNANCE.md](../../../.github/GOVERNANCE.md)'s
+solo-maintainer clause and is not invoked.
+
+**Normative.** §5.2 gains one bullet, *Implementation hazards*:
+
+- The primitives MUST be constant time where the host library offers it.
+- Ephemeral keys MUST NOT be reused, in either role: an initiator draws a fresh one for
+  every attempt, and a responder a fresh one for every second message it writes. Answering a
+  byte-identical first message with the stored second message (§5.4) is not a reuse. If both sides
+  reused theirs, the session keys would repeat.
+
+As drafted, §6.8's "across attempts" read as the initiator's rule only, because only an initiator
+makes attempts. The clause now names both roles, matching what §5.4 already requires of each
+(initiator step 1 and responder step 4 each draw a fresh ephemeral key). §6.8 now explains the
+clauses without key words and points to §5.2. Its advice on wiping key material in released slots
+stays informative, in lowercase; this amendment does not make it normative. The binding page,
+[reference/23](../../reference/23-noise-link-binding.md), carries the clauses in its §2.
+
+## Erratum (2026-10-10) — Appendix A.4 overstated what the generator prints
+
+**What the text said.** *"It prints A.3 and fails if the two sides disagree."* A.3 lists the
+symmetric state after every handshake step as well as the datagrams, the handshake hash and the
+transport keys.
+
+**What the generator does.** It prints eight hex lines: `msg1`, `msg2`, the handshake hash,
+`k_i2r`, `k_r2i` and the three transport messages. It prints none of the step-by-step `ck`, `h`
+and `k` values. A.4 now says so. The script, the vectors and every clause are unchanged, so this
+is an erratum. The text has been wrong since the RFC's first draft, 565f790a: the script never
+printed the step-by-step states, so no later change made the two diverge.
+
 ---
 
 ## Appendix A — Test vectors
@@ -1186,8 +1230,10 @@ frame "pang", responder -> initiator, n = 0 (33 B)
 
 ### A.4 The generator
 
-Run with Python 3 and the `cryptography` package. It prints A.3 and fails if the two sides
-disagree.
+Run with Python 3 and the `cryptography` package. It prints the two handshake datagrams, the
+handshake hash, the two transport keys and the three transport messages of A.3, each as one hex
+line. It does not print the step-by-step symmetric states. It fails if the two sides disagree
+(erratum 2026-10-10).
 
 ```python
 import hashlib, hmac, struct
