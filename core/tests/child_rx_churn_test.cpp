@@ -66,6 +66,21 @@ using tr::wire::opt_t;
 using tr::wire::path_ref_element_t;
 using tr::wire::type_t;
 
+/** @brief The link `bound_send` egresses on for a one-element binding of @p e, or null. Only
+ *         compared, never sent on: the links are the test's own. */
+tr::net::transport_t* bound_link(const fwd_router_t& r, path_ref_element_t e) {
+    path_t p("/bound");
+    (void)p.bind(std::span<const path_ref_element_t>(&e, 1));
+    tr::net::transport_t* got = nullptr;
+    (void)r.bound_send(
+        p, acl_right_t::READ,
+        [](void* c, tr::net::transport_t& link, std::span<const std::byte>) {
+            *static_cast<tr::net::transport_t**>(c) = &link;
+        },
+        &got);
+    return got;
+}
+
 using tr::testing::check;
 
 /** @brief A transport that only counts and keeps what it was handed — no socket, no thread. */
@@ -165,8 +180,7 @@ void test_readd_resolves_the_new_tenancy() {
 
     const std::optional<path_ref_element_t> e = router.connection_ref(kMount);
     check(e.has_value(), "the re-added child is bindable now its connection vertex exists");
-    check(e && router.bound_egress(*e, {}, acl_right_t::READ) == &second,
-          "and element 0 egresses over the NEW link");
+    check(e && bound_link(router, *e) == &second, "and element 0 egresses over the NEW link");
 }
 
 /**
@@ -220,7 +234,7 @@ void test_churn_does_not_grow_the_chain() {
 
     const std::optional<path_ref_element_t> e = router.connection_ref(kMount);
     check(e.has_value(), "the churned name is still bindable");
-    check(e && router.bound_egress(*e, {}, acl_right_t::READ) == &b,
+    check(e && bound_link(router, *e) == &b,
           "and resolves to the link the LAST add bound, not the first");
 
     sink_link_t other;
@@ -241,7 +255,7 @@ void test_duplicate_add_rebinds() {
     check(router.add_child(std::string(kMount), b), "registered the SAME name again");
     check(router.receiver_ctx_count() == 1, "no shadow ctx — the registry's rule, one layer out");
     const std::optional<path_ref_element_t> e = router.connection_ref(kMount);
-    check(e && router.bound_egress(*e, {}, acl_right_t::READ) == &b,
+    check(e && bound_link(router, *e) == &b,
           "and the name egresses over the link the re-add bound");
 }
 

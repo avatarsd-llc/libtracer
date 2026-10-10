@@ -71,6 +71,28 @@ using tr::graph::subject_token_t;
 using tr::net::conn_role_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_vertex_t;
+
+/** @brief What `bound_send` handed its callback, copied out for the test's checks. The links
+ *         here are the test's own and outlive every check, so keeping one is safe. */
+struct dispatched_t {
+    tr::net::transport_t* link = nullptr;
+    std::vector<std::byte> dst;
+};
+
+/** @brief The callback a test hands a bracketed send: copy the link and the `dst` out. */
+void keep_dispatch(void* ctx, tr::net::transport_t& link, std::span<const std::byte> dst) {
+    auto& out = *static_cast<dispatched_t*>(ctx);
+    out.link = &link;
+    out.dst.assign(dst.begin(), dst.end());
+}
+
+/** @brief `bound_send` through @ref keep_dispatch: the dispatch, or nullopt on a refusal. */
+std::optional<dispatched_t> bound_dispatch(const fwd_router_t& r, const path_t& path,
+                                           acl_right_t right) {
+    dispatched_t out;
+    if (!r.bound_send(path, right, &keep_dispatch, &out)) return std::nullopt;
+    return out;
+}
 using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::path_ref_element_t;
@@ -416,10 +438,10 @@ int main() {
     std::printf("A bound WRITE traverses the same two hops (§3.4/§5):\n");
     const std::uint32_t kWritten = 0x12345678u;
     cli_label_src.closed = true;
-    check(!r_cli.bound_dispatch(target, acl_right_t::WRITE).has_value(),
+    check(!bound_dispatch(r_cli, target, acl_right_t::WRITE).has_value(),
           "a refused `dst` block is no dispatch — the caller falls back to canonical (#1779)");
     cli_label_src.closed = false;
-    const auto dispatch = r_cli.bound_dispatch(target, acl_right_t::WRITE);
+    const auto dispatch = bound_dispatch(r_cli, target, acl_right_t::WRITE);
     check(dispatch.has_value(), "the origin resolves its OWN element 0 to the link out");
     check(dispatch &&
               std::ranges::equal(
@@ -512,7 +534,7 @@ int main() {
     // ===== 6) the ablation: the sound binding still lands ================================
     {
         const std::size_t before = at_b.count();
-        const auto again = r_cli.bound_dispatch(target, acl_right_t::WRITE);
+        const auto again = bound_dispatch(r_cli, target, acl_right_t::WRITE);
         check(again.has_value(), "the binding is still good");
         if (again)
             again->link->send(b_fwd_raw_op(kWrite, again->dst, b_path({"reply-ep"}), {},
@@ -532,14 +554,14 @@ int main() {
             path_t("/net/uplink/b:acl"),
             owned(allow_acl("net/downlink/cli", static_cast<std::uint32_t>(acl_right_t::READ))));
         const std::size_t before = at_b.count();
-        const auto denied = r_cli.bound_dispatch(target, acl_right_t::WRITE);
+        const auto denied = bound_dispatch(r_cli, target, acl_right_t::WRITE);
         if (denied)
             denied->link->send(b_fwd_raw_op(kWrite, denied->dst, b_path({"reply-ep"}), {},
                                             b_value_u32(0xFEEDFACEu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "a bound WRITE through a relay that grants only READ drops at that relay");
 
-        const auto allowed = r_cli.bound_dispatch(target, acl_right_t::READ);
+        const auto allowed = bound_dispatch(r_cli, target, acl_right_t::READ);
         if (allowed) allowed->link->send(b_fwd_raw_op(kRead, allowed->dst, b_path({"reply-ep"})));
         check(at_b.wait_for_count(before + 1, kBudget),
               "and the bound READ the SAME ACL grants goes through — the denial is the ACL's");
@@ -552,7 +574,7 @@ int main() {
         // The ACL from (7) still stands: READ only, at A's connection vertex for `b`, for the
         // inbound subject. A canonical `dst` that walks through that vertex by NAME must be
         // refused the WRITE the bound spelling is refused, and granted the READ it is granted.
-        const auto first_hop = r_cli.bound_dispatch(target, acl_right_t::READ);
+        const auto first_hop = bound_dispatch(r_cli, target, acl_right_t::READ);
         check(first_hop.has_value(), "the client still has its first-hop link to A");
         const std::vector<std::byte> by_name = b_path({"net", "uplink", "b", "sensor", "temp"});
         const std::size_t before = at_b.count();
