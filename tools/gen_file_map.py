@@ -55,6 +55,10 @@ PAGES = {
         "link_index.hpp", "thread_id.hpp",
     ],
     "security-acl.md": ["security_acl.hpp", "acl_ace.hpp"],
+    "security-noise.md": [
+        "security_noise.hpp", "security_noise_crypto.hpp", "security_noise_openssl.hpp",
+        "security_noise_sodium.hpp", "security_noise_psa.hpp",
+    ],
     "fwd-router.md": [
         "fwd_router.hpp", "fwd_frame_view.hpp", "op_resolve.hpp", "route_handle.hpp",
         "child_registry.hpp", "transport_vertex.hpp", "path_label.hpp", "path_label_table.hpp",

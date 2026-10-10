@@ -16,6 +16,7 @@ tests/conformance/
         ├── field/                  :field addressing and its payload shapes
         ├── framing/                header, opt bits, length widths, minimum frame
         ├── fwd/                    FWD ops, labels, compaction, rejection cases
+        ├── noise/                  RFC-0033 Noise link transcripts (transcript.json, no input.bin)
         ├── path/                   PATH TLVs, path handles, segment limits
         ├── path-label/             RFC-0027 path-label elements inside a packed PATH
         ├── spec/                   creation SPECs — the `:children[]` vertex/link formation write

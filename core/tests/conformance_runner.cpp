@@ -12,7 +12,9 @@
  *   (4) negative vectors    — decode(reject.bin) MUST fail with the error named by
  *       expected.json's "reject" field (extracted by a tiny scan, no JSON parser);
  *   (5) input legality       — every input.bin is a legal frame (packed PATH bodies, label
- *       elements, the FWD head) unless expected.json declares "malformed_input": true (#1587).
+ *       elements, the FWD head) unless expected.json declares "malformed_input": true (#1587);
+ *   (6) noise transcripts    — on a build with a Noise crypto backend, every
+ *       noise/<case>/transcript.json is replayed and each recorded value compared (#2072).
  * expected.json stays as the human-readable / cross-language spec.
  */
 
@@ -38,6 +40,10 @@
 #include "libtracer/path_pair.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
+#if defined(LIBTRACER_NOISE_CRYPTO_OPENSSL) || defined(LIBTRACER_NOISE_CRYPTO_SODIUM) || \
+    defined(LIBTRACER_NOISE_CRYPTO_PSA)
+#include "libtracer/security_noise.hpp"
+#endif
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
@@ -409,6 +415,157 @@ void check_symmetry(const symmetry_case_t& c) {
     }
 }
 
+// --- noise/ transcripts (RFC-0033 Appendix A, #2072) --------------------------
+#if defined(LIBTRACER_NOISE_CRYPTO_OPENSSL) || defined(LIBTRACER_NOISE_CRYPTO_SODIUM) || \
+    defined(LIBTRACER_NOISE_CRYPTO_PSA)
+/** @brief Whether this build has a Noise crypto backend to replay the noise/ transcripts on. */
+constexpr bool kHasNoise = true;
+
+/**
+ * @brief The string value of @p key in a flat-keyed transcript.json (tiny scan, no JSON
+ *        parser: every key in a transcript is unique, wherever it nests).
+ */
+std::string transcript_str(std::string_view text, std::string_view key) {
+    const std::string needle = "\"" + std::string(key) + "\"";
+    const std::size_t at = text.find(needle);
+    if (at == std::string_view::npos) return {};
+    const std::size_t open = text.find('"', text.find(':', at + needle.size()));
+    const std::size_t close = text.find('"', open + 1);
+    return std::string(text.substr(open + 1, close - open - 1));
+}
+
+/** @brief One transcript, replayed on the build's backend, every value compared. */
+void check_noise_transcript(const fs::path& dir, const std::string& label) {
+    namespace noise = tr::net::noise;
+    using B = noise::default_crypto_t;
+    std::ifstream f(dir / "transcript.json");
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto bytes = [&](std::string_view key) {
+        return from_hex(transcript_str(text, key)).value_or(std::vector<std::byte>{});
+    };
+    const auto key32 = [&](std::string_view key) {
+        noise::key32_t k{};
+        const auto b = bytes(key);
+        if (b.size() == k.size()) std::ranges::copy(b, k.begin());
+        return k;
+    };
+    const auto number = [&](std::string_view key) {
+        return std::stoull("0" + transcript_str(text, key));
+    };
+    const auto same = [&](std::span<const std::byte> got, std::string_view key) {
+        return to_hex(got) == transcript_str(text, key);
+    };
+    const auto is = [&](const noise::key32_t& got, std::string_view key) { return same(got, key); };
+    const std::string at = label + ": ";
+
+    check(B::init() && transcript_str(text, "protocol_name") == noise::kProtocolName &&
+              same(std::as_bytes(std::span(noise::kPrologue)), "prologue"),
+          at + "the protocol name and the prologue are RFC-0033 §5.2's");
+    const auto byte0 = [&](std::string_view key) {
+        const auto b = bytes(key);
+        return b.size() == 1 ? std::uint8_t(b[0]) : std::uint8_t{0xFF};
+    };
+    const noise::first_payload_t p1{.flags = byte0("msg1_flags"),
+                                    .counter = number("msg1_counter_decimal")};
+    check(same(noise::encode_first_payload(p1), "msg1_payload"),
+          at + "msg1's payload is the flags byte then the counter, u64 LE");
+
+    // The symmetric state token by token (Appendix A.3), on one chain both sides share.
+    noise::symmetric_state_t<B> s;
+    typename B::aead_t hc;  // the link's handshake cipher
+    B::dh_key_t ei;
+    B::dh_key_t er;
+    noise::key32_t pub_i{};
+    noise::key32_t pub_r{};
+    noise::key32_t dh{};
+    const auto ck_h = [&](std::string_view step) {
+        return is(s.chaining_key(), std::string(step) + "_ck") &&
+               is(s.handshake_hash(), std::string(step) + "_h");
+    };
+    const auto ck_h_k = [&](std::string_view step) {
+        return ck_h(step) && is(s.cipher_key(), std::string(step) + "_k");
+    };
+    check(s.initialize(std::as_bytes(std::span(noise::kProtocolName))) && ck_h("initialize"),
+          at + "InitializeSymmetric");
+    check(s.mix_hash(bytes("prologue")) && ck_h("prologue"), at + "MixHash(prologue)");
+    check(s.mix_key_and_hash(key32("psk")) && ck_h_k("psk"), at + "-> psk: MixKeyAndHash(psk)");
+    check(ei.set(key32("initiator_ephemeral_private"), pub_i) &&
+              is(pub_i, "initiator_ephemeral_public") && s.mix_hash(pub_i) &&
+              is(s.handshake_hash(), "initiator_e_h") && s.mix_key(pub_i) && ck_h_k("initiator_e"),
+          at + "-> e: e.pub, MixHash(e.pub), MixKey(e.pub)");
+    std::array<std::byte, 9 + noise::kTagLen> ct1{};
+    check(s.encrypt_and_hash(hc, bytes("msg1_payload"), ct1.data()) &&
+              is(s.handshake_hash(), "msg1_payload_h"),
+          at + "-> payload: EncryptAndHash");
+    check(er.set(key32("responder_ephemeral_private"), pub_r) &&
+              is(pub_r, "responder_ephemeral_public") && s.mix_hash(pub_r) &&
+              is(s.handshake_hash(), "responder_e_h") && s.mix_key(pub_r) && ck_h_k("responder_e"),
+          at + "<- e: e.pub, MixHash(e.pub), MixKey(e.pub)");
+    noise::key32_t dh_r{};
+    check(ei.agree(pub_r, dh) && er.agree(pub_i, dh_r) && dh == dh_r && is(dh, "dh_ee") &&
+              s.mix_key(dh) && is(s.chaining_key(), "ee_ck") && is(s.cipher_key(), "ee_k"),
+          at + "<- ee: DH(e, re) from both sides, MixKey");
+    std::array<std::byte, 1 + noise::kTagLen> ct2{};
+    check(s.encrypt_and_hash(hc, bytes("msg2_payload"), ct2.data()) &&
+              is(s.handshake_hash(), "msg2_payload_h") && is(s.handshake_hash(), "handshake_hash"),
+          at + "<- payload: EncryptAndHash, and h is the handshake hash");
+    noise::key32_t k1{};
+    noise::key32_t k2{};
+    check(s.split(k1, k2) && is(k1, "k_i2r") && is(k2, "k_r2i"), at + "Split()");
+
+    // The same transcript through the two handshake_t sides, datagram by datagram.
+    noise::symmetric_state_t<B> base;
+    check(noise::psk_state(key32("psk"), base) && is(base.chaining_key(), "psk_ck") &&
+              is(base.handshake_hash(), "psk_h"),
+          at + "psk_state is the state after the psk token");
+    noise::handshake_t<B> i(noise::role_t::INITIATOR, base, hc);
+    noise::handshake_t<B> r(noise::role_t::RESPONDER, base, hc);
+    std::array<std::byte, noise::kFirstMessageBytes> m1{};
+    std::array<std::byte, noise::kSecondMessageBytes> m2{};
+    check(
+        i.write_first(key32("initiator_ephemeral_private"), p1, m1).has_value() && same(m1, "msg1"),
+        at + "msg1 (58 B), written by the initiator");
+    const auto got1 = r.read_first(m1);
+    check(got1 && got1->flags == p1.flags && got1->counter == p1.counter,
+          at + "msg1 read by the responder: flags and counter");
+    const auto f2 = byte0("msg2_payload");
+    check(r.write_second(key32("responder_ephemeral_private"), f2, m2).has_value() &&
+              same(m2, "msg2"),
+          at + "msg2 (50 B), written by the responder");
+    const auto got2 = i.read_second(m2);
+    check(got2 && *got2 == f2, at + "msg2 read by the initiator: flags");
+    check(is(i.symmetric_state().handshake_hash(), "handshake_hash") &&
+              is(r.symmetric_state().handshake_hash(), "handshake_hash"),
+          at + "both sides' handshake hash");
+    noise::transport_cipher_t<B> ti;
+    noise::transport_cipher_t<B> tr_;
+    check(i.split(ti).has_value() && r.split(tr_).has_value(), at + "both sides split");
+
+    const auto transport = [&](noise::transport_cipher_t<B>& from, noise::transport_cipher_t<B>& to,
+                               std::string_view nonce, std::string_view frame,
+                               std::string_view want) {
+        const std::vector<std::byte> pt = bytes(frame);
+        std::vector<std::byte> d(pt.size() + noise::kTransportOverhead);
+        const auto n = from.seal(0, number(nonce), pt, d);
+        const auto h = noise::parse_transport_header(d);
+        const bool wrote = n && same(d, want);
+        const auto opened = to.open(h.value_or(noise::transport_header_t{}), d);
+        return wrote && h && opened && std::ranges::equal(*opened, pt);
+    };
+    check(transport(ti, tr_, "confirmation_nonce_decimal", "", "confirmation"),
+          at + "the empty confirmation, i->r (25 B), sealed and opened");
+    check(transport(ti, tr_, "frame_i2r_nonce_decimal", "frame_i2r", "datagram_i2r"),
+          at + "frame i->r (33 B), sealed and opened");
+    check(transport(tr_, ti, "frame_r2i_nonce_decimal", "frame_r2i", "datagram_r2i"),
+          at + "frame r->i (33 B), sealed and opened");
+}
+#else
+/** @brief Whether this build has a Noise crypto backend to replay the noise/ transcripts on. */
+constexpr bool kHasNoise = false;
+
+/** @brief Built without a Noise backend: nothing to replay a transcript on. */
+void check_noise_transcript(const fs::path&, const std::string&) {}
+#endif
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -508,6 +665,23 @@ int main(int argc, char** argv) {
         }
         check(node && same_tree(*node, *dec) && std::ranges::equal(node->bytes(), bytes),
               label + " (read alike)");
+    }
+
+    // noise/ cases are transcripts (RFC-0033 §12.2), not frames: no input.bin, so the codec
+    // walks above and the --tap matrix never see them. A build with a Noise crypto backend
+    // replays each one on that backend (#2072).
+    std::printf("Noise transcripts (noise/*/transcript.json, backend %s):\n",
+                kHasNoise ? "of this build" : "none: skipped");
+    for (const auto& e : fs::recursive_directory_iterator(vroot)) {
+        if (e.path().filename() != "transcript.json") continue;
+        const fs::path dir = e.path().parent_path();
+        const std::string label = fs::relative(dir, vroot).generic_string();
+        if (!kHasNoise) {
+            std::printf("  [SKIP] %s (configure with -DLIBTRACER_NOISE_CRYPTO=...)\n",
+                        label.c_str());
+            continue;
+        }
+        check_noise_transcript(dir, label);
     }
 
     std::printf("Golden builders (encode == input.bin && decode == built):\n");

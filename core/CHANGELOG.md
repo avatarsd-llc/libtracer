@@ -16,6 +16,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **The Noise link's crypto backend, chosen at compile time
+  ([#2072](https://github.com/avatarsd-llc/libtracer/issues/2072)).** The first slice of the
+  RFC-0033 Noise link ([#2064](https://github.com/avatarsd-llc/libtracer/issues/2064)): the
+  `Noise_NNpsk0_25519_ChaChaPoly_SHA256` handshake and transport steps, in the new headers
+  `security_noise.hpp` and `security_noise_crypto.hpp` (namespace `tr::net::noise`).
+  - `symmetric_state_t`, `psk_state`, `handshake_t` and `transport_cipher_t` run the handshake
+    and seal and open transport datagrams in RFC-0033 §5.3's layout, on caller memory. The
+    responder checks a first message's PSK tag with no Diffie-Hellman. An all-zero X25519
+    result is refused, as are nonces at or above 2^62. Every refusal is a `refusal_t`.
+  - The backend is a compile-time policy that meets the `crypto_backend` concept. The new cache
+    variable `LIBTRACER_NOISE_CRYPTO` selects `openssl` (`security_noise_openssl.hpp`), `sodium`
+    (`security_noise_sodium.hpp`) or `psa` (`security_noise_psa.hpp`, mbedTLS, the ESP-IDF
+    backend), aliased as `default_crypto_t` on the header-only target `libtracer_noise`. The
+    default is `none`: such a build compiles none of the module and links no crypto library.
+  - No backend allocates before a first message's PSK tag is proven, nor per frame
+    (RFC-0033 §5.8), and `security_noise_test` asserts both. The tag is checked with the
+    link's handshake cipher, passed to `handshake_t`. The PSA backend requires mbedTLS's
+    static key slots and refuses to build without them; the app sizes the slot table, and
+    the module page gives the rule. Handshake allocations are reported per backend.
+  - A backend cipher takes one call at a time: `seal` and `open` are non-const. `clear()`
+    drops its key, and the handshake cipher is cleared after every message.
+  - `conformance_runner` replays the new `noise/` transcripts on the build's backend. The first
+    is RFC-0033 Appendix A, which `noiseprotocol` and `snow` also reproduce.
+
 - **`graph_t::set_suspended` / `graph_t::is_suspended`: a subscription is suspended and
   resumed in place, allocating nothing
   ([#1533](https://github.com/avatarsd-llc/libtracer/issues/1533)).** A suspended edge keeps

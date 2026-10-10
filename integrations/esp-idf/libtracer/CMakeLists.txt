@@ -485,6 +485,15 @@ idf_component_register(
 # libtracer's core is C++23. ESP-IDF compiles component sources with the project's
 # C++ standard; pin it here so the component is correct regardless of project default.
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_23)
+# The Noise link's crypto backend (#2072). Header-only, so the option adds no source: it
+# defines the backend for every includer and passes mbedtls on as a public requirement. A
+# requirement cannot depend on Kconfig in IDF's early expansion pass, so this is an OPTIONAL
+# one: it applies when mbedtls is in the build, which every chip build is (tcp_transport
+# requires it), and a linux-target app adds `REQUIRES mbedtls` itself.
+if(CONFIG_LIBTRACER_NOISE_CRYPTO_PSA)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC LIBTRACER_NOISE_CRYPTO_PSA=1)
+    idf_component_optional_requires(PUBLIC mbedtls)
+endif()
 
 # -Werror=switch, mirroring core/CMakeLists.txt — the SAME core sources compile here, and the
 # hand-written maps out of closed enums (status_t -> wire::err_t at the L4->wire cast point,

@@ -964,6 +964,111 @@ jobs:
         if: always()
         run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
+  # THE NOISE LINK'S CRYPTO BACKEND (#2072). LIBTRACER_NOISE_CRYPTO is a compile-time choice
+  # (default `none`, which compiles none of the module), so no other leg builds it. One leg per
+  # host backend: each builds `libtracer_noise` over its library and runs the two suites that
+  # use it, `security_noise` (the backend seam, its refusals, zero allocations per frame) and
+  # `conformance` (which replays the noise/ transcripts, RFC-0033 Appendix A, on that backend).
+  # The core library is the default leg's build, so only those two targets are built. The psa
+  # leg builds mbedTLS 3.6 LTS from its pinned release tarball, with
+  # MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS as ESP-IDF sets it.
+  build-test-noise:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      # Same container budget and compiler-cache mount as build-test (see there).
+      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        crypto: [openssl, sodium, psa]
+    name: build-test-noise (crypto=${{ matrix.crypto }})
+    steps:
+      # Build parallelism and the compiler cache: as build-test.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
+      - name: Install the crypto library (${{ matrix.crypto }})
+        timeout-minutes: 10
+        run: |
+          case "${{ matrix.crypto }}" in
+            openssl) pkgs=libssl-dev ;;
+            sodium) pkgs=libsodium-dev ;;
+            psa) pkgs="curl bzip2" ;;
+          esac
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $pkgs
+          if [ "${{ matrix.crypto }}" = "psa" ]; then
+            v=3.6.5
+            curl -fsSL -o "$RUNNER_TEMP/mbedtls.tar.bz2" \
+              "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$v/mbedtls-$v.tar.bz2"
+            echo "4a11f1777bb95bf4ad96721cac945a26e04bf19f57d905f241fe77ebeddf46d8  $RUNNER_TEMP/mbedtls.tar.bz2" | sha256sum -c -
+            tar -xjf "$RUNNER_TEMP/mbedtls.tar.bz2" -C "$RUNNER_TEMP"
+            # The installed config header carries what the backend needs (#2072): exclusive
+            # buffers (no copy per call) and static key slots (no allocation per key import,
+            # which the dynamic key store excludes); security_noise_psa.hpp refuses without
+            # them. The table is the documented Noise-only size, 8 slots of 32 B, the fewest
+            # the two suites pass with, so the recommended configuration is the tested one.
+            cfg="$RUNNER_TEMP/mbedtls-$v/include/mbedtls/mbedtls_config.h"
+            for o in MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS MBEDTLS_PSA_STATIC_KEY_SLOTS; do
+              sed -i "s|^//#define $o\$|#define $o|" "$cfg"
+              grep -q "^#define $o\$" "$cfg"
+            done
+            sed -i 's|^#define MBEDTLS_PSA_KEY_STORE_DYNAMIC$|//#define MBEDTLS_PSA_KEY_STORE_DYNAMIC|' "$cfg"
+            if grep -q '^#define MBEDTLS_PSA_KEY_STORE_DYNAMIC' "$cfg"; then exit 1; fi
+            sed -i -e 's|^//#define MBEDTLS_PSA_KEY_SLOT_COUNT 32$|#define MBEDTLS_PSA_KEY_SLOT_COUNT 8|' \
+              -e 's|^//#define MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE  *256$|#define MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE 32|' "$cfg"
+            grep -q '^#define MBEDTLS_PSA_KEY_SLOT_COUNT 8$' "$cfg"
+            grep -q '^#define MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE 32$' "$cfg"
+            cmake -S "$RUNNER_TEMP/mbedtls-$v" -B "$RUNNER_TEMP/mbedtls-build" -DCMAKE_BUILD_TYPE=Release \
+              -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF \
+              -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/mbedtls"
+            cmake --build "$RUNNER_TEMP/mbedtls-build" --parallel "$BUILD_JOBS"
+            cmake --install "$RUNNER_TEMP/mbedtls-build" > /dev/null
+            echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/mbedtls" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
+      - name: Configure + build the Noise suites + ctest
+        run: |
+          cmake -S core -B core/build-noise -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DLIBTRACER_NOISE_CRYPTO=${{ matrix.crypto }}
+          cmake --build core/build-noise --parallel "$BUILD_JOBS" \
+            --target security_noise_test conformance_runner
+          ctest --test-dir core/build-noise --output-on-failure -R '^(security_noise|conformance)$'
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
+      - name: Restore workspace ownership for the host runner
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
+
   # Both sanitizer legs run against both LKV slot bindings (ADR-0069 §1) as parallel
   # matrix jobs rather than extra steps, so the second binding costs no wall clock.
   # hazard_slot_t is hand-rolled lock-free reclamation: ASan/LSan is what proves a
@@ -1517,7 +1622,7 @@ jobs:
   build-test-required:
     name: build-test
     if: always()
-    needs: [changes, build-test, build-test-minimal-set, build-test-reclaim-strict, build-test-bus-closed, build-test-self-heal-closed, build-test-reclaim-qsbr, build-test-arm64, build-test-gcc15, sanitizers, tsan, tsan-reclaim-qsbr, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
+    needs: [changes, build-test, build-test-minimal-set, build-test-reclaim-strict, build-test-bus-closed, build-test-self-heal-closed, build-test-reclaim-qsbr, build-test-arm64, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-reclaim-qsbr, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

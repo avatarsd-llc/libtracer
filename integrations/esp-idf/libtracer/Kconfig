@@ -273,6 +273,61 @@ menu "libtracer"
             is ON by default once that is. Turn OFF on a bus node with no CAN bus —
             this also drops the TWAI driver glue (twai_link.cpp).
 
+    config LIBTRACER_NOISE_CRYPTO_PSA
+        bool "Noise link crypto backend: mbedTLS through PSA"
+        default n
+        select MBEDTLS_CHACHA20_C
+        select MBEDTLS_CHACHAPOLY_C
+        help
+            Make the Noise link's crypto (RFC-0033, security_noise.hpp) usable in this
+            image, over ESP-IDF's own mbedTLS through the PSA API: this component then
+            requires mbedtls and defines LIBTRACER_NOISE_CRYPTO_PSA, which aliases
+            tr::net::noise::default_crypto_t to psa_crypto_t. It selects
+            MBEDTLS_CHACHA20_C and MBEDTLS_CHACHAPOLY_C, which ESP-IDF leaves off by
+            default. ESP-IDF's port already sets MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS,
+            so a frame costs no allocation. Every chip build already has mbedtls; an
+            app built for the linux target adds REQUIRES mbedtls to its own component.
+
+            The app must also give mbedTLS static key slots, or security_noise_psa.hpp
+            refuses to build: without them every key import allocates, and a first
+            message imports its handshake key before its PSK tag is checked (RFC-0033
+            5.8). The slot table is shared by every PSA user in the image, so the app
+            sizes it, not this component:
+              - MBEDTLS_PSA_KEY_SLOT_COUNT: at least 6 per Noise link (two sessions of
+                two keys during a rekey, the handshake cipher and the ephemeral key),
+                plus the peak of the image's other PSA users (TLS, the supplicant).
+              - MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE: at least the largest key any
+                of them imports. Noise's keys are all 32 B.
+            Left unsized, mbedTLS sizes 32 slots for the largest key type enabled,
+            which at ESP-IDF's defaults (an RSA-4096 key pair) is 76,616 B of .bss on
+            an ESP32-C6. A Noise-only image needs 8 slots of 32 B, 360 B of .bss
+            measured on an ESP32-C6. Rough figures for a mixed image at 16 slots:
+            about 2 KB with TLS that verifies only ECDSA P-256 or X25519 peers, about
+            5 KB with RSA-2048 server certificates, about 20 KB if the image holds its
+            own RSA-2048 private key. A slot table that is too small fails at run time
+            (an import returns INSUFFICIENT_MEMORY or NOT_SUPPORTED), not at build.
+
+            ESP-IDF has no option for these. Put them in a header and pass it as
+            MBEDTLS_USER_CONFIG_FILE, for example with
+            idf_build_set_property(COMPILE_DEFINITIONS "MBEDTLS_USER_CONFIG_FILE=..."
+            APPEND) in the project CMakeLists.txt. With IDF v6.0's mbedTLS 4 the two
+            sizes must skip mbedTLS's own config-check unit, which refuses PSA values
+            from that file (checked by an esp32c6 build, not yet run on silicon):
+                #define MBEDTLS_PSA_STATIC_KEY_SLOTS
+                #undef MBEDTLS_PSA_KEY_STORE_DYNAMIC
+                #if !defined(MBEDTLS_CONFIG_CHECK_WASSET_MBEDTLS_PSA_KEY_SLOT_COUNT)
+                #define MBEDTLS_PSA_KEY_SLOT_COUNT 8
+                #define MBEDTLS_PSA_STATIC_KEY_SLOT_BUFFER_SIZE 32
+                #endif
+
+            A NARROW image that needs PSA for nothing else is better served by
+            libsodium (the ESP-IDF component registry's port): it allocates nothing,
+            has no global table and needs no mbedTLS change. The backend is a
+            compile-time choice, so the swap is one define.
+
+            OFF by default: the module is header-only, so an image that does not turn
+            this on compiles none of it and links no crypto for it (#2072).
+
     config LIBTRACER_SELF_HEAL_LINKS
         bool "Build the link-liveness engine (self-healing dial connections)"
         default n

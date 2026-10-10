@@ -1,0 +1,62 @@
+# RFC-0033 Appendix A, reproduced by noiseprotocol (independent Noise implementation, RFC-0033 §15 Q6)
+# date: 2026-10-10
+# command: python -I independent_check_noiseprotocol.py   (venv with noiseprotocol==0.3.1)
+
+ok  msg1 payload = flags || counter (u64 LE)
+ok  msg1 (58 B)
+ok  msg2 (50 B)
+ok  responder reads msg1's payload
+ok  initiator reads msg2's payload
+ok  initiator e.pub
+ok  responder e.pub
+ok  initiator initialize_ck
+ok  initiator initialize_h
+ok  initiator prologue_ck
+ok  initiator prologue_h
+ok  initiator psk_ck
+ok  initiator psk_h
+ok  initiator psk_k
+ok  initiator initiator_e MixHash h
+ok  initiator initiator_e_ck
+ok  initiator initiator_e_k
+ok  initiator msg1_payload_h
+ok  initiator responder_e MixHash h
+ok  initiator responder_e_ck
+ok  initiator responder_e_k
+ok  initiator ee_ck
+ok  initiator ee_k
+ok  initiator msg2_payload_h
+ok  initiator DH(e, re) input to MixKey
+ok  responder initialize_ck
+ok  responder initialize_h
+ok  responder prologue_ck
+ok  responder prologue_h
+ok  responder psk_ck
+ok  responder psk_h
+ok  responder psk_k
+ok  responder initiator_e MixHash h
+ok  responder initiator_e_ck
+ok  responder initiator_e_k
+ok  responder msg1_payload_h
+ok  responder responder_e MixHash h
+ok  responder responder_e_ck
+ok  responder responder_e_k
+ok  responder ee_ck
+ok  responder ee_k
+ok  responder msg2_payload_h
+ok  responder DH(e, re) input to MixKey
+ok  handshake hash (initiator)
+ok  handshake hash (responder)
+ok  k_i2r (initiator send)
+ok  k_i2r (responder receive)
+ok  k_r2i (responder send)
+ok  k_r2i (initiator receive)
+ok  confirmation datagram
+ok  frame i->r datagram
+ok  frame r->i datagram
+ok  responder opens the confirmation
+ok  responder opens frame i->r
+ok  initiator opens frame r->i
+
+55/55 values reproduced by noiseprotocol 0.3.1, cryptography 50.0.2, Python 3.12.3
+INDEPENDENT CHECK: PASS
