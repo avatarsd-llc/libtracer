@@ -278,8 +278,8 @@ Three things the ruling fixes, all of them direction rather than shipped behavio
    no wire surface — which is what the 2026-08-04 retraction already implied once the
    `:settings` container was gone.
 2. **`SUBSCRIBER.qos_settings` is the only sanctioned wire carrier**, on the precedent of
-   `delivery_compact` ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md)
-   §E.1, described in [05-protocol-tlvs.md](05-protocol-tlvs.md) §SUBSCRIBER) — and today it
+   `delivery_policy` ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
+   §3.A, described in [05-protocol-tlvs.md](05-protocol-tlvs.md) §SUBSCRIBER) — and today it
    needs to carry nothing new, because `delivery_policy` already lives there.
 3. **No new wire surface may be added for QoS outside this shape** without the deferred RFC.
 

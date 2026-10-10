@@ -283,22 +283,15 @@ rejoining leaf or a downed forwarding hop costs only the paths through it. There
 node holds another node's wiring. A constrained CAN leaf stays dumb (a compile-time
 CAN-ID scheme); the map machinery runs in `transport_can` on whatever node hosts it.
 
-### The ws/UDP generalization — the route-handle
+### Full-TLV transports have no map — chain delivery
 
-CAN's `identity↔path` map is **mandatory** because the ID *is* the path. On a
-**full-TLV** transport (ws/UDP) the same idea is **opt-in compaction**: the
-**route-handle** ([05-protocol-tlvs.md](05-protocol-tlvs.md) §route-handle frames,
-RFC-0004 §E.1, [ADR-0035 — implementing RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)
-slice 4) is a per-link **u16 label** that aliases an established delivery route,
-advertised in-band exactly as a CAN binding is — but with the label **swapped each
-hop** (MPLS-style), since a ws label is meaningful only on its link. The mechanics
-mirror this section one-for-one: an `ADVERTISE` frame establishes `label ↔ route`,
-lean `COMPACT` frames then carry only the label + value, a stale label is dropped
-with a `HANDLE_NACK`, and **re-advertise on (re)connect is the self-heal**. The
-difference is policy, not mechanism: CAN always labels (no route fits in 8 bytes);
-ws labels **only** flows whose `SUBSCRIBER.qos_settings.delivery_compact` is set, so
-a ws node forwarding one-shot/cold traffic holds zero label state. The ws table
-lives in `tr::net::route_handle_t`, owned by `fwd_router_t`.
+CAN's `identity↔path` map is **mandatory** because the ID *is* the path, and it is **private to
+`transport_can`**: its state lives inside the transport, is bounded by the bus ID space, and is
+shared only by the two ends of one link. The router never sees it. On a **full-TLV** transport
+(ws/UDP/TCP) there is no counterpart: the former per-link route handle (`ADVERTISE` / `COMPACT` /
+`HANDLE_NACK`, RFC-0004 §E.1) is retired, and a delivery is a `FWD{WRITE}` carrying the full
+`PAIR` chain ([03-addressing.md](03-addressing.md)). A ws node forwarding a running stream holds
+zero per-flow state, exactly as it does for one-shot traffic.
 
 This is one of two framing modes, chosen per transport and mixable per frame. **Full-TLV** frames are self-describing: they carry the whole path and control surface, and they are used on IP and WebSocket links, where a 4-byte header is negligible, and for occasional control frames on any transport. **Header-elided** frames key on the transport's native identity through the map above. An occasional full-TLV control frame is what establishes an elided binding.
 

@@ -40,46 +40,42 @@ tr::esp::critical_pool_t rx_pool{std::span<std::byte>(g_slab, kRxRegion), 1536};
 // ... transport_vertex_t net{graph, router, "/net", &rx_pool};
 
 // Back region: monotonic + synchronized arena — the pmr seam (LKV control
-// blocks). NOT the label tables any more: since #603 defect 1 they draw from a
-// FAILABLE seam, because a peer's ADVERTISE reaches that store on a receive
-// thread and pmr cannot report exhaustion by value.
+// blocks). Nothing a peer provokes draws from it: the router keeps no per-link
+// route state (chain delivery), so there is no label store to feed.
 std::pmr::monotonic_buffer_resource arena{back_region(g_slab).data(),
                                           back_region(g_slab).size()};
 std::pmr::synchronized_pool_resource shared{&arena};
 
 // The FAILABLE seams are separate: everything a PEER can provoke — the terminus
-// decode arena, and the router's label tables — draws from one, and reports
+// decode arena and the router's receive path — draws from one, and reports
 // exhaustion by value instead of throwing (ADR-0065). Injecting only `shared`
 // above leaves those allocations on the global heap.
 //
-// TWO of them, not one, because their sharing topologies differ. `blocks` is the
-// per-child RX source (see the warning below: give each receive thread its own).
-// `label_blocks` is ONE source shared by the whole label plane and therefore takes
-// a locking policy — it is touched only when a flow is SET UP (`on_advertise` on a
-// receive thread, `ensure_egress` minting on the writer thread); the per-delivery
-// reuse path finds the label already bound and reaches no allocator at all, which
-// is exactly the "wiring frequency" case `sync_mutex_t` is for.
-static tr::mem::size_class_t label_classes[12];
-static tr::mem::pool_source_t<tr::mem::sync_mutex_t> label_blocks{label_region, label_classes};
+// `blocks` is the per-child RX source (see the warning below: give each receive
+// thread its own).
 //
 // The two BYTE-BUFFER seams — graph_t's `value_backend` and fwd_router_t's `flat`
 // — stay on heap_backend() here; the warning below says why a BARE pool_t is never
 // the alternative (both are reached from several threads). They may take a
 // critical_pool_t of their own, sized from what this node actually stores.
 //
+// `label_blocks` is ONE source shared by the whole router (it feeds the NAME->link
+// demux chunks) and therefore takes a locking policy — it is touched only when a
+// link is registered, which is the "wiring frequency" case `sync_mutex_t` is for.
+static tr::mem::size_class_t label_classes[12];
+static tr::mem::pool_source_t<tr::mem::sync_mutex_t> label_blocks{label_region, label_classes};
+//
 // ... graph_t graph{&shared, /*value_backend=*/&tr::mem::heap_backend(),
 // ...               /*ctl=*/&blocks};
 // ... fwd_router_t router{graph, /*label_src=*/&label_blocks, /*rx=*/&blocks,
 // ...                     /*flat=*/&tr::mem::heap_backend(),
-// ...                     /*max_label_bindings_per_link=*/64,
 // ...                     /*egress=*/&tr::mem::heap_backend()};
 ```
 
 `integrations/esp-idf/examples/full_node` is this recipe as running code: three slab
-regions (RX pool / label source / pmr arena) and a self-proof that prints the label
-source's own census — `288/2048 B used, 0/12 size classes, 0 block(s) overflowed` for
-one link carrying one compact flow — so the sizing above is a number to check against
-your own node rather than one to copy.
+regions (RX pool / control source / pmr arena) and a self-proof that prints the sources'
+own census, so the sizing above is a number to check against your own node rather than one
+to copy.
 
 Those all reach the ONE injection point of `graph_t`'s constructor
 (`core/include/libtracer/graph.hpp:graph_t::graph_t(mem::block_source_t&`): since
@@ -87,20 +83,17 @@ Those all reach the ONE injection point of `graph_t`'s constructor
 `tr::mem::block_source_t` and builds the pmr resource and the value backend over it internally,
 so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
 **four** of
-`fwd_router_t`: the failable `label_src` source its label tables draw from, the
+`fwd_router_t`: the failable `label_src` source its demux chunks draw from, the
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
 backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
 (`core/include/libtracer/fwd_router.hpp:router_planes_t`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
-`retained` is #1610 and defaults to `flat` when un-injected, and the
-`max_label_bindings_per_link` bound sits between `flat` and `egress`).
+`retained` is #1610 and defaults to `flat` when un-injected).
 Each is its own injection because each one's live set is governed by a different
 quantity — threads inside the router, replies in flight, flattens in flight, and
 the subscription population respectively — and a slab is sized against that
 quantity, so a shared seam silently re-scopes it.
-`label_src` was a `std::pmr::memory_resource` until #603 defect 1 — it could not
-stay one, because a peer's `ADVERTISE` reaches it and pmr reports exhaustion by
-throwing. The full set of
+The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure
 semantics of the third seam are in
@@ -144,8 +137,8 @@ targets can take.
 :::
 
 Keeping `flat` on the heap means every rope flatten on the forward **and** terminus paths
-sits outside the node's slab bound — the ingress `ADVERTISE` / `COMPACT` sub-rope
-flattens, the cold bus-name rejection flatten and the per-delivery egress one, plus
+sits outside the node's slab bound — the
+cold bus-name rejection flatten and the per-delivery egress one, plus
 the terminus resolver's rope-tier flattens one call below `resolve_terminus_rope`
 (`view_node::ensure_cache`, `view_node::own_wire` — both of its branches, so a
 peer cannot escape the bound by sending a payload that happens to land contiguously) and, since
@@ -205,11 +198,9 @@ router.add_child("up", up_link, /*rx=*/&up_blocks);
 ```
 
 A source shared at **wiring** frequency — a graph's `ctl`, or the router's
-`label_src` — is fine with a locking `Sync` policy (`tr::mem::sync_mutex_t` from
-`mem_source_sync.hpp`, or a target's own interrupt-disable section). The label store
-qualifies on its own terms rather than by analogy: it allocates only when a flow is
-set up, and the per-delivery `COMPACT` leg finds the label already bound and reaches
-no allocator. The policy is the `pool_source_t<Sync>` template parameter, defaulting
+`label_src` — is fine with a locking
+`Sync` policy (`tr::mem::sync_mutex_t` from `mem_source_sync.hpp`, or a target's own
+interrupt-disable section). The policy is the `pool_source_t<Sync>` template parameter, defaulting
 to `tr::no_guard_t`, which compiles to nothing.
 :::
 
@@ -228,9 +219,8 @@ Rules that follow:
   rule is **not yet met everywhere**: `try_reserve`'s throwing second step under
   concurrency (#850) still aborts on exhaustion. (It is the last of three. The CAN egress
   window table went in #1110 — `can_framing.hpp`'s `can_frame_at` now derives each window and
-  allocates nothing — and the peer-driven label-table binds of #603 defect 1 went when
-  `route_handle_t` moved onto the injected `mem::block_source_t`, which answers exhaustion by
-  value.) Price that one before shipping a `-fno-exceptions` image, and audit any
+  allocates nothing — and the peer-driven label-table binds of #603 defect 1 went with the
+  route handle itself, which chain delivery retired.) Price that one before shipping a `-fno-exceptions` image, and audit any
   path that calls throwing `new`; the full accounting is in
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
@@ -369,7 +359,7 @@ The backpressure counters come from `graph_t::delivery_drops()`
 `no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:graph_t::delivery_drops`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
-`FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a
+`FWD{WRITE}` terminus and a subscription edge alike (#1068) — so on a
 node whose vertices carry ACLs it is the signal that a peer is writing where it may not, and
 a peer whose grant was revoked shows up here rather than as a link that simply went quiet.
 They are counted and

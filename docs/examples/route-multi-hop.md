@@ -26,9 +26,9 @@ forwarder at all.
   synchronous and puts the intermediate bytes where they can be asserted on.
 - **The names are private.** `b` means something only to A and `c` means something only to B.
   `/b/c/sensor/temp` is the composition, spelled by whoever holds both mounts.
-- **Statelessness is a choice with a price, and the price is on the wire.** Every frame
-  re-carries its route. [The label plane](route-label-compact.md) is what buys that back for
-  flows that repeat — deliberately, per flow, and only when someone asks.
+- **Statelessness has a price, and the price is on the wire.** Every frame re-carries its
+  route, as a `PAIR` chain that shrinks by one element per hop. There is no per-flow shortcut:
+  a flow that repeats batches its samples into one `BATCH` frame if the app wants fewer headers.
 - **This target needs the FWD net plane.** It is built only when `LIBTRACER_NET_PLANE` is on
   (the default). Nothing in it is conditional at run time.
 

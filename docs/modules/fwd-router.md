@@ -108,8 +108,8 @@ authorization of a labelled operation is decided at each hop that dereferences a
 
 Alongside the routing legs the router installs the graph's **remote-delivery sink**: a write to a
 vertex that carries a remote subscriber fans out as `FWD{WRITE}` addressed by that subscriber's
-stored return route, or — when the subscription is compact-flagged — as a lean `COMPACT` bearing a
-label bound by a prior `ADVERTISE`.
+stored return route. That is chain delivery: the frame carries the whole `PAIR` chain, each hop
+consumes its own element, and no hop holds per-flow state.
 
 ## Interface
 
@@ -117,18 +117,16 @@ label bound by a prior `ADVERTISE`.
 namespace tr::net {
 
 class fwd_router_t {
-    // graph: terminus op resolution. label_src: the NOTHROW block source the route-handle
-    // label tables draw from (#603 defect 1 / ADR-0065 — it was a `memory_resource` until a
-    // peer's ADVERTISE proved pmr cannot report exhaustion by value).
+    // graph: terminus op resolution. label_src: the NOTHROW block source the NAME->link demux
+    // chunks draw from (ADR-0065; the route-handle tables that once shared it are retired).
     // rx: the NOTHROW block source the terminus decode arena draws from (ADR-0065).
     // flat: the byte backend EVERY rope flatten draws from, forward AND terminus (#730/#766).
-    // max_label_bindings_per_link: 0 = unbounded. egress: the reply-egress backend (#795).
+    // egress: the reply-egress backend (#795).
     // FOUR independent memory seams, each defaulting to the global heap on its own.
     explicit fwd_router_t(graph::graph_t& graph,
                           mem::block_source_t* label_src = &mem::heap_source(),
                           mem::block_source_t* rx = &mem::heap_source(),
                           mem::mem_backend_t* flat = &mem::heap_backend(),
-                          std::size_t max_label_bindings_per_link = 0,
                           mem::mem_backend_t* egress = &mem::heap_backend());
 
     // `name` is this node's mount RUN for `link`: the leading dst segments that route onward
@@ -139,7 +137,7 @@ class fwd_router_t {
     // than kMaxSegments. Optional per-child failable source; null falls back to the router's.
     bool add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
     bool remove_child(std::string_view name);   // removal, not departure
-    void link_down(std::string_view link_name); // departure: evict edges + drop label state
+    void link_down(std::string_view link_name); // departure: evict subscriber edges
 
     // Bind a LOCAL producer's subscription toward a MOUNT-PATH target (#739): resolves
     // `target` through the SAME strip-K cached descent the forward path uses (ADR-0061),
@@ -156,21 +154,9 @@ class fwd_router_t {
                                            const wire::tlv_node_t& fwd);  // read in place
     using raw_fn_t              = void (*)(void* ctx, std::string_view inbound,
                                            std::span<const std::byte> frame);
-    using compact_delivery_fn_t = void (*)(void* ctx, std::span<const std::byte> route,
-                                           std::span<const std::byte> payload);
-    using stale_label_fn_t      = void (*)(void* ctx, std::string_view inbound,
-                                           std::uint16_t label);
     void on_reply(reply_fn_t, void* ctx = nullptr) noexcept;
     void on_inbound(inbound_fn_t, void* ctx = nullptr) noexcept;
     void on_raw(raw_fn_t, void* ctx = nullptr) noexcept;
-    void on_compact_delivery(compact_delivery_fn_t, void* ctx = nullptr) noexcept;
-    void on_stale_label(stale_label_fn_t, void* ctx = nullptr) noexcept;
-
-    // Route-handle producer side (RFC-0004 §E.1).
-    std::uint16_t advertise(std::string_view link_name, std::span<const std::byte> route_path);
-    void send_compact(std::string_view link_name, std::uint16_t label,
-                      std::span<const std::byte> payload);
-    void clear_link(std::string_view link_name);
 
     void on_frame(std::string_view inbound_name, std::span<const std::byte> frame);
 
@@ -183,7 +169,6 @@ class fwd_router_t {
                                     const graph::path_t* reply_to = nullptr);
     bool cancel(origin_t& slot) noexcept;
     const child_registry_t& registry() const noexcept;
-    const route_handle_t&   handles()  const noexcept;
 };
 
 class child_registry_t {                 // the one NAME -> link demux table (ADR-0037)
@@ -276,23 +261,21 @@ Signature source: `core/include/libtracer/fwd_router.hpp:fwd_router_t::originate
 
 - **Stateless hops.** No per-request table means no timeout sweeper, no correlation map, and no
   memory that scales with concurrent operations. The cost is that the frame carries its own route:
-  address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
-  amortise on a steady flow.
+  address size grows with hop count, but each hop consumes its own element so the frame shrinks as
+  it travels. That multi-hop byte cost is accepted; an app that wants fewer headers on a steady
+  flow batches its samples into one `BATCH` frame.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:fwd_router_t::compact_delivery_fn_t`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:fwd_router_t::reply_fn_t`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:fwd_router_t::deliver_remote`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:fwd_router_t::deliver_local`) — single-link, that
-  flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
-  (#730), not the global heap.
+  stored value (`core/src/fwd_router.cpp:fwd_router_t::deliver_remote`). No leg of chain delivery flattens: the
+  value's spans ride by reference (the retired `COMPACT` form was the one that did).
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
-  started (#730) as the router's own four sites — the two ingress control-frame sub-rope flattens,
-  the cold bus-name rejection flatten, and the per-delivery `COMPACT` egress one. The terminus half
+  started (#730) as the router's own sites — the cold bus-name rejection flatten among them. The terminus half
   was not covered: the resolver's rope-tier flattens, one call below `resolve_terminus_rope`, took
   `rope_t::materialize`'s default global-heap backend, so a **fragmented** request from a peer
   allocated outside a bounded node's slab no matter what it had injected. The router now passes the
@@ -312,17 +295,11 @@ Signature source: `core/include/libtracer/fwd_router.hpp:fwd_router_t::originate
   exhaustion by value, and folding it into `flat` would silently re-scope an injection callers have
   already sized — see
   [failable allocation and backpressure](../design/allocation-and-backpressure.md)).
-- **Delivery drops rather than aborts on the value path — with one named residual.** The flatten,
-  frame build and `iovec` reserve on the writer thread are all failable: each **drops that one
-  delivery** — a subscriber misses a value under exhaustion, which is valid delivery behaviour —
-  instead of raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
-  `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The label store used to be the residual
-  here — a **compact-flagged** flow's first delivery on a link resolves its label *before* those
-  three steps, and that allocated its `link_tables_t` and its egress entry from a throwing
-  `std::pmr::memory_resource`, so that one leg could abort under `-fno-exceptions`
-  ([#603](https://github.com/avatarsd-llc/libtracer/issues/603) defect 1). It is closed: the store
-  draws every byte from an injected `mem::block_source_t` and answers exhaustion by value, so the
-  leg degrades to the full-route `FWD{WRITE}` form instead of aborting. See
+- **Delivery drops rather than aborts on the value path.** The frame head build and `iovec`
+  reserve on the writer thread are failable: each **drops that one delivery** — a subscriber
+  misses a value under exhaustion, which is valid delivery behaviour — instead of raising an
+  exception that `-fno-exceptions` would turn into `abort()`. The router holds no per-link label
+  store, which was once the one throwing leg (#603 defect 1). See
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Per-frame sinks are a function pointer plus a context, not `std::function`**
   ([ADR-0047 — build-time closed module sets and compile-time seams](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)).
@@ -458,7 +435,7 @@ Inside the process a link is addressed by its connection vertex's handle (the ro
   was registered, so a caller that ignores it wires a link that is audible on its transport and
   resolvable by no `dst`, while `size()` and `live_size()` report the registry as healthy.
 - **`remove_child` is removal; `link_down` is departure.** A link that merely dropped must take
-  `link_down`, which evicts subscriber edges and label state but keeps the registry entry. Calling
+  `link_down`, which evicts subscriber edges but keeps the registry entry. Calling
   `remove_child` on a reconnecting `DIAL` link permanently unroutes it, because under the RFC-0014
   model a connection's *vertex* outlives its *socket*. Conversely, call `remove_child` **before**
   destroying the `transport_t`, or a forward can resolve a freed object.
@@ -488,9 +465,6 @@ Inside the process a link is addressed by its connection vertex's handle (the ro
   request would draw one reply per peer and scramble any client that correlates replies FIFO.
   Naming the mount *exactly* still terminates locally, and a peer-directed hop
   (`/net/<module>/<name>/<peer>/…`) still forwards — only the broadcast shape is refused.
-- **A stale `COMPACT` label is dropped, never fatal.** A label with no ingress binding on its link
-  produces a `HANDLE_NACK` back to the producer, which re-advertises. An implementation that treats
-  an unknown label as a protocol error breaks the self-heal.
 
 ## The rest of the plane
 
@@ -505,13 +479,6 @@ tested against hand-built frames with no live transport.
   a serialize into a fresh buffer. It is local-only by construction — a `dst`
   that does not resolve locally is answered `NOT_FOUND`, and hop-by-hop
   forwarding stays the router's job.
-- **`route_handle_t`** is the per-node label store behind delivery compaction.
-  Read literally, "a delivery is a FWD WRITE" makes every streamed sample
-  re-carry its full return route; a per-link label aliases that route instead,
-  and each hop *swaps* the label the way a CAN ID is re-resolved against each
-  bus. Binding is advertise-driven and re-advertise on reconnect is the
-  self-heal. A flow that is not flagged for compaction allocates nothing here,
-  which is what preserves the stateless-forwarder property for everything else.
 - **The frame view** (`fwd_hdr_t`, `fwd_pre_t`, `dst_seg_walk_t`,
   `control_head_t`, `fwd_rebuild_t`, `stack_writer_t`) is the offset-dispatch
   cluster the forward hop reads a frame by: one header read as absolute offsets,
@@ -522,8 +489,8 @@ tested against hand-built frames with no live transport.
   re-slices from its own cursor.
 - **`sink_slot_t`** (`tr::sink_slot_t` — layer-neutral since #1049, when L4 took its
   three configuration seams into one; it has no `tr::net` spelling)
-  holds each of the router's five observability/terminus sinks —
-  reply, inbound-FWD, raw-frame, compact-delivery, stale-label. A sink is a
+  holds each of the router's observability/terminus sinks —
+  reply, inbound-FWD and raw-frame. A sink is a
   `{function pointer, context}` pair set from a control thread and read on every
   transport receive thread, so the two halves have to be published as a unit: a
   torn read hands a newly installed function the previous sink's context, and
@@ -593,23 +560,6 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 
 ```{doxygenenum} tr::graph::reply_kind_t
 :project: libtracer
-```
-
-### Delivery compaction
-
-```{doxygenclass} tr::net::route_handle_t
-:project: libtracer
-:members:
-```
-
-```{doxygenstruct} tr::net::resolved_binding_t
-:project: libtracer
-:members:
-```
-
-```{doxygenstruct} tr::net::handle_binding_t
-:project: libtracer
-:members:
 ```
 
 ### The FWD frame view

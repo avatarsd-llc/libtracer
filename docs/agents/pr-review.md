@@ -188,11 +188,11 @@ available on this axis — more serious than anything in 2f or 2g.
    contradicts this.
 4. **Forwarding is core.** Two transport modules loaded means the node is a
    forwarder — a stateless `FWD` hop. From a subscriber's view, transport choice
-   is invisible. "Stateless" is qualified: the route-handle plane and RFC-0027's
-   path labels put per-flow state on hops that mint labels, both **opt-in and off
-   by default**, and both degrade to the bare hop when the state is absent. A
-   change that makes state **mandatory** on the bare hop breaks the claim; a
-   change that adds more opt-in state does not, but must say how it degrades.
+   is invisible. A hop holds no hard state and no per-flow or per-link
+   state: a stream delivery is chain delivery (the full `PAIR` chain rides in the frame), and
+   the route-handle plane is retired. Only a transport may keep a link-local alias private to
+   its two ends. A change that puts state on the bare hop breaks the claim; soft state whose
+   miss falls through to the canonical string does not, but must say how it degrades.
 5. **The graph imposes no shape on user data.** An endpoint is a name attached to
    a memory view; the protocol claims nothing about what the memory contains. A
    change that requires user payloads to be framed, typed or aligned a particular
@@ -382,7 +382,7 @@ yourself**; CI already did.
 | Formatting | `clang-format-18 --dry-run --Werror` over the paths `core-ci.yml`'s format step lists — **version 18** (CI runs 18.1.3); another major version reformats untouched files | no |
 | Public-header docs gate | Doxygen with `core/Doxyfile` (`WARN_AS_ERROR=YES`) | no |
 | Doc citations (`doc-citations`) | `python3 tools/check_doc_citations.py` — fails on a symbol citation that is gone or ambiguous, and on any line-number citation in a living doc | no |
-| Symbol-size ratchet (`symbol-ratchet`) | `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer bench_compact_delivery -j && python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json` — toolchain-bound, so a local number is not CI's | no |
+| Symbol-size ratchet (`symbol-ratchet`) | `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer -j && python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json` — toolchain-bound, so a local number is not CI's | no |
 | Perf gate (`perf`, path-filtered to `core/`, `bench/`, `docs/methodology.md`) | `gate-pr` in `.github/workflows/perf.yml`: a same-runner interleaved A/B against `main` via `bench/perf_gate.py`; a contributor does not reproduce it locally | no |
 | Docs build (`docs`) | `sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html` after `doxygen core/Doxyfile`; a Doxygen autolink inside backticks breaks `-n -W` — escape it with `%` | no |
 | Cortex-M0 footprint sentinel | the `sentinel` job in `.github/workflows/footprint-cortexm0.yml` (needs `arm-none-eabi`) | no |

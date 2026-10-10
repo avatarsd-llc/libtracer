@@ -28,7 +28,7 @@
 
 
 
-- **Forwarder** (router): the stateless component that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the whole leading `dst` mount run and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write. *"Stateless" means no hard state and no per-request state ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §9.1): a learned chain of PAIR elements is a soft cache whose miss falls through to the canonical string, and RFC-0004 §E.1's compact delivery flows, which do leave per-link state on the hops they cross ([05-protocol-tlvs.md](05-protocol-tlvs.md) §Route-handle frames), are the single named exception — recoverable, and never a wrong delivery.*
+- **Forwarder** (router): the stateless component that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the whole leading `dst` mount run and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write. *"Stateless" means no hard state and no per-request state ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §9.1): a learned chain of PAIR elements is a soft cache whose miss falls through to the canonical string. A stream delivery is a `FWD{WRITE}` carrying the whole chain, so no hop holds per-flow or per-link state.*
 
 - **Buffer segment**: a refcounted region of real memory backing one or more views. The unit of ownership.
 
@@ -447,7 +447,7 @@ Two invariants make the modes coherent:
 - **Assign is never gated.** Whatever the mode, assign swaps the value and advances the sequence. The mode governs propagation, not storage.
 - **A direct propagate always delivers its argument.** The mode governs only the descendants a sweep pulls in, which is what makes `EXPLICIT` reachable at all.
 
-Delivery mode is host state on the vertex, defaulting to `IF_NEWER`. It is **not** carried in `SUBSCRIBER.qos_settings` — the source vertex owns the policy, not the observer. Configuring it from a remote peer over the vertex `:settings` path is specified but deferred; the core semantics need only the attribute and its default. The value-based `ON_CHANGE` filter and the `min_interval_ns` / `keepalive_ns` throttles that once lived in `qos_settings` are removed for good: the runtime never compares stored bytes to decide delivery, because a vertex never parses its bytes and comparing an *N*-byte value costs the same memory traffic the delivery would. `delivery_compact` (label compaction) is orthogonal — it concerns how a route is encoded, not whether a value is delivered — and is retained.
+Delivery mode is host state on the vertex, defaulting to `IF_NEWER`. It is **not** carried in `SUBSCRIBER.qos_settings` — the source vertex owns the policy, not the observer. Configuring it from a remote peer over the vertex `:settings` path is specified but deferred; the core semantics need only the attribute and its default. The value-based `ON_CHANGE` filter and the `min_interval_ns` / `keepalive_ns` throttles that once lived in `qos_settings` are removed for good: the runtime never compares stored bytes to decide delivery, because a vertex never parses its bytes and comparing an *N*-byte value costs the same memory traffic the delivery would. The retired `delivery_compact` flag (per-link label compaction) had no bearing on whether a value is delivered; delivery is now always chain delivery.
 
 ### Wire mapping
 
@@ -533,7 +533,7 @@ Unsubscribe-then-subscribe remains available and is the only spelling that does 
 
 Delivery policy is a property of **one producer→subscriber relationship**, not of the producer
 ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A). A `SUBSCRIBER` MAY carry it in its
-**existing `SETTINGS` child** — the same child `delivery_compact` uses, so this introduced no
+**existing `SETTINGS` child** — so this introduced no
 new wire structure — as one packed 16-bit value under the key `delivery_policy`:
 
 | bits | field | values |

@@ -14,7 +14,7 @@ references are integration facts about the transport seam.
 On single-link traffic — one recv chunk becoming one ingress segment, which is what every
 unfragmented TCP, UDP and WS producer emits — **no payload flatten fires.** `rope_t::materialize`
 returns the sole link (`core/include/libtracer/rope.hpp:rope_t::materialize`), a refcount bump, so the branch
-write, the field write, the per-node parse cache, span-only delivery and COMPACT remote delivery
+write, the field write, the per-node parse cache, span-only delivery and remote chain delivery
 all resolve to reference counting rather than `memcpy`. Every payload flatten in the codebase is a
 multi-link fallback.
 
@@ -92,8 +92,8 @@ identifiers for the rest of this page.
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:receiver_slot_t::deliver_rope`) | no | yes — only when no rope sink is installed; a refused materialize now DROPS the frame rather than handing the sink an empty span (#917) | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
 | ⑧ | WS RX reassembly — `asm_buf_t` regrow-and-memcpy (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | no — unfragmented delivers borrowed (scratch-backed, no per-frame alloc for fitting frames), or OWNING out of an injected bounded pool where an integrator named one (#1565, rank 2 below, unfragmented only) | yes — O(n²) across fragments; the owning mode adds one copy into a pool segment at the end of a fragmented message so a rope-only sink is not starved | Fallback | Enables ⑦'s removal; the copy itself is a pool-recv question, not a cursor one |
 | ⑨ | WS TX gather — memcpy into a pooled tx work slot in `queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; an exhausted pool drops and counts, #949). Since #1566 an integrator may declare a second BOUNDED size class (`tx_large_bytes` × `tx_large_slots`), which takes the band above `tx_inline_bytes` and leaves only the exceptional tail past it, drawn from the link's `memory.io` store since #1880; exhausting the class is a named drop, never a heap fallback | copy per frame per peer; alloc only past the declared classes | yes | Structural within the `esp_http_server` seam | **No** — TX-side; the cursor is irrelevant |
-| ⑩ | COMPACT remote delivery — `deliver_remote` (`core/src/fwd_router.cpp:fwd_router_t::deliver_remote`, materialize at `core/src/fwd_router.cpp:val.try_materialize(*flat_)`, from the router's injected backend) | no — adopt | yes — auto-promotion leg only | Fallback, narrow | Yes — a scatter-gather compact encoder |
-| ⑪ | Control-child strip — `on_control_rope` (`core/src/fwd_router.cpp:fwd_router_t::on_control_rope`, sub-rope materialize at `core/src/fwd_router.cpp:frame.subrope(off, total).try_materialize(*flat_)` and `core/src/fwd_router.cpp:const std::span<const std::byte> payload`, from the router's injected backend) | no | only a multi-link ADVERTISE / COMPACT sub-rope | Fallback, and fused rather than eliminated — the next consumer re-encodes anyway | Yes, with a near-zero saving |
+| ⑩ | *Retired.* The per-link COMPACT remote delivery materialized the value before its encode; chain delivery gathers the value's spans off a stack head and has no flatten | n/a | n/a | n/a | n/a |
+| ⑪ | *Retired.* The control-child strip flattened a multi-link ADVERTISE / COMPACT sub-rope; both frames are gone from the router | n/a | n/a | n/a | n/a |
 | ⑫ | Reply-route synthesis — `tlv_sliced` (`core/src/fwd_reply.hpp:emit_cursor_t::tlv_sliced`, called at `core/src/fwd_reply.cpp:assemble_reply`) | yes | yes | Bounded frame synthesis: the route wires are rewritten | No — these are emitted bytes, not a copy of payload |
 
 On the single-link path the only copies that fire are ① (the recv floor), ④ (the structure arena),
@@ -380,7 +380,7 @@ the gate.
 | **3** | Rope-native branch and field node type | ②③, the multi-link branch/field flatten | Nothing on single-link, which is a refcount bump; one flatten becomes a refcount bump on fragmented POINT writes | **no — multi-link only** | Ratification-gated sink type (ADR-0041 §2); needs rank 1 to matter |
 | **4** | Rope-native walk accessors plus a scatter-gather reply head | ⑥, the per-straddling-node `ensure_cache` | On straddling route TLVs, fuses flatten and memcpy into one gather | **no — multi-link only** | Converts the shared span-based `resolve_node` concept — non-local |
 | **5** | Rope-chaining WS reassembler (the host `ws_assembler_t` shape) | ⑧'s O(n²) regrow | O(n²) → O(n) owning copies; no 2×n transient heap peak. Not zero-copy, and fragmentation may worsen (k small segments). | **no — fragmented only** | Needs rank 2 or the rope sink wired, or ⑦ re-materializes |
-| **6** | Scatter-gather COMPACT encoder | ⑩'s delivery flatten | Real only on server-side `writev` links, on the auto-promotion leg; neutral on a masked WS client | no | Low value |
+| **6** | *Retired.* Scatter-gather COMPACT encoder | ⑩'s delivery flatten | Chain delivery already gathers; there is no COMPACT left to encode | n/a | n/a |
 | — | `LWIP_NETCONN` pbuf-as-rope-link | ①, the ingress ownership copy | Collapses even the structural copy | yes | Non-portable (no pbuf on a Linux host); incompatible with `esp_http_server` framing |
 | — | Raw `sendmsg` WS TX, leaving `esp_http_server` | ⑨, the TX gather | One full-payload allocation and memcpy per frame per peer | yes | Abandons the threadless HTTP-server seam; breaks the `send_fn` indirection; lwIP still copies at the socket |
 

@@ -391,7 +391,7 @@ outside it, so a callback may re-enter the graph. Because a delivery landing on 
 does not re-fan from that target, re-entry cannot build a dispatch cycle.
 
 A remote subscriber's delivery does not go on the wire from here: the fan-out hands
-`{link, return_route, delivery_compact}` and the value to the graph's injected
+`{link, return_route}` and the value to the graph's injected
 remote-delivery sink, which is a `tr::net` concern. See
 [fwd-router](fwd-router.md) and [transport](transport.md).
 
@@ -508,7 +508,7 @@ whose notify clone failed used to be the widest case of this; [#1505](https://gi
 removed the *clone*, so that shed is now impossible rather than merely counted.
 
 `denied` counts a refusal on **every plane the value-write path is entered from** — an API
-`write`, a `FWD{WRITE}` terminus, a `COMPACT` terminus, and a subscription edge's fan-in gate
+`write`, a `FWD{WRITE}` terminus, and a subscription edge's fan-in gate
 — because it is counted at the graph's own WRITE gate rather than once per deliverer (#1068).
 It is therefore *refusals*, not *refusals nobody was told about*: an API caller both receives
 `PERMISSION_DENIED` and counts here. A number that depended on which door a refusal came

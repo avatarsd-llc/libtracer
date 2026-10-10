@@ -206,13 +206,6 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "ns p50, batch-amortized",
         "recorded per `main` push"),
     instrument_t(
-        "bench_compact_delivery.cpp", "framed", ("routing",),
-        "Drives the Nth `COMPACT` frame on an already-advertised binding — the steady state of "
-        "an established flow — in both its forms: the label resolves locally (`terminus`) or "
-        "swaps and re-emits downstream (`forward`).",
-        "ns p50 · allocations per frame",
-        "recorded per `main` push"),
-    instrument_t(
         "bench_forward_heap.cpp", "counted", ("memory",),
         "Replaces the global allocator with a counting wrapper and arms it around exactly one "
         "operation, so every number is an exact count rather than a sample. Eight probes: the "
@@ -783,13 +776,12 @@ same-named connections distinct, which is correctness, not lookup time (ADR-0061
 | path | registry work per frame |
 | --- | --- |
 | plain `FWD` write | mount descent + inbound lookup, **per frame** — the frame carries the full path, so there is nothing to cache against |
-| `COMPACT` on a bound label | one dereference of the cached registry slot, **first frame only** — resolved once, then memoized |
+| chain delivery (`FWD{WRITE}` carrying the `PAIR` chain) | the same per-frame mount descent and inbound lookup as a plain write, once per hop — the hop consumes its own chain element and keeps nothing |
 | remote delivery to a subscriber | one lookup by link name, **per frame** — the subscriber record holds a name |
 
-A binding holds the resolved target rather than a name, and both cached forms self-invalidate
-without a callback: the terminus compares a retirement generation, and the forwarding hop
-reads the registry slot, whose `link` teardown nulls in place — so a departed link reads
-`nullptr`, the same clean miss an unresolved lookup gives (ADR-0062, ADR-0063).
+A departed link self-invalidates without a callback: the forwarding hop reads the registry
+slot, whose `link` teardown nulls in place, so a departed link reads `nullptr`, the same clean
+miss an unresolved lookup gives (ADR-0062, ADR-0063). No hop caches a binding of its own.
 
 The dominant term in a hop is TLV header parsing — the FWD header, the op, the `dst` PATH and
 its segments, the selector peek and the `src` PATH on rebuild, each read exactly once — and it
@@ -797,11 +789,22 @@ sits at a local optimum for that structure. At `-O3` the parse inlines with valu
 registers into the narrow struct's stores, so there is no intermediate object to remove:
 forcing the inline, or narrowing the header struct, each *regress* the hop by about 10 %.
 
-A `COMPACT` re-emit builds no frame: the head goes to a 12-byte stack buffer and the payload
+A chain-delivery re-emit builds no frame: the head goes to a 12-byte stack buffer and the payload
 is handed to the transport by reference as a scatter-gather list, which is why the forward
 charts are flat in payload size. Zero allocations **in the router** is not zero on the wire —
 a transport that does not override the gather form concatenates once in
-`transport_t::send(iov)`."""
+`transport_t::send(iov)`.
+
+### Retired series
+
+`compact-forward`, `compact-terminus` and `route-handle-egress-*` are no longer produced. They
+measured RFC-0004 §E.1's per-link route handle (`ADVERTISE` / `COMPACT` / `HANDLE_NACK`), which
+left the protocol and the router when delivery became chain delivery: a `FWD{WRITE}` carrying
+the full `PAIR` chain, one element consumed per hop, no state held. Their history stays in the
+charts as a closed record and is not comparable to later points. The cost chain delivery pays is
+bytes on the wire, not time per hop, and the maintainer has ruled that multi-hop byte cost
+accepted: the benches report it and never veto on it. `BATCH` is the application's tool for
+amortising headers on a steady flow."""
 
 
 def _parse_codec(out: str) -> list[tuple[int, float, float, float]]:

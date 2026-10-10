@@ -233,19 +233,23 @@ connection *vertex* persists ([13](13-network-formation.md) §link liveness). Wh
 up is itself a readable, `await`-able, subscribable value on the connection vertex — the graph
 answers the question with the same three verbs it answers everything else with.
 
-### 6. Compaction forms exist only across links
+### 6. Alias forms exist only across links
 
-Three alias forms exist, all of them *aliases for an address*, none of them a second address
+Two alias forms exist, both of them *aliases for an address*, none of them a second address
 space, and each degrading to the canonical string rather than failing:
 
 | Form | Scope | Degrades to | Where |
 | --- | --- | --- | --- |
-| Route handle (`ADVERTISE` / `COMPACT` / `HANDLE_NACK`) | per **link**, swapped at each hop | full-route `FWD` after a `HANDLE_NACK` and a re-advertise | RFC-0004 §E.1 |
 | Bound path (`PATH_REF`) | one 8-byte ref per **host** on the route | dropped and re-minted from the canonical original — never repaired | RFC-0024 |
 | Path label | per **host**, per **element** | the string path the sender still holds, re-minted from the next reply | RFC-0027 |
 
-The canonical string `PATH` remains the mint key and the fallback in all three, which is what
+The canonical string `PATH` remains the mint key and the fallback in both, which is what
 keeps one spelling per address (CONTEXT.md §Path label).
+
+The per-link route handle (`ADVERTISE` / `COMPACT` / `HANDLE_NACK`) is **retired**: delivery is
+the `PAIR` chain, which carries the whole route in the frame and holds no state at any hop. A
+transport may still keep a link-local alias private to its two ends (CAN's native-ID map); the
+router never sees it.
 
 ## Where the deployment spectrum changes the answer
 
@@ -256,13 +260,13 @@ forwarder holding ≥ 2 transports (rung 2, P2), **WIDE** is a full host (rungs 
 
 - **Address cost is settled for NARROW and open for MID/WIDE.** On a header-elided transport
   there is no room for a route at all — the CAN ID *is* the path, the `identity↔path` map is
-  mandatory, and compaction is therefore not a choice
+  mandatory, and a link-local alias is therefore not a choice
   ([ADR-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md),
   [14 — CAN transport](14-can-transport.md)). On full-TLV transports the default is
-  **full-route and stateless**, and compaction is opt-in — a constrained node forwarding 50 cold
-  reads holds **zero** label state (RFC-0004 §E.1 §state boundary).
+  **full-route and stateless** for every delivery — a constrained node forwarding 50 cold reads
+  holds **zero** per-flow state, and so does one forwarding a running stream (chain delivery).
 - **Per-hop state is a WIDE-only purchase.** A path-label-minting hop knowingly holds per-hop
-  state in exchange for per-element degradation and terminus-residual compaction; the tables
+  state in exchange for per-element degradation; the tables
   are injected, per-peer ceilinged, and refuse new mints on exhaustion rather than evicting a
   live one (RFC-0027; CONTEXT.md §Path label).
 - **Partition detection follows the transport kind, not the rung — and NARROW's usual kinds
@@ -274,16 +278,14 @@ forwarder holding ≥ 2 transports (rung 2, P2), **WIDE** is a full host (rungs 
 ### Partition
 
 **What the wire does.** When a connection-oriented link's session dies, the transport fires the
-link-departure hook `fwd_router_t::link_down`, which runs two halves in order:
+link-departure hook `fwd_router_t::link_down`, and
 `graph_t::evict_link_edges` deactivates and reclaims every subscriber edge whose stored link is
-that link, then `clear_link` drops the link's route-handle label state
-(`core/include/libtracer/fwd_router.hpp`). The first half is why a producer stops addressing a
-dead session; the header records what it releases — roughly 90 bytes of route/link/caller state
-per edge, against the ESP32-C6's measured ~27 KB per browser session that motivated it.
-Mid-chain, `clear_link` also drops every ingress binding on
-*any* link whose downstream half crossed the departed one, so an upstream that never saw the
-reconnect draws an ordinary stale-label `HANDLE_NACK` and re-advertises rather than streaming
-into a dead out-label ([#716](https://github.com/avatarsd-llc/libtracer/issues/716)).
+that link. That is why a producer stops addressing a dead session; the header records what it
+releases — roughly 90 bytes of route/link/caller state per edge, against the ESP32-C6's measured
+~27 KB per browser session that motivated it. The router holds no per-link route state beyond
+the edges, so there is nothing mid-chain to unwind: an upstream that never saw the reconnect
+draws an ordinary stale-element error on its next chain write rather than streaming into a dead
+hop ([#716](https://github.com/avatarsd-llc/libtracer/issues/716)).
 
 **What it does not do.** Three gaps, all deliberate and all load-bearing when designing a
 deployment:
@@ -357,8 +359,8 @@ four instruments, and withholds history.
 - **New vertices announce themselves by existing.** A child's *appearance* is just its first
   write bubbling to the parent's subscribers, so a subtree subscriber learns about vertices
   created after it joined without polling `:children[]` (RFC-0005 §A; RFC-0030 §7.3).
-- **Compaction re-establishes itself in-band.** A route handle is re-advertised on (re)connect —
-  that *is* the self-heal (RFC-0004 §E.1); a path label the joiner does not know draws a
+- **Addressing re-establishes itself in-band.** A chain delivery holds no per-link state, so
+  there is nothing to re-advertise on (re)connect; a path label the joiner does not know draws a
   `NOT_FOUND`-class error and the sender falls back to the full string path and re-mints from
   the next reply, with no withdraw frame, no lease and no TTL (RFC-0027); a CAN transport's
   `identity↔path` map re-learns from advertise frames
