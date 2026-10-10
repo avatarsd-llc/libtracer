@@ -148,6 +148,12 @@ add_executable(bench_terminus_tier bench_terminus_tier.cpp)
 target_link_libraries(bench_terminus_tier PRIVATE libtracer)
 target_compile_options(bench_terminus_tier PRIVATE -Wall -Wextra)
 
+# #1533: what cleared and suspended subscriber slots cost a fan-out write (A/B: build the
+# `cleared` arm on a pre-#1533 tree for the old per-entry skip).
+add_executable(bench_subscriber_suspend bench_subscriber_suspend.cpp)
+target_link_libraries(bench_subscriber_suspend PRIVATE libtracer)
+target_compile_options(bench_subscriber_suspend PRIVATE -Wall -Wextra)
+
 # Many-core contention microbenchmarks (Wave 0e; the ADR-0032 measurement-first
 # answer to the 128-core scaling question). bench_fanout_clone_storm measures
 # segment-refcount cacheline contention under wide fan-out; bench_await_wakeup_storm

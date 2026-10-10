@@ -14,6 +14,42 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`graph_t::set_suspended` / `graph_t::is_suspended`: a subscription is suspended and
+  resumed in place, allocating nothing
+  ([#1533](https://github.com/avatarsd-llc/libtracer/issues/1533)).** A suspended edge keeps
+  its slot index, callback pair, binding, cold half and admission decision, and receives no
+  delivery; a resume delivers from the next propagated value with no replay. A toggle flips the
+  edge's published entry under the vertex's stripe lock: no republish, nothing drawn from any
+  source, no frame. A suspend cannot fail. A resume draws only after an edge republish on that
+  vertex was refused for want of memory: it rebuilds the array itself, and answers
+  `BACKPRESSURE`, unchanged, if that draw is refused too; a retry succeeds once the source has
+  room. It is not a grace point: a fan-out that took its
+  snapshot before the flip still delivers once after the call returns.
+  - The RFC-0005 counts are of delivering edges: `own_subs`, `has_subscribers` and the
+    ancestors' bubbling count leave a suspended edge out, so a vertex whose every edge is
+    suspended skips the fan-out as one with none does, and no drop tally counts one.
+  - The published edge array now holds one entry per ACTIVE slot: a cleared slot has none (it
+    used to keep a dead one the copy loop loaded and skipped), and a suspended slot keeps its
+    entry with the liveness bit clear, so each suspended edge still costs a write one skipped
+    entry while other edges deliver. The array is still sized for every slot, so a cleared slot
+    costs the same capacity as before; nothing here saves memory.
+  - `pub_edge_t` gains `slot`, in the padding after `active`: 32 bits on LP64, 16 on ILP32, so
+    the entry stays 56 B and 32 B, both pinned by `static_assert`. On ILP32 a vertex is capped
+    at 65,536 subscriber slots (`add_edge` refuses past it). `subscriber_t::suspended` rides the
+    record's tail padding (80 B and 44 B, unchanged). `edge_block_t` gains `pub_current`.
+  - `vertex_t::set_edge_suspended` is the slot primitive; `vertex_t::published_edges()`
+    reports the array's width; `vertex_t::clear_edge`, `evict_link_edges` and
+    `evict_route_edges` report suspended edges so the counts are not unwound twice, and
+    `replace_edge` answers the new `edge_replace_t::REPLACED_SUSPENDED`.
+  - Cost, measured on the bench host: a suspend plus a resume takes about 50 ns at any fan
+    (1 to 1024 edges), where an unsubscribe plus a re-subscribe takes 0.2 to 5 µs. The
+    fan-out path's instruction count is unchanged (+0.2 % at 1024 edges).
+  - In-process API only: the `:subscribers[N]` wire spelling is
+    [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019). A `subscription_t` carries
+    no generation (#1932), so a stale handle whose slot was reused names the new edge.
+
 ### Changed
 
 - **Docs: `heap_backend()` and a null `memory.io` no longer promise "the heap"
