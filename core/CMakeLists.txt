@@ -302,6 +302,67 @@ if(LIBTRACER_WITH_QUIC)
     endif()
 endif()
 
+# The security_noise module's crypto backend (RFC-0033, #2072): one compile-time choice, no
+# runtime switch. `none` (the default) configures nothing, so a build without the Noise link
+# compiles none of it and links no crypto library. Any other value makes the header-only
+# INTERFACE target `libtracer_noise`, which carries the backend library and the
+# `LIBTRACER_NOISE_CRYPTO_<BACKEND>` define that `security_noise.hpp` aliases as
+# `tr::net::noise::default_crypto_t`. The core library itself stays crypto-free (ADR-0045).
+#   openssl  libcrypto 3 (find_package(OpenSSL))
+#   sodium   libsodium (sodium.h + libsodium)
+#   psa      mbedTLS through PSA: an existing MbedTLS::tfpsacrypto / MbedTLS::mbedcrypto
+#            target, else find_package(MbedTLS), else psa/crypto.h + libtfpsacrypto or
+#            libmbedcrypto on the search path. Build it with MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS
+#            (see security_noise_psa.hpp).
+set(LIBTRACER_NOISE_CRYPTO "none" CACHE STRING
+    "Crypto backend of the Noise link module (none, openssl, sodium, psa)")
+set_property(CACHE LIBTRACER_NOISE_CRYPTO PROPERTY STRINGS none openssl sodium psa)
+if(NOT LIBTRACER_NOISE_CRYPTO STREQUAL "none")
+    add_library(libtracer_noise INTERFACE)
+    target_include_directories(libtracer_noise INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_compile_features(libtracer_noise INTERFACE cxx_std_23)
+    if(LIBTRACER_NOISE_CRYPTO STREQUAL "openssl")
+        find_package(OpenSSL 3 REQUIRED COMPONENTS Crypto)
+        target_link_libraries(libtracer_noise INTERFACE OpenSSL::Crypto)
+        target_compile_definitions(libtracer_noise INTERFACE LIBTRACER_NOISE_CRYPTO_OPENSSL=1)
+    elseif(LIBTRACER_NOISE_CRYPTO STREQUAL "sodium")
+        find_path(LIBTRACER_SODIUM_INCLUDE_DIR sodium.h)
+        find_library(LIBTRACER_SODIUM_LIBRARY NAMES sodium libsodium)
+        if(NOT LIBTRACER_SODIUM_INCLUDE_DIR OR NOT LIBTRACER_SODIUM_LIBRARY)
+            message(FATAL_ERROR "LIBTRACER_NOISE_CRYPTO=sodium but libsodium was not found "
+                "(install libsodium-dev, or set CMAKE_PREFIX_PATH).")
+        endif()
+        target_include_directories(libtracer_noise SYSTEM INTERFACE "${LIBTRACER_SODIUM_INCLUDE_DIR}")
+        target_link_libraries(libtracer_noise INTERFACE "${LIBTRACER_SODIUM_LIBRARY}")
+        target_compile_definitions(libtracer_noise INTERFACE LIBTRACER_NOISE_CRYPTO_SODIUM=1)
+    elseif(LIBTRACER_NOISE_CRYPTO STREQUAL "psa")
+        if(NOT TARGET MbedTLS::tfpsacrypto AND NOT TARGET MbedTLS::mbedcrypto)
+            find_package(MbedTLS CONFIG QUIET)
+        endif()
+        if(TARGET MbedTLS::tfpsacrypto)
+            target_link_libraries(libtracer_noise INTERFACE MbedTLS::tfpsacrypto)
+        elseif(TARGET MbedTLS::mbedcrypto)
+            target_link_libraries(libtracer_noise INTERFACE MbedTLS::mbedcrypto)
+        else()
+            find_path(LIBTRACER_PSA_INCLUDE_DIR psa/crypto.h)
+            find_library(LIBTRACER_PSA_LIBRARY NAMES tfpsacrypto mbedcrypto)
+            if(NOT LIBTRACER_PSA_INCLUDE_DIR OR NOT LIBTRACER_PSA_LIBRARY)
+                message(FATAL_ERROR "LIBTRACER_NOISE_CRYPTO=psa but no PSA Crypto library was "
+                    "found (an MbedTLS CMake package, or psa/crypto.h and libmbedcrypto; set "
+                    "CMAKE_PREFIX_PATH).")
+            endif()
+            target_include_directories(libtracer_noise SYSTEM INTERFACE "${LIBTRACER_PSA_INCLUDE_DIR}")
+            target_link_libraries(libtracer_noise INTERFACE "${LIBTRACER_PSA_LIBRARY}")
+        endif()
+        target_compile_definitions(libtracer_noise INTERFACE LIBTRACER_NOISE_CRYPTO_PSA=1)
+    else()
+        message(FATAL_ERROR "LIBTRACER_NOISE_CRYPTO='${LIBTRACER_NOISE_CRYPTO}': expected one of "
+            "none, openssl, sodium, psa.")
+    endif()
+    message(STATUS "libtracer: Noise link crypto backend = ${LIBTRACER_NOISE_CRYPTO}")
+endif()
+
 # Install / export: make libtracer consumable with `find_package(libtracer)` and
 # `target_link_libraries(app PRIVATE libtracer::libtracer)` — the release-hardening
 # packaging seam (before this, a downstream could only source-vendor the tree).

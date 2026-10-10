@@ -1471,6 +1471,17 @@ target_compile_definitions(conformance_runner PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME conformance COMMAND conformance_runner)
 
+# The Noise link's crypto backend (#2072), only when LIBTRACER_NOISE_CRYPTO names one: the
+# runner then also replays the noise/ transcripts (RFC-0033 Appendix A) on that backend, and
+# security_noise_test proves the backend seam, its refusals and its allocation counts.
+if(TARGET libtracer_noise)
+    target_link_libraries(conformance_runner PRIVATE libtracer_noise)
+    add_executable(security_noise_test security_noise_test.cpp)
+    target_link_libraries(security_noise_test PRIVATE libtracer_noise)
+    libtracer_test_warnings(security_noise_test)
+    add_test(NAME security_noise COMMAND security_noise_test)
+endif()
+
 # M2 — substrate harness (links the built library; atomic refcounts).
 add_executable(substrate_test substrate_test.cpp)
 target_link_libraries(substrate_test PRIVATE libtracer)

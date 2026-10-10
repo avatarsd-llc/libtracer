@@ -16,6 +16,15 @@ Each case is a directory under `vectors/v1/<category>/<case>/` containing:
 | `expected.json` | Human-readable / cross-language decoded form (the spec of what `input.bin` *means*). |
 | `description.md` | Prose describing the case. |
 
+A **Noise transcript** (`vectors/v1/noise/<case>/`) carries `transcript.json` and no
+`.bin` file at all (RFC-0033 §12.2): the inputs of one Noise link handshake and the bytes it
+must produce. It is not a frame, so a codec harness, the `--tap` matrix and `run-all.py`
+never walk it. A core that implements the Noise link replays it on its crypto backend and
+compares every value. The C++ `conformance_runner` does so on a build with a backend
+(`-DLIBTRACER_NOISE_CRYPTO=openssl|sodium|psa`) and prints a skip line otherwise. Each case
+also records the third-party Noise implementations that reproduce it, with their scripts and
+their results.
+
 A **negative case** carries `reject.bin` **instead of** `input.bin` (exactly one of
 the two, never both): bytes the codec MUST refuse to decode. Its `expected.json`
 has a top-level `"reject": "<ERROR_NAME>"` naming the required decode error using

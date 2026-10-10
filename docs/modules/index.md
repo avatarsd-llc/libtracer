@@ -75,6 +75,7 @@ Each module has its own page in the sidebar, grouped by layer:
 - **Cross-cutting** — [status & errors](status.md) (`status_t` / `result_t<T>` / `err_t`),
   [config](config.md) (the named-traits type and the policies it selects),
   [security & ACL](security-acl.md) (typed entries and the policy seam),
+  [security & Noise](security-noise.md) (the Noise link's compile-time crypto backend),
   [instrumentation](instrumentation.md) (the optional reachability counters)
 
 ## The dispatcher module boundary
@@ -155,6 +156,7 @@ Wire format, bit by bit <wire-format-bits>
 path — addressing <path>
 graph — vertices & dispatch <graph>
 security & ACL — access control <security-acl>
+security & Noise — the Noise link's crypto <security-noise>
 fwd-router — FWD routing and the /net plane <fwd-router>
 transport — the wire <transport>
 connection config — the SPEC config keys <connection-config>

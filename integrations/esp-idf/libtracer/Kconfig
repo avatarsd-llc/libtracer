@@ -273,6 +273,24 @@ menu "libtracer"
             is ON by default once that is. Turn OFF on a bus node with no CAN bus —
             this also drops the TWAI driver glue (twai_link.cpp).
 
+    config LIBTRACER_NOISE_CRYPTO_PSA
+        bool "Noise link crypto backend: mbedTLS through PSA"
+        default n
+        select MBEDTLS_CHACHA20_C
+        select MBEDTLS_CHACHAPOLY_C
+        help
+            Make the Noise link's crypto (RFC-0033, security_noise.hpp) usable in this
+            image, over ESP-IDF's own mbedTLS through the PSA API: this component then
+            requires mbedtls and defines LIBTRACER_NOISE_CRYPTO_PSA, which aliases
+            tr::net::noise::default_crypto_t to psa_crypto_t. It selects
+            MBEDTLS_CHACHA20_C and MBEDTLS_CHACHAPOLY_C, which ESP-IDF leaves off by
+            default. ESP-IDF's port already sets MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS,
+            so a frame costs no allocation. Every chip build already has mbedtls; an
+            app built for the linux target adds REQUIRES mbedtls to its own component.
+
+            OFF by default: the module is header-only, so an image that does not turn
+            this on compiles none of it and links no crypto for it (#2072).
+
     config LIBTRACER_SELF_HEAL_LINKS
         bool "Build the link-liveness engine (self-healing dial connections)"
         default n

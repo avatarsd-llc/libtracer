@@ -20,6 +20,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   emits a link's or a source's vtable. Own a link as its concrete type or through
   `tr::mem::make_poly`, as the component already does; see the core CHANGELOG for the
   migration.
+### Added
+
+- **`CONFIG_LIBTRACER_NOISE_CRYPTO_PSA`: the Noise link's crypto over ESP-IDF's mbedTLS
+  ([#2072](https://github.com/avatarsd-llc/libtracer/issues/2072)).** On, the component
+  defines `LIBTRACER_NOISE_CRYPTO_PSA` for every includer, so `security_noise.hpp`'s
+  `default_crypto_t` is the PSA backend, passes mbedtls on as a public requirement, and selects
+  `CONFIG_MBEDTLS_CHACHA20_C` and `CONFIG_MBEDTLS_CHACHAPOLY_C`, which ESP-IDF leaves off.
+  Default `n`: the module is header-only, so an image that leaves it off builds as before.
 
 ## [0.19.0] — 2026-10-09
 
