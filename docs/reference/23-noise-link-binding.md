@@ -135,7 +135,9 @@ follow §1–§11. A link that does not follow it is not a conforming Tracer Noi
   The **ephemeral keys** MUST come from a cryptographic random source that the application
   injects. The library has no entropy source of its own.
 - **Implementation hazards** *(RFC-0033 Amendment 1, 2026-10-10)*. The primitives MUST be constant time where
-  the host library offers it. Ephemeral keys MUST NOT be reused across attempts: if both sides
+  the host library offers it. Ephemeral keys MUST NOT be reused, in either role: an initiator draws a fresh one for
+  every attempt, and a responder a fresh one for every second message it writes. Answering a
+  byte-identical first message with the stored second message (§4) is not a reuse. If both sides
   reused theirs, the session keys would repeat.
 - **An all-zero X25519 result is refused.** If `DH(e, re)` is 32 zero bytes (the peer sent a
   low-order point), the side computing it MUST abort the handshake. It sends nothing, keeps no
@@ -616,11 +618,11 @@ the transport message exactly a Noise transport message.
 
 ### 12.8 Implementation hazards
 
-The primitives MUST be constant time where the host library offers it, and ephemeral keys MUST
-NOT be reused across attempts. Both are normative clauses of §2 since RFC-0033 Amendment 1, restated here: if both sides
-reused their ephemeral keys, the session keys would repeat. A bad random
-source breaks every guarantee here, and the application injects it, so the application owns it.
-Key material in released slots SHOULD be wiped.
+Constant-time primitives where the host library offers them, and a fresh ephemeral key for
+every attempt and every second message, in both roles, are normative clauses of §2 since RFC-0033 Amendment 1; this
+section only explains them. If both sides reused their ephemeral keys, the session keys would
+repeat. A bad random source breaks every guarantee here, and the application injects it, so
+the application owns it. Key material in released slots should be wiped.
 
 ---
 
