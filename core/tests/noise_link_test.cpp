@@ -616,6 +616,9 @@ void refusals() {
     tampered[1] = std::byte{9};  // a fresh nonce, so the window passes it to the tag
     n.b.carrier().inject(tampered, kAddrStranger);
     check(n.b.count(counter_t::DECRYPT_FAILED) == 1, "  a tampered message fails its tag");
+    n.b.send(std::span<const std::byte>(value_frame("pang")));
+    check(n.wire.log.size() == sent + 1 && n.wire.log.back().to == kAddrA,
+          "  the replayed and tampered messages from a stranger never moved B's peer (§4)");
     n.b.carrier().inject(second, kAddrA);
     n.a.carrier().inject(first, kAddrB);
     check(n.b.count(counter_t::STALE) == 1 && n.a.count(counter_t::STALE) == 1,
@@ -632,10 +635,7 @@ void refusals() {
     n.b.carrier().pump();
     check(n.b.drop_stats().malformed_rx == 3 && n.sink_b.frames.size() == 1,
           "  a plaintext that is not exactly one frame is malformed, not delivered");
-    check(n.wire.log.size() == sent + 1, "  none of these drew an answer");
-    n.b.send(std::span<const std::byte>(value_frame("pang")));
-    check(n.wire.log.size() == sent + 2 && n.wire.log.back().to == kAddrA,
-          "  the replayed and tampered messages from a stranger never moved B's peer (§4)");
+    check(n.wire.log.size() == sent + 2, "  none of these drew an answer");
     const std::size_t dropped = n.a.drop_stats().dropped_tx;
     n.a.send(std::span<const std::byte>{});
     check(n.a.drop_stats().dropped_tx == dropped + 1 && n.wire.log.size() == sent + 2,
