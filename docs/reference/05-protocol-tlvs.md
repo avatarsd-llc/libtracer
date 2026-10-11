@@ -149,8 +149,7 @@ Free-form UTF-8 human-readable description of a vertex or field. Optional in eve
 
 ### Where it appears
 
-- ⚠️ `<vertex>:description` field — **unimplemented**; a read or write answers `tr::schema::not_found` ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)).
-- Inside `:schema` responses annotating fields — reachable only through the RFC-0010 owner part, whose descriptor bytes are served verbatim; the synthesized protocol part emits no `TEXT`.
+- Inside `:schema` responses annotating fields — reachable only through the RFC-0010 owner part, whose descriptor bytes are served verbatim; the synthesized protocol part emits no `DESCRIPTION`. The intent document is **not** a `DESCRIPTION` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) Amendment 5: it is the `POINT`-level pair `NAME "doc"` → `VALUE`).
 - Inside ERROR TLVs as the human-readable detail.
 
 ---
@@ -726,25 +725,38 @@ Subscribers and children appear as direct children of POINT, identified by their
 
 ### The `:schema` read — two parts, defined precedence
 
-`read <vertex>:schema` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2) serves one POINT holding the **synthesized protocol part** and — iff the owner installed a field descriptor table — the **owner part**, appended verbatim:
+`read <vertex>:schema` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2, as amended by [Amendment 5](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105)) serves one POINT holding the **synthesized protocol part**, then — iff the owner installed one — the **intent document**, then — iff the owner installed a field descriptor table — the **owner part**, appended verbatim:
 
 ```
 POINT (PL=1) {
   NAME      <vertex name>
   SETTINGS  <protocol part>          ; synthesized by the runtime — authoritative for
                                      ; protocol fields; the owner part is never consulted
+  NAME "doc"  VALUE <intent document>  ; iff installed — UTF-8, VERBATIM, never parsed
   NAME "app"  SETTINGS (PL=1) {      ; owner part — present iff a table is installed
     NAME <field-name>  SETTINGS (PL=1) {
       NAME "access" VALUE <"ro"|"rw"|"wo">  ; runtime-projected from the table — the one
                                             ; member the runtime owns (it cannot be lied about)
-      <owner descriptor bytes, verbatim>    ; SHOULD-level vocabulary: dtype/unit/min/max/label…
+      <owner descriptor bytes, verbatim>    ; SHOULD-level vocabulary; MAY be empty when
+                                            ; the intent document describes the field
     }
     ...
   }
 }
 ```
 
-Precedence is by position, with zero merge logic: the two parts describe disjoint namespaces (flat protocol knobs vs the reserved `app` subtree, §`0x0B`), so a name collision cannot occur by construction. A vertex without a table serves the protocol part alone, byte-for-byte the record a runtime without owner fields serves.
+Precedence is by position, with zero merge logic: the two parts describe disjoint namespaces (flat protocol knobs vs the reserved `app` subtree, §`0x0B`), so a name collision cannot occur by construction. The `POINT`-level names are protocol-owned, and `doc` is one of them, beside `app`; owner field names live below `app`, so the `doc` pair cannot collide with a field either, and no name inside `app` is reserved. A vertex with neither a document nor a table serves the protocol part alone, byte-for-byte the record a runtime without owner fields serves.
+
+**The intent document** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) Amendment 5) is the device maker's statement of intent for the vertex, installed by the owner through the local host API, one per vertex:
+
+- It SHOULD be YAML restricted to a JSON-compatible subset of YAML 1.2 (no anchors or aliases, no custom tags, ambiguous scalars quoted), so valid JSON is also valid. The runtime serves it verbatim and never parses, validates or rewrites it; an implementation MAY serve it as a borrowed view of constant storage.
+- It MUST carry a top-level **`contract`**: a URI naming the device's contract globally without a registry (`https://vendor.example/contracts/model/1.2`, or a `urn:`). A reader compares it as a string. With `:identity` ([RFC-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0011-node-identity-facet.md)) it answers "which device, and do I know it". No other key is required.
+- The recommended keys (SHOULD, for consistent spelling; nothing validates them) are `type`, `write`/`emit` where they differ from `type`, `unit` (UCUM), `min`/`max`/`step`, `labels` (enum value to label), `default`, `help` (one line, for a UI), `guide` (prose for an agent), `fields` (the `settings.app.*` fields, described with the same keys), `byte-order` (little-endian when absent), `media-type` (IANA, for foreign-encoded `bytes`) and `x-<vendor>.*` for everything else. Text is one UTF-8 language, with no i18n machinery.
+- Value structure is any TLV whose `opt.PL=1`, with child TLVs as its payload ([06 §Structured record with named fields](06-user-data-packing.md#structured-record-with-named-fields)): `NAME` + value children make a record, and homogeneous children make a collection. A generic client recurses on `PL`, and the intent document adds only meaning. A leaf is `bool`, `u8`…`u64`, `i8`…`i64`, `f32`, `f64`, `utf8` or `bytes`, and a foreign encoding is `bytes` plus `media-type`. There is no `encoding` key and no `variant`.
+- The document is the ordinary pair `NAME "doc"` → `VALUE`, not a `DESCRIPTION` TLV.
+- Owner bytes that are not YAML, or that have no top-level `contract`, stay opaque owner bytes, as before the amendment.
+
+**What the runtime projects.** Only what it holds natively: the protocol part, unchanged, and each field's declared `access`. It projects no vertex role, and it does not project the reader's effective rights, so the `:schema` bytes are the same for every reader the READ gate admits and a client may cache them. The schema has no size rule of its own; a large one is read like any large value.
 
 `:schema` addresses the whole vertex or nothing. It describes that vertex's own structure and never its children's: a child's schema is read from the child (`<parent>/<child>:schema`). There is no schema below a field, and `:children[]` lists members while `:schema` describes the vertex.
 
@@ -777,6 +789,7 @@ sequenceDiagram
 
 - `opt.PL` MUST be `1`.
 - The `vertex_name` MUST be the first child; the optional `VALUE` (the vertex's own value) immediately follows it when present.
+- Inside a `:schema` POINT (§The `:schema` read, above), a `VALUE` belongs to the `NAME` before it, as `NAME "app"` → `SETTINGS` already does, and the vertex-value bullet above does not apply.
 - Children that represent recursive vertex structure MUST themselves be POINT TLVs (type `0x07`).
 
 ---

@@ -16,7 +16,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Created** | 2026-07-09 |
 | **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |
 | **Tracking issue** | [#411](https://github.com/avatarsd-llc/libtracer/issues/411) |
-| **Amendments** | [1](#amendment-1-2026-08-22--the-node-scoped-seam-census-a-reserved-stats-field-namespace-1503-step-5) (2026-08-22, `:stats` census); [2](#amendment-2-2026-08-23--the-net-plane-seam-sampler-router-labels-and-link-join-the-census-1503-residual) (2026-08-23, net-plane seams); [3](#amendment-3-2026-10-03--three-statsmem-seam-names-for-the-graphs-sub-pools) (2026-10-03, `:stats.mem` sub-pools); [4](#amendment-4-2026-10-06--a-named-app-field-read-serves-the-owners-current-value-when-the-owner-answers-it-1878) (2026-10-06, owner-answered app-field reads) |
+| **Amendments** | [1](#amendment-1-2026-08-22--the-node-scoped-seam-census-a-reserved-stats-field-namespace-1503-step-5) (2026-08-22, `:stats` census); [2](#amendment-2-2026-08-23--the-net-plane-seam-sampler-router-labels-and-link-join-the-census-1503-residual) (2026-08-23, net-plane seams); [3](#amendment-3-2026-10-03--three-statsmem-seam-names-for-the-graphs-sub-pools) (2026-10-03, `:stats.mem` sub-pools); [4](#amendment-4-2026-10-06--a-named-app-field-read-serves-the-owners-current-value-when-the-owner-answers-it-1878) (2026-10-06, owner-answered app-field reads); [5](#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) (2026-10-12, `:schema` carries a maker's intent document; `:description` retired) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 | **Roadmap item** | this RFC is the specification of the **"field descriptor table"** item of the 2026-07-08 architecture-review backlog (the vertex-verbs / lazy-validation / field-descriptor-table cluster; item 2 of that backlog — the `vertex_t` verb seam — shipped as [#338](https://github.com/avatarsd-llc/libtracer/pull/338), and is the seam §D slots behind) |
 
@@ -309,6 +309,12 @@ runtime validates *addressing* (declared or not) eagerly and cheaply, and
 leaves *shape* validation to the consumers and the owner, who own the
 vocabulary.
 
+> **Amendment 5 (2026-10-12), [#2105](https://github.com/avatarsd-llc/libtracer/issues/2105) —
+> see [§Amendment 5](#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105).** The owner MAY install one per-vertex **intent
+> document** (UTF-8, a JSON-compatible YAML subset, one normative key `contract`) that describes
+> the vertex and its fields under recommended keys; a field the document describes MAY then
+> have empty descriptor bytes. Descriptor bytes the owner does supply keep the meaning above.
+
 #### B.2 `read :schema` — merge shape and precedence
 
 `read <v>:schema` serves **one `POINT`** containing both parts:
@@ -349,6 +355,10 @@ POINT (PL=1) {
   verbatim (no runtime merge *into* it — precedence by position, zero merge
   logic on an MCU: the read is two stored/synthesized byte runs concatenated
   inside one POINT).
+
+  > **Amendment 5 (2026-10-12) — see [§Amendment 5](#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105).** The owner may also install an intent
+  > document, served verbatim at the `POINT` level as the pair `NAME "doc"` → `VALUE <UTF-8
+  > document>`, before the owner part. The owner part itself is unchanged.
 - A name collision cannot occur by construction: the two parts describe
   disjoint namespaces (flat protocol knobs vs the reserved `app` subtree) —
   which is the quiet payoff of the §A.1 namespace decision.
@@ -1174,3 +1184,171 @@ deletes it: S3 for `label_not_found` and `label_resolves`, and RFC-0032 for the 
 seam name and noun is published exactly as before, with the same value. No frame, type code,
 grammar rule, error identity or seam name moves. The deletion itself is RFC-0032's amendment, not
 this erratum.
+
+## Amendment 5 (2026-10-12) — `:schema` carries a maker's intent document ([#2105](https://github.com/avatarsd-llc/libtracer/issues/2105))
+
+**Status:** accepted (maintainer ruling 2026-10-12; the 14-day window is waived per
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md), the solo-maintainer default, as on
+Amendments 1–4).
+
+**Scope.** This amendment changes **§B** (the `read <v>:schema` record gains an
+owner-supplied intent document beside the owner part) and the descriptor bytes of a §A.2
+table entry. §A.1, §A.3, §A.4 (as Amendment 4 left it), the §Erratum's gate order, §C and §D are untouched. It also retires the never-implemented
+`:description` field. **No new type code, frame, verb, field name, opt bit or status.** The
+`:schema` `POINT` gains one optional key/value pair, `NAME "doc"` → `VALUE`, built only from
+existing types. The owner part (`NAME "app"`) is unchanged, and a vertex whose owner installs no
+document serves byte-for-byte what it served before.
+
+**Instrument: amendment, not erratum.** A reader can observe the new member, and two SHOULDs and
+one MUST are new. [reference/05](../../reference/05-protocol-tlvs.md) is a normative annex of
+[v1.md §3](../v1.md), so its §`0x03` and §`0x07` edits are part of this amendment.
+
+**Why.** §B.1 gave the owner part a loose per-field vocabulary (`dtype`, `unit`, `label`, …).
+A client that has never seen a vertex could not learn what the vertex is for. An agent got no
+instructions. Nothing said "this vertex implements contract X", so capability discovery had
+nothing stable to rest on. This amendment answers all three with one document written by the
+device maker. It is built for a twenty-year horizon. Prose and plain text outlive structure. There
+is no language version number, because every key but one is a recommendation. It rests only on
+long-lived standards: UTF-8, a JSON-compatible subset of YAML 1.2, UCUM, IANA media types and
+URIs.
+
+### B.3 The intent document
+
+- **One document per vertex.** Through the same local host API as the descriptor table
+  (§A.2), the owner MAY install one **intent document** per vertex: the device maker's
+  statement of what the vertex is, what it accepts and how to use it. It is UTF-8 text. There is
+  no wire operation that installs, replaces or removes it.
+- **Format.** The document SHOULD be a YAML document restricted to a JSON-compatible subset of
+  YAML 1.2: no anchors or aliases, no custom tags, and every scalar that would otherwise be
+  ambiguous is quoted. Valid JSON is therefore also a valid document.
+- **Served verbatim, never parsed.** The runtime serves the document's bytes verbatim and
+  never parses, validates or rewrites them. The document is meant to live in constant storage
+  (flash), and an implementation MAY serve it as a borrowed view of that storage, so the
+  runtime neither parses nor copies it.
+- **`contract` is the one normative key.** A document MUST carry a top-level `contract` key
+  whose value is a URI ([RFC 3986](https://www.rfc-editor.org/rfc/rfc3986)). The URI names the
+  device's contract globally without a registry: an `https` URI under a domain the maker
+  controls (`https://vendor.example/contracts/model/1.2`) or a `urn:`. A reader treats it as a
+  name and compares it as a string; nothing requires it to be dereferenceable. Together with
+  `:identity` ([RFC-0011](0011-node-identity-facet.md)), it answers "which device is this, and do
+  I know it". No other key is required.
+- **Recommended keys** (SHOULD, so that makers spell the same thing the same way; the runtime
+  and readers validate none of them):
+
+  | Key | Meaning |
+  | --- | --- |
+  | `type` | the value's type (see *Value bytes* below) |
+  | `write`, `emit` | only where they differ from `type`: the payload a write accepts, and what a subscription delivers |
+  | `unit` | a [UCUM](https://ucum.org/) unit |
+  | `min`, `max`, `step` | the value's range and resolution |
+  | `labels` | a map from enum value to label |
+  | `default` | the default value |
+  | `help` | one line, for a UI |
+  | `guide` | prose for an agent: preconditions, side effects, safe values, how to verify |
+  | `fields` | the `settings.app.*` fields of §A, each described with the same keys |
+  | `byte-order` | little-endian when absent, matching the wire ([v1.md §3](../v1.md)) |
+  | `media-type` | an IANA media type, for foreign-encoded `bytes` |
+  | `x-<vendor>.*` | everything else |
+
+  Text is in one UTF-8 language. There is no i18n machinery. `access` is not a document key:
+  the runtime projects it (§B.1).
+- **Value bytes.** Structure is any TLV whose `opt.PL=1`, with child TLVs as its payload
+  ([reference/06](../../reference/06-user-data-packing.md) §Structured record with named
+  fields). `NAME` + value children make a record; homogeneous children make a collection. A
+  generic client recurses on `PL`, and the intent document adds only meaning. A leaf is a primitive (`bool`, `u8`, `u16`,
+  `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, little-endian unless `byte-order`
+  says otherwise), `utf8`, or `bytes`. A foreign encoding is `bytes` plus `media-type`. There is
+  no `encoding` key and no `variant`.
+- **How a reader uses it.** An agent or a human reads the document. A generic UI uses the
+  recommended keys on a best-effort basis. An application that already knows the device checks
+  `contract` and parses nothing else.
+- **Size.** No special rule. A large `:schema` is read like any large value.
+
+### B.1 (amended) — per-field descriptor bytes
+
+A table entry's descriptor bytes MAY be empty when the vertex's intent document describes that
+field under `fields`. Non-empty descriptor bytes keep their §B.1 meaning and stay opaque to the
+runtime. Backward compatibility: owner bytes that are not YAML, or that have no top-level
+`contract`, stay opaque owner bytes, as before this amendment.
+
+### B.2 (amended) — where the document sits, and what the runtime projects
+
+The document sits at the `POINT` level of the `:schema` record, after the protocol part and
+before the owner part, as the ordinary key/value pair `NAME "doc"` → `VALUE <UTF-8 document>`:
+
+```
+POINT (PL=1) {
+  NAME      <vertex name>
+  SETTINGS  <protocol part>              ; synthesized, unchanged
+  NAME "doc"  VALUE <intent document>    ; iff installed; UTF-8, served VERBATIM
+  NAME "app"  SETTINGS (PL=1) {          ; owner part: iff a table is installed, as before
+    NAME <field-name>  SETTINGS (PL=1) { ; one per declared field, as before
+      NAME "access" VALUE <"ro"|"rw"|"wo">  ; runtime-projected, as before
+      <owner descriptor bytes, verbatim>    ; MAY be empty (§B.1 amended)
+    }
+    ...
+  }
+}
+```
+
+- **The owner part is unchanged.** It is present iff a descriptor table is installed, exactly
+  as before this amendment, and holds only field records.
+- **The `POINT`-level names are protocol-owned, and `doc` is one of them**, beside `app`. An
+  owner never mints a name at that level, and owner field names live below `app`, so a field
+  named `doc` cannot collide with the document. No name inside `app` is reserved, and the
+  owner part's collision-proofing (§A.1, and reference/05 §`0x0B` and §`0x07`) holds as written.
+- **The document is not a `DESCRIPTION` (`0x03`) TLV.** That type code is dead inside a
+  `POINT`, [#1982](https://github.com/avatarsd-llc/libtracer/issues/1982) removes it there, and one type code does not carry three meanings.
+- **What the runtime projects.** Only what it holds natively: the protocol part, unchanged, and
+  each field's declared `access`, as before. It projects **no vertex role**. It does **not**
+  project the reader's effective rights. The `:schema` bytes are therefore the same for every
+  reader the READ gate admits, and a client may cache them.
+- The document is schema, not a value. It does not appear in `:settings` or `:settings.app`
+  reads.
+
+### `:description` is retired
+
+reference/02 listed a `:description` field (UTF-8, "human-readable description") that no
+implementation ever served; it was marked unimplemented under
+[#586](https://github.com/avatarsd-llc/libtracer/issues/586). It is removed from the normative
+text. The help text and the agent text now live in the intent document (`help`, `guide`).
+reference/02 listed it among the core fields, but no implementation ever served it and it was
+never in the field namespace an implementation dispatches, so a read or a write of it answers
+`tr::schema::not_found`, as it always did, and still does. §Discussion 5's suggestion to spell it
+`settings.app.label` is superseded by `help`. The intent document does not use the
+`DESCRIPTION` type code (`0x03`); that code keeps its other uses, and once
+[#1982](https://github.com/avatarsd-llc/libtracer/issues/1982) lands it remains only as the human-text
+detail of `ERROR` and `STATUS`.
+
+### Compatibility
+
+Additive. A vertex whose owner installs no document serves the same bytes as before. A reader
+that walks the `POINT` by `NAME` sees one more protocol-owned pair, `doc`; the owner part is
+byte-identical. A node that does not
+implement the document never serves one and stays conformant. Descriptor-only owners keep
+working unchanged. The [wire audit](../../ietf/wire-audit.md) row F5
+([#1982](https://github.com/avatarsd-llc/libtracer/issues/1982), drop the `POINT` description
+child) is a separate wire deletion with its own conformance vector. It proceeds independently:
+this amendment does not perform it and does not depend on `DESCRIPTION`.
+
+### Files this amendment edits (on acceptance)
+
+- [reference/05](../../reference/05-protocol-tlvs.md): §`0x03` (where it appears; the
+  `:description` bullet removed) and §`0x07` §The `:schema` read.
+- [reference/04](../../reference/04-communication-flows.md) §Schema discovery.
+- [wire audit](../../ietf/wire-audit.md): the `:schema` rows.
+- [reference/02](../../reference/02-graph-model.md): §Definitions (Schema) and §Core writable
+  fields (the `:description` row and its note).
+- [CONTEXT.md](../../../CONTEXT.md): the Schema entry.
+- [v1.md](../v1.md) §Changelog.
+- Reference implementation, as a follow-up: the core serves a borrowed intent document at the
+  `POINT` level, and the TypeScript client reads `contract`.
+
+### Conformance
+
+To be added with the core follow-up: `schema/owner-intent-document`, byte-exact. A vertex with
+a document and no table serves `POINT{ NAME, SETTINGS{}, NAME "doc" VALUE <doc> }`. A vertex
+with both serves the `doc` pair, then the unchanged owner part, with each field's projected
+`access` and possibly empty descriptor bytes. A vertex with neither serves
+the record `tlv-types/point-schema-app` and `settings/schema-enumerates-nothing` pin,
+unchanged.
