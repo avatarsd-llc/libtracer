@@ -2,7 +2,7 @@
 
 > **Topic**: how application data of any size — from a single boolean to a streaming GB/s feed — is put into the graph and delivered with the intended copy semantics.
 > **Audience**: anyone designing the data layout for an application on top of libtracer.
-> **See also**: [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics; [03-addressing.md](03-addressing.md) §address-shift slicing; [05-protocol-tlvs.md](05-protocol-tlvs.md) §VALUE.
+> **See also**: [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics; [03-addressing.md](03-addressing.md) §address-shift slicing; [05-protocol-tlvs.md](05-protocol-tlvs.md) §VALUE. For choosing what becomes a vertex, a structured value or a `:` field, see [24-modelling-granularity.md](24-modelling-granularity.md).
 
 ---
 
@@ -162,6 +162,8 @@ To a subscriber, all three look identical. Tooling such as `tracer-top` enumerat
 For self-describing data, define a user-range structured TLV (`opt.PL=1`) with NAME + value children. Pick a type code in `0x80–0xFF` and document its layout for the project.
 
 A structured node is a parent (`POINT`) TLV with `opt.PL=1` carrying `NAME` + `VALUE` children; the encoder emits it under a user-range type code (`0x80+`). See the [wire module](../modules/frame-codec.md).
+
+> **Note (informative):** the core refuses the example below today. A structured `POINT` written to a value vertex is a branch write, and a `NAME`/`VALUE` record under `POINT` answers `tr::schema::type_mismatch`. Until [#2114](https://github.com/avatarsd-llc/libtracer/issues/2114) corrects the example, carry the record as a `VALUE` with `opt.PL=1` or under a user-range type code. See [24-modelling-granularity.md](24-modelling-granularity.md) §3.
 
 ```cpp
 struct imu_sample {
