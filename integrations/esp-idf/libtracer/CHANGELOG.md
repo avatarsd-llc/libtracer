@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-10-11
+
 ### Changed
 
 - **`httpd_ws_link_t`, `esp_ws_client_link_t` and `twai_link_t` are `final`, and their
