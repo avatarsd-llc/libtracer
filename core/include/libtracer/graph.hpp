@@ -2425,12 +2425,10 @@ class graph_t {
      * **What a toggle costs.** A flip of the edge's published entry under the vertex's stripe
      * lock, plus the counter walk over the vertex's descendants that a subscribe also pays:
      * no republish, and nothing drawn from any source, so a switch (one suspend plus one
-     * resume) allocates nothing and sends nothing. A suspend cannot fail. The one exception
-     * is a resume after an edge republish on this vertex was refused for want of memory: the
-     * array may then name the slot's previous occupant, so the resume rebuilds it first, the
-     * one draw a toggle makes, from the vertex's own edge source. If that draw is refused too,
-     * it answers BACKPRESSURE with nothing changed, and a retry succeeds once the source has
-     * room again.
+     * resume) allocates nothing and sends nothing. Neither direction can fail, even after an
+     * edge republish on this vertex was refused for want of memory: the array then still
+     * carries a dead entry for a cleared slot, never one naming a slot's previous occupant,
+     * because an add or a replace publishes its edge or changes nothing (#1622).
      *
      * **The guarantee, exactly.** This is not a grace point. A fan-out that took its snapshot
      * before the flip — concurrently on another thread, or re-entrantly up this one's stack —
@@ -2443,9 +2441,7 @@ class graph_t {
      *          or reads it (a cleared shell is reused by a later @ref subscribe, as
      *          @ref unsubscribe notes).
      * @note The callback-form subscriptions only, as for @ref unsubscribe.
-     * @retval NOT_FOUND    No live edge @p sub names.
-     * @retval BACKPRESSURE A resume that had to rebuild a stale edge array (see above) and was
-     *                      refused the draw; the edge stays suspended and a retry may succeed.
+     * @retval NOT_FOUND No live edge @p sub names.
      */
     [[nodiscard]] result_t<void> set_suspended(const subscription_t& sub, bool suspended);
 
@@ -3301,13 +3297,13 @@ class graph_t {
     // RFC-0009 §B.6: pre-order re-virginize of @p v's subtree — unwind each vertex's
     // subscriber contribution to its descendants' listeners_above_, revert it to a
     // placeholder, and flip it unregistered. Parks each detached value-seam block
-    // into @ref retired_seams_. Each vertex's subscriber slot table is MOVED into @p gone,
-    // which the caller reserved one entry per visited vertex, so the walk cannot fail; the
-    // caller gives each routed edge's link hold back and drops the tables once the locks are
-    // released (#1816, #1778). Call with map_mutex_ held UNIQUE (it flips registered_ and
-    // parks into retired_seams_, both map-lock-guarded).
-    /** @brief The slot tables a retirement moved out of its vertices. */
-    using gone_edges_t = mem::block_array_t<mem::block_array_t<subscriber_t>>;
+    // into @ref retired_seams_. Each vertex's subscriber tables (slot table and published edge
+    // array) are MOVED into @p gone, which the caller reserved one entry per visited vertex, so
+    // the walk cannot fail; the caller gives each routed edge's link hold back and drops the
+    // tables once the locks are released (#1816, #1778, #1622). Call with map_mutex_ held UNIQUE
+    // (it flips registered_ and parks into retired_seams_, both map-lock-guarded).
+    /** @brief The subscriber tables a retirement moved out of its vertices. */
+    using gone_edges_t = mem::block_array_t<detached_edges_t>;
     void retire_subtree(vertex_t* v, gone_edges_t& gone);
 
     // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,

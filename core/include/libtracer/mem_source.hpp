@@ -767,6 +767,18 @@ class pool_source_t final : public block_source_t {
 };
 
 /**
+ * @brief A `T` whose bytes, copied to a new address, are the same object, so a container may
+ *        relocate it with `memcpy` and leave the old bytes undestroyed.
+ *
+ * Opt-in: a type declares `using bitwise_relocatable_t = void;`. It qualifies when it holds
+ * no pointer into itself and nothing registers its address; an owner of plain pointers
+ * (a reference count, a block, a source) does. Relocation then reaches no move constructor
+ * and no destructor, which is what keeps a growable array of owners off every release path.
+ */
+template <class T>
+concept bitwise_relocatable = requires { typename T::bitwise_relocatable_t; };
+
+/**
  * @brief The core's failable vector: a nothrow growable array of @p T drawn from a
  *        @ref block_source_t (ADR-0083 Decision 2, #1776).
  *
@@ -787,6 +799,10 @@ class pool_source_t final : public block_source_t {
  *    must be `noexcept`, and destroyed in place; that branch is compiled only for such a `T`,
  *    so a trivially copyable array generates the same code it always did.
  *
+ *    A `T` that declares `bitwise_relocatable_t` (see `%bitwise_relocatable`) takes the
+ *    `memcpy` branch too: its growth moves bytes and destroys nothing, so relocating it can
+ *    never reach a destructor (#1622).
+ *
  * Same footprint as `std::pmr::vector` (four words), one virtual call per growth instead of
  * the allocator's two. Non-copyable: a copy is a failable allocation, so it is not hidden in
  * a constructor.
@@ -800,6 +816,8 @@ class block_array_t {
     /** @brief True when growth relocates by `memcpy` and leaves nothing to destroy. */
     static constexpr bool kTrivial =
         std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>;
+    /** @brief True when growth moves bytes: a trivial `T` or a `%bitwise_relocatable` one. */
+    static constexpr bool kBitwise = kTrivial || bitwise_relocatable<T>;
 
    public:
     /** @brief The element type. */
@@ -1095,7 +1113,7 @@ class block_array_t {
 
     /** @brief Move elements `[first, last)` into the uninitialized @p to and end their lives. */
     static void relocate(T* first, T* last, T* to) noexcept {
-        if constexpr (kTrivial) {
+        if constexpr (kBitwise) {
             if (first != last)
                 std::memcpy(static_cast<void*>(to), first,
                             static_cast<std::size_t>(last - first) * sizeof(T));
