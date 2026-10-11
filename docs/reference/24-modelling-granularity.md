@@ -38,7 +38,7 @@ runtime does not re-encode it and adds no envelope. For a subscriber on vertex `
 
 | Event | What the subscriber of `V` receives |
 | --- | --- |
-| A plain write to `V` | `V`'s new value, whole. A write replaces the value (last writer wins). If the owner installed an admission filter, subscribers see the value it admitted (`core/src/graph.cpp:is the only value any subscriber can observe`). |
+| A plain write to `V` | `V`'s new value, whole. A write replaces the value (last writer wins). If the owner installed an admission filter, subscribers see the value it admitted. See `core/src/graph.cpp:is the only value any subscriber can observe`. |
 | A write to a descendant `W` | `W`'s written TLV. This is not `V`'s value and not a composed view of `V`'s subtree. A local callback can learn the concrete path out of band. A remote delivery carries no path tag; provenance travels in the data ([03 §subscriber identity](03-addressing.md#subscriber-identity-across-a-subtree)). |
 | A branch write (a `POINT` tree) at `V` | The written `POINT` as-is, which covers only the nodes the writer included. Each landing vertex's own subscribers get the slice covering that vertex. Admission is all-or-nothing, but application is per leaf: there is **no branch transaction** ([05 §`0x07`](05-protocol-tlvs.md) §branch write). |
 | *k* assigns, then one `propagate` (a stored-value vertex) | **One** delivery of the current stored value. The intermediate values are not delivered: coalescing is the default contract ([02 §assign, propagate](02-graph-model.md#assign-propagate-and-the-coalescing-sweep)). |
@@ -82,12 +82,16 @@ await surface:
   ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §C;
   `core/src/graph_fields.cpp:field write itself deliberately neither wakes`).
 
-> **Caution: in the C++ host API, a field tail is ignored, not refused.** `graph_t::subscribe`
-> and `graph_t::await` take a `path_t` and resolve only its vertex part
+> **Known defect: do not rely on this.** The rule is refusal: an await or subscribe that names
+> a `:` field is refused, whatever the selector
+> ([02 §owner-declared application fields](02-graph-model.md#owner-declared-application-fields-settingsapp),
+> "This is enforced"). The C++ host path overloads do not yet follow it. `graph_t::subscribe`
+> and `graph_t::await` resolve only the vertex part of a `path_t`
 > (`core/src/graph.cpp:graph_t::subscribe(const path_t& src, subscriber_fn_t fn`,
-> `core/src/graph.cpp:graph_t::await(const path_t& path`). A path such as `/x:schema` is
-> accepted, and the call subscribes to, or awaits, the whole vertex `/x`. Never pass a field
-> tail to these calls.
+> `core/src/graph.cpp:graph_t::await(const path_t& path`). Given a path such as `/x:schema`, they
+> act on the whole vertex `/x` and do not refuse. This is tracked in
+> [#2113](https://github.com/avatarsd-llc/libtracer/issues/2113). Once it is fixed, they will
+> answer `tr::schema::not_found`, as the remote path does. Never pass a field tail to these calls.
 
 ### Field values can change
 
@@ -115,7 +119,9 @@ the graph treats them as opaque bytes:
 - **No path reaches a child TLV.** The address grammar reserves a segment index (`/x/v[3]`), but
   v1 gives it no carrier, and a bracketed segment is refused with `tr::path::invalid`
   ([03 §index forms](03-addressing.md#index-forms)). The field `[N]` indexes field-plane arrays
-  such as `:subscribers[N]`, never a value. There is no `:value` field.
+  such as `:subscribers[N]`, never a value. There is no `:value` field. (`[n]` on a value is
+  proposed by [RFC-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0017-element-addressing-value-plane-index.md),
+  which is a draft.)
 - **`:children[]` lists registered child vertices**, not the child TLVs of a value.
 - **A read returns the stored TLV whole.** On a vertex with registered children, a plain read
   returns the composed branch read: one `POINT` tree over the child **vertices'** stored values
@@ -124,12 +130,14 @@ the graph treats them as opaque bytes:
 - **A write replaces the whole value.** No member-wise write exists. A single write is atomic: a
   concurrent reader sees the whole old value or the whole new one
   ([03 §atomicity of multi-field writes](03-addressing.md#atomicity-of-multi-field-writes)).
-- **Do not use `POINT` (`0x07`) as a record type.** A structured `POINT` written to a vertex is a
-  *branch write* (`core/src/graph.cpp:is_branch_point`). It must be rooted at the target vertex,
+- **Do not use `POINT` (`0x07`) as a record type.** A structured `POINT` written to a value vertex
+  (any role but `HANDLER`, from host memory) is a *branch write* (`core/src/graph.cpp:is_branch_point`). It must be rooted at the target vertex,
   and its nodes may hold only a leading `NAME`, at most one `VALUE` and nested `POINT`s, so a record
   of `NAME`/`VALUE` pairs under `POINT` is refused with `tr::schema::type_mismatch`. Carry a record
   as a `VALUE` with `opt.PL=1`, or under a user-range type code. A vertex that should ride a
-  `FOLD` sweep must store a single `VALUE`.
+  `FOLD` sweep must store a single `VALUE`. The structured-record example in
+  [06-user-data-packing.md](06-user-data-packing.md) still uses the `POINT` shape and is refused
+  today. This is tracked in [#2114](https://github.com/avatarsd-llc/libtracer/issues/2114).
 
 ## 4. Field change notification
 
@@ -166,7 +174,7 @@ These follow from §1–§4. They are advice, not requirements.
 - a consumer must `await` it, or it needs its own role (for example, a `STREAM` that keeps every
   sample) or its own `delivery_mode`.
 
-**Make it a field of one structured value when:**
+**Make it a member of one structured value when:**
 
 - its parts change together;
 - readers must never see a half-applied update. Only a single write is atomic. A branch write

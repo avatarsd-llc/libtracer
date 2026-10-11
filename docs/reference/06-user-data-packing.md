@@ -163,6 +163,8 @@ For self-describing data, define a user-range structured TLV (`opt.PL=1`) with N
 
 A structured node is a parent (`POINT`) TLV with `opt.PL=1` carrying `NAME` + `VALUE` children; the encoder emits it under a user-range type code (`0x80+`). See the [wire module](../modules/frame-codec.md).
 
+> **Note (informative):** the core refuses the example below today. A structured `POINT` written to a value vertex is a branch write, and a `NAME`/`VALUE` record under `POINT` answers `tr::schema::type_mismatch`. Until [#2114](https://github.com/avatarsd-llc/libtracer/issues/2114) corrects the example, carry the record as a `VALUE` with `opt.PL=1` or under a user-range type code. See [24-modelling-granularity.md](24-modelling-granularity.md) §3.
+
 ```cpp
 struct imu_sample {
     std::uint64_t ts_ns;
