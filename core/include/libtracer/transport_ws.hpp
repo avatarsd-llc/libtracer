@@ -274,6 +274,9 @@ class ws_server_transport_t final : public stream_server_base_t {
     /** @brief Stop the recv thread and close all sockets. */
     ~ws_server_transport_t();
 
+    /** @brief See @ref transport_t::shut_down. */
+    void shut_down() override;
+
     ws_server_transport_t(const ws_server_transport_t&) = delete;
     ws_server_transport_t& operator=(const ws_server_transport_t&) = delete;
 
@@ -463,6 +466,9 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
 
     /** @brief Stop the recv thread and close the socket. */
     ~ws_client_transport_t();
+
+    /** @brief See @ref transport_t::shut_down. */
+    void shut_down() override;
 
     ws_client_transport_t(const ws_client_transport_t&) = delete;
     ws_client_transport_t& operator=(const ws_client_transport_t&) = delete;

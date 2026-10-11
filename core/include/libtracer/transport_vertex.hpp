@@ -283,8 +283,10 @@ class transport_vertex_t {
      *                   every socket it constructs, so a creator-endpoint-created
      *                   connection participates in owning delivery. Default: the
      *                   process net sub-pool; a bounded host injects its pool over its
-     *                   static slab. Must outlive this object (and thus every
-     *                   owned transport).
+     *                   static slab. Must outlive every owned transport, which
+     *                   a removal parks until the graph's second `graph_t::collect()`
+     *                   after it: so it must outlive this object AND that `collect()` (or
+     *                   the graph).
      * @param egress_src The EGRESS twin of @p rx_backend (#873 family 1, ADR-0079's
      *                   net-plane failable store): the `block_source_t` every socket
      *                   these built-in factories construct draws its per-send gather
@@ -292,8 +294,9 @@ class transport_vertex_t {
      *                   `iov_table_t` overflow, both sized by the SENDING peer. Sizing it
      *                   is what bounds this node's egress allocation; exhaustion drops the
      *                   frame and counts it, exactly as it already does. Default: the
-     *                   process net sub-pool (#1777). Must outlive this
-     *                   object (and thus every owned transport). A kind's own factory
+     *                   process net sub-pool (#1777). Must outlive every
+     *                   owned transport, so this object AND the graph's next
+     *                   `graph_t::collect()` after a removal (or the graph). A kind's own factory
      *                   registered later via @ref register_transport_type reaches the same
      *                   store through @ref egress_source.
      */
@@ -326,7 +329,9 @@ class transport_vertex_t {
      *                   store", and before this parameter existed it answered the process
      *                   heap on a slim node no matter what the composition root had chosen.
      *                   `nullptr` (and the default) means the process net sub-pool
-     *                   (#1777). Must outlive this object.
+     *                   (#1777). Must outlive this object and, like the default ctor's,
+     *                   the graph's second `graph_t::collect()` after a removal (or the
+     *                   graph).
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string_view net_root,
                        mem::mem_backend_t* rx_backend, slim_net_t,
@@ -563,6 +568,12 @@ class transport_vertex_t {
      * cover) and wired into the router when the matching creator-endpoint SPEC is created.
      * The caller keeps ownership. Call at setup, before the SPEC write.
      *
+     * Lifetime: once its connection is removed, the link must stay valid until the graph's
+     * second `graph_t::collect()` after the removal, because a forward or a `:children[]` listing
+     * that reached it just before the removal may still be inside it. The plane leaves a borrowed
+     * link alone, so the caller may call @ref transport_t::shut_down on it first, then destroy it
+     * after that `collect()`.
+     *
      * The staging key is `<module>/<name>` in BOTH halves (#883). A creating SPEC reaches
      * this staging when it resolves to the same module — i.e. it carries no `kind` (and no
      * second staging shares @p name), or it carries a `kind` whose @ref register_module
@@ -607,14 +618,22 @@ class transport_vertex_t {
     [[nodiscard]] graph::result_t<void> set_link_state(std::string_view name, link_state_t state);
 
     /**
-     * @brief Remove connection @p name — un-route it, retire its vertex, close its socket.
+     * @brief Remove connection @p name — un-route it, retire its vertex, shut its socket down.
      *
      * The teardown counterpart of creation (#494), in the order the invariants require:
-     * `fwd_router_t::remove_child` first (the name stops resolving, so no forward can
-     * reach the link), then `graph.retire()` on the identity vertex (RFC-0009 §B.6 —
-     * the path re-virginizes), then the owned transport is destroyed (joining its recv
-     * thread). A connection whose link was staged via @ref provide_link leaves that
-     * borrowed link alone; only the routing entry and the vertex go.
+     * `fwd_router_t::remove_child` first (the name stops resolving, so no NEW forward
+     * reaches the link), then `graph.retire()` on the identity vertex (RFC-0009 §B.6 —
+     * the path re-virginizes), then the owned transport is shut down
+     * (@ref transport_t::shut_down, joining its recv thread) and parked: it is destroyed at
+     * the graph's second `graph_t::collect()` after the removal, so a forward or a listing
+     * that reached it just before the removal finds a valid object for at least one whole
+     * interval between two calls. If the retire or the park is refused, the
+     * shut-down transport is kept for the graph's lifetime instead. A connection whose link
+     * was staged via @ref provide_link leaves that borrowed link alone (see its lifetime
+     * note); only the routing entry and the vertex go.
+     *
+     * A node whose connections are removed must therefore call `graph_t::collect()` at a
+     * quiescent point, or every removed link is kept until the graph is destroyed.
      *
      * This is the owner-internal operation the RFC-0014 `NAME`-write removal dispatch
      * (S2b) will call; it is not itself reachable from the wire.
@@ -660,10 +679,10 @@ class transport_vertex_t {
     // The NAME→link routing table is NOT duplicated here — it has one owner, the router's
     // child_registry_t (Brick 3a); `make_connection_locked` registers the link there.
     /**
-     * @brief A bus connection's `:children[]` hook context: the link's bus facet, cleared under
-     *        its own lock before the link is closed. Defined in `%transport_vertex.cpp`.
+     * @brief Where a removed connection's link waits, shut down, for the graph's next
+     *        `collect()`. Drawn with the connection; defined in `%transport_vertex.cpp`.
      */
-    struct bus_listing_t;
+    struct conn_park_t;
 
     struct conn_t {
         graph::vertex_handle_t vertex;  // the /net/<name> identity vertex (set on creation)
@@ -678,9 +697,8 @@ class transport_vertex_t {
         // a non-owning view of `owned` as its concrete type, so teardown can stop the
         // worker BEFORE the vertex retires and acquire/release can reach the refcount.
         self_heal_link_t* engine = nullptr;
-        // The `:children[]` hook context, iff the link is a bus. It outlives the link; see
-        // `bus_listing_t`.
-        bus_listing_t* listing = nullptr;
+        // The block the link is parked in when the connection goes; see `conn_park_t`.
+        conn_park_t* park = nullptr;
     };
 
     // One declared module: the segment it mounts under, the config `kind` it constructs, and
@@ -766,14 +784,14 @@ class transport_vertex_t {
         /** @brief Collect `graph_t::retire(vertex)` — the connection's identity goes. */
         void retire(graph::vertex_handle_t vertex);
 
-        /** @brief Collect the closing of @p listing — the bus `:children[]` context of the
-         *         vertex this transaction retires — before its link is destroyed. */
-        void close_listing(bus_listing_t* listing);
+        /** @brief Collect @p park: the collected link is shut down into it and it is handed
+         *         to the graph to free, instead of the link being destroyed. */
+        void park(conn_park_t* park);
 
         /**
          * @brief Phase 2: drop `ctl_m_`, then run the collected work in teardown order —
-         *        un-route, stop the engine, retire the vertex, close its bus listing,
-         *        destroy the socket, publish.
+         *        un-route, stop the engine, retire the vertex, shut the socket down and
+         *        park it, publish.
          *
          * `ops_m_`, if this is an `OPERATION`, is NOT dropped here: it is the destructor's,
          * so the whole mutation stays one serialized step.
@@ -804,8 +822,8 @@ class transport_vertex_t {
         // armed flag rather than riding beside a synthetic null handle.
         std::optional<graph::vertex_handle_t> retire_;  /**< @brief The vertex to retire. */
         std::optional<graph::vertex_handle_t> publish_; /**< @brief The vertex to write. */
-        bus_listing_t* listing_ = nullptr; /**< @brief Null = no bus listing to close. */
-        link_state_t publish_state_{};     /**< @brief The value to write. */
+        conn_park_t* park_ = nullptr;  /**< @brief Null = destroy the link here instead. */
+        link_state_t publish_state_{}; /**< @brief The value to write. */
     };
 
     /** @brief True iff THIS thread is inside a `%ctl_txn_t`'s phase 1 — the S6 lock-order

@@ -208,6 +208,10 @@ quic_transport_t::~quic_transport_t() = default;  // ~impl_t runs the base teard
 // Every accessor below tolerates an absent impl_ (its store refused it at construction):
 // such a link is inert — never ok(), never up, sends nothing, counts nothing.
 
+void quic_transport_t::shut_down() {
+    if (impl_) impl_->teardown();  // idempotent; the destructor's own teardown is then a no-op
+}
+
 void quic_transport_t::send(std::span<const std::byte> frame) {
     if (impl_) impl_->send_frame(frame);
 }
