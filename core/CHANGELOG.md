@@ -77,6 +77,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   hosts compile the fenced entry whatever the knob says. The ordering argument is in `qsbr.hpp`.
   Override fragment: `static constexpr bool kQsbrAsymmetricFence = true;`
 
+### Changed
+
+- **A QSBR reclaim pass takes one horizon, fenced once, before the map lock.** `graph_t::collect()`
+  and `drain_ripe` read the epoch counter, fence and scan the cells once per pass, and compare
+  each entry against that horizon. `collect()` no longer fences per entry under `map_mutex_`.
+  An entry parked after the horizon was taken waits for the next pass.
+
 ## [0.19.1] — 2026-10-11
 
 This patch release also carries RFC-0032's deletion of COMPACT delivery, ADVERTISE, HANDLE_NACK and the route-handle tables, which was planned for 0.20.0. A 0.19.0 peer that still sends them gets a counted unknown-member error.

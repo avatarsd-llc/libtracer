@@ -23,7 +23,7 @@
  * emits nothing from here. The transport plane uses it in EVERY build: `fwd_router_t` brackets
  * each inbound frame and each origination with `%enter` / `%leave`, and the graph frees a
  * parked link or value seam only once every bracket open when it was parked has closed
- * (`%advance`, `%all_quiescent_past`). Both share one per-thread nesting depth, so a
+ * (`%advance`, `%horizon`). Both share one per-thread nesting depth, so a
  * dispatch nested in a frame neither re-announces nor goes quiescent early.
  *
  * @section qsbr_why_global Why the retired list is GLOBAL and the participant table is not
@@ -103,9 +103,9 @@
  *   `L_e`'s value), or a relaxed `overflow_online` increment; `F_R`, a `seq_cst` fence; then
  *   `L_R`, its reads.
  * - W: `S_W`, the unpublish; the epoch bump `B` (`seq_cst` RMW, `%advance`) that closes epoch
- *   `e`; `F_W`, the `seq_cst` fence `%all_quiescent_past` opens with; then `L_W`, its `seq_cst`
- *   loads of `overflow_online` and the cells. It frees only when every cell `L_W` reads is
- *   offline or online at an epoch after `e`, and `overflow_online` reads 0.
+ *   `e`; `L_c`, an acquire load of the counter; `F_W`, the `seq_cst` fence `%horizon` pays;
+ *   then `L_W`, its acquire loads of `overflow_online` and the cells. It frees only when every
+ *   cell `L_W` reads is offline or online at an epoch after `e`, and `overflow_online` reads 0.
  *
  * `F_R` and `F_W` are both in S, so one precedes the other:
  *
@@ -124,12 +124,9 @@
  *    `F_R` is an acquire fence sequenced after `L_e`, so `B` synchronizes with `F_R`, `S_W`
  *    happens before `L_R`, and `L_R` reads `S_W` or later.
  *
- * Neither way is a reader inside its bracket while what it reads is freed. `%retire` and the
- * drainer reach `F_W` through `%all_quiescent_past`, which opens with it, below every early-out
- * on the dispatch path. When `%advance` stalls it makes no bump: `e` is then its `seq_cst`
- * re-load of the epoch after its fence, and a cell online after `e` means `L_e` read a later
- * value, so that re-load is coherence-ordered before `L_e`, the stall fence precedes `F_R` in
- * S, and `L_R` again reads `S_W` or later.
+ * Neither way is a reader inside its bracket while what it reads is freed. `%retire`, the
+ * drainer and `graph_t::collect` reach `F_W` through `%horizon`, below every early-out on the
+ * dispatch path; a stalled `%advance` is covered there (@ref qsbr_horizon).
  *
  * On x86-64 (GCC 13) the entry is a plain `mov` and one locked instruction (`lock or` to the
  * stack) where the `seq_cst` store was one `xchg`, so it still pays one full barrier. On rv32
@@ -148,9 +145,9 @@
  *   `L_e`'s value), a plain `mov` on x86; a compiler barrier; then `L_R`, its reads of what W
  *   may free (the link, the edge array).
  * - W: `S_W`, the unpublish; the epoch bump (`seq_cst` RMW, `advance`) that closes epoch
- *   `e`; later `F1`, a `seq_cst` fence, `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED)`, `F2`,
- *   another `seq_cst` fence; then `L_W`, its loads of the cells. It frees only when every
- *   cell `L_W` reads is offline or online at an epoch after `e`.
+ *   `e`; later `L_c` and `F1`, a `seq_cst` fence, `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED)`,
+ * `F2`, another `seq_cst` fence; then `L_W`, its loads of the cells. It frees only when every cell
+ * `L_W` reads is offline or online at an epoch after `e`.
  *
  * The kernel's guarantee is that every thread of the process runs a full barrier `F_R` at some
  * point of its own program order between `F1` and `F2` (a thread not running then does so
@@ -162,7 +159,7 @@
  *    `S_R` before `L_R` in program order, and `F_R < F2` with `F2` before `L_W`, so `L_W` reads
  *    `S_R` or later. Every later store to the cell is a release made after `L_R`, as in
  *    @ref qsbr_ordering case 2 (R's offline store, R's next announce, or the first announce of
- *    the cell's next owner), and `L_W`'s `seq_cst` loads synchronize with it, so `L_R` happens
+ *    the cell's next owner), and `L_W`'s acquire loads synchronize with it, so `L_R` happens
  *    before the free. A relaxed `S_R` would not do: a later announce read by `L_W` would then
  *    order nothing. If it reads `S_R` itself, R is online at `L_e`'s value. If that is `e` or
  * earlier, W does not free. If it is after `e`, `L_e` read the bump that closed `e` or a later one;
@@ -175,15 +172,40 @@
  * `lock or` on x86-64) is what this saves.
  *
  * A scan's FALSE needs no fence (it only defers), so W scans once without one, and pays the
- * `membarrier` only when a scan would conclude TRUE, then scans again after `F2`
- * (`scan_fence`, `ripe`). A `membarrier` call that fails makes the scan answer false:
- * frees are deferred, never early. Readers use the plain store only after the registration
+ * `membarrier` only when that scan finds something to free, then scans again after `F2`
+ * (`%horizon`). A `membarrier` call that fails makes the scan answer nothing past: frees are
+ * deferred, never early. Readers use the plain store only after the registration
  * succeeded (`control_t::asym` is set inside `asym_ready`, which every fencing scan runs
  * first), so a reader that took the plain store always meets a reclaimer that calls it.
+ *
+ * @section qsbr_horizon One horizon per reclaim pass
+ *
+ * A reclaimer with several entries to free pays the fence once, not once per entry. `%horizon`
+ * reads the counter (`L_c`), fences (`F_W`, or `F1`/`membarrier`/`F2`), scans the cells once and
+ * returns a plain value, `%horizon_t`: the arc of epochs that the counter value `c` and every
+ * online cell are after. Each entry is then one compare against it. Every reclaimer has one:
+ * `%retire` asks about its own epoch, `%drain_ripe` about the shared table, and
+ * `graph_t::collect` about both of its parks, outside the map lock.
+ *
+ * Why `L_c` makes the value good for an entry found AFTER the scan, however it got there: an
+ * entry the horizon covers has an epoch `e` before `c`. Its bump `B` (the RMW that closed `e`)
+ * then precedes in the counter's modification order the value `L_c` read, which continues
+ * `B`'s release sequence, so `S_W` happens before `L_c` and so before `F_W`, which is all
+ * either case above uses. Where `advance` stalled instead of bumping, its fence `F_X` follows
+ * `S_W`, and its `seq_cst` load of `e` precedes in `S` the later bump that `L_c` read, which
+ * precedes `F_W` ([atomics.order]: a `seq_cst` write coherence-ordered before a load that is
+ * sequenced before a `seq_cst` fence precedes that fence). So `F_X` precedes `F_W` in `S`, and
+ * both cases go through with `F_X` in `S_W`'s place. The loads `L_W` need only be acquire:
+ * the fence-to-fence rule makes any atomic load after `F_W` read `S_R` or later, and acquire
+ * is what lets the offline store it reads synchronize with it. On rv32 that is one `fence`
+ * per load where `seq_cst` paid two. An entry parked
+ * after `L_c` carries `c` or later, which the horizon does not cover: it waits for the next
+ * pass. So no caller needs "nothing joins while I scan", and none holds a lock across the fence.
  */
 #ifndef LIBTRACER_QSBR_HPP
 #define LIBTRACER_QSBR_HPP
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -323,13 +345,14 @@ enum class slot_state_t : std::uint32_t {
  * `ctx` / `release` are written only under @ref slot_state_t::FILLING and read only under
  * @ref slot_state_t::CLAIMING — both states are owned exclusively by one thread — so they are
  * plain members rather than atomics, published and consumed by @ref state's release/acquire
- * transitions.
+ * transitions. @ref epoch is atomic because a drainer reads it BEFORE it claims, to skip a slot
+ * that is not yet past without writing to it; `%drain_ripe` checks it again once claimed.
  */
 struct retired_slot_t {
     std::atomic<slot_state_t> state{slot_state_t::EMPTY}; /**< @brief The handoff. */
     void* ctx = nullptr;                                  /**< @brief The subscriber's context. */
     void (*release)(void*) = nullptr;                     /**< @brief Its release hook. */
-    std::uint32_t epoch = 0;                              /**< @brief The epoch it retired at. */
+    std::atomic<std::uint32_t> epoch{0};                  /**< @brief The epoch it retired at. */
 };
 
 /**
@@ -526,7 +549,7 @@ inline void enter() noexcept {
 
 /**
  * @brief Close the epoch after a writer's unpublish: what the writer parks now is free once
- *        @ref all_quiescent_past answers true for the value returned.
+ *        @ref horizon_t::past answers true for the value returned.
  *
  * `seq_cst`, and load-bearing for the same reason @ref retire's bump is: this RMW (or, when
  * stalled, the fence) is the full barrier between the caller's unpublish and any later scan.
@@ -580,92 +603,108 @@ inline void enter() noexcept {
 }
 
 /**
- * @brief The reclaim side's barrier before a scan that may conclude: `F1`, the `membarrier`
- *        when readers enter with a plain store, `F2` (@ref qsbr_asym).
- * @return False when the `membarrier` call failed; the caller then frees nothing.
+ * @brief The epochs one scan saw as past: an arc of the 2^31 epoch circle that ends at
+ *        @ref end and is @ref len long (@ref qsbr_horizon). The default value covers nothing.
  */
-[[nodiscard]] inline bool scan_fence() noexcept {
+struct horizon_t {
+    std::uint32_t end = 0; /**< @brief The newest epoch that is past. */
+    std::uint32_t len = 0; /**< @brief How many epochs, counting back from @ref end, are past. */
+
+    /** @brief Is epoch @p e past for every bracket this horizon saw? */
+    [[nodiscard]] constexpr bool past(std::uint32_t e) const noexcept {
+        return ((end - e) & kEpochMask) < len;
+    }
+};
+
+/**
+ * @brief The scan alone, with no fence: the epochs every participant is past, given that
+ *        @p c was read from the counter before the scan. @p MO orders its loads: `acquire`
+ *        after the pass's fence, so a reader's offline store it reads synchronizes with it,
+ *        and `relaxed` for the unfenced look ahead of it, whose answer only decides whether
+ *        to fence.
+ *
+ * Each online cell `s` is past exactly the arc of epochs @ref epoch_after places before it, and
+ * so is the counter value @p c. Every such arc is shorter than half the circle, so two of them
+ * meet in one arc or none, and the scan narrows one arc cell by cell. A thread counted in
+ * `overflow_online` has no epoch, so the answer is then the empty arc.
+ */
+template <std::memory_order MO>
+[[nodiscard]] inline horizon_t scan(std::uint32_t c) noexcept {
+    registry_t& r = registry();
+    if (r.ctl.overflow_online.load(MO) != 0) return {};
+    horizon_t h{c - 1, kEpochWindow - 1};
+    for (std::size_t i = 0; i < kQsbrParticipants; ++i) {
+        const std::uint32_t s = r.cells[i].state.load(MO);
+        if (s == 0) continue;
+        const horizon_t a{s - 1, kEpochWindow - 1};
+        if (h.past(a.end)) {
+            h = {a.end, std::min(a.len, h.len - ((h.end - a.end) & kEpochMask))};
+        } else if (a.past(h.end)) {
+            h.len = std::min(h.len, a.len - ((a.end - h.end) & kEpochMask));
+        } else {
+            return {};
+        }
+    }
+    return h;
+}
+
+/**
+ * @brief One reclaim pass's horizon: the counter, then the fence, then the scan
+ *        (@ref qsbr_horizon). Its @ref horizon_t::past is a grace period for any entry the
+ *        caller then finds, whenever that entry was parked.
+ *
+ * @p wants is asked first with an unfenced scan, and the fence is paid only when it answers
+ * true: a false needs no fence, it only defers. With the asymmetric fence (@ref qsbr_asym) that
+ * fence is `F1`, `membarrier`, `F2`, and a `membarrier` call that fails yields the empty
+ * horizon, so frees are deferred, never early.
+ */
+template <class Wants>
+[[nodiscard]] inline horizon_t horizon(Wants&& wants) noexcept {
+    registry_t& r = registry();
+    constexpr std::memory_order relaxed = std::memory_order_relaxed;
+    if (!wants(scan<relaxed>(r.ctl.epoch.load(relaxed)))) return {};
+    const std::uint32_t c = r.ctl.epoch.load(std::memory_order_acquire);  // L_c, before F_W
     std::atomic_thread_fence(std::memory_order_seq_cst);
 #if defined(LIBTRACER_QSBR_MEMBARRIER)
     if constexpr (kMembarrier) {
         if (asym_ready() && syscall(__NR_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0)
-            return false;
+            return {};
         std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 #endif
-    return true;
+    return scan<std::memory_order_acquire>(c);
 }
 
 /**
- * @brief The scan alone: is every participant offline or online at an epoch after @p e?
- *        Its TRUE means a grace period has passed only after @ref scan_fence.
- */
-[[nodiscard]] inline bool cells_past(std::uint32_t e) noexcept {
-    registry_t& r = registry();
-    if (r.ctl.overflow_online.load(std::memory_order_seq_cst) != 0) return false;
-    for (std::size_t i = 0; i < kQsbrParticipants; ++i) {
-        const std::uint32_t s = r.cells[i].state.load(std::memory_order_seq_cst);
-        if (s != 0 && !epoch_after(s, e)) return false;
-    }
-    return true;
-}
-
-/**
- * @brief Has every participant passed a quiescent state since epoch @p e?
+ * @brief Run every retired pair whose grace period has elapsed, under one horizon.
  *
- * True when each is either offline or online at an epoch strictly greater than @p e. The
- * opening fence (@ref scan_fence) is what makes this sound for a caller that did NOT just bump
- * the epoch (a drainer at a quiescent point); it is below every early-out on the dispatch
- * path. With the asymmetric fence that fence is a `membarrier` call, so it is paid only when a
- * scan without it would already conclude (a false needs no fence: it only defers), and a
- * caller with several epochs to ask about in one row uses @ref ripe, which pays it once.
- */
-[[nodiscard]] [[gnu::noinline]] inline bool all_quiescent_past(std::uint32_t e) noexcept {
-    if constexpr (kMembarrier) {
-        if (!cells_past(e)) return false;
-    }
-    return scan_fence() && cells_past(e);
-}
-
-/**
- * @brief @ref all_quiescent_past for one of several epochs asked in a row: the fence is paid at
- *        most once across the row, and only when a scan would conclude.
- * @param e      The epoch closed after the unpublish of what the caller would free.
- * @param fenced The row's state, false at its start. Every epoch asked with it must belong to
- *               something unpublished before the row began, and nothing may join the row once
- *               it has begun: `graph_t::collect` asks under the one map-lock hold that every
- *               append to its parks also takes.
- */
-[[nodiscard]] inline bool ripe(std::uint32_t e, bool& fenced) noexcept {
-    if constexpr (!kMembarrier) return all_quiescent_past(e);
-    if (fenced) return cells_past(e);
-    if (!cells_past(e)) return false;  // a false needs no fence: it only defers
-    fenced = scan_fence();
-    return fenced && cells_past(e);
-}
-
-/**
- * @brief Run every retired pair whose grace period has elapsed.
- *
- * Called at a quiescent point (and once more by a retiring thread that had to defer). The
- * early-out is one relaxed load of a read-mostly line that is 0 on every node that is not
- * mid-teardown, which is what keeps this off the dispatch path's budget.
+ * Called at a quiescent point (and once more by a retiring thread that had to defer). A slot is
+ * CLAIMED before its epoch is trusted: between a load of the epoch and the claim, another
+ * drainer may run that pair and a retiring thread refill the slot, and the claim alone would
+ * then win a pair this pass never checked. Claimed, the slot cannot change, so its epoch is
+ * checked again. A refilled slot is judged by its own epoch, as an entry appended after the
+ * scan is (see @ref qsbr_horizon): it passes only if stamped before the counter read, and
+ * otherwise goes back.
  *
  * A slot is EMPTIED before its hook runs, for the reason `%graph.cpp`'s park drain gives: a
  * hook is arbitrary user code that may publish, and a nested publish re-enters here.
  */
 [[gnu::noinline]] inline void drain_ripe() noexcept {
     registry_t& r = registry();
-    for (std::size_t i = 0; i < kDeferredReleaseSlots; ++i) {
-        retired_slot_t& s = r.retired[i];
-        if (s.state.load(std::memory_order_acquire) != slot_state_t::READY) continue;
+    const horizon_t h = horizon([&r](const horizon_t& h0) {
+        for (const retired_slot_t& s : r.retired)
+            if (s.state.load(std::memory_order_acquire) == slot_state_t::READY &&
+                h0.past(s.epoch.load(std::memory_order_relaxed)))
+                return true;
+        return false;
+    });
+    for (retired_slot_t& s : r.retired) {
         slot_state_t expected = slot_state_t::READY;
-        // Claimed first, so the epoch checked below is the claimed pair's own: an unclaimed
-        // slot may be drained and refilled by others at any moment. Not yet ripe, it goes back.
-        if (!s.state.compare_exchange_strong(expected, slot_state_t::CLAIMING,
+        if (!h.past(s.epoch.load(std::memory_order_relaxed)) ||
+            !s.state.compare_exchange_strong(expected, slot_state_t::CLAIMING,
                                              std::memory_order_acq_rel, std::memory_order_relaxed))
             continue;
-        if (!all_quiescent_past(s.epoch)) {
+        if (!h.past(s.epoch.load(std::memory_order_relaxed))) {
             s.state.store(slot_state_t::READY, std::memory_order_release);
             continue;
         }
@@ -673,7 +712,6 @@ inline void enter() noexcept {
         void (*const fn)(void*) = s.release;
         s.ctx = nullptr;
         s.release = nullptr;
-        s.epoch = 0;
         r.ctl.live.fetch_sub(1, std::memory_order_relaxed);
         s.state.store(slot_state_t::EMPTY, std::memory_order_release);
         fn(ctx);
@@ -685,9 +723,9 @@ inline void enter() noexcept {
  *
  * THE EARLY-OUT IS THE WHOLE POINT and it is why @ref drain_ripe is `noinline`. This is called
  * from every outermost dispatch exit, so all a publish may pay is one relaxed load of a
- * read-mostly line and one branch nobody takes; the O(slots × participants) scan behind it must
- * never be inlined into `fan_out`, which is a property `objdump` is asked to confirm rather than
- * a hope. (Measured: letting it inline added 162 instructions to `fan_out`.)
+ * read-mostly line and one branch nobody takes; the scan behind it must never be inlined into
+ * `fan_out`, which is a property `objdump` is asked to confirm rather than a hope. (Measured:
+ * letting it inline added 162 instructions to `fan_out`.)
  */
 inline void drain() noexcept {
     if (registry().ctl.live.load(std::memory_order_relaxed) == 0) return;
@@ -711,19 +749,18 @@ inline bool retire(void* ctx, void (*release)(void*)) noexcept {
     // seq_cst, and load-bearing: this RMW is the full barrier standing between the caller's
     // `clear_edge` and the scan below, which is the writer half of the Dekker pairing.
     const std::uint32_t e = advance();
-    if (all_quiescent_past(e)) {
+    if (horizon([e](const horizon_t& h) { return h.past(e); }).past(e)) {
         release(ctx);
         return true;
     }
-    for (std::size_t i = 0; i < kDeferredReleaseSlots; ++i) {
-        retired_slot_t& s = r.retired[i];
+    for (retired_slot_t& s : r.retired) {
         slot_state_t expected = slot_state_t::EMPTY;
         if (!s.state.compare_exchange_strong(expected, slot_state_t::FILLING,
                                              std::memory_order_acq_rel, std::memory_order_relaxed))
             continue;
         s.ctx = ctx;
         s.release = release;
-        s.epoch = e;
+        s.epoch.store(e, std::memory_order_relaxed);
         r.ctl.live.fetch_add(1, std::memory_order_relaxed);
         s.state.store(slot_state_t::READY, std::memory_order_release);
         // One retry, on THIS thread, now that the pair is visible to every drainer: the

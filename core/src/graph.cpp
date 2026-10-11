@@ -1286,29 +1286,35 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
  * @brief Free every parked value seam and run every parked release that no router frame can
  *        still reach — the embedder-called other end of retirement's park (#576).
  *
+ * One QSBR horizon covers the whole call, taken BEFORE the map lock: its fence (a `membarrier`
+ * on a Linux host) is paid once and never under the lock, and only when an unfenced scan finds
+ * a ripe front. An entry parked after it waits for the next call (qsbr.hpp §qsbr_horizon).
  * Epochs grow in park order, so the ripe entries are a prefix of each park. They are taken in
  * stack-sized batches under the map lock, which draws nothing, and freed outside it.
  */
 void graph_t::collect() {
     constexpr std::size_t kBatch = 16;
+    const detail_qsbr::horizon_t h = detail_qsbr::horizon([this](const detail_qsbr::horizon_t& h0) {
+        const std::shared_lock lock(map_mutex_);
+        const auto& s = retired_seams_.seams;
+        const auto& r = parked_releases_.releases;
+        return (s.size() != 0 && h0.past(s[0].epoch)) || (r.size() != 0 && h0.past(r[0].epoch));
+    });
     for (;;) {
         std::array<value_handlers_t*, kBatch> seams{};
         std::array<retired_callback_t, kBatch> releases{};
         std::size_t ns = 0;
         std::size_t nr = 0;
         {
-            // Under the map lock: nothing but the take. The lock is what serialises us against
-            // retire_subtree's append; no user code runs under it.
+            // Under the map lock: nothing but the take, one compare per entry. The lock is what
+            // serialises us against retire_subtree's append; no user code runs under it.
             const std::unique_lock lock(map_mutex_);
-            // One row for `detail_qsbr::ripe`: nothing joins either park while this lock is held,
-            // so one reclaim-side fence covers every entry taken under it.
-            bool fenced = false;
             auto& s = retired_seams_.seams;
-            for (; ns < kBatch && ns < s.size() && detail_qsbr::ripe(s[ns].epoch, fenced); ++ns)
+            for (; ns < kBatch && ns < s.size() && h.past(s[ns].epoch); ++ns)
                 seams[ns] = s[ns].seam;
             s.erase_front(ns);
             auto& r = parked_releases_.releases;
-            for (; nr < kBatch && nr < r.size() && detail_qsbr::ripe(r[nr].epoch, fenced); ++nr)
+            for (; nr < kBatch && nr < r.size() && h.past(r[nr].epoch); ++nr)
                 releases[nr] = r[nr].release;
             r.erase_front(nr);
         }
