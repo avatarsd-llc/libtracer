@@ -7,6 +7,10 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-10-11
+
+This patch release also carries RFC-0032's deletion of COMPACT delivery, ADVERTISE, HANDLE_NACK and the route-handle tables, which was planned for 0.20.0. A 0.19.0 peer that still sends them gets a counted unknown-member error.
+
 ### Removed
 
 - **BREAKING — `CompactFlowError` is gone** (#1951, RFC-0032). ADVERTISE (`0x11`), COMPACT

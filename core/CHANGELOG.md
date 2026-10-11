@@ -14,6 +14,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-10-11
+
+This patch release also carries RFC-0032's deletion of COMPACT delivery, ADVERTISE, HANDLE_NACK and the route-handle tables, which was planned for 0.20.0. A 0.19.0 peer that still sends them gets a counted unknown-member error.
+
 ### Added
 
 - **`kArenaBytes = 0`: a build with no static arena, whose default root is the platform heap
