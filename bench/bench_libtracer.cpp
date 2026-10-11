@@ -508,7 +508,7 @@ void run_inproc_remote(std::size_t S, std::size_t F, const char* mode,
             [](void* ctx, const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
                 auto* s = static_cast<sink_ctx_t*>(ctx);
                 s->n->fetch_add(1, std::memory_order_relaxed);
-                s->link_bytes += d.link.size();  // READ the borrowed spelling, don't just count
+                s->link_bytes += d.link.conn.index;  // READ the edge's link, don't just count
             },
             &sink_ctx};
         g.set_hooks(hooks);
@@ -526,7 +526,10 @@ void run_inproc_remote(std::size_t S, std::size_t F, const char* mode,
     for (std::size_t f = 0; f < F; ++f) {
         std::string link =
             "192.168." + std::to_string(f / 250) + "." + std::to_string(f % 250) + ":9000";
-        if (g.subscribe_wire(src, sub_tlv, route_tlv, std::move(link)).has_value()) ++admitted;
+        // The pairs a transport plane would mint (#1941): one distinct connection per link.
+        const tr::graph::link_pair_t pair{.conn = {static_cast<std::uint32_t>(f), 1}};
+        if (g.subscribe_wire(src, sub_tlv, route_tlv, link, {}, {}, {}, pair).has_value())
+            ++admitted;
     }
     if (admitted != F) {
         std::fprintf(stderr, "SKIP mode=%s fanout=%zu: admitted %zu of %zu remote edges\n", mode, F,

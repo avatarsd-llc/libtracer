@@ -1046,16 +1046,17 @@ class fwd_router_t {
      * @brief The link-departure hook (RFC-0009 §D extended to peer departure): evict
      *        everything the routing plane holds against a link that just died.
      *
-     * Two halves, in order: `graph_t::evict_link_edges(link_name)` deactivates and
-     * reclaims every subscriber edge whose stored link is @p link_name (write fan-outs
+     * Two halves, in order: `graph_t::evict_link_edges` deactivates and reclaims every
+     * subscriber edge that delivers over the link — matched by its pairs (#1941) — or was
+     * filed under @p link_name as a `:subscribers[]` caller context (write fan-outs
      * stop addressing the dead session, and its ~90 B/edge of route/link/caller state is
      * released — the C6's measured ~27 KB/browser-session leak), then @ref clear_link
      * drops the link's route-handle label state (unchanged self-heal semantics).
      *
      * `add_child` installs this automatically behind every child's departure notifier
      * (`transport_t::set_down_notifier` with the child's registered NAME; the bus facet's
-     * `bus_link_t::set_peer_down_notifier` with the departed PEER's name — the same name
-     * inbound frames were tagged with, hence the name subscriber edges stored). A host
+     * `bus_link_t::set_peer_down_notifier` with the departed PEER's handle and name — the
+     * handle the edges it admitted stored in their pairs). A host
      * that learns of a departure out-of-band (its own session manager) may call it
      * directly; calling it for a live or unknown link is safe (the next delivery-compact
      * flow re-advertises; eviction of nothing is a no-op).
@@ -1063,7 +1064,10 @@ class fwd_router_t {
      * Runs on the calling thread (typically a transport receive/close thread) and takes
      * graph locks — callers must hold no transport-internal locks (the
      * `set_down_notifier` calling discipline).
-     * @param link_name The routing plane's inbound NAME for the departed link/peer.
+     * @param link_name The registered NAME of the departed point-to-point child. A departed
+     *                  bus PEER's edges are evicted by the bus facet's own notifier, which
+     *                  knows the peer's handle; a peer name passed here finds no link pairs,
+     *                  so it reclaims only the `:subscribers[]` edges filed under that name.
      */
     void link_down(std::string_view link_name);
 
@@ -1264,6 +1268,8 @@ class fwd_router_t {
     }
 
    private:
+    struct child_rx_ctx_t;  // defined below, named here by `reclaim_refused_route`
+
     /**
      * @brief Reclaim the subscriber edge a refused delivery route names (#1223 step 5).
      *
@@ -1280,9 +1286,12 @@ class fwd_router_t {
      * dropping it into a sink that never matched it.
      *
      * @param inbound_name This node's NAME for the link the reply arrived on.
+     * @param inbound_ctx  That link's receive context, whose slot gives its pairs (#1941).
+     * @param peer         The bus peer the reply came from, when it came from one.
      * @param route        The echoed route TLV's contiguous bytes (header and body).
      */
-    void reclaim_refused_route(std::string_view inbound_name, std::span<const std::byte> route);
+    void reclaim_refused_route(std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx,
+                               peer_handle_t peer, std::span<const std::byte> route);
 
     /**
      * @brief A link's stable per-child receiver state — its identity AND its mount run.
@@ -1730,7 +1739,38 @@ class fwd_router_t {
     /** @brief The `graph::link_id_fn_t` trampoline: `ctx` is the router (this supplier has
      *         state, unlike the subject one), and the receive context comes back out of the
      *         opaque `inbound_ref_t::origin` the terminus put there. */
-    static graph::link_id_t link_id_thunk(void* ctx, const graph::inbound_ref_t& inbound);
+    static graph::carried_link_t link_id_thunk(void* ctx, const graph::inbound_ref_t& inbound);
+    /**
+     * @brief The pairs a remote edge admitted over @p door stores and delivers over (#1941):
+     *        the door's connection-vertex PAIR, plus @p peer when the door is a bus.
+     * @retval {} No door, or its connection vertex has no PAIR to give (a saturated slot).
+     */
+    [[nodiscard]] graph::link_pair_t link_pair_of(const child_registry_t::child_t* door,
+                                                  peer_handle_t peer) const;
+    /** @brief Where a remote delivery leaves (#1941): see `delivery_egress`. */
+    struct delivery_leg_t {
+        /** @brief The link to send on; nullptr drops the delivery. */
+        transport_t* link = nullptr;
+        /** @brief The child's registered name, the label plane's key for a flat link. */
+        std::string_view name;
+        /** @brief The bus facet a PEER edge egresses through; it names the peer's key. */
+        bus_link_t* bus = nullptr;
+    };
+    /**
+     * @brief The link a remote delivery egresses on: the PAIR deref of @p to (#1941).
+     *
+     * Valid only inside the caller's frame bracket, like every link this router resolves.
+     * The label plane still keys a link by NAME, so the leg carries what that key is built
+     * from: the child's name, or, for a bus peer, the facet that formats the peer's.
+     * @retval {} The link is gone, its door no longer matches the edge's shape, or the bus
+     *         peer is not currently audible — the delivery drops.
+     */
+    [[nodiscard]] delivery_leg_t delivery_egress(graph::link_pair_t to) const;
+    /**
+     * @brief @ref link_down with the departed link's pairs already in hand (#1941) — what the
+     *        departure notifiers and `remove_child` call, since each holds the slot.
+     */
+    void link_gone(std::string_view link_name, graph::link_pair_t link);
     /** @brief The `graph::stats_sampler_fn_t` trampoline: `ctx` is the router
      *         (RFC-0010 Amendment 2). */
     static bool stats_sampler_thunk(void* ctx, std::string_view seam_class,

@@ -120,6 +120,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     before. The router alone reads the kept pointer, for a frame its receiver was handed.
   - A deferred AWAIT's reply gathers through the waiter's own block source rather than its
     link's, so a reply that fires after its link was removed reads nothing through the link.
+- **BREAKING: a remote subscriber edge names its link by pairs, not by name
+  ([#1941](https://github.com/avatarsd-llc/libtracer/issues/1941), the link-identity half of
+  [#1622](https://github.com/avatarsd-llc/libtracer/issues/1622)).** The new
+  `graph::link_pair_t` holds the link's connection-vertex pair and, on a bus, the peer's
+  handle; `same_link` compares two of them. A delivery finds its link by dereferencing the
+  pair, so the two name scans each remote delivery paid (the registry's, then the bus's peer
+  table) are gone. The per-link label tables still key by name. Source changes:
+  - `remote_delivery_t::link`, `subscriber_remote_t::link` and `edge_view_t::link()` are a
+    `link_pair_t`, not a string. `subscriber_remote_t` shrinks from 120 B to 104 B.
+  - `graph_t::subscribe_wire` takes the pair after the link token. A remote subscribe
+    without a valid pair is refused `INVALID_PATH`, and so is any remote subscribe a resolver
+    admits without an `on_link_id` supplier.
+  - `link_id_fn_t` returns a `carried_link_t` (the token and the pair), and `link_hold_fn_t`
+    takes a `link_pair_t`.
+  - `graph_t::evict_link_edges` and `evict_route_edges` take the pair after the name. The
+    name still keys the eviction index and matches field-write edges; the pair matches the
+    delivering edges.
+  - `wire_target_split_t` gains `pair`.
+  - `bus_link_t` gains `peer_link_of(peer_handle_t)`, which resolves a peer by its handle.
+    The default formats the peer's name and calls `peer_link`. `slot_server_t` and the CAN
+    link override it with a direct lookup.
+  - `child_registry_t::by_name` and `erase` resolve through `entry_by_name`. A name has one
+    slot, so neither changes behaviour.
 - **Breaking: a link cannot exist without its connection vertex
   ([#1940](https://github.com/avatarsd-llc/libtracer/issues/1940), stage 2 of spec
   [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938)).** `fwd_router_t::add_child`

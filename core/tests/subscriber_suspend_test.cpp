@@ -278,10 +278,14 @@ void test_remote_slot_toggles() {
     link_counts_t seen;
     const tr::testing::remote_sink_guard_t sink(
         g, [&](const tr::graph::remote_delivery_t& d, const value_t&) {
-            (d.link == "a" ? seen.a : seen.b) += 1;
+            (d.link == tr::testing::test_link("a") ? seen.a : seen.b) += 1;
         });
-    check(g.subscribe_wire(v, subscriber_tlv("pa"), route_to("a"), "a").has_value() &&
-              g.subscribe_wire(v, subscriber_tlv("pb"), route_to("b"), "b").has_value(),
+    check(g.subscribe_wire(v, subscriber_tlv("pa"), route_to("a"), "a", {}, {}, {},
+                           tr::testing::test_link("a"))
+                  .has_value() &&
+              g.subscribe_wire(v, subscriber_tlv("pb"), route_to("b"), "b", {}, {}, {},
+                               tr::testing::test_link("b"))
+                  .has_value(),
           "two routed edges, slots 0 (link a) and 1 (link b)");
     tr::graph::vertex_t& raw_v = *std::bit_cast<tr::graph::vertex_t*>(v);
     using edge_suspend_t = tr::graph::vertex_t::edge_suspend_t;

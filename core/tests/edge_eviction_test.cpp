@@ -181,7 +181,8 @@ using tr::testing::b_fwd_mint;
 bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_view marker) {
     return g
         .subscribe_wire(v, make_value(b_subscriber(marker)),
-                        make_value(b_path({std::string(link)})), std::string(link))
+                        make_value(b_path({std::string(link)})), std::string(link), {}, {}, {},
+                        tr::testing::test_link(std::string(link)))
         .has_value();
 }
 
@@ -357,7 +358,7 @@ void test_evict_scoped_to_link() {
     std::size_t cli = 0, other = 0;
     const tr::testing::remote_sink_guard_t sink_guard(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-            (d.link == "cli" ? cli : other) += 1;
+            (d.link == tr::testing::test_link("cli") ? cli : other) += 1;
         });
     std::size_t local = 0;
     auto on_local = [&](const tr::graph::value_t&) { ++local; };
@@ -371,9 +372,12 @@ void test_evict_scoped_to_link() {
     check(cli == 2 && other == 1 && local == 1, "pre-evict fan-out reaches every edge");
 
     cli = other = local = 0;
-    check(g.evict_link_edges("cli") == 3, "evict('cli') reports exactly its 3 edges");
-    check(g.evict_link_edges("cli") == 0, "second evict is a no-op (idempotent)");
-    check(g.evict_link_edges("ghost") == 0, "evicting an unknown link is a no-op");
+    check(g.evict_link_edges("cli", tr::testing::test_link("cli")) == 3,
+          "evict('cli') reports exactly its 3 edges");
+    check(g.evict_link_edges("cli", tr::testing::test_link("cli")) == 0,
+          "second evict is a no-op (idempotent)");
+    check(g.evict_link_edges("ghost", tr::testing::test_link("ghost")) == 0,
+          "evicting an unknown link is a no-op");
 
     check(g.write(a, make_value({0x02})).has_value(), "write /a post-evict");
     check(cli == 0, "the dead link gets NO delivery");
@@ -448,7 +452,8 @@ void test_departure_cost_is_scoped_to_the_peer() {
           "a repeat subscription on the same vertex does not grow the cost (dedup)");
 
     // The eviction itself is still exact — cheapness must not have cost correctness.
-    check(g.evict_link_edges("cli") == 3, "evict('cli') still reclaims all three of its edges");
+    check(g.evict_link_edges("cli", tr::testing::test_link("cli")) == 3,
+          "evict('cli') still reclaims all three of its edges");
     check(g.link_edge_candidates("cli") == 0, "and its index entry is gone with them");
     check(g.link_edge_candidates("peer0") == 1, "a bystander's own cost is untouched");
 }
@@ -469,12 +474,13 @@ void test_index_recreated_after_a_full_eviction() {
     std::size_t cli = 0;
     const tr::testing::remote_sink_guard_t sink_guard3(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-            if (d.link == "cli") ++cli;
+            if (d.link == tr::testing::test_link("cli")) ++cli;
         });
     vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
 
     check(wire_sub(g, v, "cli", "first"), "the first session subscribes");
-    check(g.evict_link_edges("cli") == 1, "it departs and its edge is reclaimed");
+    check(g.evict_link_edges("cli", tr::testing::test_link("cli")) == 1,
+          "it departs and its edge is reclaimed");
     check(g.link_edge_candidates("cli") == 0, "the index entry went with it");
 
     check(wire_sub(g, v, "cli", "second"), "a redial reuses the SAME link name and subscribes");
@@ -483,7 +489,8 @@ void test_index_recreated_after_a_full_eviction() {
     check(g.write(v, make_value({0x01})).has_value(), "write reaches the redialed session");
     check(cli == 1, "the redialed edge delivers");
 
-    check(g.evict_link_edges("cli") == 1, "the SECOND departure reclaims the redial's edge too");
+    check(g.evict_link_edges("cli", tr::testing::test_link("cli")) == 1,
+          "the SECOND departure reclaims the redial's edge too");
     cli = 0;
     check(g.write(v, make_value({0x02})).has_value(), "write after the second departure");
     check(cli == 0, "and nothing is delivered to the dead session — no leaked edge");
@@ -548,7 +555,8 @@ void test_index_insert_is_idempotent() {
 
     // A departure in the middle of the live set disturbs exactly one peer.
     const int mid = kLinks / 2;
-    check(g.evict_link_edges(peers[mid]) == 2, "a middle peer departs, taking both its edges");
+    check(g.evict_link_edges(peers[mid], tr::testing::test_link(peers[mid])) == 2,
+          "a middle peer departs, taking both its edges");
     check(g.link_edge_candidates(peers[mid]) == 0, "its index entry is gone");
     bool rest_intact = true;
     for (int i = 1; i < kLinks; ++i)
@@ -575,7 +583,7 @@ void test_stale_index_entries_are_harmless() {
     std::size_t cli = 0;
     const tr::testing::remote_sink_guard_t sink_guard4(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-            if (d.link == "cli") ++cli;
+            if (d.link == tr::testing::test_link("cli")) ++cli;
         });
     vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
     vertex_handle_t w = g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
@@ -588,7 +596,7 @@ void test_stale_index_entries_are_harmless() {
     // route, so one route matches both. That leaves the link with no edges at all — and, by
     // design, with both of its index entries still standing.
     const std::vector<std::byte> route = b_path({std::string("cli")});
-    check(g.evict_route_edges("cli", route) == 2,
+    check(g.evict_route_edges("cli", tr::testing::test_link("cli"), route) == 2,
           "the narrow route-scoped reclaim takes both edges");
     check(g.link_edge_candidates("cli") == 2,
           "both index entries are now STALE — the narrow path does not un-index");
@@ -600,7 +608,8 @@ void test_stale_index_entries_are_harmless() {
 
     // The whole-link eviction now runs against two vertices that hold nothing. The contract
     // is that this is a NO-OP reporting zero, not a miscount and not a fault.
-    check(g.evict_link_edges("cli") == 0, "the whole-link eviction over stale entries reports 0");
+    check(g.evict_link_edges("cli", tr::testing::test_link("cli")) == 0,
+          "the whole-link eviction over stale entries reports 0");
     check(g.link_edge_candidates("cli") == 0, "and clears them, so the staleness is not immortal");
 }
 
@@ -683,7 +692,8 @@ void test_slot_reuse_and_index_stability() {
         const auto r = g.read(path_t(("/v:subscribers[" + std::to_string(idx) + "]").c_str()));
         return r ? rope_bytes(**r) : std::vector<std::byte>{};
     };
-    check(g.evict_link_edges("cli") == 2, "evict('cli') frees slots 0 and 2");
+    check(g.evict_link_edges("cli", tr::testing::test_link("cli")) == 2,
+          "evict('cli') frees slots 0 and 2");
     check(slot(1) == b_subscriber("B"), "survivor B still reads at index 1 (no renumber)");
     check(slot(0).empty() && slot(2).empty(), "freed slots read as cleared");
 
@@ -702,7 +712,7 @@ void test_slot_reuse_and_index_stability() {
     std::size_t hits = 0;
     const tr::testing::remote_sink_guard_t sink_guard5(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-            hits += d.link == "cli:2";
+            hits += d.link == tr::testing::test_link("cli:2");
         });
     check(g.write(v, make_value({0x11})).has_value(), "write /v");
     check(hits == 3, "D, E and F (two reused slots + one appended) all deliver");
@@ -860,7 +870,8 @@ void test_evict_reaches_field_write_admitted_edges() {
     const auto slot0 = g.read(path_t("/p:subscribers[0]"));
     check(!slot0.has_value() || rope_bytes(**slot0).empty(),
           "slot 0 was RECLAIMED, not just left active (free for add_edge reuse)");
-    check(g.evict_link_edges("cli") == 0, "a second eviction for 'cli' finds nothing left");
+    check(g.evict_link_edges("cli", tr::testing::test_link("cli")) == 0,
+          "a second eviction for 'cli' finds nothing left");
 }
 
 /**
@@ -909,7 +920,8 @@ void test_empty_link_name_evicts_nothing() {
           "the compact local edge IS delivering (the test is not vacuous)");
     check(value_of("/tp") == b_value_u8(0x61), "the plain local edge IS delivering");
 
-    check(g.evict_link_edges("") == 0, "evict('') reclaims nothing and reports 0");
+    check(g.evict_link_edges("", tr::testing::test_link("")) == 0,
+          "evict('') reclaims nothing and reports 0");
 
     check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x62))}).has_value(),
           "write /p after the empty-key eviction");
@@ -946,14 +958,14 @@ void test_concurrent_evict_vs_writes() {
     });
     std::thread evictor([&] {
         for (int i = 0; i < 100; ++i) {
-            (void)g.evict_link_edges("cli");
+            (void)g.evict_link_edges("cli", tr::testing::test_link("cli"));
             (void)wire_sub(g, v, "cli", "sx");
         }
     });
     writer.join();
     evictor.join();
 
-    (void)g.evict_link_edges("cli");
+    (void)g.evict_link_edges("cli", tr::testing::test_link("cli"));
     check(true, "no crash/deadlock under eviction x write");
     // Coherent end state: exactly the surviving 'keep' edge fires.
     delivered.store(0);
@@ -991,7 +1003,8 @@ void test_clear_edge_releases_the_slot_pin() {
     const std::uint_least32_t held = refs();
 
     check(g.subscribe_wire(a, view_t::over(tr::view::segment_ptr_t(seg)),
-                           make_value(b_path({"cli:9"})), "cli:9")
+                           make_value(b_path({"cli:9"})), "cli:9", {}, {}, {},
+                           tr::testing::test_link("cli:9"))
               .has_value(),
           "wire subscriber bound");
     const std::uint_least32_t pinned = refs();

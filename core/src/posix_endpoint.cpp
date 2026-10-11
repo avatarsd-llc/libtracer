@@ -535,6 +535,16 @@ transport_t* slot_server_t::peer_link(std::string_view peer) {
     return nullptr;
 }
 
+transport_t* slot_server_t::peer_link_of(peer_handle_t peer) {
+    // `p<index>` names slot `index` (see `peer_name`), so the slot IS the lookup: the same
+    // open-slot test `peer_link` makes, without the name compare across every slot.
+    if (!peer.valid()) return nullptr;
+    const std::lock_guard lock(peers_m_);
+    if (peer.index >= slots_.size()) return nullptr;
+    const session_base_t& s = *slots_[peer.index];
+    return s.open.load(std::memory_order_relaxed) && s.name[0] != '\0' ? s.peer_endpoint : nullptr;
+}
+
 bool slot_server_t::close_peer(std::string_view peer) {
     // Shutdown-only under the sender lock order (peers_m_ → write_m_); the poll thread's
     // next pass observes the close and runs the IDENTICAL remote-FIN teardown — no

@@ -168,8 +168,9 @@ struct inbound_ref_t {
 };
 
 /**
- * @brief The terminus's LINK-TOKEN supplier: `(ctx, the inbound identity) → the link's
- *        interned `%tr::graph::link_id_t`` (#1266 / #1417).
+ * @brief The terminus's LINK supplier: `(ctx, the inbound identity) → the link's interned
+ *        `%tr::graph::link_id_t`` (#1266 / #1417) and the pairs a remote edge delivers over
+ *        (`%tr::graph::link_pair_t`, #1941), as one `%tr::graph::carried_link_t`.
  *
  * Declared at namespace scope rather than inside `op_resolver_t` — unlike its three sibling
  * seams — because @ref link_token_seam_t below has to name it, and that struct is what the
@@ -184,7 +185,7 @@ struct inbound_ref_t {
  * @param inbound The request's inbound identity — `peer` is the handle whose link is wanted
  *                and `origin` is the opaque per-link token the installer put there.
  */
-using link_id_fn_t = link_id_t (*)(void* ctx, const inbound_ref_t& inbound);
+using link_id_fn_t = carried_link_t (*)(void* ctx, const inbound_ref_t& inbound);
 
 /**
  * @brief The link-token seam as the resolve walk carries it — the `{fn, ctx}` pair plus the
@@ -213,7 +214,7 @@ struct link_token_seam_t {
      * branch on a path that is already building an owned SUBSCRIBER copy, and an installed
      * one costs an indirect call per remote subscribe and nothing per frame.
      */
-    [[nodiscard]] link_id_t ask() const {
+    [[nodiscard]] carried_link_t ask() const {
         if (fn == nullptr || inbound == nullptr) return {};
         return fn(ctx, *inbound);
     }
@@ -603,11 +604,15 @@ class op_resolver_t {
      * #1290's prototype, so unlike @ref subject_fn_t this one is NOT resolved once per
      * resolve. A read, a write, an await and a forwarding hop never call it.
      *
-     * An invalid answer is the conformant default and costs nothing but the lookup the index
+     * An invalid token is the conformant default and costs nothing but the lookup the index
      * does today — no installed supplier, a peer the supplier has no token for, a census bus
-     * that never announced. So is a WRONG answer: the index verifies that the token's slot
+     * that never announced. So is a WRONG token: the index verifies that the token's slot
      * spells the key it is about to index under, so a supplier that confuses two links loses
      * a subscript, not an edge.
+     *
+     * The answer's PAIRS are not optional the same way (#1941). They are where the edge
+     * delivers, and `graph_t::subscribe_wire` refuses a remote subscribe that arrives
+     * without them, so a resolver with no supplier installed admits no remote subscriber.
      */
     void on_link_id(link_id_fn_t fn, void* ctx) noexcept {
         link_id_fn_ = fn;

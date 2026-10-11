@@ -742,24 +742,20 @@ class child_registry_t {
      * @return true if @p name named a live child, false if it named none.
      */
     bool erase(std::string_view name) {
-        bool erased = false;
-        for_each([&](const child_t& c) {
-            if (c.live() && c.name == name) {
-                // Mark it dead, KEEP the shape bit: a tombstoned BUS mount must still reject a
-                // residual segment rather than fall through to the local terminus (ADR-0073
-                // §3). The pointer stays for `child_t::bound` alone. Writers are serialized by
-                // the caller, so the load/store pair needs no RMW.
-                child_t& slot = const_cast<child_t&>(c);
-                slot.egress_.store(slot.egress_.load(std::memory_order_relaxed) | kRetiredBit,
-                                   std::memory_order_release);
-                erased = true;  // keep going: belt-and-braces against any shadow slot
-            }
-            return false;
-        });
+        // One slot per name: @ref add rebinds a name's slot, live or tombstoned, and never
+        // appends a second, so the first live match is the only one.
+        child_t* const slot = const_cast<child_t*>(entry_by_name(name));
+        if (slot == nullptr) return false;
+        // Mark it dead, KEEP the shape bit: a tombstoned BUS mount must still reject a residual
+        // segment rather than fall through to the local terminus (ADR-0073 §3). The pointer
+        // stays for `child_t::bound` alone. Writers are serialized by the caller, so the
+        // load/store pair needs no RMW.
+        slot->egress_.store(slot->egress_.load(std::memory_order_relaxed) | kRetiredBit,
+                            std::memory_order_release);
         // A departed mount moves the split for every `dst` that used to descend through it,
         // so it restamps the label plane exactly as a registration does (#765).
-        if (erased) bump_generation();
-        return erased;
+        bump_generation();
+        return true;
     }
 
     /**
@@ -821,25 +817,13 @@ class child_registry_t {
      * @ref resolve_peer for scoped peer resolution.
      */
     [[nodiscard]] transport_t* by_name(std::string_view name) const {
+        if (const child_t* const exact = entry_by_name(name)) return exact->link();
+        // Each BUS child, asked through the same scoped door the descent uses: a tombstone or
+        // a point-to-point child resolves no peer.
         transport_t* hit = nullptr;
         for_each([&](const child_t& c) {
-            if (c.live() && c.name == name) {
-                hit = c.link();
-                return true;
-            }
-            return false;
-        });
-        if (hit != nullptr) return hit;
-        for_each([&](const child_t& c) {
-            transport_t* const l = c.link();
-            if (l == nullptr) return false;  // tombstone (#494) — no link to ask
-            if (bus_link_t* const bus = bus_of(*l)) {
-                if (transport_t* const peer = bus->peer_link(name)) {
-                    hit = peer;
-                    return true;
-                }
-            }
-            return false;
+            hit = resolve_peer(c, name);
+            return hit != nullptr;
         });
         return hit;
     }
