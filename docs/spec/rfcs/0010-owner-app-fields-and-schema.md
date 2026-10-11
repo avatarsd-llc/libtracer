@@ -1200,7 +1200,7 @@ existing types. The owner part (`NAME "app"`) is unchanged, and a vertex whose o
 document serves byte-for-byte what it served before.
 
 **Instrument: amendment, not erratum.** A reader can observe the new member, and two SHOULDs and
-two MUSTs (one for writers, one for readers) are new. [reference/05](../../reference/05-protocol-tlvs.md) is a normative annex of
+one MUST are new. [reference/05](../../reference/05-protocol-tlvs.md) is a normative annex of
 [v1.md §3](../v1.md), so its §`0x03` and §`0x07` edits are part of this amendment.
 
 **Why.** §B.1 gave the owner part a loose per-field vocabulary (`dtype`, `unit`, `label`, …).
@@ -1268,9 +1268,8 @@ URIs.
 
 A table entry's descriptor bytes MAY be empty when the vertex's intent document describes that
 field under `fields`. Non-empty descriptor bytes keep their §B.1 meaning and stay opaque to the
-runtime. **Rule for readers:** a reader MUST treat owner bytes that are not YAML, or that carry
-no top-level `contract`, as opaque owner bytes, exactly as before this amendment, and not as an
-intent document.
+runtime. Backward compatibility: owner bytes that are not YAML, or that have no top-level
+`contract`, stay opaque owner bytes, as before this amendment.
 
 ### B.2 (amended) — where the document sits, and what the runtime projects
 

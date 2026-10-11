@@ -21,7 +21,7 @@
 > POINT{ NAME <vertex name>
 >        SETTINGS{ }                  // the implemented protocol knobs: NONE
 >        [ NAME "doc" VALUE <doc> ]   // only when an intent document is installed
-       [ NAME "app" SETTINGS{…} ]   // only when a descriptor table is installed
+>        [ NAME "app" SETTINGS{…} ]   // only when a descriptor table is installed
 > }
 > ```
 >
@@ -497,7 +497,7 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | `:schema` | structured TLV | read-only | Self-describing schema of fields and types |
 | `:acl` | ACL | yes (with permission) | Access control list |
 
-> ⚠️ **The three marked rows have no implementation, in either direction** ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)). There is no liveness surface and no heartbeat engine anywhere in the reference implementation; a read or a write of any of them answers `tr::schema::not_found` (`0x0031`) — the ENOTTY contract [CONTEXT.md](../../CONTEXT.md) §Field-write declares (*"an unsupported one returns `SCHEMA_NOT_FOUND` — the `ENOTTY` of an unsupported ioctl"*). The complete implemented field set is `{children, acl, identity, schema, settings, subscribers}`. A fourth row, `:description`, is **retired** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) Amendment 5): the help text and the agent text live in the vertex's intent document, in the `:schema` owner part.
+> ⚠️ **The three marked rows have no implementation, in either direction** ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)). There is no liveness surface and no heartbeat engine anywhere in the reference implementation; a read or a write of any of them answers `tr::schema::not_found` (`0x0031`) — the ENOTTY contract [CONTEXT.md](../../CONTEXT.md) §Field-write declares (*"an unsupported one returns `SCHEMA_NOT_FOUND` — the `ENOTTY` of an unsupported ioctl"*). The complete implemented field set is `{children, acl, identity, schema, settings, subscribers}`. A fourth row, `:description`, is **retired** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) Amendment 5): the help text and the agent text live in the vertex's intent document, the `NAME "doc"` pair at the `:schema` `POINT` level.
 >
 > They are **marked rather than deleted** because whether deadline/liveness enforcement is a v1 commitment is an open design question ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) liveness is the pending work). Marking removes the fiction without foreclosing either answer; deleting would foreclose one. If liveness lands, drop the markers — if it is ruled out of v1, drop the rows.
 >

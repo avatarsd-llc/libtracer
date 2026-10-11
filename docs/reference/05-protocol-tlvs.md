@@ -754,7 +754,7 @@ Precedence is by position, with zero merge logic: the two parts describe disjoin
 - The recommended keys (SHOULD, for consistent spelling; nothing validates them) are `type`, `write`/`emit` where they differ from `type`, `unit` (UCUM), `min`/`max`/`step`, `labels` (enum value to label), `default`, `help` (one line, for a UI), `guide` (prose for an agent), `fields` (the `settings.app.*` fields, described with the same keys), `byte-order` (little-endian when absent), `media-type` (IANA, for foreign-encoded `bytes`) and `x-<vendor>.*` for everything else. Text is one UTF-8 language, with no i18n machinery.
 - Value structure is any TLV whose `opt.PL=1`, with child TLVs as its payload ([06 §Structured record with named fields](06-user-data-packing.md#structured-record-with-named-fields)): `NAME` + value children make a record, and homogeneous children make a collection. A generic client recurses on `PL`, and the intent document adds only meaning. A leaf is `bool`, `u8`…`u64`, `i8`…`i64`, `f32`, `f64`, `utf8` or `bytes`, and a foreign encoding is `bytes` plus `media-type`. There is no `encoding` key and no `variant`.
 - The document is the ordinary pair `NAME "doc"` → `VALUE`, not a `DESCRIPTION` TLV.
-- **Rule for readers:** a reader MUST treat owner bytes that are not YAML, or that carry no top-level `contract`, as opaque owner bytes, as before the amendment, and not as an intent document.
+- Owner bytes that are not YAML, or that have no top-level `contract`, stay opaque owner bytes, as before the amendment.
 
 **What the runtime projects.** Only what it holds natively: the protocol part, unchanged, and each field's declared `access`. It projects no vertex role, and it does not project the reader's effective rights, so the `:schema` bytes are the same for every reader the READ gate admits and a client may cache them. The schema has no size rule of its own; a large one is read like any large value.
 
@@ -789,6 +789,7 @@ sequenceDiagram
 
 - `opt.PL` MUST be `1`.
 - The `vertex_name` MUST be the first child; the optional `VALUE` (the vertex's own value) immediately follows it when present.
+- Inside a `:schema` POINT (§The `:schema` read, above), a `VALUE` belongs to the `NAME` before it, as `NAME "app"` → `SETTINGS` already does, and the vertex-value bullet above does not apply.
 - Children that represent recursive vertex structure MUST themselves be POINT TLVs (type `0x07`).
 
 ---
