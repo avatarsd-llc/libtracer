@@ -275,6 +275,8 @@ A receiver encountering a TLV whose core-range type code it does not implement �
 - If nested inside a structured TLV (parent has `opt.PL=1`): treat as opaque bytes and continue.
 - Forwarders MAY pass-through unmodified.
 
+A **retired** code with a specific rule follows that rule instead: `0x11`–`0x13` are answered on their arrival link, counted, and never passed through ([05-protocol-tlvs.md](05-protocol-tlvs.md) §retired route-handle codes, [RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §6.1).
+
 This is the **forward extension path**: new core type codes are added in the unassigned core range without breaking deployed receivers, which ignore what they do not understand.
 
 Reserved bits in `opt` non-zero MUST be rejected as INVALID — reserved-bit-non-zero is a hard error to prevent silent semantic drift.
