@@ -149,7 +149,7 @@ Free-form UTF-8 human-readable description of a vertex or field. Optional in eve
 
 ### Where it appears
 
-- Inside `:schema` responses annotating fields — reachable only through the RFC-0010 owner part, whose descriptor bytes are served verbatim; the synthesized protocol part emits no `DESCRIPTION`. The intent document is **not** a `DESCRIPTION` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) Amendment 5: it is the `POINT`-level pair `NAME "doc"` → `VALUE`).
+- Inside `:schema` responses annotating fields — reachable only through the RFC-0010 owner part, whose descriptor bytes are served verbatim; the synthesized protocol part emits no `DESCRIPTION`. The intent document is **not** a `DESCRIPTION` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) Amendment 5: it is the `POINT`-level pair `NAME "doc"` → `VALUE`).
 - Inside ERROR TLVs as the human-readable detail.
 
 ---
@@ -725,7 +725,7 @@ Subscribers and children appear as direct children of POINT, identified by their
 
 ### The `:schema` read — two parts, defined precedence
 
-`read <vertex>:schema` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2, as amended by Amendment 5) serves one POINT holding the **synthesized protocol part**, then — iff the owner installed one — the **intent document**, then — iff the owner installed a field descriptor table — the **owner part**, appended verbatim:
+`read <vertex>:schema` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2, as amended by [Amendment 5](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105)) serves one POINT holding the **synthesized protocol part**, then — iff the owner installed one — the **intent document**, then — iff the owner installed a field descriptor table — the **owner part**, appended verbatim:
 
 ```
 POINT (PL=1) {
@@ -747,7 +747,7 @@ POINT (PL=1) {
 
 Precedence is by position, with zero merge logic: the two parts describe disjoint namespaces (flat protocol knobs vs the reserved `app` subtree, §`0x0B`), so a name collision cannot occur by construction. The `POINT`-level names are protocol-owned, and `doc` is one of them, beside `app`; owner field names live below `app`, so the `doc` pair cannot collide with a field either, and no name inside `app` is reserved. A vertex with neither a document nor a table serves the protocol part alone, byte-for-byte the record a runtime without owner fields serves.
 
-**The intent document** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) Amendment 5) is the device maker's statement of intent for the vertex, installed by the owner through the local host API, one per vertex:
+**The intent document** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) Amendment 5) is the device maker's statement of intent for the vertex, installed by the owner through the local host API, one per vertex:
 
 - It SHOULD be YAML restricted to a JSON-compatible subset of YAML 1.2 (no anchors or aliases, no custom tags, ambiguous scalars quoted), so valid JSON is also valid. The runtime serves it verbatim and never parses, validates or rewrites it; an implementation MAY serve it as a borrowed view of constant storage.
 - It MUST carry a top-level **`contract`**: a URI naming the device's contract globally without a registry (`https://vendor.example/contracts/model/1.2`, or a `urn:`). A reader compares it as a string. With `:identity` ([RFC-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0011-node-identity-facet.md)) it answers "which device, and do I know it". No other key is required.

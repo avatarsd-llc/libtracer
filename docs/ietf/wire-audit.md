@@ -141,7 +141,7 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | POINT SUBSCRIBER children | SUBSCRIBER | optional | the `:subscribers[]` read (RFC-0004 §D) | — | **keep** | |
 | POINT child POINTs | POINT | optional | branch read and write | — | **keep** | |
 | `:schema` owner part | NAME `"app"`, `"access"` | assigned | `tlv-types/point-schema-app` | — | **keep** | |
-| `:schema` intent document | NAME `"doc"` + VALUE (UTF-8), at the `POINT` level | assigned by RFC-0010 Amendment 5 ([#2105](https://github.com/avatarsd-llc/libtracer/issues/2105)) | none yet: the core follow-up adds `schema/owner-intent-document` | — | **keep**: an ordinary NAME/VALUE pair; not a `DESCRIPTION` | |
+| `:schema` intent document | NAME `"doc"` + VALUE (UTF-8), at the `POINT` level | assigned by [RFC-0010 Amendment 5](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) ([#2105](https://github.com/avatarsd-llc/libtracer/issues/2105)) | none yet: the core follow-up adds `schema/owner-intent-document` | — | **keep**: an ordinary NAME/VALUE pair; not a `DESCRIPTION` | |
 | ERROR registered identity | first child VALUE u16 | assigned | `core/src/fwd_reply.cpp:error_code`; `errors/error-registered-code` | — | **keep** | |
 | ERROR string identity | first child NAME | assigned | `errors/error-string-form` | — | **keep**: third-party codes without an RFC. | |
 | ERROR detail children | DESCRIPTION / VALUE | optional | `errors/error-registered-detail` | — | **keep** | |

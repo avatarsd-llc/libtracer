@@ -493,7 +493,7 @@ Caller                              Vertex
 
 The synthesized protocol part enumerates the implemented `settings.*` knobs, and since [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B there are none — so it is empty, and therefore for the first time complete. The empty `SETTINGS` is emitted rather than omitted, so a generic renderer walks the same record shape whatever the vertex declares.
 
-The `doc` pair is the device maker's **intent document** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) Amendment 5): UTF-8 text, one per vertex, whose one normative key is the `contract` URI. A client that has never seen the vertex reads it to learn what the vertex is for; a client that already knows the device checks `contract` and parses nothing else. A vertex without one omits the pair.
+The `doc` pair is the device maker's **intent document** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) Amendment 5): UTF-8 text, one per vertex, whose one normative key is the `contract` URI. A client that has never seen the vertex reads it to learn what the vertex is for; a client that already knows the device checks `contract` and parses nothing else. A vertex without one omits the pair.
 
 ### Vertex enumeration
 

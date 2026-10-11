@@ -16,7 +16,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Created** | 2026-07-09 |
 | **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |
 | **Tracking issue** | [#411](https://github.com/avatarsd-llc/libtracer/issues/411) |
-| **Amendments** | [1](#amendment-1-2026-08-22--the-node-scoped-seam-census-a-reserved-stats-field-namespace-1503-step-5) (2026-08-22, `:stats` census); [2](#amendment-2-2026-08-23--the-net-plane-seam-sampler-router-labels-and-link-join-the-census-1503-residual) (2026-08-23, net-plane seams); [3](#amendment-3-2026-10-03--three-statsmem-seam-names-for-the-graphs-sub-pools) (2026-10-03, `:stats.mem` sub-pools); [4](#amendment-4-2026-10-06--a-named-app-field-read-serves-the-owners-current-value-when-the-owner-answers-it-1878) (2026-10-06, owner-answered app-field reads); [5](#amendment-5-2026-10-12--the-schema-owner-part-is-a-makers-intent-document-2105) (2026-10-12, the `:schema` owner part is a maker's intent document; `:description` retired) |
+| **Amendments** | [1](#amendment-1-2026-08-22--the-node-scoped-seam-census-a-reserved-stats-field-namespace-1503-step-5) (2026-08-22, `:stats` census); [2](#amendment-2-2026-08-23--the-net-plane-seam-sampler-router-labels-and-link-join-the-census-1503-residual) (2026-08-23, net-plane seams); [3](#amendment-3-2026-10-03--three-statsmem-seam-names-for-the-graphs-sub-pools) (2026-10-03, `:stats.mem` sub-pools); [4](#amendment-4-2026-10-06--a-named-app-field-read-serves-the-owners-current-value-when-the-owner-answers-it-1878) (2026-10-06, owner-answered app-field reads); [5](#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105) (2026-10-12, `:schema` carries a maker's intent document; `:description` retired) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 | **Roadmap item** | this RFC is the specification of the **"field descriptor table"** item of the 2026-07-08 architecture-review backlog (the vertex-verbs / lazy-validation / field-descriptor-table cluster; item 2 of that backlog — the `vertex_t` verb seam — shipped as [#338](https://github.com/avatarsd-llc/libtracer/pull/338), and is the seam §D slots behind) |
 
@@ -310,7 +310,7 @@ leaves *shape* validation to the consumers and the owner, who own the
 vocabulary.
 
 > **Amendment 5 (2026-10-12), [#2105](https://github.com/avatarsd-llc/libtracer/issues/2105) —
-> see §Amendment 5 at the end of this document.** The owner MAY install one per-vertex **intent
+> see [§Amendment 5](#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105).** The owner MAY install one per-vertex **intent
 > document** (UTF-8, a JSON-compatible YAML subset, one normative key `contract`) that describes
 > the vertex and its fields under recommended keys; a field the document describes MAY then
 > have empty descriptor bytes. Descriptor bytes the owner does supply keep the meaning above.
@@ -356,7 +356,7 @@ POINT (PL=1) {
   logic on an MCU: the read is two stored/synthesized byte runs concatenated
   inside one POINT).
 
-  > **Amendment 5 (2026-10-12) — see §Amendment 5.** The owner may also install an intent
+  > **Amendment 5 (2026-10-12) — see [§Amendment 5](#amendment-5-2026-10-12--schema-carries-a-makers-intent-document-2105).** The owner may also install an intent
   > document, served verbatim at the `POINT` level as the pair `NAME "doc"` → `VALUE <UTF-8
   > document>`, before the owner part. The owner part itself is unchanged.
 - A name collision cannot occur by construction: the two parts describe
@@ -1185,7 +1185,7 @@ seam name and noun is published exactly as before, with the same value. No frame
 grammar rule, error identity or seam name moves. The deletion itself is RFC-0032's amendment, not
 this erratum.
 
-## Amendment 5 (2026-10-12) — the `:schema` owner part is a maker's intent document ([#2105](https://github.com/avatarsd-llc/libtracer/issues/2105))
+## Amendment 5 (2026-10-12) — `:schema` carries a maker's intent document ([#2105](https://github.com/avatarsd-llc/libtracer/issues/2105))
 
 **Status:** accepted (maintainer ruling 2026-10-12; the 14-day window is waived per
 [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the solo-maintainer default, as on
