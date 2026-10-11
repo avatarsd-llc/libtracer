@@ -149,7 +149,7 @@ Free-form UTF-8 human-readable description of a vertex or field. Optional in eve
 
 ### Where it appears
 
-- Inside `:schema` responses annotating fields — reachable only through the RFC-0010 owner part, whose descriptor bytes are served verbatim; the synthesized protocol part emits no `DESCRIPTION`. The owner part's intent document is **not** a `DESCRIPTION` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) Amendment 5: it is the pair `NAME "doc"` → `VALUE`).
+- Inside `:schema` responses annotating fields — reachable only through the RFC-0010 owner part, whose descriptor bytes are served verbatim; the synthesized protocol part emits no `DESCRIPTION`. The intent document is **not** a `DESCRIPTION` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) Amendment 5: it is the `POINT`-level pair `NAME "doc"` → `VALUE`).
 - Inside ERROR TLVs as the human-readable detail.
 
 ---
@@ -725,26 +725,27 @@ Subscribers and children appear as direct children of POINT, identified by their
 
 ### The `:schema` read — two parts, defined precedence
 
-`read <vertex>:schema` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2, as amended by Amendment 5) serves one POINT holding the **synthesized protocol part** and — iff the owner installed a field descriptor table or an intent document — the **owner part**, appended verbatim:
+`read <vertex>:schema` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2, as amended by Amendment 5) serves one POINT holding the **synthesized protocol part**, then — iff the owner installed one — the **intent document**, then — iff the owner installed a field descriptor table — the **owner part**, appended verbatim:
 
 ```
 POINT (PL=1) {
   NAME      <vertex name>
   SETTINGS  <protocol part>          ; synthesized by the runtime — authoritative for
                                      ; protocol fields; the owner part is never consulted
-  NAME "app"  SETTINGS (PL=1) {      ; owner part — a table or a document is installed
-    NAME "doc"  VALUE <intent document>  ; iff installed — UTF-8, VERBATIM, never parsed
+  NAME "doc"  VALUE <intent document>  ; iff installed — UTF-8, VERBATIM, never parsed
+  NAME "app"  SETTINGS (PL=1) {      ; owner part — present iff a table is installed
     NAME <field-name>  SETTINGS (PL=1) {
       NAME "access" VALUE <"ro"|"rw"|"wo">  ; runtime-projected from the table — the one
                                             ; member the runtime owns (it cannot be lied about)
-      <owner descriptor bytes, verbatim>    ; MAY be empty when the document describes the field
+      <owner descriptor bytes, verbatim>    ; SHOULD-level vocabulary; MAY be empty when
+                                            ; the intent document describes the field
     }
     ...
   }
 }
 ```
 
-Precedence is by position, with zero merge logic: the two parts describe disjoint namespaces (flat protocol knobs vs the reserved `app` subtree, §`0x0B`), so a name collision cannot occur by construction. The intent document is the owner record's first member, the ordinary key/value pair `NAME "doc"` → `VALUE <UTF-8 document>`; a field record's value is a `SETTINGS`, so the `doc` pair is told apart from it by its value's type code. A vertex with neither a table nor a document serves the protocol part alone, byte-for-byte the record a runtime without owner fields serves.
+Precedence is by position, with zero merge logic: the two parts describe disjoint namespaces (flat protocol knobs vs the reserved `app` subtree, §`0x0B`), so a name collision cannot occur by construction. The `POINT`-level names are protocol-owned, and `doc` is one of them, beside `app`; owner field names live below `app`, so the `doc` pair cannot collide with a field either, and no name inside `app` is reserved. A vertex with neither a document nor a table serves the protocol part alone, byte-for-byte the record a runtime without owner fields serves.
 
 **The intent document** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) Amendment 5) is the device maker's statement of intent for the vertex, installed by the owner through the local host API, one per vertex:
 
@@ -752,7 +753,8 @@ Precedence is by position, with zero merge logic: the two parts describe disjoin
 - It MUST carry a top-level **`contract`**: a URI naming the device's contract globally without a registry (`https://vendor.example/contracts/model/1.2`, or a `urn:`). A reader compares it as a string. With `:identity` ([RFC-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0011-node-identity-facet.md)) it answers "which device, and do I know it". No other key is required.
 - The recommended keys (SHOULD, for consistent spelling; nothing validates them) are `type`, `write`/`emit` where they differ from `type`, `unit` (UCUM), `min`/`max`/`step`, `labels` (enum value to label), `default`, `help` (one line, for a UI), `guide` (prose for an agent), `fields` (the `settings.app.*` fields, described with the same keys), `byte-order` (little-endian when absent), `media-type` (IANA, for foreign-encoded `bytes`) and `x-<vendor>.*` for everything else. Text is one UTF-8 language, with no i18n machinery.
 - Value structure is any TLV whose `opt.PL=1`, with child TLVs as its payload ([06 §Structured record with named fields](06-user-data-packing.md#structured-record-with-named-fields)): `NAME` + value children make a record, and homogeneous children make a collection. A generic client recurses on `PL`, and the intent document adds only meaning. A leaf is `bool`, `u8`…`u64`, `i8`…`i64`, `f32`, `f64`, `utf8` or `bytes`, and a foreign encoding is `bytes` plus `media-type`. There is no `encoding` key and no `variant`.
-- Owner bytes that are not YAML, or carry no top-level `contract`, are opaque owner bytes, as before the amendment.
+- The document is the ordinary pair `NAME "doc"` → `VALUE`, not a `DESCRIPTION` TLV.
+- **Rule for readers:** a reader MUST treat owner bytes that are not YAML, or that carry no top-level `contract`, as opaque owner bytes, as before the amendment, and not as an intent document.
 
 **What the runtime projects.** Only what it holds natively: the protocol part, unchanged, and each field's declared `access`. It projects no vertex role, and it does not project the reader's effective rights, so the `:schema` bytes are the same for every reader the READ gate admits and a client may cache them. The schema has no size rule of its own; a large one is read like any large value.
 
@@ -1012,7 +1014,7 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 
 - `<vertex>:settings` for atomic multi-field reads; a bare `:settings` read serves the container — the nested `app` record when a descriptor table is installed, and an **empty** `SETTINGS{}` when none is ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.4 as amended by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §4) — and `:settings.app` serves the app record alone. Writes are **per-field** under `settings.app.`; the flat core namespace takes none, and there is no atomic multi-field settings *write* (a bare `:settings` write resolves nothing and returns `SCHEMA_NOT_FOUND`).
 - Inside SUBSCRIBER as the `qos_settings` sub-field for per-subscription overrides.
-- Inside the `:schema` POINT (§`0x07`): the synthesized protocol part, and the owner part's `app` record, holding the optional intent document (`NAME "doc"` → `VALUE`) and one `SETTINGS` per declared app field.
+- Inside the `:schema` POINT (§`0x07`): the synthesized protocol part, and one `SETTINGS` per declared app field inside the owner part.
 - As the whole reply to `read <vertex>:identity` — the node-identity record below.
 
 ### Validation

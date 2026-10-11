@@ -479,6 +479,8 @@ Caller                              Vertex
    | <── POINT (PL=1) {                |
    |       NAME "temp"                  |
    |       SETTINGS (PL=1) { }          |  ; the synthesized protocol part: EMPTY
+   |       NAME "doc"                   |  ; the intent document, iff installed
+   |       VALUE <UTF-8 document>       |  ; (RFC-0010 Amendment 5), verbatim
    |       NAME "app"                   |  ; the owner part, iff a descriptor
    |       SETTINGS (PL=1) {            |  ; table is installed
    |         NAME "setpoint"            |
@@ -490,6 +492,8 @@ Caller                              Vertex
 `:schema` is the introspection root. Tooling — a live-graph browser, a conformance test, a code generator — walks `:schema` on every vertex of interest. A field absent from the emitted schema is a field the vertex does not answer to; the schema is the authority, not a documented field table.
 
 The synthesized protocol part enumerates the implemented `settings.*` knobs, and since [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B there are none — so it is empty, and therefore for the first time complete. The empty `SETTINGS` is emitted rather than omitted, so a generic renderer walks the same record shape whatever the vertex declares.
+
+The `doc` pair is the device maker's **intent document** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) Amendment 5): UTF-8 text, one per vertex, whose one normative key is the `contract` URI. A client that has never seen the vertex reads it to learn what the vertex is for; a client that already knows the device checks `contract` and parses nothing else. A vertex without one omits the pair.
 
 ### Vertex enumeration
 

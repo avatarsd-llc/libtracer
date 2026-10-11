@@ -356,9 +356,9 @@ POINT (PL=1) {
   logic on an MCU: the read is two stored/synthesized byte runs concatenated
   inside one POINT).
 
-  > **Amendment 5 (2026-10-12) — see §Amendment 5.** The owner part is present iff a table
-  > **or** an intent document is installed; the document is its first member, the pair
-  > `NAME "doc"` → `VALUE <UTF-8 document>`, served verbatim.
+  > **Amendment 5 (2026-10-12) — see §Amendment 5.** The owner may also install an intent
+  > document, served verbatim at the `POINT` level as the pair `NAME "doc"` → `VALUE <UTF-8
+  > document>`, before the owner part. The owner part itself is unchanged.
 - A name collision cannot occur by construction: the two parts describe
   disjoint namespaces (flat protocol knobs vs the reserved `app` subtree) —
   which is the quiet payoff of the §A.1 namespace decision.
@@ -1191,17 +1191,17 @@ this erratum.
 [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the solo-maintainer default, as on
 Amendments 1–4).
 
-**Scope.** This amendment changes **§B** (the owner part of `read <v>:schema`) and the
-descriptor bytes of a §A.2 table entry. §A.1, §A.3, §A.4 (as Amendment 4 left it), the
-§Erratum's gate order, §C and §D are untouched. It also retires the never-implemented
+**Scope.** This amendment changes **§B** (the `read <v>:schema` record gains an
+owner-supplied intent document beside the owner part) and the descriptor bytes of a §A.2
+table entry. §A.1, §A.3, §A.4 (as Amendment 4 left it), the §Erratum's gate order, §C and §D are untouched. It also retires the never-implemented
 `:description` field. **No new type code, frame, verb, field name, opt bit or status.** The
-owner record gains one optional key/value pair, `NAME "doc"` → `VALUE`, built only from existing
-types, and a vertex whose owner installs no document serves byte-for-byte what it served
-before.
+`:schema` `POINT` gains one optional key/value pair, `NAME "doc"` → `VALUE`, built only from
+existing types. The owner part (`NAME "app"`) is unchanged, and a vertex whose owner installs no
+document serves byte-for-byte what it served before.
 
 **Instrument: amendment, not erratum.** A reader can observe the new member, and two SHOULDs and
-one MUST are new. [reference/05](../../reference/05-protocol-tlvs.md) is a normative annex of
-[v1.md §3](../v1.md), so its §`0x03`, §`0x07` and §`0x0B` edits are part of this amendment.
+two MUSTs (one for writers, one for readers) are new. [reference/05](../../reference/05-protocol-tlvs.md) is a normative annex of
+[v1.md §3](../v1.md), so its §`0x03` and §`0x07` edits are part of this amendment.
 
 **Why.** §B.1 gave the owner part a loose per-field vocabulary (`dtype`, `unit`, `label`, …).
 A client that has never seen a vertex could not learn what the vertex is for. An agent got no
@@ -1268,27 +1268,22 @@ URIs.
 
 A table entry's descriptor bytes MAY be empty when the vertex's intent document describes that
 field under `fields`. Non-empty descriptor bytes keep their §B.1 meaning and stay opaque to the
-runtime. Backward compatibility: owner bytes that are not YAML, or that carry no top-level
-`contract`, are opaque owner bytes exactly as before this amendment, and are not an intent
-document.
+runtime. **Rule for readers:** a reader MUST treat owner bytes that are not YAML, or that carry
+no top-level `contract`, as opaque owner bytes, exactly as before this amendment, and not as an
+intent document.
 
 ### B.2 (amended) — where the document sits, and what the runtime projects
 
-The owner part is present iff the owner installed a descriptor table **or** an intent document.
-The document is the owner record's first member: the ordinary key/value pair `NAME "doc"` →
-`VALUE <UTF-8 document>`. A field record is `NAME <field-name>` → `SETTINGS{…}`, so the `doc`
-pair is also told apart from a field record by its value's type code (`VALUE`, not
-`SETTINGS`). The document is not a `DESCRIPTION` (`0x03`) TLV: that type code is dead inside a
-`POINT`, [#1982](https://github.com/avatarsd-llc/libtracer/issues/1982) removes it there, and one
-type code does not carry three meanings.
+The document sits at the `POINT` level of the `:schema` record, after the protocol part and
+before the owner part, as the ordinary key/value pair `NAME "doc"` → `VALUE <UTF-8 document>`:
 
 ```
 POINT (PL=1) {
   NAME      <vertex name>
-  SETTINGS  <protocol part>               ; synthesized, unchanged
-  NAME "app"  SETTINGS (PL=1) {           ; owner part: a table or a document installed
-    NAME "doc"  VALUE <intent document>   ; iff installed; UTF-8, served VERBATIM
-    NAME <field-name>  SETTINGS (PL=1) {  ; one per declared field, as before
+  SETTINGS  <protocol part>              ; synthesized, unchanged
+  NAME "doc"  VALUE <intent document>    ; iff installed; UTF-8, served VERBATIM
+  NAME "app"  SETTINGS (PL=1) {          ; owner part: iff a table is installed, as before
+    NAME <field-name>  SETTINGS (PL=1) { ; one per declared field, as before
       NAME "access" VALUE <"ro"|"rw"|"wo">  ; runtime-projected, as before
       <owner descriptor bytes, verbatim>    ; MAY be empty (§B.1 amended)
     }
@@ -1297,12 +1292,20 @@ POINT (PL=1) {
 }
 ```
 
-The runtime projects only what it holds natively: the protocol part, unchanged, and each
-field's declared `access`, as before. It projects **no vertex role**. It does **not** project
-the reader's effective rights. The
-`:schema` bytes are therefore the same for every reader the READ gate admits, and a client may
-cache them. The document is schema, not a value. It does not appear in `:settings` or
-`:settings.app` reads.
+- **The owner part is unchanged.** It is present iff a descriptor table is installed, exactly
+  as before this amendment, and holds only field records.
+- **The `POINT`-level names are protocol-owned, and `doc` is one of them**, beside `app`. An
+  owner never mints a name at that level, and owner field names live below `app`, so a field
+  named `doc` cannot collide with the document. No name inside `app` is reserved, and the
+  owner part's collision-proofing (§A.1, and reference/05 §`0x0B` and §`0x07`) holds as written.
+- **The document is not a `DESCRIPTION` (`0x03`) TLV.** That type code is dead inside a
+  `POINT`, [#1982](https://github.com/avatarsd-llc/libtracer/issues/1982) removes it there, and one type code does not carry three meanings.
+- **What the runtime projects.** Only what it holds natively: the protocol part, unchanged, and
+  each field's declared `access`, as before. It projects **no vertex role**. It does **not**
+  project the reader's effective rights. The `:schema` bytes are therefore the same for every
+  reader the READ gate admits, and a client may cache them.
+- The document is schema, not a value. It does not appear in `:settings` or `:settings.app`
+  reads.
 
 ### `:description` is retired
 
@@ -1310,18 +1313,19 @@ reference/02 listed a `:description` field (UTF-8, "human-readable description")
 implementation ever served; it was marked unimplemented under
 [#586](https://github.com/avatarsd-llc/libtracer/issues/586). It is removed from the normative
 text. The help text and the agent text now live in the intent document (`help`, `guide`).
-`:description` was never in the protocol-owned field namespace, so a read or a write of it
-answers `tr::schema::not_found`, as it always did. §Discussion 5's suggestion to spell it
+reference/02 listed it among the core fields, but no implementation ever served it and it was
+never in the field namespace an implementation dispatches, so a read or a write of it answers
+`tr::schema::not_found`, as it always did, and still does. §Discussion 5's suggestion to spell it
 `settings.app.label` is superseded by `help`. The intent document does not use the
 `DESCRIPTION` type code (`0x03`); that code keeps its other uses, and once
-[#1982](https://github.com/avatarsd-llc/libtracer/issues/1982) lands it remains only as `ERROR`'s
-human-text detail.
+[#1982](https://github.com/avatarsd-llc/libtracer/issues/1982) lands it remains only as the human-text
+detail of `ERROR` and `STATUS`.
 
 ### Compatibility
 
 Additive. A vertex whose owner installs no document serves the same bytes as before. A reader
-that walks the owner record by `NAME` sees one more pair, `doc`, whose value is a `VALUE`
-rather than a field record's `SETTINGS`. A node that does not
+that walks the `POINT` by `NAME` sees one more protocol-owned pair, `doc`; the owner part is
+byte-identical. A node that does not
 implement the document never serves one and stays conformant. Descriptor-only owners keep
 working unchanged. The [wire audit](../../ietf/wire-audit.md) row F5
 ([#1982](https://github.com/avatarsd-llc/libtracer/issues/1982), drop the `POINT` description
@@ -1331,19 +1335,21 @@ this amendment does not perform it and does not depend on `DESCRIPTION`.
 ### Files this amendment edits (on acceptance)
 
 - [reference/05](../../reference/05-protocol-tlvs.md): §`0x03` (where it appears; the
-  `:description` bullet removed), §`0x07` §The `:schema` read, and §`0x0B` (where it appears).
+  `:description` bullet removed) and §`0x07` §The `:schema` read.
+- [reference/04](../../reference/04-communication-flows.md) §Schema discovery.
+- [wire audit](../../ietf/wire-audit.md): the `:schema` rows.
 - [reference/02](../../reference/02-graph-model.md): §Definitions (Schema) and §Core writable
   fields (the `:description` row and its note).
 - [CONTEXT.md](../../../CONTEXT.md): the Schema entry.
 - [v1.md](../v1.md) §Changelog.
-- Reference implementation, as a follow-up: the core serves a borrowed owner document in the
-  owner part, and the TypeScript client reads `contract`.
+- Reference implementation, as a follow-up: the core serves a borrowed intent document at the
+  `POINT` level, and the TypeScript client reads `contract`.
 
 ### Conformance
 
 To be added with the core follow-up: `schema/owner-intent-document`, byte-exact. A vertex with
-a document and no table serves `POINT{ NAME, SETTINGS{}, NAME "app" SETTINGS{ NAME "doc"
-VALUE <doc> } }`. A vertex with both serves the document first, then the field records, with each
-field's projected `access` and possibly empty descriptor bytes. A vertex with neither serves
+a document and no table serves `POINT{ NAME, SETTINGS{}, NAME "doc" VALUE <doc> }`. A vertex
+with both serves the `doc` pair, then the unchanged owner part, with each field's projected
+`access` and possibly empty descriptor bytes. A vertex with neither serves
 the record `tlv-types/point-schema-app` and `settings/schema-enumerates-nothing` pin,
 unchanged.
