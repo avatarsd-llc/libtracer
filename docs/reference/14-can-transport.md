@@ -289,8 +289,8 @@ CAN's `identity↔path` map is **mandatory** because the ID *is* the path, and i
 `transport_can`**: its state lives inside the transport, is bounded by the bus ID space, and is
 shared only by the two ends of one link. The router never sees it. On a **full-TLV** transport
 (ws/UDP/TCP) there is no counterpart: the former per-link route handle (`ADVERTISE` / `COMPACT` /
-`HANDLE_NACK`, RFC-0004 §E.1) is retired, and a delivery is a `FWD{WRITE}` carrying the full
-`PAIR` chain ([03-addressing.md](03-addressing.md)). A ws node forwarding a running stream holds
+`HANDLE_NACK`, RFC-0004 §E.1) is retired, and a delivery is a `FWD{WRITE}` addressed by the
+subscription edge's chain ([05-protocol-tlvs.md](05-protocol-tlvs.md) §Producer fan-out to remote subscribers). A ws node forwarding a running stream holds
 zero per-flow state, exactly as it does for one-shot traffic.
 
 This is one of two framing modes, chosen per transport and mixable per frame. **Full-TLV** frames are self-describing: they carry the whole path and control surface, and they are used on IP and WebSocket links, where a 4-byte header is negligible, and for occasional control frames on any transport. **Header-elided** frames key on the transport's native identity through the map above. An occasional full-TLV control frame is what establishes an elided binding.

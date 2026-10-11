@@ -28,7 +28,7 @@
 
 
 
-- **Forwarder** (router): the stateless component that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the whole leading `dst` mount run and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write. *"Stateless" means no hard state and no per-request state ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §9.1): a learned chain of PAIR elements is a soft cache whose miss falls through to the canonical string. A stream delivery is a `FWD{WRITE}` carrying the whole chain, so no hop holds per-flow or per-link state.*
+- **Forwarder** (router): the stateless component that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the whole leading `dst` mount run and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write. *"Stateless" means no hard state and no per-request state ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §9.1): a learned chain of PAIR elements is a soft cache whose miss falls through to the canonical string. A stream delivery is a `FWD{WRITE}` addressed by the edge's chain, so no hop holds per-flow state for it. Until [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) slice S3 deletes it, RFC-0027's opt-in path-label table is the one place a minting hop does.*
 
 - **Buffer segment**: a refcounted region of real memory backing one or more views. The unit of ownership.
 

@@ -237,7 +237,7 @@ edge.
   (#1951). Every stream delivery is a `FWD{WRITE}` on the edge's `PAIR` chain, so a deep path
   costs bytes on the wire (11 B per `PAIR` element, RFC-0029 §5.2), not a table that can fill.
   `label_not_found()` on the receiving side still counts labelled `dst` elements this node
-  refused; it moves after a teardown and is never an error.
+  refused; it moves after a teardown and is not a fault on its own.
 - **Designated pressure point**: the egress TX pool of the busiest link. `rx` is sized so
   `arena_dropped` stays zero — and `arena_dropped` is deliberately split from `malformed_rx` so a
   peer sending garbage never reads as a slab that is too small.

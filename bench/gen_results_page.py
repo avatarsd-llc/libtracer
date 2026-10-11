@@ -785,8 +785,8 @@ a transport that does not override the gather form concatenates once in
 
 `compact-forward`, `compact-terminus` and `route-handle-egress-*` are no longer produced. They
 measured RFC-0004 §E.1's per-link route handle (`ADVERTISE` / `COMPACT` / `HANDLE_NACK`), which
-RFC-0032 removed from the protocol and the router (#1951); delivery became chain delivery: a `FWD{WRITE}` carrying
-the full `PAIR` chain, one element consumed per hop, no state held. Their history stays in the
+RFC-0032 removed from the protocol and the router (#1951); delivery became chain delivery: a `FWD{WRITE}` addressed by
+the subscription edge's chain, one element consumed per hop, no state held. Their history stays in the
 charts as a closed record and is not comparable to later points; `chain-forward` and
 `chain-terminus` (`bench_chain_delivery`) are the rows that replaced them. The cost chain delivery pays is
 bytes on the wire, not time per hop, and the maintainer has ruled that multi-hop byte cost

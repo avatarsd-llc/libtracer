@@ -228,8 +228,8 @@ The in-process surfaces above measure the graph. A separate set of benches measu
 **network plane** — what a frame costs between arriving and being applied — because the two
 move independently and an improvement to one can hide a regression in the other. They cover
 the three shapes a frame takes: a transit hop that never resolves, a cold terminus resolve,
-and the steady-state chain delivery that dominates a running system — a `FWD{WRITE}` carrying
-the full `PAIR` chain, which shrinks by one element per hop and needs no state at any hop.
+and the steady-state chain delivery that dominates a running system — a `FWD{WRITE}` addressed by
+the subscription edge's chain, which shrinks by one element per hop and needs no state at any hop.
 
 Every bench on this surface reports latency **and** exact allocation counts, and every one
 calibrates its own batch size against the host clock rather than hardcoding a number: a
@@ -258,8 +258,8 @@ their rows are not comparable to anything after the cut.
 | `compact-forward/*`, `compact-terminus/*` (`bench_compact_delivery`) | the Nth `COMPACT` frame on an already-advertised binding: a forward hop that swaps the label and re-emits, and a terminus that resolves it locally | the frame and its label store were deleted; `bench_chain_delivery`'s `chain-forward/*`, `chain-terminus/*` and `chain-delivery` RSS line took their gate points |
 | `route-handle-egress-mt1` / `-mt2` / `-mt4` | producer threads sharing one advertised route-handle flow | the egress reuse read belonged to the handle table |
 
-The replacement is the delivery every flow now takes: chain delivery, a `FWD{WRITE}` carrying the
-full `PAIR` chain, which each hop consumes one element of. It holds no state at any hop, so
+The replacement is the delivery every flow now takes: chain delivery, a `FWD{WRITE}` addressed by the
+subscription edge's chain, which each hop consumes one element of. It holds no state at any hop, so
 there is no warm/cold split, no first-frame advertise and no stale-label repair to price. Its
 cost is bytes: the frame is larger on every hop but the last, by 11 B per remaining PAIR
 element (RFC-0029 §5.2). The

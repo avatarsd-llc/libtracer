@@ -282,10 +282,12 @@ link-departure hook `fwd_router_t::link_down`, and
 `graph_t::evict_link_edges` deactivates and reclaims every subscriber edge whose stored link is
 that link. That is why a producer stops addressing a dead session; the header records what it
 releases — roughly 90 bytes of route/link/caller state per edge, against the ESP32-C6's measured
-~27 KB per browser session that motivated it. The router holds no per-link route state beyond
-the edges, so there is nothing mid-chain to unwind: an upstream that never saw the reconnect
-draws an ordinary stale-element error on its next chain write rather than streaming into a dead
-hop ([#716](https://github.com/avatarsd-llc/libtracer/issues/716)).
+~27 KB per browser session that motivated it. The router holds no per-flow route state beyond
+the edges, so there is nothing mid-chain to unwind. A delivery whose chain names an element the
+reconnect invalidated fails that hop's generation check and is dropped there; it carries an empty
+`src`, so no error comes back to the producer. The producer's edge recovers through its own link's
+departure, which evicts it, or through a re-learn once a departure clears its chain
+([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §7.2, §8).
 
 **What it does not do.** Three gaps, all deliberate and all load-bearing when designing a
 deployment:
@@ -359,7 +361,7 @@ four instruments, and withholds history.
 - **New vertices announce themselves by existing.** A child's *appearance* is just its first
   write bubbling to the parent's subscribers, so a subtree subscriber learns about vertices
   created after it joined without polling `:children[]` (RFC-0005 §A; RFC-0030 §7.3).
-- **Addressing re-establishes itself in-band.** A chain delivery holds no per-link state, so
+- **Addressing re-establishes itself in-band.** A chain delivery holds no per-flow state, so
   there is nothing to re-advertise on (re)connect; a path label the joiner does not know draws a
   `NOT_FOUND`-class error and the sender falls back to the full string path and re-mints from
   the next reply, with no withdraw frame, no lease and no TTL (RFC-0027); a CAN transport's
