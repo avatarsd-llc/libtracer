@@ -172,7 +172,7 @@ the architecture working as intended; it does not belong in a register of gaps.
   (`PATH_IN_USE`). Recovery needs a **new name** — a hard blocker for stable-identity
   reconnection, and the sharpest argument for #407.
 - **`close_peer` has no in-band surface.** #418 made the documented
-  `link_of(name)->bus()->close_peer(peer)` path *reachable* (the bus's listener is now both
+  `with_link(name, fn)` → `link.bus()->close_peer(peer)` path *reachable* (the bus's listener is now both
   config-constructed and `peer_named`), but invoking it needs the removal model #407 owns.
 
 ### 3. ~~The revisit error is fiction~~ — RETIRED, #420 closed the docs side

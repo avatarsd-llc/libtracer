@@ -207,8 +207,9 @@ struct reclaim_local_t {
  * to, because the bracket sits below `fan_out`'s no-subscriber gate:
  *
  * - entry: one RELAXED load of a read-mostly shared line (the epoch, bumped only on the
- *   control plane) and one `seq_cst` store to this thread's own cache-line-isolated cell. No
- *   atomic read-modify-write;
+ *   control plane), one release store to this thread's own cache-line-isolated cell and one
+ *   `seq_cst` fence after it (`qsbr.hpp` §qsbr_ordering). No atomic read-modify-write on a
+ *   shared line;
  * - exit: one `release` store to that same cell, plus one relaxed load of a read-mostly count
  *   that is 0 on any node not mid-teardown, and the predictable branch it guards.
  *
@@ -217,7 +218,9 @@ struct reclaim_local_t {
  * put a hazard scan on the READ path. Storage is
  * @ref tr::graph::default_config_t::kQsbrParticipants cache-line-isolated cells plus one
  * shared table of @ref tr::graph::default_config_t::kDeferredReleaseSlots retired pairs, all
- * `.bss`, and **none of it emitted into a build that binds a different policy**.
+ * `.bss`. The cells and the epoch are also the transport plane's grace in every build
+ * (`fwd_router_t`'s frame bracket), so a net-plane build carries them under any policy; the
+ * dispatch bracket's QSBR arm is still emitted only under this one.
  *
  * @section reclaim_qsbr_897 What it discharges for #897
  *

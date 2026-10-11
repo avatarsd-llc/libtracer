@@ -64,6 +64,7 @@
 #include "libtracer/ws.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
+#include "transport_vertex_test_access.hpp"
 
 namespace {
 
@@ -281,7 +282,8 @@ void test_constructed_link_reports_role_state() {
     check(wl.has_value(), "a SPEC to the udp LISTEN module's endpoint constructs the bound socket");
     check(read_link_state_byte(node, "/net/udp-server/srv") == 4,
           "a constructed LISTEN reports LISTENING (0x04)");
-    auto* const srv = dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/srv"));
+    auto* const srv =
+        dynamic_cast<tr::net::udp_transport_t*>(tr::testing::link_of(net, "net/udp-server/srv"));
     const std::uint16_t srv_port = srv != nullptr ? srv->local_port() : 0;
     check(srv_port != 0, "the LISTENING socket reports its OS-granted bind port");
 
@@ -499,7 +501,8 @@ void test_config_constructed_udp() {
     check(router_b.registry().by_name("net/udp-server/a") != nullptr,
           "B: the socket is wired into the router");
     // The OS granted the bind port; A dials the port B actually got, not a literal.
-    auto* const b_link = dynamic_cast<tr::net::udp_transport_t*>(net_b.link_of("net/udp-server/a"));
+    auto* const b_link =
+        dynamic_cast<tr::net::udp_transport_t*>(tr::testing::link_of(net_b, "net/udp-server/a"));
     const std::uint16_t b_port = b_link != nullptr ? b_link->local_port() : 0;
     check(b_port != 0, "B: the ephemeral bind port is readable back off the link");
 
@@ -944,7 +947,7 @@ void test_factory_built_ws_dial_delivers_push_on_connect() {
                                   conn_spec("up", ntohs(bound.sin_port), "ws", "127.0.0.1"));
 
         check(w.has_value(), "the SPEC created the connection through the built-in ws factory");
-        check(net.link_of("net/ws-client/up") != nullptr,
+        check(tr::testing::link_of(net, "net/ws-client/up") != nullptr,
               "the link is a CONSTRUCTED one (no provide_link staged anything here)");
         if constexpr (kBuiltinDialIsEngineManaged) {
             // The #1548 flip, observed from the peer's side: creation dialled NOTHING. The raw
@@ -1104,7 +1107,7 @@ void test_factory_built_tcp_dial_delivers_push_on_connect() {
                                   conn_spec("up", ntohs(bound.sin_port), "tcp", "127.0.0.1"));
 
         check(w.has_value(), "the SPEC created the connection through the built-in tcp factory");
-        check(net.link_of("net/tcp-client/up") != nullptr,
+        check(tr::testing::link_of(net, "net/tcp-client/up") != nullptr,
               "the link is a CONSTRUCTED one (no provide_link staged anything here)");
         if constexpr (kBuiltinDialIsEngineManaged) {
             // The #1548 flip, observed from the peer's side: creation dialled NOTHING.
@@ -1197,7 +1200,8 @@ void test_creation_errors() {
     // grant is readable off the constructed link.
     const auto w6 = node.write(path_t("/net/udp-server/conn"), conn_spec("eph", 0, "udp"));
     check(w6.has_value(), "udp listener with port = 0 => EPHEMERAL, creation succeeds");
-    auto* const eph = dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/eph"));
+    auto* const eph =
+        dynamic_cast<tr::net::udp_transport_t*>(tr::testing::link_of(net, "net/udp-server/eph"));
     check(eph != nullptr && eph->ok() && eph->local_port() != 0,
           "the OS-granted bind port is readable back off the link");
 
@@ -1223,8 +1227,8 @@ void test_creation_errors() {
           "no vertices were created for the kind-less configs");
 }
 
-void test_link_of_accessor() {
-    std::printf("link_of reaches a SPEC-constructed owned transport (#374):\n");
+void test_with_link_accessor() {
+    std::printf("with_link reaches a SPEC-constructed owned transport (#374):\n");
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
@@ -1235,13 +1239,25 @@ void test_link_of_accessor() {
     const auto w = node.write(path_t("/net/ws-server/conn"), conn_spec("srv", kEphemeral, "ws"));
     check(w.has_value(), "a SPEC{kind=ws} at the LISTEN endpoint constructs the owned server");
 
-    tr::net::transport_t* const link = net.link_of("net/ws-server/srv");
-    check(link != nullptr, "link_of resolves the owned transport (previously unreachable)");
-    auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(link);
-    check(srv != nullptr, "the owned transport is a transport_ws_server");
-    if (srv != nullptr)
-        check(srv->ok() && srv->local_port() != 0, "it is the live, bound owned socket");
-    check(net.link_of("net/ws-client/absent") == nullptr, "link_of of an unknown NAME is nullptr");
+    struct seen_t {
+        bool server = false; /**< @brief The owned transport is a transport_ws_server. */
+        bool live = false;   /**< @brief It is the live, bound owned socket. */
+    } seen;
+    const bool found = net.with_link(
+        "net/ws-server/srv",
+        [](void* c, tr::net::transport_t& link) {
+            auto& s = *static_cast<seen_t*>(c);
+            auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(&link);
+            s.server = srv != nullptr;
+            s.live = srv != nullptr && srv->ok() && srv->local_port() != 0;
+        },
+        &seen);
+    check(found, "with_link reaches the owned transport (previously unreachable)");
+    check(seen.server, "the owned transport is a transport_ws_server");
+    check(seen.live, "it is the live, bound owned socket");
+    check(!net.with_link(
+              "net/ws-client/absent", [](void*, tr::net::transport_t&) {}, nullptr),
+          "with_link of an unknown NAME does not call back");
 }
 
 void test_link_name_collision_rejected() {
@@ -1396,7 +1412,7 @@ void test_udp_max_frame_reaches_the_transport() {
         node.write(path_t("/net/udp-server/conn"), conn_spec("plain", kEphemeral, "udp"));
     check(plain.has_value(), "SPEC{kind=udp} with no max_frame constructs the socket");
     auto* const plain_link =
-        dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/plain"));
+        dynamic_cast<tr::net::udp_transport_t*>(tr::testing::link_of(net, "net/udp-server/plain"));
     check(plain_link != nullptr &&
               plain_link->effective_max_frame() == tr::net::udp_transport_t::kMaxDatagram,
           "without the key the connection carries the full datagram ceiling");
@@ -1409,7 +1425,7 @@ void test_udp_max_frame_reaches_the_transport() {
     const auto* const s = net.settings_of("net/udp-server/capped");
     check(s != nullptr && s->max_frame == 4096, "the key was parsed into conn_settings_t");
     auto* const capped_link =
-        dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/capped"));
+        dynamic_cast<tr::net::udp_transport_t*>(tr::testing::link_of(net, "net/udp-server/capped"));
     check(capped_link != nullptr, "the owned transport is a live udp_transport_t");
     check(capped_link != nullptr && capped_link->effective_max_frame() == 4096,
           "and the CONFIGURED cap is the one the socket honors");
@@ -1463,8 +1479,8 @@ void test_ws_peer_named_config() {
     const auto plain =
         node.write(path_t("/net/ws-server/conn"), conn_spec("plain", kEphemeral, "ws"));
     check(plain.has_value(), "SPEC{kind=ws} with no peer_named constructs the server");
-    auto* const plain_srv =
-        dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/plain"));
+    auto* const plain_srv = dynamic_cast<tr::net::transport_ws_server*>(
+        tr::testing::link_of(net, "net/ws-server/plain"));
     check(plain_srv != nullptr && plain_srv->bus() == nullptr,
           "without the key the SPEC-created server has a NULL bus (no ADR-0044 facet)");
 
@@ -1473,7 +1489,8 @@ void test_ws_peer_named_config() {
         node.write(path_t("/net/ws-server/conn"),
                    ws_listener_spec("bus", kEphemeral, /*peer_named=*/true, /*max_peers=*/8));
     check(w.has_value(), "SPEC{kind=ws, peer_named=1} constructs the owned server");
-    auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/bus"));
+    auto* const srv =
+        dynamic_cast<tr::net::transport_ws_server*>(tr::testing::link_of(net, "net/ws-server/bus"));
     check(srv != nullptr && srv->ok(), "the owned transport is a live transport_ws_server");
     check(srv != nullptr && srv->bus() != nullptr,
           "the ws-private key exposed the bus_link_t facet on a CONFIG-constructed link");
@@ -2010,7 +2027,8 @@ void test_app_chosen_root_and_module() {
     check(node_b.find(path_t::parse("/io/l/a")->key()).has_value(),
           "B: the connection vertex is /io/l/a — the app's shape, not the library's");
     check(router_b.registry().by_name("io/l/a") != nullptr, "B: the socket is routed under io/l/a");
-    auto* const b_link = dynamic_cast<tr::net::udp_transport_t*>(net_b.link_of("io/l/a"));
+    auto* const b_link =
+        dynamic_cast<tr::net::udp_transport_t*>(tr::testing::link_of(net_b, "io/l/a"));
     const std::uint16_t b_port = b_link != nullptr ? b_link->local_port() : 0;
     check(b_port != 0, "B: the ephemeral bind port is readable back off the app-planed link");
 
@@ -2205,7 +2223,8 @@ void test_wire_name_reaches_add_child() {
     check(router.registry().size() == mounts_after_control,
           "the registry gained NOTHING from the five rejected creates");
     // No socket was constructed either: the gate is upstream of the transport factory.
-    check(net.link_of("net/udp-client/a:b") == nullptr, "no link was constructed for a bad name");
+    check(tr::testing::link_of(net, "net/udp-client/a:b") == nullptr,
+          "no link was constructed for a bad name");
 }
 
 /** @brief Lowercase hex of a byte buffer, for the golden-SPEC comparisons below. */
@@ -2620,7 +2639,7 @@ int main() {
     test_factory_built_ws_dial_delivers_push_on_connect();
     test_factory_built_tcp_dial_delivers_push_on_connect();
     test_creation_errors();
-    test_link_of_accessor();
+    test_with_link_accessor();
     test_link_name_collision_rejected();
     test_link_name_collision_placeholder_parent();
     test_udp_max_frame_reaches_the_transport();

@@ -91,13 +91,15 @@ generation, and a list already at the 255-element cap — because a relayed list
 not a shorter route but a wrong one: the skipped hop would later find one element left, believe
 itself the terminus, and dereference another host's element against its own vertex map.
 
-The router also carries the origin's half — `connection_ref`, `bound_egress`, `adopt_binding` and
-`bound_dispatch` — because both halves are the same act: consume element 0, dereference it,
-egress. The origin's element is the one no peer can supply, since the hop out of this node is the
-one hop nobody else sees.
+The router also carries the origin's half — `connection_ref`, `adopt_binding` and `bound_send` —
+because both halves are the same act: consume element 0, dereference it, egress (one private
+`bound_egress` serves both). The origin's element is the one no peer can supply, since the hop out
+of this node is the one hop nobody else sees. `bound_send` hands the egress link and the `dst` to
+a callback that sends, inside the router's frame bracket, so a link removed meanwhile is not freed
+under the send; the link is not the app's to keep past the callback.
 
 The **path-label** origin (RFC-0027 §6.1 amendment 8) is the same shape one plane over:
-`adopt_path_label` caches the spelling a minted reply's `src` came back with, `label_dispatch`
+`adopt_path_label` caches the spelling a minted reply's `src` came back with, `label_send`
 spends it as the next request's `dst`, and `fall_back_on_label_refusal` drops it on
 `tr::path::not_found`. What differs is what the origin contributes for its own first hop. A bound
 route needs an element only this node can mint, so the origin mints one; a labelled route does not

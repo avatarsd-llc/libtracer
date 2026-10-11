@@ -47,6 +47,7 @@
 #include "libtracer/transport_quic.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
+#include "transport_vertex_test_access.hpp"
 
 namespace {
 
@@ -708,7 +709,8 @@ void test_config_constructed_quic() {
     check(router_b.registry().by_name("net/quic-server/a") != nullptr,
           "B: the socket is wired into the router");
     // Read the granted port back off the owned link — the dialer below names it.
-    auto* const srv_a = dynamic_cast<quic_transport_t*>(net_b.link_of("net/quic-server/a"));
+    auto* const srv_a =
+        dynamic_cast<quic_transport_t*>(tr::testing::link_of(net_b, "net/quic-server/a"));
     check(srv_a != nullptr, "B: the SPEC-constructed listener is reachable via link_of");
     const std::uint16_t srv_port = (srv_a != nullptr) ? srv_a->local_port() : std::uint16_t{0};
     check(srv_port != 0, "B: the OS granted the ephemeral listener a port");
@@ -780,7 +782,7 @@ void test_spec_dial_trust_keys() {
         const auto w =
             node_b.write(path_t("/net/quic-server/conn"), quic_conn_spec(nm, 0, {}, "dev"));
         auto* const link = dynamic_cast<quic_transport_t*>(
-            net_b.link_of(std::string("net/quic-server/").append(nm)));
+            tr::testing::link_of(net_b, std::string("net/quic-server/").append(nm)));
         ports[nm] = (link != nullptr) ? link->local_port() : std::uint16_t{0};
         listening = listening && w.has_value() && ports[nm] != 0;
     }
@@ -922,7 +924,8 @@ void test_app_default_profile() {
 
     const auto l = node.write(path_t("/net/quic-server/conn"), quic_conn_spec("srv", 0));
     check(l.has_value(), "a LISTEN with no `tls` key serves the app's default credential");
-    auto* const srv = dynamic_cast<quic_transport_t*>(net.link_of("net/quic-server/srv"));
+    auto* const srv =
+        dynamic_cast<quic_transport_t*>(tr::testing::link_of(net, "net/quic-server/srv"));
     const std::uint16_t port = (srv != nullptr) ? srv->local_port() : std::uint16_t{0};
     check(port != 0, "the default-profile listener is up on an OS-granted port");
 

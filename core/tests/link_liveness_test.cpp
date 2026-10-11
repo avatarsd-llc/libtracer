@@ -41,6 +41,7 @@
 #include "libtracer/transport_tcp.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
+#include "transport_vertex_test_access.hpp"
 
 namespace {
 
@@ -181,7 +182,7 @@ std::uint8_t state_byte(graph_t& g, std::string_view path) {
 
 /** @brief One dropped-frame census read off the engine link. */
 std::uint64_t dropped_tx(transport_vertex_t& net, std::string_view qualified) {
-    tr::net::transport_t* const link = net.link_of(qualified);
+    tr::net::transport_t* const link = tr::testing::link_of(net, qualified);
     return link != nullptr ? link->drop_stats().dropped_tx : ~0ULL;
 }
 
@@ -237,7 +238,7 @@ void test_op_autowakes_and_dials() {
     declare_fake_engine_module(net, script);
     const script_guard_t guard{script};  // bounded teardown even on a failing test
     (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
-    tr::net::transport_t* const link = net.link_of("net/fake-client/a");
+    tr::net::transport_t* const link = tr::testing::link_of(net, "net/fake-client/a");
     check(link != nullptr, "link_of answers the engine link");
     check(!link->link_up(), "link_up() is false while dormant (#1059)");
 
@@ -276,7 +277,7 @@ void test_lone_oneshot_failure_redormants() {
     declare_fake_engine_module(net, script);
     const script_guard_t guard{script};  // bounded teardown even on a failing test
     (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
-    tr::net::transport_t* const link = net.link_of("net/fake-client/a");
+    tr::net::transport_t* const link = tr::testing::link_of(net, "net/fake-client/a");
 
     script.script(false);  // pre-queued: the attempt concludes without blocking
     const std::byte frame[1] = {std::byte{0x00}};
@@ -299,7 +300,7 @@ void test_loss_at_refcount_zero_redormants() {
     declare_fake_engine_module(net, script);
     const script_guard_t guard{script};  // bounded teardown even on a failing test
     (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
-    tr::net::transport_t* const link = net.link_of("net/fake-client/a");
+    tr::net::transport_t* const link = tr::testing::link_of(net, "net/fake-client/a");
 
     // Wake by op only — NO acquire, so the socket comes up with refcount 0 the whole
     // time. Keeping it up past the op is §4.1's MAY, which this engine exercises.
@@ -372,7 +373,7 @@ void test_standing_binding_selfheals() {
     const std::uint64_t drops_before = dropped_tx(net, "net/fake-client/a");
     const std::byte frame[1] = {std::byte{0x00}};
     const auto t0 = std::chrono::steady_clock::now();
-    net.link_of("net/fake-client/a")->send(frame);
+    tr::testing::link_of(net, "net/fake-client/a")->send(frame);
     const auto elapsed = std::chrono::steady_clock::now() - t0;
     check(dropped_tx(net, "net/fake-client/a") == drops_before + 1,
           "an op on a RECONNECTING link is dropped and counted");
@@ -665,7 +666,7 @@ void test_builtin_tcp_kind_runs_through_the_engine() {
           "the built-in kind's DIAL vertex is minted DORMANT — no socket at creation");
 
     // 2. The link is the engine, answering the statically declared capability.
-    tr::net::transport_t* const link = net.link_of("net/tcp-client/a");
+    tr::net::transport_t* const link = tr::testing::link_of(net, "net/tcp-client/a");
     check(dynamic_cast<tr::net::self_heal_link_t*>(link) != nullptr,
           "the connection's link IS the S5 engine, not a tcp_transport_t");
     check(link != nullptr && link->delivers_ropes(),
@@ -705,9 +706,9 @@ void test_builtin_tcp_kind_runs_through_the_engine() {
     check(state_byte(node, "/net/tcp-server/srv") ==
               static_cast<std::uint8_t>(link_state_t::LISTENING),
           "a LISTEN link still binds EAGERLY and reports LISTENING at creation (RFC-0014 §4)");
-    check(
-        dynamic_cast<tr::net::transport_tcp_server*>(net.link_of("net/tcp-server/srv")) != nullptr,
-        "and its link is the real listener — the flip is DIAL-only");
+    check(dynamic_cast<tr::net::transport_tcp_server*>(
+              tr::testing::link_of(net, "net/tcp-server/srv")) != nullptr,
+          "and its link is the real listener — the flip is DIAL-only");
 }
 
 /** @brief The raw bytes of a conformance vector's `input.bin`. */
