@@ -357,8 +357,8 @@ POINT (PL=1) {
   inside one POINT).
 
   > **Amendment 5 (2026-10-12) — see §Amendment 5.** The owner part is present iff a table
-  > **or** an intent document is installed; the document is its first member, a `DESCRIPTION`
-  > TLV served verbatim.
+  > **or** an intent document is installed; the document is its first member, the pair
+  > `NAME "doc"` → `VALUE <UTF-8 document>`, served verbatim.
 - A name collision cannot occur by construction: the two parts describe
   disjoint namespaces (flat protocol knobs vs the reserved `app` subtree) —
   which is the quiet payoff of the §A.1 namespace decision.
@@ -1195,8 +1195,9 @@ Amendments 1–4).
 descriptor bytes of a §A.2 table entry. §A.1, §A.3, §A.4 (as Amendment 4 left it), the
 §Erratum's gate order, §C and §D are untouched. It also retires the never-implemented
 `:description` field. **No new type code, frame, verb, field name, opt bit or status.** The
-owner record gains one optional member of an existing type (`DESCRIPTION`, `0x03`), and a
-vertex whose owner installs no document serves byte-for-byte what it served before.
+owner record gains one optional key/value pair, `NAME "doc"` → `VALUE`, built only from existing
+types, and a vertex whose owner installs no document serves byte-for-byte what it served
+before.
 
 **Instrument: amendment, not erratum.** A reader can observe the new member, and two SHOULDs and
 one MUST are new. [reference/05](../../reference/05-protocol-tlvs.md) is a normative annex of
@@ -1272,16 +1273,19 @@ document.
 ### B.2 (amended) — where the document sits, and what the runtime projects
 
 The owner part is present iff the owner installed a descriptor table **or** an intent document.
-The document is the owner record's first member, a `DESCRIPTION` TLV. That is the one unkeyed
-member of the record, told apart by its type code, the way `POINT` children are, so it cannot
-collide with a field name:
+The document is the owner record's first member: the ordinary key/value pair `NAME "doc"` →
+`VALUE <UTF-8 document>`. A field record is `NAME <field-name>` → `SETTINGS{…}`, so the `doc`
+pair is also told apart from a field record by its value's type code (`VALUE`, not
+`SETTINGS`). The document is not a `DESCRIPTION` (`0x03`) TLV: that type code is dead inside a
+`POINT`, [#1982](https://github.com/avatarsd-llc/libtracer/issues/1982) removes it there, and one
+type code does not carry three meanings.
 
 ```
 POINT (PL=1) {
   NAME      <vertex name>
   SETTINGS  <protocol part>               ; synthesized, unchanged
   NAME "app"  SETTINGS (PL=1) {           ; owner part: a table or a document installed
-    DESCRIPTION <intent document>         ; iff installed; UTF-8, served VERBATIM
+    NAME "doc"  VALUE <intent document>   ; iff installed; UTF-8, served VERBATIM
     NAME <field-name>  SETTINGS (PL=1) {  ; one per declared field, as before
       NAME "access" VALUE <"ro"|"rw"|"wo">  ; runtime-projected, as before
       <owner descriptor bytes, verbatim>    ; MAY be empty (§B.1 amended)
@@ -1291,8 +1295,9 @@ POINT (PL=1) {
 }
 ```
 
-The runtime projects only what it holds natively: the protocol part and each field's declared
-`access`, both as before. It does **not** project the reader's effective rights. The
+The runtime projects only what it holds natively: the protocol part, unchanged, and each
+field's declared `access`, as before. It projects **no vertex role**. It does **not** project
+the reader's effective rights. The
 `:schema` bytes are therefore the same for every reader the READ gate admits, and a client may
 cache them. The document is schema, not a value. It does not appear in `:settings` or
 `:settings.app` reads.
@@ -1305,18 +1310,21 @@ implementation ever served; it was marked unimplemented under
 text. The help text and the agent text now live in the intent document (`help`, `guide`).
 `:description` was never in the protocol-owned field namespace, so a read or a write of it
 answers `tr::schema::not_found`, as it always did. §Discussion 5's suggestion to spell it
-`settings.app.label` is superseded by `help`. The `DESCRIPTION` type code (`0x03`) stays: it is
-the human-text carrier of `ERROR` detail, and now of the intent document.
+`settings.app.label` is superseded by `help`. The intent document does not use the
+`DESCRIPTION` type code (`0x03`); that code keeps its other uses, and once
+[#1982](https://github.com/avatarsd-llc/libtracer/issues/1982) lands it remains only as `ERROR`'s
+human-text detail.
 
 ### Compatibility
 
 Additive. A vertex whose owner installs no document serves the same bytes as before. A reader
-that walks the owner record by `NAME` skips one leading non-`NAME` member. A node that does not
+that walks the owner record by `NAME` sees one more pair, `doc`, whose value is a `VALUE`
+rather than a field record's `SETTINGS`. A node that does not
 implement the document never serves one and stays conformant. Descriptor-only owners keep
 working unchanged. The [wire audit](../../ietf/wire-audit.md) row F5
 ([#1982](https://github.com/avatarsd-llc/libtracer/issues/1982), drop the `POINT` description
-child) is a separate wire deletion with its own conformance vector, and this amendment does not
-perform it.
+child) is a separate wire deletion with its own conformance vector. It proceeds independently:
+this amendment does not perform it and does not depend on `DESCRIPTION`.
 
 ### Files this amendment edits (on acceptance)
 
@@ -1332,8 +1340,8 @@ perform it.
 ### Conformance
 
 To be added with the core follow-up: `schema/owner-intent-document`, byte-exact. A vertex with
-a document and no table serves `POINT{ NAME, SETTINGS{}, NAME "app" SETTINGS{ DESCRIPTION
-<doc> } }`. A vertex with both serves the document first, then the field records, with each
+a document and no table serves `POINT{ NAME, SETTINGS{}, NAME "app" SETTINGS{ NAME "doc"
+VALUE <doc> } }`. A vertex with both serves the document first, then the field records, with each
 field's projected `access` and possibly empty descriptor bytes. A vertex with neither serves
 the record `tlv-types/point-schema-app` and `settings/schema-enumerates-nothing` pin,
 unchanged.
