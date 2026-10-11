@@ -99,9 +99,9 @@
  * argument is fence to fence ([atomics.fences], with the `seq_cst` total order S of
  * [atomics.order]):
  *
- * - R: `L_e`, a relaxed load of the epoch; `S_R`, a relaxed store of its cell (online at
- *   `L_e`'s value, or the `overflow_online` increment); `F_R`, a `seq_cst` fence; then `L_R`,
- *   its reads.
+ * - R: `L_e`, a relaxed load of the epoch; `S_R`, a release store of its cell (online at
+ *   `L_e`'s value), or a relaxed `overflow_online` increment; `F_R`, a `seq_cst` fence; then
+ *   `L_R`, its reads.
  * - W: `S_W`, the unpublish; the epoch bump `B` (`seq_cst` RMW, `%advance`) that closes epoch
  *   `e`; `F_W`, the `seq_cst` fence `%all_quiescent_past` opens with; then `L_W`, its `seq_cst`
  *   loads of `overflow_online` and the cells. It frees only when every cell `L_W` reads is
@@ -112,19 +112,28 @@
  * 1. `F_W` before `F_R`. `S_W` is sequenced before `F_W` and `L_R` after `F_R`, so `L_R` reads
  *    `S_W` or later: R does not see what W unpublished.
  * 2. `F_R` before `F_W`. `S_R` is sequenced before `F_R` and `L_W` after `F_W`, so `L_W` reads
- *    `S_R` or later. Later is R's release offline store (or decrement), which `L_W` then
- *    synchronizes with, so R's reads happen before the free. If `L_W` reads `S_R` itself, R is
- *    online at `L_e`'s value. At `e` or earlier, W does not free. After `e`, `L_e` read `B` or
- *    a later bump, which continues `B`'s release sequence; `F_R` is an acquire fence sequenced
- *    after `L_e`, so `B` synchronizes with `F_R`, `S_W` happens before `L_R`, and `L_R` reads
- *    `S_W` or later.
+ *    `S_R` or later. Every later store to the cell is a release made after R's reads: R's
+ *    offline store, R's own next announce, or, once R's thread has exited, the first announce
+ *    of the thread that claimed the cell next (R's destructor stores the cell and releases
+ *    `claimed`; the new owner's `acq_rel` claim reads that, so R's reads happen before its
+ *    announce). `L_W` synchronizes with whichever it reads, so R's reads happen before the
+ *    free. The counter has only RMWs, so a later value `L_W` reads is in the release sequence
+ *    of R's `seq_cst` decrement, and a 0 read after `S_R` means that decrement came first. If
+ *    `L_W` reads `S_R` itself, R is online at `L_e`'s value. At `e` or earlier, W does not
+ *    free. After `e`, `L_e` read `B` or a later bump, which continues `B`'s release sequence;
+ *    `F_R` is an acquire fence sequenced after `L_e`, so `B` synchronizes with `F_R`, `S_W`
+ *    happens before `L_R`, and `L_R` reads `S_W` or later.
  *
  * Neither way is a reader inside its bracket while what it reads is freed. `%retire` and the
  * drainer reach `F_W` through `%all_quiescent_past`, which opens with it, below every early-out
- * on the dispatch path. On x86-64 (GCC 13) the entry is a plain `mov` and one locked
- * instruction (`lock or` to the stack) where the `seq_cst` store was one `xchg`, so it still
- * pays one full barrier. On rv32 it is the store and one `fence rw,rw`, one fence fewer than
- * the `seq_cst` store's `fence rw,w` / store / `fence rw,rw`.
+ * on the dispatch path. When `%advance` stalls it makes no bump: `e` is then its `seq_cst`
+ * re-load of the epoch after its fence, and a cell online after `e` means `L_e` read a later
+ * value, so that re-load is coherence-ordered before `L_e`, the stall fence precedes `F_R` in
+ * S, and `L_R` again reads `S_W` or later.
+ *
+ * On x86-64 (GCC 13) the entry is a plain `mov` and one locked instruction (`lock or` to the
+ * stack) where the `seq_cst` store was one `xchg`, so it still pays one full barrier. On rv32
+ * it is `fence rw,w`, the store and `fence rw,rw`, as the `seq_cst` store was.
  *
  * Going OFFLINE needs only `release`: it must publish that this thread's reads are done, and
  * a release store is exactly "nothing above me moves below me".
@@ -367,10 +376,11 @@ inline void go_online() noexcept {
     }
     // Relaxed on the epoch: reading a STALE (smaller) epoch is always the conservative
     // direction — it can only make a scan decide this thread is not yet past a retirement it
-    // is in fact past, which defers a free rather than permitting one. The store is relaxed
-    // and the fence after it is what orders it before this bracket's reads (@ref qsbr_ordering).
+    // is in fact past, which defers a free rather than permitting one. The store is a release,
+    // so a scan that reads it also sees this thread's earlier brackets done, and the fence
+    // after it orders it before this bracket's reads (@ref qsbr_ordering).
     const std::uint32_t e = r.ctl.epoch.load(std::memory_order_relaxed);
-    r.cells[idx].state.store((e & kEpochMask) | kOnlineBit, std::memory_order_relaxed);
+    r.cells[idx].state.store((e & kEpochMask) | kOnlineBit, std::memory_order_release);
     std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 

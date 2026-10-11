@@ -207,7 +207,7 @@ struct reclaim_local_t {
  * to, because the bracket sits below `fan_out`'s no-subscriber gate:
  *
  * - entry: one RELAXED load of a read-mostly shared line (the epoch, bumped only on the
- *   control plane), one relaxed store to this thread's own cache-line-isolated cell and one
+ *   control plane), one release store to this thread's own cache-line-isolated cell and one
  *   `seq_cst` fence after it (`qsbr.hpp` §qsbr_ordering). No atomic read-modify-write on a
  *   shared line;
  * - exit: one `release` store to that same cell, plus one relaxed load of a read-mostly count

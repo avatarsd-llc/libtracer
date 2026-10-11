@@ -291,7 +291,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   is not yet ripe stays parked for a later call. So `collect()` no longer needs a quiet point
   for the transport plane's threads; in-process `read` / `write` / `:children[]` calls on
   other application threads remain the caller's to settle. Cost: a thread's outermost
-  bracket loads the global epoch, makes one relaxed store to the thread's own
+  bracket loads the global epoch, makes one release store to the thread's own
   cache-line-isolated cell and then one sequentially consistent fence on entry, and one
   release store on exit; a nested bracket is a
   thread-local counter increment and decrement. An inbound frame pays one outermost bracket,
