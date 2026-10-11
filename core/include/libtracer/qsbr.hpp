@@ -137,6 +137,49 @@
  *
  * Going OFFLINE needs only `release`: it must publish that this thread's reads are done, and
  * a release store is exactly "nothing above me moves below me".
+ *
+ * @section qsbr_asym The asymmetric fence: a plain entry store, `membarrier` on the reclaim side
+ *
+ * Where `%kMembarrier` holds (a Linux host, `kQsbrAsymmetricFence`, and a registration the
+ * kernel accepted), the reader's half of the barrier moves to the reclaim side, as liburcu's
+ * "memb" flavour does. The reader R and the reclaimer W, with every access each side makes:
+ *
+ * - R: `L_e`, an ACQUIRE load of the epoch; `S_R`, a RELEASE store of its cell (online at
+ *   `L_e`'s value), a plain `mov` on x86; a compiler barrier; then `L_R`, its reads of what W
+ *   may free (the link, the edge array).
+ * - W: `S_W`, the unpublish; the epoch bump (`seq_cst` RMW, `advance`) that closes epoch
+ *   `e`; later `F1`, a `seq_cst` fence, `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED)`, `F2`,
+ *   another `seq_cst` fence; then `L_W`, its loads of the cells. It frees only when every
+ *   cell `L_W` reads is offline or online at an epoch after `e`.
+ *
+ * The kernel's guarantee is that every thread of the process runs a full barrier `F_R` at some
+ * point of its own program order between `F1` and `F2` (a thread not running then does so
+ * when it next runs, at the context switch). So `F1 < F_R < F2` in the `seq_cst` order, and:
+ *
+ * 1. `F_R` falls before `L_R` in R's program order. `S_W` is sequenced before `F1`, and
+ *    `F1 < F_R`, so `L_R` reads `S_W` or later: R does not see what W unpublished.
+ * 2. `F_R` falls after `L_R`. Then it falls after `S_R` too, because the compiler barrier keeps
+ *    `S_R` before `L_R` in program order, and `F_R < F2` with `F2` before `L_W`, so `L_W` reads
+ *    `S_R` or later. Every later store to the cell is a release made after `L_R`, as in
+ *    @ref qsbr_ordering case 2 (R's offline store, R's next announce, or the first announce of
+ *    the cell's next owner), and `L_W`'s `seq_cst` loads synchronize with it, so `L_R` happens
+ *    before the free. A relaxed `S_R` would not do: a later announce read by `L_W` would then
+ *    order nothing. If it reads `S_R` itself, R is online at `L_e`'s value. If that is `e` or
+ * earlier, W does not free. If it is after `e`, `L_e` read the bump that closed `e` or a later one;
+ * the bump is a release, so `S_W` happens before `L_R`, and `L_R` cannot see what W unpublished.
+ *
+ * Neither way is a reader inside its bracket while the thing it reads is freed. `L_e` being an
+ * acquire is what the second case needs: a relaxed load would let `L_R` be satisfied before it
+ * on a weakly ordered CPU, so R could announce an epoch after `e` with a stale `L_R`. On x86 an
+ * acquire load is a plain load; the full barrier of the fenced entry (@ref qsbr_ordering, a
+ * `lock or` on x86-64) is what this saves.
+ *
+ * A scan's FALSE needs no fence (it only defers), so W scans once without one, and pays the
+ * `membarrier` only when a scan would conclude TRUE, then scans again after `F2`
+ * (`scan_fence`, `ripe`). A `membarrier` call that fails makes the scan answer false:
+ * frees are deferred, never early. Readers use the plain store only after the registration
+ * succeeded (`control_t::asym` is set inside `asym_ready`, which every fencing scan runs
+ * first), so a reader that took the plain store always meets a reclaimer that calls it.
  */
 #ifndef LIBTRACER_QSBR_HPP
 #define LIBTRACER_QSBR_HPP
@@ -145,10 +188,54 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
+
+#if defined(__linux__) && defined(__has_include)
+#if __has_include(<linux/membarrier.h>)
+#include <linux/membarrier.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#if defined(__NR_membarrier)
+// The `MEMBARRIER_CMD_*` names are enumerators, not macros, so the header is detected here.
+#define LIBTRACER_QSBR_MEMBARRIER 1
+#endif
+#endif
+#endif
 
 #include "libtracer/config.hpp"
 
 namespace tr::graph::detail_qsbr {
+
+#if defined(LIBTRACER_QSBR_MEMBARRIER)
+/** @brief This target has `membarrier(2)` with the private expedited command. */
+inline constexpr bool kHaveMembarrier = true;
+#else
+/** @brief This target has `membarrier(2)` with the private expedited command. */
+inline constexpr bool kHaveMembarrier = false;
+#endif
+
+/**
+ * @brief The asymmetric fence is compiled in (@ref qsbr_asym): the build asks for it and the
+ *        target has `membarrier`. False on every MCU target, whose entry is the store and `seq_cst`
+ * fence.
+ */
+inline constexpr bool kMembarrier = kQsbrAsymmetricFence && kHaveMembarrier;
+
+/** @brief Stands in for a member a build without @ref kMembarrier has no use for. */
+struct no_member_t {};
+
+/** @brief Is the plain entry in use? Never, where there is no flag. */
+[[nodiscard]] inline bool flag_on(const no_member_t&) noexcept { return false; }
+/** @brief Is the plain entry in use? */
+[[nodiscard]] inline bool flag_on(const std::atomic<std::uint32_t>& f) noexcept {
+    return f.load(std::memory_order_relaxed) != 0;
+}
+/** @brief Turn the plain entry on: nothing to turn on, where there is no flag. */
+inline void flag_set(no_member_t&) noexcept {}
+/** @brief Turn the plain entry on. */
+inline void flag_set(std::atomic<std::uint32_t>& f) noexcept {
+    f.store(1, std::memory_order_relaxed);
+}
 
 /**
  * @brief The domain's padding width: @ref tr::graph::kCacheLineBytes, floored at the
@@ -274,6 +361,13 @@ struct alignas(kCellAlign) control_t {
     std::atomic<std::uint32_t> live{0};
     /** @brief Dispatching threads that could not claim a cell; see @ref participant_t::index. */
     std::atomic<std::uint32_t> overflow_online{0};
+    /**
+     * @brief Non-zero once this process's `membarrier` registration succeeded: readers may
+     *        then enter with a plain store (@ref qsbr_asym). Set once, inside @ref asym_ready;
+     *        never cleared. Beside the epoch because the entry loads both.
+     */
+    [[no_unique_address]] std::conditional_t<kMembarrier, std::atomic<std::uint32_t>, no_member_t>
+        asym{};
 };
 
 /**
@@ -374,13 +468,23 @@ inline void go_online() noexcept {
         std::atomic_thread_fence(std::memory_order_seq_cst);
         return;
     }
-    // Relaxed on the epoch: reading a STALE (smaller) epoch is always the conservative
-    // direction — it can only make a scan decide this thread is not yet past a retirement it
-    // is in fact past, which defers a free rather than permitting one. The store is a release,
-    // so a scan that reads it also sees this thread's earlier brackets done, and the fence
-    // after it orders it before this bracket's reads (@ref qsbr_ordering).
-    const std::uint32_t e = r.ctl.epoch.load(std::memory_order_relaxed);
-    r.cells[idx].state.store((e & kEpochMask) | kOnlineBit, std::memory_order_release);
+    // A STALE (smaller) epoch is always the conservative direction — it can only make a scan
+    // decide this thread is not yet past a retirement it is in fact past, which defers a free
+    // rather than permitting one. Relaxed where the fence follows; acquire for the plain
+    // store, whose proof needs it (@ref qsbr_asym case 2). Both stores are releases, so a scan
+    // that reads one also sees this thread's earlier brackets done (@ref qsbr_ordering).
+    const std::uint32_t e =
+        r.ctl.epoch.load(kMembarrier ? std::memory_order_acquire : std::memory_order_relaxed);
+    const std::uint32_t word = (e & kEpochMask) | kOnlineBit;
+    if constexpr (kMembarrier) {
+        if (flag_on(r.ctl.asym)) {
+            r.cells[idx].state.store(word, std::memory_order_release);
+            std::atomic_signal_fence(std::memory_order_seq_cst);  // keeps S_R before L_R
+            return;
+        }
+    }
+    // The fence after the store orders it before this bracket's reads (@ref qsbr_ordering).
+    r.cells[idx].state.store(word, std::memory_order_release);
     std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
@@ -452,14 +556,51 @@ inline void enter() noexcept {
 }
 
 /**
- * @brief Has every participant passed a quiescent state since epoch @p e?
+ * @brief Register this process for `membarrier`, once; true when readers may enter with a
+ *        plain store (@ref qsbr_asym).
  *
- * True when each is either offline or online at an epoch strictly greater than @p e. The
- * opening fence is what makes this sound for a caller that did NOT just bump the epoch (a
- * drainer at a quiescent point); it is below every early-out on the dispatch path.
+ * The first call registers (`MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED`) and, on success, sets
+ * `control_t::asym`; every later call returns the cached answer. `graph_t`'s constructor calls
+ * it so the plain entry is in use from the start, and every fencing scan calls it before it
+ * relies on the answer. A refused registration leaves the fenced entry in place for good.
  */
-[[nodiscard]] [[gnu::noinline]] inline bool all_quiescent_past(std::uint32_t e) noexcept {
+[[nodiscard]] inline bool asym_ready() noexcept {
+#if defined(LIBTRACER_QSBR_MEMBARRIER)
+    if constexpr (kMembarrier) {
+        static const bool ok = [] {
+            const bool reg =
+                syscall(__NR_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0) == 0;
+            if (reg) flag_set(registry().ctl.asym);
+            return reg;
+        }();
+        return ok;
+    }
+#endif
+    return false;
+}
+
+/**
+ * @brief The reclaim side's barrier before a scan that may conclude: `F1`, the `membarrier`
+ *        when readers enter with a plain store, `F2` (@ref qsbr_asym).
+ * @return False when the `membarrier` call failed; the caller then frees nothing.
+ */
+[[nodiscard]] inline bool scan_fence() noexcept {
     std::atomic_thread_fence(std::memory_order_seq_cst);
+#if defined(LIBTRACER_QSBR_MEMBARRIER)
+    if constexpr (kMembarrier) {
+        if (asym_ready() && syscall(__NR_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0)
+            return false;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+#endif
+    return true;
+}
+
+/**
+ * @brief The scan alone: is every participant offline or online at an epoch after @p e?
+ *        Its TRUE means a grace period has passed only after @ref scan_fence.
+ */
+[[nodiscard]] inline bool cells_past(std::uint32_t e) noexcept {
     registry_t& r = registry();
     if (r.ctl.overflow_online.load(std::memory_order_seq_cst) != 0) return false;
     for (std::size_t i = 0; i < kQsbrParticipants; ++i) {
@@ -467,6 +608,40 @@ inline void enter() noexcept {
         if (s != 0 && !epoch_after(s, e)) return false;
     }
     return true;
+}
+
+/**
+ * @brief Has every participant passed a quiescent state since epoch @p e?
+ *
+ * True when each is either offline or online at an epoch strictly greater than @p e. The
+ * opening fence (@ref scan_fence) is what makes this sound for a caller that did NOT just bump
+ * the epoch (a drainer at a quiescent point); it is below every early-out on the dispatch
+ * path. With the asymmetric fence that fence is a `membarrier` call, so it is paid only when a
+ * scan without it would already conclude (a false needs no fence: it only defers), and a
+ * caller with several epochs to ask about in one row uses @ref ripe, which pays it once.
+ */
+[[nodiscard]] [[gnu::noinline]] inline bool all_quiescent_past(std::uint32_t e) noexcept {
+    if constexpr (kMembarrier) {
+        if (!cells_past(e)) return false;
+    }
+    return scan_fence() && cells_past(e);
+}
+
+/**
+ * @brief @ref all_quiescent_past for one of several epochs asked in a row: the fence is paid at
+ *        most once across the row, and only when a scan would conclude.
+ * @param e      The epoch closed after the unpublish of what the caller would free.
+ * @param fenced The row's state, false at its start. Every epoch asked with it must belong to
+ *               something unpublished before the row began, and nothing may join the row once
+ *               it has begun: `graph_t::collect` asks under the one map-lock hold that every
+ *               append to its parks also takes.
+ */
+[[nodiscard]] inline bool ripe(std::uint32_t e, bool& fenced) noexcept {
+    if constexpr (!kMembarrier) return all_quiescent_past(e);
+    if (fenced) return cells_past(e);
+    if (!cells_past(e)) return false;  // a false needs no fence: it only defers
+    fenced = scan_fence();
+    return fenced && cells_past(e);
 }
 
 /**

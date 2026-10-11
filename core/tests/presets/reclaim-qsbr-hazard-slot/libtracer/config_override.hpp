@@ -11,7 +11,9 @@
  * under the cross-thread grace period. One build has one `config_t`, so this ONE fragment binds
  * both the slot and the policy; a second fragment on the include path would shadow it rather
  * than compose with it. The test build's instrumented preset yields to it, so it restates that
- * preset's members as well.
+ * preset's members as well. It also opts in to the asymmetric fence (`kQsbrAsymmetricFence`),
+ * so this leg runs the `membarrier` entry and single-flight drain passes while its sibling runs
+ * the default fenced entry.
  */
 #pragma once
 
@@ -22,6 +24,7 @@ namespace tr::graph {
 struct ci_reclaim_qsbr_hazard_slot_config_t : default_config_t {
     using lkv_slot_t = hazard_slot_t;
     using reclaim_policy_t = reclaim_qsbr_t;
+    static constexpr bool kQsbrAsymmetricFence = true;
     static constexpr bool kInstrumentCounters = true;
     static constexpr bool kFaultInjection = true;
     static constexpr bool kBusLinks = true;

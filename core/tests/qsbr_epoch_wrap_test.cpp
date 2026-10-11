@@ -62,10 +62,37 @@ void stall_behind_an_old_bracket() {
           "the next advance bumps again");
 }
 
+/**
+ * @brief The asymmetric fence (`qsbr.hpp` §qsbr_asym): where the process registered for
+ *        `membarrier`, a bracket enters with a plain store and still holds what it covers.
+ */
+void asymmetric_entry() {
+    std::printf("a bracket entered with a plain store holds a pair; one fence serves a row\n");
+    if constexpr (!q::kMembarrier) {
+        std::printf(
+            "  (not compiled in on this target: the entry is the store and seq_cst fence)\n");
+        return;
+    }
+    const bool on = q::asym_ready();
+    std::printf("  membarrier registration: %s\n",
+                on ? "accepted, plain entry in use" : "refused, fenced entry kept");
+    set_epoch(500);
+    q::enter();
+    const std::uint32_t e = q::advance();
+    bool fenced = false;
+    check(!q::ripe(e, fenced) && !fenced, "inside the bracket: not ripe, and no fence was paid");
+    check(!q::all_quiescent_past(e), "nor by the single-epoch scan");
+    check(q::leave(), "the bracket closes");
+    check(q::ripe(e, fenced) && fenced == true, "once it closed: ripe, after one fence");
+    check(q::ripe(e - 1, fenced), "a second epoch of the same row reuses that fence");
+    check(q::all_quiescent_past(e), "and the single-epoch scan agrees");
+}
+
 }  // namespace
 
 int main() {
     across_the_wrap();
     stall_behind_an_old_bracket();
+    asymmetric_entry();
     return tr::testing::summary("qsbr_epoch_wrap");
 }

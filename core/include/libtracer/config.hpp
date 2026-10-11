@@ -652,6 +652,31 @@ struct default_config_t {
     static constexpr std::size_t kQsbrParticipants = kEdgePinSlots;
 
     /**
+     * @brief Whether a frame bracket's entry announces itself with a plain store, leaving the
+     *        full barrier to the reclaim side's `membarrier(2)` (the asymmetric fence).
+     *
+     * With it, `detail_qsbr::enter` on a Linux host stores its cell with no fence; the reclaim
+     * side, before a scan may conclude that a grace period has passed, makes every running
+     * thread of the process execute a full barrier (`MEMBARRIER_CMD_PRIVATE_EXPEDITED`), so the
+     * store-load ordering the entry's `seq_cst` fence gave is paid once per freeing scan, not
+     * once per frame. The proof is in `qsbr.hpp`, section "The asymmetric fence". It applies only
+     * where the target has `membarrier`: on any other target (ESP-IDF, Cortex-M0, any non-Linux
+     * host) the entry stays the store and `seq_cst` fence, whatever this says. On Linux, a
+     * process whose registration is refused (an older kernel, a seccomp filter) also keeps the
+     * fenced entry.
+     *
+     * Off by default: the fenced entry costs about 2 ns per outermost bracket on an x86 host,
+     * while every `membarrier` interrupts each running thread of the process and costs the
+     * reclaimer tens of microseconds. A node that churns hooked subscriptions or removes links
+     * pays far more on the reclaim side than it saves on frames (#2100 has the numbers). Opt
+     * in on a read-mostly host node, where frames outnumber reclaim events by tens of thousands
+     * to one. Under it, drain passes run single-flight: a drainer that finds another one
+     * fencing skips its pass, which only defers a free.
+     * Override fragment: `static constexpr bool kQsbrAsymmetricFence = true;`
+     */
+    static constexpr bool kQsbrAsymmetricFence = false;
+
+    /**
      * @brief How many `DEVICE`-space memory backends may register a transfer hook at once
      *        (#1381) — the bound on `tr::mem::register_device_backend`'s table.
      *
@@ -1128,6 +1153,8 @@ inline constexpr std::size_t kShareThresholdBytes = config_t::kShareThresholdByt
 inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
 /** @brief @ref default_config_t::kQsbrParticipants for this build. */
 inline constexpr std::size_t kQsbrParticipants = config_t::kQsbrParticipants;
+/** @brief @ref default_config_t::kQsbrAsymmetricFence for this build. */
+inline constexpr bool kQsbrAsymmetricFence = config_t::kQsbrAsymmetricFence;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
 using acl_policy_t = config_t::acl_policy_t;
 /** @brief @ref default_config_t::kInstrumentCounters for this build. */

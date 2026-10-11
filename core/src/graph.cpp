@@ -625,6 +625,9 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     roots_ = mem::make_block<roots_t>(*tables_, *tables_);
     if (!roots_ || !vertex_slots_.reserve_next()) mem::exhausted_at_init(*tables_, "graph_t");
     set_hooks(hooks);
+    // Readers enter their frame bracket with a plain store from here on where the process may
+    // use `membarrier` (qsbr.hpp §qsbr_asym); elsewhere this is `false` and changes nothing.
+    (void)detail_qsbr::asym_ready();
     // Slot 0 is the structural root (RFC-0024 §6.4): the index is seeded here so it stays
     // allocation-ordered from the first vertex_t this graph owns. The root is not a
     // registrable address, so no bound path ever names slot 0 — it is in the vector because
@@ -1297,14 +1300,15 @@ void graph_t::collect() {
             // Under the map lock: nothing but the take. The lock is what serialises us against
             // retire_subtree's append; no user code runs under it.
             const std::unique_lock lock(map_mutex_);
+            // One row for `detail_qsbr::ripe`: nothing joins either park while this lock is held,
+            // so one reclaim-side fence covers every entry taken under it.
+            bool fenced = false;
             auto& s = retired_seams_.seams;
-            for (; ns < kBatch && ns < s.size() && detail_qsbr::all_quiescent_past(s[ns].epoch);
-                 ++ns)
+            for (; ns < kBatch && ns < s.size() && detail_qsbr::ripe(s[ns].epoch, fenced); ++ns)
                 seams[ns] = s[ns].seam;
             s.erase_front(ns);
             auto& r = parked_releases_.releases;
-            for (; nr < kBatch && nr < r.size() && detail_qsbr::all_quiescent_past(r[nr].epoch);
-                 ++nr)
+            for (; nr < kBatch && nr < r.size() && detail_qsbr::ripe(r[nr].epoch, fenced); ++nr)
                 releases[nr] = r[nr].release;
             r.erase_front(nr);
         }

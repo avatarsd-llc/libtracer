@@ -63,6 +63,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   and `key_of` renders a vertex's canonical PATH key. None takes a lock or draws from the heap
   (`key_of` draws the key from the caller's own source); the slot-reuse caveat of
   `set_suspended` (#1932) applies.
+- **`default_config_t::kQsbrAsymmetricFence`: an opt-in frame bracket entry with no fence on a
+  Linux host ([#2100](https://github.com/avatarsd-llc/libtracer/pull/2100)).** Off by default:
+  every target keeps the fenced entry (a release store, then a `seq_cst` fence). Bound `true`
+  where the process can register for `membarrier(2)`, the entry is the release store alone (a
+  plain `mov` on x86) and the reclaim side issues
+  `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED)` before a scan that would conclude, so the
+  barrier is paid once per freeing reclaim pass instead of once per frame. Drain passes then run
+  single-flight: a drainer that finds another one fencing skips its pass, which only defers a
+  free. The opt-in suits a read-mostly host node; under hooked-unsubscribe or link-removal churn
+  every `membarrier` interrupts the running threads and costs far more than it saves. A Linux
+  process whose registration is refused keeps the fenced entry; ESP-IDF, Cortex-M0 and non-Linux
+  hosts compile the fenced entry whatever the knob says. The ordering argument is in `qsbr.hpp`.
+  Override fragment: `static constexpr bool kQsbrAsymmetricFence = true;`
 
 ## [0.19.1] — 2026-10-11
 
