@@ -345,13 +345,15 @@ class noise_link_t final : public transport_t {
      * @brief Seal and send the gathered spans as one frame, as one transport message.
      *
      * Best effort, like every link: a frame above @ref max_frame is refused (`noise_oversize`);
-     * one sent with no session, or with an exhausted `memory.io`, is dropped (`dropped_tx`).
+     * an empty one (an empty plaintext is the protocol's own message, reference/23 §3), one
+     * sent with no session, or one with an exhausted `memory.io`, is dropped (`dropped_tx`).
      * With no session on the DIAL side the send is also a demand: it starts a handshake.
      */
     void send(std::span<const std::span<const std::byte>> iov) override {
         std::size_t len = 0;
         for (const std::span<const std::byte> s : iov) len += s.size();
         if (len > max_frame_) return bump_locked(noise::counter_t::OVERSIZE);
+        if (len == 0) return bump_locked(noise::counter_t::DROPPED_TX);
         const std::size_t bytes = len + kOverhead;
         auto* const buf = static_cast<std::byte*>(io_src_->try_alloc(bytes, alignof(std::byte)));
         if (buf == nullptr) return bump_locked(noise::counter_t::DROPPED_TX);
@@ -646,6 +648,8 @@ class noise_link_t final : public transport_t {
             return 0;
         }
         if (!s->cipher.seal(s->phase, s->send_nonce, frame, out)) {
+            // In practice only the 2^62 nonce limit refuses here. Discarding the session and
+            // counting `noise_expired` (reference/23 §5) come with rekey, #2074.
             bump(noise::counter_t::DROPPED_TX);
             return 0;
         }
