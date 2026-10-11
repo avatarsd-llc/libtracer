@@ -416,14 +416,14 @@ struct stats_counter_t {
  * sampling half never touches an allocator on a path a peer can drive.
  *
  * @ref kMaxMembers is a compile-time ceiling on how many nouns one seam may publish, not a
- * protocol limit: it is sized to the widest block the reference net plane serves
- * (`router_stats_t`'s seven) with headroom, and a seam that outgrew it would be split rather
- * than truncated — @ref add refuses silently past the ceiling exactly so a caller cannot
- * emit a half-member.
+ * protocol limit: it is sized to the widest block the reference net plane serves (a Noise
+ * link's `:stats.link.<child>`: the three universal nouns and RFC-0033 §5.11's
+ * ten) with headroom, and a seam that outgrew it would be split rather than truncated —
+ * @ref add refuses silently past the ceiling exactly so a caller cannot emit a half-member.
  */
 struct stats_block_t {
     /** @brief The per-seam member ceiling — see the class brief. */
-    static constexpr std::size_t kMaxMembers = 12;
+    static constexpr std::size_t kMaxMembers = 16;
     std::array<stats_counter_t, kMaxMembers> members{}; /**< @brief The filled prefix. */
     std::size_t count = 0;                              /**< @brief How much of it is filled. */
 

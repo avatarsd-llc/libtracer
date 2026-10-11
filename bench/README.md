@@ -1521,9 +1521,12 @@ The Noise link binding (RFC-0033, #2063; implemented by #2064) is measured from 
 commit by a harness that was ready before it. Three binaries, one driver (`link_harness.hpp`):
 
 - **`bench_noise_link`**: libtracer's link arms. `udp` is the plain UDP link, the baseline.
-  `noise` is the #2064 link kind, compiled only with `-DLIBTRACER_BENCH_NOISE_LINK=ON`.
-  `make_noise_pair` is the one function that names that link, so #2064 adjusts it to the
-  constructor it ships and nothing else.
+  `noise` is the Noise link (`transport_noise.hpp`, #2073) over the same UDP carrier, compiled
+  with `-DLIBTRACER_BENCH_NOISE_LINK=ON` and a backend (`-DLIBTRACER_NOISE_CRYPTO=openssl`, the
+  fastest on a host). `make_noise_pair` is the one function that names it. The Noise link
+  carries only complete Tracer frames, so this arm sends each payload behind a 4-byte VALUE
+  header (its largest payload is 65478 B: the IPv4 bound less 25 B of transport overhead and
+  that header), and the harness drives the link's deadlines with `poll(now)` while it waits.
 - **`bench_zenoh_link`**: the Zenoh arms through the same driver. `udp` is the counterpart of
   libtracer's `udp`. `tls` (over TCP) and `quic` are the counterpart of `noise`: **different
   security protocols, same goal: authenticated encryption.** TLS 1.3 authenticates the server
@@ -1575,6 +1578,7 @@ plaintext under a 16-byte tag).
 
 ```sh
 cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release \
+      -DLIBTRACER_NOISE_CRYPTO=openssl -DLIBTRACER_BENCH_NOISE_LINK=ON \
       -DLIBTRACER_BENCH_MBEDTLS_SOURCE=$IDF_PATH/components/mbedtls/mbedtls
 cmake --build bench/build --target bench_noise_link bench_zenoh_link bench_noise_crypto -j
 BENCH_CPUS=2-6 flock ../bench.lock bench/run_noise.sh bench/build 3   # bench CPUs, best of 3

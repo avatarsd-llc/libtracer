@@ -328,6 +328,13 @@ class transport_cipher_t {
         return send_.set_key(send) && recv_.set_key(recv);
     }
 
+    /** @brief Drop both keys (wiped, or the library's key slots freed), so a discarded
+     *         session holds no key material (RFC-0033 §6.8); @ref set_keys keys it again. */
+    void clear() {
+        send_.clear();
+        recv_.clear();
+    }
+
     /**
      * @brief Write one transport datagram: the type byte for @p phase, nonce @p n, then
      *        @p frame sealed with empty associated data, and its tag.

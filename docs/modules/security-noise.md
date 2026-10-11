@@ -1,11 +1,12 @@
-# security & Noise — the Noise link's crypto backend
+# security & Noise — the Noise link and its crypto backend
 
 ```{admonition} In one paragraph
 :class: tip
 The Noise link binding ([RFC-0033](../spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md))
 carries frames inside a `Noise_NNpsk0_25519_ChaChaPoly_SHA256` session. This module is its
-cryptographic half: the handshake and transport steps, written once over a **crypto backend
-chosen at compile time** (OpenSSL, libsodium or mbedTLS through PSA). The core stays
+cryptographic half, the handshake and transport steps written once over a **crypto backend
+chosen at compile time** (OpenSSL, libsodium or mbedTLS through PSA), and the link built on
+them, `noise_link_t`, which carries one request and its reply in two round trips. The core stays
 crypto-free. A build that does not name a backend compiles none of this and links no crypto
 library. Everything works on caller memory: no allocation of its own, no clock and no
 randomness. On every backend, nothing allocates before a first message's PSK tag is proven,
@@ -39,9 +40,56 @@ and nothing allocates per frame.
 
 Every refusal is a `refusal_t`, which the link maps onto RFC-0033 §5.9's counters.
 
-The link half (the slots, the counter and the mark, the replay window, the key phase, the
-`now` deadlines and the counters) is the next slice of
-[#2064](https://github.com/avatarsd-llc/libtracer/issues/2064), built on these types.
+## The link
+
+`transport_noise.hpp` is the link half, built on these types: `noise_link_t<B, Host, Carrier>`
+is an ordinary `transport_t` to the router, and the frames it carries are byte-identical to the
+ones its carrier would carry without it (reference/23 §1). It owns its carrier, a
+`udp_transport_t` on a host, and takes three compile-time choices:
+
+| parameter | what | |
+| --- | --- | --- |
+| `B` | the crypto backend | `default_crypto_t` |
+| `Host` | the application's seams (`noise::link_host`) | `resolve_psk(ref, key)`, the key store; `ephemeral(key)`, a fresh random private key per call; `next_counter()`, strictly increasing across attempts |
+| `Carrier` | the datagram link underneath (`noise::datagram_carrier`) | `send_to(address, iov)`, `inbound_source()`, `peer_address()` |
+
+The PSK is named by reference (`noise_config_t::psk_ref`) and resolved once, when the link is
+built. The library holds no key, no entropy and no clock.
+
+**One request and its reply.** DIAL initiates and LISTEN answers. A send on a link with no
+session fails at once, counted in `dropped_tx`, and on DIAL it starts a handshake (`dial()`
+demands without a frame). Once the second message arrives, `poll` reports `session`: the
+request sent then is the confirmation, the responder's reply is the acknowledgement, and the
+link reports `UP` after it. Four datagrams, two round trips:
+
+```cpp
+link.dial();                                  // or the first send, which fails and dials
+while (!link.poll(app_now()).session) wait(); // the app's clock, the app's wait
+link.send(request);                           // the confirmation
+// ... the reply arrives on the receiver: the acknowledgement; link.state() == UP
+```
+
+**Time.** `poll(now)` runs every deadline `now` has passed and returns the next one
+(`noise_poll_t::next`): the initiator's retry (the stored first message, or an empty
+confirmation while unacknowledged, the interval doubling to `retry_cap`) and attempt deadlines,
+and the responder's pending expiry. A deadline of 0 is never due, and deadlines count from the
+last `now` the link was given, so an application polls once before its first demand.
+
+**Memory.** Everything the link holds about its sessions (the PSK state, the handshake cipher,
+the two session slots, the handshake slot and its stored messages) is one block from the
+link's `memory.state`, drawn when the link is built. On x86-64 it is 504 B with PSA Crypto,
+520 B with OpenSSL 3 (where each cipher is a pointer to a library context the backend builds
+with it) and 664 B with libsodium. A handshake fills slots that already
+exist, so a first message under a wrong PSK, or a replayed one, costs no memory. A transport
+message is decrypted in place in the carrier's receive buffer, and a send seals into one block
+of `frame + 25` bytes from `memory.io`, returned after the send.
+
+**Counters.** Reference/23 §11's ten `noise_*` nouns follow the universal three in the link's
+`:stats.link.<child>` block (`transport_t::kind_stats`). This slice keeps no previous session,
+so a message in a replaced session's phase is `noise_stale`. Rekey and the generation rule are
+[#2074](https://github.com/avatarsd-llc/libtracer/issues/2074), persisting the counter and the
+mark is [#2075](https://github.com/avatarsd-llc/libtracer/issues/2075), and ESP-IDF is
+[#2076](https://github.com/avatarsd-llc/libtracer/issues/2076).
 
 ## Choosing a backend
 
@@ -204,6 +252,38 @@ reproduce it too, as the RFC's §15 Q6 ruling requires: `noiseprotocol` (Python)
 ```
 
 ```{doxygenstruct} tr::net::noise::psa_crypto_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::noise_link_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::noise_config_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::noise_poll_t
+:project: libtracer
+:members:
+```
+
+```{doxygenconcept} tr::net::noise::link_host
+:project: libtracer
+```
+
+```{doxygenconcept} tr::net::noise::datagram_carrier
+:project: libtracer
+```
+
+```{doxygenenum} tr::net::noise::counter_t
+:project: libtracer
+```
+
+```{doxygenstruct} tr::net::noise::session_t
 :project: libtracer
 :members:
 ```

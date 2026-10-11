@@ -68,6 +68,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/security_noise_openssl.hpp \
                          core/include/libtracer/security_noise_sodium.hpp \
                          core/include/libtracer/security_noise_psa.hpp \
+                         core/include/libtracer/transport_noise.hpp \
                          core/include/libtracer/status.hpp \
                          core/include/libtracer/error.hpp \
                          core/include/libtracer/tlv.hpp \
