@@ -87,17 +87,44 @@
  * The scan is `O(kQsbrParticipants)` and lives on the RECLAIM path only. That is the precise
  * difference from the shape #635 rejected, which put a hazard scan on the READ path.
  *
- * @section qsbr_ordering Why the announce store is `seq_cst`
+ * @section qsbr_ordering Why the announce is followed by a `seq_cst` fence
  *
  * The hazard is Dekker-shaped and it is the only ordering argument this file makes. The
- * reader announces itself and then reads the edge array; the retiring thread mutates the edge
- * array (`clear_edge`, already done before it gets here) and then reads the announcements.
- * Neither side may miss the other. Store-buffering permits exactly that outcome unless BOTH
- * sides carry a full barrier, so both do: the reader's announcing store is `seq_cst`, and the
- * retiring thread's epoch bump is a `seq_cst` read-modify-write standing between its mutation
- * and its scan. `%all_quiescent_past` opens with an explicit `seq_cst` fence for the OTHER
- * caller — a drainer at a quiescent point, which did not just bump the epoch — and that fence
- * sits below the early-out, so the dispatch path never reaches it.
+ * reader R announces itself and then reads what the writer may free (the edge array, a child
+ * link); the writer W unpublishes it (`clear_edge`, an unrouted link, already done before it
+ * gets here) and then reads the announcements. Neither side may miss the other.
+ * Store-buffering permits exactly that outcome unless BOTH sides fence, and a `seq_cst` STORE
+ * is not a fence: C++ does not order it before a later load of another location that is not
+ * itself `seq_cst` (an ACQUIRE load may compile to `ldapr` on Armv8.3 and pass it). So the
+ * argument is fence to fence ([atomics.fences], with the `seq_cst` total order S of
+ * [atomics.order]):
+ *
+ * - R: `L_e`, a relaxed load of the epoch; `S_R`, a relaxed store of its cell (online at
+ *   `L_e`'s value, or the `overflow_online` increment); `F_R`, a `seq_cst` fence; then `L_R`,
+ *   its reads.
+ * - W: `S_W`, the unpublish; the epoch bump `B` (`seq_cst` RMW, `%advance`) that closes epoch
+ *   `e`; `F_W`, the `seq_cst` fence `%all_quiescent_past` opens with; then `L_W`, its `seq_cst`
+ *   loads of `overflow_online` and the cells. It frees only when every cell `L_W` reads is
+ *   offline or online at an epoch after `e`, and `overflow_online` reads 0.
+ *
+ * `F_R` and `F_W` are both in S, so one precedes the other:
+ *
+ * 1. `F_W` before `F_R`. `S_W` is sequenced before `F_W` and `L_R` after `F_R`, so `L_R` reads
+ *    `S_W` or later: R does not see what W unpublished.
+ * 2. `F_R` before `F_W`. `S_R` is sequenced before `F_R` and `L_W` after `F_W`, so `L_W` reads
+ *    `S_R` or later. Later is R's release offline store (or decrement), which `L_W` then
+ *    synchronizes with, so R's reads happen before the free. If `L_W` reads `S_R` itself, R is
+ *    online at `L_e`'s value. At `e` or earlier, W does not free. After `e`, `L_e` read `B` or
+ *    a later bump, which continues `B`'s release sequence; `F_R` is an acquire fence sequenced
+ *    after `L_e`, so `B` synchronizes with `F_R`, `S_W` happens before `L_R`, and `L_R` reads
+ *    `S_W` or later.
+ *
+ * Neither way is a reader inside its bracket while what it reads is freed. `%retire` and the
+ * drainer reach `F_W` through `%all_quiescent_past`, which opens with it, below every early-out
+ * on the dispatch path. On x86-64 (GCC 13) the entry is a plain `mov` and one locked
+ * instruction (`lock or` to the stack) where the `seq_cst` store was one `xchg`, so it still
+ * pays one full barrier. On rv32 it is the store and one `fence rw,rw`, one fence fewer than
+ * the `seq_cst` store's `fence rw,w` / store / `fence rw,rw`.
  *
  * Going OFFLINE needs only `release`: it must publish that this thread's reads are done, and
  * a release store is exactly "nothing above me moves below me".
@@ -334,15 +361,17 @@ inline void go_online() noexcept {
     registry_t& r = registry();
     const std::size_t idx = self().index();
     if (idx == kNoIndex) {
-        r.ctl.overflow_online.fetch_add(1, std::memory_order_seq_cst);
+        r.ctl.overflow_online.fetch_add(1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
         return;
     }
     // Relaxed on the epoch: reading a STALE (smaller) epoch is always the conservative
     // direction — it can only make a scan decide this thread is not yet past a retirement it
-    // is in fact past, which defers a free rather than permitting one. The store is seq_cst
-    // for the Dekker argument in this file's header.
+    // is in fact past, which defers a free rather than permitting one. The store is relaxed
+    // and the fence after it is what orders it before this bracket's reads (@ref qsbr_ordering).
     const std::uint32_t e = r.ctl.epoch.load(std::memory_order_relaxed);
-    r.cells[idx].state.store((e & kEpochMask) | kOnlineBit, std::memory_order_seq_cst);
+    r.cells[idx].state.store((e & kEpochMask) | kOnlineBit, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
 /**
