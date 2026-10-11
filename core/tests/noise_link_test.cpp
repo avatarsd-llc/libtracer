@@ -209,6 +209,8 @@ struct test_host_t {
 constexpr std::uint64_t kAddrA = 0xA;
 /** @brief See @ref kAddrA. */
 constexpr std::uint64_t kAddrB = 0xB;
+/** @brief An address that is neither end, for messages a stranger sends. */
+constexpr std::uint64_t kAddrStranger = 0xC;
 
 /** @brief One datagram on the in-memory wire. */
 struct datagram_t {
@@ -403,10 +405,10 @@ void request_reply_two_round_trips() {
 /**
  * @brief RFC-0033 Appendix A through the link: the same inputs give the same datagrams.
  *
- * The initiator's empty confirmation (n=0, sent at its retry deadline) and its `ping` (n=1)
- * match A.3 byte for byte. The responder answers the empty confirmation with an empty
- * message first (§4 step 7), so its `pang` goes out at n=1, not at A.3's n=0; that one is
- * checked by decryption, not against A.3's bytes.
+ * All four transport messages match A.3 byte for byte: the initiator's empty confirmation
+ * (n=0, sent at its retry deadline) and its `ping` (n=1), then the responder's empty
+ * acknowledgement (n=0, §4 step 7) and its `pang` (n=1), as RFC-0033's erratum of 2026-10-11
+ * lists them.
  */
 void appendix_a_through_the_link() {
     std::printf("RFC-0033 Appendix A, reproduced by the link:\n");
@@ -450,11 +452,16 @@ void appendix_a_through_the_link() {
                   unhex("04 0100000000000000 843c7ef02f4b3184 8add30c2b08aa1eef0985b2201f08621"),
           "  the ping is A.3's (n=1)");
     b.carrier().pump();
-    check(wire.log.size() == 5 && wire.log[4].bytes.size() == 25,
-          "  the responder answers the empty confirmation with an empty message");
+    check(wire.log.size() == 5 &&
+              wire.log[4].bytes == unhex("04 0000000000000000 4a986111144b7702d0a867a37da80f23"),
+          "  the responder's empty acknowledgement is A.3's (n=0)");
     check(sink_b.frames.size() == 1 && sink_b.frames[0] == ping, "  the responder delivers ping");
     const auto pang = unhex("0100040070616e67");
     b.send(std::span(pang));
+    check(wire.log.size() == 6 &&
+              wire.log[5].bytes ==
+                  unhex("04 0100000000000000 d4df8a687acd1ca4 14ed6223ec12519b15a8e6edc0328c18"),
+          "  the pang is A.3's (n=1)");
     a.carrier().pump();
     check(a.state() == link_state_t::UP && sink_a.frames.size() == 1 && sink_a.frames[0] == pang,
           "  the initiator is UP and receives pang");
@@ -601,13 +608,13 @@ void refusals() {
           "  a replayed first message stops at the counter, unanswered");
     if (kCountsAllocations)
         check(allocated == 0, "  ... before any Diffie-Hellman: it allocates nothing");
-    n.b.carrier().inject(request, kAddrA);
+    n.b.carrier().inject(request, kAddrStranger);
     check(n.b.count(counter_t::REPLAYED) == 1 && n.sink_b.frames.size() == 1,
           "  a copy of the newest frame is refused by the replay window");
     auto tampered = request;
     tampered[12] ^= std::byte{1};
     tampered[1] = std::byte{9};  // a fresh nonce, so the window passes it to the tag
-    n.b.carrier().inject(tampered, kAddrA);
+    n.b.carrier().inject(tampered, kAddrStranger);
     check(n.b.count(counter_t::DECRYPT_FAILED) == 1, "  a tampered message fails its tag");
     n.b.carrier().inject(second, kAddrA);
     n.a.carrier().inject(first, kAddrB);
@@ -626,6 +633,13 @@ void refusals() {
     check(n.b.drop_stats().malformed_rx == 3 && n.sink_b.frames.size() == 1,
           "  a plaintext that is not exactly one frame is malformed, not delivered");
     check(n.wire.log.size() == sent + 1, "  none of these drew an answer");
+    n.b.send(std::span<const std::byte>(value_frame("pang")));
+    check(n.wire.log.size() == sent + 2 && n.wire.log.back().to == kAddrA,
+          "  the replayed and tampered messages from a stranger never moved B's peer (§4)");
+    const std::size_t dropped = n.a.drop_stats().dropped_tx;
+    n.a.send(std::span<const std::byte>{});
+    check(n.a.drop_stats().dropped_tx == dropped + 1 && n.wire.log.size() == sent + 2,
+          "  an empty frame is refused at send: an empty plaintext is the protocol's (§3)");
 }
 
 /** @brief A frame above `max_frame` is refused at send, whole, and counted. */

@@ -26,7 +26,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     (`noise_config_t::psk_ref`), the random source of the ephemeral keys, and the initiator
     counter. The library holds no key, no entropy and no clock of its own.
   - A send with no session fails at once (`dropped_tx`) and, on DIAL, starts a handshake;
-    `dial()` demands without a frame. The request sent once `poll` reports a session is the
+    `dial()` demands without a frame. An empty frame is refused at send (`dropped_tx`), since an
+    empty plaintext is the protocol's own message. The request sent once `poll` reports a session is the
     confirmation, and the reply is the acknowledgement: two round trips, `UP` only after the
     reply. `poll(now)` runs the retry, attempt and pending deadlines on the application's clock
     and returns the next one (`noise_poll_t`); a deadline of 0 is never due.
