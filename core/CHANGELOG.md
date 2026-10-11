@@ -225,6 +225,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **`reclaim_qsbr`: `drain_ripe` claims a slot before checking its epoch.** A drainer read a
+  retired slot's epoch, judged it, and only then claimed the slot. It now claims the slot first
+  and checks the epoch of the pair it claimed, returning the slot unchanged when that pair's
+  grace period has not elapsed, so a release hook runs only for a pair whose own epoch every
+  participant is past. Builds on `reclaim_local` or `reclaim_strict` are unaffected. A new
+  stress test, `qsbr_drain_claim`, drains concurrently while slots are refilled.
 - **`graph_t`: recheck vertex registration after the terminus access check.** An operation
   finds its terminus vertex registered and then runs the vertex's access check with no lock
   held, so a retire could land between the two. The check now tests the vertex's registration

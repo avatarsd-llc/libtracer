@@ -484,13 +484,16 @@ inline void enter() noexcept {
     for (std::size_t i = 0; i < kDeferredReleaseSlots; ++i) {
         retired_slot_t& s = r.retired[i];
         if (s.state.load(std::memory_order_acquire) != slot_state_t::READY) continue;
-        if (!all_quiescent_past(s.epoch)) continue;
         slot_state_t expected = slot_state_t::READY;
-        // Two drainers may reach the same ripe slot; the CAS is what makes the hook run
-        // exactly once, and the loser simply moves on.
+        // Claimed first, so the epoch checked below is the claimed pair's own: an unclaimed
+        // slot may be drained and refilled by others at any moment. Not yet ripe, it goes back.
         if (!s.state.compare_exchange_strong(expected, slot_state_t::CLAIMING,
                                              std::memory_order_acq_rel, std::memory_order_relaxed))
             continue;
+        if (!all_quiescent_past(s.epoch)) {
+            s.state.store(slot_state_t::READY, std::memory_order_release);
+            continue;
+        }
         void* const ctx = s.ctx;
         void (*const fn)(void*) = s.release;
         s.ctx = nullptr;
