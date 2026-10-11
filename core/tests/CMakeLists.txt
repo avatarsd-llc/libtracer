@@ -1321,6 +1321,13 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(qsbr_epoch_wrap_test PRIVATE libtracer)
     libtracer_test_warnings(qsbr_epoch_wrap_test)
     add_test(NAME qsbr_epoch_wrap COMMAND qsbr_epoch_wrap_test)
+    # drain_ripe judges the pair it claimed: readers hold the published object across a
+    # bracket while a writer retires and the shared table is drained and refilled concurrently.
+    # A stress test (a few seconds), and a TSan target.
+    add_executable(qsbr_drain_claim_test qsbr_drain_claim_test.cpp)
+    target_link_libraries(qsbr_drain_claim_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(qsbr_drain_claim_test)
+    add_test(NAME qsbr_drain_claim COMMAND qsbr_drain_claim_test)
 endif()
 
 # #82 — in-band :children[] SPEC vertex creation (ADR-0017). Reads the shared `spec/`
