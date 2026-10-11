@@ -151,6 +151,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     `edge_replace_t::REFUSED`.
   - `vertex_t::revert_to_placeholder` takes a `detached_edges_t`, which carries the slot table
     and the published array out of the retired vertex and retires the array when dropped.
+  - New `mem::bitwise_relocatable`: a type that declares `using bitwise_relocatable_t = void;`
+    is relocated by `mem::block_array_t` with `memcpy`, and the old bytes are not destroyed.
+    `subscriber_slot_t` and `detached_edges_t` declare it, so growing the slot table or the
+    retire batch runs no destructor and no longer reaches the heap.
 
 - **Docs: `heap_backend()` and a null `memory.io` no longer promise "the heap"
   ([#2051](https://github.com/avatarsd-llc/libtracer/issues/2051)).** On a build with

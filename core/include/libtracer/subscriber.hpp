@@ -618,6 +618,10 @@ struct subscriber_t {
  * RFC-0009 §D.2 makes the indices stable.
  */
 struct subscriber_slot_t {
+    /** @brief A view, a policy word and a flag: nothing points into the record, so the slot
+     *         table grows by `memcpy` and its growth releases nothing
+     * (`%mem::bitwise_relocatable`). */
+    using bitwise_relocatable_t = void;
     /** @brief The SUBSCRIBER TLV view the slot was written from (@ref subscriber_t::source_view),
      *         empty for in-process sugar that carries none. */
     view::view_t source_view{};
@@ -1065,6 +1069,9 @@ inline void scan_retired_edges(edge_block_t& b) noexcept {
  */
 class detached_edges_t {
    public:
+    /** @brief Pointers and an array of them, none into the object, so the retire batch grows
+     *         by `memcpy` and its growth reaches no destructor (`%mem::bitwise_relocatable`). */
+    using bitwise_relocatable_t = void;
     /** @brief Nothing detached; the slot table, when one is moved in, keeps @p src. */
     explicit detached_edges_t(mem::block_source_t& src) noexcept : slots_(src) {}
     detached_edges_t(const detached_edges_t&) = delete;
