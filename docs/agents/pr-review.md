@@ -188,11 +188,13 @@ available on this axis — more serious than anything in 2f or 2g.
    contradicts this.
 4. **Forwarding is core.** Two transport modules loaded means the node is a
    forwarder — a stateless `FWD` hop. From a subscriber's view, transport choice
-   is invisible. "Stateless" is qualified: the route-handle plane and RFC-0027's
-   path labels put per-flow state on hops that mint labels, both **opt-in and off
-   by default**, and both degrade to the bare hop when the state is absent. A
-   change that makes state **mandatory** on the bare hop breaks the claim; a
-   change that adds more opt-in state does not, but must say how it degrades.
+   is invisible. A stream delivery is chain delivery (a `FWD{WRITE}` on the edge's
+   chain, with an empty `src`), and the route-handle plane is retired (RFC-0032). "Stateless"
+   keeps one qualification until RFC-0029 slice S3 lands: RFC-0027's path labels put per-flow
+   state on hops that mint labels, **opt-in and off by default**, and degrade to the bare hop
+   when the state is absent. Only a transport may keep a link-local alias private to its two
+   ends. A change that makes state **mandatory** on the bare hop breaks the claim; a change that
+   adds more opt-in state does not, but must say how it degrades.
 5. **The graph imposes no shape on user data.** An endpoint is a name attached to
    a memory view; the protocol claims nothing about what the memory contains. A
    change that requires user payloads to be framed, typed or aligned a particular

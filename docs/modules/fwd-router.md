@@ -116,17 +116,15 @@ stored return route, or over the edge's PAIR chain (RFC-0024 §7.1) with an empt
 namespace tr::net {
 
 class fwd_router_t {
-    // graph: terminus op resolution. label_src: the NOTHROW block source the router's
-    // long-lived link state draws from (#603 defect 1 / ADR-0065).
-    // rx: the NOTHROW block source the terminus decode arena draws from (ADR-0065).
-    // flat: the byte backend EVERY rope flatten draws from, forward AND terminus (#730/#766).
-    // egress: the reply-egress backend (#795).
-    // FOUR independent memory seams, each defaulting to the global heap on its own.
-    explicit fwd_router_t(graph::graph_t& graph,
-                          mem::block_source_t* label_src = &mem::heap_source(),
-                          mem::block_source_t* rx = &mem::heap_source(),
-                          mem::mem_backend_t* flat = &mem::heap_backend(),
-                          mem::mem_backend_t* egress = &mem::heap_backend());
+    // graph: terminus op resolution. planes: the router's FIVE independent memory planes
+    // (router_planes_t), each defaulting to the net sub-pool on its own:
+    //   label_src  the NOTHROW block source the router's long-lived link state draws from
+    //              (#603 defect 1 / ADR-0065);
+    //   rx         the NOTHROW block source the terminus decode arena draws from (ADR-0065);
+    //   flat       the byte backend EVERY rope flatten draws from, forward AND terminus (#730/#766);
+    //   egress     the reply-egress backend (#795);
+    //   retained   a remote subscription's life-long copies (#1610); null means `flat`.
+    explicit fwd_router_t(graph::graph_t& graph, const router_planes_t& planes = {});
 
     // `name` is this node's mount RUN for `link`: the leading dst segments that route onward
     // through it, and the run prepended to src on the way back. ANY width (#523) -- the
@@ -134,7 +132,8 @@ class fwd_router_t {
     // width, so the only bound is the path-depth budget. Returns false, always (not only in
     // debug), for a name no address could ever name: empty, with an empty segment, or wider
     // than kMaxSegments. Optional per-child failable source; null falls back to the router's.
-    bool add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
+    bool add_child(std::string_view name, transport_t& link, mem::block_source_t* rx = nullptr,
+                   link_kind_t kind = {});
     bool remove_child(std::string_view name);   // removal, not departure
     void link_down(std::string_view link_name); // departure: evict edges
 
@@ -434,7 +433,7 @@ Inside the process a link is addressed by its connection vertex's handle (the ro
   was registered, so a caller that ignores it wires a link that is audible on its transport and
   resolvable by no `dst`, while `size()` and `live_size()` report the registry as healthy.
 - **`remove_child` is removal; `link_down` is departure.** A link that merely dropped must take
-  `link_down`, which evicts subscriber edges and label state but keeps the registry entry. Calling
+  `link_down`, which evicts subscriber edges but keeps the registry entry. Calling
   `remove_child` on a reconnecting `DIAL` link permanently unroutes it, because under the RFC-0014
   model a connection's *vertex* outlives its *socket*. Conversely, call `remove_child` **before**
   destroying the `transport_t`, or a forward can resolve a freed object.

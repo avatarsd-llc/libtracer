@@ -240,7 +240,6 @@ Slices assemble into a coherent group keyed by **`(origin, ts)`**, with each sli
 | --- | --- |
 | Local | The producing vertex path, available out-of-band. |
 | Remote, full-route | The accumulated `src` route of the delivering `FWD{WRITE}` — the return route to the producer, retained in the subscriber slot at subscribe time ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x04`) and grown one link-NAME per hop ([07-host-embedding.md](07-host-embedding.md) §loop safety). |
-| Remote, compacted | The per-link `label` aliasing that return route ([05-protocol-tlvs.md](05-protocol-tlvs.md) §route-handle frames). A label is per-link and re-advertised after a reconnect, so it identifies an origin only within one flow. |
 | Header-elided (CAN) | The link-local peer identity the transport derives from the frame id ([14-can-transport.md](14-can-transport.md)). |
 
 Grouping by `ts` alone is wrong: two publishers that happen to emit at the same timestamp merge into one group.
@@ -366,7 +365,7 @@ every other node's part still compacts. A local call is a chain of length one, a
 a canonical resolution and from nothing else, so no address is reachable in PAIR form alone, a
 refused PAIR (`tr::path::not_found`) always has a string original to fall back to, and the next reply
 re-teaches the chain. A PAIR-bearing `PATH` is therefore **never admissible as a canonical key** —
-not as a vertex-map lookup key, not as an `ADVERTISE` route, not as a pre-encoded path handle — which
+not as a vertex-map lookup key, not as a pre-encoded path handle — which
 keeps one spelling per address and keeps byte-prefix-implies-ancestor true. Canonical support is
 mandatory; PAIR support is optional to issue and to honour.
 

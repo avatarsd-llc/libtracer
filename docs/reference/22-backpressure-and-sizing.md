@@ -232,11 +232,12 @@ edge.
   `egress_backend()` (`core/include/libtracer/fwd_router.hpp:fwd_router_t::label_source`) reach the four injected
   objects even when the host took the defaults — which is what makes the §5 loop runnable on a
   gateway at all.
-- **Watch the silent degrade**: label exhaustion. `labels_used(link)` against the wire constant
-  65535, plus `labels_exhausted()`; and `label_not_found()` on the receiving side. Nothing is
-  lost when a label table fills — the flow reverts to full-route `FWD{WRITE}` frames, which is
-  *correct* and *larger*. It shows up as bandwidth, not as errors, and it is the degrade behind
-  the #1491/#1502 reply-cost story.
+- **No label space to exhaust**: a forwarder holds no per-link label table since
+  [RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md)
+  (#1951). Every stream delivery is a `FWD{WRITE}` on the edge's `PAIR` chain, so a deep path
+  costs bytes on the wire (11 B per `PAIR` element, RFC-0029 §5.2), not a table that can fill.
+  `label_not_found()` on the receiving side still counts labelled `dst` elements this node
+  refused; it moves after a teardown and is not a fault on its own.
 - **Designated pressure point**: the egress TX pool of the busiest link. `rx` is sized so
   `arena_dropped` stays zero — and `arena_dropped` is deliberately split from `malformed_rx` so a
   peer sending garbage never reads as a slab that is too small.
@@ -496,8 +497,7 @@ Five traps this loop has to name, because each one has produced a wrong size:
   decision can be made against.
 
 Beyond the block sources, the same loop reads: `synchronized_pool_t`'s `in_use()` / `available()`
-beside `capacity()` for the shared-pool archetype; `route_handle_t::labels_used(link)` against the
-wire constant 65535 for a forwarder's label space; `transport_t::drop_stats()` for every link kind
+beside `capacity()` for the shared-pool archetype; `transport_t::drop_stats()` for every link kind
 (both ESP WebSocket links answer it, so a kind-agnostic supervisor no longer reads zero from a
 link that was counting); and `graph_t::delivery_drops()` for the fan-out plane.
 
@@ -519,8 +519,8 @@ as one snapshot: `in_use` and `peak` against `capacity`, plus `refused` and `dro
 *movement* (§5's difference-between-snapshots discipline, not the instant).
 
 **In-process supervisors can do this today**, against the shipped C++ accessors: a supervisor task
-holding the `graph_t`, the `fwd_router_t` and the links calls `stats()`, `drop_stats()` and
-`labels_used()` on its own cadence and applies §5's readings. This is the arm to build now.
+holding the `graph_t`, the `fwd_router_t` and the links calls `stats()` and `drop_stats()` on its own
+cadence and applies §5's readings. This is the arm to build now.
 
 **The remote arm — shipped.** The same monitoring is reachable over the protocol: a supervisor
 elsewhere on the graph issues an ordinary READ of a node's reserved `:stats` field and gets the
@@ -533,9 +533,9 @@ block, rather than a field at a time. The spelling is
 read <any-vertex>:stats.mem.control        ; capacity / in_use / peak / refused / largest_refused
 read <any-vertex>:stats.mem.ring           ; the same five, for the default receiver-ring source
 read <any-vertex>:stats.graph.delivery     ; no_target / denied / out_of_memory / fan_out_truncated
-read <any-vertex>:stats.router.drops       ; the forwarder's seven per-cause cold-path drops
-read <any-vertex>:stats.labels.table       ; labels_exhausted / refused_bindings / label_not_found / label_resolves
-read <any-vertex>:stats.link.<child>       ; dropped_rx / malformed_rx / dropped_tx (+ labels_used)
+read <any-vertex>:stats.router.drops       ; the forwarder's eight per-cause cold-path drops
+read <any-vertex>:stats.labels.table       ; label_not_found / label_resolves
+read <any-vertex>:stats.link.<child>       ; dropped_rx / malformed_rx / dropped_tx
 ```
 
 The field is **node-scoped** — it takes no vertex, and every vertex of the node answers
@@ -544,8 +544,8 @@ identically — so a monitor addresses whichever vertex suits it. It is **`READ`
 **read-only and never awaitable**, and the whole block is sampled in the single call that answers
 the read, which is what makes §5's difference-between-snapshots reading valid.
 
-**The net-plane seams too, and how they get there.** The router, label-table and per-link
-counters are per `fwd_router_t` / `route_handle_t` / link rather than per graph, and L4 still does
+**The net-plane seams too, and how they get there.** The router and per-link
+counters are per `fwd_router_t` / link rather than per graph, and L4 still does
 not reach DOWN into the net plane to sample them. The wiring points the other way
 ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md)
 §Amendment 2): the router registers a sampler UP into the graph in its constructor, beside the five
