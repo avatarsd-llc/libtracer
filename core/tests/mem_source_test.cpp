@@ -199,8 +199,9 @@ int main() {
             check(own == tr::mem::kSlabPool,
                   "and each default graph draws its tables from its own sub-pool (#1778)");
         }
-        check(g_default.derives_sub_pools(),
-              "it derives sub-pools from the default root: the host slab pool or the MCU arena");
+        check(g_default.derives_sub_pools() == !tr::mem::kHeapRoot,
+              "it derives sub-pools from the default root: the host slab pool or the MCU arena "
+              "(the heap root has none, #2090)");
 
         budget_source_t injected(8);
         tr::graph::graph_t g_ptr{injected};
