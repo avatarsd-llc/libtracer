@@ -1252,8 +1252,10 @@ URIs.
 
   Text is in one UTF-8 language. There is no i18n machinery. `access` is not a document key:
   the runtime projects it (§B.1).
-- **Value bytes.** Structure is the TLV tree, which the TLV header already describes: `POINT`
-  and `NAME` children make a record or an array. A leaf is a primitive (`bool`, `u8`, `u16`,
+- **Value bytes.** Structure is any TLV whose `opt.PL=1`, with child TLVs as its payload
+  ([reference/06](../../reference/06-user-data-packing.md) §Structured record with named
+  fields). `NAME` + value children make a record; homogeneous children make a collection. A
+  generic client recurses on `PL`, and the intent document adds only meaning. A leaf is a primitive (`bool`, `u8`, `u16`,
   `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, little-endian unless `byte-order`
   says otherwise), `utf8`, or `bytes`. A foreign encoding is `bytes` plus `media-type`. There is
   no `encoding` key and no `variant`.
