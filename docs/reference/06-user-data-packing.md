@@ -2,7 +2,7 @@
 
 > **Topic**: how application data of any size — from a single boolean to a streaming GB/s feed — is put into the graph and delivered with the intended copy semantics.
 > **Audience**: anyone designing the data layout for an application on top of libtracer.
-> **See also**: [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics; [03-addressing.md](03-addressing.md) §address-shift slicing; [05-protocol-tlvs.md](05-protocol-tlvs.md) §VALUE.
+> **See also**: [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics; [03-addressing.md](03-addressing.md) §address-shift slicing; [05-protocol-tlvs.md](05-protocol-tlvs.md) §VALUE. For choosing what becomes a vertex, a structured value or a `:` field, see [24-modelling-granularity.md](24-modelling-granularity.md).
 
 ---
 
