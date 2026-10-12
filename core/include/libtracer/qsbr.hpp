@@ -201,6 +201,23 @@
  * per load where `seq_cst` paid two. An entry parked
  * after `L_c` carries `c` or later, which the horizon does not cover: it waits for the next
  * pass. So no caller needs "nothing joins while I scan", and none holds a lock across the fence.
+ *
+ * @section qsbr_single_flight Single flight, under the asymmetric fence
+ *
+ * With `%kMembarrier`, `%drain_ripe`'s passes run single flight: a drainer whose unfenced
+ * scan found something ripe, and that finds another pass fencing (`%in_flight` non-zero),
+ * records itself there and returns the empty horizon instead of issuing a second `membarrier`.
+ * Skipping only defers a free, so safety is the arguments above unchanged.
+ *
+ * Liveness: the pass in flight takes `%in_flight` back to 0 with an `exchange` after `F2` and
+ * BEFORE its scan. Whatever made a skipper's unfenced scan find something ripe (its own offline
+ * store, an entry it made READY) is sequenced before its `fetch_add`, which that `exchange`
+ * reads, so the holder's scan sees it too, at no second fence: a scan anywhere after `F2` is a
+ * valid horizon for its `c`. A drainer arriving after the `exchange` finds 0 and runs its own
+ * pass. What a skip can still defer is an entry retired after the holder's `L_c`, which its `c`
+ * does not cover: that one waits for the next drain, `%retire` or `graph_t::collect` on any
+ * thread, as any entry parked behind an open bracket does. `%retire` and `graph_t::collect` are
+ * not gated. The fenced build has no gate and no `%in_flight`.
  */
 #ifndef LIBTRACER_QSBR_HPP
 #define LIBTRACER_QSBR_HPP
@@ -414,6 +431,15 @@ struct registry_t {
     static constinit registry_t reg{};
     return reg;
 }
+
+/**
+ * @brief Drain passes in flight, for single flight (@ref qsbr_single_flight): 0 when none is,
+ *        else 1 plus the passes that skipped. A variable template so that only a build that
+ *        instantiates `%horizon<true>` (one with @ref kMembarrier) has it; it is off the
+ *        registry's read-mostly line, and only drainers write it.
+ */
+template <bool kSingleFlight>
+inline constinit std::atomic<std::uint32_t> in_flight{0};
 
 /** @brief This thread's claim on a participant index, released when the thread ends. */
 class participant_t {
@@ -658,18 +684,24 @@ template <std::memory_order MO>
  * fence is `F1`, `membarrier`, `F2`, and a `membarrier` call that fails yields the empty
  * horizon, so frees are deferred, never early.
  */
-template <class Wants>
+template <bool kSingleFlight = false, class Wants>
 [[nodiscard]] inline horizon_t horizon(Wants&& wants) noexcept {
     registry_t& r = registry();
     constexpr std::memory_order relaxed = std::memory_order_relaxed;
     if (!wants(scan<relaxed>(r.ctl.epoch.load(relaxed)))) return {};
+    if constexpr (kSingleFlight)
+        if (in_flight<kSingleFlight>.fetch_add(1, std::memory_order_acq_rel) != 0) return {};
     const std::uint32_t c = r.ctl.epoch.load(std::memory_order_acquire);  // L_c, before F_W
     std::atomic_thread_fence(std::memory_order_seq_cst);
 #if defined(LIBTRACER_QSBR_MEMBARRIER)
     if constexpr (kMembarrier) {
-        if (asym_ready() && syscall(__NR_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0)
-            return {};
+        const bool refused =
+            asym_ready() && syscall(__NR_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0;
         std::atomic_thread_fence(std::memory_order_seq_cst);
+        // Back to 0 BEFORE the scan, so the scan sees what every pass that skipped meanwhile saw.
+        if constexpr (kSingleFlight)
+            (void)in_flight<kSingleFlight>.exchange(0, std::memory_order_acq_rel);
+        if (refused) return {};
     }
 #endif
     return scan<std::memory_order_acquire>(c);
@@ -691,7 +723,7 @@ template <class Wants>
  */
 [[gnu::noinline]] inline void drain_ripe() noexcept {
     registry_t& r = registry();
-    const horizon_t h = horizon([&r](const horizon_t& h0) {
+    const horizon_t h = horizon<kMembarrier>([&r](const horizon_t& h0) {
         for (const retired_slot_t& s : r.retired)
             if (s.state.load(std::memory_order_acquire) == slot_state_t::READY &&
                 h0.past(s.epoch.load(std::memory_order_relaxed)))

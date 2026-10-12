@@ -16,6 +16,7 @@
  */
 #include <algorithm>
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -90,9 +91,85 @@ void hook_runs_after_every_reader() {
     check(retired.load() > 0, "the writer retired pairs");
 }
 
+/**
+ * @brief A drain that meets a pass in flight skips it and leaves its request behind
+ *        (`qsbr.hpp` §qsbr_single_flight): the pair stays parked, the skip is counted in
+ *        `in_flight`, and nothing is freed early.
+ */
+void a_skipped_pass_leaves_its_request() {
+    if constexpr (!q::kMembarrier) {
+        std::printf("  (single flight is not compiled in: the fenced build has no drain gate)\n");
+        return;
+    } else {
+        auto& flight = q::in_flight<true>;
+        object_t x;
+        q::enter();
+        (void)q::retire(&x, release);                // this thread's own bracket holds it: parked
+        flight.store(1, std::memory_order_relaxed);  // as if another pass were fencing now
+        check(q::leave(), "the bracket closes");
+        q::drain();
+        check(!x.released.load() && flight.load() == 2,
+              "a drain that meets a pass in flight skips it and records the skip");
+        flight.store(0, std::memory_order_relaxed);  // that pass is over
+        q::drain();
+        check(x.released.load(), "with no pass in flight, the next drain frees the pair");
+    }
+}
+
+/**
+ * @brief Drain passes that collide strand nothing (`qsbr.hpp` §qsbr_single_flight): once every
+ *        reader has made its last quiescent point, with no drain after it, the pair those
+ *        readers held has run.
+ *
+ * Each round the readers open a bracket, the test retires a pair they hold, and the readers
+ * then all leave and drain at the same moment, so drain passes overlap. Under the asymmetric
+ * fence only one of them fences; the others skip, and the one in flight must see what they
+ * saw. The pair is retired before any of those passes reads the counter, which is the case a
+ * skip must never defer. Nothing drains after that, so a skip that went unserved leaves the
+ * pair parked. Without the asymmetric fence there is no gate and this checks the plain drain.
+ */
+void collided_passes_strand_nothing() {
+    constexpr int kRounds = 3000;
+    constexpr unsigned kReaders = 3;
+    const auto pool = std::make_unique<object_t[]>(kRounds);
+    std::barrier sync(kReaders + 1);
+    std::vector<std::thread> ts;
+    for (unsigned t = 0; t < kReaders; ++t) {
+        ts.emplace_back([&] {
+            for (int round = 0; round < kRounds; ++round) {
+                q::enter();
+                sync.arrive_and_wait();  // online: the test retires a pair this bracket holds
+                sync.arrive_and_wait();  // retired: every reader leaves and drains at once
+                if (q::leave()) q::drain();
+                sync.arrive_and_wait();  // drained: the test looks, then cleans up
+                sync.arrive_and_wait();
+            }
+        });
+    }
+    const std::uint64_t drops_before = q::drops();
+    int stranded = 0;
+    for (int round = 0; round < kRounds; ++round) {
+        sync.arrive_and_wait();
+        (void)q::retire(&pool[round], release);
+        sync.arrive_and_wait();
+        sync.arrive_and_wait();
+        stranded += !pool[round].released.load(std::memory_order_acquire);
+        q::drain();  // so a stranded pair does not carry into the next round
+        sync.arrive_and_wait();
+    }
+    for (auto& t : ts) t.join();
+    std::printf("  %u readers x %d rounds (%s), %d pairs left parked after the last drain\n",
+                kReaders, kRounds, q::kMembarrier ? "single-flight drain" : "no drain gate",
+                stranded);
+    check(stranded == 0, "no colliding drain pass leaves a ripe pair parked");
+    check(q::drops() == drops_before, "and the table never filled");
+}
+
 }  // namespace
 
 int main() {
     hook_runs_after_every_reader();
+    a_skipped_pass_leaves_its_request();
+    collided_passes_strand_nothing();
     return tr::testing::summary("qsbr_drain_claim");
 }
