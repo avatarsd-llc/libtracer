@@ -102,6 +102,8 @@ std::span<const std::byte> g_reply;
 std::string_view g_subject;
 /** @brief The ctx the hook was handed, for the registration check. */
 void* g_ctx = nullptr;
+/** @brief The session descriptor the hook was last handed (#1846). */
+int g_hook_fd = -1;
 
 void reset_hook(std::vector<httpd_ws_link_t::auth_verdict_t> verdicts) {
     g_seen.clear();
@@ -109,11 +111,14 @@ void reset_hook(std::vector<httpd_ws_link_t::auth_verdict_t> verdicts) {
     g_reply = {};
     g_subject = {};
     g_ctx = nullptr;
+    g_hook_fd = -1;
 }
 
 /** @brief The hook under test: record the payload, answer the scripted verdict. */
-httpd_ws_link_t::auth_result_t recording_auth(void* ctx, std::span<const std::byte> payload) {
+httpd_ws_link_t::auth_result_t recording_auth(void* ctx, int sockfd,
+                                              std::span<const std::byte> payload) {
     g_ctx = ctx;
+    g_hook_fd = sockfd;
     g_seen.emplace_back(payload.begin(), payload.end());
     httpd_ws_link_t::auth_result_t res;
     const std::size_t at = g_seen.size() - 1;
@@ -423,11 +428,130 @@ bool admit_all(void*, httpd_req_t*) { return true; }
 httpd_ws_link_t::admission_verdict_t g_admission_verdict =
     httpd_ws_link_t::admission_verdict_t::ADMIT;
 int g_admission_calls = 0;
+/** @brief The session key the admission predicate last read from its request (#1846). */
+int g_admission_fd = -1;
 
 /** @brief A three-valued admission predicate answering whatever the case scripted. */
-httpd_ws_link_t::admission_verdict_t preauth_admission(void*, httpd_req_t*) {
+httpd_ws_link_t::admission_verdict_t preauth_admission(void*, httpd_req_t* req) {
     ++g_admission_calls;
+    g_admission_fd = httpd_req_to_sockfd(req);
     return g_admission_verdict;
+}
+
+/**
+ * @brief #1846 — the credential hook is told WHICH session it is judging: the same key the
+ *        admission predicate read at the handshake, so an embedder can re-tag that session.
+ */
+void test_hook_sees_the_admission_key() {
+    std::printf("#1846 the auth hook's session argument is the admission predicate's key:\n");
+    reset_server();
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    link->set_admission_verdict_cb(&preauth_admission, nullptr);
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook(
+        {httpd_ws_link_t::auth_verdict_t::CONTINUE, httpd_ws_link_t::auth_verdict_t::ACCEPT});
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::ADMIT;  // provisional
+    g_admission_fd = -1;
+    constexpr int kA = 695;
+    constexpr int kB = 696;
+
+    check(fake_httpd::instance().open_session(kA), "session A's handshake was answered");
+    const int admitted_a = g_admission_fd;
+    check(fake_httpd::instance().open_session(kB), "session B's handshake was answered");
+    const int admitted_b = g_admission_fd;
+    check(admitted_a == kA && admitted_b == kB, "the predicate keyed each handshake by its socket");
+
+    check(fake_httpd::instance().deliver_frame(kB, kCredential) == ESP_OK, "B's first frame");
+    check(g_hook_fd == admitted_b, "the hook judging B was handed B's admission key");
+    check(fake_httpd::instance().deliver_frame(kA, kCredential) == ESP_OK, "A's first frame");
+    check(g_hook_fd == admitted_a, "and the hook judging A was handed A's, not B's");
+    check(fake_httpd::instance().deliver_frame(kA, kCredential) == ESP_OK, "A's second frame");
+    check(g_hook_fd == admitted_a && peer_count(*link) == 1,
+          "the ACCEPT that promoted A named A's key as well");
+
+    fake_httpd::instance().close_session(kA);
+    fake_httpd::instance().close_session(kB);
+    run_server();
+}
+
+/** @brief The subject @p link answers for the session at slot @p index, generation @p gen. */
+std::string subject_of(const httpd_ws_link_t& link, std::uint32_t index, std::uint32_t gen) {
+    char scratch[tr::net::kPeerNameChars] = {};
+    return std::string(link.peer_subject(tr::net::peer_handle_t{index, gen}, scratch));
+}
+
+/**
+ * @brief #1846 — a subject is bound ONLY by an ACCEPT. A CONTINUE or a REJECT that carries one
+ *        binds nothing, and neither does a pending session's own traffic.
+ */
+void test_subject_is_bound_only_by_accept() {
+    std::printf("#1846 only an ACCEPT binds a caller subject:\n");
+    reset_server();
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook(
+        {httpd_ws_link_t::auth_verdict_t::CONTINUE, httpd_ws_link_t::auth_verdict_t::REJECT});
+    g_subject = "role:operator";
+    constexpr int kFd = 697;
+
+    check(fake_httpd::instance().open_session(kFd), "the handshake was answered");
+    check(fake_httpd::instance().deliver_frame(kFd, kCredential) == ESP_OK, "a CONTINUE frame");
+    // A fresh link claims slot 0 at generation 1.
+    check(subject_of(*link, 0, 1).empty(), "a CONTINUE carrying a subject binds none");
+    check(fake_httpd::instance().deliver_frame(kFd, kCredential) == ESP_OK, "a REJECT frame");
+    run_server();
+    check(subject_of(*link, 0, 1).empty(), "nor does a REJECT carrying one");
+
+    // An ACCEPT with an EMPTY subject promotes the session and binds nothing either: it keeps
+    // the link-name caller.
+    reset_hook({httpd_ws_link_t::auth_verdict_t::ACCEPT});
+    check(fake_httpd::instance().open_session(kFd), "a second session's handshake");
+    check(fake_httpd::instance().deliver_frame(kFd, kCredential) == ESP_OK, "an ACCEPT frame");
+    check(peer_count(*link) == 1, "the ACCEPT promoted it");
+    check(subject_of(*link, 0, 2).empty(), "an empty subject binds no caller");
+
+    fake_httpd::instance().close_session(kFd);
+    run_server();
+}
+
+/**
+ * @brief #1846 — the bound subject never survives slot reuse: the handle of the departed
+ *        session reads nothing, even once the slot's next session has signed in itself.
+ */
+void test_subject_does_not_survive_slot_reuse() {
+    std::printf("#1846 a bound subject dies with its session:\n");
+    reset_server();
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook({httpd_ws_link_t::auth_verdict_t::ACCEPT});
+    g_subject = "role:operator";
+    constexpr int kFd = 698;
+
+    check(fake_httpd::instance().open_session(kFd), "the first session's handshake");
+    check(fake_httpd::instance().deliver_frame(kFd, kCredential) == ESP_OK, "it signs in");
+    check(subject_of(*link, 0, 1) == "role:operator",
+          "its own handle reads the subject its ACCEPT bound");
+    fake_httpd::instance().close_session(kFd);
+    run_server();
+    check(subject_of(*link, 0, 1).empty(), "after the close its handle reads nothing");
+
+    // The same descriptor and the same slot, a new session that has not signed in yet.
+    check(fake_httpd::instance().open_session(kFd), "a new session reuses descriptor and slot");
+    reset_hook(
+        {httpd_ws_link_t::auth_verdict_t::CONTINUE, httpd_ws_link_t::auth_verdict_t::ACCEPT});
+    g_subject = "role:viewer";
+    check(fake_httpd::instance().deliver_frame(kFd, kCredential) == ESP_OK, "it claims slot 0");
+    check(subject_of(*link, 0, 2).empty(), "the new session inherits no subject while pending");
+    check(fake_httpd::instance().deliver_frame(kFd, kCredential) == ESP_OK, "it signs in");
+    check(subject_of(*link, 0, 2) == "role:viewer", "and then reads only its OWN subject");
+    check(subject_of(*link, 0, 1).empty(),
+          "while the departed session's handle still reads nothing: the generation is the tag");
+
+    fake_httpd::instance().close_session(kFd);
+    run_server();
 }
 
 /**
@@ -884,6 +1008,9 @@ int main() {
     test_full_ledger_refuses_the_handshake();
     test_refusal_after_upgrade_closes_with_a_code();
     test_refusal_after_upgrade_custom_code_and_long_reason();
+    test_hook_sees_the_admission_key();
+    test_subject_is_bound_only_by_accept();
+    test_subject_does_not_survive_slot_reuse();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

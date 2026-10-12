@@ -3142,7 +3142,7 @@ void httpd_ws_link_t::on_auth_message(session_t* slot, std::span<const std::byte
     // The hook runs with NO lock of this link held — foreign code of unbounded duration,
     // and `peers_m_` is the mutex the whole send path needs. Same placement the admission
     // predicate gets in ws_pre_handshake, for the same reason.
-    const auth_result_t res = fn(ctx, body);
+    const auth_result_t res = fn(ctx, fd, body);
     // The reply goes out FIRST, whatever the verdict. On CONTINUE it is the handshake's next
     // message; on REJECT it lets a scheme say why in its own language, ahead of the close
     // code; on ACCEPT it is the confirmation a client may be waiting for before it starts
@@ -3154,6 +3154,8 @@ void httpd_ws_link_t::on_auth_message(session_t* slot, std::span<const std::byte
             if (!slot->open || slot->dead) return;  // departed inside the hook
             const std::size_t n =
                 res.subject.size() < kMaxSubjectChars ? res.subject.size() : kMaxSubjectChars;
+            // The subject is the session's caller context from the next frame on (#1846):
+            // @ref peer_subject answers it for this generation only, and the reclaim clears it.
             if (n != 0) std::memcpy(slot->subject, res.subject.data(), n);
             slot->subject[n] = '\0';
             // The session becomes a peer HERE, and everything that was closed to it opens at
@@ -3404,10 +3406,12 @@ void httpd_ws_link_t::note_rx_drop(session_t* slot) {
 void httpd_ws_link_t::deliver(peer_handle_t peer, std::span<const std::byte> frame) {
     // Peer-named bus tag when the facet is on (each tab its own return route); the flat
     // point-to-point sink otherwise — matching what fwd_router_t::add_child installed.
-    if (peer_named_)
+    if (peer_named_) {
         peer_rx_.deliver_borrowed(peer, frame);
-    else
+    } else {
+        rx_peer_ = peer;  // the flat arm's WHO, for @ref inbound_peer (#1846)
         rx_.deliver_borrowed(frame);
+    }
 }
 
 void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::view_t frame) {
@@ -3417,10 +3421,12 @@ void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::view_t frame) {
     // subrope it, or forward it; a span-only sink installed by some other embedder gets the
     // same bytes borrowed for the call. Either way this function is unreachable unless an
     // integrator named an rx_backend, so no borrowed link pays a single instruction of it.
-    if (peer_named_)
+    if (peer_named_) {
         peer_rx_.deliver(peer, std::move(frame));
-    else
+    } else {
+        rx_peer_ = peer;
         rx_.deliver(std::move(frame));
+    }
 }
 
 void httpd_ws_link_t::deliver_owned_copy(peer_handle_t peer, std::span<const std::byte> body) {
@@ -4621,6 +4627,18 @@ std::string_view httpd_ws_link_t::peer_name(peer_handle_t peer, std::span<char> 
     if (name.len > scratch.size()) return {};
     std::copy_n(name.text.data(), name.len, scratch.data());
     return std::string_view(scratch.data(), name.len);
+}
+
+std::string_view httpd_ws_link_t::peer_subject(peer_handle_t peer, std::span<char> scratch) const {
+    (void)scratch;
+    // No lock: the claim, the ACCEPT and the reclaim that write these fields all run on the
+    // httpd task, which is also the task delivering the frame this is asked about. The
+    // generation compare is the tag (#1846): a handle of a departed session names a slot whose
+    // generation has moved on, and gets no subject even if the slot's new session has one.
+    if (!peer.valid() || peer.index >= slots_.size()) return {};
+    const session_t* const s = slots_[peer.index];
+    if (!s->open || s->auth_pending || s->gen != peer.generation) return {};
+    return std::string_view(s->subject);
 }
 
 httpd_ws_link_t::peer_resolution_t* httpd_ws_link_t::acquire_resolution(session_t* slot) {
