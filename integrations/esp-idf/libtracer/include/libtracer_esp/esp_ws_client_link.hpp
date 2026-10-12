@@ -418,7 +418,8 @@ class esp_ws_client_link_t final : public transport_t {
      * The second phase of the two-phase bring-up the base contract describes
      * (`transport_t::start_receiving`): construct with `defer_recv`, install the sinks,
      * then call this. It is also where a `defer_recv` link's recv thread is SPAWNED
-     * (#1606), so an unarmed link holds no thread stack; a no-op after @ref shut_down.
+     * (#1606), so an unarmed link holds no thread stack; a no-op after @ref shut_down. Not
+     * concurrent with @ref shut_down: the owner orders the two, as `transport_vertex_t` does.
      * IDEMPOTENT and SAFE ON A LINK THAT NEVER CONNECTED —
      * `transport_vertex_t::make_connection` arms every link unconditionally once the
      * receiver is installed, and on a link constructed without `defer_recv` (or armed

@@ -686,6 +686,10 @@ void test_an_unconnected_link_holds_no_connection_memory() {
               "both scratches went back with the connection");
         check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
               "and so did its transport pair, ahead of the re-dial");
+        // End CONNECTED, so the teardown joins the recv thread: a failing dial still in
+        // flight would be orphaned and return its slot to `state` after this scope.
+        fake_ws::fail_connects(false);
+        check(wait_until([&] { return link->link_up(); }, 5s), "and it came back up");
     }
     check(drained_fake(), "it drained");
     check(state.live == 0 && io.live == 0, "and its destructor returned everything else");
@@ -759,6 +763,64 @@ void test_shut_down_stops_now_and_the_destructor_frees() {
     check(drained_fake(), "it drained");
     check(state.live == 0, "and the destructor returned everything it drew");
 }
+
+/**
+ * @brief A heap store that, once @ref park is set, holds the next draw until it is cleared:
+ *        the lever that stops a dial between its resolve and its `connected_` store.
+ */
+class parking_source_t final : public tr::mem::block_source_t {
+   public:
+    parking_source_t() noexcept : tr::mem::block_source_t("parking") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (park.load()) {
+            parked.store(true);
+            while (park.load()) std::this_thread::sleep_for(1ms);
+        }
+        return tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+    std::atomic<bool> park{false};   /**< @brief Hold the next draw. */
+    std::atomic<bool> parked{false}; /**< @brief A draw is being held. */
+};
+
+/**
+ * @brief #1606 review: shut_down() racing a dial that has RESOLVED but not yet published
+ *        `connected_ = true` must still leave the link down.
+ *
+ * The dial is held inside its scratch draw — past the resolve, so it is not in flight and
+ * shut_down() cannot condemn it — while shut_down() runs its top-of-function `connected_`
+ * clear and parks in the join. Released, the dial stores `true` and the thread exits on
+ * `stop_` without a departure arm. Without the second clear beside the release, link_up()
+ * then answers true for a link whose pair is already gone. Run under TSan as well.
+ */
+void test_shut_down_racing_a_resolved_dial_leaves_the_link_down() {
+    std::printf("#1606 shut_down() racing a resolved dial leaves the link down:\n");
+    parking_source_t state;
+    const tr::net::esp_ws_client_config_t cfg{.rx_bytes = kBufBytes,
+                                              .tx_bytes = kBufBytes,
+                                              .defer_recv = true,
+                                              .memory = {.rx = nullptr, .state = &state}};
+    fake_ws::reset();
+    {
+        auto link =
+            tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        state.park.store(true);
+        link->start_receiving();
+        check(wait_until([&] { return state.parked.load(); }, 2s),
+              "the dial resolved and is held inside its scratch draw");
+        std::thread stopper([&] { link->shut_down(); });
+        // Let shut_down() pass its first clear and reach the join; the dial cannot move.
+        std::this_thread::sleep_for(100ms);
+        state.park.store(false);
+        stopper.join();
+        check(!link->link_up(), "link_up() is false once shut_down() returns");
+        check(!link->stats().up, "and so is stats().up");
+        check(fake_ws::live_handles() == 0, "and the pair is released");
+    }
+    check(drained_fake(), "it drained");
+}
 }  // namespace
 
 int main() {
@@ -776,6 +838,7 @@ int main() {
     test_an_unconnected_link_holds_no_connection_memory();
     test_a_refused_scratch_is_a_failed_dial();
     test_shut_down_stops_now_and_the_destructor_frees();
+    test_shut_down_racing_a_resolved_dial_leaves_the_link_down();
     // Nothing detached may still be running here: a condemned dial's recv thread outlives
     // its link by design, and one still inside the transport at process exit is a crash
     // under ASan/TSan and a leak under LSan. Every case drains, and this is the backstop.

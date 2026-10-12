@@ -1,7 +1,8 @@
 /**
  * @file
- * @brief `tr::net::fixed_array_t` — a run of @p T drawn ONCE from a `block_source_t`, the
- *        shape every once-sized buffer and table in this component's links has.
+ * @brief `tr::net::fixed_array_t` — a run of @p T drawn from a `block_source_t` at a fixed
+ *        size, the shape every fixed-size buffer and table in this component's links has:
+ *        drawn once, or once per connection (the WS client's scratches, #1606).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC

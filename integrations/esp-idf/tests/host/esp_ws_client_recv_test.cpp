@@ -71,6 +71,7 @@
 #include <vector>
 
 #include "fake_esp_transport.hpp"
+#include "gated_source.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
@@ -606,15 +607,19 @@ void test_named_io_store_backs_the_tx_scratch() {
     fake_ws::reset();
     app_source_t refusing;
     refusing.refuse.store(true);
+    gated_source_t state;  // counted, so the read scratch's return is observable
     {
         tr::net::esp_ws_client_link_t link(
             "127.0.0.1", 8080,
-            tr::net::esp_ws_client_config_t{.tx_bytes = 512,
-                                            .memory = {.rx = nullptr, .io = &refusing}});
+            tr::net::esp_ws_client_config_t{
+                .tx_bytes = 512, .memory = {.rx = nullptr, .io = &refusing, .state = &state}});
+        const int slot = state.live.load();
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
         check(!wait_until([&] { return link.ok(); }, 300ms),
               "a store that refuses the write scratch keeps the connection down (#1606)");
         check(link.tx_bytes() == 512, "and the ceiling is still the configured one");
+        check(state.live == slot,
+              "the read scratch drawn before the write scratch was refused went back (#1606)");
     }
     check_drained();
 }

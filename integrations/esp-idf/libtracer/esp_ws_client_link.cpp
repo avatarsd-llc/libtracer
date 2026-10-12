@@ -429,8 +429,13 @@ void esp_ws_client_link_t::shut_down() {
         // before this lock was taken) and leaves without reading either handle.
         // A connection standing at the stop is released here: the recv loop breaks on
         // `stop_` before its departure arm, which releases every other one.
+        // `connected_` is cleared AGAIN, here, beside the release: a dial that had already
+        // resolved when the top-of-function store ran was not condemned, so it may have
+        // stored `true` since, and the joined thread then broke on `stop_` without a
+        // departure arm. The last store wins, so link_up() is false once this returns.
         const std::lock_guard<std::mutex> lk(write_m_);
         release_pair(ws_, tcp_);
+        connected_.store(false, std::memory_order_release);
     }
 }
 
@@ -826,11 +831,13 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
     // bumped a counter would make every clean shutdown look like a failure.
     if (stop_.load(std::memory_order_acquire)) return;
     // THE handle gate, and the reason nothing above it may read `ws_`. `write_m_` does
-    // NOT order a handle read against a re-dial: connect_once() destroys and rewrites
-    // ws_/tcp_ holding no lock at all. What orders them is this acquire pairing with the
-    // release store connect_once makes only AFTER the rebuild — and `connected_` is
-    // cleared only under this lock (drop(), a failed write) or by the destructor, whose
-    // store the recv loop answers by breaking rather than re-dialing. So an observed
+    // NOT order a handle read against a re-dial: connect_once() adopts a fresh ws_/tcp_
+    // (and draws the write scratch) holding no lock at all. What orders them is this
+    // acquire pairing with the release store connect_once makes only AFTER the adoption —
+    // and `connected_` is cleared only under this lock (drop(), a failed write, the
+    // shut_down() release) or at shut_down()'s top, whose store the recv loop answers by
+    // breaking rather than re-dialing. The pair and the scratch are destroyed only under
+    // this lock with `connected_` false: the departure arm, or shut_down() (#1606). So an observed
     // `true` here is a happens-before edge with the writes that built the handle this
     // call is about to use, and a handle check placed AHEAD of this line is read against
     // an unsynchronised rewrite — the same unsynchronised handle read #952 is about,
