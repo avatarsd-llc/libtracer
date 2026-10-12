@@ -103,6 +103,7 @@ The policy (who may run a hook, and when) must not follow the core count, becaus
 - **Refusals.** Every refusal to park a retired context is named and counted in one place ([#2117](https://github.com/avatarsd-llc/libtracer/issues/2117) (name and count every refusal; fix the silent `park_release` refusal at link teardown)). The study found two summed drop counters and a refused link park that was counted nowhere.
 - **One park.** Every retired-context kind parks in one park per graph ([#2118](https://github.com/avatarsd-llc/libtracer/issues/2118) (one park per graph for every retired-context kind)). Links and seams share one park, one ripe prefix and one drain. It measured byte-identical on the `fan_out` path, at −8 CCN.
 - **Domain object.** The grace state becomes a domain object with a `constinit` default instance ([#2119](https://github.com/avatarsd-llc/libtracer/issues/2119) (grace state as a domain object with a `constinit` default)). Library call sites keep the default, and a test can own a domain and drive participants by index. Its numbers are in §9.6: it is cheaper than the global static on every target measured. It also makes the shipped header model-checkable, because GenMC cannot model the current `thread_local` participant that has a destructor.
+- **Registry size.** [#2111](https://github.com/avatarsd-llc/libtracer/issues/2111) (qsbr registry: derive the participant count per config and split out the reclaim-only parts) still applies, in part. Deriving `kQsbrParticipants` from the config it is bound in still saves 192 B of `.bss` on the ESP32-C6. Once `reclaim_qsbr` is the default ([#2127](https://github.com/avatarsd-llc/libtracer/issues/2127)), the 260 B that splitting out the reclaim-only parts (the retired table and the drop counter) would save goes away, because under `reclaim_qsbr` those parts are live.
 - **CI.** GenMC runs on the shipped header in CI ([#2120](https://github.com/avatarsd-llc/libtracer/issues/2120) (model-check the shipped qsbr header with GenMC)). A leg runs the suite under a seccomp filter that refuses `membarrier` ([#2121](https://github.com/avatarsd-llc/libtracer/issues/2121) (a seccomp leg that refuses membarrier so the fenced path runs on Linux)), so the refusal fallback runs on a multi-core host under real threads.
 - **A per-graph domain is rejected.** Embedding the domain in `graph_t` costs +2,808 B per graph on x86-64 and +336 B on the ESP32-C6. It decouples two graphs only for the fenced entry, not for MEMBARRIER. It also reopens [ADR-0072](0072-one-reclamation-domain-graph-owned-and-backend-injected.md) §2 ("one domain instance per `graph_t`"), which that ADR's supersession retired. A graph-pointer variant buys nothing without it. One process domain stays.
 
@@ -113,7 +114,7 @@ Each participant self-drains at its own outermost exit, and `collect()` drains t
 - **One park drained only by `collect()`, triggered at the outermost dispatch exit** (the study's C3 option O5). It deletes the per-thread park and 136 B of TLS per FreeRTOS task. On the old bracket it costs −39 % on a quiet hooked unsubscribe, and it frees on a library-chosen thread.
 - **No drain on the data path** (C5's options O4 and O5). It gives an RX p99.9 of 0.84 µs under `reclaim_qsbr` unsubscribe churn, but it conflicts with §#897's self-drain.
 
-The tail they would fix is the MEMBARRIER path's. Under unsubscribe churn paced at 10k/s on 4 cores, the RX p99.9 is **1.38 µs with FENCED against 111 µs with MEMBARRIER**. With FENCED as the Linux default (§2) the default no longer has that tail, so there is no case yet for moving the drain.
+The tail they would fix is the MEMBARRIER path's. Under unsubscribe churn paced at 10k/s on 4 cores, the RX p99.9 is **1.38 µs with FENCED against 111 µs with MEMBARRIER as #2100 opened it**, and 7.3 µs in the ruled MEMBARRIER shape (one horizon per pass plus single-flight, §5). With FENCED as the Linux default (§2) the default no longer has that tail, so there is no case yet for moving the drain.
 
 ### 5. #2100 is reworked, not merged as opened
 
@@ -129,7 +130,7 @@ As opened, #2100 put one `membarrier` inside `map_mutex_` on every `collect()` b
 ### 6. The edge pin: single-hart on MID, kept on host and ARM64; ADR-0075 holds
 
 - **On MID under `kSingleCore`**, the edge pin's announce becomes a plain store with a compiler barrier ([#2122](https://github.com/avatarsd-llc/libtracer/issues/2122) (edge pin: single-hart announce under `kSingleCore`)). On the ESP32-C6 that is 8 → 4 fences per `fan_out` beyond the common three, for +54 B, with no syscall and no change on the host.
-- **On host and ARM64 the edge pin is kept.** The study measured the alternative: delete the pin and retire displaced edge arrays under the frame or dispatch bracket. With other threads publishing, subscribe and unsubscribe ran 20–100× slower (−75 … −99.6 %), because every scan that might free pays a `membarrier`. Parked memory also lost its bound: up to 622 arrays (11.6 MB) at peak, and up to 121 still parked after the publishers stopped, against the pin's 2–5 arrays (≤ 287 KB). Without the syscall the reader saves nothing on x86 (`mfence` 4.97 ns against the pin's `xchg` 4.98 ns). On ARM64 the pin is already `dmb`-free.
+- **On host and ARM64 the edge pin is kept.** The study measured the alternative: delete the pin and retire displaced edge arrays under the frame or dispatch bracket. With other threads publishing, subscribe and unsubscribe ran 20–100× slower (−75 … −99.6 %), because every scan that might free pays a `membarrier`. Parked memory also lost its bound: at peak up to 622 arrays (1.16 MB) with 32 subscribers per vertex, and 202 arrays (11.6 MB) with 1,024; up to 121 arrays stayed parked after the publishers stopped, against the pin's 2–5 arrays (≤ 287 KB). Without the syscall the reader saves nothing on x86 (`mfence` 4.97 ns against the pin's `xchg` 4.98 ns). On ARM64 the pin is already `dmb`-free.
 - **[ADR-0075](0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md) holds.** Its rejection of epoch reclamation for edge arrays rests on parked memory scaling with write rate × read-region length rather than staying a constant per slot. On today's numbers that rejection is stronger than written.
 
 ### 7. One trivially destructible per-thread record, and the `fan_out` bracket hoisted
@@ -163,7 +164,7 @@ The table under §Decision is replaced by one table per decision, with one colum
 | cross-thread hooked unsubscribe during a delivery | **use-after-free**, on 4 CPUs and on 1 | safe | not protected (allowed only with no live dispatch) |
 | WIDE `forward` / `publish1` / `publish8` p50 | 120 / 90 / 110 ns | 130 / 100 / 110 ns | 120 / 90 / 100 ns |
 | WIDE hooked unsubscribe, idle | 200 ns | 220 ns | 200 ns |
-| WIDE hooked unsubscribe/s, 4–5 busy publishers (A/A-fail set, effect beyond its spread) | 1.2–1.8 M | 0.94–1.5 M | 1.8 M |
+| WIDE hooked unsubscribe/s, 4–5 busy publishers (A/A-fail set, effect beyond its spread) | 1.2–1.8 M | 0.94–1.5 M | 1.3–1.8 M |
 | WIDE TLS per thread | 272 B | 16 B | 16 B |
 | MID ESP32-C6 instructions per in-process publish bracket | ≈ 22 | ≈ 136 before #2124, ≈ 50 with the §7 record | 0 |
 | MID TLS area per FreeRTOS task (on every task's stack) | 192 B | 64 B (**−128 B per task**) | 64 B [est] |
@@ -179,7 +180,7 @@ The table under §Decision is replaced by one table per decision, with one colum
 | WIDE `forward` / `publish1` / `publish8` p50 | 120 / 90 / 100 ns (a 1-CPU floor, not a configuration) | 130 / 100 / 110 ns | 120 / 90 / 100 ns |
 | WIDE hooked unsubscribe, idle | — | 220–230 ns | 280 ns |
 | WIDE hooked unsubscribe/s, 4–5 busy publishers | — | 0.94–1.5 M | **31–165 k** |
-| WIDE unsubscribe churn 10k/s, 4 cores, RX p99.9 | — | **1.38 µs** | **111 µs** |
+| WIDE unsubscribe churn 10k/s, 4 cores, RX p99.9 | — | **1.38 µs** | **111 µs** as opened; 7.3 µs with E + single-flight (§9.3) |
 | WIDE link churn, 64-entry `collect()`, 4 cores, p50 / `map_mutex_` hold p50 | — | 4.9 µs / 840 ns | 142 µs / 33.2 µs (as opened; §9.3) |
 | WIDE `membarrier` per call, with 1 / 3 / 4 other threads spinning | — | — | 12.6 / 31.2 / 40.9 µs |
 | MID ESP32-C6 fences per outermost bracket | **0** (`sw` / `sw`) | 3 (`fence rw,w` + `sw` + `fence rw,rw` / `fence rw,w` + `sw`) | n/a (no `membarrier`) |
@@ -208,7 +209,7 @@ The table under §Decision is replaced by one table per decision, with one colum
 | WIDE barrier per `fan_out` | 1 `xchg` (4.98 ns) | n/a on a multi-core host | 0 with `membarrier`; 1 `lock or` fenced (4.97 ns) |
 | WIDE subscribe+unsubscribe pairs/s, 1 publisher | 988 k | n/a | 37–41 k |
 | WIDE same, 32 subscribers, 4 publishers, 100 µs callbacks | 1.93 M | n/a | 11–87 k |
-| WIDE parked arrays, peak / after publishers stop | 2–5 / 0 | as kept | up to 622 (11.6 MB) / up to 121 |
+| WIDE parked arrays, peak / after publishers stop | 2–5 (≤ 287 KB) / 0 | as kept | up to 622 (1.16 MB, 32 subscribers) or 202 (11.6 MB, 1,024 subscribers) / up to 121 |
 | MID ESP32-C6 fences per `fan_out` beyond the common three | 8 | **4** | 4 outermost, 1 nested |
 | MID image against #2100 | 0 | +54 B | −386 … −1,062 B |
 | NARROW M0 reader sequence | 7 `dmb` | 3 `dmb` | 3 `dmb` |
@@ -222,7 +223,7 @@ The churn rows failed their own A/A guard (scheduling-bound). Their effects (75�
 | --- | --- | --- | --- |
 | WIDE x86 instructions, outermost / nested bracket | 44 / 20 | 40 / 16 | 40 / 16 |
 | WIDE `fan32` instructions per write, against main before #2087 | +9.1 % | +3.6 % | +1.5 % |
-| WIDE `fan32` p50, default policy, against the same | +11.8 % | +4.9 % | +4.6 % |
+| WIDE `fan32` p50, `reclaim_local`, against the same | +11.8 % | +4.9 % | +4.6 % |
 | WIDE `-fPIC` `.so` outermost bracket (`__tls_get_addr` sites) | 11.2 ns (10) | 4.0 ns (2) | 4.0 ns (2) |
 | MID ESP32-C6 outermost bracket: instructions / tp accesses / `self()` calls | 103 / 8 / 4 | 51 / 2 / 0 | 51 / 2 / 0 |
 | MID nested bracket; each remote edge after the first | 48 instructions; 103 instructions + 3 fences | 18; 51 + 3 fences | 18; **18, 0 fences** |
@@ -235,7 +236,7 @@ The churn rows failed their own A/A guard (scheduling-bound). Their effects (75�
 | row | process-global static (today) | domain object, `constinit` default (#2119) | per-graph embedded domain (rejected) |
 | --- | --- | --- | --- |
 | WIDE outermost bracket, MEMBARRIER / FENCED | 3.68 / 6.62 ns | 2.71 / 6.63 ns | 2.71 / 6.40 ns |
-| WIDE `fan32` kfps, default policy | 558 | 588 (+5.4 %) | 580 |
+| WIDE `fan32` kfps, `reclaim_local` | 558 | 588 (+5.4 %) | 580 |
 | WIDE `receive` 64 B kfps | 2,892 | 2,815 (within A/A) | 2,568 (−8 … −13 %, unexplained) |
 | WIDE `sizeof(graph_t)` | 904 B | 904 B | 3,712 B |
 | MID ESP32-C6 bracket hot path: instructions / guarded TLS reads | 96 / 4 | 54 / 2 | ≈ 54 / 2 [est] |
