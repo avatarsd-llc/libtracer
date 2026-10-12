@@ -17,7 +17,9 @@
  *      with no subject (so its caller is still its link name `p<slot>`) is DENIED;
  *   2. a later session in the same slot inherits nothing: its WRITE is denied;
  *   3. the same holds on a FLAT link (`peer_named = false`, ADR-0082);
- *   4. with no auth hook installed the caller is the link name, exactly as before.
+ *   4. with no auth hook installed the caller is the link name, exactly as before;
+ *   5. an ACCEPT whose subject is longer than the field or carries a NUL binds nothing, is
+ *      counted in `auth_rejected`, and closes the session like a REJECT.
  *
  * Ablation: making `httpd_ws_link_t::peer_subject` answer empty reddens 1 and 3; dropping its
  * generation test, or the reclaim's clear of the subject, reddens 2.
@@ -188,6 +190,50 @@ void signed_session_is_the_caller(bool peer_named) {
     run_server();
 }
 
+/**
+ * @brief Case 5: a subject the session cannot store whole binds nothing. One longer than the
+ *        field whose first 127 bytes are a privileged subject, and one that is a privileged
+ *        subject followed by a NUL and more bytes: each ACCEPT is answered as a REJECT and
+ *        counted, and neither session's WRITE gets the privileged subject's access.
+ */
+void unfit_subject_is_refused() {
+    std::printf("#1846 a subject that does not fit, or carries a NUL, is refused:\n");
+    reset();
+    graph_t g;
+    fwd_router_t router(g);
+    build_graph(g);
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    link->set_auth_cb(&accept_as, nullptr);
+    check(router.add_child("ws", *link), "the link is a routed child");
+    // An :acl that grants the exact 127-byte prefix, so a shortened subject WOULD match it.
+    const std::string prefix =
+        "role:operator" + std::string(httpd_ws_link_t::kMaxSubjectChars - 13, 'x');
+    (void)g.write(*path_t::parse("/knob:acl"), grant_write(prefix));
+
+    const std::string too_long = prefix + "y";
+    sign_in_and_write(830, too_long);
+    check(g_writers.empty(), "the over-long subject's WRITE gains nothing");
+    check(link->stats().auth_rejected == 1, "and its ACCEPT was counted as a refused sign-in");
+    check(!fake_httpd::instance().has_session(830), "and the session was closed");
+
+    (void)g.write(*path_t::parse("/knob:acl"), grant_write("role:operator"));
+    const char with_nul[] = {'r', 'o', 'l', 'e', ':', 'o',  'p', 'e',
+                             'r', 'a', 't', 'o', 'r', '\0', 'x'};
+    sign_in_and_write(831, std::string_view(with_nul, sizeof(with_nul)));
+    check(g_writers.empty(), "the subject with an embedded NUL gains nothing");
+    check(link->stats().auth_rejected == 2, "and its ACCEPT was counted too");
+    check(!fake_httpd::instance().has_session(831), "and that session was closed");
+
+    // The field's exact capacity still binds: the rule is whole-or-nothing, not shorter.
+    (void)g.write(*path_t::parse("/knob:acl"), grant_write(prefix));
+    sign_in_and_write(832, prefix);
+    check(g_writers.size() == 1 && g_writers[0] == prefix,
+          "a subject of exactly kMaxSubjectChars binds and is granted");
+    fake_httpd::instance().close_session(832);
+    run_server();
+}
+
 /** @brief Case 4: no hook installed, the caller is the session's link name as before. */
 void no_hook_keeps_the_link_name() {
     std::printf("#1846 with no auth hook the caller is the link name:\n");
@@ -215,6 +261,7 @@ int main() {
     signed_session_is_the_caller(/*peer_named=*/true);
     signed_session_is_the_caller(/*peer_named=*/false);
     no_hook_keeps_the_link_name();
+    unfit_subject_is_refused();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

@@ -874,7 +874,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
         std::uint32_t rx_dropped_pool = 0;
         /**
          * @brief Sessions closed because the auth hook answered REJECT — a credential this
-         *        node was OFFERED and refused.
+         *        node was OFFERED and refused — or answered ACCEPT with a subject the session
+         *        cannot store whole (@ref auth_result_t::subject).
          *
          * Kept apart from @ref peers_refused, which counts handshakes turned away one stage
          * earlier (the admission predicate, or `max_peers`), and from @ref auth_expired,
@@ -1234,8 +1235,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          *
          * TEXT, and printable: an identity that is natively bytes (an ed25519 public key)
          * is spelled by the hook in hex or base64, which is what keeps it reportable through
-         * @ref peer_stats_t::subject beside `endpoint_str`. Truncated at
-         * @ref kMaxSubjectChars.
+         * @ref peer_stats_t::subject beside `endpoint_str`. At most @ref kMaxSubjectChars
+         * bytes and no NUL byte: an ACCEPT whose subject breaks either rule binds nothing and
+         * is answered as a REJECT (closed with @ref kCloseAuthFailed, counted in
+         * @ref stats_t::auth_rejected), so a subject is never shortened into another one.
          *
          * This link BINDS it, publishes it, and makes it the session's CALLER CONTEXT
          * (#1846): every later frame of the session reaches the graph under this subject
@@ -1348,9 +1351,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Default `auth_deadline_ms`: long enough for a multi-round-trip handshake over
      *         a slow link, short enough that a squatting session is not a resource. */
     static constexpr std::uint32_t kDefaultAuthDeadlineMs = 10000;
-    /** @brief Longest @ref auth_result_t::subject a session stores; a longer one is
-     *         truncated. Sized to hold a hex-spelled 32-byte public key (64 chars) with
-     *         room for a scheme prefix. */
+    /** @brief Longest @ref auth_result_t::subject a session stores; an ACCEPT with a longer
+     *         one is answered as a REJECT. Sized to hold a hex-spelled 32-byte public key (64
+     * chars) with room for a scheme prefix. */
     static constexpr std::size_t kMaxSubjectChars = 127;
     /**
      * @brief How many upgraded sockets may be awaiting their first data frame at once on a

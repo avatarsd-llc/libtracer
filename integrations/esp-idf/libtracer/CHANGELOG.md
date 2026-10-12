@@ -42,7 +42,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     (no hook, an empty subject, or `ADMIT_AUTHENTICATED`) keeps the link-name caller, byte for
     byte. **Migration:** an `:acl` that granted a WebSocket session by its `p<slot>` name must
     name the subject your hook binds instead.
-  - Cost: no new per-session state (the subject was already stored in the session), one
+  - A subject is stored whole or not at all. An ACCEPT whose subject is longer than
+    `kMaxSubjectChars` or contains a NUL byte binds nothing: it is answered as a REJECT
+    (closed with `kCloseAuthFailed`, counted in `stats_t::auth_rejected`). It used to be
+    truncated to `kMaxSubjectChars`.
+  - Cost: one byte of per-session state (the subject length; the subject was already stored), one
     indexed load and a generation compare per locally terminating operation, and on a flat
     link one 8-byte store per delivered frame.
 
