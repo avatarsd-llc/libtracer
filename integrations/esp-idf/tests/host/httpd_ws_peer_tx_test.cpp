@@ -22,7 +22,11 @@
  *   5. the link keeps ONE flush in the control queue, however many frames and peers;
  *   6. a refused flush is a counted drop and costs no frame storage;
  *   7. producers, refusals and the drain racing for real wedge nothing (the sanitizer lanes);
- *   8. the RAM: per-link and per-peer costs are reported and bind to the constructor sizes.
+ *   8. the RAM: per-link and per-peer costs are reported and bind to the constructor sizes;
+ *   9. a producer that posts once and goes quiet: the newest frame still arrives whole, moved
+ *      by the link's own events (a write that took bytes, an inbound frame, flush_held);
+ *  10. a peer whose socket never drains is struck after kTxStallStrikes replacements;
+ *  11. producers racing session close and reclaim on the httpd task (the TSan lane).
  */
 
 #include <atomic>
@@ -39,6 +43,7 @@
 #include "fake_httpd.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
+#include "libtracer/value.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -192,8 +197,8 @@ void test_a_recovered_peer_gets_the_newest_frame() {
         drain();
     }
     fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
-    // The send-complete signal is event-driven: the next frame posted on the link is what
-    // moves a held one on. No timer stands in for it.
+    // The next frame posted on the link moves the held one on (case 9 covers a link that
+    // posts nothing more). No timer stands in for it.
     const auto last = tagged(5);
     link->send(std::span<const std::byte>(last));
     drain();
@@ -217,9 +222,10 @@ std::array<std::byte, 64> payload(std::uint8_t seed) {
 }
 
 /**
- * @brief The socket takes the header and half the payload, then nothing more until the next
- *        flush. A blocking write would have counted that as the #951 desync and condemned the
- *        session; a non-blocking one owes the rest, and writes it before the next frame.
+ * @brief The socket takes the header and half the payload, then nothing (the re-post that a
+ *        partial write makes finds it full). A blocking write would have counted that as the
+ *        #951 desync and condemned the session; a non-blocking one owes the rest, and writes
+ *        it before the next frame.
  */
 void test_a_part_written_frame_is_finished_first() {
     std::printf("a frame the socket took only part of:\n");
@@ -228,8 +234,8 @@ void test_a_part_written_frame_is_finished_first() {
     drain();
     const auto a = payload(0x10);
     const auto b = payload(0x80);
-    fake_httpd::instance().set_send_script(
-        kStalled, {send_result_t::FULL, send_result_t::SHORT, send_result_t::FULL});
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL, send_result_t::SHORT,
+                                                      send_result_t::TIMEOUT, send_result_t::FULL});
     fake_httpd::instance().clear_wire(kStalled);
     link->send(std::span<const std::byte>(a));
     drain();
@@ -260,8 +266,8 @@ void test_a_close_finishes_the_part_written_frame() {
     claim(kStalled);
     drain();
     const auto a = payload(0x20);
-    fake_httpd::instance().set_send_script(
-        kStalled, {send_result_t::FULL, send_result_t::SHORT, send_result_t::FULL});
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL, send_result_t::SHORT,
+                                                      send_result_t::TIMEOUT, send_result_t::FULL});
     fake_httpd::instance().clear_wire(kStalled);
     link->send(std::span<const std::byte>(a));
     drain();
@@ -375,7 +381,6 @@ void test_producers_and_the_drain_race_without_wedging() {
     drain();
     const auto got = frames_to(kHealthy);
     check(got.size() == 1 && got[0][0] == last[0], "the healthy peer still receives");
-    check(fake_httpd::instance().has_session(kStalled), "the stalled peer is still connected");
 
     reset(link);
 }
@@ -394,8 +399,8 @@ void test_the_ram_is_reported_and_binds() {
         check_eq(stock->buffer_bytes(),
                  httpd_ws_link_t::kDefaultRxScratchBytes + httpd_ws_link_t::kDefaultTxInlineBytes,
                  "per link: the RX scratch and one reply scratch");
-        check(stock->peer_tx_bytes() >= 2 * httpd_ws_link_t::kDefaultTxInlineBytes,
-              "per peer: two frames' inline buffers and their bookkeeping");
+        check(stock->peer_tx_bytes() <= 64,
+              "per peer: two frame references, no copy (a few words, whatever the frame)");
         std::printf("    buffer_bytes=%zu peer_tx_bytes=%zu\n", stock->buffer_bytes(),
                     stock->peer_tx_bytes());
         reset(stock);
@@ -406,8 +411,7 @@ void test_the_ram_is_reported_and_binds() {
     check_eq(link->rx_scratch_bytes(), kRx, "a sized link reports its RX scratch");
     check_eq(link->tx_inline_bytes(), kInline, "and its inline capacity");
     check_eq(link->buffer_bytes(), kRx + kInline, "and the per-link cost they make");
-    check(link->peer_tx_bytes() >= 2 * kInline && link->peer_tx_bytes() < 2 * kInline + 512,
-          "and the per-peer cost they make");
+    check(link->peer_tx_bytes() <= 64, "and the per-peer cost does not grow with them");
     claim(kHealthy);
     drain();
     fake_httpd::instance().clear_sent_frames();
@@ -419,6 +423,207 @@ void test_the_ram_is_reported_and_binds() {
           "a frame one byte past the inline buffer still goes out (from memory.io)");
 
     reset(link);
+}
+
+// ---------------------------------------------------------------------------
+// 9 — a producer that posts once and goes quiet.
+// ---------------------------------------------------------------------------
+/**
+ * @brief Nothing more is posted after the one frame, and it still reaches the slow peer
+ *        whole. ESP-IDF's server selects for read only, so what moves a held frame is the
+ *        link's own events: (a) a write that took bytes re-posts the flush, so a socket that
+ *        drains piecemeal is written to the end; (b) an inbound frame from any peer; (c) the
+ *        application's flush_held() on its own tick, for a link with no traffic at all.
+ */
+void test_a_quiet_producer_still_delivers_the_newest_frame() {
+    std::printf("one frame, then a quiet producer:\n");
+    auto link = make_link();
+    claim(kStalled);
+    claim(kHealthy);
+    drain();
+    const auto a = payload(0x40);
+    std::vector<std::byte> want(2, std::byte{0});  // the fake writes IDF's header as zeroes
+    want.insert(want.end(), a.begin(), a.end());
+
+    // (a) the socket takes a part on every pass: half, a quarter, an eighth, then the rest.
+    fake_httpd::instance().set_send_script(
+        kStalled, {send_result_t::FULL, send_result_t::SHORT, send_result_t::SHORT,
+                   send_result_t::SHORT, send_result_t::FULL});
+    fake_httpd::instance().clear_wire(kStalled);
+    {
+        const std::span<const std::byte> one[] = {std::span<const std::byte>(a)};
+        link->peer_link("p0")->send(std::span<const std::span<const std::byte>>(one));
+    }
+    drain();
+    check(fake_httpd::instance().wire(kStalled) == want,
+          "(a) a socket that drains piecemeal gets the whole frame with nothing more posted");
+
+    // (b) the socket takes nothing, then drains; the next event is a frame from ANOTHER peer.
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_wire(kStalled);
+    {
+        const std::span<const std::byte> one[] = {std::span<const std::byte>(a)};
+        link->peer_link("p0")->send(std::span<const std::span<const std::byte>>(one));
+    }
+    drain();
+    check_eq(fake_httpd::instance().wire(kStalled).size(), 0, "(b) held on a full socket");
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
+    drain();
+    check_eq(fake_httpd::instance().wire(kStalled).size(), 0,
+             "    and nothing moves it while the link is idle");
+    (void)fake_httpd::instance().deliver_frame(kHealthy, kBody);
+    check(fake_httpd::instance().wire(kStalled) == want,
+          "    an inbound frame on the link offers it the socket again: whole, newest");
+
+    // (c) the same stall, and no traffic at all: the application's own tick.
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_wire(kStalled);
+    {
+        const std::span<const std::byte> one[] = {std::span<const std::byte>(a)};
+        link->peer_link("p0")->send(std::span<const std::span<const std::byte>>(one));
+    }
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
+    link->flush_held();
+    drain();
+    check(fake_httpd::instance().wire(kStalled) == want,
+          "(c) flush_held() from the application's tick delivers it");
+    link->flush_held();
+    check_eq(fake_httpd::instance().queue_depth(), 0, "    and is a no-op once nothing is held");
+    check_eq(link->stats().tx_send_failed, 0, "no send failed");
+
+    reset(link);
+}
+
+// ---------------------------------------------------------------------------
+// 10 — a peer that never drains is struck.
+// ---------------------------------------------------------------------------
+/**
+ * @brief kTxStallStrikes replacements, each after a write the socket took nothing of, close
+ *        the session through the strike path; a frame a socket takes ANY byte of clears the
+ *        count, so a slow peer that drains is never struck.
+ */
+void test_a_peer_that_never_drains_is_struck() {
+    std::printf("a peer whose socket never drains:\n");
+    auto link = make_link();
+    claim(kStalled);
+    claim(kHealthy);
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    const auto push = [&](std::size_t i) {
+        const auto frame = tagged(i);
+        link->send(std::span<const std::byte>(frame));
+        drain();
+    };
+    // The first frame is staged with nothing to replace, so N replacements are N + 1 frames.
+    for (std::size_t i = 0; i < httpd_ws_link_t::kTxStallStrikes; ++i) push(i);
+    check_eq(link->stats().tx_stall_strikes, 0, "one replacement short of the bound: not struck");
+    std::size_t census = 0;
+    link->enumerate_peers([&census](std::string_view) { ++census; });
+    check_eq(census, 2, "both peers are still served");
+    push(httpd_ws_link_t::kTxStallStrikes);
+    check_eq(link->stats().tx_stall_strikes, 1, "the bound reached: struck, and counted");
+    check_eq(link->stats().sessions_condemned, 1, "through the strike path (condemned)");
+    census = 0;
+    link->enumerate_peers([&census](std::string_view) { ++census; });
+    check_eq(census, 1, "the stalled peer left the census; the healthy one stays");
+
+    // A peer that drains a little at a time is not struck, however long it is slow.
+    reset(link);
+    link = make_link();
+    claim(kStalled);
+    drain();
+    std::vector<send_result_t> slow;
+    for (std::size_t i = 0; i < 4 * httpd_ws_link_t::kTxStallStrikes; ++i) {
+        slow.push_back(send_result_t::TIMEOUT);
+        slow.push_back(send_result_t::TIMEOUT);
+        slow.push_back(send_result_t::FULL);
+        slow.push_back(send_result_t::FULL);
+    }
+    fake_httpd::instance().set_send_script(kStalled, slow);
+    for (std::size_t i = 0; i < 3 * httpd_ws_link_t::kTxStallStrikes; ++i) push(i);
+    check_eq(link->stats().tx_stall_strikes, 0, "a peer whose socket takes bytes is never struck");
+    check(fake_httpd::instance().has_session(kStalled), "and stays connected");
+
+    reset(link);
+}
+
+// ---------------------------------------------------------------------------
+// 11 — producers racing close and reclaim.
+// ---------------------------------------------------------------------------
+/** @brief A published value of @p n patterned bytes (the payload a delivery retains). */
+tr::graph::value_ref_t retained_value(std::size_t n) {
+    std::vector<std::byte> b(n);
+    for (std::size_t i = 0; i < n; ++i) b[i] = std::byte(static_cast<std::uint8_t>(i * 3u + 1u));
+    return tr::graph::value_ref_t::adopt(tr::graph::value_t::make_copy(b, tr::mem::heap_source()));
+}
+
+/**
+ * @brief stage() on producer tasks against the httpd task's flush AND its session close and
+ *        reclaim (free_ctx -> reclaim_slot releases both frames under tx_m and recycles the
+ *        generation), with sessions re-admitted onto the same descriptors. Both gathered and
+ *        retained frames, and directed sends through resolutions that go stale. Run under
+ *        TSan in CI; the post-condition here is that nothing wedged and every block was freed.
+ */
+void test_producers_race_close_and_reclaim() {
+    std::printf("producers racing close and reclaim:\n");
+    auto link = make_link();
+    static constexpr int kFds[] = {640, 641, 642, 643};
+    for (const int fd : kFds) claim(fd);
+    drain();
+    fake_httpd::instance().set_send_script(kFds[0], {send_result_t::TIMEOUT});
+    fake_httpd::instance().set_send_script(kFds[1], {send_result_t::FULL, send_result_t::SHORT});
+    const tr::graph::value_ref_t v = retained_value(300);
+
+    std::atomic<bool> stop{false};
+    httpd_ws_link_t* const raw = link.get();
+    const tr::graph::value_t* const val = v.get();
+    std::vector<std::thread> producers;
+    for (int t = 0; t < 3; ++t)
+        producers.emplace_back([raw, val, t] {
+            const std::span<const std::byte> head[] = {std::span<const std::byte>(kBody)};
+            for (int i = 0; i < 400; ++i) {
+                if ((i + t) % 3 == 0) {
+                    raw->send(std::span<const std::span<const std::byte>>(head), *val);
+                } else if ((i + t) % 3 == 1) {
+                    raw->send(std::span<const std::byte>(kBody));
+                } else if (tr::net::transport_t* const to = raw->peer_link("p2")) {
+                    to->send(std::span<const std::byte>(kBody));
+                }
+            }
+        });
+    std::thread httpd_task([&stop] {
+        for (unsigned i = 0; !stop.load(std::memory_order_relaxed); ++i) {
+            (void)fake_httpd::instance().run_pending();
+            if (i % 7 == 0) {
+                // A departure and a fresh client on the same descriptor: free_ctx runs the
+                // reclaim on this task, exactly where httpd runs it.
+                const int fd = kFds[(i / 7) % 4];
+                fake_httpd::instance().close_session(fd);
+                claim(fd);
+            }
+        }
+    });
+    for (auto& p : producers) p.join();
+    stop.store(true, std::memory_order_relaxed);
+    httpd_task.join();
+    drain();
+
+    for (const int fd : kFds) fake_httpd::instance().set_send_script(fd, {send_result_t::FULL});
+    fake_httpd::instance().clear_sent_frames();
+    const auto last = tagged(0x6B);
+    link->send(std::span<const std::byte>(last));
+    drain();
+    std::size_t served = 0;
+    for (const int fd : kFds) {
+        const auto got = frames_to(fd);
+        if (!got.empty() && got.back().size() == 1 && got.back()[0] == last[0]) ++served;
+    }
+    std::size_t open_peers = 0;
+    link->enumerate_peers([&open_peers](std::string_view) { ++open_peers; });
+    check_eq(served, open_peers, "after the race, the final frame reaches every open peer");
+    reset(link);
+    check(v->use_count() == 1, "every retained frame released its value reference");
 }
 
 }  // namespace
@@ -433,6 +638,9 @@ int main() {
     test_a_refused_flush_is_a_counted_drop();
     test_producers_and_the_drain_race_without_wedging();
     test_the_ram_is_reported_and_binds();
+    test_a_quiet_producer_still_delivers_the_newest_frame();
+    test_a_peer_that_never_drains_is_struck();
+    test_producers_race_close_and_reclaim();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

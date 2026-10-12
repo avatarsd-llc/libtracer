@@ -870,25 +870,68 @@ struct httpd_ws_link_t::gate_t {
 };
 
 /**
- * @brief One outbound frame, held for one peer until its socket takes it (#2095): the bytes
- *        gather-copied ONCE, nothrow, so they outlive the send() caller's spans.
+ * @brief One outbound frame's bytes, gathered ONCE per send and shared by every peer it goes
+ *        to (#2095): a reference count, the gathered bytes, and a retained frame's value.
+ *
+ * A broadcast gathers its iovec into one of these and every destination's slot takes a
+ * reference, so a fan-out to N peers costs one copy and one block, not N. Drawn from
+ * `memory.io` with its bytes trailing it in the same block, or with them in a buffer
+ * borrowed from the declared LARGE size class where the frame lands in its band (#1566,
+ * bounded, fails closed). The last reference frees it, from whichever task drops it, through
+ * the source recorded in it. Never a `std::vector` for the copy — the vector's THROWING
+ * allocator once defeated a nothrow guard here, and under `-fno-exceptions` a reply-sized
+ * copy hitting heap exhaustion aborted the node (the browser-session crash).
+ */
+struct httpd_ws_link_t::tx_block_t {
+    mem::block_source_t* src = nullptr; /**< @brief Where this block was drawn. */
+    std::size_t alloc_bytes = 0;        /**< @brief Its size there, for the release. */
+    std::atomic<std::uint32_t> refs{1}; /**< @brief Slots (and a builder) holding it. */
+    std::byte* payload = nullptr;       /**< @brief Gathered bytes: trailing, or large-class. */
+    std::size_t len = 0;                /**< @brief Bytes at @ref payload. */
+    /**
+     * @brief A RETAINED frame's value (RFC-0028 §6.9): @ref payload then holds the frame's
+     *        encoded WebSocket header and head, and these bytes follow them on the wire,
+     *        written straight from the published block. Empty for a gathered frame.
+     */
+    graph::value_ref_t value;
+    /** @brief The LARGE-class claimed flag this block holds, or null (#1566). The flag and
+     *         not an index, so the last release needs no link to give it back. */
+    std::atomic<bool>* large_busy = nullptr;
+    /** @brief Bytes the frame accounts for: the gathered payload, or a retained frame's
+     *         header, head and value. */
+    [[nodiscard]] std::size_t total() const noexcept {
+        return len + (value ? value->total_length() : 0);
+    }
+};
+
+std::size_t httpd_ws_link_t::tx_block_header() noexcept {
+    return (sizeof(tx_block_t) + alignof(std::max_align_t) - 1) / alignof(std::max_align_t) *
+           alignof(std::max_align_t);
+}
+
+std::size_t httpd_ws_link_t::large_stride() const noexcept {
+    return tx_block_header() + (tx_large_bytes_ + alignof(std::max_align_t) - 1) /
+                                   alignof(std::max_align_t) * alignof(std::max_align_t);
+}
+
+/**
+ * @brief One peer's reference to an outbound frame, held until its socket takes it (#2095).
  *
  * Each session owns two of these (@ref session_t::tx): the frame on the wire and the newest
- * one waiting behind it. Its PAYLOAD has three storages, in the order the gather tries them:
- * the frame's own inline buffer (`tx_inline_bytes`, the common frame, no allocation, a slice of
- * the session's block drawn from `memory.io` when the session slot was first created); a
- * buffer borrowed from the declared LARGE size class where the frame lands in its band (#1566,
- * @ref large_busy, still no allocation); and @ref owned, the per-frame nothrow payload from
- * `memory.io`, for the exceptional tail past both. Never a `std::vector` for the copy — the
- * vector's THROWING allocator once defeated a nothrow guard here, and under `-fno-exceptions` a
- * reply-sized copy hitting heap exhaustion aborted the node (the browser-session crash).
+ * one waiting behind it. The bytes live in the shared @ref tx_block_t; what is per peer is the
+ * reference, the session it was staged for and how far the socket has taken it — a few words,
+ * whatever the frame size.
  */
 struct httpd_ws_link_t::tx_frame_t {
-    /** @brief This frame's slice of the session's inline block, bound once at the slot's
-     *         creation and never rewritten. */
-    std::byte* inline_buf = nullptr;
-    std::byte* payload = nullptr; /**< @brief Gathered bytes (inline, large or `owned`). */
-    std::size_t len = 0;          /**< @brief Bytes at @ref payload. */
+    tx_block_t* blk = nullptr; /**< @brief The shared bytes; null = the frame is empty. */
+    /**
+     * @brief The session generation this frame was staged for.
+     *
+     * A producer resolves its destination, then stores, and the slot can be reclaimed and
+     * claimed again between the two; the generation is what makes a frame stored late for
+     * a departed session skippable at the flush rather than written to its successor (#954).
+     */
+    std::uint32_t gen = 0;
     /**
      * @brief Wire bytes of this frame the socket has already taken — its WebSocket header
      *        included (httpd task only).
@@ -897,35 +940,9 @@ struct httpd_ws_link_t::tx_frame_t {
      * what the socket had room for and the rest goes on the session's next flush. Nothing
      * else may be written to that socket in between (@ref httpd_ws_link_t::finish_wire).
      */
-    std::size_t sent = 0;
-    /**
-     * @brief The session generation this frame was gathered for; 0 = the frame is empty.
-     *
-     * A producer resolves its destination, then stores, and the slot can be reclaimed and
-     * claimed again between the two; the generation is what makes a frame stored late for
-     * a departed session skippable at the flush rather than written to its successor (#954).
-     */
-    std::uint32_t gen = 0;
-    /** @brief A payload past the inline and large capacities, from `memory.io`. */
-    fixed_array_t<std::byte> owned;
-    /**
-     * @brief A RETAINED frame's value (RFC-0028 §6.9): @ref payload then holds the frame's
-     *        encoded WebSocket header and head, and these bytes follow them on the wire,
-     *        written straight from the published block. Empty for a gathered frame.
-     */
-    graph::value_ref_t value;
-    /**
-     * @brief The LARGE-class claimed flag this frame holds, or null (#1566). The flag and not
-     *        an index, so @ref httpd_ws_link_t::release_frame needs no link to give it back.
-     */
-    std::atomic<bool>* large_busy = nullptr;
+    std::uint32_t sent = 0;
     /** @brief True while a frame is held. */
-    [[nodiscard]] bool held() const noexcept { return gen != 0; }
-    /** @brief Bytes the frame accounts for: the gathered payload, or a retained frame's
-     *         header, head and value. */
-    [[nodiscard]] std::size_t total() const noexcept {
-        return len + (value ? value->total_length() : 0);
-    }
+    [[nodiscard]] bool held() const noexcept { return blk != nullptr; }
 };
 
 /**
@@ -1107,9 +1124,18 @@ struct httpd_ws_link_t::session_t {
     /** @brief Guards the waiting frame and @ref tx_wire. Held for a gather or a flip, never
      *         across a socket write, and never with `peers_m_` taken under it. */
     std::mutex tx_m;
-    /** @brief Both frames' inline buffers, `2 * tx_inline_bytes` from `memory.io`, drawn once
-     *         when the slot is created and recycled with it. */
-    fixed_array_t<std::byte> tx_block;
+    /**
+     * @brief Writes of this session's frames that the socket took nothing of, each followed
+     *        by a newer frame replacing the waiting one (tx_m).
+     *
+     * Bumped by @ref httpd_ws_link_t::stage when it replaces a frame after such a write
+     * (@ref tx_refused), cleared by any write that moves a byte. At
+     * @ref httpd_ws_link_t::kTxStallStrikes the flush condemns the session through the
+     * strike path: a peer whose socket never drains holds no seat for ever.
+     */
+    std::uint32_t tx_stalls = 0;
+    /** @brief The last write of this session's wire frame took zero bytes (tx_m). */
+    bool tx_refused = false;
     /**
      * @brief This session has not authenticated yet — it exists, and it is served NOTHING
      *        (peers_m_).
@@ -1553,15 +1579,12 @@ void httpd_ws_link_t::alloc_buffers() {
     // (#1880): the RX scratch is connection state, the in-call scratch frame is egress. Both
     // are sized by the integrator's own knobs, so a store that cannot hold them is a sizing
     // bug and aborts here, naming it (ADR-0083) — never a link that comes up and then drops
-    // every frame. The per-PEER frames are not drawn here: each session slot draws its own
-    // when it is first created (claim_session), so a link pays for the peers it has (#2095).
+    // every frame. No per-peer TX buffer exists at all: a frame's bytes are gathered once per
+    // send into a block every destination shares (make_block, #2095).
     if (!rx_scratch_.assign(*state_src_, rx_scratch_bytes_))
         mem::exhausted_at_init(*state_src_, "httpd_ws_link_t: the RX scratch");
     if (!tx_scratch_block_.assign(*io_src_, tx_inline_bytes_))
         mem::exhausted_at_init(*io_src_, "httpd_ws_link_t: the TX reply scratch");
-    if (!tx_scratch_.assign(*io_src_, 1))
-        mem::exhausted_at_init(*io_src_, "httpd_ws_link_t: the TX reply scratch");
-    tx_scratch_[0].inline_buf = tx_scratch_block_.data();
     alloc_tx_large();
 }
 
@@ -1592,12 +1615,14 @@ void httpd_ws_link_t::alloc_tx_large() {
     // A VALID declaration is sized by the integrator exactly as the pool is, so a store that
     // cannot hold it is the same sizing bug and aborts the same way (#1880): the pair is
     // drawn together, and each claimed flag starts clear (value-initialized).
-    if (!tx_large_.assign(*io_src_, tx_large_slots_ * tx_large_bytes_) ||
+    // Each buffer is a whole frame block — its header and its bytes — so a frame in the band
+    // draws nothing at all, not even the block header.
+    if (!tx_large_.assign(*io_src_, tx_large_slots_ * large_stride() / sizeof(std::max_align_t)) ||
         !tx_large_busy_.assign(*io_src_, tx_large_slots_))
         mem::exhausted_at_init(*io_src_, "httpd_ws_link_t: the TX large class");
 }
 
-std::byte* httpd_ws_link_t::claim_tx_large(tx_frame_t& frame) {
+void* httpd_ws_link_t::claim_tx_large(std::atomic<bool>*& flag) {
     // Undeclared, rejected or failed: the caller's band test already excluded that case
     // (tx_large_bytes_ is 0 and no frame is <= 0 bytes past the inline capacity), so this is
     // belt and braces for a future caller rather than a live arm.
@@ -1606,9 +1631,9 @@ std::byte* httpd_ws_link_t::claim_tx_large(tx_frame_t& frame) {
         bool expected = false;
         if (!tx_large_busy_[i].compare_exchange_strong(expected, true, std::memory_order_acquire))
             continue;
-        frame.large_busy = &tx_large_busy_[i];
+        flag = &tx_large_busy_[i];
         note_tx_large_peak();
-        return tx_large_.data() + i * tx_large_bytes_;
+        return reinterpret_cast<std::byte*>(tx_large_.data()) + i * large_stride();
     }
     return nullptr;  // every buffer of the class in flight — the caller drops and counts
 }
@@ -1635,39 +1660,75 @@ void httpd_ws_link_t::note_tx_large_peak() {
     }
 }
 
-std::byte* httpd_ws_link_t::claim_payload(tx_frame_t& frame, std::size_t total) {
-    // The common frame gathers straight into its own inline buffer: no allocation at all.
-    if (total <= tx_inline_bytes_) return frame.inline_buf;
-    if (total <= tx_large_bytes_) {
-        // The LARGE band (#1566), and it exists only where an integrator declared it: with no
-        // class, tx_large_bytes_ is 0, no frame satisfies this test, and the arm below is
-        // reached exactly as before. Exhausted, it fails CLOSED, never onto the heap: falling
-        // back would hand back the unbounded footprint the class was declared to remove,
-        // under exactly the load that motivated the declaration — counted, so an operator
-        // can size `tx_large_slots` against it.
-        std::byte* const dst = claim_tx_large(frame);
-        if (dst == nullptr) tx_large_dropped_.fetch_add(1, std::memory_order_relaxed);
-        return dst;
+httpd_ws_link_t::tx_block_t* httpd_ws_link_t::make_block(
+    std::span<const std::byte> prefix, std::span<const std::span<const std::byte>> iov,
+    const graph::value_t* value) {
+    std::size_t len = prefix.size();
+    for (const auto& part : iov) len += part.size();
+    // The LARGE band (#1566), and it exists only where an integrator declared it: with no
+    // class, tx_large_bytes_ is 0 and no frame satisfies this test. Exhausted, it fails
+    // CLOSED, never onto the egress store: falling back would hand back the unbounded
+    // footprint the class was declared to remove, under exactly the load that motivated the
+    // declaration — counted, so an operator can size `tx_large_slots` against it.
+    std::atomic<bool>* large = nullptr;
+    void* raw = nullptr;
+    std::size_t bytes = 0;
+    if (len > tx_inline_bytes_ && len <= tx_large_bytes_) {
+        // A whole block of the class: its header leads the buffer (large_stride).
+        raw = claim_tx_large(large);
+        if (raw == nullptr) {
+            tx_large_dropped_.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
+    } else {
+        // Every other frame: one exact-size block from the egress store, the bytes trailing
+        // the header, failable end to end. A refusal is the caller's counted drop.
+        bytes = tx_block_header() + len;
+        raw = io_src_->try_alloc(bytes, alignof(std::max_align_t));
+        if (raw == nullptr) return nullptr;
     }
-    // The exceptional tail: one exact-size payload from the egress store, failable end to
-    // end (never a std::vector, see tx_frame_t). A refusal is the caller's counted drop.
-    return frame.owned.assign(*io_src_, total) ? frame.owned.data() : nullptr;
+    auto* const b = new (raw) tx_block_t;
+    b->src = large != nullptr ? nullptr : io_src_;
+    b->alloc_bytes = bytes;
+    b->large_busy = large;
+    b->payload = static_cast<std::byte*>(raw) + tx_block_header();
+    b->len = len;
+    if (value != nullptr) {
+        b->value = graph::value_ref_t::keep(*value);
+        if (!b->value) {  // a caller-owned value whose links could not be kept
+            drop_block(b);
+            return nullptr;
+        }
+    }
+    std::byte* p = b->payload;
+    if (!prefix.empty()) std::memcpy(p, prefix.data(), prefix.size());
+    p += prefix.size();
+    for (const auto& part : iov) {
+        if (!part.empty()) std::memcpy(p, part.data(), part.size());
+        p += part.size();
+    }
+    return b;
+}
+
+void httpd_ws_link_t::drop_block(tx_block_t* b) {
+    if (b == nullptr || b->refs.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+    // The last reference: whichever task dropped it frees it, through what it recorded, so
+    // this needs no link. The value reference first (RFC-0028 §6.9), then the large-class
+    // buffer, then the block.
+    b->value.reset();
+    mem::block_source_t* const src = b->src;
+    const std::size_t bytes = b->alloc_bytes;
+    std::atomic<bool>* const large = b->large_busy;
+    b->~tx_block_t();
+    if (large != nullptr)
+        large->store(false, std::memory_order_release);  // a block of the class: hand it back
+    else
+        src->release(b, bytes, alignof(std::max_align_t));
 }
 
 void httpd_ws_link_t::release_frame(tx_frame_t& frame) {
-    frame.owned.reset();  // drop an exceptional-tail payload
-    frame.value.reset();  // and a retained frame's value reference (RFC-0028 §6.9)
-    // Hand back the large-class buffer this frame borrowed, if it borrowed one (#1566) —
-    // through the flag it carries, because this function has no link to ask.
-    if (frame.large_busy != nullptr) {
-        std::atomic<bool>* const flag = frame.large_busy;
-        frame.large_busy = nullptr;
-        flag->store(false, std::memory_order_release);
-    }
-    frame.payload = nullptr;
-    frame.len = 0;
-    frame.sent = 0;
-    frame.gen = 0;
+    drop_block(frame.blk);
+    frame = tx_frame_t{};
 }
 
 httpd_ws_link_t::~httpd_ws_link_t() {
@@ -1951,6 +2012,11 @@ esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
     // takes the fork that keeps it off the control queue (#1494 — see t_serving_link and
     // @ref httpd_ws_link_t::send_in_call). The scope restores the previous value on the way
     // out and never touches `self`, which the next comment explains may be gone by then.
+    // An inbound frame is the one socket event ESP-IDF's server hands this link (it selects
+    // for read only), so it is also when a frame held on a full socket — this peer's or any
+    // other's — is offered its socket again (#2095). Before the app runs, while `self` is
+    // provably alive, and only when something is held: one relaxed load otherwise.
+    if (self->tx_held_.load(std::memory_order_relaxed)) (void)self->flush_egress();
     esp_err_t err = ESP_OK;
     {
         const serving_scope_t serving(self);
@@ -2264,16 +2330,10 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
         // `memory.state` (#1880). A refusal of either is this peer's to pay — it is refused
         // exactly like a peer past `max_peers`, and the CALLER counts it the same way.
         slot = mem::make_in<session_t>(*state_src_, *state_src_);
-        // Its two TX frames come with it, from `memory.io` (#2095): the per-peer cost is drawn
-        // when the peer arrives and recycled with the slot, never per frame. A refusal is
-        // this peer's to pay, like the slot's own.
-        if (slot == nullptr || !slot->tx_block.assign(*io_src_, 2 * tx_inline_bytes_) ||
-            !slots_.push_back(slot)) {
+        if (slot == nullptr || !slots_.push_back(slot)) {
             mem::drop_in(*state_src_, slot);
             return nullptr;
         }
-        slot->tx[0].inline_buf = slot->tx_block.data();
-        slot->tx[1].inline_buf = slot->tx_block.data() + tx_inline_bytes_;
         slot->gate = gate_.load(std::memory_order_relaxed);
         idx = slots_.size() - 1;
     }
@@ -3105,6 +3165,8 @@ httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer
         const std::lock_guard lock(slot->tx_m);
         release_frame(slot->tx[0]);
         release_frame(slot->tx[1]);
+        slot->tx_stalls = 0;  // the stall count is the departed session's, like its frames
+        slot->tx_refused = false;
     }
     // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that hung up
     // leaves its subscriber edges behind, so the routing plane's eviction hook
@@ -3270,14 +3332,18 @@ void httpd_ws_link_t::deliver_owned_copy(peer_handle_t peer, std::span<const std
 
 void httpd_ws_link_t::queue_send(const session_ref_t& to,
                                  std::span<const std::span<const std::byte>> iov) {
-    stage(to, iov, nullptr);
+    // One destination, one block: gathered here, referenced by the peer's slot, and this
+    // builder's reference dropped once it is staged.
+    std::size_t total = 0;
+    for (const auto& part : iov) total += part.size();
+    tx_block_t* const blk = make_block({}, iov, nullptr);
+    stage(to, blk, total);
+    drop_block(blk);
 }
 
-void httpd_ws_link_t::stage(const session_ref_t& to,
-                            std::span<const std::span<const std::byte>> iov,
-                            const graph::value_t* value) {
+void httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_t total) {
     // ONE load of the handle, into a local (#963): the plain read this replaces raced the
-    // destructor's write outright, and re-reading it across the gather let one send act on
+    // destructor's write outright, and re-reading it across the store let one send act on
     // two different values of the same member.
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
     if (h == nullptr) return;
@@ -3290,66 +3356,53 @@ void httpd_ws_link_t::stage(const session_ref_t& to,
         tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    std::size_t total = 0;
-    for (const auto& part : iov) total += part.size();
-    // Teardown gate: once the dtor is draining, nothing new is held, so nothing runs past it.
-    if (stopping_.load(std::memory_order_relaxed)) {
+    // A frame with no block — the large class spent, the egress store refusing, or the value
+    // not keepable — is a counted drop at the link: evidence about this link's memory, not
+    // about the peer. And once the dtor is draining, nothing new is held (teardown gate).
+    if (blk == nullptr || stopping_.load(std::memory_order_relaxed)) {
         note_enqueue_drop(fd, total);
         return;
     }
-    // Into THIS peer's waiting frame, and nowhere else (#2095). The gather-copy happens once,
-    // nothrow, because the flush runs later on the httpd task and the caller's spans are gone
-    // by then. A frame already waiting there is REPLACED and counted, never queued behind and
-    // never waited for: the newest frame is the one a slow peer gets, and a slow peer holds no
-    // buffer, no work item and no part of the httpd task that another peer needs. Nothing is
-    // shared across peers but the optional large class, which is a bound the integrator
-    // declared and drops when spent.
+    // Into THIS peer's waiting frame, and nowhere else (#2095): a reference to the shared
+    // block, never a copy. A frame already waiting there is REPLACED and counted, never
+    // queued behind and never waited for: the newest frame is the one a slow peer gets, and a
+    // slow peer holds no buffer, no work item and no part of the httpd task that another peer
+    // needs. A replacement that follows a write the socket took nothing of is a stall
+    // (session_t::tx_stalls), which the flush strikes at kTxStallStrikes.
     session_t* const s = to.slot;
-    bool conflated = false;
-    bool held = false;
+    blk->refs.fetch_add(1, std::memory_order_relaxed);
+    tx_frame_t old;
     {
         const std::lock_guard lock(s->tx_m);
         tx_frame_t& f = s->tx[s->tx_wire ^ 1];
+        old = f;
+        f = tx_frame_t{blk, to.gen, 0};
         // A frame left for this slot's PREVIOUS session is not this peer's loss: released
         // uncounted, as the flush would have skipped it.
-        conflated = f.held() && f.gen == to.gen;
-        release_frame(f);
-        std::byte* p = claim_payload(f, total);
-        if (p != nullptr && value != nullptr) {
-            f.value = graph::value_ref_t::keep(*value);
-            if (!f.value) p = nullptr;  // a caller-owned value whose links could not be kept
-        }
-        if (p != nullptr) {
-            f.payload = p;
-            f.len = total;
-            for (const auto& part : iov) {
-                if (!part.empty()) std::memcpy(p, part.data(), part.size());
-                p += part.size();
-            }
-            f.gen = to.gen;
-            held = true;
-        } else {
-            release_frame(f);
+        if (old.held() && old.gen == to.gen && s->tx_refused) {
+            ++s->tx_stalls;
+            s->tx_refused = false;
         }
     }
+    const bool conflated = old.held() && old.gen == to.gen;
+    release_frame(old);
     if (conflated) note_tx_conflated(to);
-    // A frame with nowhere to go — the large class spent, the egress store refusing, or the
-    // value not keepable — is a counted drop at the link: evidence about this link's memory,
-    // not about the peer.
-    if (!held) {
-        note_enqueue_drop(fd, total);
-        return;
-    }
     egress_posted();  // a parked drain flushes it now rather than hold it
     if (post_flush(h)) return;
     // The control queue refused the flush. The frame cannot go out until something else
-    // posts one, so it is taken back and counted exactly as a refused enqueue always was —
-    // a fact about the shared control queue, charged to the link and to no peer.
+    // posts one, so it is taken back (if no newer one replaced it meanwhile) and counted
+    // exactly as a refused enqueue always was — a fact about the shared control queue,
+    // charged to the link and to no peer.
+    tx_frame_t back;
     {
         const std::lock_guard lock(s->tx_m);
         tx_frame_t& f = s->tx[s->tx_wire ^ 1];
-        if (f.held()) release_frame(f);
+        if (f.blk == blk && f.gen == to.gen) {
+            back = f;
+            f = tx_frame_t{};
+        }
     }
+    release_frame(back);
     note_enqueue_drop(fd, total);
 }
 
@@ -3436,32 +3489,35 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // level up), which is exactly what the asynchronous path could not assume and had to
     // gather-copy to escape. So the common reply now costs zero copies and zero slots.
     std::span<const std::byte> payload = iov.empty() ? std::span<const std::byte>() : iov[0];
-    tx_frame_t* scratch = nullptr;
+    tx_block_t* big = nullptr;
     if (iov.size() > 1) {
         // A rope reply still has to reach the wire as ONE WebSocket frame, so it is gathered
         // — into the link's one reply scratch, never into a temporary of its own (a flatten
         // temp alongside the tx copy is the heap spike behind the on-device OOM abort). Only
-        // this task uses it and only inside this call, so it is never contended and cannot
-        // strand: the large band and the egress-store tail are the same claim_payload a held
-        // frame takes, and exhaustion is the same counted drop.
-        scratch = &tx_scratch_[0];
-        std::byte* p = claim_payload(*scratch, total);
-        if (p == nullptr) {
-            release_frame(*scratch);
-            note_enqueue_drop(fd, total);
-            return;
-        }
-        payload = {p, total};
-        for (const auto& part : iov) {
-            if (!part.empty()) std::memcpy(p, part.data(), part.size());
-            p += part.size();
+        // this task uses it and only inside this call, so it is never contended. A rope past
+        // the scratch takes a block, the same make_block a queued frame takes, and exhaustion
+        // is the same counted drop.
+        std::byte* p = tx_scratch_block_.data();
+        if (total > tx_inline_bytes_) {
+            big = make_block({}, iov, nullptr);
+            if (big == nullptr) {
+                note_enqueue_drop(fd, total);
+                return;
+            }
+            payload = {big->payload, total};
+        } else {
+            payload = {p, total};
+            for (const auto& part : iov) {
+                if (!part.empty()) std::memcpy(p, part.data(), part.size());
+                p += part.size();
+            }
         }
     }
     std::size_t on_wire = 0;
     const esp_err_t err = send_now(to.slot, fd, HTTPD_WS_TYPE_BINARY, payload, &on_wire);
     // Released BEFORE the accounting, which takes peers_m_ and may close the session: the
-    // scratch has done its job the instant the send returns.
-    if (scratch != nullptr) release_frame(*scratch);
+    // block has done its job the instant the send returns.
+    drop_block(big);
     // No `httpd_sess_update_lru_counter` here, unlike @ref tx_work: that call exists for a
     // push the adopted server's LRU cannot see, and this send is INSIDE `httpd_sess_process`
     // — the one place IDF advances the counter by itself.
@@ -3487,6 +3543,7 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     stats_t s;
     s.enqueue_drops = enqueue_drops_.load(std::memory_order_relaxed);
     s.tx_conflated = tx_conflated_.load(std::memory_order_relaxed);
+    s.tx_stall_strikes = tx_stall_strikes_.load(std::memory_order_relaxed);
     s.tx_large_dropped = tx_large_dropped_.load(std::memory_order_relaxed);
     s.tx_large_peak = tx_large_peak_.load(std::memory_order_relaxed);
     s.tx_to_dead_peer = tx_to_dead_peer_.load(std::memory_order_relaxed);
@@ -3521,13 +3578,13 @@ std::size_t httpd_ws_link_t::tx_large_in_use() const noexcept {
 std::size_t httpd_ws_link_t::buffer_bytes() const noexcept {
     // What was actually allocated, not what was asked for: a large class that was rejected
     // or could not be allocated has had BOTH its numbers zeroed, so its term vanishes from
-    // this sum without a test of its own. The per-peer frames are not here: they are drawn
-    // per session slot (@ref peer_tx_bytes).
-    return rx_scratch_bytes_ + tx_scratch_block_.size() + tx_large_slots_ * tx_large_bytes_;
+    // this sum without a test of its own. The frames in flight are not here: each send draws
+    // one shared block that every peer references (@ref peer_tx_bytes).
+    return rx_scratch_bytes_ + tx_scratch_block_.size() + tx_large_slots_ * large_stride();
 }
 
 std::size_t httpd_ws_link_t::peer_tx_bytes() const noexcept {
-    return sizeof(session_t::tx) + 2 * tx_inline_bytes_;
+    return sizeof(session_t::tx) + sizeof(session_t::tx_wire) + sizeof(session_t::tx_stalls);
 }
 
 void httpd_ws_link_t::note_enqueue_drop(int fd, std::size_t bytes) {
@@ -3614,7 +3671,8 @@ void httpd_ws_link_t::note_tx_skip(const session_ref_t& to) {
     ++to.slot->st.tx_drops;
 }
 
-void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes) {
+void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes,
+                                     bool stalled) {
     // The link-wide tally first, before any test of the destination: a frame the socket
     // write refused is a frame the peer never got whether or not its session is still here
     // to carry the streak. Until this counter existed the only trace was the WARN line.
@@ -3647,6 +3705,9 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
         // NOW?" and its #835 3-strike semantics are untouched by the addition.
         ++slot->st.tx_drops;
         if (slot->tx_drops < kMaxConsecutiveTxDrops) ++slot->tx_drops;
+        // A peer whose socket took nothing through kTxStallStrikes replacements is the
+        // streak spent in one verdict (#2095): the evidence is already that many frames deep.
+        if (stalled) slot->tx_drops = kMaxConsecutiveTxDrops;
         close_now = slot->tx_drops >= kMaxConsecutiveTxDrops;
         peer = slot->name;
         std::memcpy(addr, slot->endpoint_str, sizeof(addr));
@@ -3663,8 +3724,14 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
     // Never `getpeername` here: the socket is by definition the one that is not working,
     // and naming a peer at the moment it is being struck must not depend on that socket
     // answering — the reason the address is STORED rather than recomputed.
-    ESP_LOGW(kTag, "%u consecutive failed sends peer=%s (%s) fd=%d len=%u - closing session",
-             (unsigned)kMaxConsecutiveTxDrops, peer.c_str(), addr, fd, (unsigned)bytes);
+    if (stalled) {
+        tx_stall_strikes_.fetch_add(1, std::memory_order_relaxed);
+        ESP_LOGW(kTag, "%u frames replaced, socket took none peer=%s (%s) fd=%d - closing session",
+                 (unsigned)kTxStallStrikes, peer.c_str(), addr, fd);
+    } else {
+        ESP_LOGW(kTag, "%u consecutive failed sends peer=%s (%s) fd=%d len=%u - closing session",
+                 (unsigned)kMaxConsecutiveTxDrops, peer.c_str(), addr, fd, (unsigned)bytes);
+    }
     // At the streak cap the session is broken, not bursty: close it so the peer's onclose
     // fires and it reconnects, instead of silently missing frames forever. This is what
     // aims the teardown at the peer that is actually stalled — and the dead mark set above
@@ -3908,11 +3975,13 @@ void httpd_ws_link_t::tx_work(void* arg) {
 }
 
 bool httpd_ws_link_t::flush_egress() {
-    // Runs on the httpd task only — from tx_work, or from a drain parked for idle (pace_rx),
-    // where nothing of this task's is mid-write. Every session is offered its turn; one
-    // whose socket is full returns at once, so no peer's socket is waited on here and the
-    // slowest peer sets nobody's rate but its own. The same fixed on-stack chunk and
-    // resumable scan the broadcast walks (kFanoutChunk), for the same reasons.
+    // Runs on the httpd task only — from tx_work, from a drain parked for idle (pace_rx), or
+    // from the handler entry when a frame is held (ws_handler), where nothing of this task's
+    // is mid-write. Every session is offered its turn; one whose socket is full returns at
+    // once, so no peer's socket is waited on here and the slowest peer sets nobody's rate but
+    // its own. The same fixed on-stack chunk and resumable scan the broadcast walks
+    // (kFanoutChunk), for the same reasons.
+    tx_held_.store(false, std::memory_order_relaxed);
     session_t* batch[kFanoutChunk];
     std::size_t next = 0;
     bool progress = false;
@@ -3935,7 +4004,8 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
     // socket would otherwise keep this task on it for as long as the socket keeps up.
     for (int turn = 0; turn < 2; ++turn) {
         tx_frame_t* f = &s->tx[s->tx_wire];
-        std::uint32_t superseded = 0;
+        tx_frame_t superseded;
+        bool stalled = false;
         {
             // The waiting frame moves onto the wire when the wire is free — or holds a frame
             // not one byte of which has gone out yet, which is no more owed to the peer than
@@ -3946,16 +4016,26 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
             const bool waiting = s->tx[s->tx_wire ^ 1].held();
             if (!waiting && !f->held()) return progress;
             if (waiting && f->sent == 0) {
-                if (f->held()) superseded = f->gen;
-                release_frame(*f);
+                superseded = *f;
+                *f = tx_frame_t{};
                 s->tx_wire ^= 1;
                 f = &s->tx[s->tx_wire];
+                // A replacement after a write the socket took nothing of: a stall, as in stage.
+                if (superseded.held() && s->tx_refused) {
+                    ++s->tx_stalls;
+                    s->tx_refused = false;
+                }
             }
+            stalled = s->tx_stalls >= kTxStallStrikes;
         }
-        if (superseded != 0) note_tx_conflated(session_ref_t{s, superseded});
-        // The frame names the session it was gathered for (#954), and the server's own
-        // verdict is the second opinion. A skip is not a send result: it feeds the
-        // cumulative tally, never the streak (note_tx_skip).
+        if (superseded.held()) {
+            const session_ref_t was{s, superseded.gen};
+            release_frame(superseded);
+            note_tx_conflated(was);
+        }
+        // The frame names the session it was staged for (#954), and the server's own verdict
+        // is the second opinion. A skip is not a send result: it feeds the cumulative tally,
+        // never the streak (note_tx_skip).
         const session_ref_t to{s, f->gen};
         const int fd = live_fd(to);
         if (h == nullptr || fd < 0 || httpd_ws_get_fd_info(h, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
@@ -3964,13 +4044,42 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
             progress = true;
             continue;
         }
-        const std::size_t before = f->sent;
+        if (stalled) {
+            // kTxStallStrikes newer frames replaced this peer's, each after a write its socket
+            // took nothing of: the peer is not draining, and a full socket under MSG_DONTWAIT is
+            // never an error, so without this it would hold its seat and its slot for ever.
+            // Through the strike path, as a peer whose writes fail is (note_tx_result).
+            const std::size_t len = f->blk->total();
+            release_frame(*f);
+            note_tx_result(to, false, len, /*stalled=*/true);
+            progress = true;
+            continue;
+        }
+        const std::uint32_t before = f->sent;
         const tx_outcome_t out = write_frame(h, fd, *s, *f, /*nonblock=*/true);
-        // The socket is full: the frame stays where it is, and goes on with this session's
-        // next flush — the next frame posted on this link, or a parked drain. That is the
-        // whole of the event-driven send-complete signal: no timer and no clock read, and a
-        // frame that newer data supersedes meanwhile is replaced, not queued.
-        if (out == tx_outcome_t::HELD) return progress || f->sent != before;
+        const bool moved = f->sent != before;
+        {
+            // What the stall count is about: a write that moved a byte clears it, one that moved
+            // none arms the next replacement to count (stage).
+            const std::lock_guard lock(s->tx_m);
+            if (moved || out != tx_outcome_t::HELD) {
+                s->tx_stalls = 0;
+                s->tx_refused = false;
+            } else {
+                s->tx_refused = true;
+            }
+        }
+        if (out == tx_outcome_t::HELD) {
+            // The socket is full: the frame stays where it is. ESP-IDF's server selects for
+            // READ only, so there is no writable event to wait on; what moves a held frame on
+            // is this link's own events, and no timer or clock read: a socket that took bytes
+            // now is offered the rest on the next pass (the re-post below); otherwise the next
+            // frame posted on this link, the next frame any of its peers sends (ws_handler), a
+            // parked drain, or the application's flush_held().
+            tx_held_.store(true, std::memory_order_relaxed);
+            if (moved && h != nullptr) (void)post_flush(h);
+            return progress || moved;
+        }
         if (out == tx_outcome_t::SENT && !owns_httpd_) {
             // Tell an ADOPTED server this session is not idle (#955): IDF advances a session's
             // LRU counter only from inbound request processing, so a pure subscriber would
@@ -3978,14 +4087,14 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
             // immunity; owning mode starts its server with the purge off.
             (void)httpd_sess_update_lru_counter(h, fd);
         }
+        const std::size_t len = f->blk->total();
         if (out == tx_outcome_t::FAILED && f->sent == 0) {
             // DROP the frame, keep the session (#481): one refused write loses the peer one
             // frame it can recover from; three in a row condemn it (note_tx_result, #835).
             // A frame that failed part-way is the other fault (#951): send_guarded has
             // already condemned the session and logged it, so it is not reported twice.
-            ESP_LOGW(kTag, "ws send failed fd=%d len=%u - frame dropped", fd, (unsigned)f->total());
+            ESP_LOGW(kTag, "ws send failed fd=%d len=%u - frame dropped", fd, (unsigned)len);
         }
-        const std::size_t len = f->total();
         release_frame(*f);
         note_tx_result(to, out == tx_outcome_t::SENT, len);
         progress = true;
@@ -4001,6 +4110,15 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
     return progress;
 }
 
+void httpd_ws_link_t::flush_held() {
+    // The application's own tick, for a link that has gone quiet with a frame still held on a
+    // full socket: nothing else would offer it the socket again. No clock is read here; the
+    // caller's cadence is the whole policy. One flush, as any post makes.
+    if (!tx_held_.load(std::memory_order_relaxed)) return;
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    if (h != nullptr) (void)post_flush(h);
+}
+
 httpd_ws_link_t::tx_outcome_t httpd_ws_link_t::write_frame(httpd_handle_t h, int fd, session_t& s,
                                                            tx_frame_t& f, bool nonblock) {
     // Bracket the writes: everything the override lands between these two calls belongs to
@@ -4009,19 +4127,20 @@ httpd_ws_link_t::tx_outcome_t httpd_ws_link_t::write_frame(httpd_handle_t h, int
     // broken one (#2095). Only the caller knows that boundary.
     s.open_tx_frame(nonblock, f.sent);
     esp_err_t err = ESP_OK;
-    if (f.sent == 0 && !f.value) {
+    const tx_block_t& b = *f.blk;
+    if (f.sent == 0 && !b.value) {
         httpd_ws_frame_t wf = {};
         wf.final = true;
         wf.fragmented = false;
         wf.type = HTTPD_WS_TYPE_BINARY;
-        wf.payload = reinterpret_cast<std::uint8_t*>(f.payload);
-        wf.len = f.len;
+        wf.payload = reinterpret_cast<std::uint8_t*>(b.payload);
+        wf.len = b.len;
         err = httpd_ws_send_frame_async(h, fd, &wf);
     } else {
         err = write_rest(h, fd, f);
     }
     const bool blocked = s.tx_frame_blocked;
-    f.sent = s.close_tx_frame();
+    f.sent = static_cast<std::uint32_t>(s.close_tx_frame());
     if (err == ESP_OK) return tx_outcome_t::SENT;
     return blocked ? tx_outcome_t::HELD : tx_outcome_t::FAILED;
 }
@@ -4033,8 +4152,9 @@ esp_err_t httpd_ws_link_t::write_rest(httpd_handle_t h, int fd, const tx_frame_t
     // (encode_ws_header); a retained frame carries its own in `payload`. Every write goes
     // through the session's send override inside write_frame's bracket, so a part the socket
     // takes only some of ends this call with the rest still owed.
+    const tx_block_t& b = *f.blk;
     std::array<std::byte, kWsHeaderMax> hdr{};
-    const std::size_t hdr_len = f.value ? 0 : encode_ws_header(f.len, hdr);
+    const std::size_t hdr_len = b.value ? 0 : encode_ws_header(b.len, hdr);
     std::size_t skip = f.sent;
     const auto write_part = [&](const std::byte* p, std::size_t n) {
         if (skip >= n) {
@@ -4047,9 +4167,9 @@ esp_err_t httpd_ws_link_t::write_rest(httpd_handle_t h, int fd, const tx_frame_t
         const int ret = httpd_socket_send(h, fd, reinterpret_cast<const char*>(p), n, 0);
         return ret >= 0 && static_cast<std::size_t>(ret) == n;
     };
-    if (!write_part(hdr.data(), hdr_len) || !write_part(f.payload, f.len)) return ESP_FAIL;
-    if (f.value)
-        for (const view::view_t& l : f.value->links())
+    if (!write_part(hdr.data(), hdr_len) || !write_part(b.payload, b.len)) return ESP_FAIL;
+    if (b.value)
+        for (const view::view_t& l : b.value->links())
             if (!write_part(l.bytes().data(), l.bytes().size())) return ESP_FAIL;
     return ESP_OK;
 }
@@ -4066,50 +4186,40 @@ bool httpd_ws_link_t::finish_wire(session_t* slot, int fd) {
     const session_ref_t to{slot, f.gen};
     const tx_outcome_t out =
         write_frame(handle_.load(std::memory_order_relaxed), fd, *slot, f, /*nonblock=*/false);
-    const std::size_t len = f.total();
+    const std::size_t len = f.blk->total();
     release_frame(f);
     note_tx_result(to, out == tx_outcome_t::SENT, len);
     return out == tx_outcome_t::SENT;
 }
 
+httpd_ws_link_t::tx_block_t* httpd_ws_link_t::make_retained(
+    std::span<const std::span<const std::byte>> head, const graph::value_t& value) {
+    // The server frame header, encoded here because the retained frame writes its own: the
+    // block holds header and head, and the value's links follow them on the wire straight
+    // from the published block, by reference.
+    std::size_t head_len = 0;
+    for (const auto& part : head) head_len += part.size();
+    std::array<std::byte, kWsHeaderMax> ws_hdr{};
+    const std::size_t ws_len = encode_ws_header(head_len + value.total_length(), ws_hdr);
+    return make_block(std::span<const std::byte>(ws_hdr.data(), ws_len), head, &value);
+}
+
 void httpd_ws_link_t::queue_send_retained(const session_ref_t& to,
                                           std::span<const std::span<const std::byte>> head,
                                           const graph::value_t& value) {
-    std::size_t head_len = 0;
-    for (const auto& part : head) head_len += part.size();
-    const std::size_t payload_len = head_len + value.total_length();
-    // The server frame header, encoded here because the retained frame writes its own (the
-    // value's links follow the head straight from the published block).
-    std::array<std::byte, kWsHeaderMax> ws_hdr{};
-    const std::size_t ws_len = encode_ws_header(payload_len, ws_hdr);
-    std::array<std::span<const std::byte>, 8> iov;
-    if (ws_len + head_len > tx_inline_bytes_ || head.size() >= iov.size()) {
-        // A head wider than a frame's inline buffer: the gathered path, which has the large
-        // class and the heap tail for exactly this. Built on the stack for the common width.
-        if (head.size() + value.link_count() > iov.size()) {
-            note_enqueue_drop(live_fd(to), payload_len);
-            return;
-        }
-        std::size_t n = 0;
-        for (const auto& part : head) iov[n++] = part;
-        for (const view::view_t& l : value.links()) iov[n++] = l.bytes();
-        queue_send(to, std::span<const std::span<const std::byte>>(iov.data(), n));
-        return;
-    }
-    // Header and head into the peer's waiting frame, the value by reference: the same stage
-    // a gathered frame takes, conflation included.
-    std::size_t n = 0;
-    iov[n++] = std::span<const std::byte>(ws_hdr.data(), ws_len);
-    for (const auto& part : head) iov[n++] = part;
-    stage(to, std::span<const std::span<const std::byte>>(iov.data(), n), &value);
+    tx_block_t* const blk = make_retained(head, value);
+    stage(to, blk, value.total_length());
+    drop_block(blk);
 }
 
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
                            const graph::value_t& value) {
-    // The broadcast's snapshot-then-enqueue shape (see the iovec override below), with the
-    // retained enqueue in place of the gathered one.
+    // The broadcast's snapshot-then-stage shape (see the iovec override below), with the
+    // retained block in place of the gathered one: built once, on the first destination.
     session_ref_t targets[kFanoutChunk];
     std::size_t next = 0;
+    tx_block_t* blk = nullptr;
+    bool built = false;
     for (bool more = true; more;) {
         std::size_t n = 0;
         {
@@ -4121,8 +4231,13 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
             }
             more = next < slots_.size();
         }
-        for (std::size_t i = 0; i < n; ++i) queue_send_retained(targets[i], head, value);
+        if (n != 0 && !built) {
+            blk = make_retained(head, value);
+            built = true;
+        }
+        for (std::size_t i = 0; i < n; ++i) stage(targets[i], blk, value.total_length());
     }
+    drop_block(blk);
 }
 
 void httpd_ws_link_t::send(std::span<const std::byte> frame) {
@@ -4133,8 +4248,8 @@ void httpd_ws_link_t::send(std::span<const std::byte> frame) {
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     // Broadcast: snapshot the destinations under the lock, then enqueue unlocked — the
     // per-session drop accounting inside queue_send takes peers_m_ itself. Overriding
-    // the iovec entry point means a rope reply is gathered ONCE per peer, straight
-    // into the queued work buffer — the base default's gather-into-a-temporary would
+    // the iovec entry point means a rope is gathered ONCE for every peer, straight
+    // into the shared block — the base default's gather-into-a-temporary would
     // double-buffer a large reply (flatten temp + tx copy live simultaneously), the
     // heap spike behind the on-device OOM abort.
     //
@@ -4155,8 +4270,12 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     // mid-fan-out lands past `next` and is simply included, which a broadcast (already
     // non-atomic: every enqueue happens outside the lock, and the writes later still) has
     // never promised either way.
+    std::size_t total = 0;
+    for (const auto& part : iov) total += part.size();
     session_ref_t targets[kFanoutChunk];
     std::size_t next = 0;
+    tx_block_t* blk = nullptr;
+    bool built = false;
     for (bool more = true; more;) {
         std::size_t n = 0;
         {
@@ -4174,8 +4293,15 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
             }
             more = next < slots_.size();
         }
-        for (std::size_t i = 0; i < n; ++i) queue_send(targets[i], iov);
+        // ONE block for the whole fan-out (#2095), gathered on the first destination: every
+        // peer's slot takes a reference, so N peers cost one copy and one block.
+        if (n != 0 && !built) {
+            blk = make_block({}, iov, nullptr);
+            built = true;
+        }
+        for (std::size_t i = 0; i < n; ++i) stage(targets[i], blk, total);
     }
+    drop_block(blk);
 }
 
 tr::net::transport_drop_stats_t httpd_ws_link_t::peer_resolution_t::drop_stats() const noexcept {

@@ -61,27 +61,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **BREAKING: `httpd_ws_link_t` holds one latest-wins TX slot per peer, and a slow peer no
   longer blocks the others ([#2095](https://github.com/avatarsd-llc/libtracer/issues/2095)).**
-  Each admitted session holds one frame on the wire and one waiting, drawn from `memory.io`
-  when the session is admitted. A newer frame for that session replaces the waiting one, and
-  the replacement is counted. The link posts one flush to the httpd control queue, whatever the
+  Each send gathers its frame once into one refcounted block drawn from `memory.io`, and every
+  destination peer's slot takes a reference to it: one frame on the wire and one waiting per
+  peer, no per-peer copy. A newer frame for that peer replaces the waiting one, and the
+  replacement is counted. The link posts one flush to the httpd control queue, whatever the
   number of frames or peers behind it, and the flush writes each socket without waiting: a full
-  socket keeps its frame, part-written if need be, and the rest is written on the session's
-  next flush. The httpd task is therefore never held by one peer's send window, and a stalled
-  peer stays connected and receives the newest frame once it drains. Only a hard socket error
-  is a strike; a partial frame cut off by one still condemns the session (#951). In-call
-  replies keep the bounded blocking write. The TX wait that slept on the clock when the pool
-  was full is gone, along with the pool.
+  socket keeps its frame, part-written if need be. The httpd task is therefore never held by
+  one peer's send window. A held frame is moved by the link's own events, with no timer: the
+  flush re-posts itself while a held write still moves bytes, and the next post, an inbound
+  frame on any session, or `flush_held()` resumes it. A peer whose socket takes zero bytes
+  across `kTxStallStrikes` (64) consecutive replacements is struck and disconnected through
+  the existing strike path; a hard socket error is still a strike, and a partial frame cut
+  off by one still condemns the session (#951). In-call replies keep the bounded blocking
+  write. The TX wait that slept on the clock when the pool was full is gone, along with the
+  pool. A leaving peer drops its references, and the last reference frees the block.
   - Removed: `httpd_ws_config_t::tx_pool_slots`, `httpd_ws_link_t::kDefaultTxPoolSlots`,
     `tx_slot_capacity()`, `tx_slots_busy()`, `tx_reply_reserve()`, and
     `stats_t::tx_pool_misses` / `tx_pool_waits`. Drop the knob from configs; there is no
     link-wide depth left to size.
   - Added: `stats_t::tx_conflated` (link total), `link_counters_t::tx_conflated` (per peer,
-    through `enumerate_peer_stats`), and `peer_tx_bytes()`, the per-session TX cost.
-    `drop_stats().dropped_tx` now includes the replaced frames.
-  - RAM at the defaults: `buffer_bytes()` is 3,648 B per link (was 10,648 B with the
-    pool), plus `peer_tx_bytes()` = 3,360 B per admitted session (two `tx_inline_bytes()`
-    frames). The total is lower up to two sessions and higher from three: 17,088 B at
-    four. Lowering `tx_inline_bytes` lowers both.
+    through `enumerate_peer_stats`), `stats_t::tx_stall_strikes`, `kTxStallStrikes`,
+    `flush_held()` (the app's resume seam for a held frame), and `peer_tx_bytes()`, the
+    per-session TX cost. `drop_stats().dropped_tx` now includes the replaced frames.
+  - RAM at the defaults (x86-64): `buffer_bytes()` is 3,648 B per link (was 10,648 B with
+    the pool), plus `peer_tx_bytes()` = 37 B per admitted session (two frame references and
+    the stall count), so 3,685 B at one session, 3,796 B at four and 3,944 B at eight. A
+    frame in flight costs one block (a 64 B header plus the frame) however many peers it
+    goes to, held until its last peer has written it. `max_peers` stays 0 by default, meaning
+    unbounded.
 
 ## [0.19.1] — 2026-10-11
 

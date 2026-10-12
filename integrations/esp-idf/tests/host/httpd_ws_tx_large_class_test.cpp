@@ -27,8 +27,9 @@
  *      the heap arm. This is the baseline that keeps every zero below from being vacuous,
  *      and the pin on "no behaviour change for a link that did not ask";
  *   2. with a class declared, a frame in its band allocates NOTHING;
- *   3. a frame that FITS `tx_inline_bytes` allocates nothing either way — the band the
- *      issue explicitly took off the table is byte-identical to what it was;
+ *   3. a frame that FITS `tx_inline_bytes` costs ONE block from `memory.io` either way — the
+ *      block every destination shares since #2095 (here `memory.io` is the heap, so it is
+ *      counted) — and never reaches for the class;
  *   4. a frame past the class's own slot size still takes the heap arm, which is the
  *      demotion the ruling asked for rather than a removal: one composed-root snapshot is
  *      a heap block worth taking, a stream of them is not;
@@ -168,7 +169,7 @@ std::vector<std::byte> band_frame() {
     return std::vector<std::byte>(httpd_ws_link_t::kDefaultTxInlineBytes + 512, std::byte{0x5A});
 }
 
-/** @brief A payload that fits a work slot's inline buffer — the untouched band. */
+/** @brief A payload that fits the inline capacity — below the class band. */
 std::vector<std::byte> inline_frame() {
     return std::vector<std::byte>(httpd_ws_link_t::kDefaultTxInlineBytes - 8, std::byte{0x3C});
 }
@@ -230,7 +231,7 @@ void reset(tr::mem::poly_ptr_t<httpd_ws_link_t>& link) {
  *
  * Refusing is what keeps the fake's own `std::deque` out of the measured window: the
  * enqueue fails before anything is pushed, so every allocation counted is the link's. The
- * refusal also hands the work slot — and any large buffer bound to it — straight back, so
+ * refusal also hands the frame block — and any large buffer it is built in — straight back, so
  * the window can be repeated without draining.
  */
 std::size_t allocs_for_one_send(tr::net::transport_t* peer, std::span<const std::byte> frame) {
@@ -324,7 +325,8 @@ void test_a_declared_class_costs_no_allocation() {
 // ---------------------------------------------------------------------------
 /**
  * @brief The band the ruling explicitly took off the table: a frame that FITS
- *        `tx_inline_bytes` gathers into its work slot's inline buffer, class or no class.
+ *        `tx_inline_bytes` is gathered once into a shared block from `memory.io`, class or
+ *        no class (#2095), and never into the class.
  *
  * Measured on both link shapes with the same frame, so a regression that routed a fitting
  * frame at the new class (or at anything else) shows up as a non-zero on the right-hand
@@ -340,7 +342,8 @@ void test_the_inline_band_did_not_move() {
     check(peer != nullptr, "the peer resolved on the classless link");
     if (peer == nullptr) return;
     drain();
-    check_eq(allocs_for_one_send(peer, frame), 0, "no class: the fitting frame allocates nothing");
+    check_eq(allocs_for_one_send(peer, frame), 1,
+             "no class: the fitting frame costs one shared block from memory.io");
     reset(plain);
 
     auto classed = make_link(kLargeBytes, kLargeSlots);
@@ -349,8 +352,8 @@ void test_the_inline_band_did_not_move() {
     check(peer != nullptr, "the peer resolved on the classed link");
     if (peer == nullptr) return;
     drain();
-    check_eq(allocs_for_one_send(peer, frame), 0,
-             "with a class: the fitting frame still allocates nothing");
+    check_eq(allocs_for_one_send(peer, frame), 1,
+             "with a class: the fitting frame still costs that one block, and no more");
     check_eq(classed->tx_large_in_use(), 0, "and it never reached for the class at all");
     check_eq(classed->stats().tx_large_peak, 0, "which the class's untouched peak confirms");
     reset(classed);
@@ -482,8 +485,9 @@ void test_a_rejected_declaration_is_inert_and_reported() {
     reset(countless);
 
     auto real = make_link(kLargeBytes, kLargeSlots);
-    check_eq(real->buffer_bytes(), narrow_bytes + kLargeBytes * kLargeSlots,
-             "while an honoured one IS charged, exactly its own size x count");
+    check(real->buffer_bytes() >= narrow_bytes + kLargeBytes * kLargeSlots &&
+              real->buffer_bytes() <= narrow_bytes + (kLargeBytes + 256) * kLargeSlots,
+          "while an honoured one IS charged: its size x count, plus a block header per buffer");
     reset(real);
 }
 

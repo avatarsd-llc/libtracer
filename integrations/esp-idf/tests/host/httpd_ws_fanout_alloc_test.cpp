@@ -33,9 +33,9 @@
  *      property 1 is satisfied by a link that fans out to nobody, or by a resumable scan
  *      that skips or repeats a peer at the chunk boundary;
  *   3. a fan-out WIDER than one chunk still allocates nothing but the one flush item the
- *      fake queues (#949, #2095). Each frame lands in its own peer's slot, drawn when the
- *      peer was admitted, and the whole fan-out posts ONE flush to the control queue, so
- *      the cost of a broadcast does not grow with the peer count.
+ *      fake queues (#949, #2095). The frame is gathered once into one shared block that
+ *      every peer's slot references, and the whole fan-out posts ONE flush to the control
+ *      queue, so the cost of a broadcast does not grow with the peer count.
  *
  * Keeping the fake's own heap out of the measured window is what makes property 1 a clean
  * zero rather than a fragile delta: the control socket is set REFUSING, so every enqueue
@@ -216,12 +216,13 @@ void reset(tr::mem::poly_ptr_t<httpd_ws_link_t>& link) {
 // ---------------------------------------------------------------------------
 /**
  * @brief The headline. A fan-out to a full chunk of peers must not touch the global heap
- *        at all — not once for the destination snapshot, not once per frame.
+ *        — not once for the destination snapshot, not once per frame — beyond the one
+ *        shared block, and only where memory.io is the heap.
  *
- * Every gathered frame lands in its destination peer's own TX slot, drawn from the link's
- * memory source when the peer was admitted (#2095), so nothing in the window has a reason
- * to allocate. A frame past the inline size would take the large class or its documented
- * nothrow fallback; the body here is far below it, so the count is the fan-out's own.
+ * The frame is gathered once into one block drawn from the link's memory source, and every
+ * destination peer's TX slot takes a reference to it (#2095), so nothing in the window has
+ * a reason to touch the global heap. A frame past the inline size would take the large class or its
+ * documented nothrow fallback; the body here is far below it, so the count is the fan-out's own.
  *
  * The companion assertion is what stops the zero from being vacuous: the control socket
  * was offered exactly one frame per peer, so the broadcast measured here really did
@@ -255,7 +256,12 @@ void test_a_broadcast_allocates_nothing() {
     broadcast(*link);
     const std::size_t allocs_after = g_allocs.load(std::memory_order_relaxed);
 
-    check_eq(allocs_after - allocs_before, 0, "the broadcast touched the global heap ZERO times");
+    // The broadcast draws its one shared block from memory.io. On a slab-pooled build that
+    // is the pool, so the global heap sees nothing; on a heap-rooted build memory.io IS the
+    // heap, and the count is that one block, whatever the peer count (#2095).
+    const std::size_t want = tr::graph::config_t::kSlabPool ? 0 : 1;
+    check_eq(allocs_after - allocs_before, want,
+             "the broadcast touched the global heap only for its one shared block, if at all");
     check_eq(link->enqueue_drops() - drops_before, peers,
              "and it really fanned out: one frame offered to the control socket per peer");
 
@@ -351,8 +357,9 @@ void test_the_fanout_reaches_every_open_peer_exactly_once() {
  *
  * Until #949 a send that found no free TX slot allocated a work item AND a payload buffer
  * on the global heap; after it, a fan-out past the link-wide pool dropped its tail. With a
- * slot per peer (#2095) neither happens: every peer's frame is gathered into that peer's
- * own slot and the whole fan-out posts ONE flush to the control queue.
+ * slot per peer (#2095) neither happens: the frame is gathered once into one shared block,
+ * every peer's slot references it, and the whole fan-out posts ONE flush to the control
+ * queue.
  *
  * The control socket is left ACCEPTING, so the one flush is really queued and the fake's
  * own `std::deque` push is inside the window — at most one block. Anything per peer would

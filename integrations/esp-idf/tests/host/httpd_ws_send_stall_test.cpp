@@ -214,8 +214,9 @@ void test_short_write_closes_immediately() {
     // mid-buffer on silicon. Since #2095 that is not a fault on the push path: the frame is
     // held part-written and the session's next flush writes the rest. Here the rest meets a
     // hard error, which leaves the peer holding a frame that never ends.
-    fake_httpd::instance().set_send_script(
-        600, {send_result_t::FULL, send_result_t::SHORT, send_result_t::FAIL});
+    // (The TIMEOUT is the re-post a partial write makes, finding the socket full.)
+    fake_httpd::instance().set_send_script(600, {send_result_t::FULL, send_result_t::SHORT,
+                                                 send_result_t::TIMEOUT, send_result_t::FAIL});
 
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
     broadcast(*link);

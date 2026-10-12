@@ -339,14 +339,27 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * @brief Default inline payload capacity of one TX frame, bytes — the ctor's
      *        `tx_inline_bytes` when left 0.
      *
-     * Sized past the common outbound frames (value pushes, directed replies, census) so a
-     * steady-state send gathers straight into the frame with NO allocation; a larger frame
-     * (e.g. a composed-root snapshot reply) takes a nothrow payload from `memory.io`.
-     * Roughly one Ethernet MTU. It multiplies: each peer holds two of these (the frame on
-     * the wire and the newest waiting behind it, #2095) and the link one reply scratch, so
-     * it is the dominant term of the link's RAM (@ref peer_tx_bytes, @ref buffer_bytes).
+     * Two uses since #2095: the size of the link's one in-call reply scratch, which gathers
+     * a rope reply with no allocation, and the lower edge of the LARGE size class's band. A
+     * queued frame is gathered once per send into a block from `memory.io` that every
+     * destination shares, whatever its size, so this no longer multiplies by the peer count
+     * (@ref buffer_bytes, @ref peer_tx_bytes). Roughly one Ethernet MTU.
      */
     static constexpr std::size_t kDefaultTxInlineBytes = 1600;
+
+    /**
+     * @brief Replacements of a peer's waiting frame, each after a write its socket took zero
+     *        bytes of, that strike the peer (#2095).
+     *
+     * The flush writes without waiting, so a full socket is never an error, and a peer that
+     * never drains would otherwise hold its seat, its slot and a reference to a frame for as
+     * long as it stayed connected. Counted in publishes, not time — this link reads no clock:
+     * at 100 updates/s the default strikes a peer whose socket took nothing for about 0.6 s of
+     * them, at 1/s after about a minute. Any byte the socket takes clears the count. The
+     * strike closes the session through the ordinary strike path (@ref stats_t::
+     * tx_stall_strikes counts it, @ref stats_t::sessions_condemned too). Compile-time.
+     */
+    static constexpr std::uint32_t kTxStallStrikes = 64;
 
     /**
      * @brief Start an `esp_http_server` instance on @p bind_port with a WebSocket
@@ -748,6 +761,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          * not refused.
          */
         std::uint32_t tx_conflated = 0;
+        /** @brief Sessions closed because @ref kTxStallStrikes newer frames replaced theirs
+         *         while their socket took nothing (#2095); a subset of
+         *         @ref sessions_condemned. */
+        std::uint32_t tx_stall_strikes = 0;
         /**
          * @brief Of @ref enqueue_drops, the ones that found the LARGE size class exhausted
          *        (#1566) — the `dropped` noun of `core/STYLE.md` §Introspection for that
@@ -988,19 +1005,31 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         tx_inline_bytes() + tx_large_slot_capacity() * tx_large_bytes()` — the RX
      *         scratch, the in-call reply scratch and a declared large class. What a RAM audit
      *         asks for, and what #1160 exists to make reportable rather than
-     *         derivable-from-sources; add @ref peer_tx_bytes per session slot. */
+     *         derivable-from-sources; add @ref peer_tx_bytes per session slot, and the frames
+     *         in flight (one block per send still held by some peer, shared by all). */
     [[nodiscard]] std::size_t buffer_bytes() const noexcept;
 
     /**
-     * @brief The TX cost of ONE session slot, bytes: its two frames' inline buffers
-     *        (`2 * tx_inline_bytes()`) plus their bookkeeping (#2095).
+     * @brief The TX cost of ONE session slot, bytes: two frame references and their
+     *        bookkeeping (#2095). A per-ABI `sizeof`, so the figure differs by target.
      *
-     * Drawn from `memory.io` when a peer first lands on a new slot and recycled with it, so
-     * a link's TX RAM is this times its peer high-water mark, on top of @ref buffer_bytes.
-     * It is what the per-peer conflating slot costs: the frame on the wire, which a
-     * non-blocking write may leave part-way, and the newest frame waiting behind it.
+     * Part of the slot itself: a peer holds a reference to the frame on the wire and to the
+     * newest one waiting, never a copy; the bytes are in a block shared by every peer the
+     * send went to, freed by the last of them to let go. A departing peer lets go of both.
      */
     [[nodiscard]] std::size_t peer_tx_bytes() const noexcept;
+
+    /**
+     * @brief Offer every frame held on a full socket its socket again (#2095); any task.
+     *
+     * ESP-IDF's server selects for read only, so the link has no writable event to wait on.
+     * A held frame moves on with this link's own events: a write that took bytes re-posts the
+     * flush, and the next frame posted to any peer, the next frame any peer sends and a
+     * parked drain each flush too. A link that goes quiet with a frame still held needs one
+     * more event, and that is this call: the application makes it on its own tick, and the
+     * link reads no clock. A no-op when nothing is held.
+     */
+    void flush_held();
 
     /**
      * @brief Admission predicate: given the parsed opening GET, return true to admit the
@@ -1334,7 +1363,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     struct gate_t;            // the handler-admission gate + teardown barrier (in the .cpp)
     struct session_t;         // one peer slot's connection state (defined in the .cpp)
     struct session_ref_t;     // a session identity that survives fd reuse (defined in the .cpp)
-    struct tx_frame_t;        // one outbound frame held for one peer (defined in the .cpp)
+    struct tx_block_t;        // one outbound frame's bytes, shared by its peers (the .cpp)
+    struct tx_frame_t;        // one peer's reference to a frame (defined in the .cpp)
     struct detach_req_t;      // the teardown session-detach work item (defined in the .cpp)
     struct close_req_t;       // the close_peer work item (defined in the .cpp)
     struct refusal_req_t;     // a refusal-after-upgrade work item (defined in the .cpp)
@@ -1573,12 +1603,23 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
                              std::span<const std::span<const std::byte>> head,
                              const graph::value_t& value);
     /**
-     * @brief The one store both queue_send forms end in: gather @p iov (and keep @p value,
-     *        when given) into @p to's waiting frame under its `tx_m`, count a frame it
-     *        replaces, and post the link's flush (#2095).
+     * @brief The one store every queued send ends in: a reference to @p blk into @p to's
+     *        waiting frame under its `tx_m`, counting a frame it replaces, then the link's
+     *        flush (#2095). A null @p blk is the counted drop of a @p total -byte frame.
      */
-    void stage(const session_ref_t& to, std::span<const std::span<const std::byte>> iov,
-               const graph::value_t* value);
+    void stage(const session_ref_t& to, tx_block_t* blk, std::size_t total);
+    /** @brief Gather @p prefix then @p iov once into a new block (one reference, the
+     *         caller's), keeping @p value when given; null when the large class is spent
+     *         (counted) or `memory.io` refuses. */
+    [[nodiscard]] tx_block_t* make_block(std::span<const std::byte> prefix,
+                                         std::span<const std::span<const std::byte>> iov,
+                                         const graph::value_t* value);
+    /** @brief A retained frame's block (RFC-0028 §6.9): its WebSocket header and @p head,
+     *         with @p value kept by reference. */
+    [[nodiscard]] tx_block_t* make_retained(std::span<const std::span<const std::byte>> head,
+                                            const graph::value_t& value);
+    /** @brief Drop one reference to @p b (null is a no-op); the last frees it. Needs no link. */
+    static void drop_block(tx_block_t* b);
     /** @brief Post this link's ONE flush to the httpd task unless one is already posted.
      *  @return False when the control queue refused it. */
     bool post_flush(httpd_handle_t h);
@@ -1618,12 +1659,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         (`mem::exhausted_at_init`, ADR-0083, #1880). Per-peer frames are drawn per
      *         session slot instead (@ref peer_tx_bytes). */
     void alloc_buffers();
-    /** @brief The bytes @p frame gathers @p total into: its inline buffer, a large-class
-     *         buffer, or an exact-size block from `memory.io`; null when the class is spent
-     *         (counted) or the store refuses. */
-    [[nodiscard]] std::byte* claim_payload(tx_frame_t& frame, std::size_t total);
-    /** @brief Empty @p frame: drop its heap payload and value reference and hand back its
-     *         large-class buffer. Needs no link, so it is safe on any task that owns it. */
+    /** @brief Empty @p frame, dropping its block reference. Needs no link, so it is safe on
+     *         any task that owns the frame. */
     static void release_frame(tx_frame_t& frame);
 
     /**
@@ -1639,7 +1676,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * result carried back for a session that has since departed must strike NOBODY, and
      * charging it to whoever inherited the descriptor condemns a stranger (#954).
      */
-    void note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes);
+    void note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes,
+                        bool stalled = false);
 
     /**
      * @brief Resolve @p to to the socket it may be sent on RIGHT NOW, or refuse it
@@ -2109,6 +2147,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     void note_reassembly_over_cap(std::size_t had, std::size_t adding);
     /** @brief See @ref stats_t::tx_conflated. */
     std::atomic<std::uint32_t> tx_conflated_{0};
+    /** @brief See @ref stats_t::tx_stall_strikes. */
+    std::atomic<std::uint32_t> tx_stall_strikes_{0};
+    /** @brief A frame was left held on a full socket by the last flush (httpd task writes,
+     *         any task reads): what @ref flush_held and the handler entry test first. */
+    std::atomic<bool> tx_held_{false};
     /**
      * @brief A flush is posted to the httpd task and has not started its walk (#2095). Set by
      *        the poster (@ref post_flush), cleared by the flush before it walks, so the link
@@ -2240,20 +2283,20 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief The session socket currently switched from TCP_NODELAY to Nagle because a
      *         drain showed the flood shape, or -1 (ADR-0085 §7). httpd task only. */
     int rx_nagle_fd_ = -1;
-    /** @brief The in-call reply scratch: one frame, used only on the httpd task inside
-     *         @ref send_in_call to gather a rope reply into one WebSocket frame. */
-    fixed_array_t<tx_frame_t> tx_scratch_;
-    /** @brief Its inline buffer, `tx_inline_bytes_` from `memory.io`. */
+    /** @brief The in-call reply scratch, `tx_inline_bytes_` from `memory.io`: used only on
+     *         the httpd task inside @ref send_in_call to gather a rope reply into one
+     *         WebSocket frame. */
     fixed_array_t<std::byte> tx_scratch_block_;
     /** @brief Effective inline capacity of one TX frame — the ctor's `tx_inline_bytes`. */
     std::size_t tx_inline_bytes_ = 0;
     /**
-     * @brief The LARGE size class's payload storage, one flat block of
-     *        `tx_large_slots_ * tx_large_bytes_` — null when no class was declared (#1566).
+     * @brief The LARGE size class's storage, one flat block of `tx_large_slots_` whole frame
+     *        blocks (@ref large_stride each) — null when no class was declared (#1566).
      *
-     * One block: allocated once per link and never grown.
+     * One block: allocated once per link and never grown. A frame in the band is built in
+     * one of these, header and bytes, so it draws nothing else.
      */
-    fixed_array_t<std::byte> tx_large_;
+    fixed_array_t<std::max_align_t> tx_large_;
     /** @brief One claimed flag per large buffer, claimed by CAS. A separate array rather
      *         than a member of a shell type: the large class lends a BUFFER to a frame and
      *         has no frame of its own. */
@@ -2268,13 +2311,18 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     std::atomic<std::uint32_t> tx_large_peak_{0};    /**< @brief @ref stats_t::tx_large_peak. */
     std::atomic<std::uint32_t> tx_large_dropped_{0}; /**< @brief @ref stats_t::tx_large_dropped. */
     /**
-     * @brief Claim a large buffer for @p frame and bind it, or return nullptr when the class
-     *        is undeclared or every buffer of it is in flight.
+     * @brief Claim a large buffer, setting @p flag to its claimed flag, or return nullptr when the
+     * class is undeclared or every buffer of it is in flight.
      *
      * Callers treat a null exactly as they treat a failed `new (std::nothrow)`: the counted
      * drop. It never waits: nothing on the TX path does (#2095).
      */
-    [[nodiscard]] std::byte* claim_tx_large(tx_frame_t& frame);
+    [[nodiscard]] void* claim_tx_large(std::atomic<bool>*& flag);
+    /** @brief Bytes one buffer of the large class spans: a frame block's header, then
+     *         `tx_large_bytes_`, each rounded to `max_align_t`. */
+    [[nodiscard]] std::size_t large_stride() const noexcept;
+    /** @brief Where a frame block's bytes start: its header, rounded to `max_align_t`. */
+    [[nodiscard]] static std::size_t tx_block_header() noexcept;
     /** @brief Validate the declared large size class and allocate it — the tail of
      *         @ref alloc_buffers, out of line because a rejected or failed declaration is
      *         reported rather than clamped and that is three arms of prose. */
