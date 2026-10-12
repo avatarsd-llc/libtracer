@@ -639,6 +639,126 @@ void test_the_dial_slot_returns_to_its_store_on_both_arms() {
     check(drained_fake(), "the orphaned dial resolved");
     check(wait_until([&] { return state.live == 0; }, 2s), "and returned the slot itself");
 }
+
+/**
+ * @brief #1606 — nothing connection-sized while unconnected: a link holds its scratches and
+ *        its transport pair only while a connection stands.
+ *
+ * The stores' live counts are the oracle. Dialling an unreachable peer, the link holds its
+ * dial slot and nothing else from `memory.state`, nothing from `memory.io` beyond its queue
+ * table, and no transport pair across the backoff. When a handshake lands it draws one read
+ * scratch and one write scratch; when the peer closes, both go back, with the pair, before
+ * the re-dial — the link is back to what a never-connected one holds.
+ */
+void test_an_unconnected_link_holds_no_connection_memory() {
+    std::printf("#1606 an unconnected link holds no scratch and no transport pair:\n");
+    gated_source_t state;
+    gated_source_t io;
+    const tr::net::esp_ws_client_config_t cfg{
+        .rx_bytes = kBufBytes,
+        .tx_bytes = kBufBytes,
+        .memory = {.rx = nullptr, .io = &io, .state = &state}};
+
+    fake_ws::reset();
+    fake_ws::fail_connects(true);
+    {
+        auto link =
+            tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        const int slot = state.live.load();  // the slot and its string copies
+        const int io_table = io.live.load();
+        check(wait_until([] { return fake_ws::connect_count() >= 2; }, 5s),
+              "the link dialed an unreachable peer twice");
+        check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
+              "and holds no transport pair across the backoff");
+        check(state.live == slot, "from memory.state it holds the dial slot only");
+        check(io.live == io_table, "and from memory.io nothing beyond its queue table");
+
+        fake_ws::fail_connects(false);
+        check(wait_until([&] { return link->link_up(); }, 5s), "the peer came back");
+        check(state.live == slot + 1, "a standing connection holds its read scratch");
+        check(io.live == io_table + 1, "and its write scratch");
+
+        fake_ws::fail_connects(true);
+        fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, /*fin=*/true,
+                                                  /*len=*/2, /*seed=*/0x11)});
+        check(wait_until([&] { return !link->link_up(); }, 5s), "the peer closed");
+        check(wait_until([&] { return state.live == slot && io.live == io_table; }, 2s),
+              "both scratches went back with the connection");
+        check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
+              "and so did its transport pair, ahead of the re-dial");
+    }
+    check(drained_fake(), "it drained");
+    check(state.live == 0 && io.live == 0, "and its destructor returned everything else");
+}
+
+/**
+ * @brief #1606 — a store that refuses a scratch when the handshake lands is backpressure:
+ *        the fresh connection is released like a failed dial, and the link comes up on a
+ *        later attempt once the store has room. Never a sizing abort at runtime.
+ */
+void test_a_refused_scratch_is_a_failed_dial() {
+    std::printf("#1606 a refused scratch fails the dial, and the next one succeeds:\n");
+    gated_source_t state;
+    gated_source_t io;
+    const tr::net::esp_ws_client_config_t cfg{
+        .rx_bytes = kBufBytes,
+        .tx_bytes = kBufBytes,
+        .defer_recv = true,
+        .memory = {.rx = nullptr, .io = &io, .state = &state}};
+
+    fake_ws::reset();
+    {
+        auto link =
+            tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        state.refusing.store(true);
+        link->start_receiving();
+        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
+        check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
+              "the refused connection's pair was released");
+        check(!link->ok(), "and the link did not come up");
+        state.refusing.store(false);
+        check(wait_until([&] { return link->link_up(); }, 5s),
+              "the next dial came up once the store had room");
+    }
+    check(drained_fake(), "it drained");
+    check(state.live == 0 && io.live == 0, "and returned everything it drew");
+}
+
+/**
+ * @brief #1606 — shut_down() stops the link now and the destructor frees it later ("shut
+ *        down now, free at collect()").
+ *
+ * After shut_down() the connection is closed and its pair released, the link reports down,
+ * and a send is shed without reaching the transport or counting a drop; the scratches stay
+ * drawn until the destructor, which then returns everything.
+ */
+void test_shut_down_stops_now_and_the_destructor_frees() {
+    std::printf("#1606 shut_down() stops now, the destructor frees:\n");
+    gated_source_t state;
+    const tr::net::esp_ws_client_config_t cfg{
+        .rx_bytes = kBufBytes, .tx_bytes = kBufBytes, .memory = {.rx = nullptr, .state = &state}};
+
+    fake_ws::reset();
+    {
+        auto link =
+            tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        check(wait_until([&] { return link->link_up(); }, 2s), "a link came up");
+        const int drawn = state.live.load();
+        const auto start = std::chrono::steady_clock::now();
+        link->shut_down();
+        check_under_ms(ms_since(start), 1500, "shut_down() is bounded");
+        check(!link->link_up(), "it reports down");
+        check(fake_ws::live_handles() == 0, "its transport pair is released");
+        const int writes = fake_ws::writes_started();
+        link->send(payload());
+        check(fake_ws::writes_started() == writes, "a later send never reaches the transport");
+        check(link->stats().c.tx_drops == 0, "and is not counted as a loss toward the peer");
+        check(state.live == drawn, "the memory stays drawn until the destructor");
+        link->shut_down();  // idempotent
+    }
+    check(drained_fake(), "it drained");
+    check(state.live == 0, "and the destructor returned everything it drew");
+}
 }  // namespace
 
 int main() {
@@ -653,6 +773,9 @@ int main() {
     test_the_blocking_bounds_are_derived_from_the_watchdog();
     test_a_second_sender_does_not_wait_on_a_parked_write();
     test_the_dial_slot_returns_to_its_store_on_both_arms();
+    test_an_unconnected_link_holds_no_connection_memory();
+    test_a_refused_scratch_is_a_failed_dial();
+    test_shut_down_stops_now_and_the_destructor_frees();
     // Nothing detached may still be running here: a condemned dial's recv thread outlives
     // its link by design, and one still inside the transport at process exit is a crash
     // under ASan/TSan and a leak under LSan. Every case drains, and this is the backstop.

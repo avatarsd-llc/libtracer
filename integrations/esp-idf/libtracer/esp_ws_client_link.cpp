@@ -241,6 +241,27 @@ class sender_exit_t {
     std::atomic<std::uint32_t>& tally_; /**< @brief esp_ws_client_link_t::senders_. */
 };
 
+/**
+ * @brief Close and destroy one tcp+ws transport pair, and null both handles — the ONE
+ *        release every owner of a pair uses (#1606).
+ *
+ * `esp_transport_ws_init(parent)` does NOT take ownership of the parent, so both handles
+ * are destroyed, ws first, then tcp — IDF's own teardown order. Closing a pair whose dial
+ * failed is harmless; closing one whose handshake landed takes the connection down on the
+ * peer's side too. A null handle is skipped, so a half-built pair releases what it has.
+ */
+void release_pair(esp_transport_handle_t& ws, esp_transport_handle_t& tcp) noexcept {
+    if (ws != nullptr) {
+        esp_transport_close(ws);
+        esp_transport_destroy(ws);
+        ws = nullptr;
+    }
+    if (tcp != nullptr) {
+        esp_transport_destroy(tcp);
+        tcp = nullptr;
+    }
+}
+
 }  // namespace
 
 /**
@@ -302,24 +323,24 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
     : dial_(mem::make_in<dial_t>(config.memory.state_or_default(), config.memory.state_or_default(),
                                  host, port, config.ws_path, config.handshake_headers)),
       rx_backend_(config.memory.rx),
-      // The send side's store (#1661): the scratch below, the queue's slots and the base
-      // class's gather temporary draw from the application's `memory.io`, EXCEPT that a null
-      // `io` sends the scratch and the queue slots to the platform heap (`heap_source()`) while
+      // The send side's store (#1661): the scratch, the queue's slots and the base class's
+      // gather temporary draw from the application's `memory.io`, EXCEPT that a null `io`
+      // sends the scratch and the queue slots to the platform heap (`heap_source()`) while
       // the gather temporary stays on the base class's net sub-pool (the static arena on this
       // target; `set_egress_source` below runs only for a non-null `io`). The host client
       // (`ws_client_transport_t`) resolves a null `io` to the net sub-pool throughout.
-      tx_buf_(config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
-      tx_(kTxQueueDepth, config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
-      armed_(!config.defer_recv) {
-    // The connection state is drawn at setup, so a store that cannot hold it is a sizing
-    // bug, never a runtime condition (ADR-0083): the constructor stops here, before the
-    // recv thread that would read it exists.
+      tx_src_(config.memory.io != nullptr ? config.memory.io : &tr::mem::heap_source()),
+      rx_bytes_(config.rx_bytes),
+      tx_bytes_(config.tx_bytes),
+      recv_stack_(config.recv_stack),
+      tx_(kTxQueueDepth, *tx_src_) {
+    // The dial slot is drawn at setup, so a store that cannot hold it is a sizing bug, never
+    // a runtime condition (ADR-0083): the constructor stops here, before the recv thread
+    // that would read it exists. The scratches are NOT drawn here (#1606): a link that never
+    // reaches its peer never holds them — connect_once() draws them when a handshake lands.
     mem::block_source_t& state = config.memory.state_or_default();
-    if (dial_ == nullptr || !dial_->copied || !rx_buf_.assign(state, config.rx_bytes))
-        mem::exhausted_at_init(state, "esp_ws_client_link_t dial slot and read scratch");
-    // Reserved ONCE, here: a source that refuses leaves a zero-capacity scratch, so every
-    // outbound frame takes the logged oversize drop rather than an allocation at send time.
-    if (tx_buf_.reserve(config.tx_bytes)) tx_bytes_ = config.tx_bytes;
+    if (dial_ == nullptr || !dial_->copied)
+        mem::exhausted_at_init(state, "esp_ws_client_link_t dial slot");
     if (config.memory.io != nullptr) set_egress_source(*config.memory.io);
     // Every member the recv thread reads is initialized ABOVE this line, which is the
     // whole of #959: the thread spawned below dials at once, so a knob delivered after the
@@ -329,37 +350,38 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
     // ordering is a property of the type rather than a request in a doc comment. Nothing
     // may be added between here and the spawn that the recv thread also reads.
     //
-    // The recv thread owns dialing + the read loop; the ctor never blocks on the
-    // network. recv_stack==0 uses the pthread default; any other value is APPLIED —
-    // this thread runs in-call delivery through the graph's on_write seam, so a node
-    // that knows its delivery depth must be able to size it (#900).
-    recv_thread_ = esp::spawn_thread(config.recv_stack, "ws_cli_rx", [this] { recv_loop(); });
+    // Without `defer_recv` the recv thread starts here; with it, at the owner's arm.
+    if (!config.defer_recv) start_receiving();
 }
 
 void esp_ws_client_link_t::start_receiving() {
     // Idempotent, and safe on a link that never connected: `transport_vertex_t::
     // make_connection` arms every link unconditionally once the receiver is installed, so
-    // a second call — or one on a link constructed without `defer_recv`, whose latch
-    // started set — finds the exchange returning true and does nothing. The latch is
-    // never cleared (one-shot): a re-dial only happens on a link that was already armed,
-    // so reconnects need no re-gating (ADR-0081, #1102).
-    if (armed_.exchange(true, std::memory_order_acq_rel)) return;
-    {
-        // Taking the latch mutex before notifying is what makes the wake safe against a
-        // recv thread that has evaluated the predicate but not yet parked — the same
-        // pattern the destructor uses for the backoff wake.
-        const std::lock_guard<std::mutex> lk(backoff_m_);
-    }
-    backoff_cv_.notify_all();
+    // a second call — or one on a link constructed without `defer_recv`, which the ctor
+    // armed — finds the exchange returning true and does nothing. The latch is never
+    // cleared (one-shot): a re-dial only happens on a link that was already armed, so
+    // reconnects need no re-gating (ADR-0081, #1102). A link already shut down stays down.
+    //
+    // The latch IS the spawn (#1606): a `defer_recv` link used to spawn its thread in the
+    // ctor and park it on a condition variable until this call, holding a whole recv stack
+    // for a link that could not dial. Now nothing exists to park. The recv thread owns
+    // dialing + the read loop; the caller never blocks on the network. recv_stack==0 uses
+    // the pthread default; any other value is APPLIED — this thread runs in-call delivery
+    // through the graph's on_write seam, so a node that knows its delivery depth must be
+    // able to size it (#900).
+    if (stop_.load(std::memory_order_acquire) || armed_.exchange(true, std::memory_order_acq_rel))
+        return;
+    recv_thread_ = esp::spawn_thread(recv_stack_, "ws_cli_rx", [this] { recv_loop(); });
 }
 
-esp_ws_client_link_t::~esp_ws_client_link_t() {
+void esp_ws_client_link_t::shut_down() {
     // Disarm the link BEFORE waiting on anything. `stop_` is what every blocking wait
     // in the recv loop is predicated on, and it is also what a sender re-reads after it
     // gets `write_m_` — so from here on no NEW work reaches the handles. Clearing
     // `connected_` makes link_up() honest for the rest of teardown; the recv loop's own
-    // stop_ re-check keeps it from reading that as "re-dial" (see recv_loop).
-    stop_.store(true, std::memory_order_release);
+    // stop_ re-check keeps it from reading that as "re-dial" (see recv_loop). The exchange
+    // makes a second call — the destructor after an owner's shut_down — a no-op.
+    if (stop_.exchange(true, std::memory_order_acq_rel)) return;
     connected_.store(false, std::memory_order_release);
     {
         // Taking the backoff mutex before notifying is what makes the wakeup safe
@@ -382,23 +404,19 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
     // costs is one recv-thread stack — the one already allocated, no new thread — held for
     // the remainder of kDialTimeoutMs. That is the price of not charging this task for a
     // blocking call it cannot interrupt, and it is stated in the header's threading note.
-    bool orphaned_dial = false;
     {
         const std::lock_guard<std::mutex> lk(dial_->m);
         if (dial_->in_flight) {
             dial_->condemned = true;
-            orphaned_dial = true;
+            dial_orphaned_ = true;
         }
     }
-    if (orphaned_dial && recv_thread_.joinable()) {
+    if (dial_orphaned_ && recv_thread_.joinable()) {
         ESP_LOGI(kTag, "torn down mid-dial: the dial is orphaned, not waited out");
         recv_thread_.detach();
     } else if (recv_thread_.joinable()) {
         recv_thread_.join();
     }
-    // The slot has exactly one owner left (#1880): a condemned dial returns it itself as it
-    // resolves, so only a slot with no dial in flight is this destructor's to return.
-    if (!orphaned_dial) mem::drop_in(*dial_->src, dial_);
     {
         // The recv thread has stopped (or been condemned and detached, in which case it
         // touches nothing on this object ever again), but it was only ONE of the two
@@ -409,19 +427,21 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
         // acquiring it means no sender is inside — and every sender that acquires it
         // afterwards finds `stop_` set (and `connected_` cleared, both stored above,
         // before this lock was taken) and leaves without reading either handle.
-        // esp_transport_ws_init(parent) does NOT take ownership of the parent, so both
-        // handles are destroyed here (ws first, then tcp) — mirrors IDF's own teardown.
+        // A connection standing at the stop is released here: the recv loop breaks on
+        // `stop_` before its departure arm, which releases every other one.
         const std::lock_guard<std::mutex> lk(write_m_);
-        if (ws_ != nullptr) {
-            esp_transport_close(ws_);
-            esp_transport_destroy(ws_);
-            ws_ = nullptr;
-        }
-        if (tcp_ != nullptr) {
-            esp_transport_destroy(tcp_);
-            tcp_ = nullptr;
-        }
+        release_pair(ws_, tcp_);
     }
+}
+
+esp_ws_client_link_t::~esp_ws_client_link_t() {
+    // Shut down now, free here (#1606): an owner that already called shut_down() at the
+    // link's removal finds this a no-op, and the destructor — at the graph's collect() —
+    // only waits out the senders and returns the memory.
+    shut_down();
+    // The slot has exactly one owner left (#1880): a condemned dial returns it itself as it
+    // resolves, so only a slot with no dial in flight is this destructor's to return.
+    if (!dial_orphaned_) mem::drop_in(*dial_->src, dial_);
     // Drain the senders that ANNOUNCED themselves on the tally. Holding `write_m_` for
     // this would deadlock — that is the lock they are queued on — so the wait is here,
     // after it. Each one wakes, sees the disarmed link, and leaves; only then is it safe
@@ -442,24 +462,10 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // esp_transport_ws handle would inherit its internal frame_state (bytes_remaining
     // etc.) — ws_connect() does not reset it, only ws_init() zero-allocates it — so a
     // reconnect mid-fragment would mis-parse the first frame of the new connection.
-    // Rebuilding is the only way to guarantee a clean frame state.
+    // Rebuilding is the only way to guarantee a clean frame state. No pair is standing
+    // here: a failed dial releases its own below, and a lost connection's is released by
+    // the recv loop's departure arm (#1606).
     //
-    // This rewrite runs with NO lock — deliberately: taking `write_m_` here would put the
-    // whole dial bound in front of every sender, which is the stall #952 is about. What
-    // makes it safe is that the handles are PUBLISHED by the `connected_` release store
-    // at the end of this function, and nothing off this thread may read them without
-    // first observing that store (see send()). `connected_` is false for the whole of
-    // this rewrite, so a sender racing it turns back at the gate instead of reading.
-    if (ws_ != nullptr) {
-        esp_transport_close(ws_);
-        esp_transport_destroy(ws_);
-        ws_ = nullptr;
-    }
-    if (tcp_ != nullptr) {
-        esp_transport_destroy(tcp_);
-        tcp_ = nullptr;
-    }
-
     // PUBLISH the dial (#1058). From the lock below until the resolve at the bottom of
     // this block, this thread touches NOT ONE member of the link — everything the dial
     // needs is in the slot, whose lifetime is not this object's (#1880). That is
@@ -514,35 +520,29 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
         dial_us = esp_timer_get_time() - dial_t0;
     }
 
-    // RESOLVE. Invariant 1 of the #1058 ruling, and it is structural rather than
-    // remembered: the pair this dial built is released here by EXACTLY ONE owner. Either
-    // the link is still alive and adopts it (and the ordinary destructor releases it
-    // later), or the link is gone and this orphan releases it right now — success closes
-    // first, because a completed handshake means there is a connection on the peer's side
-    // to take down. `condemned` is read under the same mutex the destructor set it under,
-    // so the two decisions cannot both fire and cannot both be skipped.
+    // RESOLVE. `condemned` is read under the same mutex the teardown set it under, so a
+    // condemning shut_down and this resolve cannot both miss each other: once `in_flight`
+    // is cleared here, a teardown joins this thread instead, and nothing else touches the
+    // slot's pair — so the pair is this thread's alone below, lock or no lock.
     bool orphaned = false;
     {
         const std::lock_guard<std::mutex> lk(slot->m);
         slot->in_flight = false;
         orphaned = slot->condemned;
-        if (orphaned) {
-            if (slot->ws != nullptr) {
-                esp_transport_close(slot->ws);
-                esp_transport_destroy(slot->ws);
-                slot->ws = nullptr;
-            }
-            if (slot->tcp != nullptr) {
-                esp_transport_destroy(slot->tcp);
-                slot->tcp = nullptr;
-            }
-        } else {
-            ws_ = slot->ws;
-            tcp_ = slot->tcp;
-            slot->ws = nullptr;
-            slot->tcp = nullptr;
-        }
     }
+    // The connection's scratches are drawn HERE, when a handshake has landed, and not in
+    // the constructor (#1606): a link that never reaches its peer never holds them. An
+    // orphan touches no member, so the draw is skipped for one (`&&` stops at it). A store
+    // that refuses is backpressure, not a sizing abort: the fresh connection is released
+    // like a failed dial and the next attempt tries again after the backoff.
+    const bool up = !orphaned && rc == 0 && rx_buf_.assign(*slot->src, rx_bytes_) &&
+                    tx_buf_.assign(*tx_src_, tx_bytes_);
+    // Invariant 1 of the #1058 ruling, structural rather than remembered: the pair this dial
+    // built is released by EXACTLY ONE owner. A dial that did not come up releases it right
+    // here, on the failure path (#1606 ask 2) — an orphan, a failed connect and a refused
+    // draw alike, closing first so a landed handshake is taken down on the peer's side too.
+    // A dial that came up hands it to the link, whose departure arm releases it.
+    if (!up) release_pair(slot->ws, slot->tcp);
     if (orphaned) {
         // The link is gone, so this dial is the slot's last owner and returns it — with its
         // mutex released, never from inside it. No log (the strings go with the slot) and no
@@ -551,20 +551,10 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
         mem::drop_in(*slot->src, slot);
         return dial_outcome_t::ORPHANED;
     }
-    if (rc != 0) {
-        // #1606 ask 2: release the failed pair HERE, on the failure path, not at the top of
-        // the next attempt — so a link backing off from an unreachable peer holds no
-        // transport pair for the whole backoff. Safe without a lock for the reason the
-        // top-of-dial teardown is: `connected_` is false, so no sender may read either handle.
-        if (ws_ != nullptr) {
-            esp_transport_close(ws_);
-            esp_transport_destroy(ws_);
-            ws_ = nullptr;
-        }
-        if (tcp_ != nullptr) {
-            esp_transport_destroy(tcp_);
-            tcp_ = nullptr;
-        }
+    if (!up) {
+        // A draw that half-succeeded returns its half: nothing connection-sized outlives a
+        // dial that did not come up.
+        rx_buf_.reset();
 #ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
         const std::uint32_t failures = dial_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
         // #1606 ask 1: the failure arm is no longer silent. Rate-limited, because a peer
@@ -582,6 +572,14 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
         // logging are the application's choice, and it did not make one.
         return dial_outcome_t::FAILED;
     }
+    // Adopted with no lock, deliberately: taking `write_m_` here would put this in front of
+    // every sender, which is the stall #952 is about. The handles and the scratches are
+    // PUBLISHED by the `connected_` release store at the end of this function, and nothing
+    // off this thread may read them without first observing that store (see send()).
+    ws_ = slot->ws;
+    tcp_ = slot->tcp;
+    slot->ws = nullptr;
+    slot->tcp = nullptr;
     // Disable Nagle on the freshly connected socket, symmetric with the server side
     // (httpd_ws_link_t::bound_socket): a board-to-board dial carries the same small,
     // latency-sensitive TLV frames whose replies the peer awaits, so delayed-ACK +
@@ -801,10 +799,12 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov)
     // the ONE copy a gathered frame costs (it used to be two, #1620 (a)). A queued frame is
     // already a private copy, so it is written from its slot directly. This link never
     // queues a RETAINED record (it does not override the retained send: a masked frame
-    // cannot be written from a shared block), so every record here is a copy.
-    write_locked(std::span<std::byte>(tx_buf_.data(), total), iov);
+    // cannot be written from a shared block), so every record here is a copy. The scratch
+    // is named only inside write_locked, past the connection gate: it exists only while a
+    // connection stands (#1606).
+    write_locked({}, iov, total);
     for (tr::net::tx_handoff_t::record_t rec = tx_.next(); rec; rec = tx_.next())
-        write_locked(rec.bytes, {});
+        write_locked(rec.bytes, {}, 0);
 }
 
 void esp_ws_client_link_t::gather_into(std::byte* dst,
@@ -815,8 +815,9 @@ void esp_ws_client_link_t::gather_into(std::byte* dst,
     }
 }
 
-void esp_ws_client_link_t::write_locked(std::span<std::byte> wire,
-                                        std::span<const std::span<const std::byte>> src) {
+void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
+                                        std::span<const std::span<const std::byte>> src,
+                                        std::size_t len) {
     const std::lock_guard<std::mutex> lk(write_m_);
     // Re-checked, not re-read for tidiness: teardown may have run while this record waited,
     // and it disarms `stop_` BEFORE it takes this very lock to null the handles, so a writer
@@ -841,6 +842,10 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> wire,
         tx_drops_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    // Past the gate, the write scratch is drawn and stays drawn until this lock is released:
+    // the departure arm returns it only under `write_m_`, after `connected_` is cleared.
+    const std::span<std::byte> wire =
+        queued.empty() ? std::span<std::byte>(tx_buf_.data(), len) : queued;
     if (!src.empty()) gather_into(wire.data(), src);
     const int n = esp_transport_write(ws_, reinterpret_cast<char*>(wire.data()),
                                       static_cast<int>(wire.size()), kWriteTimeoutMs);
@@ -929,21 +934,8 @@ void esp_ws_client_link_t::recv_loop() {
     // one backoff later instead of at once. That is the harmless direction — the cost is
     // one interval on a link that was silent anyway, against a spin that reboots the node.
     bool exchanged = false;
-    // The `defer_recv` dial latch (ADR-0081's defer-the-dial arm, #1102): park BEFORE the
-    // first dial, so an unarmed link has no connection and the peer has nothing to push
-    // into the pre-sink window — "not delivered yet" spelled as "not connected yet", the
-    // purest form of holding upstream of the library. Waited here ONCE and never
-    // re-checked below, deliberately: every re-dial happens on a link that was already
-    // armed, and the router keeps the receiver installed across a `link_down`, so a
-    // per-connection re-latch would gate delivery against a sink that is standing
-    // (triage Correction 1 on #1102). The wait shares the backoff CV, so the
-    // destructor's stop wake covers a never-armed link too — teardown stays prompt.
-    {
-        std::unique_lock<std::mutex> lk(backoff_m_);
-        backoff_cv_.wait(lk, [this] {
-            return armed_.load(std::memory_order_acquire) || stop_.load(std::memory_order_acquire);
-        });
-    }
+    // No `defer_recv` latch is waited here: an unarmed link has no recv thread at all
+    // (#1606), and this thread only exists once start_receiving() armed the link.
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!connected_.load(std::memory_order_acquire)) {
             off = 0;
@@ -967,6 +959,19 @@ void esp_ws_client_link_t::recv_loop() {
                 // Captured before notify_down: the seam runs app code, which may send, and
                 // nothing it does retroactively makes this connection productive.
                 backoff_now = !exchanged;
+                // Release the dead connection NOW, before the backoff and the re-dial (#1606):
+                // its transport pair and both scratches, so a link whose peer went away is
+                // back to holding only what a never-connected one holds. Under `write_m_`,
+                // because a writer reads the handles and the write scratch only under it, past
+                // the `connected_` gate — and `connected_` is already false. The read scratch
+                // is this thread's own. Before notify_down: no transport lock may be held
+                // across it.
+                {
+                    const std::lock_guard<std::mutex> lk(write_m_);
+                    release_pair(ws_, tcp_);
+                    tx_buf_.reset();
+                }
+                rx_buf_.reset();
                 // The departure seam (RFC-0009 §D extended to peer departure), and the
                 // reason it is reported at all (#957). This arm is downstream of all
                 // three sites that clear `connected_` — drop() (peer CLOSE, a poll

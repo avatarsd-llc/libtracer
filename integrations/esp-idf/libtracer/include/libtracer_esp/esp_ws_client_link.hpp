@@ -40,15 +40,15 @@
  * SPEC wiring `httpd_ws_link_t` uses for the listener.
  *
  * Threading (the review-critical part):
- *   - EVERY DIAL INPUT IS SETTLED BEFORE THE RECV THREAD EXISTS. The ctor spawns a thread
- *     that dials as soon as it is armed (immediately, unless `defer_recv` holds the first
- *     dial for @ref start_receiving — see below), so this type has NO
+ *   - EVERY DIAL INPUT IS SETTLED BEFORE THE RECV THREAD EXISTS. The recv thread dials as
+ *     soon as it exists, and it exists from the ctor on (or, under `defer_recv`, from
+ *     @ref start_receiving on — see below), so this type has NO
  *     post-construction dial-configuration
  *     surface: host, port, `ws_path` and the handshake headers are all constructor
  *     arguments and all `const` thereafter — read by the recv thread, written by nobody.
- *     (The rx/tx buffers are the same rule in a weaker spelling: sized once in the ctor and
- *     never resized. The vectors are not `const` because their BYTES are scratch, but no
- *     one may make their extent settable after the spawn either.)
+ *     (The rx/tx scratch SIZES are the same rule in a weaker spelling: fixed by the ctor and
+ *     never resized. The storage behind them is drawn per connection — see the cost note
+ *     at the end of this comment — but no one may make their extent settable either.)
  *     It used to have one such surface — `set_handshake_headers()` assigned an
  *     unsynchronized `std::string` that `connect_once()` was already reading (#959). That
  *     assignment is concurrent with the read, so it is a data race: a reallocating
@@ -73,10 +73,10 @@
  *     `fwd_router_t::add_child`), and our own connect is what provokes the peer's
  *     push-on-connect — so a link that dials from its ctor can deliver a message into an
  *     empty `receiver_slot_t`, a silent loss with no counter moving. Constructed with
- *     `defer_recv`, the recv thread parks BEFORE its first dial until
- *     @ref start_receiving releases it: nothing can arrive before the sink exists because
- *     nothing is connected, which is ADR-0081's "hold in the transport's native window"
- *     stated for a link whose window IS its connection. The latch is ONE-SHOT,
+ *     `defer_recv`, the recv thread is not spawned until @ref start_receiving (#1606): nothing
+ *     can arrive before the sink exists because nothing is connected, which is ADR-0081's
+ *     "hold in the transport's native window" stated for a link whose window IS its
+ *     connection — and an unarmed link holds no thread stack either. The latch is ONE-SHOT,
  *     deliberately: every re-dial happens on a link that was already armed, the router
  *     keeps the receiver installed across a `link_down`, so a latch that re-closed per
  *     connection would hold bytes against a sink that is already standing. Default off —
@@ -84,8 +84,8 @@
  *     target to arm it: the embedder that stages the link with `provide_link` is the one
  *     that must opt in (and then MUST issue the creating write, or arm the link itself —
  *     see the ctor's `defer_recv` note).
- *   - A single recv thread (spawned in the ctor) owns the read side: once armed (see
- *     above; immediately unless `defer_recv`) it dials
+ *   - A single recv thread (spawned in the ctor, or by @ref start_receiving under
+ *     `defer_recv`) owns the read side: it dials
  *     (with reconnect/backoff), then loops `esp_transport_poll_read` +
  *     `esp_transport_read` — reading each frame's payload DIRECTLY into a reusable
  *     buffer (server→client frames are unmasked per RFC 6455 §5.1, so the read is
@@ -179,12 +179,16 @@
  *     off (the default) there is no `st_m_` at all, and the success path takes no
  *     counter lock.
  *
- * NO per-frame heap: the rx/tx buffers are allocated ONCE at construction (bounded,
- * tunable; the tx scratch and queue slots from the application's `memory.io`, #1661);
- * steady-state send/recv touch neither the global heap nor a per-frame allocation. The
- * one per-message draw is opt-in: a link given `memory.rx` takes each receive block from
- * that application source. One recv thread per dialed peer (each blocks on its own connection),
- * mirroring `ws_client_transport_t`.
+ * NO per-frame heap, and NOTHING CONNECTION-SIZED WHILE UNCONNECTED (#1606). The read and
+ * write scratches are drawn when a handshake lands (the read scratch from `memory.state`,
+ * the write scratch from `memory.io`, #1661) and returned when that connection goes down,
+ * together with its transport pair; a failed dial returns its pair on the failure path. So
+ * a link that is dialling, backing off, or has never reached its peer holds its dial slot,
+ * this object and its recv thread — and, only while a dial is in flight, the transport
+ * pair being built. Steady-state send/recv touch neither the global heap nor a per-frame
+ * allocation. The one per-message draw is opt-in: a link given `memory.rx` takes each
+ * receive block from that application source. One recv thread per dialed peer (each
+ * blocks on its own connection), mirroring `ws_client_transport_t`.
  */
 #pragma once
 
@@ -267,18 +271,22 @@ struct esp_ws_client_config_t {
      * kind's default) keeps borrowed delivery straight out of the scratch, with no per-message
      * allocation — the sibling server link's default and the reason for it.
      *
-     * `io` is the send side's store: the writer's masked-frame scratch (`tx_bytes`), the
-     * enqueue-then-write queue's slots and the base class's gather temporary all draw from
-     * it. With `nullptr` the scratch and the queue slots draw from the platform heap
+     * `io` is the send side's store: the writer's masked-frame scratch (`tx_bytes`, drawn per
+     * connection like the read scratch, with the same refusal rule), the enqueue-then-write
+     * queue's slots and the base class's gather temporary all draw from it. With `nullptr` the
+     * scratch and the queue slots draw from the platform heap
      * (`mem::heap_source()`) but the gather temporary draws from the process net sub-pool
      * (`mem::net_source()`, the static arena on this target). Pass a source to put all three on it.
      *
      * `state` is the connection-state store (#1880): the dial slot (the copies of the host,
-     * URI and handshake headers every dial reads) and the read scratch (`rx_bytes`). Both
-     * are drawn once, by the constructor; a store that refuses them is a sizing bug, and the
-     * constructor aborts naming it (`mem::exhausted_at_init`, ADR-0083). The store must
-     * outlive the link's recv thread: a dial condemned by the destructor returns its slot
-     * when that dial resolves, up to `kDialTimeoutMs` after the destructor has returned.
+     * URI and handshake headers every dial reads) and the read scratch (`rx_bytes`). The
+     * slot is drawn once, by the constructor; a store that refuses it is a sizing bug, and
+     * the constructor aborts naming it (`mem::exhausted_at_init`, ADR-0083). The read
+     * scratch is drawn when a handshake lands and returned when that connection goes down
+     * (#1606), so it is a runtime draw: a refusal is backpressure — the fresh connection is
+     * closed and the attempt counts as a failed dial. The store must outlive the link's
+     * recv thread: a dial condemned by the destructor returns its slot when that dial
+     * resolves, up to `kDialTimeoutMs` after the destructor has returned.
      *
      * What stays outside all three, because IDF offers no allocator hook for it:
      * - the transport pair each dial builds (`esp_transport_tcp_init`/`esp_transport_ws_init`)
@@ -342,7 +350,8 @@ class esp_ws_client_link_t final : public transport_t {
     /**
      * @brief Stop the recv thread, then close + destroy the esp_transport handles.
      *
-     * Bounded and ordered (#952): the link is disarmed first, the recv thread's
+     * @ref shut_down first, then the memory (#1606). Bounded and ordered (#952): the link is
+     * disarmed first, the recv thread's
      * reconnect backoff is woken rather than waited out, the handles are destroyed
      * under the send serializer, and every sender that has ANNOUNCED itself on the
      * in-flight tally is waited out before this object's own members go. The tally is
@@ -408,7 +417,9 @@ class esp_ws_client_link_t final : public transport_t {
      *
      * The second phase of the two-phase bring-up the base contract describes
      * (`transport_t::start_receiving`): construct with `defer_recv`, install the sinks,
-     * then call this. IDEMPOTENT and SAFE ON A LINK THAT NEVER CONNECTED —
+     * then call this. It is also where a `defer_recv` link's recv thread is SPAWNED
+     * (#1606), so an unarmed link holds no thread stack; a no-op after @ref shut_down.
+     * IDEMPOTENT and SAFE ON A LINK THAT NEVER CONNECTED —
      * `transport_vertex_t::make_connection` arms every link unconditionally once the
      * receiver is installed, and on a link constructed without `defer_recv` (or armed
      * already) this finds the latch set and does nothing. ONE-SHOT: a reconnect never
@@ -416,6 +427,20 @@ class esp_ws_client_link_t final : public transport_t {
      * and the router keeps the receiver installed across a `link_down`.
      */
     void start_receiving() override;
+
+    /**
+     * @brief Stop for good, short of being destroyed (the @ref transport_t::shut_down
+     *        contract): disarm, stop the recv thread, close and release the connection.
+     *
+     * "Shut down now, free at collect()": an owner that removes this link while a forward
+     * may still be on its way into it calls this at removal, and the destructor — at the
+     * graph's next `collect()` — returns the memory (the scratches, the dial slot). A
+     * `send()` after this is shed without touching a handle and without counting a drop.
+     * Its cost is the destructor's worst case, `kPollMs + kWriteBudgetMs`; a dial in flight
+     * is condemned rather than waited out, as there. IDEMPOTENT, and safe to follow with
+     * the destructor.
+     */
+    void shut_down() override;
 
     /** @brief Span delivery by default: the router services each inbound frame in-call,
      *         so no frame outlives its callback. True when `memory.rx` named a source: each
@@ -527,15 +552,15 @@ class esp_ws_client_link_t final : public transport_t {
      */
     [[nodiscard]] stats_t stats() const;
 
-    /** @brief Effective reusable RX capacity, bytes — the ctor's `rx_bytes` as this link
-     *         actually allocated it. A message past it is dropped whole (@ref dropped_rx),
-     *         so a node reporting an inbound-drop streak can now report the ceiling that
+    /** @brief Effective reusable RX capacity, bytes — the ctor's `rx_bytes`, which every
+     *         connection's read scratch is drawn at (#1606). A message past it is dropped whole
+     * (@ref dropped_rx), so a node reporting an inbound-drop streak can now report the ceiling that
      *         produced it instead of quoting a constant from third-party sources (#1160). */
-    [[nodiscard]] std::size_t rx_bytes() const noexcept { return rx_buf_.size(); }
+    [[nodiscard]] std::size_t rx_bytes() const noexcept { return rx_bytes_; }
 
-    /** @brief Effective reusable TX scratch capacity, bytes — the ctor's `tx_bytes`. An
-     *         outbound frame past it is dropped whole and charged to `stats().c.tx_drops`
-     *         (#1160). */
+    /** @brief Effective reusable TX scratch capacity, bytes — the ctor's `tx_bytes`, which
+     *         every connection's write scratch is drawn at (#1606). An outbound frame past it
+     *         is dropped whole and charged to `stats().c.tx_drops` (#1160). */
     [[nodiscard]] std::size_t tx_bytes() const noexcept { return tx_bytes_; }
 
     /** @brief The injected owning-RX source (`memory.rx`), or null for borrowed delivery. */
@@ -631,8 +656,9 @@ class esp_ws_client_link_t final : public transport_t {
 
     /** @brief The recv thread body: (re)connect, then poll+read+deliver until stopped. */
     void recv_loop();
-    /** @brief One dial attempt: (lazily) build the tcp+ws transports, connect, apply the
-     *         per-socket policy (Nagle off, bounded write, keepalive probes), mark up.
+    /** @brief One dial attempt: build the tcp+ws transports, connect, draw the scratches,
+     *         apply the per-socket policy (Nagle off, bounded write, keepalive probes), mark
+     *         up — or release all of it on the failure path (#1606).
      *         @return which of the three outcomes it reached (@ref dial_outcome_t). */
     dial_outcome_t connect_once();
     /** @brief Close the connection and mark down; the next recv_loop turn reports the
@@ -647,11 +673,14 @@ class esp_ws_client_link_t final : public transport_t {
      * `stop_` is set, drops and counts toward a peer that is down, and tears the connection
      * down on an error or a short write.
      *
-     * @param wire The bytes the transport masks in place and writes.
-     * @param src  Gathered into @p wire first when non-empty (the writer's own, possibly
-     *             shared, frame); empty when @p wire is already a private queued copy.
+     * @param queued A private queued copy, written as it is; empty for the writer's own frame.
+     * @param src    The writer's own (possibly shared) frame, gathered into the write scratch
+     *               only once the connection gate has passed — the scratch exists only while
+     *               a connection stands (#1606). Empty when @p queued is given.
+     * @param len    The bytes in @p src.
      */
-    void write_locked(std::span<std::byte> wire, std::span<const std::span<const std::byte>> src);
+    void write_locked(std::span<std::byte> queued, std::span<const std::span<const std::byte>> src,
+                      std::size_t len);
     /**
      * @brief Copy the first @p len bytes of the read scratch into a receive block from
      *        @ref rx_backend_ and deliver it owning; count and drop if the source refuses.
@@ -676,32 +705,43 @@ class esp_ws_client_link_t final : public transport_t {
      *
      * `const` because the slot is never replaced: it is reused dial after dial, and its
      * mutex is a LEAF (never taken with `write_m_`, `st_m_` or `backoff_m_` held, and never
-     * held across the connect). Exactly one party returns it: the destructor, or — when the
-     * destructor condemned a dial in flight — that dial, as it resolves.
+     * held across the connect). Exactly one party returns it: the destructor, or — when
+     * @ref shut_down condemned a dial in flight — that dial, as it resolves.
      */
     dial_t* const dial_;
 
-    // Both handles are written ONLY by the recv thread (connect_once tears them down
-    // before a dial and adopts the freshly built pair out of `dial_` after it, holding no
-    // lock either side of the connect) and PUBLISHED by the connected_ release store
-    // below; any other thread must observe that store before it may read either one.
-    // NULL for the whole of a dial, which is what makes a destructor that lands mid-dial
-    // find nothing to destroy: the pair being built belongs to `dial_` until it resolves.
+    // Both handles are written ONLY by the recv thread (connect_once adopts the freshly
+    // built pair out of `dial_` when a handshake lands, holding no lock; the recv loop
+    // releases it under `write_m_` when that connection goes down) and PUBLISHED by the
+    // connected_ release store below; any other thread must observe that store before it
+    // may read either one. NULL whenever no connection stands, which is what makes a
+    // teardown that lands mid-dial find nothing to destroy: the pair being built belongs to
+    // `dial_` until it resolves.
     esp_transport_handle_t tcp_ = nullptr;  // parent TCP transport (owned)
     esp_transport_handle_t ws_ = nullptr;   // WS transport over tcp_ (owned)
 
-    /** @brief The reusable RX fill (zero-copy read target), `rx_bytes` drawn once from
-     *         `memory.state` (#1880). */
+    /** @brief The RX fill (zero-copy read target), `rx_bytes_` drawn from `memory.state`
+     *         (#1880) when a handshake lands and returned when the connection goes down
+     *         (#1606). Recv thread only. */
     fixed_array_t<std::byte> rx_buf_;
     /** @brief The owning-RX source (`memory.rx`, #1661), or null for borrowed delivery.
      *         Written once by the constructor, before the recv thread exists. */
     mem::mem_backend_t* const rx_backend_;
-    /** @brief The reusable TX scratch the writer gathers into and the transport masks in
-     *         place, reserved once from `memory.io` (#1661). */
-    mem::block_array_t<std::byte> tx_buf_;
-    /** @brief The scratch's effective capacity: the ctor's `tx_bytes`, or 0 when the source
-     *         refused it, so the size and the storage can never disagree. */
-    std::size_t tx_bytes_ = 0;
+    /** @brief The TX scratch the writer gathers into and the transport masks in place,
+     *         `tx_bytes_` drawn from @ref tx_src_ with the read scratch and returned with it
+     *         (#1606). Drawn on the recv thread before the `connected_` release store and
+     *         returned under `write_m_` after `connected_` is cleared, so a writer — which
+     *         reads it only past the connection gate — never sees it change. */
+    fixed_array_t<std::byte> tx_buf_;
+    /** @brief The store the TX scratch is drawn from: `memory.io`, or the platform heap. */
+    mem::block_source_t* const tx_src_;
+    /** @brief The configured read ceiling, `rx_bytes`. */
+    const std::size_t rx_bytes_;
+    /** @brief The configured write ceiling, `tx_bytes`: what @ref send admits and what every
+     *         connection's scratch is drawn at, so the size and the storage cannot disagree. */
+    const std::size_t tx_bytes_;
+    /** @brief The recv thread's stack, kept for a spawn deferred to @ref start_receiving. */
+    const std::size_t recv_stack_;
     /** @brief Enqueue-then-write (RFC 0028 §4.7, #1619): frames other senders queued while
      *         a write was in flight, drained by the sender holding the writer role. */
     tr::net::tx_handoff_t tx_;
@@ -715,13 +755,11 @@ class esp_ws_client_link_t final : public transport_t {
      *         covers exactly the callers that could already be parked on that mutex —
      *         and, by the same token, no earlier than the raise itself (#952). */
     std::atomic<std::uint32_t> senders_{0};
-    /** @brief Guards the recv thread's two parked waits — the reconnect backoff and the
-     *         `defer_recv` dial latch — both of which the destructor has to be able to
-     *         cut short, hence a condition variable rather than `sleep_for` (#952).
-     *         Never taken with `write_m_` held. */
+    /** @brief Guards the recv thread's parked wait — the reconnect backoff — which
+     *         @ref shut_down has to be able to cut short, hence a condition variable rather
+     *         than `sleep_for` (#952). Never taken with `write_m_` held. */
     std::mutex backoff_m_;
-    std::condition_variable backoff_cv_; /**< @brief Signalled by the destructor and by
-                                          *          @ref start_receiving. */
+    std::condition_variable backoff_cv_; /**< @brief Signalled by @ref shut_down. */
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     /**
      * @brief The per-message TRAFFIC half of @ref link_counters_t (#1663), kept only when
@@ -782,11 +820,14 @@ class esp_ws_client_link_t final : public transport_t {
      *         cross-thread; it is a hint, not a synchronisation point. */
     std::atomic<bool> came_up_{false};
     std::atomic<bool> stop_{false};
-    /** @brief The ONE-SHOT dial latch (ADR-0081, #1102): the recv thread parks before its
-     *         FIRST dial until this is true. Starts true unless the ctor's `defer_recv`;
-     *         set by @ref start_receiving and never cleared — every re-dial happens on a
-     *         link that was already armed, so reconnects are not re-gated. */
-    std::atomic<bool> armed_{true};
+    /** @brief The ONE-SHOT dial latch (ADR-0081, #1102): set by @ref start_receiving when it
+     *         spawns the recv thread (from the ctor unless `defer_recv`), and never cleared —
+     *         every re-dial happens on a link that was already armed, so reconnects are not
+     *         re-gated. */
+    std::atomic<bool> armed_{false};
+    /** @brief @ref shut_down condemned a dial in flight, so that dial — not the destructor
+     *         — returns the dial slot. Owner thread only. */
+    bool dial_orphaned_ = false;
     /** @brief Receive-path message drops — see @ref dropped_rx. Written only by the recv
      *         thread, read by anyone, so relaxed is enough (it is a statistic). */
     std::atomic<std::uint64_t> dropped_rx_{0};

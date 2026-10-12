@@ -181,6 +181,40 @@ void test_recv_stack_reaches_the_thread() {
     check_drained();
 }
 
+/**
+ * @brief #1606 — a `defer_recv` link spawns NO recv thread until it is armed: the thread
+ *        stack is the largest thing an unarmed link used to hold for nothing.
+ *
+ * The observable is #900's: a sized spawn arms the pthread config, so a link that has not
+ * armed it has not spawned. Arming spawns it at the configured size; a second arm is a
+ * no-op, and an arm after shut_down() spawns nothing.
+ */
+void test_defer_recv_spawns_no_thread_until_armed() {
+    std::printf("#1606 an unarmed defer_recv link has no recv thread:\n");
+    fake_ws::reset();
+    {
+        tr::net::esp_ws_client_link_t link(
+            "127.0.0.1", 8080,
+            {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288, .defer_recv = true});
+        check(fake_ws::armed_stack() == 0, "construction spawned no thread");
+        link.start_receiving();
+        check(fake_ws::armed_stack() == 12288, "arming spawned it, at the configured stack");
+        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "and it dialed");
+    }
+    check_drained();
+    fake_ws::reset();
+    {
+        tr::net::esp_ws_client_link_t link(
+            "127.0.0.1", 8080,
+            {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288, .defer_recv = true});
+        link.shut_down();
+        link.start_receiving();
+        check(fake_ws::armed_stack() == 0, "an arm after shut_down() spawns nothing");
+        check(!wait_until([] { return fake_ws::connect_count() >= 1; }, 200ms), "nor dials");
+    }
+    check_drained();
+}
+
 /** @brief #900 — `recv_stack == 0` keeps the historical behaviour: nothing is armed. */
 void test_zero_recv_stack_arms_nothing() {
     std::printf("#900 recv_stack=0 is the platform default:\n");
@@ -553,7 +587,8 @@ void test_named_rx_source_delivers_owning_ropes() {
     check_drained();
 }
 
-/** @brief #1661 — the TX scratch is reserved from `memory.io`, and a refusal sizes it 0. */
+/** @brief #1661 — the TX scratch is drawn from `memory.io`; since #1606 a refusal is
+ *         backpressure on the connection, not a zero-size scratch. */
 void test_named_io_store_backs_the_tx_scratch() {
     std::printf("#1661 memory.io backs the TX scratch:\n");
     fake_ws::reset();
@@ -563,6 +598,7 @@ void test_named_io_store_backs_the_tx_scratch() {
             "127.0.0.1", 8080,
             tr::net::esp_ws_client_config_t{.tx_bytes = 512,
                                             .memory = {.rx = nullptr, .io = &roomy}});
+        check(wait_until([&] { return link.ok(); }, 2s), "the link came up");
         check(roomy.served.load() >= 1, "the scratch was drawn from the injected store");
         check(link.tx_bytes() == 512, "at its configured size");
     }
@@ -575,8 +611,10 @@ void test_named_io_store_backs_the_tx_scratch() {
             "127.0.0.1", 8080,
             tr::net::esp_ws_client_config_t{.tx_bytes = 512,
                                             .memory = {.rx = nullptr, .io = &refusing}});
-        check(link.tx_bytes() == 0,
-              "a refused scratch reports 0, so every send takes the logged oversize drop");
+        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
+        check(!wait_until([&] { return link.ok(); }, 300ms),
+              "a store that refuses the write scratch keeps the connection down (#1606)");
+        check(link.tx_bytes() == 512, "and the ceiling is still the configured one");
     }
     check_drained();
 }
@@ -585,6 +623,7 @@ int main() {
     std::printf("esp_ws_client_link receive-path host suite (#900, #901, #1102):\n");
     test_recv_stack_reaches_the_thread();
     test_zero_recv_stack_arms_nothing();
+    test_defer_recv_spawns_no_thread_until_armed();
     test_oversized_single_frame_tail_is_not_delivered();
     test_oversized_fragmented_message_tail_is_not_delivered();
     test_exact_fit_message_delivers();
