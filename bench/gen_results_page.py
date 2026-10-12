@@ -291,6 +291,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "through the host API and through the `active` field write, and writes to a producer "
         "whose delivering edges stand beside a selector's suspended ones, swept over payload size.",
         "ns per switch · ns per write · deliveries/s"),
+    instrument_t(
         "bench_chain_vs_compact.cpp", "framed", (),
         "Stream delivery over the RFC-0029 PAIR chain at 1 and 3 hops, 64 B to 16 KiB, "
         "unbatched and with BATCH, with the reply leg priced separately. Its COMPACT arm "
