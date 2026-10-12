@@ -13,23 +13,23 @@
  * pipelined writes past the link's TX depth: throughput degraded, then the session went
  * silent and a later READ on it timed out while the node stayed healthy. The mechanism
  * that survived audit is the reply leg's dependence on the httpd control mbox: the in-call
- * reserve (`tx_reply_reserve`) is claimable once per DRAIN, not once per request — the
- * httpd task takes one control message per server pass — so a pipelining client is
- * serviced again before the previous reply's slot comes back, its reply falls into the
- * general pool where it competes with subscription pushes, and an in-call send never waits
- * for the pool (it would be waiting on its own stack frame, the #814 deadlock). Every
- * reply past that point is dropped.
+ * reserve (then `tx_reply_reserve`, since removed by #2095) was claimable once per DRAIN, not once
+ * per request — the httpd task takes one control message per server pass — so a pipelining client
+ * is serviced again before the previous reply's slot comes back, its reply falls into the general
+ * pool where it competes with subscription pushes, and an in-call send never waits for the pool (it
+ * would be waiting on its own stack frame, the #814 deadlock). Every reply past that point is
+ * dropped.
  *
  * The fix takes the reply leg off the queue entirely: a send issued from inside this
  * link's own handler frame writes straight to the socket, which is the task it was going
  * to be marshalled onto anyway. What that has to buy, and what is pinned here:
  *   1. the reply reaches the wire DURING the handler call — before anything drains — and
  *      the control queue is offered nothing;
- *   2. it survives the exact conditions that used to lose it: a fully claimed TX pool AND
+ *   2. it survives the exact conditions that used to lose it: undrained pushes AND
  *      a control queue that refuses every enqueue. This is the case that fails against the
  *      pre-fix code, and it is the issue's headline;
- *   3. a ROPE reply still crosses as ONE WebSocket frame, gathered without a second
- *      buffer, and the slot it borrows for the gather is back in the pool on return;
+ *   3. a ROPE reply still crosses as ONE WebSocket frame, gathered through the link's
+ *      one scratch frame;
  *   4. an off-task producer is UNCHANGED — it still marshals through the queue, which is
  *      what the queue is for. Without this the fix would be "stop using the queue", which
  *      is not safe from a task that does not own the descriptor.
@@ -195,7 +195,6 @@ void test_an_in_call_reply_bypasses_the_queue() {
         check(same_bytes(sent[0].payload, kHead), "carrying the reply bytes");
     }
     check_eq(fake_httpd::instance().queue_depth(), 0, "the control queue was offered nothing");
-    check_eq(link->tx_slots_busy(), 0, "and no TX slot was claimed for it");
     check_eq(link->enqueue_drops() - drops_before, 0, "nothing was dropped");
 
     reset(link);
@@ -208,15 +207,15 @@ void test_an_in_call_reply_bypasses_the_queue() {
  * @brief #1494's headline, staged in one call.
  *
  * The two conditions the reported session met before it went silent, imposed together and
- * deliberately harder than the field case: every pool slot is claimed by pushes that have
- * not drained, and the control socket refuses every further enqueue. Against the pre-fix
+ * deliberately harder than the field case: the peer's TX slot holds pushes that have not
+ * drained, and the control socket refuses every further enqueue. Against the pre-fix
  * code the reply reaches `queue_send`, finds the pool exhausted or its enqueue refused,
  * and is dropped and counted — the session answers nothing and the client's read times
  * out. The reply leg no longer consults either resource, so it goes out regardless, and
- * the pushes' slots are still theirs afterwards.
+ * the pushes' flush is still queued afterwards.
  */
 void test_a_full_pool_and_a_refused_queue_do_not_wedge_the_reply() {
-    std::printf("a reply against a full pool and a refusing control queue:\n");
+    std::printf("a reply against held pushes and a refusing control queue:\n");
     auto link = make_link();
     replier_t app;
     link->set_peer_receiver(app);
@@ -227,14 +226,14 @@ void test_a_full_pool_and_a_refused_queue_do_not_wedge_the_reply() {
     if (to == nullptr) return;
     fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
 
-    // Fill the pool from ANOTHER task, which is the only producer that can: these are
-    // queued and left undrained, so every slot they claimed stays claimed.
-    const std::size_t capacity = httpd_ws_link_t::kDefaultTxPoolSlots;
-    std::thread producer([to, capacity] {
-        for (std::size_t i = 0; i < capacity; ++i) to->send(std::span<const std::byte>(kBody));
+    // Hold pushes from ANOTHER task, which is the only producer that can: these are left
+    // undrained, so the peer's waiting frame stays occupied (#2095 conflates them into one).
+    constexpr std::size_t kPushes = 4;
+    std::thread producer([to] {
+        for (std::size_t i = 0; i < kPushes; ++i) to->send(std::span<const std::byte>(kBody));
     });
     producer.join();
-    check_eq(link->tx_slots_busy(), capacity, "the pool is fully claimed by the pushes");
+    check_eq(fake_httpd::instance().queue_depth(), 1, "the pushes hold one undrained flush");
 
     fake_httpd::instance().set_queue_refusing(true);
     fake_httpd::instance().clear_sent_frames();
@@ -247,13 +246,13 @@ void test_a_full_pool_and_a_refused_queue_do_not_wedge_the_reply() {
     check_eq(sent.size(), 1, "the reply went out anyway");
     if (sent.size() == 1) check(same_bytes(sent[0].payload, kHead), "and it is the reply");
     check_eq(link->enqueue_drops() - drops_before, 0, "it was not dropped");
-    check_eq(link->tx_slots_busy(), capacity, "and it took none of the pushes' slots");
+    check_eq(fake_httpd::instance().queue_depth(), 1, "and the pushes' flush is still queued");
 
     // The session is not merely answered once: with the congestion gone it keeps serving,
     // which is what "permanent wedge" would deny.
     fake_httpd::instance().set_queue_refusing(false);
     drain();
-    check_eq(link->tx_slots_busy(), 0, "the pushes drained and the pool is idle again");
+    check_eq(fake_httpd::instance().queue_depth(), 0, "the pushes' flush drained");
     fake_httpd::instance().clear_sent_frames();
     (void)fake_httpd::instance().deliver_frame(kFd, kBody);
     check_eq(fake_httpd::instance().sent_frames().size(), 1, "and the next request is answered");
@@ -263,16 +262,14 @@ void test_a_full_pool_and_a_refused_queue_do_not_wedge_the_reply() {
 }
 
 // ---------------------------------------------------------------------------
-// 3 — a rope reply crosses as one frame, and gives its scratch slot straight back.
+// 3 — a rope reply crosses as one frame, gathered through the link's scratch frame.
 // ---------------------------------------------------------------------------
 /**
- * @brief The gather arm, which is the one that still touches the pool.
+ * @brief The gather arm.
  *
  * A multi-segment reply cannot be written from the caller's memory — a WebSocket frame is
- * contiguous — so it is gathered through a pool slot used as scratch. The slot is claimed
- * and released inside the call and posted nowhere, so the pool must read idle on return;
- * a shape that leaked it would fail the last check here rather than three thousand frames
- * later on silicon.
+ * contiguous — so it is gathered through the link's one scratch frame (#2095), claimed and
+ * released inside the call and posted nowhere.
  */
 void test_a_rope_reply_is_one_frame_and_strands_no_slot() {
     std::printf("a two-segment reply rope:\n");
@@ -299,7 +296,6 @@ void test_a_rope_reply_is_one_frame_and_strands_no_slot() {
         check(same_bytes(sent[0].payload, want), "carrying both segments, in order");
     }
     check_eq(fake_httpd::instance().queue_depth(), 0, "the control queue was offered nothing");
-    check_eq(link->tx_slots_busy(), 0, "and the scratch slot went straight back to the pool");
 
     app.disarm();
     reset(link);
@@ -314,8 +310,8 @@ void test_a_rope_reply_is_one_frame_and_strands_no_slot() {
  * A send from a task that does not own the descriptor MUST still be marshalled: writing
  * the socket from it is the #954 hazard the whole async-send pattern exists to avoid. So
  * the same endpoint, called off-task, has to behave exactly as it always did — nothing on
- * the wire until the httpd task drains, one slot held until then, and the frame delivered
- * when it does.
+ * the wire until the httpd task drains, the frame held in the peer's slot until then, and
+ * delivered when it does.
  */
 void test_an_off_task_send_still_takes_the_queue() {
     std::printf("the same endpoint, called from a producer task:\n");
@@ -335,12 +331,10 @@ void test_an_off_task_send_still_takes_the_queue() {
 
     check_eq(fake_httpd::instance().sent_frames().size(), 0, "nothing reached the wire yet");
     check_eq(fake_httpd::instance().queue_depth(), 1, "it was posted to the control queue");
-    check_eq(link->tx_slots_busy(), 1, "holding the slot it gathered into");
     drain();
     const auto sent = fake_httpd::instance().sent_frames();
     check_eq(sent.size(), 1, "the drain delivered it");
     if (sent.size() == 1) check(same_bytes(sent[0].payload, kHead), "intact");
-    check_eq(link->tx_slots_busy(), 0, "and gave the slot back");
 
     reset(link);
 }

@@ -173,66 +173,35 @@ void test_send_to_departed_peer_is_counted() {
 }
 
 // ---------------------------------------------------------------------------
-// 4 — tx_pool_misses is a SUBSET of enqueue_drops, not a second tally.
+// 4 — a refused flush is an enqueue drop; a replaced frame is a conflation, not a drop.
 // ---------------------------------------------------------------------------
-void test_pool_miss_is_a_labelled_subset() {
-    std::printf("#953 a refused enqueue lands on enqueue_drops and NOT on tx_pool_misses:\n");
+void test_refusal_and_conflation_are_told_apart() {
+    std::printf("#953/#2095 a refused flush and a replaced frame land on different counters:\n");
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(730);
     drain();
     const auto before = link->stats();
 
-    // Refuse at the control queue — the cause that is NOT a pool miss. This is the
-    // discrimination the issue asked for: before this change both causes incremented one
-    // undifferentiated counter whose log line read "queue refused / pool exhausted / OOM",
-    // so a reader could not tell depth pressure from a sick server.
     fake_httpd::instance().set_queue_refusing(true);
     tr::net::transport_t* const to = link->peer_link("p0");
     check(to != nullptr, "the directed endpoint resolved");
     to->send(std::span<const std::byte>(kBody));
     fake_httpd::instance().set_queue_refusing(false);
 
-    const auto after = link->stats();
-    check(after.enqueue_drops == before.enqueue_drops + 1, "the refused enqueue is counted");
-    check(after.tx_pool_misses == before.tx_pool_misses,
-          "and is NOT attributed to the pool — the slot was claimed, the queue said no");
+    auto after = link->stats();
+    check(after.enqueue_drops == before.enqueue_drops + 1, "the refused flush is counted");
+    check(after.tx_conflated == before.tx_conflated, "and is NOT a conflation");
     check(after.tx_to_dead_peer == before.tx_to_dead_peer,
-          "nor to the dead-peer path — the destination was alive");
+          "nor a dead-peer drop — the destination was alive");
 
-    link.reset();
-    fake_httpd::instance().close_all();
-}
-
-// ---------------------------------------------------------------------------
-// 4b — tx_pool_misses POSITIVELY: exhaust the pool and watch the field move.
-// ---------------------------------------------------------------------------
-void test_pool_exhaustion_is_counted() {
-    std::printf("#953 exhausting the TX pool increments tx_pool_misses:\n");
-    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
-                                                    tr::net::httpd_ws_config_t{.peer_named = true});
-    claim(735);
-    drain();
-    const auto before = link->stats();
-    tr::net::transport_t* const to = link->peer_link("p0");
-    check(to != nullptr, "the directed endpoint resolved");
-
-    // Do NOT drain: on this fake a queued work item only runs when the test pumps it, so
-    // every send holds its slot. Past the claimable depth the link has nothing left, which
-    // is the DEPTH-pressure condition — distinct from a refusing control queue, and the
-    // whole reason it got a field of its own. These sends are issued ON the httpd task, so
-    // the depth is the pool PLUS the in-call reserve (#1218).
-    const std::size_t depth =
-        httpd_ws_link_t::kDefaultTxPoolSlots + httpd_ws_link_t::tx_reply_reserve();
-    check(depth > 0, "the pool has a capacity to exhaust");
-    for (std::size_t i = 0; i < depth + 2; ++i) to->send(std::span<const std::byte>(kBody));
-
-    const auto after = link->stats();
-    check(after.tx_pool_misses >= 2, "the sends past the pool's depth are counted as misses");
-    check(after.enqueue_drops >= after.tx_pool_misses,
-          "and each one is also an enqueue_drop: misses are a labelled SUBSET, not a second tally");
-    check(after.tx_to_dead_peer == before.tx_to_dead_peer,
-          "the destination was alive throughout — no dead-peer drop");
+    // Do NOT drain: on this fake a queued flush runs only when the test pumps it, so every
+    // send past the first replaces the one waiting before it.
+    for (int i = 0; i < 3; ++i) to->send(std::span<const std::byte>(kBody));
+    after = link->stats();
+    check(after.tx_conflated == before.tx_conflated + 2,
+          "two of the three were replaced before the flush ran, and counted");
+    check(after.enqueue_drops == before.enqueue_drops + 1, "and none of them is an enqueue drop");
 
     drain();
     link.reset();
@@ -269,12 +238,13 @@ void test_condemn_is_counted() {
     check(!routable.empty(), "the surviving session has a routable name");
     tr::net::transport_t* const to = link->peer_link(routable);
     check(to != nullptr, "and a directed endpoint");
-    fake_httpd::instance().set_send_script(741, {fake_httpd::send_result_t::SHORT});
+    fake_httpd::instance().set_send_script(
+        741, {fake_httpd::send_result_t::FULL, fake_httpd::send_result_t::FAIL});
     if (to != nullptr) {
         to->send(std::span<const std::byte>(kBody));
         drain();
     }
-    check(link->stats().sessions_condemned == 1, "the short-write teardown IS counted");
+    check(link->stats().sessions_condemned == 1, "the cut-off-frame teardown IS counted");
 
     link.reset();
     fake_httpd::instance().close_all();
@@ -297,12 +267,13 @@ void test_condemned_peer_leaves_the_facet() {
 
     // Condemn it WITHOUT letting httpd run its select loop — this is the whole gap. The
     // slot is dead and shut, but free_ctx has not run, so the slot is still occupied.
-    fake_httpd::instance().set_send_script(760, {fake_httpd::send_result_t::SHORT});
+    fake_httpd::instance().set_send_script(
+        760, {fake_httpd::send_result_t::FULL, fake_httpd::send_result_t::FAIL});
     tr::net::transport_t* const to = link->peer_link(name);
     if (to != nullptr) {
         to->send(std::span<const std::byte>(kBody));
-        // EXACTLY ONE work item, and the count matters. That item is the tx_work whose
-        // short write condemns the peer; condemn() then enqueues httpd_sess_trigger_close
+        // EXACTLY ONE work item, and the count matters. That item is the flush whose
+        // cut-off frame condemns the peer; condemn() then enqueues httpd_sess_trigger_close
         // BEHIND it, and running that second item deletes the session, runs free_ctx ->
         // reclaim_slot, and clears `open` — closing the very gap under test.
         //
@@ -492,8 +463,7 @@ int main() {
     test_peers_refused_counts_both_paths();
     test_rx_oversize_is_counted();
     test_send_to_departed_peer_is_counted();
-    test_pool_miss_is_a_labelled_subset();
-    test_pool_exhaustion_is_counted();
+    test_refusal_and_conflation_are_told_apart();
     test_condemn_is_counted();
     test_condemned_peer_leaves_the_facet();
     test_stats_snapshot_tracks();

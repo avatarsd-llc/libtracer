@@ -396,21 +396,27 @@ void test_past_the_class_the_heap_tail_survives() {
 /**
  * @brief The fail-closed arm (#949's named drop, applied to the new class).
  *
- * The class is declared with ONE buffer and two large frames are offered without a drain
- * between them, so the second finds it empty. Three measurements, and all three are needed:
- * the class's own counter says which resource refused, the link-level `enqueue_drops` says
- * the frame was lost (so the class does not hide a loss from the generic
- * `transport_drop_stats_t` view), and the allocation count says the drop was not quietly
- * served from the heap — which would give back the exact footprint the declaration bounds.
+ * The class is declared with ONE buffer and two large frames, to two peers, are offered
+ * without a drain between them, so the second finds it empty. (Two frames to ONE peer would
+ * not: the second replaces the first in that peer's slot and takes over its buffer, #2095.)
+ * Three measurements, and all three are needed: the class's own counter says which resource
+ * refused, the link-level `enqueue_drops` says the frame was lost (so the class does not hide
+ * a loss from the generic `transport_drop_stats_t` view), and the allocation count says the
+ * drop was not quietly served from the heap — which would give back the exact footprint the
+ * declaration bounds.
  */
 void test_an_exhausted_class_drops_and_counts() {
-    std::printf("two large frames offered to a one-buffer class:\n");
+    std::printf("two large frames, to two peers, offered to a one-buffer class:\n");
     auto link = make_link(kLargeBytes, 1);
     check_eq(link->tx_large_slot_capacity(), 1, "the class holds exactly one buffer");
     claim(kFd);
     tr::net::transport_t* const peer = only_peer(*link);
     check(peer != nullptr, "the peer resolved to a directed endpoint");
     if (peer == nullptr) return;
+    claim(kFd + 1);
+    tr::net::transport_t* const other = link->peer_link("p1");
+    check(other != nullptr, "the second peer resolved to a directed endpoint");
+    if (other == nullptr) return;
     drain();
 
     const std::vector<std::byte> frame = band_frame();
@@ -420,17 +426,16 @@ void test_an_exhausted_class_drops_and_counts() {
 
     const std::uint32_t drops_before = link->enqueue_drops();
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
-    peer->send(std::span<const std::byte>(frame));  // takes the only buffer, stays queued
+    peer->send(std::span<const std::byte>(frame));  // takes the only buffer, stays held
     check_eq(link->tx_large_in_use(), 1, "the first frame holds the class's only buffer");
 
     const std::size_t allocs_before = g_allocs.load(std::memory_order_relaxed);
-    peer->send(std::span<const std::byte>(frame));  // finds it empty
+    other->send(std::span<const std::byte>(frame));  // finds it empty
     const std::size_t allocs_after = g_allocs.load(std::memory_order_relaxed);
 
     check_eq(link->stats().tx_large_dropped, 1, "the exhausted class counted the loss as its own");
     check_eq(link->enqueue_drops() - drops_before, 1, "and the link counted it as a lost frame");
     check_eq(allocs_after - allocs_before, 0, "the drop did NOT fall back to the heap");
-    check_eq(link->tx_slots_busy(), 1, "the dropped frame's work slot came straight back");
 
     drain();
     check_eq(fake_httpd::instance().frames_sent() - sent_before, 1,
