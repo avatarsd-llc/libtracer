@@ -71,6 +71,8 @@ ARM64 was compiled to objects (clang 18, `armv8.3-a+rcpc`) and not run. Multi-th
 
 ### 1. `reclaim_local` is withdrawn; `reclaim_qsbr` is the default on every target
 
+This is [#2127](https://github.com/avatarsd-llc/libtracer/issues/2127) (withdraw `reclaim_local`; `reclaim_qsbr` is the default on every target).
+
 `reclaim_local`'s grace point is the *unsubscribing* thread's dispatch depth. An app thread that unsubscribes is at depth 0, so it runs the release hook at once, while another thread that snapshotted the edges before the unsubscribe still holds `{fn, ctx}` and calls it afterwards. This is #894's hole in the default build. The study showed it with a deterministic reproducer (a latch, not a race): ASan reports a heap-use-after-free in the default build on main and on #2100, for an in-process publisher thread and for a router RX thread inside its frame bracket alike. It does so on 4 CPUs **and on 1 CPU**, so the hole needs no second core. On the ESP32-C6 the same window opens through FreeRTOS preemption (`configUSE_PREEMPTION`, time slicing at 100 Hz) and through a callback that blocks inside the fan-out (a mutex, or a remote edge's socket send). `reclaim_qsbr` was safe in every cell. The default policy now closes the hole. It is a correctness fix, and nothing else is claimed for it.
 
 - **Tags.** `reclaim_qsbr` is the default on WIDE, MID and NARROW. `reclaim_strict` is the only opt-out. The tag set closes at two, and the traits that were equal to `kDefersToDispatchExit` in every tag (`kReentrantUnsubscribe`, `kGraceSpansThreads`) go with `reclaim_local_t`. That is a public API break, noted in the CHANGELOG of the change that removes the tag.
@@ -80,6 +82,8 @@ ARM64 was compiled to objects (clang 18, `armv8.3-a+rcpc`) and not run. Multi-th
 - **Spelling.** "MID / NARROW host" in §Decision is the composition spelling that [ADR-0079](0079-allocation-store-composition-defaults-to-per-plane-mid.md)'s amendment retired. This page now uses the target axis: NARROW is the Cortex-M0 class, MID is an RTOS MCU with one or a few cores, and WIDE is the host.
 
 ### 2. The entry fence is chosen at compile time
+
+This is [#2126](https://github.com/avatarsd-llc/libtracer/issues/2126) (compile-time fence flavour keyed on `kSingleCore`).
 
 The policy (who may run a hook, and when) must not follow the core count, because the 1-CPU reproducer shows the race on one CPU. The *fence* may follow it, because the app never sees the fence. There are three flavours:
 
