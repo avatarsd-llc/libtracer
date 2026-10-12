@@ -25,7 +25,8 @@
  *   8. the RAM: per-link and per-peer costs are reported and bind to the constructor sizes;
  *   9. a producer that posts once and goes quiet: the newest frame still arrives whole, moved
  *      by the link's own events (a write that took bytes, an inbound frame, flush_held);
- *  10. a peer whose socket never drains is struck after kTxStallStrikes replacements;
+ *  10. a peer whose socket never drains is struck after kTxStallStrikes replacements, and
+ *      so is one that pins the large class's only block (refused draws count against it);
  *  11. producers racing session close and reclaim on the httpd task (the TSan lane).
  */
 
@@ -548,6 +549,46 @@ void test_a_peer_that_never_drains_is_struck() {
     reset(link);
 }
 
+/**
+ * @brief A peer that never drains and holds the large class's ONLY block is struck too: every
+ *        later large frame is refused at the draw, so no replacement ever reaches the peer,
+ *        and the refused draws count against it instead. Once it is struck the block comes
+ *        back and the healthy peer receives large frames again.
+ */
+void test_a_peer_pinning_the_last_large_block_is_struck() {
+    std::printf("a peer that pins the large class's only block:\n");
+    auto link = make_link({.tx_large = {.bytes = 4096, .slots = 1}});
+    check_eq(link->tx_large_slot_capacity(), 1, "the large class has one block");
+    claim(kStalled);
+    claim(kHealthy);
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_sent_frames();
+    const auto push = [&](std::size_t tag) {
+        std::vector<std::byte> frame(2000, std::byte{0x33});
+        frame[0] = static_cast<std::byte>(tag & 0xFF);
+        link->send(std::span<const std::byte>(frame));
+        drain();
+    };
+    push(0);  // the class's one block: the healthy peer takes it, the stalled one pins it
+    check_eq(frames_to(kHealthy).size(), 1, "the first large frame reached the healthy peer");
+    check_eq(link->tx_large_in_use(), 1, "and the stalled peer still holds the block");
+    for (std::size_t i = 1; i < httpd_ws_link_t::kTxStallStrikes; ++i) push(i);
+    check_eq(link->stats().tx_large_dropped, httpd_ws_link_t::kTxStallStrikes - 1,
+             "every later large frame was refused at the draw, for every peer");
+    check_eq(link->stats().tx_stall_strikes, 0, "one refused draw short of the bound: not struck");
+    push(httpd_ws_link_t::kTxStallStrikes);
+    check_eq(link->stats().tx_stall_strikes, 1, "the bound reached: the pinning peer is struck");
+    check_eq(link->stats().sessions_condemned, 1, "through the strike path (condemned)");
+    check_eq(link->tx_large_in_use(), 0, "and the block is back in the class");
+    fake_httpd::instance().clear_sent_frames();
+    push(200);
+    const auto healthy = frames_to(kHealthy);
+    check(healthy.size() == 1 && healthy[0].size() == 2000 && healthy[0][0] == std::byte{200},
+          "the healthy peer receives large frames again");
+    reset(link);
+}
+
 // ---------------------------------------------------------------------------
 // 11 — producers racing close and reclaim.
 // ---------------------------------------------------------------------------
@@ -640,6 +681,7 @@ int main() {
     test_the_ram_is_reported_and_binds();
     test_a_quiet_producer_still_delivers_the_newest_frame();
     test_a_peer_that_never_drains_is_struck();
+    test_a_peer_pinning_the_last_large_block_is_struck();
     test_producers_race_close_and_reclaim();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;

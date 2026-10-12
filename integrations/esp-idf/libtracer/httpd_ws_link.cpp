@@ -1638,6 +1638,38 @@ void* httpd_ws_link_t::claim_tx_large(std::atomic<bool>*& flag) {
     return nullptr;  // every buffer of the class in flight — the caller drops and counts
 }
 
+void httpd_ws_link_t::note_large_pinned() {
+    // The class is spent, and a peer whose socket took nothing may be what holds it: its frame
+    // pins a block no later large frame can replace, so no replacement ever happens and the
+    // stall count of stage() never moves. Each refused draw therefore counts as a replacement
+    // attempt for every peer that holds a block of the class and whose last write moved no
+    // byte (tx_refused, cleared only by a write that moves one). Reaching kTxStallStrikes
+    // posts the flush that strikes it, which hands the block back. Same chunked walk as the
+    // flush; no timer, no clock.
+    session_t* batch[kFanoutChunk];
+    std::size_t next = 0;
+    bool strike = false;
+    for (bool more = true; more;) {
+        std::size_t n = 0;
+        {
+            const std::lock_guard lock(peers_m_);
+            while (next < slots_.size() && n < kFanoutChunk) batch[n++] = slots_[next++];
+            more = next < slots_.size();
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            session_t* const s = batch[i];
+            const std::lock_guard lock(s->tx_m);
+            const auto pins = [](const tx_frame_t& f) {
+                return f.held() && f.blk->large_busy != nullptr;
+            };
+            if (!s->tx_refused || !(pins(s->tx[0]) || pins(s->tx[1]))) continue;
+            if (++s->tx_stalls >= kTxStallStrikes) strike = true;
+        }
+    }
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    if (strike && h != nullptr) (void)post_flush(h);
+}
+
 void httpd_ws_link_t::note_tx_large_peak() {
     // The high-water mark of the class's occupancy, which is the number an operator SIZES
     // `tx_large_slots` with — and the one thing a scan-on-demand accessor cannot
@@ -1678,6 +1710,7 @@ httpd_ws_link_t::tx_block_t* httpd_ws_link_t::make_block(
         raw = claim_tx_large(large);
         if (raw == nullptr) {
             tx_large_dropped_.fetch_add(1, std::memory_order_relaxed);
+            note_large_pinned();
             return nullptr;
         }
     } else {

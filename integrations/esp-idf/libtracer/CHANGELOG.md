@@ -71,7 +71,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   flush re-posts itself while a held write still moves bytes, and the next post, an inbound
   frame on any session, or `flush_held()` resumes it. A peer whose socket takes zero bytes
   across `kTxStallStrikes` (64) consecutive replacements is struck and disconnected through
-  the existing strike path; a hard socket error is still a strike, and a partial frame cut
+  the existing strike path, and a large frame refused because a peer like that pins the large
+  class counts against that peer the same way; a hard socket error is still a strike, and a partial frame cut
   off by one still condemns the session (#951). In-call replies keep the bounded blocking
   write. The TX wait that slept on the clock when the pool was full is gone, along with the
   pool. A leaving peer drops its references, and the last reference frees the block.

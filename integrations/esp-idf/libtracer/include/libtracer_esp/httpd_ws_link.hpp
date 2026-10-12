@@ -357,7 +357,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * at 100 updates/s the default strikes a peer whose socket took nothing for about 0.6 s of
      * them, at 1/s after about a minute. Any byte the socket takes clears the count. The
      * strike closes the session through the ordinary strike path (@ref stats_t::
-     * tx_stall_strikes counts it, @ref stats_t::sessions_condemned too). Compile-time.
+     * tx_stall_strikes counts it, @ref stats_t::sessions_condemned too). A large frame
+     * refused because the large class is spent counts as a replacement attempt for each peer
+     * holding a block of that class with no byte moved, so a peer pinning the class's last
+     * block is struck the same way. Compile-time.
      */
     static constexpr std::uint32_t kTxStallStrikes = 64;
 
@@ -2330,6 +2333,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Re-sample @ref stats_t::tx_large_peak from the class's occupancy — called
      *         from @ref claim_tx_large, the only edge that can raise it. */
     void note_tx_large_peak();
+    /** @brief A refused large-class draw: one stall for every peer that holds a block of the
+     *         class with no byte moved since, and the striking flush once one reaches
+     *         @ref kTxStallStrikes (#2095). Without it a peer that never drains could pin the
+     *         class's last block, and no replacement would ever count against it. */
+    void note_large_pinned();
     /**
      * @brief The handler-admission gate registered as the URI's `user_ctx` — every
      *        dispatch resolves this link through it (see @ref close_gate).
