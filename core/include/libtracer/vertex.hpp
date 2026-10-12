@@ -2530,9 +2530,8 @@ class vertex_t {
             return copy_published(b->pub.load(std::memory_order_acquire), inline_buf, overflow,
                                   drops);
         }
-        const std::size_t n = copy_published(pin.acquire(b->pub), inline_buf, overflow, drops);
-        pin.release();  // BEFORE the caller dispatches — the invariant `pin_t` asserts
-        return n;
+        // The pin ends with this scope, BEFORE the caller dispatches (`pin_t` asserts it).
+        return copy_published(pin.acquire(b->pub), inline_buf, overflow, drops);
     }
 
     /**

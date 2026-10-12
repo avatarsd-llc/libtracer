@@ -83,6 +83,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   and `drain_ripe` read the epoch counter, fence and scan the cells once per pass, and compare
   each entry against that horizon. `collect()` no longer fences per entry under `map_mutex_`.
   An entry parked after the horizon was taken waits for the next pass.
+- **The edge pin clears its cell once per fan-out.** `snapshot_edges` cleared the pin explicitly
+  and the destructor cleared it again; `pin_t::release()` is gone and the destructor is the one
+  clear.
 
 ## [0.19.1] — 2026-10-11
 
