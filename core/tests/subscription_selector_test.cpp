@@ -31,10 +31,14 @@
  *      BACKPRESSURE and change nothing, a retry completes them, and an `active` read never
  *      refuses. The same again on the busy flag's guarded binding (no atomic RMW).
  *  12. A temporary option name does not compile; a literal and an lvalue do.
+ *  13. A switch suspends before it resumes: at a resume's one draw, the only delivering edge on
+ *      the producer is the one being resumed (#2161).
  */
 
 #include "libtracer/subscription_selector.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -42,6 +46,7 @@
 #include <memory>
 #include <memory_resource>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -118,6 +123,8 @@ class gate_source_t final : public tr::mem::block_source_t {
 
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
         if (armed_) return nullptr;
+        if (watched_) counts_[std::min(draws_, counts_.size() - 1)] = g_->own_subs(*watched_);
+        draws_ += watched_.has_value();
         return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
     }
     void release(void* p, std::size_t, std::size_t align) noexcept override {
@@ -127,9 +134,23 @@ class gate_source_t final : public tr::mem::block_source_t {
     void arm() noexcept { armed_ = true; }
     /** @brief Serve everything again. */
     void disarm() noexcept { armed_ = false; }
+    /** @brief From now on, note @p v's delivering-edge count (`own_subs`) at each served draw:
+     *         a draw is the one point a toggle can be seen from inside. */
+    void watch(const graph_t& g, vertex_handle_t v) noexcept {
+        g_ = &g;
+        watched_ = v;
+    }
+    /** @brief Draws served since @ref watch. */
+    [[nodiscard]] std::size_t draws() const noexcept { return draws_; }
+    /** @brief The count noted at draw @p i (the last slot keeps the latest past the table). */
+    [[nodiscard]] std::uint32_t count_at(std::size_t i) const noexcept { return counts_[i]; }
 
    private:
-    bool armed_ = false; /**< @brief Refusing? */
+    bool armed_ = false;                     /**< @brief Refusing? */
+    const graph_t* g_ = nullptr;             /**< @brief The watched vertex's graph. */
+    std::optional<vertex_handle_t> watched_; /**< @brief The vertex whose count is noted. */
+    std::size_t draws_ = 0;                  /**< @brief Draws served while watching. */
+    std::array<std::uint32_t, 4> counts_{};  /**< @brief The counts noted, in order. */
 };
 
 /** @brief A TLV of @p type over @p body, as a written value. */
@@ -334,6 +355,44 @@ void test_refused_switch() {
     check(sel.select("a").has_value() && sel.select("b").has_value(),
           "with the array current again, a switch draws nothing");
     gate.disarm();
+}
+
+/**
+ * @brief (13) Suspend before resume, observed inside the switch (#2161).
+ *
+ * The toggles themselves call nothing back, and writes between switches cannot tell the two
+ * orders apart. The one point a switch can be seen from inside is the draw a resume makes to
+ * rebuild a stale edge array, from the graph's own source: there, the producer's
+ * delivering-edge count (RFC-0005, which a resume bumps before it flips) must hold the resumed
+ * edge alone. Resume first, and A's edge is still counted beside it.
+ */
+void test_suspend_before_resume() {
+    std::printf("a switch suspends every ref outside the new option before it resumes one:\n");
+    gate_source_t gate;
+    graph_t g{gate};
+    const vertex_handle_t in = g.register_vertex(path_t("/in"), role_t::STORED_VALUE);
+    counter_t a, b, other;
+    const auto sa = g.subscribe(path_t("/in"), count, &a);
+    const auto sb = g.subscribe(path_t("/in"), count, &b);
+    const auto so = g.subscribe(path_t("/in"), count, &other);
+    check(sa && sb && so && g.set_suspended(*sb, true), "three subscriptions on /in, b suspended");
+    selector_t sel(g);
+    check(sel.add("a", *sa) && sel.add("b", *sb) && sel.select("a"), "a selector on a");
+
+    // A refused republish (an unrelated unsubscribe) leaves /in's array stale, so the switch's
+    // resume of b must rebuild it: one draw, served, inside the switch.
+    gate.arm();
+    check(g.unsubscribe(*so).has_value() && g.own_subs(in) == 1,
+          "an unsubscribe with no room takes effect");
+    gate.disarm();
+    gate.watch(g, in);
+    check(sel.select("b").has_value() && sel.settled(), "the switch to b completes");
+    check(gate.draws() >= 1, "the resume of b drew from the source, inside the switch");
+    check(gate.draws() >= 1 && gate.count_at(0) == 1,
+          "at that draw, b's edge is the only one counted: a was suspended first");
+
+    (void)g.write(in, byte_value(1));
+    check(a.seen == 0 && b.seen == 1 && other.seen == 0, "and after it, only b delivers");
 }
 
 /** @brief (4) A dangling ref is listed INERT, skipped, and kept. */
@@ -611,6 +670,7 @@ int main() {
     test_switching();
     test_fields();
     test_refused_switch();
+    test_suspend_before_resume();
     test_dangling_ref();
     test_teardown();
     test_creator_door();
