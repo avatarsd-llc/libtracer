@@ -240,4 +240,7 @@ The byte threshold existed to bound what a shared value holds beyond its payload
 
 **`docs/spec/v1.md` §3 check: no annex changes.** The incorporated annexes are [01-data-format](../../reference/01-data-format.md), [03-addressing](../../reference/03-addressing.md), [05-protocol-tlvs](../../reference/05-protocol-tlvs.md) and [23-noise-link-binding](../../reference/23-noise-link-binding.md). None of them describes the store decision, so none changes, and `v1.md` is untouched. The non-normative [02-graph-model](../../reference/02-graph-model.md) describes the shipped byte threshold and changes with the implementing PR.
 
-**Open.** The ruling names the arena and the slab pool. What the heap-rooted build (`kArenaBytes = 0`) defaults to is left to the implementing ticket.
+**Open.** Two questions are left to the implementing ticket:
+
+- The ruling names the arena and the slab pool. What the heap-rooted build (`kArenaBytes = 0`) defaults to is not ruled.
+- [RFC-0028](0028-lean-value-path.md) §6.9's `kRxLoanBytes` reserve was keyed on the deleted threshold, so what now triggers it is not ruled. Read literally, an always-share arena would reserve 32 B on every MID receive block [est].
