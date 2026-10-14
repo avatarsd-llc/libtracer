@@ -290,6 +290,11 @@ replaces, not by shaving the core.
   **4–8** (`config.hpp:default_config_t::kVertexLockStripes`). A stripe's platform mutex is lazy: on FreeRTOS it
   costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
   no heap.
+- **Turn lwIP core locking on**: `CONFIG_LWIP_TCPIP_CORE_LOCKING=y` and
+  `CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y` in `sdkconfig.defaults`. IDF's default sends every
+  socket call to the tcpip task and back (2 task switches a call); with locking on, an inbound
+  WebSocket frame costs about 1 switch instead of about 9 [est]. The component README's
+  *Recommended sdkconfig* section gives the counts per path.
 - **Pin task priorities deliberately**: transport RX threads just below the
   application's control loop. Publish cadence belongs to the producer; no throttling
   exists in the library.

@@ -12,6 +12,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The recommended sdkconfig turns lwIP core locking on
+  ([#2131](https://github.com/avatarsd-llc/libtracer/issues/2131)).** The README's new
+  *Recommended sdkconfig* section sets `CONFIG_LWIP_TCPIP_CORE_LOCKING=y` and
+  `CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y`, and the `full_node` and `concepts/one_link`
+  examples carry both. A socket call then takes the lwIP core mutex in the calling task instead
+  of a round trip to the tcpip task: about 8 fewer task switches per inbound WebSocket frame
+  and about 6 fewer per queued send per peer [est, from code; silicon measurement pending].
+  The component's own code is unchanged; an app that keeps the IDF default keeps today's
+  behaviour.
 - **`esp_ws_client_link_t` holds nothing connection-sized while it is not connected
   ([#1606](https://github.com/avatarsd-llc/libtracer/issues/1606)).** The read scratch
   (`rx_bytes`, from `memory.state`) and the write scratch (`tx_bytes`, from `memory.io`) are
