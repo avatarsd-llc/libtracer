@@ -260,8 +260,8 @@ void test_view_delivery() {
         check(bytes.size() == frame.size() &&
                   std::memcmp(bytes.data(), frame.data(), frame.size()) == 0,
               "owning frame bytes are identical (narrowed to the datagram length)");
-        check(v.owner && v.owner->bytes.size() == tr::net::udp_transport_t::kMaxDatagram,
-              "frame segment was allocated at the transport's max datagram size");
+        check(v.owner && v.owner->bytes.size() == tr::net::udp_transport_t::kDefaultMaxFrame + 1,
+              "frame segment was drawn one byte past the default cap, not at 64 KiB (#2132)");
         check(v.owner.use_count() == 1, "the receiver holds the ONLY reference (no library copy)");
     }
     check(b.dropped_rx() == 0, "no backpressure drops on the heap backend");
@@ -326,7 +326,8 @@ void test_settings_max_frame() {
     // ----- the accessor: the honored cap is the configured one, and it only tightens. -----
     {
         const tr::net::udp_transport_t plain(0, "127.0.0.1", 1);
-        check(plain.effective_max_frame() == kMax, "unset max_frame keeps the kMaxDatagram cap");
+        check(plain.effective_max_frame() == tr::net::udp_transport_t::kDefaultMaxFrame,
+              "unset max_frame is the one-MTU default cap (#2132)");
         const tr::net::udp_transport_t tight(0, "127.0.0.1", 1, {.max_frame = kCap});
         check(tight.effective_max_frame() == kCap, "a configured max_frame IS the honored cap");
         const tr::net::udp_transport_t wide(0, "127.0.0.1", 1, {.max_frame = 8 * kMax});
@@ -526,9 +527,10 @@ void test_shut_down_frees_the_port() {
  *
  * @section udp_share_hold What sharing holds here, and why the threshold is the consumer's
  *
- * `udp_transport_t` receives every datagram into a `kMaxDatagram` (65,536 B) segment and
- * delivers a length-`n` window over it, so sharing this 68-byte payload TLV holds 64 KB for as
- * long as it is the vertex's value. The retired ratio priced that and declined (it needed
+ * `udp_transport_t` receives every datagram into a segment one byte past its cap (1,473 B at
+ * the default `kDefaultMaxFrame`, 65,536 B before #2132) and delivers a length-`n` window over
+ * it, so sharing this 68-byte payload TLV holds the whole segment for as long as it is the
+ * vertex's value. The retired ratio priced that and declined (it needed
  * K >= 964); the threshold prices only the payload, and the hold is the retention hazard the
  * consumer sizes against (RFC-0022 Amendment 2) — which is why the host default (4 KB) copies a
  * payload this small, and this test declares a threshold of 64 to keep the shared path covered.
@@ -652,7 +654,73 @@ void test_span_scratch_bounded_by_backend() {
     check(spans.load() == 1, "and nothing truncated was handed to the span receiver");
 }
 
+/**
+ * @brief #2132 — a link with no `max_frame` holds one MTU at rest, not 64 KiB.
+ *
+ * The unset cap used to be `kMaxDatagram`, so every UDP link drew a 65,536-byte receive segment
+ * before its first datagram and kept it while idle. The unset cap is now `kDefaultMaxFrame`
+ * (one Ethernet MTU's payload), the segment is drawn one byte past it, and a wider datagram is
+ * refused and counted (`malformed_rx`), never truncated and delivered. A link that carries wider
+ * datagrams sets `max_frame`, which may now exceed the default up to `kMaxDatagram`.
+ */
+void test_default_cap_is_one_mtu() {
+    std::printf("UDP transport — the unset cap is one MTU, and it sizes the segment (#2132):\n");
+    constexpr std::size_t kDef = tr::net::udp_transport_t::kDefaultMaxFrame;
+    std::mutex m;
+    std::vector<std::size_t> lens;
+    std::vector<std::size_t> seg_lens;
+    auto rope_rx = [&](tr::view::rope_t f) {
+        const tr::view::view_t v = f.only();
+        const std::lock_guard lock(m);
+        lens.push_back(v.bytes().size());
+        seg_lens.push_back(v.owner ? v.owner->bytes.size() : 0);
+    };
+    tr::net::udp_transport_t b(0, "", 0);
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
+    check(a.ok() && b.ok(), "both UDP sockets bound");
+    b.set_rope_receiver(rope_rx);
+
+    const std::vector<std::byte> over(kDef + 1, std::byte{0x11});
+    a.send(std::span<const std::byte>(over));
+    check(wait_until([&] { return b.malformed_rx() == 1; }, 3s),
+          "a datagram one byte over the default cap is refused and counted");
+    const std::vector<std::byte> wide(16u * 1024u, std::byte{0x22});
+    a.send(std::span<const std::byte>(wide));
+    check(wait_until([&] { return b.malformed_rx() == 2; }, 3s),
+          "and so is a 16 KiB one, not truncated to the cap");
+    const std::vector<std::byte> exactly(kDef, std::byte{0x33});
+    a.send(std::span<const std::byte>(exactly));
+    check(wait_until(
+              [&] {
+                  const std::lock_guard lock(m);
+                  return !lens.empty();
+              },
+              3s),
+          "a datagram of exactly the default cap lands");
+    {
+        const std::lock_guard lock(m);
+        check(lens.size() == 1, "nothing over the cap reached the receiver");
+        if (!lens.empty()) {
+            check(lens.front() == kDef, "and the at-cap datagram arrives whole");
+            check(seg_lens.front() == kDef + 1, "its segment is one byte past the cap");
+        }
+    }
+    check(b.dropped_rx() == 0, "a refusal is not counted as backpressure");
+
+    // Widening past the default is a configuration, bounded by the datagram ceiling.
+    std::atomic<std::size_t> wide_len{0};
+    tr::net::udp_transport_t d(0, "", 0, {.max_frame = 16u * 1024u});
+    tr::net::udp_transport_t c(0, "127.0.0.1", d.local_port());
+    check(d.effective_max_frame() == 16u * 1024u, "a max_frame above the default is honored");
+    auto wide_rx = [&](std::span<const std::byte> f) { wide_len.store(f.size()); };
+    d.set_receiver(wide_rx);
+    c.send(std::span<const std::byte>(wide));
+    check(wait_until([&] { return wide_len.load() == wide.size(); }, 3s),
+          "and admits the 16 KiB datagram the default refuses");
+}
+
 int main() {
+    test_default_cap_is_one_mtu();
     test_raw_frame();
     test_two_nodes_over_udp();
     test_scatter_gather();

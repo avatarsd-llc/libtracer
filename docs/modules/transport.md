@@ -252,7 +252,8 @@ class udp_transport_t : public transport_t {
     // send(span) = one sendto; send(iov) = one sendmsg(iovec) — a composite rope
     // in one syscall. Datagrams land in segments from `backend`; exhaustion drops
     // the datagram and ticks dropped_rx. `max_frame` (the universal :settings key,
-    // 0 = kMaxDatagram) is the largest datagram accepted — a longer one is refused
+    // 0 = kDefaultMaxFrame, one MTU's 1,472 B; at most kMaxDatagram) is the largest
+    // datagram accepted, and sizes the RX segment — a longer one is refused
     // and ticks malformed_rx instead of being delivered, while the backend can
     // furnish max_frame + 1 bytes (below that it truncates first, #1074).
 };

@@ -62,10 +62,10 @@ udp_transport_t::udp_transport_t(std::uint16_t bind_port, std::string_view peer_
     : backend_(config.memory.rx), state_src_(&config.memory.state_or_default()) {
     const std::size_t max_frame = config.max_frame;
     const std::size_t recv_stack = config.recv_stack;
-    // `:settings max_frame` (0 = unset) tightens the accepted-datagram cap. kMaxDatagram is
-    // not a policy default here but the datagram ceiling itself — a UDP payload cannot be
+    // `:settings max_frame` (0 = unset) sets the accepted-datagram cap; unset is one Ethernet
+    // MTU (#2132). kMaxDatagram is the datagram ceiling itself — a UDP payload cannot be
     // larger — so a configured value above it is inert, never a widened ingress bound.
-    if (max_frame != 0 && max_frame < max_frame_) max_frame_ = max_frame;
+    if (max_frame != 0) max_frame_ = std::min(max_frame, kMaxDatagram);
     std::uint32_t peer_ip = 0;
     in_addr addr{};
     if (parse_ipv4(peer_host, addr)) peer_ip = addr.s_addr;
@@ -207,8 +207,9 @@ void udp_transport_t::run() {
     // the buffer it is given and reports the truncated length, so a buffer of exactly the
     // cap would deliver an over-cap datagram as a short, corrupt frame. With a buffer of
     // cap+1, any datagram above the cap reads back as `n > cap` and is refused below.
-    // Unset (kMaxDatagram) keeps the pre-#926 buffers exactly: cap+1 exceeds both bounds,
-    // and no datagram can reach 65,536 bytes, so the refusal is unreachable.
+    // Unset, the cap is kDefaultMaxFrame, so a link holds a 1,473-byte segment at rest, not
+    // 64 KiB (#2132). A cap at kMaxDatagram makes cap+1 exceed both bounds, and no datagram
+    // can reach 65,536 bytes, so the refusal is unreachable there.
     const std::size_t frame_cap = max_frame_;
     const std::size_t alloc_cap = std::min(rx_cap, frame_cap + 1);
     // The borrowed-span path holds no segment, so nothing bounds its scratch but this: one

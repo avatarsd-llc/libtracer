@@ -15,9 +15,10 @@
  * no length prefix and no partial-frame state anywhere in the kind. That is the whole
  * difference between the two families, and it has two consequences worth seeing:
  *
- *  - **The bound is hard, not configurable upward.** `kMaxDatagram` is what a datagram can
- *    physically be, so the `:settings max_frame` key can only TIGHTEN it. A frame larger
- *    than a datagram is not a UDP frame; that is what streaming kinds are for.
+ *  - **The bound is hard past one datagram.** The unset cap is `kDefaultMaxFrame`, one
+ *    Ethernet MTU; `:settings max_frame` may raise it up to `kMaxDatagram`, what a datagram can
+ *    physically be, and no further. A frame larger than a datagram is not a UDP frame; that
+ *    is what streaming kinds are for.
  *  - **The listener has no peer until one talks to it.** UDP is connectionless, so a
  *    listener-mode transport — constructed with no peer address — LEARNS its peer from the
  *    source address of the first inbound datagram. Until then `send` is a no-op, which is
@@ -150,7 +151,7 @@ int main() {
     check(ok, at_dialer.wait_for(1, 2s), "the listener could reply once it had heard a peer");
     check(ok, at_dialer.at(0) == reply, "…and the reply is byte-identical too");
 
-    // The bound is the datagram's, and `max_frame` may only tighten it.
+    // The bound is the datagram's: `max_frame` never raises it past kMaxDatagram.
     check(ok, listener.effective_max_frame() <= udp_transport_t::kMaxDatagram,
           "the receive cap never exceeds what a datagram can carry");
     check(ok, listener.malformed_rx() == 0 && listener.dropped_rx() == 0,

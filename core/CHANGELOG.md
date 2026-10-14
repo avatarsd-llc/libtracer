@@ -14,6 +14,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Breaking
+
+- **A UDP link with no `max_frame` accepts one MTU, not 64 KiB
+  ([#2132](https://github.com/avatarsd-llc/libtracer/issues/2132)).** The unset receive cap of
+  `udp_transport_t` is the new `udp_transport_t::kDefaultMaxFrame` (1,472 B, the payload of one
+  1,500-byte Ethernet MTU) instead of `kMaxDatagram` (65,536 B). The cap also sizes the receive
+  segment and scratch, so an idle UDP link on the default heap backend holds a 1,473-byte segment
+  instead of a 65,536-byte one. A wider datagram is refused and counted in `malformed_rx`, never
+  truncated. A link that carries wider datagrams sets `max_frame`, which on `udp` may now raise
+  the cap above the default, up to `kMaxDatagram`.
+
 ### Added
 
 - **`subscription_selector_t`: a vertex that switches among named options of subscription refs

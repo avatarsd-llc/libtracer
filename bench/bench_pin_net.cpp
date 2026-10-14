@@ -210,8 +210,9 @@ int run_sub(int argc, char** argv) {
 
     graph_t node;
     tr::net::fwd_router_t router(node);
-    tr::net::udp_transport_t t(port, "127.0.0.1", static_cast<std::uint16_t>(port + 1),
-                               {.memory = {.rx = &pool}});
+    tr::net::udp_transport_t t(
+        port, "127.0.0.1", static_cast<std::uint16_t>(port + 1),
+        {.memory = {.rx = &pool}, .max_frame = tr::net::udp_transport_t::kMaxDatagram});
     if (!t.ok()) {
         std::fprintf(stderr, "sub: bind failed on %u\n", port);
         return 1;
