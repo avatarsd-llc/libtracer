@@ -6,12 +6,12 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The `build-test-reclaim-qsbr` leg and the `tsan qsbr (slot=single_writer_slot_t)` leg of
- * `core-ci.yml` put this directory on the include path (`-DCMAKE_CXX_FLAGS=-I<this dir>`). It
- * replaced the fragments those legs used to generate inline. The test build's instrumented
+ * The `build-test-reclaim-qsbr` leg and the `tsan qsbr (slot=single_writer_slot_t, fence=fenced)`
+ * leg of `core-ci.yml` put this directory on the include path (`-DCMAKE_CXX_FLAGS=-I<this dir>`).
+ * It replaced the fragments those legs used to generate inline. The test build's instrumented
  * preset yields to it, so it restates that preset's members as well. Its `slot=hazard_slot_t`
- * sibling is `core/tests/presets/reclaim-qsbr-hazard-slot`: one build has one `config_t`, so
- * the slot and the policy are bound by ONE fragment, never by two that shadow each other.
+ * sibling is `core/tests/presets/reclaim-qsbr-hazard-slot`: one build has one `config_t`, so the
+ * slot and the policy are bound by ONE fragment, never by two that shadow each other.
  */
 #pragma once
 

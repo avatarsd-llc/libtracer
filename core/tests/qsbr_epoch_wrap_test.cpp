@@ -12,6 +12,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "libtracer/qsbr.hpp"
 #include "test_support.hpp"
@@ -116,6 +118,13 @@ void horizon_is_the_per_cell_answer() {
  */
 void asymmetric_entry() {
     std::printf("a bracket entered with a plain store holds a pair; one fence serves a row\n");
+    // A lane that opts in sets LT_EXPECT_MEMBARRIER=1: there, a build without the plain entry
+    // or a refused registration (an older kernel, a seccomp filter, a container) is a failure,
+    // never a silent fall back to the fenced entry that would leave the lane testing nothing new.
+    const char* const want = std::getenv("LT_EXPECT_MEMBARRIER");
+    if (want != nullptr && std::strcmp(want, "1") == 0)
+        check(q::kMembarrier && q::asym_ready(),
+              "LT_EXPECT_MEMBARRIER=1: the asymmetric fence is compiled in and registered");
     if constexpr (!q::kMembarrier) {
         std::printf(
             "  (not compiled in on this target: the entry is the store and seq_cst fence)\n");
