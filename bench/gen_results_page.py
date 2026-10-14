@@ -322,8 +322,8 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
     instrument_t(
         "bench_conn_ram.cpp", "counted", ("memory",),
         "Stands up a real server transport and drives K raw client peers at it, reading the live "
-        "heap balance when the server is up and quiesced, at K established connections, and "
-        "after teardown.",
+        "balance of the link's memory seam and the heap when the server is up and quiesced, at "
+        "K established connections, and after teardown.",
         "live bytes per link · live bytes per connection",
         "per-connection bytes drift past a measured ±8 B / ±0.5% band — WARN-first on the "
         "pinned host (bench/ram_census_pins.json carries the pins and the activation "

@@ -36,6 +36,13 @@
  * exactly 0 — it is printed with the rest so the reader can confirm the
  * instrument is not itself allocating inside the window.
  *
+ * Since ADR-0083 the host default root is the slab pool, which takes whole 256 KiB slabs
+ * from the platform heap, so a counting `operator new` alone cannot see a connection. Every
+ * arm therefore hands its link a `link_memory_t` whose sources are counting wrappers over
+ * the default sub-pools (`counting_source_t`, #2134): the link draws from where it would by
+ * default, each block is charged at its slab class, and the slab draws underneath are not
+ * counted. What still goes through `operator new` is counted at its usable size.
+ *
  * The counting override is process-global and NOT thread-scoped (the receive
  * threads allocate on it, which is exactly what we want to see), so the harness
  * itself must not allocate inside a window: every harness container is reserved
@@ -86,6 +93,7 @@
 
 #include "libtracer/can.hpp"
 #include "libtracer/mem_pool.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
@@ -113,6 +121,10 @@ std::atomic<long long> g_allocs{0};
 std::atomic<long long> g_frees{0};
 /** @brief Counting is on. */
 std::atomic<bool> g_armed{false};
+/** @brief Set while a @ref counting_source_t forwards a draw: the slabs the default root
+ *         takes from the platform heap then are not a connection's bytes, and a block the
+ *         source already counted must not be counted twice. */
+thread_local bool t_in_source = false;
 
 void bump_peak(long long now) {
     long long seen = g_peak.load(std::memory_order_relaxed);
@@ -122,7 +134,7 @@ void bump_peak(long long now) {
 
 void* counted_alloc(std::size_t size) {
     void* p = std::malloc(size != 0 ? size : 1);
-    if (g_armed.load(std::memory_order_relaxed) && p != nullptr) {
+    if (g_armed.load(std::memory_order_relaxed) && !t_in_source && p != nullptr) {
         g_allocs.fetch_add(1, std::memory_order_relaxed);
 #ifdef BENCH_HAS_USABLE_SIZE
         const long long now = g_live.fetch_add(static_cast<long long>(malloc_usable_size(p)),
@@ -136,7 +148,7 @@ void* counted_alloc(std::size_t size) {
 
 void counted_free(void* p) {
     if (p == nullptr) return;
-    if (g_armed.load(std::memory_order_relaxed)) {
+    if (g_armed.load(std::memory_order_relaxed) && !t_in_source) {
         g_frees.fetch_add(1, std::memory_order_relaxed);
 #ifdef BENCH_HAS_USABLE_SIZE
         g_live.fetch_sub(static_cast<long long>(malloc_usable_size(p)), std::memory_order_relaxed);
@@ -144,6 +156,72 @@ void counted_free(void* p) {
     }
     std::free(p);
 }
+
+/**
+ * @brief The bytes the default slab root charges for a @p bytes block: the smallest row of
+ *        `config_t::kSizeClasses` that holds it. A request past the last row passes straight
+ *        through to the platform heap and is charged as asked.
+ */
+long long charged(std::size_t bytes) {
+    for (const std::size_t row : tr::graph::config_t::kSizeClasses)
+        if (row >= bytes) return static_cast<long long>(row);
+    return static_cast<long long>(bytes);
+}
+
+/**
+ * @brief A @ref tr::mem::block_source_t that forwards to a default sub-pool and counts what
+ *        it hands out into the same live balance as the `operator new` counter (#2134).
+ *
+ * Since ADR-0083 the host default root is the slab pool: a link's state, egress and receive
+ * draws reach the platform heap only as whole 256 KiB slabs, so the `operator new` counter
+ * alone read 0 per connection, or one slab. Each arm hands its transport this wrapper over
+ * the very sub-pool the link would take by default, so the link draws from the same place
+ * and the bench sees every block, charged at its slab class.
+ */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Count the draws served by @p inner, which must outlive this source. */
+    explicit counting_source_t(tr::mem::block_source_t& inner) noexcept
+        : block_source_t("counting"), inner_(&inner) {}
+
+    /** @brief A block from the wrapped sub-pool, added to the live balance when armed. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        t_in_source = true;
+        void* p = inner_->try_alloc(bytes, align);
+        t_in_source = false;
+        if (p != nullptr && g_armed.load(std::memory_order_relaxed)) {
+            g_allocs.fetch_add(1, std::memory_order_relaxed);
+            const long long c = charged(bytes);
+            bump_peak(g_live.fetch_add(c, std::memory_order_relaxed) + c);
+        }
+        return p;
+    }
+
+    /** @brief Return a block to the wrapped sub-pool, taken off the live balance when armed. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        if (p != nullptr && g_armed.load(std::memory_order_relaxed)) {
+            g_frees.fetch_add(1, std::memory_order_relaxed);
+            g_live.fetch_sub(charged(bytes), std::memory_order_relaxed);
+        }
+        t_in_source = true;
+        inner_->release(p, bytes, align);
+        t_in_source = false;
+    }
+
+   private:
+    tr::mem::block_source_t* inner_; /**< @brief The default sub-pool the draws come from. */
+};
+
+/** @brief The net sub-pool, counted: every link's state and egress store in this bench. */
+counting_source_t g_net{tr::mem::net_source()};
+/** @brief The receive backend over @ref g_net — what `net_backend()` is, counted. */
+tr::mem::source_backend_t g_net_rx{g_net};
+/** @brief The value sub-pool, counted: what `heap_backend()` draws its segments from. */
+counting_source_t g_values{tr::mem::value_source()};
+/** @brief The UDP rope arm's "default heap backend", counted. */
+tr::mem::source_backend_t g_values_rx{g_values};
+/** @brief The link memory every arm injects: the defaults, through the counters. */
+const tr::net::link_memory_t kCounted{.rx = &g_net_rx, .io = &g_net, .state = &g_net};
 
 }  // namespace
 
@@ -377,14 +455,20 @@ sample_t run_stream_arm(std::size_t k, std::size_t big, Make make, Dial dial, Pu
 
 sample_t arm_tcp(std::size_t k, std::size_t big) {
     return run_stream_arm<tr::net::tcp_server_transport_t>(
-        k, big, [] { return new tr::net::tcp_server_transport_t(0, {.peer_named = true}); },
+        k, big,
+        [] {
+            return new tr::net::tcp_server_transport_t(0, {.memory = kCounted, .peer_named = true});
+        },
         [](std::uint16_t p) { return dial_tcp(p); },
         [](int fd, std::size_t n) { (void)send_tcp_frame(fd, n); });
 }
 
 sample_t arm_ws(std::size_t k, std::size_t big) {
     return run_stream_arm<tr::net::ws_server_transport_t>(
-        k, big, [] { return new tr::net::ws_server_transport_t(0, {.peer_named = true}); },
+        k, big,
+        [] {
+            return new tr::net::ws_server_transport_t(0, {.memory = kCounted, .peer_named = true});
+        },
         [](std::uint16_t p) {
             const int fd = dial_tcp(p);
             if (fd < 0) return -1;
@@ -419,12 +503,13 @@ sample_t arm_udp(std::size_t big, udp_mode_t mode) {
     // The pool lives over a static slab, so constructing it costs no heap and the
     // link_base reading below stays a pure transport measurement.
     tr::mem::pool_t pool(g_udp_slab, 1536);
-    tr::mem::mem_backend_t* backend = mode == udp_mode_t::ROPE_POOL
-                                          ? static_cast<tr::mem::mem_backend_t*>(&pool)
-                                          : &tr::mem::heap_backend();
+    tr::mem::mem_backend_t* backend =
+        mode == udp_mode_t::ROPE_POOL ? static_cast<tr::mem::mem_backend_t*>(&pool) : &g_values_rx;
+    tr::net::link_memory_t memory = kCounted;
+    memory.rx = backend;
     const long long pre = live();
-    auto srv = std::make_unique<tr::net::udp_transport_t>(
-        0, std::string{}, 0, tr::net::udp_config_t{.memory = {.rx = backend}});
+    auto srv = std::make_unique<tr::net::udp_transport_t>(0, std::string{}, 0,
+                                                          tr::net::udp_config_t{.memory = memory});
     if (mode != udp_mode_t::SPAN) srv->set_rope_receiver(&drop_rope, nullptr);
     quiesce();
     const long long t0 = live();
@@ -503,7 +588,8 @@ sample_t arm_can(std::size_t k, const char* ifname, bool with_group) {
     const long long pre = live();
     tr::net::transport_can_config_t cfg{};
     cfg.node = 1;
-    auto link = tr::mem::make_poly<tr::net::socketcan_link_t>(tr::mem::net_source(), ifname, 0);
+    cfg.reasm_src = &g_net;  // the peer table and RX tables: the net sub-pool, counted
+    auto link = tr::mem::make_poly<tr::net::socketcan_link_t>(g_net, ifname, 0);
     if (!link->ok()) {
         ::close(raw);
         return out;
