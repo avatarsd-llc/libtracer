@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0028 |
 | **Title** | The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait |
-| **Status** | **accepted** (Corrected 2026-10-02, see the erratum at the end; amended 2026-10-03 for §4.9 and §5.6, see the amendment after it; drafted 2026-09-28), **reviewed 2026-09-29** on [PR #1627](https://github.com/avatarsd-llc/libtracer/pull/1627) against `main` 641eff22: direction accepted, the five §11 questions ruled (recorded in §11), and the review's seven text/scope corrections applied in this revision; accepted on that merge. Every number in §2 and §7 is measured on the host build at the commit this RFC was drafted against and is reproducible with `bench_lean_value_path` (§7.3). |
+| **Status** | **accepted** (Corrected 2026-10-02, see the erratum at the end; amended 2026-10-03 for §4.9 and §5.6, see the amendment after it; §4.3 and §5.3 amended 2026-10-14 by RFC-0022 Amendment 3, see the last section; drafted 2026-09-28), **reviewed 2026-09-29** on [PR #1627](https://github.com/avatarsd-llc/libtracer/pull/1627) against `main` 641eff22: direction accepted, the five §11 questions ruled (recorded in §11), and the review's seven text/scope corrections applied in this revision; accepted on that merge. Every number in §2 and §7 is measured on the host build at the commit this RFC was drafted against and is reproducible with `bench_lean_value_path` (§7.3). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-09-28 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. |
@@ -1061,3 +1061,7 @@ took `link_memory_t`, and its queue slots now draw from `io` too. `socketcan_tra
 takes none, because its frames are fixed-size.
 
 **What did not change.** No wire surface, no other normative statement, and no number in §§2–11.
+
+## Amendment (2026-10-14): §4.3 and §5.3, the share threshold becomes a backend trait plus a per-vertex hint
+
+Recorded in full as [RFC-0022 Amendment 3](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md#amendment-3--2026-10-14-copy-or-share-is-a-backend-trait-plus-a-per-vertex-hint) (maintainer ruling 2026-10-14). `config_t::kShareThresholdBytes` and the per-vertex `share_threshold_bytes` of §5.3 are replaced. The block source the build composes decides by a compile-time trait: the static arena always shares, and the slab pool shares on an exact class fit. A vertex may declare `SHARE`, `COPY` or default, and default follows that trait. §5.3's table of stages (ingress, local publish, fan-out, egress) still applies, with "at or above the threshold" read as "shared" and "below" as "copied". No wire surface changes.

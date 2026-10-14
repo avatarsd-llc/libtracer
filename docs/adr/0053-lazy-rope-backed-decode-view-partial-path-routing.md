@@ -6,7 +6,7 @@ Status: **accepted** (2026-07-06 — maintainer-ratified in design review; this 
 architecture that realizes the direction ratified in
 [ADR-0052](0052-rope-aware-decode-sink-node-type.md): steady-state zero-copy rope decode
 is a **hard requirement**, including WS/CAN reassembly, delivered by a **new lazy
-decode-side type** rather than by mutating the existing sinks).
+decode-side type** rather than by mutating the existing sinks). **Amended 2026-10-14 by [ADR-0087](#amendment-2026-10-14-5-is-realized-by-one-frame-ingress-module-adr-0087)**: §5 is realized through one frame-ingress module.
 
 ## Context
 
@@ -336,3 +336,12 @@ The **reply** egress was already a different story: it uses `rope_t::try_to_iove
 §7's *reasoning* stands unchanged (no stack cap, no synthetic limit — the bound is a real injected resource per [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md)). Only the container changed, and with it the failure mode: from `abort()` to backpressure.
 
 `core/tests/fwd_rope_forward_test.cpp` pins it — the same maximally fragmented rope is forwarded through three seams: a `null_source()` (emits **nothing**, and the test asserts *nothing*, not *something short*), a bounded `bump_source_t` with room, and the default heap source; the latter two are byte-identical to the contiguous oracle. Reverting the fix fails the first two checks.
+
+## Amendment (2026-10-14): §5 is realized by one frame-ingress module ([ADR-0087](0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md))
+
+*(Maintainer-ratified 2026-10-14, peer-path grill Q1, Q2, Q4 and Q19; recorded in [ADR-0087](0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md) §1.)* §5's direction stands: transports hand ropes upward and never flatten at ingress. What changes is how WebSocket gets there.
+
+- **Every link reads through one frame-ingress module.** It reads the header, refuses a frame over `max_frame` by closing the link before drawing anything, and receives the body straight into a segment drawn from the link's own source at the exact length. A WebSocket payload is unmasked in place.
+- **The WebSocket assembler is for fragmented messages only.** An unfragmented frame is one view over its exact segment, whatever receiver tier the router installed. Fragments chain as views, as §5 says.
+- **Measured reason** (WIDE x86, user-space copies per inbound frame): the shipped WS server path copies **2.2–4.2×** the payload, and a WS-server-to-WS-client relay **4.2–7.1×**, against TCP's **1.0–3.3×**. The excess is the stream-buffer append, an `erase_front` tail move (about 3.2–3.4 KiB per frame at 4 KiB and 16 KiB), and an assembler copy that ran even for unfragmented frames.
+- **§5's last sentence is narrowed for WebSocket egress.** A WS client's only contiguous egress copy is the RFC 6455 masking pass, done while gathering. The base-class flatten before it goes. ADR-0087 §7 gates WS at ≤ 1.0 user-space payload copies per frame.
