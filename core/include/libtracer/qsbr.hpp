@@ -204,20 +204,23 @@
  *
  * @section qsbr_single_flight Single flight, under the asymmetric fence
  *
- * With `%kMembarrier`, `%drain_ripe`'s passes run single flight: a drainer whose unfenced
- * scan found something ripe, and that finds another pass fencing (`%in_flight` non-zero),
- * records itself there and returns the empty horizon instead of issuing a second `membarrier`.
- * Skipping only defers a free, so safety is the arguments above unchanged.
+ * With `%kMembarrier`, `%drain_ripe`'s passes run single flight. A drainer whose unfenced scan
+ * found something ripe takes `%in_flight` with a `fetch_add`; one that reads non-zero there has
+ * recorded itself and returns at once, without a `membarrier` of its own. Skipping only defers
+ * a free, so safety is the arguments above unchanged.
  *
- * Liveness: the pass in flight takes `%in_flight` back to 0 with an `exchange` after `F2` and
- * BEFORE its scan. Whatever made a skipper's unfenced scan find something ripe (its own offline
- * store, an entry it made READY) is sequenced before its `fetch_add`, which that `exchange`
- * reads, so the holder's scan sees it too, at no second fence: a scan anywhere after `F2` is a
- * valid horizon for its `c`. A drainer arriving after the `exchange` finds 0 and runs its own
- * pass. What a skip can still defer is an entry retired after the holder's `L_c`, which its `c`
- * does not cover: that one waits for the next drain, `%retire` or `graph_t::collect` on any
- * thread, as any entry parked behind an open bracket does. `%retire` and `graph_t::collect` are
- * not gated. The fenced build has no gate and no `%in_flight`.
+ * Liveness: the holder keeps `%in_flight` through its whole pass, hooks included, and gives it
+ * back with an `exchange`. If that reads more than its own 1, a drainer skipped meanwhile, and
+ * the holder runs one more pass, unflagged. The skipper's `fetch_add` precedes the `exchange` in
+ * `%in_flight`'s modification order (a later one would have read 0 and held the flag itself),
+ * and the `exchange` reads it, so everything sequenced before the skip (the skipper's offline
+ * store, the entries it retired and the counter bump that stamped them) happens before the
+ * second pass's counter read and scan. That pass then frees whatever the skipper's own pass
+ * could have. A drainer that arrives during the second pass finds 0, or a new holder that owes
+ * it the same, and so is never left unserved. So no skip strands an entry, even with no thread
+ * running after it, and a holder runs at most two passes; the second pays a `membarrier` only if
+ * its unfenced scan still finds something ripe. `%retire`'s own grace check and
+ * `graph_t::collect` are not gated. The fenced build has no gate.
  */
 #ifndef LIBTRACER_QSBR_HPP
 #define LIBTRACER_QSBR_HPP
@@ -259,22 +262,6 @@ inline constexpr bool kHaveMembarrier = false;
  * fence.
  */
 inline constexpr bool kMembarrier = kQsbrAsymmetricFence && kHaveMembarrier;
-
-/** @brief Stands in for a member a build without @ref kMembarrier has no use for. */
-struct no_member_t {};
-
-/** @brief Is the plain entry in use? Never, where there is no flag. */
-[[nodiscard]] inline bool flag_on(const no_member_t&) noexcept { return false; }
-/** @brief Is the plain entry in use? */
-[[nodiscard]] inline bool flag_on(const std::atomic<std::uint32_t>& f) noexcept {
-    return f.load(std::memory_order_relaxed) != 0;
-}
-/** @brief Turn the plain entry on: nothing to turn on, where there is no flag. */
-inline void flag_set(no_member_t&) noexcept {}
-/** @brief Turn the plain entry on. */
-inline void flag_set(std::atomic<std::uint32_t>& f) noexcept {
-    f.store(1, std::memory_order_relaxed);
-}
 
 /**
  * @brief The domain's padding width: @ref tr::graph::kCacheLineBytes, floored at the
@@ -406,8 +393,7 @@ struct alignas(kCellAlign) control_t {
      *        then enter with a plain store (@ref qsbr_asym). Set once, inside @ref asym_ready;
      *        never cleared. Beside the epoch because the entry loads both.
      */
-    [[no_unique_address]] std::conditional_t<kMembarrier, std::atomic<std::uint32_t>, no_member_t>
-        asym{};
+    std::atomic<std::uint32_t> asym{0};
 };
 
 /**
@@ -434,11 +420,10 @@ struct registry_t {
 
 /**
  * @brief Drain passes in flight, for single flight (@ref qsbr_single_flight): 0 when none is,
- *        else 1 plus the passes that skipped. A variable template so that only a build that
- *        instantiates `%horizon<true>` (one with @ref kMembarrier) has it; it is off the
- *        registry's read-mostly line, and only drainers write it.
+ *        else 1 plus the passes that skipped. Off the registry's read-mostly line, and only
+ *        drainers write it. Only a build with @ref kMembarrier refers to it, so only that build
+ *        emits it.
  */
-template <bool kSingleFlight>
 inline constinit std::atomic<std::uint32_t> in_flight{0};
 
 /** @brief This thread's claim on a participant index, released when the thread ends. */
@@ -526,7 +511,7 @@ inline void go_online() noexcept {
         r.ctl.epoch.load(kMembarrier ? std::memory_order_acquire : std::memory_order_relaxed);
     const std::uint32_t word = (e & kEpochMask) | kOnlineBit;
     if constexpr (kMembarrier) {
-        if (flag_on(r.ctl.asym)) {
+        if (r.ctl.asym.load(std::memory_order_relaxed) != 0) {
             r.cells[idx].state.store(word, std::memory_order_release);
             std::atomic_signal_fence(std::memory_order_seq_cst);  // keeps S_R before L_R
             return;
@@ -619,7 +604,7 @@ inline void enter() noexcept {
         static const bool ok = [] {
             const bool reg =
                 syscall(__NR_membarrier, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0) == 0;
-            if (reg) flag_set(registry().ctl.asym);
+            if (reg) registry().ctl.asym.store(1, std::memory_order_relaxed);
             return reg;
         }();
         return ok;
@@ -650,28 +635,30 @@ struct horizon_t {
  *        to fence.
  *
  * Each online cell `s` is past exactly the arc of epochs @ref epoch_after places before it, and
- * so is the counter value @p c. Every such arc is shorter than half the circle, so two of them
- * meet in one arc or none, and the scan narrows one arc cell by cell. A thread counted in
- * `overflow_online` has no epoch, so the answer is then the empty arc.
+ * so is the counter value @p c: arcs of one length, `kEpochWindow - 1`, ending at `s - 1` and
+ * `c - 1`. Arcs of one length meet in the arc that ends at the oldest end and is shortened by
+ * the spread of the ends, or in nothing once that spread reaches the length. So the scan keeps
+ * only each cell's lag behind the counter, a signed 31-bit distance (a cell read after `c` may
+ * be ahead of it), and its extremes. A thread counted in `overflow_online` has no epoch, so the
+ * answer is then the empty arc.
  */
 template <std::memory_order MO>
 [[nodiscard]] inline horizon_t scan(std::uint32_t c) noexcept {
     registry_t& r = registry();
     if (r.ctl.overflow_online.load(MO) != 0) return {};
-    horizon_t h{c - 1, kEpochWindow - 1};
+    std::int32_t behind = 0;  // the counter's own lag is 0
+    std::int32_t ahead = 0;
     for (std::size_t i = 0; i < kQsbrParticipants; ++i) {
         const std::uint32_t s = r.cells[i].state.load(MO);
         if (s == 0) continue;
-        const horizon_t a{s - 1, kEpochWindow - 1};
-        if (h.past(a.end)) {
-            h = {a.end, std::min(a.len, h.len - ((h.end - a.end) & kEpochMask))};
-        } else if (a.past(h.end)) {
-            h.len = std::min(h.len, a.len - ((a.end - h.end) & kEpochMask));
-        } else {
-            return {};
-        }
+        // Shifted up and back down, the 31-bit distance `c - s` becomes a signed lag.
+        const auto lag = static_cast<std::int32_t>(((c - s) & kEpochMask) << 1) >> 1;
+        behind = std::max(behind, lag);
+        ahead = std::min(ahead, lag);
     }
-    return h;
+    const std::int32_t len = static_cast<std::int32_t>(kEpochWindow - 1) - (behind - ahead);
+    if (len <= 0) return {};
+    return {c - 1 - static_cast<std::uint32_t>(behind), static_cast<std::uint32_t>(len)};
 }
 
 /**
@@ -684,24 +671,18 @@ template <std::memory_order MO>
  * fence is `F1`, `membarrier`, `F2`, and a `membarrier` call that fails yields the empty
  * horizon, so frees are deferred, never early.
  */
-template <bool kSingleFlight = false, class Wants>
+template <class Wants>
 [[nodiscard]] inline horizon_t horizon(Wants&& wants) noexcept {
     registry_t& r = registry();
     constexpr std::memory_order relaxed = std::memory_order_relaxed;
     if (!wants(scan<relaxed>(r.ctl.epoch.load(relaxed)))) return {};
-    if constexpr (kSingleFlight)
-        if (in_flight<kSingleFlight>.fetch_add(1, std::memory_order_acq_rel) != 0) return {};
     const std::uint32_t c = r.ctl.epoch.load(std::memory_order_acquire);  // L_c, before F_W
     std::atomic_thread_fence(std::memory_order_seq_cst);
 #if defined(LIBTRACER_QSBR_MEMBARRIER)
     if constexpr (kMembarrier) {
-        const bool refused =
-            asym_ready() && syscall(__NR_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0;
+        if (asym_ready() && syscall(__NR_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0)
+            return {};
         std::atomic_thread_fence(std::memory_order_seq_cst);
-        // Back to 0 BEFORE the scan, so the scan sees what every pass that skipped meanwhile saw.
-        if constexpr (kSingleFlight)
-            (void)in_flight<kSingleFlight>.exchange(0, std::memory_order_acq_rel);
-        if (refused) return {};
     }
 #endif
     return scan<std::memory_order_acquire>(c);
@@ -720,33 +701,48 @@ template <bool kSingleFlight = false, class Wants>
  *
  * A slot is EMPTIED before its hook runs, for the reason `%graph.cpp`'s park drain gives: a
  * hook is arbitrary user code that may publish, and a nested publish re-enters here.
+ *
+ * With @ref kMembarrier the pass runs single flight (@ref qsbr_single_flight): it holds
+ * @ref in_flight from before its horizon until after its last hook, and runs ONE more pass,
+ * unflagged, when its release shows that a drainer skipped meanwhile.
  */
 [[gnu::noinline]] inline void drain_ripe() noexcept {
     registry_t& r = registry();
-    const horizon_t h = horizon<kMembarrier>([&r](const horizon_t& h0) {
+    const auto ripe = [&r](const horizon_t& h0) {
         for (const retired_slot_t& s : r.retired)
             if (s.state.load(std::memory_order_acquire) == slot_state_t::READY &&
                 h0.past(s.epoch.load(std::memory_order_relaxed)))
                 return true;
         return false;
-    });
-    for (retired_slot_t& s : r.retired) {
-        slot_state_t expected = slot_state_t::READY;
-        if (!h.past(s.epoch.load(std::memory_order_relaxed)) ||
-            !s.state.compare_exchange_strong(expected, slot_state_t::CLAIMING,
-                                             std::memory_order_acq_rel, std::memory_order_relaxed))
-            continue;
-        if (!h.past(s.epoch.load(std::memory_order_relaxed))) {
-            s.state.store(slot_state_t::READY, std::memory_order_release);
-            continue;
+    };
+    if constexpr (kMembarrier)
+        if (!ripe(scan<std::memory_order_relaxed>(r.ctl.epoch.load(std::memory_order_relaxed))) ||
+            in_flight.fetch_add(1, std::memory_order_acq_rel) != 0)
+            return;
+    for (bool held = kMembarrier;; held = false) {
+        const horizon_t h = horizon(ripe);
+        for (retired_slot_t& s : r.retired) {
+            slot_state_t expected = slot_state_t::READY;
+            if (!h.past(s.epoch.load(std::memory_order_relaxed)) ||
+                !s.state.compare_exchange_strong(expected, slot_state_t::CLAIMING,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_relaxed))
+                continue;
+            if (!h.past(s.epoch.load(std::memory_order_relaxed))) {
+                s.state.store(slot_state_t::READY, std::memory_order_release);
+                continue;
+            }
+            void* const ctx = s.ctx;
+            void (*const fn)(void*) = s.release;
+            s.ctx = nullptr;
+            s.release = nullptr;
+            r.ctl.live.fetch_sub(1, std::memory_order_relaxed);
+            s.state.store(slot_state_t::EMPTY, std::memory_order_release);
+            fn(ctx);
         }
-        void* const ctx = s.ctx;
-        void (*const fn)(void*) = s.release;
-        s.ctx = nullptr;
-        s.release = nullptr;
-        r.ctl.live.fetch_sub(1, std::memory_order_relaxed);
-        s.state.store(slot_state_t::EMPTY, std::memory_order_release);
-        fn(ctx);
+        if constexpr (kMembarrier)
+            if (held && in_flight.exchange(0, std::memory_order_acq_rel) != 1) continue;
+        return;
     }
 }
 
@@ -799,7 +795,8 @@ inline bool retire(void* ctx, void (*release)(void*)) noexcept {
         // participants that were online a moment ago may have quiesced during the push, and a
         // node whose only other thread has since gone idle would otherwise wait for a dispatch
         // that never comes. After this, a surviving entry means a participant genuinely has
-        // not quiesced yet.
+        // not quiesced yet. Under single flight this retry may skip; the pass in flight then
+        // runs once more for it (@ref qsbr_single_flight).
         drain();
         return true;
     }

@@ -101,7 +101,7 @@ void a_skipped_pass_leaves_its_request() {
         std::printf("  (single flight is not compiled in: the fenced build has no drain gate)\n");
         return;
     } else {
-        auto& flight = q::in_flight<true>;
+        auto& flight = q::in_flight;
         object_t x;
         q::enter();
         (void)q::retire(&x, release);                // this thread's own bracket holds it: parked
@@ -114,6 +114,57 @@ void a_skipped_pass_leaves_its_request() {
         q::drain();
         check(x.released.load(), "with no pass in flight, the next drain frees the pair");
     }
+}
+
+/** @brief The forced window's state: its two pairs and the step the two threads are at. */
+object_t g_first;
+object_t g_second;
+std::atomic<int> g_step{0};
+
+/**
+ * @brief `g_first`'s hook, run inside the drain pass that freed it, while that pass still holds
+ *        the flight: it retires `g_second`, which the reader still holds, then lets the reader
+ *        leave and drain, and waits until it has.
+ */
+void release_first_then_open_the_window(void* ctx) {
+    release(ctx);
+    (void)q::retire(&g_second, release);  // stamped after the pass in flight read the counter
+    g_step.store(2, std::memory_order_release);
+    while (g_step.load(std::memory_order_acquire) != 3) std::this_thread::yield();
+}
+
+/**
+ * @brief The window a skip must not strand (`qsbr.hpp` §qsbr_single_flight), forced: a pass is
+ *        in flight, a pair is retired after it read the counter, and the last reader holding
+ *        that pair leaves and drains while that pass is still open. Under single flight that
+ *        drain skips. No thread drains after it, so the pass in flight must free the pair.
+ *
+ * The pass in flight is this thread's own drain, held open by a release hook it runs. Without
+ * the asymmetric fence there is no gate: the reader's drain frees the pair itself.
+ */
+void a_skip_inside_a_pass_is_served() {
+    std::printf("a pair retired inside a pass, whose last reader's drain skips, still runs\n");
+    g_step.store(0);
+    std::thread reader([] {
+        while (g_step.load(std::memory_order_acquire) != 1) std::this_thread::yield();
+        q::enter();  // online at an epoch after g_first's, before g_second's
+        g_step.store(4, std::memory_order_release);
+        while (g_step.load(std::memory_order_acquire) != 2) std::this_thread::yield();
+        if (q::leave())
+            q::drain();  // the pass in flight is still open: under single flight, a skip
+        g_step.store(3, std::memory_order_release);
+    });
+    q::enter();
+    (void)q::retire(&g_first, release_first_then_open_the_window);  // held by this bracket
+    g_step.store(1, std::memory_order_release);
+    while (g_step.load(std::memory_order_acquire) != 4) std::this_thread::yield();
+    check(q::leave(), "the bracket holding the first pair closes");
+    q::drain();  // the pass that frees g_first, and inside its hook, the window
+    reader.join();
+    check(g_first.released.load(), "the first pair ran, in the pass");
+    check(g_second.released.load(),
+          "the pair retired inside the pass ran, though its last reader's drain met that pass");
+    if constexpr (q::kMembarrier) check(q::in_flight.load() == 0, "and no pass is left in flight");
 }
 
 /**
@@ -170,6 +221,7 @@ void collided_passes_strand_nothing() {
 int main() {
     hook_runs_after_every_reader();
     a_skipped_pass_leaves_its_request();
+    a_skip_inside_a_pass_is_served();
     collided_passes_strand_nothing();
     return tr::testing::summary("qsbr_drain_claim");
 }
