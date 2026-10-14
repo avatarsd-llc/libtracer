@@ -19,10 +19,14 @@
  *   3. the same holds on a FLAT link (`peer_named = false`, ADR-0082);
  *   4. with no auth hook installed the caller is the link name, exactly as before;
  *   5. an ACCEPT whose subject is longer than the field or carries a NUL binds nothing, is
- *      counted in `auth_rejected`, and closes the session like a REJECT.
+ *      counted in `auth_rejected`, and closes the session like a REJECT;
+ *   6. a `:subscribers[N]` edge a signed-in session admitted leaves with THAT session (#2135):
+ *      two sessions bound to the same subject each replace one slot, and each departure
+ *      evicts its own edge and leaves the other's delivering.
  *
  * Ablation: making `httpd_ws_link_t::peer_subject` answer empty reddens 1 and 3; dropping its
- * generation test, or the reclaim's clear of the subject, reddens 2.
+ * generation test, or the reclaim's clear of the subject, reddens 2. Keying the `[N]` edge's
+ * departure on its subject again (`write_ctx_t::session` ignored) reddens 6.
  */
 
 #include <cstddef>
@@ -32,6 +36,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include "fake_httpd.hpp"
@@ -254,6 +259,123 @@ void no_hook_keeps_the_link_name() {
     run_server();
 }
 
+/** @brief Every `/a`, `/b` and `/c` delivery the `:subscribers[N]` case observed, by vertex name.
+ */
+std::vector<std::string> g_delivered;
+
+/** @brief A HANDLER that records which target a fan-out delivery reached. */
+handlers_t record_as(const char* name) {
+    handlers_t h;
+    h.on_write = {
+        [](void* ctx, const tr::graph::value_t&, const write_ctx_t&) -> tr::graph::result_t<void> {
+            g_delivered.emplace_back(static_cast<const char*>(ctx));
+            return {};
+        },
+        const_cast<char*>(name)};
+    return h;
+}
+
+/** @brief SUBSCRIBER{ PATH /@p target } — a local fan-out target (RFC-0009 §D.1 replace). */
+std::vector<std::byte> subscriber_to(std::string_view target) {
+    const std::vector<std::byte> path = b_path({target});
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::SUBSCRIBER, tr::wire::opt_t{.pl = true}, path);
+    return out;
+}
+
+/** @brief FIELD{ NAME subscribers, VALUE u32 @p slot, VALUE u8 ELEMENT } — `:subscribers[N]`. */
+std::vector<std::byte> subscribers_slot(std::uint32_t slot) {
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "subscribers");
+    const std::byte idx[4] = {std::byte(slot & 0xFFu), std::byte((slot >> 8) & 0xFFu),
+                              std::byte((slot >> 16) & 0xFFu), std::byte((slot >> 24) & 0xFFu)};
+    tr::wire::emit_tlv(body, tr::wire::type_t::VALUE, tr::wire::opt_t{},
+                       std::span<const std::byte>(idx, 4));
+    const std::byte element{1};  // index_mode = ELEMENT
+    tr::wire::emit_tlv(body, tr::wire::type_t::VALUE, tr::wire::opt_t{},
+                       std::span<const std::byte>(&element, 1));
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::FIELD, tr::wire::opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief Publish to `/src` as the owner and answer which targets the fan-out reached. */
+std::vector<std::string> publish_src(graph_t& g) {
+    g_delivered.clear();
+    const std::byte one[1] = {std::byte{0x07}};
+    std::vector<std::byte> value;
+    tr::wire::emit_tlv(value, tr::wire::type_t::VALUE, tr::wire::opt_t{},
+                       std::span<const std::byte>(one, 1));
+    (void)g.write(*path_t::parse("/src"), *tr::view::over_bytes(value));
+    return g_delivered;
+}
+
+/** @brief True iff @p got holds @p name. */
+bool reached(const std::vector<std::string>& got, std::string_view name) {
+    for (const std::string& s : got)
+        if (s == name) return true;
+    return false;
+}
+
+/**
+ * @brief Case 6 (#2135): an edge a signed-in session admits through `:subscribers[N]` is
+ *        evicted when that session leaves, and two sessions bound to the SAME subject never
+ *        share that eviction.
+ *
+ * The owner wires two local edges on `/src` (slots 0 and 1). Two sessions sign in as
+ * `role:operator`; each replaces one slot over the wire with an edge to its own target. The
+ * replace is the field-write door's (RFC-0009 §D.1): it binds no delivery link, so what its
+ * session's departure finds it by is the only thing under test.
+ */
+void slot_edge_leaves_with_its_session() {
+    std::printf("#2135 a :subscribers[N] edge leaves with the session that admitted it:\n");
+    reset();
+    graph_t g;
+    fwd_router_t router(g);
+    (void)g.register_vertex(*path_t::parse("/src"), role_t::STORED_VALUE);
+    (void)g.register_vertex(*path_t::parse("/a"), role_t::HANDLER, record_as("a"));
+    (void)g.register_vertex(*path_t::parse("/b"), role_t::HANDLER, record_as("b"));
+    (void)g.register_vertex(*path_t::parse("/c"), role_t::HANDLER, record_as("c"));
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    link->set_auth_cb(&accept_as, nullptr);
+    check(router.add_child("ws", *link), "the link is a routed child");
+    // The owner's two edges, both to `/c`: the slots the sessions replace (a replace needs an
+    // active slot), so a delivery to `/a` or `/b` can only come from a session's edge.
+    const std::vector<std::byte> to_c = subscriber_to("c");
+    check(
+        g.write(*path_t::parse("/src:subscribers[]"), *tr::view::over_bytes(to_c)).has_value() &&
+            g.write(*path_t::parse("/src:subscribers[]"), *tr::view::over_bytes(to_c)).has_value(),
+        "the owner wired slots 0 and 1");
+
+    constexpr int kFirst = 840;
+    constexpr int kSecond = 841;
+    g_subject = "role:operator";
+    for (const auto& [fd, slot, target] : {std::tuple{kFirst, 0u, std::string_view("a")},
+                                           std::tuple{kSecond, 1u, std::string_view("b")}}) {
+        (void)fake_httpd::instance().open_session(fd);
+        (void)fake_httpd::instance().deliver_frame(fd, kCredential);
+        (void)fake_httpd::instance().deliver_frame(
+            fd, b_fwd(fwd_op_t::WRITE, b_path({"src"}), b_path({"origin"}), subscribers_slot(slot),
+                      subscriber_to(target)));
+        run_server();
+    }
+    std::vector<std::string> got = publish_src(g);
+    check(reached(got, "a") && reached(got, "b") && !reached(got, "c"),
+          "both slots were replaced, and both edges deliver while both sessions are in");
+
+    fake_httpd::instance().close_session(kFirst);
+    run_server();
+    got = publish_src(g);
+    check(!reached(got, "a"), "the first session's edge left with it");
+    check(reached(got, "b"), "and the second session's edge, under the same subject, stayed");
+
+    fake_httpd::instance().close_session(kSecond);
+    run_server();
+    got = publish_src(g);
+    check(got.empty(), "the second session's edge left with it too");
+}
+
 }  // namespace
 
 int main() {
@@ -262,6 +384,7 @@ int main() {
     signed_session_is_the_caller(/*peer_named=*/false);
     no_hook_keeps_the_link_name();
     unfit_subject_is_refused();
+    slot_edge_leaves_with_its_session();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

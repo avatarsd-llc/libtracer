@@ -278,6 +278,24 @@ struct write_ctx_t {
      *          must be remembered past the return.
      */
     const net::link_kind_t* link = nullptr;
+
+    /**
+     * @brief This node's NAME for the link a FIELD write arrived over — the writer's SESSION
+     *        (CONTEXT.md §Session), the key its departure evicts by (#2135); empty when no
+     *        link carried it.
+     *
+     * @ref subject says WHO wrote and is what the ACL gates; this says which session, and is
+     * what a `:subscribers[N]` replace stores so the edge leaves with that session. The two
+     * are the same string until a link binds a subject of its own (#1846), and then they are
+     * not: two sessions signed in as one subject are two sessions.
+     *
+     * Set by the router on a field write it carries (`graph_t::write`'s field overload). A
+     * value write leaves it empty, so a HANDLER's `on_write` and an admission filter see it
+     * empty; key a policy off @ref subject, not this.
+     *
+     * @warning BORROWED for the call, like @ref subject.
+     */
+    std::string_view session;
 };
 
 /**
@@ -2297,27 +2315,26 @@ class vertex_t {
      * `subscriber_remote_t::caller` — the two spellings the two admission doors
      * leave behind for the SAME fact. `subscribe_wire` (the `SUBSCRIBE` op and the
      * wire `:subscribers[]` append) stores both; `graph_t::field_write`'s
-     * `:subscribers[]` / `:subscribers[N]` arms store ONLY the context, because
-     * those edges deliver to a LOCAL target and have no return route to send over.
-     * Matching `link` alone therefore left a field-write-admitted edge permanently
-     * un-evictable — active, counted, and still fanning out to its target under a
-     * gate context whose session had departed (#943). ADR-0018 defines that context
-     * as this node's NAME for the inbound link a remote `FWD` arrived on, i.e. the
-     * same name space @p link is spelled in, so the fallback compares like with
-     * like. A local edge still never matches a real link name: a local door passes
-     * the EMPTY context and leaves both spellings empty. An EMPTY @p link matches nothing
-     * at all and returns 0 — a link with no name never subscribed, and without that rule
-     * the empty key compared equal to exactly those empty spellings and reclaimed every
-     * local edge carrying a cold half on the vertex (#1056). Unlike @ref clear_edge, a matched slot
-     * is RECLAIMED, not just flagged: the stored SUBSCRIBER view, the return-route
-     * refcount pin, the target key, and the whole `subscriber_remote_t` block are
+     * `:subscribers[]` / `:subscribers[N]` arms store the arrival link too when a link
+     * carried the write (#2135), with no route, because those edges deliver to a LOCAL
+     * target. The caller fallback is what is left of #943 for the arm reached without a
+     * link — an embedder's `graph_t::write` naming its inbound link as the caller — whose
+     * edge would otherwise be permanently un-evictable. It is NOT the departure key of a
+     * write a link carried: since #1846 that caller is the session's bound SUBJECT, which
+     * two sessions can share and which is not the name their departure evicts by. A local edge
+     * still never matches a real link name: a local door passes the EMPTY context and leaves both
+     * spellings empty. An EMPTY @p link matches nothing at all and returns 0 — a link with no name
+     * never subscribed, and without that rule the empty key compared equal to exactly those empty
+     * spellings and reclaimed every local edge carrying a cold half on the vertex (#1056). Unlike
+     * @ref clear_edge, a matched slot is RECLAIMED, not just flagged: the stored SUBSCRIBER view,
+     * the return-route refcount pin, the target key, and the whole `subscriber_remote_t` block are
      * released in place (the slot shell stays — §D.2 index stability — and
      * @ref add_edge reuses it). An in-flight delivery is unaffected: its
      * @ref edge_view_t snapshot HOLDS the target key and the whole `subscriber_remote_t`
      * by refcount (ADR-0041 §2, #1448), so releasing the slot's pin here never dangles a
      * dispatch — the record it reads outlives this eviction by construction.
      * @param routed Incremented once per evicted edge that was ROUTED through @p link —
-     *        stored it as its delivery link rather than only as the gate context — which
+     *        stored a return route to deliver over it, not only its name — which
      *        is the count of link holds the eviction gives back (#1816).
      * @param suspended Incremented once per evicted edge that was suspended (#1533), which the
      *        RFC-0005 bookkeeping never counted.
@@ -2342,14 +2359,13 @@ class vertex_t {
             for (std::size_t i = 0; i < subs.size(); ++i) {
                 subscriber_t& s = subs[i];
                 if (!s.active || s.remote == nullptr) continue;
-                // The link this edge was ADMITTED over — see the declaration comment. Not
-                // `link` alone: a `graph_t::field_write` admission stores the inbound link
-                // ONLY as the gate context, so keying on the delivery link skipped it
-                // forever (#943). No copy: both members are `mem::string_t`.
+                // The link this edge was ADMITTED over — see the declaration comment: the
+                // stored link, or the caller of a field-write that named none (#943). No copy:
+                // both members are `mem::string_t`.
                 const std::string_view admitted_over =
                     s.remote->link.empty() ? s.remote->caller.view() : s.remote->link.view();
                 if (admitted_over != link) continue;
-                routed += static_cast<std::size_t>(!s.remote->link.empty());
+                routed += static_cast<std::size_t>(!s.remote->return_route.empty());
                 suspended += static_cast<std::size_t>(s.suspended);
                 subscriber_t reclaimed;    // an inert shell: no view, no route, no cold half
                 reclaimed.active = false;  // the slot is free for add_edge reuse
@@ -2406,9 +2422,11 @@ class vertex_t {
             for (std::size_t i = 0; i < subs.size(); ++i) {
                 subscriber_t& s = subs[i];
                 if (!s.active || s.remote == nullptr) continue;
-                // The delivery link, not the admission fallback: only a `subscribe_wire`
-                // edge has a route to be refused, and that door populates `link` and the
-                // route together (see subscriber_remote_t::return_route's invariant).
+                // The stored link, not the caller fallback. A route implies a link
+                // (`subscribe_wire` refuses either empty), but a link does not imply a route:
+                // a field-write edge stores its arrival link with none (#2135). Such an edge
+                // never matches below — its empty route is never byte-equal to a refused
+                // one, and the bound arm needs a stored reverse route.
                 if (s.remote->link != link) continue;
                 bool hit = false;
                 if (!bound_echo) {

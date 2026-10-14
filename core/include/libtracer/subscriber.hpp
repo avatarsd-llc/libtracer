@@ -190,7 +190,13 @@ struct subscriber_remote_t {
     explicit subscriber_remote_t(mem::block_source_t& src) noexcept : link(src), caller(src) {}
 
     /**
-     * @brief This node's NAME for the link the subscribe arrived on.
+     * @brief This node's NAME for the link the subscribe arrived on — the edge's SESSION, the
+     *        key its departure evicts it by.
+     *
+     * Every edge a link carried in stores it: a `subscribe_wire` edge delivers over it (or
+     * over the mount its target routes through), and a `:subscribers[N]` replace a link
+     * carried stores it with NO route, because it delivers to a local target (#2135). A name
+     * here therefore does not by itself make an edge remote — @ref return_route does.
      *
      * FIRST, and the member ORDER below is the retired `pub_remote_t`'s, not this record's
      * historical one. That is deliberate and load-bearing: unifying the two halves means the
@@ -211,17 +217,17 @@ struct subscriber_remote_t {
      * A write hands (@ref link, this route, value) to the graph's injected remote-delivery
      * sink, which emits the `FWD{WRITE}` back over the link (RFC-0004 §D, #136).
      *
-     * @ref link is the discriminator, not this field: `graph_t::dispatch_edge` takes its
-     * remote leg on a non-empty link and reads this route without testing it. The two agree
-     * because the admitting door enforces it — `graph_t::subscribe_wire` refuses an empty
-     * route as `INVALID_PATH` (#1055), and the `:subscribers[]` field-write arm, which binds
-     * no route, deliberately leaves @ref link empty (see the note at that door: assigning a
-     * link there would manufacture exactly the routeless delivery this invariant excludes).
-     * So on a published edge the two are populated together or not at all, and testing either
-     * one answers "is this subscriber remote?". Held as a view over a REFCOUNTED segment (ADR-0041
-     * §2): copied once at subscribe, then every delivery snapshot is a refcount clone —
-     * O(1) copies over the subscription's life, and an in-flight delivery keeps the route
-     * alive across a concurrent unsubscribe. An opaque view, so L4 never depends on tr::net.
+     * THIS field is the remote-leg discriminator (#2135): `graph_t::dispatch_edge` takes its
+     * remote leg on a non-empty route, and only then reads @ref link to deliver over.
+     * `graph_t::subscribe_wire` refuses an empty route as `INVALID_PATH` (#1055), so every
+     * routed edge has both; the `:subscribers[]` field-write arm binds no route, so its edge
+     * has no remote leg even when it stores its arrival link as its session. Before #2135
+     * the link was the discriminator, which is why that arm could not store one: a name with
+     * no route would have bought one `FWD{WRITE}` per publish with an empty `dst`. Held as a view
+     * over a REFCOUNTED segment (ADR-0041 §2): copied once at subscribe, then every delivery
+     * snapshot is a refcount clone — O(1) copies over the subscription's life, and an in-flight
+     * delivery keeps the route alive across a concurrent unsubscribe. An opaque view, so L4 never
+     * depends on tr::net.
      */
     view::view_t return_route{};
     /**
@@ -698,12 +704,11 @@ struct edge_view_t {
     remote_ptr_t remote;
 
     /**
-     * @brief This edge's remote-delivery link NAME; empty ⇒ no remote leg.
+     * @brief The NAME of the link this edge was admitted over (its session); empty for an
+     *        in-process edge. It is the delivery link only when @ref has_remote_leg holds.
      *
      * Borrowed from the record this view holds, so it is valid for as long as the view is —
-     * which is exactly as long as the `std::string` member it replaces was. Empty for an
-     * in-process edge AND for the `:subscribers[]` field-write arm, which binds a caller
-     * context but deliberately no link (there is no return route to deliver over).
+     * which is exactly as long as the `std::string` member it replaces was.
      */
     [[nodiscard]] std::string_view link() const noexcept {
         const subscriber_remote_t* r = remote.get();
@@ -716,16 +721,18 @@ struct edge_view_t {
         return r != nullptr ? std::string_view(r->caller) : std::string_view{};
     }
     /**
-     * @brief Does this edge have a REMOTE-delivery leg — i.e. a non-empty @ref link?
+     * @brief Does this edge have a REMOTE-delivery leg — i.e. a stored return route?
      *
      * The gate `graph_t::dispatch_edge` takes per edge, kept as one named test because it is
      * on the always-inlined per-edge body of the wide fan-out loop. The null check
      * short-circuits, so the in-process edge — the bulk of any fan-out — pays one load and
-     * one branch, exactly what `link.empty()` cost when the string was inline.
+     * one branch, exactly what `link.empty()` cost when the string was inline. The route,
+     * not the link, since #2135: a `:subscribers[N]` replace a link carried stores that link
+     * as its session and delivers locally (`subscriber_remote_t::return_route`).
      */
     [[nodiscard]] bool has_remote_leg() const noexcept {
         const subscriber_remote_t* r = remote.get();
-        return r != nullptr && !r->link.empty();
+        return r != nullptr && !r->return_route.empty();
     }
 };
 

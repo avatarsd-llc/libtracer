@@ -1748,8 +1748,8 @@ class graph_t {
      * Expected to be SMALL and bounded, not zero. It counts one per link that has never been
      * interned (the transport plane's lazy mint goes through `intern_link`, so that is not
      * counted), one per admission whose key is not the arrival link — a mount-routed target,
-     * a `field_write` `caller` fallback — and one per `subscribe_wire` reached with no
-     * transport plane behind it, which is every host-side caller and every test that binds an
+     * a `field_write` admission, which carries no token — and one per `subscribe_wire` reached with
+     * no transport plane behind it, which is every host-side caller and every test that binds an
      * edge directly. The purely LOCAL `subscribe()` doors never reach here at all: they admit
      * no `remote`, so there is no link to index them under. A count that GROWS with traffic on
      * a steady link set means the carry is not reaching the index, which is a performance
@@ -1964,10 +1964,17 @@ class graph_t {
      * materialized first. @p link is as for the plain overload: an empty @p field hands it to
      * `handlers_t::on_admit` and `on_write`, and a `:settings.app.<name>` field write hands it,
      * with @p caller, to `handlers_t::on_app_field_admit` in the same `write_ctx_t` (#1832).
+     *
+     * @p session is this node's name for the link the write arrived over, as
+     * `write_ctx_t::session` (#2135). A `:subscribers[N]` replace stores it as the edge's
+     * departure key, so the edge is evicted with that session even when @p caller is a
+     * subject the session bound. Empty, the replace falls back to @p caller, which is the key
+     * an embedder that names its inbound link as the caller has always got.
      */
     [[nodiscard]] result_t<void> write(vertex_handle_t v, const field_path_t& field,
                                        view::rope_t value, std::string_view caller = {},
-                                       const net::link_kind_t* link = nullptr);
+                                       const net::link_kind_t* link = nullptr,
+                                       std::string_view session = {});
     /**
      * @brief Assign a vertex's value — the STATE transition only, sends NOTHING (RFC-0008).
      *
@@ -2665,15 +2672,17 @@ class graph_t {
      * `delivery_policy_t` sets `durability_request` and @p v holds a value, the LKV is
      * latched to this subscriber — one synchronous sink call, RFC-0004 §D / RFC-0022 §3.A).
      *
-     * @p return_route MUST be non-empty — an empty one is `INVALID_PATH` (#1055). This door
-     * is the only one that binds a link for delivery, so it is where the two fields are held
-     * to ONE meaning: an edge that carries a link carries the route to deliver over it. The
-     * fan-out body (`dispatch_edge`) therefore tests the link alone and hands the sink the
-     * route unchecked, which is what keeps that deliberately-inlinable per-edge test at one
-     * comparison; admitting a routeless edge instead bought a `FWD{WRITE}` with a zero-byte
-     * `dst` on every publish. Both in-tree callers already satisfy this (the resolver rejects
-     * a failed route copy as `BACKPRESSURE`, `fwd_router_t::subscribe_toward` refuses an empty
-     * residual as `INVALID_PATH`), so the door narrowed to what the wire already produced.
+     * @p return_route and @p link MUST both be non-empty — either empty is `INVALID_PATH`
+     * (#1055, #2135). This door is the only one that binds a route for delivery, so it is where
+     * the two fields are held to ONE meaning: an edge that carries a route carries the link to
+     * deliver it over. The fan-out body (`dispatch_edge`) therefore tests the route alone and
+     * hands the sink the link unchecked, which is what keeps that deliberately-inlinable
+     * per-edge test at one comparison. A field-write edge stores a link with no route (its
+     * session, #2135), so a link alone does not make an edge remote; admitting a routeless
+     * edge here once bought a `FWD{WRITE}` with a zero-byte `dst` on every publish. Both in-tree
+     * callers already satisfy this (the resolver rejects a failed route copy as `BACKPRESSURE`,
+     * `fwd_router_t::subscribe_toward` refuses an empty residual as `INVALID_PATH`), so the door
+     * narrowed to what the wire already produced.
      *
      * @p reverse_route, when non-empty, is the COMPLETED reverse-direction bound route
      * (RFC-0024 §7.1 amendment 1): a `PATH_REF` TLV whose element 0 is THIS node's own
@@ -2703,9 +2712,10 @@ class graph_t {
      * the default is "no token", which is byte-identical to every pre-carry caller, and a
      * token that does not name a slot holding the key the index is about to use is ignored
      * rather than trusted. That is deliberate — the key is not always @p link (a mount-routed
-     * target rebinds it to the mount's, and a `field_write` admission has only its `caller`,
-     * #943), and a token silently indexing under the wrong link is exactly the leaked
-     * subscriber edge #1071 exists to prevent.
+     * target rebinds it to the mount's, and a `field_write` admission is keyed on its arrival
+     * link with no token, or on its `caller` when no link carried it, #943 / #2135), and a token
+     * silently indexing under the wrong link is exactly the leaked subscriber edge #1071 exists to
+     * prevent.
      */
     [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view::view_t source_view,
                                                 view::view_t return_route, std::string_view link,

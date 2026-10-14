@@ -581,17 +581,15 @@ struct graph_t::field_surface_t {
             return std::unexpected(parsed.error());
         if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
         // The fan-in gate context for this edge's deliveries (#81); the empty (local)
-        // context needs no cold half. It is ALSO what makes the edge reclaimable: this
-        // door leaves `subscriber_remote_t::link` empty (there is no return route to
-        // deliver over — the edge fans out to a LOCAL target), so
-        // `vertex_t::evict_link_edges` falls back to this context to find the link the
-        // edge was admitted over (#943). Do NOT "fix" that by assigning `link` here:
-        // `graph_t::dispatch_edge` gates its remote leg on `edge_view_t::has_remote_leg`
-        // — i.e. on a non-empty cold-half link — so a
-        // non-empty link would add a phantom `FWD{WRITE}` per publish carrying an EMPTY
-        // return route. That is the invariant `subscribe_wire` now enforces at its own
-        // door (#1055, INVALID_PATH on an empty route) — this door holds up the other half
-        // of it, by binding no link when it binds no route.
+        // context needs no cold half. The edge's SESSION — the name its departure evicts it
+        // by (`vertex_t::evict_link_edges`) — is the link a write carried in, stored as
+        // `subscriber_remote_t::link` with NO route (#2135): the edge fans out to a LOCAL
+        // target, and `edge_view_t::has_remote_leg` tests the route, so the stored name adds
+        // no remote leg. The subject is not that key: since #1846 an authenticated session's
+        // subject is its bound identity, which two sessions can share and which no departure
+        // evicts by. A write no link carried (an embedder's `graph_t::write` naming its inbound
+        // link as the caller) stores none, and its departure finds the edge by the caller
+        // (#943).
         //
         // Reachability, as of this commit: the ONE in-tree wire door
         // (`op_resolve_walk.hpp`'s WRITE case) routes a remote `:subscribers[]` append
@@ -602,7 +600,7 @@ struct graph_t::field_surface_t {
         // and IS reached from the wire.
         if (!ctx.subject.empty()) {
             subscriber_remote_t* const r = s.ensure_remote(g.table_source());
-            if (r == nullptr || !r->caller.assign(ctx.subject))
+            if (r == nullptr || !r->caller.assign(ctx.subject) || !r->link.assign(ctx.session))
                 return std::unexpected(status_t::BACKPRESSURE);
         }
         // The single admission step (ADR-0049): SUBSCRIBE gate → append (or replace at

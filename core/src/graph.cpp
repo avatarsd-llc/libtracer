@@ -56,16 +56,19 @@ inline constexpr std::size_t kFanoutFrameBytes = 8 * vertex_t::kInlineFanout * s
 
 /**
  * @brief The link an edge's cold half DELIVERS over — the one it holds (#1816); empty for an
- *        edge with no cold half or a `:subscribers[]` field-write edge, which delivers locally.
+ *        edge with no cold half or a `:subscribers[]` field-write edge, which delivers locally
+ *        and stores no route even when it stores its arrival link as its session (#2135).
  */
 std::string_view delivery_link(const remote_ptr_t& remote) noexcept {
-    return remote ? std::string_view(remote->link) : std::string_view{};
+    return remote && !remote->return_route.empty() ? std::string_view(remote->link)
+                                                   : std::string_view{};
 }
 
 /**
  * @brief The SESSION an edge's cold half was admitted for (#1841) — the name its departure
- *        evicts it by (`vertex_t::evict_link_edges`' `admitted_over`): the delivery link, or the
- *        caller context for a field-write edge that bound none (#943). Empty for no cold half.
+ *        evicts it by (`vertex_t::evict_link_edges`' `admitted_over`): the link it was admitted
+ *        over, or the caller context for a field-write edge that named none (#943, the
+ *        embedder's API write). Empty for no cold half.
  */
 std::string_view session_of(const remote_ptr_t& remote) noexcept {
     if (!remote) return {};
@@ -2202,7 +2205,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
     // WRITE gate one stack frame up passed to `acl_allows`, so the handler and the ACL
     // that admitted the write cannot disagree about who wrote. The ctx is a borrowed
     // view built on the stack — no allocation, nothing stored on the vertex.
-    const write_ctx_t ctx{.subject = caller, .link = link};
+    const write_ctx_t ctx{.subject = caller, .link = link, .session = {}};
     if (result_t<void> r = h.on_write(value, ctx); !r) return std::unexpected(r.error());
     v->note_write();
     return value_ref_t{};  // handler consumed it — nothing stored
@@ -2319,7 +2322,7 @@ admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view c
     // Same `caller` the ACL gate one frame up ran on (#375): the filter and the gate that
     // admitted the write cannot disagree about who wrote. `link` is the arrival link's catalog
     // identity (#1650) — a pointer the router resolved once per link, never looked up here.
-    const write_ctx_t ctx{.subject = caller, .link = link};
+    const write_ctx_t ctx{.subject = caller, .link = link, .session = {}};
     return a->on_admit(value, ctx);
 }
 
@@ -3074,7 +3077,8 @@ result_t<void> graph_t::write(vertex_handle_t v, view::rope_t value, std::string
 }
 
 result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, view::rope_t value,
-                              std::string_view caller, const net::link_kind_t* link) {
+                              std::string_view caller, const net::link_kind_t* link,
+                              std::string_view session) {
     vertex_t* v = vh.get();
     if (field.empty()) return write_impl(v, std::move(value), caller, link);
     // A field write targets a contiguous control TLV (settings / acl / subscribers);
@@ -3091,7 +3095,8 @@ result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, vie
                                    ? status_t::BACKPRESSURE
                                    : status_t::TYPE_MISMATCH);
     }
-    return field_write(v, field, *head, write_ctx_t{.subject = caller, .link = link});
+    return field_write(v, field, *head,
+                       write_ctx_t{.subject = caller, .link = link, .session = session});
 }
 
 result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds timeout,
@@ -3233,8 +3238,9 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // Index this vertex under the link the edge is admitted OVER, before `s` is moved into
     // the slot below and while its cold half is still readable (#1071). The spelling is
     // `vertex_t::evict_link_edges`'s, not a paraphrase of it: `link` first, `caller` when
-    // that is empty, because a field_write admission stores the inbound link only as the
-    // gate context (#943) and keying on the delivery link alone un-indexes it forever.
+    // that is empty. The stored link is the link the edge was admitted over, which for a
+    // field_write edge is a name with no route (#2135); a field_write that no link carried
+    // has only its caller (#943), and keying on the delivery link alone un-indexes either.
     //
     // Deliberately BEFORE the append and not conditional on it succeeding. The index is a
     // superset (see link_index_t): an admission that then fails BACKPRESSURE or OUT_OF_RANGE
@@ -3628,16 +3634,19 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
                                        view::view_t reverse_route, std::string_view caller,
                                        link_id_t link_token) {
     vertex_t* v = vh.get();
-    // The route is this door's precondition, not an optional extra (#1055). Every edge this
-    // door admits carries a link, and `dispatch_edge` gates its remote leg on that link while
-    // handing the sink the RETURN ROUTE — so admitting a routeless edge here bought one
-    // `FWD{WRITE}` per publish whose `dst` was a zero-byte PATH. Refusing it at the door is
-    // what lets the fan-out body keep testing the link alone: that test is the wide-fan-out
-    // loop's per-edge cost and is kept inlinable on purpose, so the invariant is established
+    // The route is this door's precondition, not an optional extra (#1055). This door's edge
+    // delivers over the RETURN ROUTE and nowhere else: when `dispatch_edge` gated its remote
+    // leg on the link, a routeless edge here bought one `FWD{WRITE}` per publish whose `dst`
+    // was a zero-byte PATH, and since #2135 it gates on the route, so the same edge would
+    // deliver nowhere at all. Either way it is a subscription that cannot be served, refused
     // once, here, rather than re-checked on every delivery. INVALID_PATH because that is what
     // an empty PATH TLV is, and what `fwd_router_t::subscribe_toward` already answers for the
     // empty residual it refuses to build a route from.
-    if (return_route.empty()) return std::unexpected(status_t::INVALID_PATH);
+    //
+    // An empty LINK is refused the same way, so a routed edge always has both (#2135): a
+    // route with no link would take the remote leg and hand the sink a delivery with nowhere
+    // to go. Every in-tree caller passes the arrival link; an embedder's call is the case.
+    if (return_route.empty() || link.empty()) return std::unexpected(status_t::INVALID_PATH);
     // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) through the door parse every subscriber
     // door shares (#869): decode, type check, parse, and the zero-copy retain the slot keeps.
     // The delivery policy comes from this parse (the resolver's parallel parse is retired).

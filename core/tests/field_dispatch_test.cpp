@@ -516,18 +516,18 @@ void test_append_plus_wildcard_is_refused() {
  * @brief `subscribe_wire` refuses an EMPTY return route, so no edge can carry a link with
  *        nothing to deliver over (#1055).
  *
- * The remote leg of `graph_t::dispatch_edge` is gated on `!e.link.empty()`, while the field
- * it hands the sink is the return route — so an edge holding a link and an empty route emitted
- * one routeless `FWD{WRITE}` per publish, its `dst` a zero-byte PATH. Neither in-tree wire door
- * can build that state (the resolver rejects a failed route copy as BACKPRESSURE; the router's
- * `subscribe_toward` refuses an empty residual as INVALID_PATH), but this door is public API and
- * validated neither argument, so an embedder driving it directly reached it.
+ * The remote leg of `graph_t::dispatch_edge` was gated on `!e.link.empty()` (on the route
+ * since #2135), while the field it hands the sink is the return route — so an edge holding a link
+ * and an empty route emitted one routeless `FWD{WRITE}` per publish, its `dst` a zero-byte PATH.
+ * Neither in-tree wire door can build that state (the resolver rejects a failed route copy as
+ * BACKPRESSURE; the router's `subscribe_toward` refuses an empty residual as INVALID_PATH), but
+ * this door is public API and validated neither argument, so an embedder driving it directly
+ * reached it.
  *
  * The ruling on #1055 put the gate at the door rather than in the fan-out body: `dispatch_edge`
  * is the wide fan-out loop's per-edge cost and is kept inlinable on purpose, and the door now
- * narrows to exactly what every in-tree caller already produces. So `link` keeps its ONE
- * meaning on a subscription edge — the link to deliver over — and the invariant that makes
- * testing it sufficient is established here.
+ * narrows to exactly what every in-tree caller already produces, and the invariant that makes
+ * one per-edge test sufficient is established here.
  */
 void test_subscribe_wire_requires_return_route() {
     std::printf("subscribe_wire refuses an empty return route (#1055):\n");
@@ -562,6 +562,34 @@ void test_subscribe_wire_requires_return_route() {
     check(deliveries == 1, "... and that edge delivers exactly once");
 }
 
+/**
+ * @brief `subscribe_wire` refuses an EMPTY link too, so a routed edge always has both (#2135).
+ *
+ * Since #2135 the remote leg is gated on the return route, not the link, because a
+ * `:subscribers[N]` replace stores its arrival link with no route. A route with no link would
+ * then take the remote leg and hand the sink a delivery with an empty link. No in-tree caller
+ * passes one; this door is public API, so the refusal is pinned here.
+ */
+void test_subscribe_wire_requires_link() {
+    std::printf("subscribe_wire refuses an empty link (#2135):\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+
+    std::size_t deliveries = 0;
+    const tr::testing::remote_sink_guard_t sink_guard(
+        g, [&](const tr::graph::remote_delivery_t&, const tr::graph::value_t&) { ++deliveries; });
+
+    const auto linkless =
+        g.subscribe_wire(v, subscriber_tlv_no_target(), make_value({0x06, 0x00, 0x00, 0x00}), "");
+    expect(linkless ? kOk : outcome_t{linkless.error()}, status_t::INVALID_PATH,
+           "a non-empty route with an EMPTY link is INVALID_PATH at the door");
+    expect(read_status(g, v, fp("subscribers", sel_t::SLOT), {}), status_t::NOT_FOUND,
+           "... and no edge was admitted");
+    check(g.write(v, make_value({0x01, 0x00, 0x01, 0x00, 0x7F})).has_value(),
+          "the producer still takes a write");
+    check(deliveries == 0, "no remote delivery fired for the refused subscribe");
+}
+
 }  // namespace
 
 int main() {
@@ -571,5 +599,6 @@ int main() {
     test_subscriber_door_parity();
     test_append_plus_wildcard_is_refused();
     test_subscribe_wire_requires_return_route();
+    test_subscribe_wire_requires_link();
     return tr::testing::summary("field_dispatch");
 }
