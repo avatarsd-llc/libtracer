@@ -158,13 +158,17 @@ void counted_free(void* p) {
 }
 
 /**
- * @brief The bytes the default slab root charges for a @p bytes block: the smallest row of
- *        `config_t::kSizeClasses` that holds it. A request past the last row passes straight
- *        through to the platform heap and is charged as asked.
+ * @brief The bytes the default slab root charges for a @p bytes block at @p align: the
+ *        smallest row of `config_t::kSizeClasses` that holds it, as `slab_pool_t::class_of`
+ *        picks it. An over-aligned request is padded to @p align and takes only a row that
+ *        is a multiple of it. A request past the last row passes straight through to the
+ *        platform heap and is charged as asked.
  */
-long long charged(std::size_t bytes) {
+long long charged(std::size_t bytes, std::size_t align) {
+    const bool over = align > alignof(std::max_align_t);
+    if (over) bytes = (bytes + align - 1) / align * align;
     for (const std::size_t row : tr::graph::config_t::kSizeClasses)
-        if (row >= bytes) return static_cast<long long>(row);
+        if (row >= bytes && (!over || row % align == 0)) return static_cast<long long>(row);
     return static_cast<long long>(bytes);
 }
 
@@ -191,7 +195,7 @@ class counting_source_t final : public tr::mem::block_source_t {
         t_in_source = false;
         if (p != nullptr && g_armed.load(std::memory_order_relaxed)) {
             g_allocs.fetch_add(1, std::memory_order_relaxed);
-            const long long c = charged(bytes);
+            const long long c = charged(bytes, align);
             bump_peak(g_live.fetch_add(c, std::memory_order_relaxed) + c);
         }
         return p;
@@ -201,7 +205,7 @@ class counting_source_t final : public tr::mem::block_source_t {
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
         if (p != nullptr && g_armed.load(std::memory_order_relaxed)) {
             g_frees.fetch_add(1, std::memory_order_relaxed);
-            g_live.fetch_sub(charged(bytes), std::memory_order_relaxed);
+            g_live.fetch_sub(charged(bytes, align), std::memory_order_relaxed);
         }
         t_in_source = true;
         inner_->release(p, bytes, align);
