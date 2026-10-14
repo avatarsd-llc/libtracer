@@ -140,7 +140,9 @@ class gate_source_t final : public tr::mem::block_source_t {
         g_ = &g;
         watched_ = v;
     }
-    /** @brief Draws served since @ref watch. */
+    /** @brief Stop noting counts; @ref draws and @ref count_at keep what was noted. */
+    void unwatch() noexcept { watched_.reset(); }
+    /** @brief Draws served while watching. */
     [[nodiscard]] std::size_t draws() const noexcept { return draws_; }
     /** @brief The count noted at draw @p i (the last slot keeps the latest past the table). */
     [[nodiscard]] std::uint32_t count_at(std::size_t i) const noexcept { return counts_[i]; }
@@ -387,7 +389,11 @@ void test_suspend_before_resume() {
     gate.disarm();
     gate.watch(g, in);
     check(sel.select("b").has_value() && sel.settled(), "the switch to b completes");
+    gate.unwatch();
     check(gate.draws() >= 1, "the resume of b drew from the source, inside the switch");
+    // This relies on a resume raising the delivering-edge count BEFORE it flips the edge, a
+    // documented, deliberate order (graph_t::set_suspended counts first, as admit_subscriber
+    // does): at the draw, b is already counted and a must already be uncounted.
     check(gate.draws() >= 1 && gate.count_at(0) == 1,
           "at that draw, b's edge is the only one counted: a was suspended first");
 

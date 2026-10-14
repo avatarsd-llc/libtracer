@@ -110,8 +110,10 @@ enum class selector_ref_state_t : std::uint8_t {
  * ref of B that is suspended. A ref in both is not touched. Suspending first is what rules out
  * a double delivery when A and B reach one target through two different subscriptions; the
  * price is a gap, from the first suspend to the last resume, in which that target receives
- * nothing. Each toggle is `%graph_t::set_suspended`: no unsubscribe, no re-subscribe, no frame,
- * and nothing drawn from any source, so a switch also reaches a subscriber behind a link at once.
+ * nothing. Each toggle is `%graph_t::set_suspended`: no unsubscribe, no re-subscribe and no
+ * frame, so a switch also reaches a subscriber behind a link at once. A suspend draws nothing; a
+ * resume draws only to rebuild its producer's stale edge list (after a refused republish there),
+ * from that producer's edge source.
  *
  * **The selector owns the suspend bit of every ref it lists.** It acts on what it last set and
  * does not watch the graph: it re-reads a ref's state only for `options`, for @ref state, and
