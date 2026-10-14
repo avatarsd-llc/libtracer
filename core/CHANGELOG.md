@@ -22,7 +22,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   1,500-byte Ethernet MTU) instead of `kMaxDatagram` (65,536 B). The cap also sizes the receive
   segment and scratch, so an idle UDP link on the default heap backend holds a 1,473-byte segment
   instead of a 65,536-byte one. A wider datagram is refused and counted in `malformed_rx`, never
-  truncated. A link that carries wider datagrams sets `max_frame`, which on `udp` may now raise
+  truncated, while the rx backend can furnish `max_frame + 1` bytes. This narrows
+  [#1074](https://github.com/avatarsd-llc/libtracer/issues/1074) (a narrow backend truncates):
+  a link on a 1,536-byte pool slot now refuses an oversize datagram by default, because the
+  default cap plus its sentinel byte fits the slot. A link that carries wider datagrams sets `max_frame`, which on `udp` may now raise
   the cap above the default, up to `kMaxDatagram`.
 
 ### Added

@@ -113,8 +113,12 @@ struct conn_settings_t {
                                                       framed transport — the length-prefix streams
                                                       (`tcp`, `quic`, `webtransport`) read it off
                                                       their u32 prefix, `ws` off the RFC 6455 frame
-                                                      header; 0 = the protocol default (`kMaxFrame`,
-                                                      16 MiB). Only tightens, never raises. */
+                                                      header, `udp` off the datagram length; 0 = the
+                                                      kind's default (`kMaxFrame`, 16 MiB, on the
+                                                      framed kinds; one MTU on `udp`, #2132). On
+                                                      the framed kinds it only tightens; on `udp`
+                                                      it may raise the cap up to the 64 KiB
+                                                      datagram ceiling (`kMaxDatagram`). */
     std::string_view kind;                /**< @brief Transport-factory selector ("udp",
                                                       "ws", ...); empty = provide_link only. */
     std::uint32_t backoff_ms = 0;         /**< @brief DIAL self-heal retry interval (RFC-0014 §4);
