@@ -139,7 +139,7 @@ void asymmetric_entry() {
     int asked = 0;
     const auto wants = [&asked, e](const q::horizon_t& h) { return ++asked, h.past(e); };
     check(q::horizon(wants).len == 0 && asked == 1,
-          "inside the bracket: nothing past, and the unfenced scan stopped the pass");
+          "inside the bracket: nothing past, and the scan before membarrier stopped the pass");
     check(q::leave(), "the bracket closes");
     const q::horizon_t h = q::horizon(wants);
     check(h.past(e) && h.past(e - 1) && !h.past(e + 1),

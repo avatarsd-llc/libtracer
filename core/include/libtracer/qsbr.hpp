@@ -171,12 +171,12 @@
  * acquire load is a plain load; the full barrier of the fenced entry (@ref qsbr_ordering, a
  * `lock or` on x86-64) is what this saves.
  *
- * A scan's FALSE needs no fence (it only defers), so W scans once without one, and pays the
- * `membarrier` only when that scan finds something to free, then scans again after `F2`
- * (`%horizon`). A `membarrier` call that fails makes the scan answer nothing past: frees are
- * deferred, never early. Readers use the plain store only after the registration
- * succeeded (`control_t::asym` is set inside `asym_ready`, which every fencing scan runs
- * first), so a reader that took the plain store always meets a reclaimer that calls it.
+ * A scan's FALSE needs no `membarrier` (it only defers), so W scans once after `F1` alone,
+ * and pays the `membarrier` only when that scan finds something to free, then scans again
+ * after `F2` (`%horizon`). A `membarrier` call that fails makes the scan answer nothing past: frees
+ * are deferred, never early. Readers use the plain store only after the registration succeeded
+ * (`control_t::asym` is set inside `asym_ready`, which every fencing scan runs first), so a reader
+ * that took the plain store always meets a reclaimer that calls it.
  *
  * @section qsbr_horizon One horizon per reclaim pass
  *
@@ -204,10 +204,10 @@
  *
  * @section qsbr_single_flight Single flight, under the asymmetric fence
  *
- * With `%kMembarrier`, `%drain_ripe`'s passes run single flight. A drainer whose unfenced scan
- * found something ripe takes `%in_flight` with a `fetch_add`; one that reads non-zero there has
- * recorded itself and returns at once, without a `membarrier` of its own. Skipping only defers
- * a free, so safety is the arguments above unchanged.
+ * With `%kMembarrier`, `%drain_ripe`'s passes run single flight. A drainer whose scan (after a
+ * fence, before any `membarrier`) found something ripe takes `%in_flight` with a `fetch_add`; one
+ * that reads non-zero there has recorded itself and returns at once, without a `membarrier` of its
+ * own. Skipping only defers a free, so safety is the arguments above unchanged.
  *
  * Liveness: the holder keeps `%in_flight` through its whole pass, hooks included, and gives it
  * back with an `exchange`. If that reads more than its own 1, a drainer skipped meanwhile, and
@@ -219,7 +219,7 @@
  * could have. A drainer that arrives during the second pass finds 0, or a new holder that owes
  * it the same, and so is never left unserved. So no skip strands an entry, even with no thread
  * running after it, and a holder runs at most two passes; the second pays a `membarrier` only if
- * its unfenced scan still finds something ripe. `%retire`'s own grace check and
+ * its first scan still finds something ripe. `%retire`'s own grace check and
  * `graph_t::collect` are not gated. The fenced build has no gate.
  */
 #ifndef LIBTRACER_QSBR_HPP
@@ -631,8 +631,8 @@ struct horizon_t {
  * @brief The scan alone, with no fence: the epochs every participant is past, given that
  *        @p c was read from the counter before the scan. @p MO orders its loads: `acquire`
  *        after the pass's fence, so a reader's offline store it reads synchronizes with it,
- *        and `relaxed` for the unfenced look ahead of it, whose answer only decides whether
- *        to fence.
+ *        and `relaxed` for the look ahead (after `F1`, before any `membarrier`) whose answer
+ *        only decides whether to pay the `membarrier`.
  *
  * Each online cell `s` is past exactly the arc of epochs @ref epoch_after places before it, and
  * so is the counter value @p c: arcs of one length, `kEpochWindow - 1`, ending at `s - 1` and
@@ -666,20 +666,24 @@ template <std::memory_order MO>
  *        (@ref qsbr_horizon). Its @ref horizon_t::past is a grace period for any entry the
  *        caller then finds, whenever that entry was parked.
  *
- * @p wants is asked first with an unfenced scan, and the fence is paid only when it answers
- * true: a false needs no fence, it only defers. With the asymmetric fence (@ref qsbr_asym) that
- * fence is `F1`, `membarrier`, `F2`, and a `membarrier` call that fails yields the empty
- * horizon, so frees are deferred, never early.
+ * The fence `F_W` comes first, before any scan. It is the grace period's fence, and it is
+ * also what keeps a pass live: a reader that leaves and drains has made its offline store
+ * before it, so of two readers leaving at once, at least one sees the other gone (a scan
+ * BEFORE the fence could see each other still online, and both would return without freeing
+ * a pair nothing then frees). With the asymmetric fence (@ref qsbr_asym) the pass then asks
+ * @p wants with a scan that pays no `membarrier`, and pays `membarrier` and `F2` only when it
+ * answers true; a false only defers. A `membarrier` call that fails yields the empty horizon,
+ * so frees are deferred, never early. The fenced build has no such question: its one fence is
+ * the whole cost.
  */
 template <class Wants>
-[[nodiscard]] inline horizon_t horizon(Wants&& wants) noexcept {
+[[nodiscard]] inline horizon_t horizon([[maybe_unused]] Wants&& wants) noexcept {
     registry_t& r = registry();
-    constexpr std::memory_order relaxed = std::memory_order_relaxed;
-    if (!wants(scan<relaxed>(r.ctl.epoch.load(relaxed)))) return {};
     const std::uint32_t c = r.ctl.epoch.load(std::memory_order_acquire);  // L_c, before F_W
     std::atomic_thread_fence(std::memory_order_seq_cst);
 #if defined(LIBTRACER_QSBR_MEMBARRIER)
     if constexpr (kMembarrier) {
+        if (!wants(scan<std::memory_order_relaxed>(c))) return {};
         if (asym_ready() && syscall(__NR_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0)
             return {};
         std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -715,10 +719,13 @@ template <class Wants>
                 return true;
         return false;
     };
-    if constexpr (kMembarrier)
+    if constexpr (kMembarrier) {
+        // The fence first, for the reason @ref horizon gives: this scan decides whether to run.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
         if (!ripe(scan<std::memory_order_relaxed>(r.ctl.epoch.load(std::memory_order_relaxed))) ||
             in_flight.fetch_add(1, std::memory_order_acq_rel) != 0)
             return;
+    }
     for (bool held = kMembarrier;; held = false) {
         const horizon_t h = horizon(ripe);
         for (retired_slot_t& s : r.retired) {

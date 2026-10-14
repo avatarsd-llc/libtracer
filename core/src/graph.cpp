@@ -1286,11 +1286,11 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
  * @brief Free every parked value seam and run every parked release that no router frame can
  *        still reach — the embedder-called other end of retirement's park (#576).
  *
- * One QSBR horizon covers the whole call, taken BEFORE the map lock: its fence (a `membarrier`
- * on a Linux host) is paid once and never under the lock, and only when an unfenced scan finds
- * a ripe front. An entry parked after it waits for the next call (qsbr.hpp §qsbr_horizon).
- * Epochs grow in park order, so the ripe entries are a prefix of each park. They are taken in
- * stack-sized batches under the map lock, which draws nothing, and freed outside it.
+ * One QSBR horizon covers the whole call, taken BEFORE the map lock: its fence is paid once
+ * and never under the lock (with the asymmetric fence, its `membarrier` only when a scan after
+ * the fence finds a ripe front). An entry parked after it waits for the next call (qsbr.hpp
+ * §qsbr_horizon). Epochs grow in park order, so the ripe entries are a prefix of each park. They
+ * are taken in stack-sized batches under the map lock, which draws nothing, and freed outside it.
  */
 void graph_t::collect() {
     constexpr std::size_t kBatch = 16;

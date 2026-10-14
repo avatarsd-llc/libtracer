@@ -655,7 +655,7 @@ struct default_config_t {
      * @brief Whether a frame bracket's entry announces itself with a plain store, leaving the
      *        full barrier to the reclaim side's `membarrier(2)` (the asymmetric fence).
      *
-     * With it, `detail_qsbr::enter` on a Linux host stores its cell with no fence; the reclaim
+     * With it, `%detail_qsbr::enter` on a Linux host stores its cell with no fence; the reclaim
      * side, before a scan may conclude that a grace period has passed, makes every running
      * thread of the process execute a full barrier (`MEMBARRIER_CMD_PRIVATE_EXPEDITED`), so the
      * store-load ordering the entry's `seq_cst` fence gave is paid once per freeing scan, not
