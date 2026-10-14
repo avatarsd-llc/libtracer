@@ -51,15 +51,10 @@ Native-window hold ([ADR-0081](0081-pre-sink-ingress-native-window-hold-or-named
 
 ### 2. Egress is one shared refcounted frame, queued per peer by reference (Q5, Q6)
 
-**A send builds its frame once, in one refcounted block, and every peer it reaches holds a reference.** [PR #2130](https://github.com/avatarsd-llc/libtracer/pull/2130) (one shared refcounted WS TX frame per send) is the C6 instance. What a peer holds while its socket is busy follows **the subscription's delivery class** ([RFC-0025](../spec/rfcs/0025-stream-class-values.md) §4.1), never the vertex's retention: conflate-or-append is a property of the edge, not of the vertex (RFC-0025 §2). The Q5 ruling's "SAMPLE" is the conflating class and its "STREAM" the appending ones:
+**A send builds its frame once, in one refcounted block, and every peer it reaches holds a reference.** [PR #2130](https://github.com/avatarsd-llc/libtracer/pull/2130) (one shared refcounted WS TX frame per send) is the C6 instance. What a peer holds while its socket is busy follows the vertex's retention (Q5):
 
-| Delivery class | Per-peer queue | When it is full |
-| --- | --- | --- |
-| `conflate` (default) | a **latest-wins slot**: one reference; a newer frame replaces an unsent one | never full; the replaced frame is the conflation the class permits |
-| `immediate`, `stream` | a **ring of references**, in order, none conflated | the RFC-0025 §4.4 pressure contract: the edge's reliability bits choose a counted shed with a flow gap, or backpressure |
-| `batch` | the same ring; each flush (RFC-0025 Amendment 3: a snapshot, or a STREAM's full list) is one entry | as for `stream` |
-
-The ring holds references, never copies, and is drawn from the link's own source. Q5 rules its depth as "the vertex depth". Which vertex that means is not ruled: it could be the producer vertex's retention `N`, or the receiving vertex's ring, where RFC-0025 Amendment 2 binds the pressure contract. The implementing ticket must rule it. Until then the depth is an owner-declared bound, never a library constant.
+- a last-value vertex (retention `LAST`, the ruling's SAMPLE class) gets a **latest-wins slot**: one reference, and a newer frame replaces an unsent one;
+- a STREAM vertex gets a **ring of references whose depth is the vertex depth**, so the per-peer queue is bounded by what the owner already declared.
 
 **The producer writes, elected by try-lock** (Q6). A sender that wins `try_lock` on the socket writes directly. A sender that loses enqueues its reference and returns. The holder re-checks the queue after unlocking (the store-buffering pattern: a `seq_cst` fence on both sides, so at least one side sees the other and nothing is stranded). This deletes the `tx_handoff_t` admit/next lock pair. It keeps the rule that a producer never queues behind a stalled writer.
 
