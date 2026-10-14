@@ -29,10 +29,12 @@
  *     receive source.
  *  4. **fragmented message**: one message sent as three fragments arrives as one message.
  *     Only for a kind whose wire has fragments (`supports_fragments`).
- *  5. **stalled peer**: a peer that stops reading cannot hold a send: every send returns
- *     inside a bound, the shed is counted, and what the peer later reads is whole frames.
- *  6. **peer leaving mid-send**: a peer that leaves while a sender is busy releases the
- *     sender, the link reports itself down, and a later send is counted, not lost silently.
+ *  5. **stalled peer**: a peer that stops reading cannot hold a send: the link is sent to
+ *     until its first counted shed, every send returns inside a bound, and what the peer
+ *     later reads is whole frames, at least one of them.
+ *  6. **peer leaving mid-send**: sends reach a present peer intact; a peer that leaves while a
+ *     sender is busy releases the sender, the link reports itself down, and one later send is
+ *     counted as exactly one drop.
  *
  * A kind that cannot express a case says so through its rig and the case reports N/A; it
  * never weakens the assertion for that kind.
@@ -356,26 +358,29 @@ inline void case_stalled_peer(rig_factory_t make) {
 
     net::transport_t& l = rig->link();
     rig->peer_stall();
-    // Far more than any socket pair buffers: the peer's window fills and stays full.
-    constexpr std::size_t kFrames = 96;
+    // Send until the first counted shed, up to a cap: the window's size is the host's (a
+    // socket's send buffer autotunes), so the case finds it rather than assuming it.
+    constexpr std::size_t kMaxFrames = 512;
     const bytes_t big = payload(256u * 1024u, 60);
     const std::uint64_t dropped_before = l.drop_stats().dropped_tx;
     std::chrono::steady_clock::duration slowest{};
-    for (std::size_t i = 0; i < kFrames; ++i) {
+    for (std::size_t i = 0; i < kMaxFrames && l.drop_stats().dropped_tx == dropped_before; ++i) {
         const auto t0 = std::chrono::steady_clock::now();
         l.send(big);
         const auto took = std::chrono::steady_clock::now() - t0;
         if (took > slowest) slowest = took;
     }
+    // The precondition, reported on its own so it is never read as a broken link.
+    check(l.drop_stats().dropped_tx > dropped_before,
+          "the peer's window filled on this host (a shed was counted within the cap)");
     // A send waits at most about one liveness window on this peer; 20 windows is slack for a
     // loaded sanitizer runner, and still far short of "blocked until the peer reads".
     const auto bound = std::chrono::milliseconds(kLivenessMs) * 20;
     check(slowest < bound, "no send was held by the stalled peer beyond the liveness bound");
-    check(l.drop_stats().dropped_tx > dropped_before,
-          "the frames the peer could not take are counted");
 
     std::vector<bytes_t> whole;
     const bool framed = rig->peer_drain(1000ms, whole);
+    check(!whole.empty(), "the frames that fit before the stall reached the peer");
     check(framed, "what the peer reads afterwards is whole frames, never a torn record");
     bool intact = true;
     for (const bytes_t& f : whole) intact = intact && f == big;
@@ -407,16 +412,27 @@ inline void case_peer_leaves_mid_send(rig_factory_t make) {
         done.store(true);
     });
     check(eventually([&] { return sent.load() >= 4; }, kWait), "the sender is under way");
+    std::vector<bytes_t> before;
+    (void)rig->peer_drain(200ms,
+                          before);  // a trailing partial is expected: the sender is mid-record
+    bool intact = !before.empty();
+    for (const bytes_t& f : before) intact = intact && f == body;
+    check(intact, "while the peer is there, the sends reach it intact");
     rig->peer_leave();
     check(eventually([&] { return !l.link_up(); }, kWait), "the link reports the peer gone");
     stop.store(true);
+    // Meaningful on a link whose send can wait on its socket; the fake's never waits.
     check(eventually([&] { return done.load(); }, kWait), "the busy sender is released");
     sender.join();
 
+    // Empty whatever the link still holds toward the peer, so the next send would fit any
+    // window and can only be shed because the peer left.
+    std::vector<bytes_t> residue;
+    (void)rig->peer_drain(0ms, residue);
     const std::uint64_t dropped_before = l.drop_stats().dropped_tx;
-    l.send(body);
-    check(l.drop_stats().dropped_tx > dropped_before,
-          "a send after the peer left is counted as dropped, not lost silently");
+    l.send(payload(1, 71));
+    check(l.drop_stats().dropped_tx == dropped_before + 1,
+          "a send after the peer left is counted as exactly one drop, not lost silently");
 }
 
 /** @brief Run every case against one link kind. */
