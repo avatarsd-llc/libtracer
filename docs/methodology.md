@@ -73,8 +73,7 @@ Several named *modes* isolate distinct costs on the same axes:
   producer's own work**: each op allocates a segment and copies the payload into it before
   the write. **From 1 KiB it does not**: the values are built ahead and freed afterwards, off
   the clock, and the row times the write alone, so above 1 KiB the row is the library's and
-  flat in payload size
-  ([#1905](https://github.com/avatarsd-llc/libtracer/issues/1905)). The Zenoh rows build their
+  flat in payload size. The Zenoh rows build their
   payload on the same side of the clock at every size;
 - `inproc-borrow` — the loaned-view path: no payload copy, but **not** allocation-free —
   each write allocates a segment header for the borrow and the block the vertex stores;
@@ -90,24 +89,20 @@ Several named *modes* isolate distinct costs on the same axes:
   target's write effects — measured at roughly **10× a callback edge** at fan-out. The
   `stored` / `handler` pair separates the target's own store from the dispatch itself.
 - `stream-w1` / `stream-w2` / `stream-w4` — 1, 2 and 4 writer threads on **one** STREAM
-  vertex, the single-lock admission of
-  [#1713](https://github.com/avatarsd-llc/libtracer/issues/1713) under contention; delivery
+  vertex, its single stripe-lock admission under contention; delivery
   is counted at the subscriber. `stream-spill` times a write whose take is wider than the
   in-frame slots (it spills), and `stream-defer` a burst of `assign`s delivered by one
-  covering `propagate`; both per cycle, batch-timed
-  ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)).
+  covering `propagate`; both per cycle, batch-timed.
 - `route-handle-egress-mt1` / `-mt2` / `-mt4` — **retired** with the route handle (see
   [Retired series](#retired-series)).
 - `seam-class-c1` / `-c8` / `-c32`, `seam-direct`, `seam-fallback` — the allocation seam's
   two decisions: finding a block's size class among C classes, and a full `bump_source_t`
   falling back to its upstream pool (`seam-direct` is that pool alone).
-- `seam-values` / `seam-tables` — the shipped host slab pool
-  ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)): one `try_alloc` +
+- `seam-values` / `seam-tables` — the shipped host slab pool: one `try_alloc` +
   `release` on the value sub-pool (through the thread's cache) and on the table sub-pool
   (one class lock per request), at every payload-ladder size, at 65552 B and at 65600 B,
-  the first request past the last class (64 KiB plus a segment header, #1990), which falls
-  back to the root. Each row refuses to print if
-  its size's class decision is not the one its label names, or if a timed request was
+  the first request past the last class (64 KiB plus a segment header), which falls
+  back to the root. Each row refuses to print if its size's class decision is not the one its label names, or if a timed request was
   refused. Charted, not gated.
 - `inproc-pool-batch` — the window-calibrated twin of the heap-view `inproc-pool` rows.
 
@@ -127,22 +122,19 @@ closely.
 **Process shape.** Each family of the sweep (the fan-out ladder, the payload ladder,
 `lkv`, …) runs in its **own fresh process**, under one fixed set of allocator settings
 (`GLIBC_TUNABLES`: mmap and trim thresholds, arena count), and records them in its output
-as an `ALLOC` line, which the gate prints and every history point carries
-([#1903](https://github.com/avatarsd-llc/libtracer/issues/1903)). Rows used to share one process
-heap, aged by every row ahead of them, so a row's value partly depended on its position in
-the sweep. A heap state that matters is now a named row instead: `lkv-*-heap` runs on a
-fresh heap and `lkv-*-heap-aged` on a deliberately fragmented one
-([#1803](https://github.com/avatarsd-llc/libtracer/issues/1803)).
+as an `ALLOC` line, which the gate prints and every history point carries. No row inherits
+a heap aged by the rows ahead of it, so a row's value does not depend on its position in the
+sweep. A heap state that matters is a named row instead: `lkv-*-heap` runs on a fresh heap
+and `lkv-*-heap-aged` on a deliberately fragmented one.
 
 **Counted, kept and listed once.** Every delivery rate in this sweep is counted at the
-receiver, never computed as publishes × fan-out: `eptype-stream`, `mixed` and
-`inproc-mt*` were the last rows that computed it, and a STREAM ring that sheds an entry
-still lets `write()` succeed, so only a count can show the shed. Timed results that
+receiver, never computed as publishes × fan-out: a STREAM ring that sheds an entry still
+lets `write()` succeed, so only a count can show the shed. Timed results that
 nothing reads (the `lkv-*` copy, the `path-parse` result) pass through an empty `asm`
 clobber so the compiler cannot delete the work. The `dce-canary` family checks that a
 timed chain is not deleted: a dependent chain eight times longer must time at least four
-times longer, or the run fails. It does not prove the clobber itself is load-bearing. Each key is emitted once: `inproc/64/1/1` comes from the
-payload sweep only ([#1805](https://github.com/avatarsd-llc/libtracer/issues/1805)).
+times longer, or the run fails. It does not prove the clobber itself is load-bearing. Each
+key is emitted once: `inproc/64/1/1` comes from the payload sweep only.
 
 ### 3 · Memory footprint (allocations counted, not sampled)
 
@@ -154,18 +146,16 @@ holds rather than what the caller asked for. A block allocated inside the window
 at its request's **exact-fit** usable size (glibc's own rounding: 8 B header, 16 B alignment,
 32 B minimum chunk). When glibc hands back a larger leftover chunk whole, `malloc_usable_size`
 reads more, and which chunks are left over depends on what ran before the window, so the
-same binary read `vertex_app5_static` as 288 or 295 B/vertex from run to run
-([#1890](https://github.com/avatarsd-llc/libtracer/issues/1890)). The coarse process-level number beside them
+same binary would read `vertex_app5_static` as 288 or 295 B/vertex from run to run. The
+coarse process-level number beside them
 is each family's **RSS delta**: every `bench_libtracer` family runs in its own process and
 prints `RSS family=<name> start_kb= peak_kb= delta_kb=`, the high-water mark minus the
-resident set the family started from. It replaced a whole-run "max RSS" from
-`/usr/bin/time -v`, which was the harness's peak, not any family's footprint
-([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). The single-family binaries
+resident set the family started from, so it is that family's footprint rather than the
+harness's peak. The single-family binaries
 `bench_chain_delivery`, `bench_forward_demux` and `bench_store_sweep latency` print the same
 line (`chain-delivery`, `forward-demux`, `store-lat`) after their last row. Their start
 figure is the process's high-water mark before the first row, one `getrusage` call, because
-any read of `/proc` ahead of their rows moved them
-([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)).
+any read of `/proc` ahead of their rows moves them.
 
 Beside the per-vertex probes, `bench_forward_heap` prints RAM **per callback edge**
 (`edge_callback`), **per wire subscriber edge** (`edge_wire`), **per link** (`link`, one
@@ -176,12 +166,10 @@ one write selects (`seamclass`: its segment and its record, each rounded to its 
 host slab pool's `config_t::kSizeClasses`, with the blocks no class serves counted apart); and
 the STREAM write's **stripe-lock sections** per write, for one, two and four writers, a
 spilling write and a refused spill (counted through `--wrap=pthread_mutex_lock`, the
-instrument #1713's own test uses).
+instrument the STREAM lock test uses).
 
-**Per object, not per slab
-([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778)).** Since a default graph draws
-its tables from the host slab pool
-([#1777](https://github.com/avatarsd-llc/libtracer/issues/1777), ADR-0083), a counting window
+**Per object, not per slab.** A default graph draws its tables from the host slab pool
+(ADR-0083), so a counting window
 over a default graph sees whole slabs (64 KiB and up, one per size class a growing table
 first reaches), not the object it is pricing. So the gated `vertex`, `vertex_app5`,
 `vertex_app5_static`, `edge_callback`, `edge_wire` and `vertex_value_1k` probes run on a graph
@@ -191,12 +179,7 @@ that same source): every block is then its own counted `operator new`, which is 
 without the slab pool (an MCU) pays per object. The same windows on a default graph are still
 printed, ungated, as `RESULT slabfoot <what> live_x1000= blocks_x1000= n=` (the two app-table
 rows have no such twin; `slabfoot vertex` already prices a leaf's slabs), so the slab cost
-stays visible. The
-two methods differ only where the old one missed a block: on `main` before #1778, a wire
-edge's per-link candidate list came from the graph's pmr pool, which the old window did not
-see (7.035 blocks per wire edge counted per object, 6.035 the old way); and the old
-`vertex_value_1k` row moved by a whole kept free slab between runs of the same code
-(+384 B over 256 units).
+stays visible.
 
 Two invariants sit on this surface, and **the scope of the armed window is part of the
 first one**. The steady-state forward hop's *own* work must touch no heap — the two-plane
@@ -241,14 +224,14 @@ history alongside the in-process series, so a routing or delivery regression sho
 trend rather than being noticed later. They emit the same `RESULT` rows as `bench_libtracer`,
 so they need no separate aggregation. `bench_chain_delivery` drives every frame through
 the child's **receiver ctx**, the way a link's receive thread delivers it, and asserts so
-before timing: the public by-name `on_frame` door is one production frames never take ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). Their transcripts are tolerated-empty — a bench that
+before timing: the public by-name `on_frame` door is one production frames never take. Their transcripts are tolerated-empty — a bench that
 fails to run must not cost a commit its whole history point — but an empty one emits a build
 warning naming the file, because a silently-empty transcript is otherwise a green job that
 recorded nothing.
 
 #### Retired series
 
-COMPACT delivery left the protocol and the router with RFC-0032 (#1951), which removes RFC-0004
+COMPACT delivery left the protocol and the router with RFC-0032, which removes RFC-0004
 §E.1 (`ADVERTISE`, `COMPACT`, `HANDLE_NACK` and the per-link handle tables), so the series that
 measured it have no code left to run. They stay in the build-to-build history as a closed record, and
 their rows are not comparable to anything after the cut.
@@ -258,18 +241,16 @@ their rows are not comparable to anything after the cut.
 | `compact-forward/*`, `compact-terminus/*` (`bench_compact_delivery`) | the Nth `COMPACT` frame on an already-advertised binding: a forward hop that swaps the label and re-emits, and a terminus that resolves it locally | the frame and its label store were deleted; `bench_chain_delivery`'s `chain-forward/*`, `chain-terminus/*` and `chain-delivery` RSS line took their gate points |
 | `route-handle-egress-mt1` / `-mt2` / `-mt4` | producer threads sharing one advertised route-handle flow | the egress reuse read belonged to the handle table |
 
-The replacement is the delivery every flow now takes: chain delivery, a `FWD{WRITE}` addressed by the
+The delivery every flow takes is chain delivery, a `FWD{WRITE}` addressed by the
 subscription edge's chain, which each hop consumes one element of. It holds no state at any hop, so
 there is no warm/cold split, no first-frame advertise and no stale-label repair to price. Its
 cost is bytes: the frame is larger on every hop but the last, by 11 B per remaining PAIR
-element (RFC-0029 §5.2). The
-maintainer ruling is that this multi-hop byte cost is accepted and the bench **reports**
-it rather than vetoing it, with `BATCH` (`0x80`) available to the application as the way to
-amortise headers on a steady flow. The one-time before/after comparison against COMPACT (1 and 3
-hops, 64 B to 16 KiB, batch 1 to 32) was taken in #1949 before the code was deleted; the
-standing rows are `chain-forward/*` and `chain-terminus/*` (`bench_chain_delivery`) and
-`fwd-demux-*`. Row-level history of the retired series stays in the
-bench history, not in these pages.
+element (RFC-0029 §5.2). RFC-0032
+(§3) accepts this multi-hop byte cost: the bench **reports** it rather than vetoing it, with `BATCH` (`0x80`) available to the application as the way to
+amortise headers on a steady flow. The chain-against-COMPACT comparison behind that is
+RFC-0032's evidence (§8), not a series here; the standing rows are `chain-forward/*` and
+`chain-terminus/*` (`bench_chain_delivery`) and `fwd-demux-*`. Row-level history of the retired
+series stays in the bench history, not in these pages.
 
 ### 4 · libtracer vs Zenoh (absolute, best of 3 rounds, same runner)
 
@@ -342,7 +323,7 @@ thresholds, one hard invariant:
 
 | mechanism | when | comparison | threshold | effect |
 | --- | --- | --- | --- | --- |
-| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 (a row at the flat threshold keeps the old disjoint-ranges + majority-of-pairs rule) | fails the PR |
+| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 (a row at the flat threshold is decided by the disjoint-ranges + majority-of-pairs rule) | fails the PR |
 | **push ratchet** | every `main` push | HEAD vs its parent, **three independently-drawn runners** | same as above | **advisory** — each replica reports (see the tier note below) |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
 | **soft trend alert** | per `main` commit | vs previous point, **cross-runner** | series drifts past **125%** | a comment, *not* a verdict |
@@ -379,7 +360,7 @@ Details that make these trustworthy:
   unpinned hosted runners, host-wide pressure decides. An execution is
   **contended** when foreign time exceeds **2 %** of its window or pressure exceeds **5**;
   a contended execution is re-run, up to three attempts, and the first clean one is kept.
-  The per-PR gate judges **each family's own window** (#1807): a pair whose execution
+  The per-PR gate judges **each family's own window**: a pair whose execution
   stayed contended is dropped for that family, both arms, and the family is judged on its
   other pairs. Only when a family that emits a gated row loses more than two of its pairs
   (and, outside the per-PR gate, when any execution is still contended after its last
@@ -391,7 +372,7 @@ Details that make these trustworthy:
   counts as coverage and never enters the rolling-drift baseline. A host whose load average
   never settles flags its sample the same way rather than skipping it. The trend charts are
   not a gating consumer: on a flagged sample they keep off the line only the rows that failed
-  their own A/A check or are outliers against their own neighbours (#1890), and draw those
+  their own A/A check or are outliers against their own neighbours, and draw those
   rows as marked suspect points. GitHub-hosted runners
   cannot be isolated: they run unpinned, their conditions are read over the whole affinity
   set, and the interleaved A/B remains their primary defence. The allocation-count
@@ -403,10 +384,9 @@ Details that make these trustworthy:
   **p75 row** disagrees by more than **6 %** or **any single row** by more than **15 %**
   (`AA_RUN_P75_BAND` and `AA_RUN_ROW_CAP` in
   [`host_guard.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/host_guard.py)),
-  and the flag records the measured p75 and max. Until 2026-10-07 the worst row alone
-  decided at 6 %, which flagged nearly every run on a clean host: on `d678bf17` the median
-  row was 0.9 % and two rows of 45 were over 6 %. Rows over 6 % are still marked one by one
-  for the charts, whatever the sample's verdict.
+  and the flag records the measured p75 and max. The worst row alone is not the test: on a
+  clean host the median row sits near 0.9 % and two rows of 45 can still exceed 6 %. Rows
+  over 6 % are marked one by one for the charts, whatever the sample's verdict.
 - The per-PR gate watches **thirty-five canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
@@ -436,13 +416,11 @@ Details that make these trustworthy:
   threads, `inproc-mt4/64/1/4` (parallel dispatch, one graph per thread),
   `acl-inherit-d4-mt4/64/1/4` (ACL-gated reads under a shared ancestor) and
   `poolalloc-mt4/64/1/1` (the thread-safe pool's alloc/free under contention); and seven
-  **16 KiB payload-ladder** rows, one per data-path family
-  ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)): `inproc/16384/1/1`,
+  **16 KiB payload-ladder** rows, one per data-path family: `inproc/16384/1/1`,
   `inproc-borrow/16384/1/1`, `lkv-store-heap/16384/1/1`, `lkv-store-pool/16384/1/1`,
   `eptype-stream/16384/1/1`, `chain-forward/16384/1/1` and `fwd-demux-value/16384/1/1`
   (the forward hop keyed by its VALUE payload rather than its frame size); and eight
-  **store-latency** rows from `bench_store_sweep`
-  ([#1869](https://github.com/avatarsd-llc/libtracer/issues/1869)), the p50 of each of its
+  **store-latency** rows from `bench_store_sweep`, the p50 of each of its
   four workload legs — the rope forward hop, a graph write, a composed subtree read, and all
   three — on the NARROW and the WIDE store profile: `store-lat-narrow-net-fwd/32/1/1`,
   `store-lat-narrow-graph-write/32/1/1`, `store-lat-narrow-graph-read/32/1/1`,
@@ -456,36 +434,27 @@ Details that make these trustworthy:
   like every other point, at the cost of about one second per gate.
 
   The multi-threaded rows are timed in their own invocation (`--family-set multi`), after
-  every single-threaded one, and that invocation is judged on **foreign CPU time only**
-  ([#1803](https://github.com/avatarsd-llc/libtracer/issues/1803)). Their own threads queue
-  behind each other on the pinned CPUs, which raises the bench's own CPU pressure with
-  nothing foreign present; scoring that pressure turned about one gate in three
-  INCONCLUSIVE. A real intruder still shows as foreign CPU time and still makes the verdict
-  INCONCLUSIVE. Every other invocation is judged on foreign time and pressure, as before.
+  every single-threaded one, and that invocation is judged on **foreign CPU time only**.
+  Their own threads queue behind each other on the pinned CPUs, which raises the bench's own
+  CPU pressure with nothing foreign present; scoring that pressure would turn about one gate
+  in three INCONCLUSIVE. A real intruder still shows as foreign CPU time and still makes the
+  verdict INCONCLUSIVE. Every other invocation is judged on foreign time and pressure.
 
-  Those last two are here because of what happened without them
-  ([#1250](https://github.com/avatarsd-llc/libtracer/issues/1250)): reshaping
-  `rope_t::flatten`'s wrapper cost **25–48%** on every path through `materialize` —
-  branch and field writes, `op_resolve` reads, FWD delivery emission, the RX span sink —
-  and no gated point at the time was downstream of that call, so the loss shipped with
-  every gate green. They are read out of `RESULT` rows the default sweep already emits,
-  so they add no wall-clock. The two 1 KiB heap rows joined them after the same kind of
-  miss ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)): putting a
-  segment's header and payload in one block made the 64 B heap rows ~30% faster and the
-  1 KiB ones ~2x slower, because a 1072 B request misses glibc's 1032 B per-thread cache,
-  and with only the 64 B row gated the release went out green. Note the name: `lkv-store-*` measures the **copy-store
+  The `lkv-store-*` rows are gated because they are downstream of `rope_t::materialize`,
+  which every path that flattens a rope takes — branch and field writes, `op_resolve` reads,
+  FWD delivery emission, the RX span sink — and no other gated point is. The 1 KiB heap rows
+  are gated because the 64 B and 1 KiB rows can move in opposite directions: a 1072 B request
+  misses glibc's 1032 B per-thread cache, so a segment layout that speeds up the 64 B row can
+  make the 1 KiB one about 2x slower. They are read out of `RESULT` rows the default sweep already emits,
+  so they add no wall-clock. Note the name: `lkv-store-*` measures the **copy-store
   allocation**, not the last-known-value slot. Each `lkv-*` row's columns are separate
   measurements of one operation: its **throughput** times the whole loop as one block, and
   its **p50 and mean** come from a second run of the same operation in window-calibrated
-  batches, in picoseconds ([#1905](https://github.com/avatarsd-llc/libtracer/issues/1905)).
-  Before that the latency columns read 0
-  ([#1804](https://github.com/avatarsd-llc/libtracer/issues/1804)), and before that they
-  repeated the bulk figure as a p50 and a mean.
+  batches, in picoseconds.
 
   Beside those rows sits the ADR-0060 **pool check**, and it is not a speed ratio. The
-  pool's acceptance has one goal: it never takes an allocation from the system heap
-  ([#1695](https://github.com/avatarsd-llc/libtracer/issues/1695), maintainer clarification
-  2026-10-03). The **LKV-ROUTE** gate in `bench_forward_heap` checks exactly that. It runs
+  pool's acceptance has one goal: it never takes an allocation from the system heap. The
+  **LKV-ROUTE** gate in `bench_forward_heap` checks exactly that. It runs
   the pooled alloc/free loop under the global operator-new counter and requires the pool
   arm to reach the heap **zero** times at 64 B and 1 KiB, with the heap arm as its control
   (it must reach the heap on every cycle, or the probe is blind). CI also runs it with
@@ -493,26 +462,21 @@ Details that make these trustworthy:
   fail. That count is the only blocking pool check; a slower pool path is caught as the
   `lkv-store-pool/64/1/1` row above.
 
-  The timed pool/heap ratio (`lkv-alloc-pool` over `lkv-alloc-heap`) is still **printed,
-  and never fails**. It used to be gated, at a 2.0x floor with a 1.25x fallback threshold,
-  and later paired against main in the same session
-  ([#1745](https://github.com/avatarsd-llc/libtracer/issues/1745)). It measured the runner:
-  across 254 best-of-3 readings on the CI runners with healthy code, the 64 B ratio ran
-  **1.4x–6.5x** (median 3.0x, bimodal), and main and an identical candidate read 2.1x and
-  1.6x in the same session. The per-PR report keeps the pairing so main's same-session
+  The timed pool/heap ratio (`lkv-alloc-pool` over `lkv-alloc-heap`) is **printed, and
+  never fails**, because it measures the runner: across 254 best-of-3 readings on the CI
+  runners with healthy code, the 64 B ratio ran **1.4x–6.5x** (median 3.0x, bimodal), and
+  main and an identical candidate read 2.1x and 1.6x in the same session. The per-PR report keeps the pairing so main's same-session
   ratio sits beside the candidate's. `bench/test_perf_gate.py` pins that no ratio fails.
 
   The `inproc-target-*` pair is gated at **fan-out 8** and nowhere else, for two measured
-  reasons ([#1077](https://github.com/avatarsd-llc/libtracer/issues/1077)). Fan 8 sits
-  exactly on `vertex_t::kInlineFanout`, the no-heap small-fan-out boundary, so it is the
-  width that prices the narrow-fan snapshot path — which is where that issue's ~**+5.5%**
-  step appeared, invisible to every gate at the time. And a layout control (the same
+  reasons. Fan 8 sits exactly on `vertex_t::kInlineFanout`, the no-heap small-fan-out
+  boundary, so it is the width that prices the narrow-fan snapshot path. And a layout control (the same
   source rebuilt at three `-falign-functions` settings) measured this row as the most
   layout-**stable** point of the whole sweep, **0.62%** across placements against ~15% for
   `fold-b4`, so the false-red risk from code placement is near zero here. Both legs are
-  gated because `stored` carries the same shape as `handler`; it reads reliably now that
+  gated because `stored` carries the same shape as `handler`, and it reads reliably because
   [`host_guard.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/host_guard.py)
-  rejects the contaminated windows that once put its own A/A null at −14.7%. Like the
+  rejects contaminated windows. Like the
   `lkv-store-*` pair they add **no wall-clock**: the default sweep already emits both rows
   at every fan width, so this is two more keys read out of output already collected. Both
   gate on **all three legs** at the nominal +15% / +12% / −12%: a fan-8 row's p50 and mean
@@ -527,27 +491,20 @@ Details that make these trustworthy:
   name — already gated, twice over, so gating them again would buy correlated evidence
   rather than coverage. `eptype-stream` is not a re-emission: it is the only point on the
   list that declares a bounded history depth, and therefore the only one downstream of the
-  **`STREAM` role's retention work**. Nothing else on the list touches that path, so a
-  pullback confined to retention was invisible to all fourteen predecessors, which is the
-  same guard-gap shape as `lkv-store-*` and the chain/demux arms below. It costs **no
+  **`STREAM` role's retention work**. Nothing else on the list touches that path, so without
+  it a pullback confined to retention would pass every gate. It costs **no
   wall-clock**: the default sweep already emits the row. And all three legs bite at the
   nominal thresholds — it measures **~190 ns** p50 and mean over five best-of-rounds on a
   busy 31-core host, far above the sub-100 ns band where the tick guard would demand an
   extra +25 ns absolute.
 
-  **What that row prices changed underneath it**, and the change is worth naming because
-  the series name did not. Until `bdd1066b` the ring was the *producer's*: a write to a
-  stream vertex appended to its own history under the stripe mutex, before fan-out. Under
-  RFC-0025 §4.6.1 Amendment 2 **a producer never queues** — the queue belongs to the party
-  that wants depth, so the ring lives on the **receiving** vertex and the admission runs
-  *after* the last-known-value publish rather than before fan-out. What the gated row times
-  today is therefore the receiver leg: retire the entry the depth intent pushes out, admit
-  the new one by reserving its retained width against that vertex's own injected block
-  source, and append. The row keeps its name on purpose. The rule above — *renaming beats
-  reinterpreting* — governs a change in what the **instrument** measures; the bench source
-  is untouched and the operation it drives is still "one 64 B write into a depth-16 stream
-  vertex". The mechanism beneath it moved, and a core change moving the line is exactly the
-  signal the series exists to show.
+  **What the row prices.** Under RFC-0025 §4.6.1 Amendment 2 **a producer never queues** —
+  the queue belongs to the party that wants depth, so the ring lives on the **receiving**
+  vertex and the admission runs *after* the last-known-value publish rather than before
+  fan-out. The gated row therefore times the receiver leg of "one 64 B write into a
+  depth-16 stream vertex": retire the entry the depth intent pushes out, admit the new one
+  by reserving its retained width against that vertex's own injected block source, and
+  append.
 
   **The append-and-admission leg is read as a gap, not as a series of its own.**
   `eptype-stream` and `eptype-lean` are the same write at the same payload, fan-out and
@@ -563,13 +520,10 @@ Details that make these trustworthy:
   `try_alloc` fires on every write — **does not exist**, and neither does one for the ring's
   resident bytes. Both are gaps in this page, not numbers it is withholding.
 
-  Fourteen of the thirty-five come from OTHER bench binaries, and they are here because of what
-  happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
-  v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
-  They are `chain-forward/64/1/1` and `chain-terminus/64/1/1` — a stream delivery's
-  forward hop and its terminus over the PAIR chain, from `bench_chain_delivery`, which
-  replaced the compact-delivery pair when COMPACT was retired
-  ([#1951](https://github.com/avatarsd-llc/libtracer/issues/1951)); and
+  Fourteen of the thirty-five come from OTHER bench binaries, because a routing or delivery
+  pullback moves none of `bench_libtracer`'s rows. They are `chain-forward/64/1/1` and
+  `chain-terminus/64/1/1` — a stream delivery's forward hop and its terminus over the PAIR
+  chain, from `bench_chain_delivery`; and
   `fwd-demux-fixed/61/1/1` and `fwd-demux-scan/61/64/64` — the fixed-slot and scanning
   arms of the FWD demux, from `bench_forward_demux`; plus the two 16 KiB ladder rows from
   those binaries, named above; and the eight store-latency rows from `bench_store_sweep`,
@@ -601,15 +555,14 @@ Details that make these trustworthy:
   same source* (one source built at three function alignments, so code layout moves the
   way an unrelated change moves it), **floor 3%**, and **capped at the flat thresholds**
   above: a measured null may tighten a row, never loosen it. The allocator-cliff rows
-  (`cliff-alloc-pool`; the heap twin is layout-bound and no longer takes a null, see below) take **5×** instead of 3×: banked on the bench
+  (`cliff-alloc-pool`; the heap twin is layout-bound and takes no null, see below) take **5×** instead of 3×: banked on the bench
   CPUs, three of them false-failed a held-out A/A replay at 3× and none at 5×, and raising
   their floor to 5% instead cleared fewer. A stable row gets as little as
   3%, so a real 10% regression fails it. A row the null does not carry is gated on the flat
-  thresholds, and the report says `flat`. This replaced the disjoint-range and
-  majority-of-pairs rules ([#1807](https://github.com/avatarsd-llc/libtracer/issues/1807)):
-  three PRs that could not touch the rows they failed, and one with identical sources,
-  failed at 15–22% with clean conditions, because within one session two builds of one
-  source differ by a layout offset, and disjoint ranges read that offset as real. The null
+  thresholds, and the report says `flat`. Disjoint ranges alone are not enough to fail a
+  stable row: within one session two builds of one source differ by a layout offset, and
+  disjoint ranges read that offset as real (changes that could not touch a row, and one with
+  identical sources, read 15–22% under clean conditions). The null
   is banked on the gate's own host and pin (`bench.slice` CPUs 3–6, single-threaded families
   on CPU 3, the bench runner stopped while it measures): a null first measured on a shared
   runner CPU was tighter than the bench CPUs' own spread and false-failed nine rows of a
@@ -630,28 +583,26 @@ Details that make these trustworthy:
   current job), and restarts the runner after every window, failures and signals included.
 - **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
   or past the flat threshold, because builds of one source move them by several percent
-  (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they keep the
-  verdict they had before the null existed — the flat threshold **and** the old rule
-  (medians breach, the arms' [min..max] ranges are disjoint, a strict majority of pairs
-  breach) — and the report says `cap`. A row the null does not carry is decided the same
+  (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they are decided
+  by the flat threshold **and** the range rule (medians breach, the arms' [min..max] ranges
+  are disjoint, a strict majority of pairs breach), and the report says `cap`. A row the null does not carry is decided the same
   way. In the 2026-10-09 null (27 fit rounds in three windows, banked from main@738c0a29)
   the null tightens 27 of the 89 legs outside the cliff family and 18 of the 294 cliff legs;
   every other leg is at the cap. Rows at the cap on every leg: `acl-inherit-d4-mt4`,
   both `eptype-stream` rows, all three `fwd-demux-*` rows, both
   `inproc-borrow` rows, `inproc-mt4`, `inproc-path/64/1/8192`, `inproc/16384`,
   `lkv-alloc-heap/1024`, `mixed`, `poolalloc-mt4`, and the `store-lat` full, net-fwd and
-  narrow graph-read rows. `fold-b4/512/1/1` is tightened on p50 only (x1.113). The three `compact-*` rows it carried were dropped
-  with COMPACT ([#1951](https://github.com/avatarsd-llc/libtracer/issues/1951)); the `chain-*`
-  rows that replace them are not in it, and are decided flat until the next bank. 97 of the 98
+  narrow graph-read rows. `fold-b4/512/1/1` is tightened on p50 only (x1.113). The `chain-*`
+  rows are not in this bank, so they are decided flat. 97 of the 98
   cliff rows hold at least one leg at the cap. The held-out window gave no A/A false fail in
   18 sessions, and an injected 10% slowdown failed 12 of the 133 rows in every session.
   Fitting on any three of the four windows and replaying the fourth gave false fails in 10 of
   54 sessions, all but two in the two daytime windows. The `cliff-alloc-heap` and
   `lkv-alloc-heap` rows move by up to x1.20 with code placement alone, more than three
-  alignment builds sample ([#2030](https://github.com/avatarsd-llc/libtracer/issues/2030)),
-  so a null cannot price them without loosening them, which was ruled out. They are not
+  alignment builds sample, so a null cannot price them without loosening them, and a null
+  never loosens a row. They are not
   gated on time at all: see **The layout-bound rows** below.
-- **The layout-bound rows** ([#2030](https://github.com/avatarsd-llc/libtracer/issues/2030)).
+- **The layout-bound rows.**
   `cliff-alloc-heap` and `lkv-alloc-heap` time one alloc/free in 3–60 ns, and where the linker
   puts the code decides the figure: a 32 B shift of identical code moved them by x1.20, and one
   source spread x1.18–1.26 over shuffled link orders (`-ffunction-sections`, lld
@@ -663,13 +614,13 @@ Details that make these trustworthy:
   same count at every size. The gate fails a size whose count is more than 2% and more than two
   instructions over main's, so ten extra instructions (about 10% of a pair) fail on any layout. The timed
   legs of these rows keep only a gross backstop of x1.5, which is above the worst measured
-  layout and still catches an allocator on a slow path (the #1768 class was x2.7); sizes past
+  layout and still catches an allocator on a slow path (a request pushed past glibc's
+  per-thread cache reads about x2.7); sizes past
   the 64 KiB last class are not counted, because the host allocator's own state moves them run
   to run (their timed legs hold a x3 backstop for the same reason). Replayed over nine layouts of
   one source (default and eight shuffled link orders, ten rounds on the bench CPUs, 216 gate
   sessions), these rows gave no false fail, the instruction count gave none in all 72 ordered
-  layout pairs, and ten injected extra instructions (+9.6%) failed all 48 sizes. The copy-store rows `lkv-store-heap/64`, `lkv-store-heap/1024` and `lkv-store-pool/64` take the same mechanism
-  ([#2039](https://github.com/avatarsd-llc/libtracer/issues/2039)): on unchanged source they false-failed 7-24 of
+  layout pairs, and ten injected extra instructions (+9.6%) failed all 48 sizes. The copy-store rows `lkv-store-heap/64`, `lkv-store-heap/1024` and `lkv-store-pool/64` take the same mechanism: on time, unchanged source false-fails 7-24 of
   216 replay sessions each. `bench_forward_heap` counts the instructions of one two-link `rope_t::materialize`
   (backend alloc, payload copy, free) as `RESULT instr-store B=<heap|pool> S=<size>`: 256, 292 and 243 instructions,
   identical on all nine layouts, and the gate fails a row more than 2% and two instructions over main. Their 16 KiB
@@ -677,53 +628,48 @@ Details that make these trustworthy:
 
   **What this gives up.** The count is of user-mode instructions only. A slowdown that adds none
   (kernel work, since kernel mode is excluded, cache misses, an atomic or fence in place of a
-  plain store, mispredicts) is no longer held at the flat 15%: it passes up to **x1.5**. Before
-  this change these rows were held at the flat threshold or the null. The cliff-step check is
-  weaker in the same way: a new size-class cliff fails only when the right-hand row is slower
-  than main by the same-size rule, which is x1.5 for `cliff-alloc-heap`, so one up to x1.5 slower
-  passes (the test fixture for a slower right-hand row moved from x1.31 to x1.59 of main for that
-  reason; the pool family keeps the x1.31 fixture). The exact segment-draw ratchet is unaffected.
+  plain store, mispredicts) is not held at the flat 15%: it passes up to **x1.5**. The
+  cliff-step check is weaker in the same way: a new size-class cliff fails only when the
+  right-hand row is slower than main by the same-size rule, which is x1.5 for
+  `cliff-alloc-heap`, so one up to x1.5 slower passes (the pool family is not affected). The
+  exact segment-draw ratchet is unaffected.
   The same holds for the three copy-store rows: a slowdown that adds no user-mode instruction (cache or
   page behaviour in the copy, a slower kernel path, an atomic in place of a plain store) passes up to its backstop
-  on `lkv-store-heap/64`, `lkv-store-heap/1024` and `lkv-store-pool/64` (table below), where before it was held at the flat 15%
-  or the null. The payload copy is `memcpy`, whose instruction count does not follow its time at 1 KiB, so a
+  on `lkv-store-heap/64`, `lkv-store-heap/1024` and `lkv-store-pool/64` (table below). The payload copy is `memcpy`, whose instruction count does not follow its time at 1 KiB, so a
   copy that gets slower per byte is seen only by the backstop.
-  **Backstop per row** ([#2055](https://github.com/avatarsd-llc/libtracer/issues/2055)). The x1.5 was inherited from the
-  allocation-step spread; the same nine-layout campaign (10 rounds, 216 sessions per row) gives each
-  `lkv` row its own. "Spread" is the largest, over the p50, mean and throughput legs, of the worst-to-best
+  **Backstop per row.** The same nine-layout campaign (10 rounds, 216 sessions per row) gives each
+  `lkv` row its own backstop. "Spread" is the largest, over the p50, mean and throughput legs, of the worst-to-best
   per-layout median. The "smallest clean bound" is the lowest backstop, found by a sweep in steps of 0.01
   (not 0.05) from x1.35 down, at which none of the 216 replayed sessions false-fails. The bound is 1.1 x the
   larger of the two, rounded up to 0.05, so it clears both the layout spread and the lowest replay-clean point.
 
   | row | worst spread (p50 / mean / throughput) | smallest clean bound | bound |
   | --- | --- | --- | --- |
-  | `lkv-alloc-heap/1024` | x1.18 / x1.20 / x1.20 | x1.20 | x1.35 (was x1.5) |
-  | `lkv-store-heap/64` | x1.08 / x1.09 / x1.10 | x1.11 | x1.25 (was x1.5) |
-  | `lkv-store-heap/1024` | x1.16 / x1.19 / x1.35 | below x1.05 | x1.5 (unchanged) |
-  | `lkv-store-pool/64` | x1.18 / x1.19 / x1.15 | x1.29 | x1.45 (was x1.5) |
+  | `lkv-alloc-heap/1024` | x1.18 / x1.20 / x1.20 | x1.20 | x1.35 |
+  | `lkv-store-heap/64` | x1.08 / x1.09 / x1.10 | x1.11 | x1.25 |
+  | `lkv-store-heap/1024` | x1.16 / x1.19 / x1.35 | below x1.05 | x1.5 |
+  | `lkv-store-pool/64` | x1.18 / x1.19 / x1.15 | x1.29 | x1.45 |
 
   `lkv-store-heap/1024` is not tightened: its p50 spread is only x1.16, but its throughput leg spreads x1.35 across
   layouts, which x1.1 rounds back to x1.5, and one bound serves all three legs. The replay alone would allow a tighter
   bound (it never false-failed down to x1.05) because the verdict also needs the arms' ranges to separate; that is
   one campaign on one source, so the rule above is kept. `cliff-alloc-heap` rows keep x1.5 (not re-measured here).
   **Stated blind spot:** at 65584 B (past the last size class) there is no instruction row and the
-  time backstop is x3, so #2030's criterion 2 (a real extra-instructions regression must fail) is
-  not met at that size.
-- **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
+  time backstop is x3, so a real extra-instructions regression is not guaranteed to fail at
+  that size.
+- **The payload ladder.**
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
   `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `chain-*` arms
-  and `fwd-demux-value`, and, since
-  [#1907](https://github.com/avatarsd-llc/libtracer/issues/1907), the pooled-backend
-  `inproc-pool`, `inproc-pool-borrow` and `inproc-pool-batch` rows. The two-process network
+  and `fwd-demux-value`, and the pooled-backend `inproc-pool`, `inproc-pool-borrow` and `inproc-pool-batch` rows. The two-process network
   rows (`net-tcp`, `net-ws`) gain a 64 KiB row on both engines; UDP keeps its four sizes,
   because a 64 KiB datagram is over the IPv4 limit. 984 and 985 B sit either side of the heap's one-block boundary (984 B
-  plus the 48 B segment header is glibc's 1032 B per-thread-cache ceiling). Rows a family
-  did not have before run after its existing rows, so no existing row moves. Above 8 KiB the
+  plus the 48 B segment header is glibc's 1032 B per-thread-cache ceiling). Ladder rows run
+  after a family's other rows, so they do not move them. Above 8 KiB the
   operation budget shrinks in proportion to the payload, and the `chain-*` and
   `fwd-demux-value` ladder rows run at a quarter of their binary's time budget, so the
   ladder adds seconds to a sweep rather than minutes. Only the 16 KiB rows are gated, and
   not the `inproc-pool*` or network ones.
-- **The allocator-cliff family** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
+- **The allocator-cliff family.**
   `cliff-alloc-heap` and `cliff-alloc-pool` time one segment alloc/free, each family in its
   own fresh process, at every size of the cliff ladder: 960–1096 B in steps of 8 plus 985 B,
   and 2^k, 2^k − 48 and 2^k + 48 from 64 B to 64 KiB. They are batch rows (picosecond p50,
@@ -738,10 +684,10 @@ Details that make these trustworthy:
   segment asks the allocator for at every ladder size (draws, total bytes, largest block),
   which is `mem_heap_request_size_test` promoted to a gate. No draw may pass the 1032 B
   fast-path ceiling unless the payload alone does, and no count may grow against main.
-  Reverting the #1768 layout split fails it at 985 B (one 1033 B draw). The timed rows do
-  not, on this host: with glibc 2.39 a 1033 B request costs about as much as the split's two
-  cached draws in a fresh process, so the 2x step the v0.17.0 sweep showed does not appear
-  in an alloc-only row timed this way. The count is what holds the boundary.
+  A segment that put its header and payload in one block fails it at 985 B (one 1033 B
+  draw). The timed rows do not, on this host: with glibc 2.39 a 1033 B request costs about
+  as much as two cached draws in a fresh process, so the 2x step the 1 KiB copy-store rows show does not
+  appear in an alloc-only row timed this way. The count is what holds the boundary.
 - Each arm's own spread across the pairs is printed, and the **baseline arm's worst
   spread is reported as the run's drift figure** — the baseline binary cannot be moved
   by the change under test, so its spread is the invariant control leg. It does not
@@ -752,8 +698,7 @@ Details that make these trustworthy:
   adds; `vertex_app5` — a leaf carrying a *copied* five-field app-field table, drawn per
   object; `vertex_app5_static` — the *borrowed* twin of that table (ADR-0058), likewise; and `reg_escape` —
   the global-heap blocks a runtime registration takes that the graph's injected
-  `memory_resource` never sees (ADR-0039 / RFC-0014), whose target is zero, reached with
-  [#1991](https://github.com/avatarsd-llc/libtracer/issues/1991) and pinned there outright
+  `memory_resource` never sees (ADR-0039 / RFC-0014), pinned at zero outright
   (`MEM_ZERO_POINTS`: any block or byte fails, whatever the baseline). Each ratchets
   on two quantities: **live bytes** per vertex, tolerant at **+2%** because it is
   host-allocator-dependent, and the **number of heap blocks**, which is host-independent
@@ -763,19 +708,18 @@ Details that make these trustworthy:
   `--baseline-bench-fwd`. Supplying that binary for one arm and not the other **fails**
   the gate as a wiring error; supplying it for neither prints an explicit `SKIP` — a
   probe that cannot run never passes silently.
-- The #1808 **exact rows** are gated beside them, on counts alone: the four RAM probes
+- The **exact rows** are gated beside them, on counts alone: the four RAM probes
   `edge_callback`, `edge_wire`, `link` and `vertex_value_1k` (`perf_gate.py`'s
   `RAM_POINTS`), the blocks per write, and the STREAM stripe-lock sections. Against main, no
   block or section count may grow at all and live bytes may not grow past the same +2%; a
-  row main emits that the candidate does not fails. #1713's claims are checked with no
-  baseline: a steady STREAM write, a spilling one and two or four concurrent writers each
+  row main emits that the candidate does not fails. The STREAM admission's claims are
+  checked with no baseline: a steady STREAM write, a spilling one and two or four concurrent writers each
   take **exactly one** stripe-lock section per write, the steady write takes nothing from the
   global heap, and a write whose spill is refused delivers nothing until the next write.
-  The `seamclass` rows
-  ([#1908](https://github.com/avatarsd-llc/libtracer/issues/1908)) ratchet the size classes
+  The `seamclass` rows ratchet the size classes
   each write selects on the host slab pool's table: blocks, requested bytes, class bytes and
   oversize blocks per write may not grow at all, and a write of up to a 64 KiB payload may
-  draw no oversize block: the last class holds that payload's segment, header and all (#1990).
+  draw no oversize block: the last class holds that payload's segment, header and all.
 - A per-vertex cost a **ratified clause already prices** is not a pullback, and the memory
   ratchet has one narrow way to say so: a **charged step** (`perf_gate.py`'s
   `MEM_CHARGED`), declared per probe, in bytes, naming the clause that charges it. A
@@ -831,11 +775,9 @@ of work per operation*.
   success, so a `publishes x fan-out` figure would report deliveries that never happened
   and nothing in the harness would contradict it.
 
-  The libtracer-only rows that audit deliberately left on the arithmetic — the
-  `inproc-target-*` pair and `inproc-remote`, which have no Zenoh row beside them — were
-  finished on the same terms
-  ([#1481](https://github.com/avatarsd-llc/libtracer/issues/1481)). `inproc-target-handler`
-  and `inproc-remote` count at their consumer like every other row. `inproc-target-stored`
+  The libtracer-only rows — the `inproc-target-*` pair and `inproc-remote`, which have no
+  Zenoh row beside them — are counted on the same terms. `inproc-target-handler` and
+  `inproc-remote` count at their consumer like every other row. `inproc-target-stored`
   has no consumer to count at — its delivery terminates in the target's last-known-value,
   and hanging a counting subscriber off each target to see it would add an edge per target
   to the topology being timed — so that one subtracts `graph_t::delivery_drops()` from the
@@ -851,27 +793,22 @@ of work per operation*.
   counterpart: value stored once, each op only delivers, matching put semantics. Both
   libtracer series are shown so the reader sees the full-work and the like-for-like
   number side by side.
-- **The topic-count rows must agree on how the destination is spelled** — and the
-  pre-existing `inproc-path` pair did **not**. libtracer's `inproc-path` row writes *by
-  address*, so a registry resolution sits inside every timed iteration; the Zenoh row of the
-  same name published through a **declared `Publisher`**, which is the bound form and resolves
-  nothing per put (until #1809 in the default sweep, and until
-  [#1910](https://github.com/avatarsd-llc/libtracer/issues/1910) in the published grid). A resolution term therefore sat inside one arm and nowhere in the other, and
-  any narrowing of the margin along that ladder could not be attributed to either engine's topic
-  scaling. The `topics-bound` / `topics-addr` pair (`bench/run_topics.sh`,
-  [#1485](https://github.com/avatarsd-llc/libtracer/issues/1485)) fixes
-  it by measuring **both** spellings on **both** engines over the same ladder — pre-bound
-  handle / declared publisher, and destination resolved inside the operation — so the resolution
-  term is visible as its own difference instead of hidden inside one arm. What is compared is
+- **The topic-count rows must agree on how the destination is spelled.** libtracer's
+  `inproc-path` row writes *by address*, so a registry resolution sits inside every timed
+  iteration; a Zenoh row that published through a **declared `Publisher`** — the bound form,
+  which resolves nothing per put — would put a resolution term inside one arm and nowhere in
+  the other, and any narrowing of the margin along that ladder could not be attributed to
+  either engine's topic scaling. The `topics-bound` / `topics-addr` pair
+  (`bench/run_topics.sh`) measures **both** spellings on **both** engines over the same
+  ladder — pre-bound handle / declared publisher, and destination resolved inside the
+  operation — so the resolution term is visible as its own difference instead of hidden
+  inside one arm. What is compared is
   per-operation *resolution*: the `path_t` on one side and the `KeyExpr` on the other are both
   pre-built, because charging one engine for a string parse the other hoisted is the same
-  mistake in the other direction. The completed two-sided run and what it does to the audit's
-  conclusion are in *Designated model boundaries* below; the short form is that bound against
-  bound both engines are near-flat, and the axis the audit reported as Zenoh's was the
-  unmatched pair.
-- **Each compared row is matched on four conditions**
-  ([#1809](https://github.com/avatarsd-llc/libtracer/issues/1809)), and every
-  libtracer-vs-Zenoh chart restates them:
+  mistake in the other direction. The two-sided result is in *Designated model boundaries*
+  below; the short form is that bound against bound both engines are near-flat.
+- **Each compared row is matched on four conditions**, and every libtracer-vs-Zenoh chart
+  restates them:
   - **One fresh process per engine and family.** Both harnesses run their default sweep as
     families, each in a new child process with pinned allocator tunables, and the Zenoh
     family opens its own session. No row inherits a heap or a session that an earlier family
@@ -882,19 +819,16 @@ of work per operation*.
   - **Equal payload bytes.** A libtracer write moves the value plus its 4-byte VALUE TLV
     header (6 bytes from 64 KiB), so a Zenoh put carries the same count. Rows stay keyed by
     the value's size.
-  - **Resolution against resolution.** Zenoh's `inproc-path` row now puts by key, resolved on
+  - **Resolution against resolution.** Zenoh's `inproc-path` row puts by key, resolved on
     every put, as libtracer's writes by path; the bound pair is `topics-bound`, which both
-    default sweeps now emit, so the topic-count charts below pair each spelling with its own.
-    The Zenoh `inproc-path` series changes meaning at that commit and steps with it.
-  - **The published grid too** ([#1910](https://github.com/avatarsd-llc/libtracer/issues/1910)).
-    The charts in chapter 4 come from each engine's `grid` mode, not from the families.
+    default sweeps emit, so the topic-count charts below pair each spelling with its own.
+  - **The published grid too.** The charts in chapter 4 come from each engine's `grid` mode, not from the families.
     Each engine runs its grid in one process under the same allocator tunables, so the
     shapes match. Both binaries narrow `grid`, `topics` and `topics-rev` to one logical
     CPU, as a single-threaded family does, and Zenoh's session starts after the pin, so
     its runtime threads inherit it. Zenoh's grid `inproc-path` rows put by key, resolved on
-    every put, so the topic-count charts draw both engines again, resolution against
-    resolution. Before #1910 the grid ran unpinned and Zenoh's grid rows used the declared
-    publisher, so those charts carried libtracer alone.
+    every put, so the topic-count charts draw both engines, resolution against
+    resolution.
 - **ACL is disabled in the comparison rows.** No subject resolver is installed, so
   the access gate is a single null check. The *cost of enforcement* is measured
   separately (the `acl-inherit` rows), never hidden inside the comparison.
@@ -902,15 +836,15 @@ of work per operation*.
   in a second process on **both** sides, with deliveries counted at the receiver rather
   than sends counted at the publisher — an engine whose publisher has no peer emits
   nothing to the wire at all, and a per-send rate multiplied by a composition width is
-  arithmetic, not a measurement. That bench now **exists** (`bench/run_compose.sh`): two
+  arithmetic, not a measurement. That bench **exists** (`bench/run_compose.sh`): two
   processes per engine over real loopback UDP, the composition width K swept on both
   sides, and every rate taken from the subscriber's own count over the subscriber's own
   clock. It carries two guards, and reports nothing unless both hold — the receiver emits
   no row at all when it observed no values, any malformed record, or fewer throughput
   datagrams than the sample floor the driver hands it, and a **wire-use audit** runs the
   publisher under `strace` and fails the point below a send-syscall floor (`COMPOSE_SEND_FLOOR`,
-  default 50), which is exactly the check whose absence let the withdrawn version report a
-  rate for an engine that had only ever emitted scouting beacons. What is still absent is
+  default 50), so an engine that has only emitted scouting beacons reports no rate. What is
+  absent is
   the **chart**: publishing this comparison is a claim, so it is a separate, reviewed step,
   and until it is taken the chapter states the gap rather than showing a number.
 - **Network latency is the surviving network comparison**, and it is fair: a
@@ -952,10 +886,8 @@ boundary has a **mitigable constant**, the mitigation is a measurement, and it i
 
 A boundary earns that name only from a measurement that **isolates** it, and the section is
 held to that standard in both directions. A number that moves for some other reason is not
-evidence for a wall, however convenient the shape of the curve — the first draft of
-boundary 1 argued from exactly such a curve and the isolating control arm refuted it. Where
-that has happened it is said outright below rather than quietly rewritten, because a
-boundaries section that only ever accumulates walls is an argument, not an instrument.
+evidence for a wall, however convenient the shape of the curve, and a boundary is stated
+only on the axis its isolating measurement shows it on.
 
 **1 · Every distinct address is resident state.** A vertex is not a name that a message
 happens to carry — it is an object that exists between writes. That is what pays for the
@@ -965,9 +897,8 @@ subtree, and for the per-vertex ACL. An engine that only *routes* keeps no such 
 so has nothing to scale in the number of addresses.
 
 **What residency costs is bytes.** That is the axis the trade is paid on, and it is
-measured rather than derived: the decomposition sweep
-([#1485](https://github.com/avatarsd-llc/libtracer/issues/1485) /
-[#1496](https://github.com/avatarsd-llc/libtracer/pull/1496)) reads **132 B of heap and
+measured rather than derived: the vertex-count decomposition sweep (`bench_scale_sweep`,
+`bench/run_scale_sweep.sh`) reads **132 B of heap and
 140 B of RSS per vertex** at 10⁶ vertices, converging from above as the upper tree's fixed
 cost amortizes, against a computed ~120 B floor — **+10 %** over the arithmetic. A million
 addresses is **132 MB of heap and 140 MB of RSS**. The **O(#addresses) residency is the
@@ -984,32 +915,17 @@ the axis on which "every distinct address is resident state" is a real constrain
 unambiguous.** Hold **one million vertices resident and touch exactly one**: a write costs
 **90 ns** — the same 90 ns it costs with a thousand resident. Resolving a single hot address
 moves 70 → 90 ns across three decades. Descent is population-independent outright
-(ADR-0057, now verified rather than assumed): a fixed-shape probe address resolves in
+(ADR-0057, verified by this sweep): a fixed-shape probe address resolves in
 **60 ns at 10³ and 60 ns at 10⁶** warm, and **90 ns flat** with its lines evicted between
 samples. Everything that grows, grows with the **touched** set, not the resident set.
 
-Read that refutation at exactly its own width. It kills the claim that residency is a
-**latency** wall — which is what the earlier draft of this section asserted, and it was
-wrong on its own evidence. It does **not** say the residency model is free: the bytes above
-are the cost, and they are real. A boundary can be genuine on one axis and absent on
-another, and saying which is which is the whole job of this section.
+Residency is therefore not a **latency** wall. It is not free either: the bytes above are
+the cost, and they are real. A boundary can be genuine on one axis and absent on another,
+and saying which is which is the whole job of this section.
 
-**The topic-count curve in the Zenoh chapter is not this boundary's evidence — and the
-completed comparison retires it.** The fairness audit
-([#1480](https://github.com/avatarsd-llc/libtracer/pull/1480)) went looking in both
-directions and reported exactly one axis where Zenoh was the better engine outright:
-**topic-count scaling**, Zenoh's p50 moving **220 → 230 ns (+5 %)** across 1 → 8192 topics
-against libtracer's **140 → 190 ns (+36 %)**, narrowing our margin from **1.57× to 1.21×**.
-Both rows were measured correctly and neither is withdrawn. They were **not the same
-operation**: the libtracer row (`inproc-path`) re-resolved the destination address inside
-every timed iteration, while `bench_zenoh` published through a declared `Publisher` and
-resolved nothing per put. A resolution term sat inside one arm and nowhere in the other, so
-the narrowing could not be attributed to either engine's topic scaling.
-
-The `topics-bound` / `topics-addr` pair
-([#1485](https://github.com/avatarsd-llc/libtracer/issues/1485), `bench/run_topics.sh`)
-measures **both** spellings on **both** engines over one ladder, and it is now a result
-rather than an instrument. 64 B payload, fan-1, deliveries counted at the subscriber,
+**Topic count is not this boundary's evidence.** The `topics-bound` / `topics-addr` pair
+(`bench/run_topics.sh`) measures **both** spellings on **both** engines over one ladder:
+64 B payload, fan-1, deliveries counted at the subscriber,
 best-of-5-rounds with both arm orders and both engine orders, **two independent ladders**
 agreeing to ≤ 2 % on every arm:
 
@@ -1022,28 +938,23 @@ agreeing to ≤ 2 % on every arm:
 
 Read **bound against bound** — the like-for-like pair, and each engine's own recommended
 spelling — libtracer moves **116 → 118 ns (+2 %)** and Zenoh **214 → 232 ns (+8 %)** across
-four decades of topic count, so the margin *widens* slightly, 1.84× → 1.97×. The audit's
-"+36 % against +5 %" was our resolve-per-operation arm charted against their bound one.
-Matched, **neither engine has a topic-count problem in the bound form**.
+four decades of topic count, so the margin *widens* slightly, 1.84× → 1.97×. Matched,
+**neither engine has a topic-count problem in the bound form**.
 
 Read **resolve against resolve**, the growth is on the other side and it is large.
 libtracer's per-operation `find()` descent moves **140 → 196 ns (+41 %)** over the same
-span — the audit's +36 %, reproduced at the shape that actually produces it. Zenoh's
-undeclared `Session::put` moves **332 ns → 226 µs**, and the completed run settles the
-"is that a different code path or a scaling curve" question #1485 left open, in the only
-sense that mattered: it is **a curve, and a linear one**. From 100 to 10 000 declared keys
+span. Zenoh's undeclared `Session::put` moves **332 ns → 226 µs**, and it is **a curve, and a
+linear one**. From 100 to 10 000 declared keys
 the log-log slope is **1.08** — O(N) within the instrument — with a marginal cost of about
 **12 ns** per additional declared key over the first decade and **23 ns** over the last two.
 It is of course reached by a different code path from `Publisher::put`; that is the arm's
 whole purpose. What it is not is an outlier, a congestion effect or a measurement artefact:
 inside that path the cost is exactly the linear match a declared publisher exists to hoist.
 
-So the honest statement of this axis, replacing the one above: **both engines are near-flat
-in the bound spelling and both degrade in the resolve-per-operation spelling — libtracer by
-41 % across four decades, Zenoh by a factor of about 680.** The mitigation is the same on
-both sides and both APIs already offer it: bind, or declare, once. There is no axis here on
-which Zenoh scales better in topic count. There was an axis on which our own bench spelled
-its destination worse than theirs did.
+So: **both engines are near-flat in the bound spelling and both degrade in the
+resolve-per-operation spelling — libtracer by 41 % across four decades, Zenoh by a factor of
+about 680.** The mitigation is the same on both sides and both APIs already offer it: bind,
+or declare, once. There is no axis here on which Zenoh scales better in topic count.
 
 Host, recorded with the numbers: 31 CPUs, no `cc1plus` alive at any 20-second sample of
 either ladder, 1-minute load 1.4–3.3 throughout except one ~60–90 s excursion per ladder
@@ -1051,28 +962,18 @@ either ladder, 1-minute load 1.4–3.3 throughout except one ~60–90 s excursio
 mitigation for one-sided contamination, and the two ladders' ≤ 2 % agreement on every arm is
 the evidence that it worked here.
 
-Two caveats on that decomposition, because it is fresh. Its arms are **not gated** — they
-are new and their run-to-run stability is unproven, and `POINTS` is a promise about
-stability.
+Two caveats on that decomposition. Its arms are **not gated** — their run-to-run stability
+is unmeasured, and `POINTS` is a promise about stability.
 
 And **the `topics-*` arms are not on the generated results page.** One ladder costs about
 nine minutes, almost all of it the Zenoh `topics-addr` rung at 10 000 keys, so wiring it
 into the documentation job would add roughly twenty minutes to every docs build to
 re-derive a result whose interesting content is structural. The table above is the output
-of a hand run. Since [#1809](https://github.com/avatarsd-llc/libtracer/issues/1809) both
-default sweeps also emit the pair (family `topics`), so the trend charts carry it on every
-recorded commit, one round and one arm order per commit; a verdict on the axis still comes
-from `run_topics.sh`. Those numbers supersede the preliminary single-round, single-engine
-Zenoh figures recorded on #1485, which were never quotable and are deliberately not
-reproduced here. The decomposition beside them was taken on a quiet box (1-minute load
+of a hand run. Both default sweeps also emit the pair (family `topics`), so the trend
+charts carry it on every recorded commit, one round and one arm order per commit; a verdict
+on the axis comes from `run_topics.sh`. The residency decomposition above was taken on a quiet box (1-minute load
 0.64–1.15, no `cc1plus` alive, 31 CPUs, best of 3 rounds with the arm order flipped on
 alternate rounds, two full ladders agreeing to ~2 % at 10⁶).
-
-One follow-up remains open and it is a ruling, not a redesign:
-[#1486](https://github.com/avatarsd-llc/libtracer/issues/1486), on memoizing
-`vertex_slot()`, whose reverse scan is exactly O(total vertices) — measured at 450 ns at
-10³ rising to **410 µs at 10⁶**, taken under a shared mutex on every binding mint. That is
-the number the ruling was blocked on; the ruling itself is #1486's to make.
 
 **2 · Paths are routes, not location-independent names.** A path is resolved from the
 vantage point of the graph doing the resolving; the same value can be reachable by
@@ -1113,17 +1014,16 @@ it has to price the move on the bench before the pin is allowed to move with it.
   and never a minimum of p99s), approximating the code's capability rather than the
   machine lottery. Sub-microsecond points sit on a
   ~10 ns timer grain — do not over-read a 5 ns wiggle.
-- **Tail percentiles are published, not gated — and here is the measurement that
-  decided it.** The deeper into a distribution a statistic reaches, the fewer samples
+- **Tail percentiles are published, not gated.** The deeper into a distribution a statistic reaches, the fewer samples
   stand behind it and the more it moves for reasons that are not the code. Running the
   *same binary* against itself and taking the worst ratio between repeats gives the
   floor any threshold on that leg would have to clear before it stopped firing on its
-  own noise. On the **in-process gated points** (18 runs, replayed through the gate's
-  then-current best-of-3 estimator, worst of 15 disjoint pairs — the numbers below are
+  own noise. On the **in-process gated points** (18 runs, replayed through a best-of-3
+  estimator, worst of 15 disjoint pairs — the numbers below are
   a property of the *machine*, not of the estimator, so the interleaved gate inherits
   them unchanged):
 
-  | leg | worst same-binary ratio | threshold it would need | gated today |
+  | leg | worst same-binary ratio | threshold it would need | gated |
   | --- | ---: | ---: | --- |
   | p50 | 1.16× | +16 % | yes, at +15 % |
   | mean | 1.22× | +22 % | yes, at +12 % |
@@ -1156,9 +1056,7 @@ it has to price the move on the bench before the pin is allowed to move with it.
   (p50, mean) and a bulk timer (deliveries/s) — and a change in what the operation costs
   moves both. When only the bulk timer moves and both latency legs come back
   flat-or-better, the two instruments contradict each other, and the gate reports the
-  contradiction rather than failing on it. This is not hypothetical: one PR that touched
-  only L4 was failed at −33 % throughput on an L0 rope-walk point it has no call path to,
-  with p50 identical and the mean *better*. The guard is deliberately narrow — any
+  contradiction rather than failing on it. The guard is deliberately narrow — any
   upward move in either latency leg, of any size, leaves the failure standing.
 - **Sign conventions in the history store.** The latency suite is
   smaller-is-better nanoseconds; throughput also appears there **inverted** as
@@ -1187,12 +1085,10 @@ it has to price the move on the bench before the pin is allowed to move with it.
   therefore rejects a dirty round, while the median merely counts them, and the median
   flips as soon as half the rounds are dirty — which is why an ad-hoc driver
   estimates best-of-N. **The per-PR gate does not:** it runs the two binaries in
-  interleaved pairs and compares **medians**, and fails only when the medians breach the
-  threshold, the two arms' `[min..max]` ranges are disjoint, and a majority of pairs
-  breach on their own (`perf_gate.py` `paired_verdict`); best-of-N survives only in its
-  legacy mode (a recorded `perf_baseline.json`, no baseline build). Measured on the pinned host with one
-  binary against itself
-  ([#1358](https://github.com/avatarsd-llc/libtracer/issues/1358)): in a window where a
+  interleaved pairs and judges the **median of the per-pair ratios** with a bootstrap
+  interval, as *What actually stops a regression* sets out; best-of-N survives only in its
+  local mode (a recorded `perf_baseline.json`, no baseline build). Measured on the pinned
+  host with one binary against itself: in a window where a
   neighbouring job got busy, median-of-rounds put `fwd-rope-hop` at **−33 % … +54 %**
   while best-of-rounds on the very same samples stayed inside **1.44 %**; quiet, both
   estimators agree inside **±0.5 %**. The `[min..max]` range is what tells the two
@@ -1213,16 +1109,15 @@ it has to price the move on the bench before the pin is allowed to move with it.
   a sample — it answers what the machine was doing, not what the code cost — so it
   neither sets the baseline nor counts as coverage. And coverage is itself guaranteed:
   a run that never happens (filtered out, failed, or cancelled while queued) leaves a
-  hole nothing notices, which is how one +41 % step became a **16-merge range** instead
-  of a commit ([#1173](https://github.com/avatarsd-llc/libtracer/issues/1173)). A daily
+  hole nothing notices, and a step inside the hole widens from a commit into a range of
+  merges. A daily
   catch-up measures HEAD whenever the last trusted point is more than 8 bench-relevant
   merges behind `main`, so the guarantee is a **bound on the gap** — narrow enough to
   bisect — rather than a point per commit.
 - **A banked series is a TREND instrument; the paired same-runner A/B is the gate.** The
   two stores answer "where has this point been going" across machines and months. They do
   not answer "did this commit cost anything", and reading them as if they did produces
-  verdicts the code never earned. A textbook case, both halves measured on the same day:
-  the rolling drift check on the banked series warned that `inproc 64B/fan1/1ep` p50 had
+  verdicts the code never earned. For example, the rolling drift check on the banked series warned that `inproc 64B/fan1/1ep` p50 had
   gone to **400 ns against a 100 ns baseline (+300%)**, while the interleaved same-runner
   A/B on the **identical commit** read **1.02×**. Nothing regressed — the banked baseline
   and the banked point were taken on different machines under different load, and the
@@ -1236,18 +1131,10 @@ it has to price the move on the bench before the pin is allowed to move with it.
   gated point read **3.6 M deliveries/s while CI was building on the box and 6.0 M/s
   quiet — 1.6×**, no code between the two. Every absolute here therefore names the machine
   and the conditions it was taken under, and a figure that arrives without them is
-  unusable rather than merely imprecise. The worked example is
-  [#1495](https://github.com/avatarsd-llc/libtracer/issues/1495), **now corrected**: RFC-0025
-  §4.6.2's evidence appendix stated its figures as bare cross-machine absolutes, and unmodified
-  `main` missed two of them by **1.40× and 1.71×** purely because nobody recorded which host they
-  were cut on. The **2026-08-24 erratum** to
+  unusable rather than merely imprecise. The same rule governs evidence in the spec:
   [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
-  restates that section as portable premiums and ratios and demotes the absolutes to a
-  host-stamped basis — the same move this bullet asks for, applied to the document that most
-  needed it. Note what the defect was *not*: §4.6.2 is informative, so those numbers were never
-  normative caps, and the "53–55 ns" / "82–84 ns" figures quoted against them were **derived
-  downstream**, never stated by the RFC. Where this page mentions them it links the erratum; it
-  does not report them as met.
+  §4.6.2 states its figures as portable premiums and ratios on a host-stamped basis, is
+  informative, and sets no normative cap.
 - **Record the load context on both sides of every measurement, and wait for
   quiescence first.** `python3 bench/host_guard.py wait` before the run and
   `/proc/loadavg` either side of it: an absolute figure without its load context cannot
@@ -1264,8 +1151,8 @@ it has to price the move on the bench before the pin is allowed to move with it.
   picks the batch by comparing two timed quantities therefore lets the machine choose
   the answer, discretely — `bench_common.hpp`'s `calibrate_batch_for_window` doubles
   until the *window* reaches 20 µs instead, so the batch follows the operation's own
-  cost and repeats across executions. Every batch row now times through one loop
-  (`time_batches`, [#1804](https://github.com/avatarsd-llc/libtracer/issues/1804)): every
+  cost and repeats across executions. Every batch row times through one loop
+  (`time_batches`): every
   window is **asserted** to be at least 20 µs, each per-op figure is kept in picoseconds
   rather than integer-divided to whole nanoseconds, and no batch row publishes a p99. Each
   run records the host's **clock floor** — the clock's resolution and the measured cost of
@@ -1275,13 +1162,10 @@ it has to price the move on the bench before the pin is allowed to move with it.
 That attribution is only sound if **nothing else** differed. Two things that look
 harmless routinely do.
 
-**Build directory: harmless, and now measured.** A cross-worktree A/B — build
-`origin/main` in one worktree, the change in another, interleave — was suspected
-(#807, from PR #806) of measuring *code layout* rather than code: identical
-`origin/main` source built at two paths appeared to differ by **+1.7 % (65589 B
-frames) to +6.7 % (53 B frames)** on `bench_terminus_tier`'s `terminus-arena` leg
-over 12 interleaved rounds, with disjoint ranges. That cause is **refuted**. Building
-the same commit at two paths of different lengths produces, on this toolchain,
+**Build directory: harmless, and measured.** A cross-worktree A/B — build
+`origin/main` in one worktree, the change in another, interleave — does not measure
+*code layout* instead of code. Building the same commit at two paths of different
+lengths produces, on this toolchain,
 **byte-identical output**: all 27 `libtracer` object files, `libtracer.a`, and the
 `bench_terminus_tier` executable `cmp` equal (one md5 for both arms). There is no
 layout to be sensitive to, so no layout lever is warranted, and none ships —
@@ -1315,8 +1199,8 @@ So the rules for any latency A/B, on this leg or any other:
 4. Prefer **same-directory A/B** (`git stash`, rebuild, re-run in one session) when it
    is available; it varies strictly less than a two-worktree run.
 5. When the expected effect is **smaller than the leg's own noise floor**, do not
-   reach for a stopwatch at all — use **object-file `cmp`** against the baseline tree
-   (the method PR #799/#806 established). A change that leaves 25 of 27 objects
+   reach for a stopwatch at all — use **object-file `cmp`** against the baseline tree.
+   A change that leaves 25 of 27 objects
    byte-identical has proved more about the unchanged paths than any bench can.
 
 The stack-offset hypothesis was also tested and is negative: sweeping the environment
