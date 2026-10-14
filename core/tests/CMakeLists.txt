@@ -2191,6 +2191,19 @@ if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_W
     add_test(NAME transport_conformance COMMAND transport_conformance_test)
 endif()
 
+if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+    # #2139 — the shared link case suite (partial frame, several frames per read, oversize
+    # length, fragmented message, stalled peer, peer leaving mid-send), written against the
+    # router's receive and send seams only, over the socket-free fake link adapter and the
+    # real dialled tcp / ws links. The test surface for the frame-ingress and egress modules
+    # (ADR-0087 §7).
+    add_executable(link_seam_test link_seam_test.cpp)
+    target_link_libraries(link_seam_test PRIVATE libtracer)
+    libtracer_test_warnings(link_seam_test)
+    add_test(NAME link_seam COMMAND link_seam_test)
+    set_tests_properties(link_seam PROPERTIES TIMEOUT 120)
+endif()
+
 if(LIBTRACER_TRANSPORT_WS)
     # #54 (interop) — standalone ws_server_transport_t harness driven by the TypeScript
     # transport-ws interop test (a real TS TransportWs client over a live socket).
