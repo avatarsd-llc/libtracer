@@ -384,7 +384,7 @@
           "_ZN2tr3net15httpd_ws_link_t10queue_sendERKNS1_13session_ref_tESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net15httpd_ws_link_t10queue_sendERKNS1_13session_ref_tESt4spanIKS5_IKSt4byteLj4294967295EELj4294967295EE": 1},
           "_ZN2tr3net15httpd_ws_link_t10ws_handlerEP9httpd_req": {"via _ZN2tr3net15httpd_ws_link_t12flush_egressEv": 1, "via _ZN2tr3net15httpd_ws_link_t13on_data_frameEP9httpd_req": 1},
           "_ZN2tr3net15httpd_ws_link_t11finish_wireEPNS1_9session_tEi": {"via _ZN2tr3net15httpd_ws_link_t13release_frameERNS1_10tx_frame_tE": 1},
-          "_ZN2tr3net15httpd_ws_link_t11set_auth_cbEPFNS1_13auth_result_tEPvSt4spanIKSt4byteLj4294967295EEES3_": {"via _ZN2tr3net15httpd_ws_link_t16auth_timer_firedEPv": 2},
+          "_ZN2tr3net15httpd_ws_link_t11set_auth_cbEPFNS1_13auth_result_tEPviSt4spanIKSt4byteLj4294967295EEES3_": {"via _ZN2tr3net15httpd_ws_link_t16auth_timer_firedEPv": 2},
           "_ZN2tr3net15httpd_ws_link_t12flush_egressEv": {"via _ZN2tr3net15httpd_ws_link_t10flush_peerEPNS1_9session_tE": 1},
           "_ZN2tr3net15httpd_ws_link_t12reclaim_slotEPNS1_9session_tERNS0_13peer_handle_tE": {"via _ZN2tr3net15httpd_ws_link_t13release_frameERNS1_10tx_frame_tE": 2},
           "_ZN2tr3net15httpd_ws_link_t12refusal_workEPv": {"via _ZN2tr3net15httpd_ws_link_t15refuse_upgradedEi": 1},
