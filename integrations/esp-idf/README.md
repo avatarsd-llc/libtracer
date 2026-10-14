@@ -113,6 +113,27 @@ The footprint is **tracked, never gated**: [`tools/esp_size_gate.py`](../../tool
 
 Steady-state heap is what you configure: the full_node example runs its RX segments and router tables out of a **24 KiB static slab** (12 KiB pool → 7 × 1536 B datagram slots + 12 KiB pmr arena); each live socket transport additionally owns one recv thread (stack below).
 
+## Recommended sdkconfig
+
+These lines are the component's recommended IDF configuration for any node that moves libtracer traffic over lwIP. They set options of other IDF components, so the libtracer component cannot set them itself: copy them into your project's `sdkconfig.defaults`. The networked examples (`full_node`, `concepts/one_link`) carry them.
+
+```ini
+# lwIP core locking (#2131): a socket call takes the lwIP core mutex in the calling task
+# instead of a message round trip to the tcpip task.
+CONFIG_LWIP_TCPIP_CORE_LOCKING=y
+CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y
+```
+
+**Why core locking.** IDF ships `CONFIG_LWIP_TCPIP_CORE_LOCKING=n`. With it off, every lwIP socket call from a task (`recv`, `send`, `sendto`) posts a message to `tcpip_thread` and blocks on a semaphore until that task has run it: 2 task switches, 1 mailbox post and 1 semaphore pair per call. With it on, the call takes the core mutex and runs in the calling task. `_INPUT` makes the netif input path (the Wi-Fi or Ethernet driver task) take the same mutex instead of posting each received packet to `tcpip_thread`. The counts below are estimates from reading the code paths, not silicon measurements:
+
+| path, per frame | switches, locking off | switches, locking on |
+| --- | --- | --- |
+| `httpd_ws_link_t` inbound frame (4 `lwip_recv`: 3 for the header and mask, 1 for the payload, plus the `select` wake) | about 9 | about 1 (the `select` wake) |
+| `httpd_ws_link_t` frame queued from another task, per peer (`httpd_queue_work` control `sendto`, then 2 `lwip_send`) | 7 to 8 | about 1 to 2 |
+| `esp_ws_client_link_t` (dialer), each way (2 transport reads or writes) | 4 | about 2 |
+
+The number of socket calls does not change; each one becomes an uncontended mutex pair in place of a cross-task round trip. The cost is that the core mutex is now shared by the httpd task, the driver input path and the application's socket tasks. FreeRTOS mutexes have priority inheritance, so a low-priority task holding it is boosted rather than starving the input path. The latency at 64 B, 1 KiB and 4 KiB and the switch count per frame on silicon have not been measured yet: that run is part of the next hardware bench batch.
+
 ## Configuration
 
 The component exposes libtracer's build-time knobs through **Kconfig** (`idf.py menuconfig` → *libtracer*, or set them in `sdkconfig` / `sdkconfig.defaults` like any IDF option):

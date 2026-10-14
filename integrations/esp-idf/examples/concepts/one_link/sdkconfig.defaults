@@ -4,3 +4,10 @@
 # One UDP link: the UDP transport stays in, the other two are left out.
 CONFIG_LIBTRACER_TRANSPORT_TCP=n
 CONFIG_LIBTRACER_TRANSPORT_WS=n
+
+# lwIP core locking, the component's recommended sdkconfig (README "Recommended sdkconfig",
+# #2131): a socket call takes the lwIP core mutex in the calling task instead of a round trip
+# to the tcpip task, about 8 fewer task switches per inbound WebSocket frame [est]. The
+# options belong to the lwip component, so the app sets them; they are ignored on `linux`.
+CONFIG_LWIP_TCPIP_CORE_LOCKING=y
+CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y
