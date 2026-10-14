@@ -51,10 +51,15 @@ Native-window hold ([ADR-0081](0081-pre-sink-ingress-native-window-hold-or-named
 
 ### 2. Egress is one shared refcounted frame, queued per peer by reference (Q5, Q6)
 
-**A send builds its frame once, in one refcounted block, and every peer it reaches holds a reference.** [PR #2130](https://github.com/avatarsd-llc/libtracer/pull/2130) (one shared refcounted WS TX frame per send) is the C6 instance. What a peer holds while its socket is busy follows the vertex's retention (Q5):
+**A send builds its frame once, in one refcounted block, and every peer it reaches holds a reference.** [PR #2130](https://github.com/avatarsd-llc/libtracer/pull/2130) (one shared refcounted WS TX frame per send) is the C6 instance.
 
-- a last-value vertex (retention `LAST`, the ruling's SAMPLE class) gets a **latest-wins slot**: one reference, and a newer frame replaces an unsent one;
-- a STREAM vertex gets a **ring of references whose depth is the vertex depth**, so the per-peer queue is bounded by what the owner already declared.
+**SAMPLE and STREAM are one mechanism** (Q5): one ring; depth 1 = SAMPLE (overwrite), depth N = STREAM. Each peer's egress queue is a ring of references to shared frames, and its depth is the vertex's own depth. Nothing else picks its shape.
+
+- **Depth 1 is a SAMPLE.** The copy policy overwrites the one slot in place, so the latest frame wins. It is the degenerate ring, not a separate slot type.
+- **Depth N is a STREAM.** A full ring follows the receiving vertex's own declared pressure arm ([RFC-0025](../spec/rfcs/0025-stream-class-values.md) §4.4).
+- **A BATCH is a value the application composes**, so it takes one ring entry, like any other write. IMMEDIATE behaves as STREAM here.
+
+**The egress path never reads the `delivery_class` bits.** This agrees with RFC-0025 §4.1 as the 2026-08-24 selector erratum left it. The class is honoured by the role of the vertex on each side of the edge and by the receiving vertex's pressure arm, never by a bit read in the fan-out loop. Removing the `delivery_class` wire bits themselves would be a separate RFC-0025 amendment, outside this ADR.
 
 **The producer writes, elected by try-lock** (Q6). A sender that wins `try_lock` on the socket writes directly. A sender that loses enqueues its reference and returns. The holder re-checks the queue after unlocking (the store-buffering pattern: a `seq_cst` fence on both sides, so at least one side sees the other and nothing is stranded). This deletes the `tx_handoff_t` admit/next lock pair. It keeps the rule that a producer never queues behind a stalled writer.
 
