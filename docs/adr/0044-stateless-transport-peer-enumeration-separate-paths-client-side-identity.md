@@ -1,8 +1,8 @@
 # Transport-peer enumeration is stateless and synthesized from live traffic; separate paths stay separate paths; matching device identities across paths is client-side logic, never core
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: ADR-0087 -->
 
-Status: accepted (maintainer-ratified 2026-07-03, migration design grilling for the originating production firmware — an ESP32-C6 smart-agriculture node). Extends [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) (explicit-source-routed only) to the discovery/enumeration question; builds on [ADR-0027](0027-transport-and-connections-are-vertices.md) (path-as-route) and [ADR-0030](0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) (in-transport advertise map). Companion to [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) and [ADR-0046](0046-bulk-transfer-is-ordinary-auth-gated-writes.md) — the three ADRs of the origin-firmware network-rulings set. **Amended 2026-08-13: §Decision 1's "no vertices for peers" is NARROWED to *announce-census* peers — an ACCEPTED ws/tcp session on a `slot_server_t` listener MAY be an ordinary vertex (see [§Amendment](#amendment-2026-08-13-decision-1-is-scoped-to-announce-census-peers-1223)).**
+Status: accepted (maintainer-ratified 2026-07-03, migration design grilling for the originating production firmware — an ESP32-C6 smart-agriculture node). Extends [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) (explicit-source-routed only) to the discovery/enumeration question; builds on [ADR-0027](0027-transport-and-connections-are-vertices.md) (path-as-route) and [ADR-0030](0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) (in-transport advertise map). Companion to [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) and [ADR-0046](0046-bulk-transfer-is-ordinary-auth-gated-writes.md) — the three ADRs of the origin-firmware network-rulings set. **Amended 2026-08-13: §Decision 1's "no vertices for peers" is NARROWED to *announce-census* peers — an ACCEPTED ws/tcp session on a `slot_server_t` listener MAY be an ordinary vertex (see [§Amendment](#amendment-2026-08-13-decision-1-is-scoped-to-announce-census-peers-1223)).** **Amended 2026-10-14 by [ADR-0087](#amendment-2026-10-14-the-per-peer-stand-in-is-deleted-and-can-peers-are-evicted-adr-0087)**: `peer_endpoint_t` is replaced by a peer record with a generation, and CAN peer entries are evicted.
 
 ## Context
 
@@ -82,3 +82,16 @@ RAM is measured, not estimated: `bench/bench_forward_heap.cpp` reports `vertex a
 - §Decisions 2, 3 and 4 are untouched. So is §Decision 1's substance for buses, and so is the synthesized-`:children[]` model: a bus vertex still stores no census and still answers from live traffic.
 - **CAN is explicitly out of scope.** It has no closure event by design (RFC-0009 §D.5 — connectionless kinds "have no closure event and honestly never fire it"), and `peer_ttl` is a *silence* signal, not a death signal; firing eviction on it would evict live-but-quiet subscribers. CAN's stale-edge problem needs its own answer.
 - The realization is [#1223](https://github.com/avatarsd-llc/libtracer/issues/1223)'s five-step work order (peer vertices on `slot_server_t`; the RFC-0024 §7.1 reverse mint; producer-side validation; retired-peer-vertex eviction). This amendment is step 1 and changes no behaviour on its own.
+
+## Amendment (2026-10-14): the per-peer stand-in is deleted, and CAN peers are evicted ([ADR-0087](0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md))
+
+*(Maintainer-ratified 2026-10-14, peer-path grill Q8, Q9, Q10 and Q15; recorded in [ADR-0087](0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md) §5 and §6.)* §Decisions 1–4 and the 2026-08-13 amendment are unchanged. Two parts of §Implementation status are replaced.
+
+**1. The forwarding bullet's "directed per-peer endpoint" is no longer a `transport_t`.** `bus_link_t::peer_link` returned a `peer_endpoint_t`, a whole `transport_t` (vtable, two receiver slots, egress source: **120 B on x86, 44 B on the C6**, by `sizeof`) built for every tcp/ws session and every CAN peer only to act as a directed facade. It is deleted. Each peer has **one peer record**, which holds its strings as spans from the link's source, is freed when the peer leaves, and **is the peer's address, with a generation counter**. A directed send goes through the owning link with that record, and a send carrying a stale generation is refused. The record is link state; it adds no vertex and no stored census, so §Decision 1 holds.
+
+**2. The CAN last-heard table is no longer insert-only and no longer reads a clock.** The bullet above describes entries that "expire by silence (`peer_ttl`)" in a table that is "insert-only, one entry per distinct node id ever heard". In the shipped code nothing erases an entry, so the table grows with every node id ever heard (128 B per peer on x86, 56 B on the C6, by `sizeof`), and `last_heard` is a `steady_clock` read that the no-timers rule removes. Instead:
+
+- a CAN peer record is **evicted on link events** (link down, teardown) **and by an application sweep that takes `now`**, so the application decides what silence means;
+- **a compile-time cap bounds the table, and a full table refuses newcomers**; it never evicts a known peer to make room.
+
+The 2026-08-13 amendment's caution still holds: silence is not death, so the sweep is the application's call, never the link's.

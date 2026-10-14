@@ -1,8 +1,8 @@
 # The host transport is a separate translation unit with a shared-nothing epoll model
 
-<!-- status: accepted -->
+<!-- status: accepted; superseded-in-part-by: ADR-0087 -->
 
-Status: **accepted (design); not implemented.** Records two decisions that were previously unrecorded: *why the shipped TCP server multiplexes on one `poll()` thread* (a choice that has lived only as a code comment citing [#362](https://github.com/avatarsd-llc/libtracer/issues/362)), and *what a many-core host does instead*. Binds through [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)'s build-time module sets; upholds [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md) (allocation reports failure by value). **Bounded by its own erratum: the prerequisite bench now measures the threshold — limits 2 and 3 bind above ~4 000 concurrent peers, and below that width this decision is not yet paid for. See §Consequences.**
+Status: **accepted (design); not implemented.** Records two decisions that were previously unrecorded: *why the shipped TCP server multiplexes on one `poll()` thread* (a choice that has lived only as a code comment citing [#362](https://github.com/avatarsd-llc/libtracer/issues/362)), and *what a many-core host does instead*. Binds through [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)'s build-time module sets; upholds [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md) (allocation reports failure by value). **Bounded by its own erratum: the prerequisite bench now measures the threshold — limits 2 and 3 bind above ~4 000 concurrent peers, and below that width this decision is not yet paid for. See §Consequences.** **Amended 2026-10-14 by [ADR-0087](#amendment-2026-10-14-the-unit-that-waits-is-the-node-not-the-link-adr-0087)**: the unit that waits on sockets is one wait module per node.
 
 ## Context
 
@@ -85,3 +85,25 @@ Related: `p999` is not a reportable statistic on this project's harness at any s
 - **Stay single-threaded; only replace `poll()` with `epoll` and drop the per-pass rebuild.** Rejected as the decision, kept as the fallback. It removes limits 2 and 3 and leaves the core cap — which is acceptable if per-peer frame rate, rather than peer count or core count, turns out to be what binds. If the prerequisite peer-scaling bench shows the single thread is not the limit, this becomes the right answer and this ADR should be revisited.
 
 - **`io_uring` now.** Deferred, not rejected. It is the only measured lever on the 96 % syscall term — the goal being **syscalls per frame below 1.0**, via batched submission and registered buffers. It is also the largest change to buffer ownership and the most kernel-version-sensitive. The shared-nothing model above is a prerequisite shape for it rather than an obstacle.
+
+## Amendment (2026-10-14): the unit that waits is the node, not the link ([ADR-0087](0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md))
+
+*(Maintainer-ratified 2026-10-14, peer-path grill Q7 and Q14; recorded in [ADR-0087](0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md) §3.)* The body above stays as the record.
+
+**What changes.** This ADR made the server transport the unit of I/O waiting and left every dialer and UDP link on its own thread. **Each node now has one wait module that owns every socket wait on the node**: server sessions, dialers and UDP links. Links own no threads. The module has one adapter per target: an `epoll` set on the WIDE host, lwIP callbacks that only enqueue and ring one doorbell to the app's task on MID, and the same callbacks polled by the app's loop under lwIP `NO_SYS=1` on NARROW. Graph code never runs in the tcpip task. The wait has no timeout; shutdown wakes it.
+
+**Why.** Counts from the 2026-10 peer-cost study:
+
+| | WIDE x86 (measured) | MID C6 ([est], from code) |
+| --- | --- | --- |
+| threads, 32 dialers / 32 UDP peers | 33 / 64 | one 12 288 B task per client link, two per self-heal connection |
+| idle wakeups (the 100 ms receive and poll timeouts) | 351/s at 32 TCP dialers, 748/s at 32 UDP peers | 5/s per WS client link (200 ms poll) |
+| task switches per inbound WS frame | 1 voluntary per paced frame | about 9 with `LWIP_TCPIP_CORE_LOCKING=n` |
+
+**What stands.**
+
+- Selection by translation unit, never an in-source `#ifdef`: each wait-module adapter is its target's TU.
+- The two-implementations consequence: every adapter runs the same conformance assertions, through the one fake link adapter ADR-0087 §7 adds.
+- `io_uring` stays reachable, as the WIDE adapter's later form.
+- **The `SO_REUSEPORT` shared-nothing split stays the deferred scale-out above about 4 000 concurrent peers**, as this ADR's erratum bounded it. Read under ADR-0087, that split is one wait-module instance per thread over its share of sockets. Whether a node may run more than one instance is not ruled here.
+- The asio rejection stands unchanged.

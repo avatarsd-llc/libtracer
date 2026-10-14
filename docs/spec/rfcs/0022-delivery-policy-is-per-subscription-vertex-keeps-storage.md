@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0022 |
 | **Title** | Delivery policy is per-subscription; `settings_t` dissolves |
-| **Status** | **accepted** — maintainer ruling 2026-08-01; comment window waived by sole maintainer per [GOVERNANCE](../../../.github/GOVERNANCE.md) §Errata, amendments, and the comment window. **Amendment 1** (2026-08-01, below) replaced §3.B–§3.D before any implementation landed; **Amendment 2** (2026-08-02, below — accepted) answers §6's measurement demand, fixes `kPinPayloadRatio`'s shipped default at the sentinel, and renames the owner-side knob. To be implemented and tested **before v0.7.0**. **Amended by [RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md)** (accepted 2026-10-07): bit 8 assigned. |
+| **Status** | **accepted** — maintainer ruling 2026-08-01; comment window waived by sole maintainer per [GOVERNANCE](../../../.github/GOVERNANCE.md) §Errata, amendments, and the comment window. **Amendment 1** (2026-08-01, below) replaced §3.B–§3.D before any implementation landed; **Amendment 2** (2026-08-02, below — accepted) answers §6's measurement demand, fixes `kPinPayloadRatio`'s shipped default at the sentinel, and renames the owner-side knob. To be implemented and tested **before v0.7.0**. **Amended by [RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md)** (accepted 2026-10-07): bit 8 assigned. **Amendment 3** (2026-10-14, below — accepted) makes the copy-or-share decision a compile-time backend trait plus a per-vertex `SHARE` / `COPY` / default hint; no wire change. |
 | **Amends** | [RFC-0004](0004-remote-operation-addressing.md) §E (delivery/fanout), [RFC-0010](0010-owner-app-fields-and-schema.md) §B.2 (the synthesized `:schema` protocol part), §A.4 (the `:settings` read container) |
 | **Supersedes** | [#617](https://github.com/avatarsd-llc/libtracer/issues/617) (intern the QoS profile) — the struct it proposed to intern ceases to exist |
 | **Dissolves** | [#706](https://github.com/avatarsd-llc/libtracer/issues/706) (`:schema` under-reports knobs) — there is nothing left to under-report |
@@ -211,3 +211,36 @@ A future proposal that wants pinning on by default starts from an **absolute-siz
 every measured arm resolved single-link) and re-run the C6 half against a true untouched-main
 control image. The out-of-scope retention hazard recorded in §6 was observed in the pool traces
 exactly as predicted and remains tracked separately.
+
+## Amendment 3 — 2026-10-14: copy-or-share is a backend trait, plus a per-vertex hint
+
+**Status: accepted** (maintainer ruling 2026-10-14, peer-path grill Q3 and Q13). The comment window is waived by default per [GOVERNANCE](../../../.github/GOVERNANCE.md) §Errata, amendments, and the comment window, and was not invoked. It is an **amendment**, not an erratum: it changes what the reference implementation does at the store decision. The design context is [ADR-0087](../../adr/0087-the-peer-path-is-one-frame-ingress-one-shared-egress-frame-one-wait-module-per-node.md) (the peer path). It also amends [RFC-0028](0028-lean-value-path.md) §4.3 and §5.3, where the size threshold that replaced §3.D's ratio now lives.
+
+**What changes.**
+
+1. **The threshold becomes a trait of the backend, chosen at compile time** (Q3). `config_t::kShareThresholdBytes` (a per-target byte count: 4 096 on the host, `SIZE_MAX`, copy always, on ESP-IDF) is deleted. The block source the build composes answers the question instead:
+   - **static arena: always share;**
+   - **slab pool: share on an exact class fit**, that is, when the received block is in the size class a copy of the value would draw, and copy otherwise.
+2. **A vertex may declare a hint: `SHARE`, `COPY` or default** (Q13). The hint replaces RFC-0028 §5.3's per-vertex `share_threshold_bytes`. Default follows the backend trait. `SHARE` shares whenever the value sits in a shareable block. `COPY` always copies; it is the owner's lever for a long-lived value that would otherwise hold a receive block (the retention hazard recorded in §6 and Amendment 2). Like the rest of the owner-side storage declaration (§3.C), the hint is set host-side and has **no wire surface**. It is a declaration, not a number, on the pattern of the `RETAINED` hint of [#1610](https://github.com/avatarsd-llc/libtracer/issues/1610) (mark subscription-retained allocations apart from transient ones): the owner states what the value is for, and the build decides what that costs.
+3. **Bytes the backend does not own never share.** A borrowed span, or on MID an lwIP `pbuf` (a Wi-Fi receive buffer), is copied when the value is stored, whatever the hint (ADR-0087 §1).
+
+**Why.** Amendment 2 measured the knee at about 4 KiB against fixed-size pooled receive slots, and it noted that on UDP every datagram landed in a 64 KiB segment. ADR-0087 §1 changes that premise: frame ingress now draws every receive block from the link's own source at the frame's exact length. Under that rule:
+
+| | WIDE x86 slab (measured today) | MID C6 arena |
+| --- | --- | --- |
+| LKV copies per inbound frame, 64 B / 1 KiB / 4 KiB | 68 B / 1 028 B / 0 (shared) | always (copy-always build) |
+| extra bytes a shared value holds beyond a copy | 0 on an exact class fit, by construction | the frame header plus the 20 B `segment_t` header [est] |
+| what the copy costs | one `memcpy` and one more block | one `memcpy` and a second block from the same 32 KiB arena that also holds every per-peer byte |
+
+The byte threshold existed to bound what a shared value holds beyond its payload. Once the receive block is exact, the backend can answer that from its own size classes. **§7 alternative 6 is therefore revisited, not reversed.** It rejected asking an allocator about frame economics. The question now put to the backend is a narrower one about its own classes: would a copy draw a block no smaller than the one already held? The placement module of [ADR-0083](../../adr/0083-one-allocation-seam.md) already owns that answer.
+
+**Conformance vector 8 is replaced:** `store/share-hint`. A `COPY` vertex stores a copy; a `SHARE` vertex stores a reference to its receive block; a default vertex follows the backend trait (arena: shared; slab: shared on an exact class fit, copied otherwise). The vector is observable only through the host API.
+
+**Wire surface: unchanged.** No frame shape, TLV, type code, error, `:settings` key or `:schema` entry is added or altered. Every frame valid before is valid after, byte for byte.
+
+**`docs/spec/v1.md` §3 check: no annex changes.** The incorporated annexes are [01-data-format](../../reference/01-data-format.md), [03-addressing](../../reference/03-addressing.md), [05-protocol-tlvs](../../reference/05-protocol-tlvs.md) and [23-noise-link-binding](../../reference/23-noise-link-binding.md). None of them describes the store decision, so none changes, and `v1.md` is untouched. The non-normative [02-graph-model](../../reference/02-graph-model.md) describes the shipped byte threshold and changes with the implementing PR.
+
+**Open.** Two questions are left to the implementing ticket:
+
+- The ruling names the arena and the slab pool. What the heap-rooted build (`kArenaBytes = 0`) defaults to is not ruled.
+- [RFC-0028](0028-lean-value-path.md) §6.9's `kRxLoanBytes` reserve was keyed on the deleted threshold, so what now triggers it is not ruled. Read literally, an always-share arena would reserve 32 B on every MID receive block [est].
