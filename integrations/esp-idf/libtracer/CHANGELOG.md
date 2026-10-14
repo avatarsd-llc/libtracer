@@ -10,6 +10,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`esp_ws_client_link_t` holds nothing connection-sized while it is not connected
+  ([#1606](https://github.com/avatarsd-llc/libtracer/issues/1606)).** The read scratch
+  (`rx_bytes`, from `memory.state`) and the write scratch (`tx_bytes`, from `memory.io`) are
+  drawn when a handshake lands and returned, with the transport pair, when that connection
+  goes down. A store that refuses one is now backpressure: the fresh connection is closed and
+  the attempt counts as a failed dial, where it used to abort the constructor (read scratch)
+  or leave a zero-size write scratch (`tx_bytes()` reported 0). `rx_bytes()` and `tx_bytes()`
+  now always report the configured ceilings. A `defer_recv` link spawns its recv thread in
+  `start_receiving()` instead of parking one from the constructor. The link now overrides
+  `transport_t::shut_down()`: it stops the recv thread and closes the connection at once, and
+  the destructor returns the memory.
+
 ## [0.19.1] — 2026-10-11
 
 ### Changed

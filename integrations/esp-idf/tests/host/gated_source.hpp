@@ -31,12 +31,15 @@ class gated_source_t final : public tr::mem::block_source_t {
             return nullptr;
         }
         void* const p = tr::mem::heap_source().try_alloc(bytes, align);
-        if (p != nullptr) live.fetch_add(1, std::memory_order_relaxed);
+        if (p != nullptr) live.fetch_add(1, std::memory_order_acq_rel);
         return p;
     }
     /** @brief Return a block to the heap. */
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
-        live.fetch_sub(1, std::memory_order_relaxed);
+        // Release, not relaxed: a case that waits for `live == 0` after an orphaned dial
+        // returned its slot from a detached thread must then own this object, so the
+        // waiter's load synchronizes with this, the last touch of `*this` (TSan, #1606).
+        live.fetch_sub(1, std::memory_order_acq_rel);
         tr::mem::heap_source().release(p, bytes, align);
     }
 

@@ -8,7 +8,8 @@
     "count, fails CI. Empty targets are the goal. Most pins are deleting destructors and std",
     "containers not yet on the seam, and everything that calls them; the PR for #1783 lists them.",
     "One-time exception (#2022 slice 1, PR #2077): 14 esp32c6 pins were ADDED by hand, none a new heap call; every added edge ends at a function already pinned on main, directly or through a new destructor stub/lambda thunk: 7 calls the closure could not see through a vtable before (make_poly's recorded ~X for tcp, tcp_server, can, tcp session; send(span)->send(iov) devirtualized by final x3), 4 address references to those thunks, and main's 2 invoke_impl->ctor edges now appear as 3 entries after the factory lambda went out of line. Not a precedent: every other change to this file only lowers pins.",
-    "#1951 (PR #2050, delete COMPACT) re-seeded esp32c6 after inlining moved: 2 new sections and 14 grown edges only re-attribute paths to callees already pinned (remote_ptr_t::free_record, value_t::destroy, rope_t::append absorbing vector::reserve); no new heap entry point, and the target drops 1884 -> 1836 references."
+    "#1951 (PR #2050, delete COMPACT) re-seeded esp32c6 after inlining moved: 2 new sections and 14 grown edges only re-attribute paths to callees already pinned (remote_ptr_t::free_record, value_t::destroy, rope_t::append absorbing vector::reserve); no new heap entry point, and the target drops 1884 -> 1836 references.",
+    "#1606 (PR #2128, lazy client-link construction) re-pinned esp_ws_client_link.cpp.obj by hand: the recv thread is now spawned in start_receiving() instead of the constructor, so the three std::thread instantiations for the ctor lambda (thread ctor, _State_impl::_M_run, ~_State_impl) are renamed to start_receiving's lambda with identical keys and counts, the ctor's 'via thread' x2 moved to start_receiving, and the ctor reaches it once. Same heap reachability moved to the lazy arm path, no new entry point; the target stays at 1836 references."
   ],
   "targets": {
     "cortex-m0": {
@@ -60,17 +61,18 @@
           "_ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE8relocateEPS4_S6_S6_": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
           "_ZN2tr3net12tx_handoff_t4nextEv": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 2},
           "_ZN2tr3net20esp_ws_client_link_t13deliver_ownedEj": {"via _ZN2tr4view13segment_ptr_t5resetEv": 2, "via _ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": 1},
+          "_ZN2tr3net20esp_ws_client_link_t15start_receivingEv": {"via _ZNSt6threadC1IZN2tr3net20esp_ws_client_link_t15start_receivingEvEUlvE_JEvEEOT_DpOT0_": 2},
           "_ZN2tr3net20esp_ws_client_link_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": {"via _ZN2tr3net12tx_handoff_t4nextEv": 1},
           "_ZN2tr3net20esp_ws_client_link_t4sendESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net20esp_ws_client_link_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": 1},
           "_ZN2tr3net20esp_ws_client_link_t9recv_loopEv": {"via _ZN2tr3net20esp_ws_client_link_t13deliver_ownedEj": 1},
-          "_ZN2tr3net20esp_ws_client_link_tC2ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_22esp_ws_client_config_tE": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE12grow_emplaceIJRNS0_14block_source_tEEEEPS4_jDpOT_": 1, "via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE6regrowEj": 1, "via _ZNSt6threadC1IZN2tr3net20esp_ws_client_link_tC4ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS2_22esp_ws_client_config_tEEUlvE_JEvEEOT_DpOT0_": 2},
+          "_ZN2tr3net20esp_ws_client_link_tC2ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_22esp_ws_client_config_tE": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE12grow_emplaceIJRNS0_14block_source_tEEEEPS4_jDpOT_": 1, "via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE6regrowEj": 1, "via _ZN2tr3net20esp_ws_client_link_t15start_receivingEv": 1},
           "_ZN2tr3net20esp_ws_client_link_tD2Ev": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZN2tr5graph7value_t7releaseEPKS1_": {"via _ZN2tr5graph7value_t7destroyEPS1_": 1},
           "_ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 6},
-          "_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN2tr3net20esp_ws_client_link_tC4ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS4_22esp_ws_client_config_tEEUlvE_EEEEE6_M_runEv": {"via _ZN2tr3net20esp_ws_client_link_t9recv_loopEv": 1},
-          "_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN2tr3net20esp_ws_client_link_tC4ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS4_22esp_ws_client_config_tEEUlvE_EEEEED0Ev": {"operator delete": 1},
-          "_ZNSt6threadC2IZN2tr3net20esp_ws_client_link_tC4ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS2_22esp_ws_client_config_tEEUlvE_JEvEEOT_DpOT0_": {"_ZNSt6thread15_M_start_threadESt10unique_ptrINS_6_StateESt14default_deleteIS1_EEPFvvE": 1, "operator new": 1},
+          "_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN2tr3net20esp_ws_client_link_t15start_receivingEvEUlvE_EEEEE6_M_runEv": {"via _ZN2tr3net20esp_ws_client_link_t9recv_loopEv": 1},
+          "_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN2tr3net20esp_ws_client_link_t15start_receivingEvEUlvE_EEEEED0Ev": {"operator delete": 1},
+          "_ZNSt6threadC2IZN2tr3net20esp_ws_client_link_t15start_receivingEvEUlvE_JEvEEOT_DpOT0_": {"_ZNSt6thread15_M_start_threadESt10unique_ptrINS_6_StateESt14default_deleteIS1_EEPFvvE": 1, "operator new": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE12emplace_backIJS2_EEERS2_DpOT_.isra.0": {"via _ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": 1},
           "_ZNSt6vectorIN2tr4view6view_tESaIS2_EE17_M_realloc_appendIJS2_EEEvDpOT_": {"operator delete": 1, "operator new": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "unlikely._ZN2tr5graph7value_t7destroyEPS1_": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3}
