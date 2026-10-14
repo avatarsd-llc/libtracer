@@ -589,6 +589,44 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
                                              std::span<char> scratch) const override;
 
     /**
+     * @brief The SUBJECT the frame in flight writes under: the identity an in-band ACCEPT
+     *        bound to @p peer's session (#1846), or empty when that session bound none.
+     *
+     * This is the JOIN: the terminus asks it once per locally-terminating operation, and a
+     * non-empty answer replaces the inbound link's name as the ACL caller context, the
+     * subject the READ, WRITE and SUBSCRIBE gates evaluate and the `write_ctx_t::subject` a
+     * handler sees. An empty answer is the base contract's fallback, so a session that never
+     * signed in, one admitted by @ref admission_verdict_t::ADMIT_AUTHENTICATED, and every
+     * session of a link with no auth hook keep the link-name caller they had before.
+     *
+     * TAGGED WITH THE GENERATION. The answer is the subject only when @p peer's generation is
+     * the slot's current one, so a handle minted for a departed session never reads the
+     * subject of whoever claimed the slot next. The subject is also cleared at the claim and
+     * at the close, so it can only be one the current session's own ACCEPT wrote.
+     *
+     * One indexed load and a generation compare: no lock, no scan. Every write of the fields
+     * it reads (the claim, the ACCEPT, the reclaim) runs on the httpd task, and so does every
+     * delivery this is asked about, so the read is ordered by the task itself. Like the base,
+     * it is meaningful only inside a receive callback.
+     * @return A view of the session's own storage, valid until that session closes; @p
+     *         scratch is unused.
+     */
+    [[nodiscard]] std::string_view peer_subject(peer_handle_t peer,
+                                                std::span<char> scratch) const override;
+
+    /**
+     * @brief The handle of the frame this FLAT link is delivering right now (#1846), so a
+     *        bound subject reaches the terminus at `peer_named = false` too (ADR-0082).
+     *
+     * A peer-named link tags every frame through the bus seam and never needs this; a flat one
+     * records the in-flight handle beside the delivery, one store per frame on the httpd task.
+     * @return The in-flight frame's handle. Outside a delivery it is the last one delivered
+     *         (or the default handle), as the base contract allows; a stale handle fails
+     *         @ref peer_subject's generation test once its session has closed.
+     */
+    [[nodiscard]] peer_handle_t inbound_peer() const noexcept override { return rx_peer_; }
+
+    /**
      * @brief Close one peer's session by NAME — the "revoke this controller" action
      *        (#1146), callable from any task.
      *
@@ -836,7 +874,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
         std::uint32_t rx_dropped_pool = 0;
         /**
          * @brief Sessions closed because the auth hook answered REJECT — a credential this
-         *        node was OFFERED and refused.
+         *        node was OFFERED and refused — or answered ACCEPT with a subject the session
+         *        cannot store whole (@ref auth_result_t::subject).
          *
          * Kept apart from @ref peers_refused, which counts handshakes turned away one stage
          * earlier (the admission predicate, or `max_peers`), and from @ref auth_expired,
@@ -1196,16 +1235,17 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          *
          * TEXT, and printable: an identity that is natively bytes (an ed25519 public key)
          * is spelled by the hook in hex or base64, which is what keeps it reportable through
-         * @ref peer_stats_t::subject beside `endpoint_str`. Truncated at
-         * @ref kMaxSubjectChars.
+         * @ref peer_stats_t::subject beside `endpoint_str`. At most @ref kMaxSubjectChars
+         * bytes and no NUL byte: an ACCEPT whose subject breaks either rule binds nothing and
+         * is answered as a REJECT (closed with @ref kCloseAuthFailed, counted in
+         * @ref stats_t::auth_rejected), so a subject is never shortened into another one.
          *
-         * This link BINDS it and publishes it. The HANDLER-side half now exists (#375 Part 1):
-         * `tr::graph::handlers_t::on_write` receives a `write_ctx_t` whose `subject` is the
-         * writer's resolved subject token. What is still open is the JOIN — a subject bound
-         * here does not yet become the graph's caller context for frames arriving on this
-         * session, so a handler currently sees the inbound link's name. Carrying it is this
-         * frame's job regardless, precisely because the frame is where a session's identity
-         * is first known.
+         * This link BINDS it, publishes it, and makes it the session's CALLER CONTEXT
+         * (#1846): every later frame of the session reaches the graph under this subject
+         * (@ref peer_subject), so the `:acl` gates and a handler's `write_ctx_t::subject` see
+         * it in place of the link name. It belongs to the session: it is dropped at close and
+         * never read under a later session in the same slot. An empty subject binds nothing,
+         * and the session keeps the link-name caller.
          */
         std::string_view subject;
     };
@@ -1219,8 +1259,15 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * decoded, not validated, and never mistaken for a TLV. That opacity is the design (the
      * frame is the permanent carrier, the credential kind is the hook's business), not an
      * omission.
+     *
+     * @p sockfd is the session's socket descriptor: the SAME key an admission predicate
+     * reads from its request with `httpd_req_to_sockfd` at the handshake (#1846). An
+     * embedder that admitted a socket provisionally there can therefore act on that session
+     * when its credential is accepted, keyed on its own bookkeeping; this link stores
+     * nothing for it. The descriptor is stable for the session's life, and is reused by a
+     * later session only after this one has closed.
      */
-    using auth_fn_t = auth_result_t (*)(void* ctx, std::span<const std::byte> payload);
+    using auth_fn_t = auth_result_t (*)(void* ctx, int sockfd, std::span<const std::byte> payload);
 
     /**
      * @brief Install (or clear, with `nullptr`) the post-handshake authentication hook.
@@ -1304,9 +1351,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Default `auth_deadline_ms`: long enough for a multi-round-trip handshake over
      *         a slow link, short enough that a squatting session is not a resource. */
     static constexpr std::uint32_t kDefaultAuthDeadlineMs = 10000;
-    /** @brief Longest @ref auth_result_t::subject a session stores; a longer one is
-     *         truncated. Sized to hold a hex-spelled 32-byte public key (64 chars) with
-     *         room for a scheme prefix. */
+    /** @brief Longest @ref auth_result_t::subject a session stores; an ACCEPT with a longer
+     *         one is answered as a REJECT. Sized to hold a hex-spelled 32-byte public key (64
+     * chars) with room for a scheme prefix. */
     static constexpr std::size_t kMaxSubjectChars = 127;
     /**
      * @brief How many upgraded sockets may be awaiting their first data frame at once on a
@@ -1966,6 +2013,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         (the default) — see @ref set_auth_cb. Read on the httpd task, unlocked. */
     auth_fn_t auth_fn_ = nullptr;
     void* auth_ctx_ = nullptr;
+    /** @brief The handle of the frame a FLAT link is delivering (@ref inbound_peer), written
+     *         before each flat delivery on the httpd task; unused when `peer_named`. */
+    peer_handle_t rx_peer_{};
     /** @brief The unauthenticated-session bound in MICROseconds, resolved from the ctor's
      *         milliseconds once (0 there => @ref kDefaultAuthDeadlineMs). */
     std::int64_t auth_deadline_us_ = 0;

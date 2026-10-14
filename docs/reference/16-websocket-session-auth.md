@@ -118,13 +118,14 @@ minted at accept, and the terminus derives the caller context from that handle t
 longer depends on the addressing facet. A stream listener answers that door with its `p<slot>`
 session token.
 
-What is still open is the last step of the **join**: a subject bound by the authentication
-check below is not yet what `peer_subject` returns for that session, so a handler sees the
-session's transport-minted token rather than the identity the peer actually proved. The seam
-to close it is now one override away — the link already knows the handle and already holds the
-session's bound subject beside it. The authentication frame is the right place to *capture* an
-identity because it is the first moment one is known; it is not the right place to decide the
-whole authorization model.
+The **join** is done ([#1846](https://github.com/avatarsd-llc/libtracer/issues/1846)): a
+subject bound by the authentication check is what `peer_subject` returns for that session, so
+the session's later frames are gated by `:acl` and reach a handler under the identity the peer
+proved, not the transport-minted token. The subject belongs to the session: it is answered only
+for the slot generation that bound it and is dropped at close, so a later session in the same
+slot never inherits it. A session that binds no subject keeps the transport-minted token. The
+authentication frame is the right place to *capture* an identity because it is the first moment
+one is known; it is not the right place to decide the whole authorization model.
 
 A subject is **not** the same claim as a peer *name*, and the two are deliberately kept
 apart ([ADR-0082](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md)):

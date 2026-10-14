@@ -501,6 +501,26 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         # suite constructs an adopting link — same exemption as the suites around it.
         set_tests_properties(httpd_ws_departure_cost
             PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+        # #1846 — the JOIN: the subject an in-band ACCEPT binds is the ACL caller context of
+        # the session's later frames. A real graph_t + fwd_router_t, because the gate is the
+        # graph's; the link only answers which subject a frame writes under.
+        add_executable(httpd_ws_session_subject_test
+            "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_session_subject_test.cpp"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+            "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+        target_include_directories(httpd_ws_session_subject_test PRIVATE
+            "${LIBTRACER_ESP_DIR}/tests/host"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+            "${LIBTRACER_ESP_DIR}/libtracer/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(httpd_ws_session_subject_test PRIVATE libtracer)
+        target_link_options(httpd_ws_session_subject_test PRIVATE
+            "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        libtracer_test_warnings(httpd_ws_session_subject_test)
+        add_test(NAME httpd_ws_session_subject COMMAND httpd_ws_session_subject_test)
+        set_tests_properties(httpd_ws_session_subject
+            PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
     endif()
 
     # #1146 — close_peer: the administrative teardown of ONE inbound session, on the same
@@ -2473,6 +2493,7 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_rx_owned
     httpd_ws_send_stall
     httpd_ws_session_identity
+    httpd_ws_session_subject
     httpd_ws_teardown
     httpd_ws_tx_large_class
     httpd_ws_tx_pool

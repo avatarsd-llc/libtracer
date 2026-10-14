@@ -23,6 +23,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `start_receiving()` instead of parking one from the constructor. The link now overrides
   `transport_t::shut_down()`: it stops the recv thread and closes the connection at once, and
   the destructor returns the memory.
+### Breaking
+
+- **`httpd_ws_link_t`: the subject an in-band ACCEPT binds is the session's caller context,
+  and the credential hook is told which session it is judging
+  ([#1846](https://github.com/avatarsd-llc/libtracer/issues/1846)).**
+  - `auth_fn_t` widens to `auth_result_t (*)(void* ctx, int sockfd, std::span<const std::byte>
+    payload)`. `sockfd` is the session's socket descriptor, the same key an admission
+    predicate reads with `httpd_req_to_sockfd(req)` at the handshake, so an embedder that
+    admitted a socket provisionally can act on that session when its credential is accepted.
+    **Migration:** add the `int` parameter to your hook; ignore it if you do not need it.
+  - `auth_result_t::subject` is now what the graph sees. The link overrides
+    `transport_t::peer_subject`, so every later frame of the session is gated by `:acl` and
+    reaches a handler's `write_ctx_t::subject` under that subject instead of the link name
+    `p<slot>`. It also overrides `inbound_peer`, so the same holds at `peer_named = false`. The
+    subject is answered only for the slot generation that bound it, and it is cleared at the
+    claim and at the close, so it never survives slot reuse. A session that binds no subject
+    (no hook, an empty subject, or `ADMIT_AUTHENTICATED`) keeps the link-name caller, byte for
+    byte. **Migration:** an `:acl` that granted a WebSocket session by its `p<slot>` name must
+    name the subject your hook binds instead.
+  - A subject is stored whole or not at all. An ACCEPT whose subject is longer than
+    `kMaxSubjectChars` or contains a NUL byte binds nothing: it is answered as a REJECT
+    (closed with `kCloseAuthFailed`, counted in `stats_t::auth_rejected`). It used to be
+    truncated to `kMaxSubjectChars`.
+  - Cost: one byte of per-session state (the subject length; the subject was already stored), one
+    indexed load and a generation compare per locally terminating operation, and on a flat
+    link one 8-byte store per delivered frame.
 
 ## [0.19.1] — 2026-10-11
 
