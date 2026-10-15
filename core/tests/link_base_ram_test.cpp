@@ -78,13 +78,16 @@ void run_arm(const char* name) {
         cfg.memory.state = &src;
         Server server(0, cfg);
         check(server.ok(), "server bound");
-        // The poll thread draws its set on its first pass; give it time to run that pass.
-        std::this_thread::sleep_for(300ms);
+        // The poll thread draws its set on its first pass: wait for that draw (the pin on a
+        // 64-bit target, any draw elsewhere) rather than for a fixed time.
+        const std::size_t want = sizeof(void*) == 8 ? kServerBaseBytes64 : 1;
+        for (int i = 0; i < 1000 && src.live.load(std::memory_order_relaxed) < want; ++i)
+            std::this_thread::sleep_for(2ms);
         base = src.live.load(std::memory_order_relaxed);
     }
     std::printf("%s: idle draw %zu B (sizeof %zu B)\n", name, base, sizeof(Server));
     if constexpr (sizeof(void*) == 8) {
-        check(base <= kServerBaseBytes64, "idle draw within the 64-bit pin");
+        check(base == kServerBaseBytes64, "idle draw equals the 64-bit pin");
     }
     check(src.live.load(std::memory_order_relaxed) == 0, "teardown returned every byte");
 }

@@ -46,6 +46,8 @@
 struct iovec;
 /** @brief The POSIX IPv4 address (`<netinet/in.h>`), forward-declared for the same reason. */
 struct in_addr;
+/** @brief The POSIX poll descriptor (`<poll.h>`), forward-declared for the same reason. */
+struct pollfd;
 
 namespace tr::detail {
 
@@ -1214,8 +1216,14 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     peer_handle_t delivering_{};
 
    private:
-    /** @brief Admit one inbound connection into a free (or newly grown) slot. */
-    void accept_peer();
+    /**
+     * @brief Admit one inbound connection into a free (or newly grown) slot.
+     *
+     * @param pfds   The poll thread's fd set; grown here to hold a new slot before it is
+     *               admitted, and a refused growth refuses the newcomer (#2156).
+     * @param pslots The session list parallel to @p pfds, grown the same way.
+     */
+    void accept_peer(mem::block_array_t<pollfd>& pfds, mem::block_array_t<session_base_t*>& pslots);
 
     /** @brief One readable pass on @p s: `recv` a chunk, or tear the slot down. */
     void service_peer(session_base_t& s);
