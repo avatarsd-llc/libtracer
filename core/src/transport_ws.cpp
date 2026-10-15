@@ -269,7 +269,14 @@ struct ws_server_transport_t::session_t : slot_server_t::session_base_t {
     mem::bytes_t hs_buf; /**< @brief HTTP Upgrade request accumulation. */
     /** @brief Frame ingress (ADR-0087 §1): no stream buffer, the body lands in its segment. */
     frame_ingress_t<ws::kMaxClientFrameHeader> ingress;
-    ws::header_t frame;       /**< @brief The header of the frame being received. */
+    /** @brief What the body of the frame being received needs from its header (the length
+     *         is frame ingress's own). */
+    struct rx_frame_t {
+        ws::opcode_t op = ws::opcode_t::CONT;   /**< @brief Its opcode. */
+        bool fin = false;                       /**< @brief Its FIN bit. */
+        bool masked = false;                    /**< @brief Its MASK bit. */
+        std::array<std::uint8_t, 4> mask_key{}; /**< @brief Its masking key, when masked. */
+    } frame;
     ws_assembler_t assembler; /**< @brief RFC 6455 fragment reassembly. */
     peer_endpoint_t endpoint; /**< @brief The directed facade `peer_link` returns. */
 };
@@ -290,17 +297,18 @@ struct ws_server_transport_t::framing_t {
         // the tcp_transport_t::serve idiom) rather than being cached: it is what stops a
         // declared 64-bit length from naming the receiver's memory, so it must be the live
         // answer, not a snapshot.
-        s.frame = ws::decode_header(
+        const ws::header_t h = ws::decode_header(
             have, length_prefix_framer_t::effective_cap(*link.backend_, link.max_frame_));
-        if (s.frame.status == ws::decode_status_t::NEED_MORE)
-            return {ingress_header_t::kind_t::MORE, s.frame.size, 0};
-        if (s.frame.status == ws::decode_status_t::PROTOCOL_ERROR) {
+        if (h.status == ws::decode_status_t::NEED_MORE)
+            return {ingress_header_t::kind_t::MORE, h.size, 0};
+        if (h.status == ws::decode_status_t::PROTOCOL_ERROR) {
             // An over-cap length, a §5.5 control breach or a §5.2 reserved opcode: a stream
             // we refuse to keep reading. Count it; the peer is torn down (§7.1.7).
             link.malformed_rx_.fetch_add(1, std::memory_order_relaxed);
             return {ingress_header_t::kind_t::CLOSE, 0, 0};
         }
-        return {ingress_header_t::kind_t::BODY, s.frame.size, s.frame.len};
+        s.frame = {h.op, h.fin, h.masked, h.mask_key};
+        return {ingress_header_t::kind_t::BODY, h.size, h.len};
     }
 
     /** @brief One whole body, in its exact segment (empty when the source refused it). */

@@ -10,9 +10,10 @@
  * `Framing` object it passes in:
  *
  * - `ingress_header_t header(std::span<const std::byte> have)`: judge the header bytes read so
- *   far. `MORE` names how many header bytes it needs in all; `CLOSE` refuses the stream (an
- *   announced length above `max_frame`, a protocol breach) BEFORE anything is drawn; `BODY`
- *   says how many bytes the header took and how long the body is.
+ *   far (a body it announces is under 4 GiB: the link's receive cap holds it there). `MORE` names
+ * how many header bytes it needs in all; `CLOSE` refuses the stream (an announced length above
+ * `max_frame`, a protocol breach) BEFORE anything is drawn; `BODY` says how many bytes the header
+ * took and how long the body is.
  * - `bool body(view::rx_block_t& blk, std::size_t len)`: one whole body. `blk` holds it at
  *   its exact length, or is empty when the source refused the draw (`len != 0`), which the
  *   link sheds and counts. The link takes the bytes out of `blk` (`blk.take(len)`) to hand
@@ -106,12 +107,11 @@ class frame_ingress_t {
 
             const auto got = static_cast<std::size_t>(n);
             const std::size_t to_body = in_body_ ? std::min(got, iov[0].iov_len) : 0;
-            const std::uint32_t frames_before = frames_;
-            body_have_ += to_body;
-            hdr_have_ += got - to_body;
-            if (!advance(rx, framing)) return false;
-            more = got == iov[0].iov_len + (parts == 2 ? iov[1].iov_len : 0) &&
-                   frames_ == frames_before;
+            body_have_ += static_cast<std::uint32_t>(to_body);
+            hdr_have_ += static_cast<std::uint8_t>(got - to_body);
+            const int done = advance(rx, framing);
+            if (done < 0) return false;
+            more = got == iov[0].iov_len + (parts == 2 ? iov[1].iov_len : 0) && done == 0;
         }
         return true;
     }
@@ -128,17 +128,17 @@ class frame_ingress_t {
         while (!in.empty()) {
             std::size_t take = 0;
             if (in_body_) {
-                take = std::min(body_len_ - body_have_, in.size());
+                take = std::min<std::size_t>(body_len_ - body_have_, in.size());
                 if (blk_.seg)
                     std::memcpy(blk_.frame(body_len_).data() + body_have_, in.data(), take);
-                body_have_ += take;
+                body_have_ += static_cast<std::uint32_t>(take);
             } else {
-                take = std::min(MaxHeader - hdr_have_, in.size());
+                take = std::min<std::size_t>(MaxHeader - hdr_have_, in.size());
                 std::memcpy(hdr_.data() + hdr_have_, in.data(), take);
-                hdr_have_ += take;
+                hdr_have_ += static_cast<std::uint8_t>(take);
             }
             in = in.subspan(take);
-            if (!advance(rx, framing)) return false;
+            if (advance(rx, framing) < 0) return false;
         }
         return true;
     }
@@ -160,46 +160,49 @@ class frame_ingress_t {
      * @brief Hand up a body that is whole, then judge the header store: start each body it
      *        announces, moving the bytes read past its header into it.
      *
-     * @return False when the framing closed the stream.
+     * @return How many bodies it handed up, or -1 when the framing closed the stream.
      */
     template <class Framing>
-    [[nodiscard]] bool advance(mem::mem_backend_t& rx, Framing& framing) {
+    [[nodiscard]] int advance(mem::mem_backend_t& rx, Framing& framing) {
+        int done = 0;
         while (true) {
             if (in_body_) {
-                if (body_have_ < body_len_) return true;
+                if (body_have_ < body_len_) return done;
                 in_body_ = false;
-                ++frames_;
+                ++done;
                 const bool keep = framing.body(blk_, body_len_);
                 blk_ = {};
-                if (!keep) return false;
+                if (!keep) return -1;
                 continue;
             }
             const ingress_header_t h =
                 framing.header(std::span<const std::byte>(hdr_.data(), hdr_have_));
             if (h.kind != ingress_header_t::kind_t::BODY)
-                return h.kind == ingress_header_t::kind_t::MORE;
+                return h.kind == ingress_header_t::kind_t::MORE ? done : -1;
             // Drawn at the exact length, from the receiving link's own source; a refusal
-            // leaves `blk_` empty and the body is read past and shed.
+            // leaves `blk_` empty and the body is read past and shed. The framing's cap keeps
+            // a body under 4 GiB, so its length fits the 32-bit count.
             in_body_ = true;
-            body_len_ = h.body;
+            body_len_ = static_cast<std::uint32_t>(h.body);
             if (h.body != 0) blk_ = view::alloc_rx(rx, h.body, graph::kShareThresholdBytes);
             const std::size_t rest = hdr_have_ - h.size;
-            body_have_ = std::min(rest, h.body);
+            body_have_ = static_cast<std::uint32_t>(std::min(rest, h.body));
             if (blk_.seg && body_have_ != 0)
                 std::memcpy(blk_.frame(body_len_).data(), hdr_.data() + h.size, body_have_);
-            hdr_have_ = rest - body_have_;
+            hdr_have_ = static_cast<std::uint8_t>(rest - body_have_);
             if (hdr_have_ != 0)
                 std::memmove(hdr_.data(), hdr_.data() + h.size + body_have_, hdr_have_);
         }
     }
 
+    static_assert(MaxHeader < 256, "the header count is one byte");
+
     std::array<std::byte, MaxHeader> hdr_; /**< @brief Header bytes read and not yet judged. */
-    std::size_t hdr_have_ = 0;             /**< @brief How many of `hdr_` are filled. */
-    view::rx_block_t blk_;                 /**< @brief The current body's segment. */
-    std::size_t body_len_ = 0;             /**< @brief The current body's length. */
-    std::size_t body_have_ = 0;            /**< @brief Body bytes received so far. */
-    std::uint32_t frames_ = 0;             /**< @brief Bodies handed up (wraps; compared only). */
+    std::uint8_t hdr_have_ = 0;            /**< @brief How many of `hdr_` are filled. */
     bool in_body_ = false;                 /**< @brief A body is being received. */
+    view::rx_block_t blk_;                 /**< @brief The current body's segment. */
+    std::uint32_t body_len_ = 0;           /**< @brief The current body's length. */
+    std::uint32_t body_have_ = 0;          /**< @brief Body bytes received so far. */
 };
 
 }  // namespace tr::net

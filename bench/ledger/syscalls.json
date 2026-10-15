@@ -110,8 +110,7 @@
       "payload": 64,
       "value": 4,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)",
-      "waiver": "#2140, for the maintainer to accept: header-first reading costs a lone paced frame one read for its header and one for its body (3 -> 4 syscalls per relayed frame at 64 B and 1 KiB), bought for receiving the body straight into its segment; 4 KiB and 16 KiB fall to 4. Back-to-back frames still cost one read each."
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-srv @1024",
@@ -122,8 +121,7 @@
       "payload": 1024,
       "value": 4,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)",
-      "waiver": "#2140, for the maintainer to accept: header-first reading costs a lone paced frame one read for its header and one for its body (3 -> 4 syscalls per relayed frame at 64 B and 1 KiB), bought for receiving the body straight into its segment; 4 KiB and 16 KiB fall to 4. Back-to-back frames still cost one read each."
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-srv @4096",
@@ -156,8 +154,7 @@
       "payload": 64,
       "value": 4,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)",
-      "waiver": "#2140, for the maintainer to accept: header-first reading costs a lone paced frame one read for its header and one for its body (3 -> 4 syscalls per relayed frame at 64 B and 1 KiB), bought for receiving the body straight into its segment; 4 KiB and 16 KiB fall to 4. Back-to-back frames still cost one read each."
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @1024",
@@ -168,8 +165,7 @@
       "payload": 1024,
       "value": 4,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)",
-      "waiver": "#2140, for the maintainer to accept: header-first reading costs a lone paced frame one read for its header and one for its body (3 -> 4 syscalls per relayed frame at 64 B and 1 KiB), bought for receiving the body straight into its segment; 4 KiB and 16 KiB fall to 4. Back-to-back frames still cost one read each."
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @4096",
