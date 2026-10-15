@@ -19,6 +19,8 @@ condition can change an answer. Three properties carry the car —
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import pathlib
 import sys
 import unittest
@@ -252,6 +254,15 @@ class ToolchainIdentity(unittest.TestCase):
 class CommandLine(unittest.TestCase):
     """@brief The exit-code contract the workflow depends on."""
 
+    def setUp(self):
+        # The CLI prints GitHub workflow commands (`::error::`, `::warning::`). Left on the real
+        # stdout, a fixture's drift (100 -> 400) became a red error annotation on every
+        # gate-pr job and read as the job's failure. Captured here, and checked where it matters.
+        self.out = io.StringIO()
+        redirect = contextlib.redirect_stdout(self.out)
+        redirect.__enter__()
+        self.addCleanup(redirect.__exit__, None, None, None)
+
     def _data(self, tmp: pathlib.Path, doc_entries: list[dict]) -> str:
         p = tmp / "data.js"
         import json
@@ -265,6 +276,7 @@ class CommandLine(unittest.TestCase):
                               [entry(i, 100) for i in range(11)] + [entry(11, 400)])
             self.assertEqual(sg.main(["drift", "--data", data]), 0)
             self.assertEqual(sg.main(["drift", "--data", data, "--mode", "fail"]), 1)
+            self.assertIn("::error::rolling-baseline drift", self.out.getvalue())
 
     def test_density_reports_without_failing_by_default(self):
         import tempfile
