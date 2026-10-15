@@ -6,21 +6,20 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The guard slice 9 must land behind. A link that queues a frame and writes it later, from
- * whichever thread holds the writer role, shares its socket with every other frame that link
- * emits. Slice 9 changes what a queued record IS — today a copy of the whole frame in a queue
- * slot (`tr::net::tx_handoff_t`), after slice 9 a retained `value_t` plus a header — and a
- * retained-value send is one partial write away from a frame whose tail is another frame's
- * bytes. Nothing in the bench set or the host suite raced two frames onto one socket, so a
- * torn frame would have shipped green (§9 item 6). This suite is that race.
+ * The guard the shared-frame egress lands behind (#2144). A link that queues a frame and
+ * writes it later, from whichever thread holds the writer role, shares its socket with every
+ * other frame that link emits. A queued record is a shared frame — the copied head plus a
+ * kept `value_t` — and such a send is one partial write away from a frame whose tail is
+ * another frame's bytes. Nothing in the bench set or the host suite raced two frames onto one
+ * socket, so a torn frame would have shipped green (§9 item 6). This suite is that race.
  *
  * Every frame carries its own identity (the sending thread, a per-thread sequence number,
  * its own length) and a body whose every byte is a function of that identity and its
  * offset, so the receiver can tell a whole frame from one spliced out of two. Two arms, one
  * per direction of one connection:
  *
- *  1. **client → server** through `ws_client_transport_t::send` — the enqueue-then-write
- *     queue (`stream_endpoint_t::handoff_send`, RFC-0028 §4.7). Two threads publish frames of
+ *  1. **client → server** through `ws_client_transport_t::send` — the peer's egress
+ *     (`stream_endpoint_t::egress_send`, ADR-0087 §2). Two threads publish frames of
  *     mixed sizes, the large ones well past both socket buffers so a write is still in
  *     flight when the other thread's frame arrives and has to QUEUE behind it. The server's
  *     sink reads slowly now and then, so the queue actually fills.
@@ -265,7 +264,12 @@ class live_count_source_t final : public tr::mem::block_source_t {
     live_count_source_t() noexcept : tr::mem::block_source_t("race-egress") {}
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
         void* const p = ::operator new(bytes, std::align_val_t{align}, std::nothrow);
-        if (p != nullptr) live.fetch_add(1, std::memory_order_relaxed);
+        if (p != nullptr) {
+            const int now = live.fetch_add(1, std::memory_order_relaxed) + 1;
+            int seen = peak.load(std::memory_order_relaxed);
+            while (now > seen && !peak.compare_exchange_weak(seen, now)) {
+            }
+        }
         return p;
     }
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
@@ -273,6 +277,7 @@ class live_count_source_t final : public tr::mem::block_source_t {
         ::operator delete(p, bytes, std::align_val_t{align});
     }
     std::atomic<int> live{0}; /**< @brief Blocks handed out and not yet released. */
+    std::atomic<int> peak{0}; /**< @brief The most blocks ever out at once. */
 };
 
 /**
@@ -304,11 +309,12 @@ void test_client_queue_race() {
     std::printf("  sends queued or refused behind a write in flight: %zu\n", nested);
     check(nested > 0, "the race was exercised: a send was queued behind another's write");
     check(client.link_up(), "the connection survived every round");
-    // A send nested in another's write was queued in a slot, or refused because every slot
-    // was full: either way a slot holds a block. Only the scratch would be here if the
-    // slots still drew from the process heap (#1661).
-    check(egress.live.load(std::memory_order_relaxed) > 1,
-          "the queue's slots drew from the injected egress store, beside the scratch");
+    // A send nested in another's write waited as a shared frame in a ring, and the frame and
+    // the ring are blocks from the store; both go back once the ring drains (#2144), so the
+    // peak is what shows them. Only the scratch would count if they drew from the process
+    // heap (#1661).
+    check(egress.peak.load(std::memory_order_relaxed) > 1,
+          "the waiting frames and rings drew from the injected egress store");
 }
 
 /**

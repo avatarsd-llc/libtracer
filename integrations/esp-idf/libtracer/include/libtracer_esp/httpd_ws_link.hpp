@@ -485,8 +485,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * session exactly as a truncated gathered frame does (#951) — never another frame's
      * bytes after a partial one.
      */
-    void send(std::span<const std::span<const std::byte>> head,
-              const graph::value_t& value) override;
+    void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+              const graph::delivery_lane_t& lane) override;
 
     /**
      * @brief True iff this link hands its sink OWNING frames — i.e. iff an integrator named

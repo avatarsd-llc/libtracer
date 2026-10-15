@@ -35,11 +35,11 @@
 #include <type_traits>
 #include <utility>
 
+#include "libtracer/egress.hpp"
 #include "libtracer/function_ref.hpp"
 #include "libtracer/inline_fn.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/transport.hpp"
-#include "libtracer/tx_handoff.hpp"
 
 /** @brief The POSIX scatter-gather descriptor (`<sys/uio.h>`), forward-declared
  *         so this header need not pull the system socket headers in. */
@@ -151,14 +151,16 @@ inline constexpr std::uint32_t kDefaultLivenessWindowMs = 10000;
 inline constexpr std::uint32_t kBoundedWaitMs = 100;
 
 /**
- * @brief Consecutive STALLED records to one peer that mark its connection broken (#838).
+ * @brief Whole rings of consecutive strikes that mark a one-peer link's connection broken
+ *        (#838): offers that found the peer's lane full and whose bounded write turn moved
+ *        NOTHING, counted in rings of the lane's depth.
  *
- * The brokenness-detector trichotomy #837 established, transferred verbatim: one stalled
- * record is transient backpressure — dropping that one frame is the lean response, and the
- * next record that completes resets the count. Two can straddle a burst. Three in a row,
- * with no completed record in between, means the peer is not riding out a burst at all: it
- * is silently missing every frame while its socket still looks open. A brokenness
- * detector, not a tunable — hence a named constant and NOT a config knob.
+ * The brokenness-detector trichotomy #837 established: one ring is transient backpressure,
+ * and any turn that moves a byte resets the count. Two can straddle a burst. Three in a row,
+ * each turn a whole bound long and each past a full lane, means the peer is not riding out a
+ * burst at all. A multi-peer server's turns never wait, so its cap is
+ * `kEgressStallStrikes` (#2144). A brokenness detector, not a tunable — hence a named
+ * constant and NOT a config knob.
  */
 inline constexpr std::uint8_t kMaxConsecutiveStalls = 3;
 
@@ -231,14 +233,14 @@ enum class write_outcome_t : std::uint8_t {
 struct write_result_t {
     write_outcome_t outcome = write_outcome_t::COMPLETE; /**< @brief How the write ended. */
     /**
-     * @brief True when SOME but not all of the record reached the socket.
+     * @brief Bytes of the record that reached the socket.
      *
-     * On a live connection this is a permanent framing desync, so it condemns the session
-     * IMMEDIATELY, bypassing the `kMaxConsecutiveStalls` streak — the same rule #837's
-     * short-write guard applies on the MCU (a different fault class: the stream is broken,
-     * not a frame missing). Meaningless once the socket is dead.
+     * Short of the record's length on a STALLED write, this is where the rest resumes: the
+     * egress keeps the frame and its offset (#2144), so a part write is never a desync on a
+     * live connection. On a FAILED one, non-zero means the peer holds a header whose payload
+     * will never arrive.
      */
-    bool partial = false;
+    std::size_t moved = 0;
 };
 
 /**
@@ -253,7 +255,7 @@ struct write_result_t {
  * **What @p peers is for a DIRECTED send** (#1295). A directed send —
  * `bus_link_t::peer_link(name)->send()` — is a round of ONE, so passing the round's own
  * size handed it the whole window: N callers targeting N stalled peers each took a full
- * window, and because directed sends on one server serialize on the same `write_m_` they
+ * window, and because directed sends on one server then serialized on one write lock they
  * accumulated N of them. Bounded per call, unbounded per node — which is not a bound.
  * A directed send on a stream SERVER therefore divides by the server's admission cap
  * (@ref slot_server_t::max_peers), not by 1: the cap is the most peers that can ever be
@@ -430,23 +432,22 @@ class posix_endpoint_t {
  * @brief The one-peer fd/teardown discipline every POSIX STREAM transport
  *        shares (tcp dial+listen, ws server, ws client).
  *
- * Owns the live peer fd (@ref conn_fd_) and the write mutex (@ref write_m_),
- * and is the ONE home of the invariants that keep a concurrent `send()` and
- * the recv thread's connection teardown safe against each other:
+ * Owns the live peer fd (@ref conn_fd_) and the link's egress (@ref egress_, ADR-0087 §2),
+ * and is the ONE home of the invariants that keep a concurrent `send()` and the recv thread's
+ * connection teardown safe against each other:
  *
- * **Write-serialization invariant:** every write to the peer fd happens with
- * @ref write_m_ held across the WHOLE write — so (a) two senders can never
- * interleave their records on the stream, and (b) the recv thread cannot
- * close and reset the fd underneath an in-flight write. `send()` reads
- * @ref conn_fd_ INSIDE the lock, pairing with the teardown below. Only the
- * sender holding the enqueue-then-write writer role (@ref handoff_send) ever
- * takes it to write, so no publisher queues on it behind another publisher's
- * write (RFC 0028 §4.7).
+ * **Write-serialization invariant:** every write to a peer fd is made by the sender holding
+ * that peer's egress WRITER ROLE (@ref egress_send), elected by try-lock: a sender that finds
+ * the peer idle writes its own record, one that finds a write in flight queues a reference
+ * and returns. So two senders never interleave records on the stream and no publisher waits
+ * on another publisher's write. A record the socket cuts short keeps its frame and offset,
+ * and the rest goes on the peer's next turn, so a part write never desyncs the framing.
  *
- * **Teardown-under-write-lock invariant:** a recv thread that closes the peer
- * fd MUST reset @ref conn_fd_ to -1 under @ref write_m_ BEFORE `close(2)`
- * (@ref teardown_peer) — so a sender never writes to (or reads) a
- * closed/reused fd.
+ * **Teardown-under-role invariant:** a recv thread that closes the peer fd first
+ * `shutdown(2)`s it (an in-flight write returns), then closes the peer's egress — which waits
+ * for the writer role to be let go — and only then resets @ref conn_fd_ to -1 and
+ * `close(2)`s it (@ref teardown_peer). So a sender never writes to (or reads) a closed or
+ * reused fd, and the shared write mutex is gone.
  *
  * The one-peer accept loop shape (poll-100ms-recheck accept → per-peer setup
  * → serve → teardown → re-accept) shared by tcp's LISTEN mode and the ws
@@ -457,24 +458,26 @@ class posix_endpoint_t {
  */
 class stream_endpoint_t : protected posix_endpoint_t {
    protected:
-    /** @brief Constructs with no peer connected (@ref conn_fd_ = -1); the queue's slots and
-     *         the gather overflow draw from the process net sub-pool. */
-    stream_endpoint_t() = default;
+    /** @brief Constructs with no peer connected (@ref conn_fd_ = -1); the egress draws from
+     *         the process net sub-pool. */
+    stream_endpoint_t() : stream_endpoint_t(mem::net_source()) {}
 
     /**
-     * @brief Constructs with no peer connected, the queue's slots drawing from @p tx_src.
+     * @brief Constructs with no peer connected, the egress drawing from @p tx_src.
      *
-     * For a link whose queued records are its own copies rather than retained references
-     * (the WebSocket client, whose frames are masked in place, #1661): the slots are then
-     * part of the link's egress store, which the application names.
-     *
-     * @param tx_src   Where the enqueue-then-write queue's slot storage comes from.
-     * @param tx_depth Records the queue holds behind the write in flight. A multi-peer server
-     *                 passes `0`: its sends go through each session, never through
-     *                 @ref handoff_send, so a ring here would be drawn and never used (#2156).
+     * @param tx_src   The link's egress store: every shared frame, each (peer, vertex) ring,
+     *                 and a frame's gather overflow (@ref write_frame).
+     * @param one_peer This endpoint IS the one peer (a dialer, a one-peer listener), whose
+     *                 write turn waits for a bound: its strike cap is `kMaxConsecutiveStalls`.
+     *                 A multi-peer server passes false and keeps one peer per session; its
+     *                 writes never wait, so its cap is `kEgressStallStrikes`.
      */
-    explicit stream_endpoint_t(mem::block_source_t& tx_src, std::size_t tx_depth = kTxQueueDepth)
-        : io_src_(&tx_src), tx_{tx_depth, tx_src} {}
+    explicit stream_endpoint_t(mem::block_source_t& tx_src, bool one_peer = true)
+        : io_src_(&tx_src),
+          egress_(tx_src, one_peer ? kMaxConsecutiveStalls : kEgressStallStrikes) {
+        // Open from the start: a send before a peer connects finds no fd and sheds, counted.
+        if (one_peer) egress_.open(peer_);
+    }
 
     /**
      * @brief Closes a leftover peer fd (one the recv thread never tore down).
@@ -501,14 +504,10 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * A socket-dead errno drops the rest silently (link-down is #66 lifecycle);
      * every OTHER errno means the call itself was malformed, is re-attempted once
      * and counted in `write_fault_stats()` rather than mistaken for a
-     * disconnect (#948). The caller holds @ref write_m_ per the
-     * write-serialization invariant.
+     * disconnect (#948).
      *
-     * A peer that stops taking bytes is bounded by @p bound_ms (#838): the record is
-     * abandoned once the deadline passes, and @ref write_result_t says whether the stream
-     * survived it. The caller holds @ref write_m_ for the whole call, so this bound is
-     * also the bound on that lock hold — which is the actual defect #838 fixes, since an
-     * unbounded write under the mutex froze every other sender on the link too.
+     * A peer that stops taking bytes is bounded by @p bound_ms (#838): the write gives up
+     * once the deadline passes, and @ref write_result_t says how far it got.
      *
      * @param fd    The destination fd; a negative fd is a no-op.
      * @param bytes The bytes to write.
@@ -521,148 +520,143 @@ class stream_endpoint_t : protected posix_endpoint_t {
                                     std::uint32_t bound_ms = 0);
 
     /**
-     * @brief Write the gathered @p vec entries to @p fd completely as ONE record,
-     *        resuming partial writes — the zero-copy scatter-gather twin of
-     *        @ref write_all.
+     * @brief Write the gathered @p vec entries to @p fd as ONE record, resuming partial
+     *        writes — the zero-copy scatter-gather twin of @ref write_all.
      *
      * `sendmsg(2)` (MSG_NOSIGNAL — a vanished peer must not SIGPIPE the process)
      * emits every iovec in one syscall; a stream write may stop anywhere, so the
      * loop resumes from the first unwritten byte. @p vec is READ-ONLY (#932): the
      * gather is NOT consumed, so the same array may be fanned to many fds with no
-     * per-fd copy — the resume path finishes a partially-written entry with a plain
-     * @ref write_all and re-gathers from the next entry boundary, which needs no
-     * mutable copy of the caller's array and no scratch store on the egress path.
-     * EINTR resumes, a socket-dead errno drops the rest silently, and any other
-     * errno is a malformed call that is re-attempted once and counted — the same
+     * per-fd copy. EINTR resumes, a socket-dead errno drops the rest silently, and any
+     * other errno is a malformed call that is re-attempted once and counted — the same
      * ONE write-fault policy as @ref write_all (#903 / #948; link-down is #66
-     * lifecycle). The caller holds @ref write_m_ per the write-serialization
-     * invariant.
+     * lifecycle).
      *
-     * The @p bound_ms deadline covers the WHOLE record, resume path included, exactly as
-     * in @ref write_all (#838).
-     *
-     * @param fd  The destination fd; a negative fd is a no-op.
-     * @param vec The entries to gather, in order, as ONE record.
+     * @param fd       The destination fd; a negative fd is a no-op.
+     * @param vec      The entries to gather, in order, as ONE record.
      * @param bound_ms Deadline for the whole record, ms; 0 = unbounded (see @ref write_all).
-     * @return How the write ended.
+     * @param nonblock Write only what the socket takes now (`MSG_DONTWAIT`), reading no clock:
+     *                 a full socket ends the write as `STALLED` with the bytes it took. The
+     *                 shape of a multi-peer server, whose writes must never wait (#2144).
+     * @return How the write ended, and how many bytes reached the socket.
      */
     static write_result_t write_all_iov(int fd, std::span<const ::iovec> vec,
-                                        std::uint32_t bound_ms = 0);
+                                        std::uint32_t bound_ms = 0, bool nonblock = false);
 
     /**
-     * @brief Account one finished write and condemn a peer that keeps stalling (#838).
+     * @brief One egress write turn: @p f from its byte @p off, gathered as one write — the
+     *        copied head, then a kept value's links straight from the published block.
      *
-     * The per-class policy of the #838 ruling, at the one seam every stream sender passes
-     * through. A STALLED record is never silently dropped: it is counted
-     * (@ref stalled_tx_, and the caller's own `dropped_tx_` via the return value) so the
-     * shed frame is visible to an observer, and the peer that caused it accrues a strike.
-     * The peer is then CLOSED — `shutdown(SHUT_RDWR)`, which takes effect on this line,
-     * needs no cooperation from the stalled socket, makes every later write fail at once
-     * and raises the readable-at-EOF the recv/poll thread turns into the ordinary
-     * remote-departure teardown (the same path @ref slot_server_t::close_peer uses) — in
-     * two cases:
+     * The gather table is inline; its overflow comes from @ref io_src_ and is refused rather
+     * than thrown, which writes nothing and reports a failed turn (a shed frame, never a
+     * desync).
      *
-     * - `write_result_t::partial`: the record half-reached the wire, so this stream's
-     *   framing is desynced permanently. Immediate, bypassing the streak.
-     * - @p streak reaching `kMaxConsecutiveStalls`: the peer is broken, not busy.
-     *
-     * Call with @ref write_m_ held (it reads the fd and mutates @p streak, both of which
-     * that lock guards) and with the fd the record was written to.
-     *
-     * @param r      The write's result.
-     * @param fd     The peer socket the record went to.
-     * @param streak The peer's consecutive-stall count, updated in place (reset by any
-     *               completed record).
-     * @retval true  The frame was SHED — the caller ticks its own `dropped_tx_`.
+     * @param fd       The destination fd.
+     * @param f        The frame.
+     * @param off      Bytes of @p f already on the wire.
+     * @param bound_ms The turn's send bound (see @ref write_all); ignored with @p nonblock.
+     * @param nonblock Write without waiting (see @ref write_all_iov).
      */
-    bool note_write_result(const write_result_t& r, int fd, std::uint8_t& streak);
+    egress_step_t write_frame(int fd, const egress_frame_t& f, std::size_t off,
+                              std::uint32_t bound_ms, bool nonblock);
 
     /**
-     * @brief Put one record on the wire through the enqueue-then-write queue (RFC 0028 §4.7).
-     *
-     * The single-peer senders' one door. A publisher that finds no write in flight becomes
-     * the writer: it takes @ref write_m_, reads @ref conn_fd_ inside it, and runs @p own on
-     * the live fd, then drains whatever other publishers queued meanwhile, one record per
-     * @ref write_m_ hold. A publisher that finds a write in flight copies its record into a
-     * slot through @p fill and returns at once, and one that finds every slot taken drops it.
-     * So no publisher waits on another publisher's write to a stalled peer (#1619); the
-     * writer's own wait stays bounded per record by the liveness window (#838).
-     *
-     * @ref write_m_ keeps its two other jobs: it still orders a write against
-     * @ref teardown_peer, and it still serializes records on the stream, because only the
-     * writer ever takes it to write.
-     *
-     * A RETAINED record (RFC-0028 §6.9) passes @p retain: @p fill then copies only the
-     * record's head (the link's framing plus the caller's head spans), the queue keeps one
-     * reference to @p retain, and the writer that drains it puts head and value on the wire
-     * as ONE gathered record (@ref write_record) — the payload is never copied into a slot.
-     * The record still leaves under one @ref write_m_ hold and one bound, so it cannot
-     * interleave with another record, and a partial write condemns the peer exactly as a
-     * copied record's does.
-     *
-     * @tparam Own  Callable `bool(int fd)`: write the caller's own record to @p fd and return
-     *              true when it was shed (the caller's `dropped_tx_` then counts it).
-     * @tparam Fill Callable `std::size_t(mem::block_array_t<std::byte>&)`: copy the record
-     *              (or, with @p retain, its head) into a queue slot, returning its byte count,
-     *              or 0 to refuse.
-     * @param retain The value a retained record's bytes end with, or null for a copied one.
-     * @return Records shed by this call: a refused enqueue, a record written into no peer,
-     *         or one the bound shed — each one the caller's `dropped_tx_` counts.
+     * @brief One egress write turn of the caller's own gathered record (the direct write).
+     * @see write_frame for the parameters.
      */
-    template <class Own, class Fill>
-    std::uint64_t handoff_send(Own&& own, Fill&& fill, const graph::value_t* retain = nullptr) {
-        switch (tx_.admit(std::forward<Fill>(fill), retain)) {
-            case tx_handoff_t::admit_t::REFUSED:
-                return 1;
-            case tx_handoff_t::admit_t::QUEUED:
-                return 0;
-            case tx_handoff_t::admit_t::WRITE:
-                break;
-        }
-        std::uint64_t shed = 0;
-        {
-            const std::lock_guard lock(write_m_);
-            const int fd = conn_fd_.load(std::memory_order_relaxed);
-            // No live peer (still dialing, or torn down) => a counted drop.
-            if (fd < 0 || std::forward<Own>(own)(fd)) ++shed;
-        }
-        for (tx_handoff_t::record_t rec = tx_.next(); rec; rec = tx_.next()) {
-            const std::lock_guard lock(write_m_);
-            const int fd = conn_fd_.load(std::memory_order_relaxed);
-            if (fd < 0) {
-                ++shed;
-                continue;
-            }
-            const write_result_t r =
-                write_record(fd, rec, derive_send_bound_ms(liveness_window_ms_, 1));
-            if (note_write_result(r, fd, tx_stall_streak_)) ++shed;
-        }
-        return shed;
+    static egress_step_t write_gather(int fd, std::span<const ::iovec> vec, std::uint32_t bound_ms,
+                                      bool nonblock);
+
+    /**
+     * @brief A shared frame of the gathered record @p rec: what comes before @p value's links
+     *        is copied, and @p value (whose non-empty links end @p rec) is kept by reference.
+     * @return The frame, or null when the egress store refused it.
+     */
+    [[nodiscard]] egress_frame_t* frame_of(std::span<const ::iovec> rec,
+                                           const graph::value_t* value = nullptr) const;
+
+    /**
+     * @brief Lay a retained send's record out as spans: @p head, then @p value's links.
+     * @return The span count, or `parts.size() + 1` when it does not fit (the caller takes
+     *         the base's copy path, `transport_t::send(head, value, lane)`).
+     */
+    [[nodiscard]] static std::size_t retained_parts(
+        std::span<std::span<const std::byte>> parts,
+        std::span<const std::span<const std::byte>> head, const graph::value_t& value) noexcept;
+
+    /**
+     * @brief Account one egress call (#838, #2144): every shed frame is a `dropped_tx_`, every
+     *        turn that found the socket full and moved nothing a `stalled_tx_`.
+     */
+    void note_egress(const egress_result_t& r) noexcept;
+
+    /**
+     * @brief Condemn a peer that earned it: `shutdown(SHUT_RDWR)` its socket — the egress's
+     *        `condemn` hook, run inside the writer role (#838, #2144).
+     *
+     * Shutdown, never close: it takes effect on this line, needs no cooperation from the
+     * stalled socket, makes every later write fail at once and raises the readable-at-EOF the
+     * recv/poll thread turns into the ordinary remote-departure teardown (the same path
+     * @ref slot_server_t::close_peer uses). A negative fd is a no-op.
+     */
+    static void condemn_fd(int fd) noexcept;
+
+    /**
+     * @brief Put one record on the wire toward the ONE peer through its egress (ADR-0087 §2).
+     *
+     * The single-peer senders' one door. A publisher that finds the peer idle takes the
+     * writer role and writes its record straight from its own memory through @p direct, with
+     * the fd read inside the role; one that finds a write in flight puts a reference to the
+     * shared frame @p frame builds in the peer's ring and returns at once. So no publisher
+     * waits on another publisher's write to a stalled peer (#1619); the writer's own wait
+     * stays bounded per turn by the liveness window (#838).
+     *
+     * @tparam Direct Callable `egress_step_t(int fd, std::uint32_t bound_ms)`: write the
+     *                caller's own record within the turn's bound.
+     * @param frame  Builds the shared frame (the record copied, a kept value by reference)
+     *               when the record has to wait.
+     * @param lane   The ring it waits in: its vertex's, or the control lane (a default).
+     */
+    template <class Direct>
+    void egress_send(function_ref_t<egress_frame_t*()> frame, Direct&& direct,
+                     const graph::delivery_lane_t& lane = {}) {
+        const std::uint32_t bound = derive_send_bound_ms(liveness_window_ms_, 1);
+        int fd = -1;
+        const egress_result_t r = egress_.send(
+            peer_, lane, frame,
+            [&] {
+                fd = conn_fd_.load(std::memory_order_acquire);
+                // No live peer (still dialing, or torn down) => a counted drop.
+                if (fd < 0) return egress_step_t{0, false, true};
+                return std::forward<Direct>(direct)(fd, bound);
+            },
+            [&](const egress_frame_t& f, std::size_t off) {
+                fd = conn_fd_.load(std::memory_order_acquire);
+                if (fd < 0) return egress_step_t{0, false, true};
+                return write_frame(fd, f, off, bound, false);
+            },
+            [&] { condemn_fd(fd); });
+        note_egress(r);
     }
 
     /**
-     * @brief Write one queued record to @p fd as ONE record: its copied bytes, then — for a
-     *        retained record — its value's links, gathered (RFC-0028 §6.9).
+     * @brief One bounded 100 ms wait on the ONE peer's socket (recv-thread side): readable,
+     *        and writable too while a frame is held (@ref egress_peer_t::wants_write).
      *
-     * A copied record is @ref write_all over its bytes. A retained one is @ref write_all_iov
-     * over `[bytes, link0, link1, ...]`, through an inline table (the overflow comes from the
-     * heap and is refused rather than thrown); a refused table writes NOTHING and is reported
-     * as `write_result_t::failed` with no byte on the wire, which the caller's stall policy
-     * counts as a shed record and never as a desync. The caller holds @ref write_m_.
+     * Writability resumes the held frame here, nonblocking (`egress_t::flush`), so a record
+     * the socket cut short finishes without waiting for a later send (#2144).
      *
-     * @param fd       The destination fd.
-     * @param rec      The record, as `%tx_handoff_t::next` handed it out.
-     * @param bound_ms The record's send bound (see @ref write_all).
-     * @return How the write ended.
+     * @return `> 0` readable (or hung up), `0` nothing to read, `< 0` a poll error.
      */
-    write_result_t write_record(int fd, const tx_handoff_t::record_t& rec, std::uint32_t bound_ms);
+    int poll_io(int fd);
 
     /**
      * @brief Tear the peer connection down (recv-thread side).
      *
-     * The teardown-under-write-lock invariant as code: resets @ref conn_fd_
-     * to -1 under @ref write_m_, THEN `close(2)` on the fd — a concurrent `send()`
-     * either finished against the still-open fd or reads -1 and no-ops.
+     * The teardown-under-role invariant as code: `shutdown(2)` the fd so a write in flight
+     * returns, close the peer's egress (waiting out its writer, releasing its frames), THEN
+     * reset @ref conn_fd_ to -1 and `close(2)` the fd — a concurrent `send()` either finished
+     * against the still-open fd or finds the peer closed and sheds.
      *
      * @param fd The peer fd the recv loop was serving.
      */
@@ -670,8 +664,8 @@ class stream_endpoint_t : protected posix_endpoint_t {
 
     /**
      * @brief The @ref transport_t::shut_down of a one-peer stream link: join the receive
-     *        thread, then tear the live peer down (@ref teardown_peer), so a later send reads
-     *        -1 and sheds. Idempotent.
+     *        thread, then tear the live peer down (@ref teardown_peer), so a later send finds
+     *        the peer closed and sheds. Idempotent.
      */
     void shut_down_stream();
 
@@ -681,8 +675,8 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * Until `stop_`: one poll-100ms-recheck accept pass (@ref poll_accept);
      * on a new connection run @p on_accept (per-peer setup — socket options,
      * handshake; return false to reject: the fd is closed and the loop
-     * re-accepts), publish the fd to @ref conn_fd_, run @p serve_peer, then
-     * @ref teardown_peer and re-accept the next peer.
+     * re-accepts), publish the fd to @ref conn_fd_ and reopen the peer's egress, run
+     * @p serve_peer, then @ref teardown_peer and re-accept the next peer.
      *
      * @param listen_fd  The bound+listening socket.
      * @param on_accept  Per-peer setup; false rejects the connection.
@@ -692,30 +686,28 @@ class stream_endpoint_t : protected posix_endpoint_t {
     void run_accept_loop(int listen_fd, function_ref_t<bool(int)> on_accept,
                          function_ref_t<void(int)> serve_peer);
 
-    std::mutex write_m_;           /**< @brief Serializes writes to @ref conn_fd_ (see the
-                                               write-serialization invariant). */
     std::atomic<int> conn_fd_{-1}; /**< @brief The live peer connection (-1 = none). */
     /** @brief The injected peer liveness window, ms (0 = `kDefaultLivenessWindowMs`) —
      *         the number every per-record send bound on this endpoint derives from
      *         (`derive_send_bound_ms`). Set once at construction, read-only after. */
     std::uint32_t liveness_window_ms_ = 0;
-    /** @brief Records shed because their send bound expired (#838) — the "how many frames
-     *         did a stalled peer cost us" counter, distinct from the other `dropped_tx_`
-     *         causes. Relaxed: a diagnostic tally, not a synchronizer. Word-wide, not
-     *         64-bit (core/STYLE.md §Introspection clause 5, #1697): a 64-bit atomic is a
+    /** @brief Write turns that found the peer's socket full and moved nothing (#838, #2144)
+     *         — the "how often did a stalled peer refuse us" counter, each one a strike.
+     *         Relaxed: a diagnostic tally, not a synchronizer. Word-wide, not 64-bit
+     *         (core/STYLE.md §Introspection clause 5, #1697): a 64-bit atomic is a
      *         libatomic call on every rv32; a 32-bit target wraps after 2^32. */
     std::atomic<std::size_t> stalled_tx_{0};
-    /** @brief The ONE peer's consecutive-stall streak (guarded by @ref write_m_) — the
-     *         multi-peer servers keep one per slot instead. */
-    std::uint8_t tx_stall_streak_ = 0;
-    /** @brief Records a single-peer sender may queue behind the write in flight
-     *         (@ref handoff_send). Past it a publisher drops and counts rather than waits. */
-    static constexpr std::size_t kTxQueueDepth = 8;
-    /** @brief This link's egress store: the queue's records, a retained record's gather
-     *         overflow (@ref write_record), and a derived class's own link buffers (#1780). */
-    mem::block_source_t* io_src_ = &mem::net_source();
-    /** @brief The enqueue-then-write queue @ref handoff_send drives (RFC 0028 §4.7). */
-    tx_handoff_t tx_{kTxQueueDepth, *io_src_};
+    /** @brief Outbound frames this link never put on the wire, every cause: a refused build,
+     *         a closed peer, a full ring, a failed write. The link's `dropped_tx`. */
+    std::atomic<std::size_t> dropped_tx_{0};
+    /** @brief This link's egress store: shared frames, rings, a frame's gather overflow
+     *         (@ref write_frame), and a derived class's own link buffers (#1780). */
+    mem::block_source_t* io_src_;
+    /** @brief The egress module (ADR-0087 §2): the source, the queue mutex, the strike cap. */
+    egress_t egress_;
+    /** @brief The ONE peer's egress — a dialer's or a one-peer listener's. A multi-peer
+     *         server keeps one per session instead and leaves this one closed. */
+    egress_peer_t peer_;
 };
 
 /**
@@ -745,16 +737,15 @@ class stream_endpoint_t : protected posix_endpoint_t {
  * @ref flat_slot_server_t according to @ref tr::net::kBusLinks.
  *
  * **Slot threading rule, ONE rule for both halves of a slot's lifecycle:**
- * @ref session_base_t::fd / @ref session_base_t::open are atomics MUTATED
- * only under `write_m_` — accept publishes them (fd FIRST, so "open ⇒ fd
- * valid" is an invariant, #891), teardown resets them (open first) — and read
- * by senders under that same lock, so a sender never sees a half-published
- * slot. @ref session_base_t::name is guarded by @ref peers_m_; every
- * protocol buffer a slot carries is poll-thread-only. The destructor's
- * closing sweep is the one mutation outside the lock and runs after the poll
- * thread is joined. Every access to the two atomics is `relaxed`: the lock,
- * not the memory order, is what orders them. Lock order where nested:
- * @ref peers_m_ → `write_m_`.
+ * @ref session_base_t::fd / @ref session_base_t::open are MUTATED only on the poll
+ * thread — accept publishes the fd, then opens the session's egress, then `open`
+ * (#891: "open ⇒ fd valid"); teardown clears `open`, shuts the fd down, closes the
+ * session's egress (which waits out its writer), and only then resets and closes the fd.
+ * A sender reads the fd only INSIDE the session's egress writer role (ADR-0087 §2), which
+ * the egress hands over with acquire/release, so it never sees a half-published slot or a
+ * closed one. @ref session_base_t::name is guarded by @ref peers_m_; every protocol buffer
+ * a slot carries is poll-thread-only. The destructor's closing sweep runs after the poll
+ * thread is joined. There is no shared write lock: a stalled peer holds only its own role.
  *
  * @warning A derived destructor MUST call `stop_and_join()` as its FIRST act:
  *          the poll thread dispatches the variance points below into the
@@ -789,10 +780,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /** @brief The actual bound TCP port (resolves an ephemeral 0 request). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
 
-    /** @brief Records shed because their send bound expired, summed over every peer this
-     *         server has carried (#838) — the subset of `dropped_tx()` a stalled peer
-     *         caused. `kMaxConsecutiveStalls` of them in a row on one session, or any
-     *         one that half-reached the wire, closes that session. */
+    /** @brief Write turns that found a peer's socket full and moved nothing, summed over
+     *         every peer this server has carried (#838, #2144). `kEgressStallStrikes` of them
+     *         in a row on one session close that session. */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
         return stalled_tx_.load(std::memory_order_relaxed);
     }
@@ -813,9 +803,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *
      * The liveness window divided by @ref max_peers — NOT by 1. A directed send is a round
      * of one, but it is not the only one a node can have in flight: every open peer can be
-     * the target of a concurrent directed send, and on one server those serialize behind
-     * `write_m_`. Dividing by the cap makes the SUM over every peer that could be stalled
-     * one window, which is the same aggregate claim @ref broadcast_iov makes for the fan.
+     * the target of a concurrent directed send. Dividing by the cap makes the SUM over every
+     * peer that could be stalled one window. Since #2144 a server's peer writes never wait,
+     * so only the ws server's one blocking write, its `101`, still uses it.
      */
     [[nodiscard]] std::uint32_t directed_send_bound_ms() const noexcept {
         return derive_send_bound_ms(liveness_window_ms_, max_peers_);
@@ -893,8 +883,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /**
      * @brief Close the open peer named @p peer, freeing its slot for reuse.
      *
-     * Shuts the socket down (`SHUT_RDWR`) under the sender lock order
-     * (@ref peers_m_ → `write_m_`); the poll thread's next pass observes the close and
+     * Shuts the socket down (`SHUT_RDWR`) under @ref peers_m_ (teardown un-names a slot
+     * under the same lock before it closes the fd); the poll thread's next pass observes the
+     * close and
      * runs the IDENTICAL remote-FIN teardown, so the recycle is asynchronous (within one
      * poll bound) and no poll-thread-only buffer is ever touched off-thread.
      * @retval true  @p peer named an open connection and its socket was shut down.
@@ -951,11 +942,11 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
         /** @brief The directed facade @ref peer_link returns — the derived slot's own
          *         member, registered here by @ref make_session. */
         transport_t* peer_endpoint = nullptr;
-        /** @brief This session's consecutive-stall streak (#838) — guarded by `write_m_`,
-         *         like the two atomics above, because it is mutated by exactly the senders
-         *         that hold it. Cleared as the slot is recycled, so a stalled peer's
-         *         strikes can never be inherited by its successor in the slot. */
-        std::uint8_t tx_stall_streak = 0;
+        /** @brief This session's egress (ADR-0087 §2, #2144): its frames waiting per vertex,
+         *         its writer role and its strikes. Closed while the slot is free; reset as the
+         *         slot is recycled, so a stalled peer's frames and strikes are never inherited
+         *         by its successor in the slot. */
+        egress_peer_t egress;
 
        protected:
         /** @brief Destroyed only as the derived slot it is: the slot table's
@@ -975,20 +966,19 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *                   that ceiling is clamped to it. Read the enforced value back from
      *                   @ref max_peers.
      * @param peer_named Expose the @ref bus_link_t facet (see @ref bus).
-     * @param src        The store the TX hand-off ring and the egress gathers are drawn from
-     *                   (the link's `memory.io`). Must outlive the server.
+     * @param src        The store every session's egress rings, the shared frames and the
+     *                   egress gathers are drawn from (the link's `memory.io`). Must outlive
+     *                   the server.
      * @param state_src  The store the slot table, every session and each poll pass's tables
      *                   are drawn from (the link's `memory.state`, #1780). Must outlive the
      *                   server.
      * @param liveness_window_ms The app-provided peer liveness window, ms (0 =
-     *                   `kDefaultLivenessWindowMs`) — see @ref broadcast_iov for how
-     *                   one fan-out round is bounded by it (#838), and
-     *                   @ref directed_send_bound_ms for the directed twin (#1295).
+     *                   `kDefaultLivenessWindowMs`) — see @ref directed_send_bound_ms (#1295).
      */
     slot_server_t(std::size_t max_peers, bool peer_named, std::uint32_t liveness_window_ms = 0,
                   mem::block_source_t& src = mem::net_source(),
                   mem::block_source_t& state_src = mem::net_source())
-        : stream_endpoint_t(src, 0),
+        : stream_endpoint_t(src, false),
           slots_(state_src),
           max_peers_(derive_max_peers(liveness_window_ms, max_peers)),
           peer_named_(peer_named) {
@@ -1031,8 +1021,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * @brief Tear one slot down and free it for reuse (poll thread only).
      *
      * Two phases: stop name resolution under @ref peers_m_ (so no new sender targets the
-     * dying slot), then reset `open`/`fd` under `write_m_` BEFORE `close(2)` (so an
-     * in-flight send either finished against the still-open fd or observes the reset).
+     * dying slot), then clear `open`, shut the fd down and close the session's egress —
+     * which waits out a writer in flight — BEFORE resetting the fd and `close(2)`ing it.
      * @ref on_slot_reset clears the protocol buffers, and the departure seam
      * (RFC-0009 §D.5) fires LAST with no transport lock held — the notifier re-enters the
      * routing plane. Which seam depends on @ref peer_named() — the departed peer's own name
@@ -1051,25 +1041,30 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     void shut_down_slots();
 
     /**
-     * @brief Fan one already-encoded gathered record to EVERY open peer.
+     * @brief Fan one already-encoded gathered record to EVERY open peer through its egress
+     *        (ADR-0087 §2, #2144).
      *
-     * `write_all_iov` reads its gather without consuming it (#932), so every peer writes
-     * straight from @p rec — no per-peer copy, and no scratch store that could exhaust
-     * and drop the frame. Takes @ref peers_m_ → `write_m_`, the header lock order.
+     * An idle peer takes @p rec straight from the caller's gather (read-only, #932); a peer
+     * with a write in flight, or whose socket takes only part of it, gets a reference to ONE
+     * shared frame built at most once for the whole fan-out (the framing copied, @p value kept
+     * by reference). Every write is nonblocking, so a stalled peer costs the round one refused
+     * syscall and never delays the peers behind it; its frames wait in its own ring for
+     * @p lane, and only ITS strikes condemn it. Shed frames and stalls are counted.
      *
-     * The ROUND is bounded (#838): the per-peer record bound is the liveness window
-     * divided by the number of open peers this round actually writes to
-     * (`derive_send_bound_ms`), so a fan-out in which EVERY peer has stopped reading
-     * still releases both locks — and the calling application thread — inside one window
-     * instead of blocking forever on the first stalled peer. A peer whose record stalls is
-     * counted and strikes only ITSELF (@ref stream_endpoint_t::note_write_result); the
-     * healthy peers behind it in the same round still get the frame.
-     *
-     * @param rec The assembled record (framing entry first, payload spans after).
-     * @return How many peers the record was SHED for (each one a `dropped_tx_` the caller
-     *         ticks — the counters live in the derived servers).
+     * @param rec   The whole record (framing first, payload after), for the direct writes.
+     * @param value The value whose links end @p rec, kept by reference in a shared frame
+     *              (@ref frame_of), or null: the frame copies all of @p rec.
+     * @param lane  The vertex the record comes from, or the control lane (a default).
      */
-    std::size_t broadcast_iov(std::span<const ::iovec> rec);
+    void broadcast(std::span<const ::iovec> rec, const graph::value_t* value = nullptr,
+                   const graph::delivery_lane_t& lane = {});
+
+    /**
+     * @brief Send one record to ONE session through its egress — the directed facades'
+     *        door. Parameters as @ref broadcast; a departed session sheds, counted.
+     */
+    void send_to(session_base_t& s, std::span<const ::iovec> rec,
+                 const graph::value_t* value = nullptr, const graph::delivery_lane_t& lane = {});
 
     /**
      * @name Variance points (runtime virtuals — ADR-0047 §4 wiring-frequency).
@@ -1119,8 +1114,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     virtual void on_slot_reset(session_base_t& s) = 0;
 
     /**
-     * @brief TEST SEAM dispatch: run inside the accept-side `write_m_` hold, with the fd
-     *        published and the slot ONE store from open.
+     * @brief TEST SEAM dispatch: run on the accept path with the fd published and the slot
+     *        not yet open (its egress still closed).
      *
      * Default: nothing. A derived server overrides it to fire its own hook pointer — the
      * instant a test holds open to prove the two stores are atomic to senders (#891).
@@ -1143,6 +1138,11 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * notifier re-enters the routing plane and takes graph locks.
      */
     void publish_peer_up(const session_base_t& s);
+
+    /** @brief Open @p s to senders: its egress, then @p first as its first frame (a WS
+     *         server's 101; empty: none), then `open` (poll thread; the fd is already
+     *         published). */
+    void open_session(session_base_t& s, std::span<const std::byte> first = {});
 
     /**
      * @name The peer-LIFECYCLE seam (#1438) — the only two places this tier needs the facet.
@@ -1174,8 +1174,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /**
      * @brief Guards the slot vector and every slot's NAME — the cross-thread reads
      *        (@ref enumerate_peers / @ref peer_link) against the poll thread's
-     *        accept/teardown. See the class-level threading rule; lock order where
-     *        nested: this → `write_m_`.
+     *        accept/teardown. See the class-level threading rule. A broadcast holds it
+     *        across its nonblocking writes, never across a wait.
      */
     mutable std::mutex peers_m_;
     /** @brief The peer slots: insert-only, recycled in place, never freed early. */
@@ -1227,6 +1227,15 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
 
     /** @brief One readable pass on @p s: `recv` a chunk, or tear the slot down. */
     void service_peer(session_base_t& s);
+
+    /** @brief @p s reported writability: resume its held frame and drain its lanes
+     *         (@ref egress_t::flush). */
+    void flush_peer(session_base_t& s);
+
+    /** @brief One record to @p s through its egress, every write nonblocking: @p rec direct
+     *         when @p s is idle, else the shared frame @p frame builds, in @p lane. */
+    void send_one(session_base_t& s, function_ref_t<egress_frame_t*()> frame,
+                  std::span<const ::iovec> rec, const graph::delivery_lane_t& lane);
 
     /**
      * @brief True while ANY slot is still open — the flat mode's "is the link still up"

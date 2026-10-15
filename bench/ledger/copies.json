@@ -63,9 +63,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 213,
+      "value": 165,
       "goal": 112,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
     },
     {
       "id": "tcp-relay-cli @1024",
@@ -74,9 +74,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 2133,
+      "value": 2085,
       "goal": 1072,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
     },
     {
       "id": "tcp-relay-cli @4096",
@@ -85,9 +85,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 4177,
+      "value": 4129,
       "goal": 48,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
     },
     {
       "id": "tcp-relay-cli @16384",
@@ -96,9 +96,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 16465,
+      "value": 16417,
       "goal": 48,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
     },
     {
       "id": "ws-relay-srv @64",

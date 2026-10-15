@@ -3161,13 +3161,15 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
     // The retained send (RFC-0028 §6.9): head + dst + empty src as three spans on the stack,
     // and the value by reference. The per-delivery iov table this leg used to draw from
     // `graph_.control_source()` (#981) is gone with it: the link lowers `head ++ value.links()`
-    // through its own inline table (`transport_t::send(head, value)`), and a link that QUEUES
+    // through its own inline table (`transport_t::send(head, value, lane)`), and a link that QUEUES
     // the frame keeps the value (one refcount) and copies only the head — so neither this leg
     // nor a queued link copies the payload, and neither allocates for a value of up to five
     // links. A multi-link value still crosses as its own segments (ADR-0053 ⑤).
     const std::array<std::span<const std::byte>, 3> head_iov{head.span(), dst,
                                                              std::span<const std::byte>(empty_src)};
-    out->send(std::span<const std::span<const std::byte>>(head_iov), val);
+    // The edge's lane rides along (ADR-0087 §2): a link that queues per peer waits it in
+    // that vertex's own ring, so one vertex's backlog never sheds another's.
+    out->send(std::span<const std::span<const std::byte>>(head_iov), val, sub.lane);
 }
 
 // --- deferred remote AWAIT (ADR-0084) ------------------------------------------------

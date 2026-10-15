@@ -185,19 +185,18 @@ bool raw_handshake(int cfd) {
  *        window is closed, proven by holding it open rather than by racing for it.
  *
  * `ws_server_transport_t::on_readable` writes the `101 Switching Protocols` response and
- * publishes the slot
- * (`open = true`) inside ONE `write_m_` critical section. Store `open` after that lock is
- * released and there is a window in which the peer has already read the response — so it
- * believes the connection is up — while every `send` still skips the slot as not-open and
- * the frame goes nowhere. In production that window is a few instructions and shows up only
- * as an occasional lost first frame (it went from 0/40 to 1/40 the moment #848 made the
- * server egress fast enough to reach `send` inside it), which is exactly the kind of fix a
- * racing test cannot pin.
+ * then opens the session (its egress, then `open = true`) before this hook runs (#2144).
+ * Open it after the hook instead and there is a window in which the peer has already read the
+ * response — so it believes the connection is up — while every `send` still skips the slot as
+ * not-open and the frame goes nowhere. In production that window is a few instructions and shows up
+ * only as an occasional lost first frame (it went from 0/40 to 1/40 the moment #848 made the server
+ * egress fast enough to reach `send` inside it), which is exactly the kind of fix a racing test
+ * cannot pin.
  *
  * So this test does not race: `detail::ws_peer_published_hook` PARKS the server's poll
  * thread at the instant after the response write, the test does its whole `send` inside that
- * parked window, and only then releases it. With the store inside the lock the send lands
- * and the client decodes the frame; with the store moved back out, the identical sequence
+ * parked window, and only then releases it. With the session opened first the send lands
+ * and the client decodes the frame; with the open moved after the hook, the identical sequence
  * reads an empty socket until the budget expires. Deterministic in both directions.
  */
 void test_peer_open_before_response_is_readable() {

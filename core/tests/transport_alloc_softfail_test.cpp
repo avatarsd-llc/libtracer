@@ -387,14 +387,12 @@ bool raw_handshake(int cfd) {
  * @brief Block until @p server counts at least @p want OPEN peers.
  *
  * `raw_handshake` returning means the CLIENT read the 101 — which is one instruction earlier
- * than the server publishing the slot, since `on_readable` writes the response and stores
- * `open = true` as two steps of one `write_m_` critical section. A sender can only reach the
- * fd through that same lock, so a `send` here cannot in fact be lost (`ws_transport_test`
- * proves it by parking the server in that instant). This barrier stays anyway because it
- * asserts the predicate DIRECTLY rather than by lock-ordering argument: `enumerate_peers`
- * visits exactly the open, named slots, which is the same predicate `send` broadcasts over.
- * (The peer's routable `p<slot>` name is stamped at accept regardless of the server's
- * `peer_named` setting, so this works on a default server too.)
+ * than the server publishing the slot, since `on_readable` writes the response and only then
+ * opens the session (its egress, then `open = true`). A broadcast in that instant skips the
+ * slot, so a `send` here could be lost (#2144). This barrier asserts the predicate DIRECTLY:
+ * `enumerate_peers` visits exactly the open, named slots, which is the same predicate `send`
+ * broadcasts over. (The peer's routable `p<slot>` name is stamped at accept regardless of the
+ * server's `peer_named` setting, so this works on a default server too.)
  */
 [[nodiscard]] bool wait_for_peers(const tr::net::ws_server_transport_t& server, std::size_t want,
                                   std::chrono::milliseconds budget) {

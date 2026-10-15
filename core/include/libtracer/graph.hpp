@@ -95,6 +95,9 @@ struct remote_delivery_t {
     /** @brief The edge's stored ACL fan-in context (#81) — the subject the sink's local
      *         element-0 consumption re-checks §6.2 under. */
     std::string_view caller;
+    /** @brief The ring this delivery waits in toward its peer, keyed by the edge and shaped
+     *         by the local vertex at subscribe time (ADR-0087 §2, #2144). */
+    delivery_lane_t lane;
 };
 
 /**

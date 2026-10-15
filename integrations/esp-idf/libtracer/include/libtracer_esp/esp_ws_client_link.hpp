@@ -402,7 +402,7 @@ class esp_ws_client_link_t final : public transport_t {
      * The base default flattened the spans into an egress temporary and then handed that to
      * @ref send, which copied it again into the scratch — two copies and an allocation per
      * gathered frame. A masked frame needs ONE private copy (the transport masks in place),
-     * and this is it. The retained send (`transport_t::send(head, value)`) lowers here too:
+     * and this is it. The retained send (`transport_t::send(head, value, lane)`) lowers here too:
      * a client frame cannot be written from a shared block, so this link keeps the value by
      * copying it, once.
      *

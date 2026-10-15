@@ -1307,8 +1307,8 @@ class httpd_ws_link_t::peer_resolution_t final : public transport_t {
     /** @brief Directed RETAINED send (RFC-0028 §6.9): queued as head bytes plus one
      *         reference to @p value (see the owning link's retained @ref httpd_ws_link_t::send);
      *         in-call it is the gathered in-call write. */
-    void send(std::span<const std::span<const std::byte>> head,
-              const graph::value_t& value) override;
+    void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+              const graph::delivery_lane_t& lane) override;
     /**
      * @brief The owning LINK's shed-frame counters, projected through this handle (#1494).
      *
@@ -4296,7 +4296,8 @@ void httpd_ws_link_t::queue_send_retained(const session_ref_t& to,
 }
 
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
-                           const graph::value_t& value) {
+                           const graph::value_t& value, const graph::delivery_lane_t& lane) {
+    (void)lane;  // the ESP-IDF link keeps tx_handoff_t's one queue for now (#2144)
     // The broadcast's snapshot-then-stage shape (see the iovec override below), with the
     // retained block in place of the gathered one: built once, on the first destination.
     session_ref_t targets[kFanoutChunk];
@@ -4444,7 +4445,9 @@ void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::span<const st
 }
 
 void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::span<const std::byte>> head,
-                                              const graph::value_t& value) {
+                                              const graph::value_t& value,
+                                              const graph::delivery_lane_t& lane) {
+    (void)lane;  // the ESP-IDF link keeps tx_handoff_t's one queue for now (#2144)
     // The directed twin of the retained broadcast, with the identity test of the iovec
     // override above (#1013 / #954) — see there.
     httpd_ws_link_t* const owner = owner_;

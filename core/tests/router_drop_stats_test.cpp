@@ -467,7 +467,8 @@ void test_malformed_frames_land_in_one_bucket() {
  *   - #873 phase 1 (09feda62) put the value channel on the ONE injected source, so an armed
  *     source now refuses the WRITE itself, by value, before any fan-out runs;
  *   - RFC-0028 slice 9 (2d5b10e0) deleted the per-delivery iov table: `deliver_remote` now
- *     hands the link three stack head spans plus the value (`transport_t::send(head, value)`).
+ *     hands the link three stack head spans plus the value (`transport_t::send(head, value,
+ * lane)`).
  *
  * `delivery_iov_dropped` survives only on the unreachable head-overflow arm. What this case
  * pins instead is the property slice 9 bought: a subscribed write draws exactly as many

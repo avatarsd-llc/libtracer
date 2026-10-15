@@ -16,7 +16,8 @@
       "arm": "tcp-server",
       "metric": "per_conn",
       "goal": 170,
-      "moved_by": "#2167 (idle server link base re-pinned, per-peer rows +10 B)",
+      "moved_by": "#2144 (shared-frame egress: the 24 B egress slot replaces the 1 B stall streak, +16 B per peer)",
+      "waiver": "#2144 maintainer ruling (one ring per (peer, vertex), review blocker 4): the 24 B egress slot is the at-rest cost of the shared-frame egress; rings are drawn only while frames wait. The ws-server row holds at its base.",
       "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record."
     },
     {
@@ -28,6 +29,15 @@
       "goal": 282,
       "moved_by": "#2167 (idle server link base re-pinned, per-peer rows +10 B)",
       "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record."
+    },
+    {
+      "id": "stream egress slot",
+      "target": "WIDE",
+      "source": "static",
+      "value": 24,
+      "goal": 24,
+      "moved_by": "#2144 (one shared-frame egress, one ring per (peer, vertex))",
+      "basis": "sizeof(tr::net::egress_peer_t) on x86-64, pinned by its static_assert (16 B on a 32-bit target): the lane round, the frame on the wire and its offset, the strike count, the role and the writability flag. A ring is drawn per (peer, vertex) only while frames wait, so an idle peer holds this slot and nothing else."
     },
     {
       "id": "tcp-server link base",

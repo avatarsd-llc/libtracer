@@ -645,7 +645,8 @@ void test_producers_race_close_and_reclaim() {
             const std::span<const std::byte> head[] = {std::span<const std::byte>(kBody)};
             for (int i = 0; i < 400; ++i) {
                 if ((i + t) % 3 == 0) {
-                    raw->send(std::span<const std::span<const std::byte>>(head), *val);
+                    raw->send(std::span<const std::span<const std::byte>>(head), *val,
+                              tr::graph::delivery_lane_t{});
                 } else if ((i + t) % 3 == 1) {
                     raw->send(std::span<const std::byte>(kBody));
                 } else if (tr::net::transport_t* const to = raw->peer_link("p2")) {

@@ -1256,25 +1256,25 @@ void test_peer_named_server_does_not_downgrade_to_flat() {
 }
 
 /**
- * @brief A broadcast that lands INSIDE the accept publish reaches the peer being accepted —
- *        `open ⇒ fd valid`, proven by holding that instant open rather than by racing for it.
+ * @brief A broadcast that lands INSIDE the accept publish neither waits on the accept nor
+ *        touches the half-published slot — `open ⇒ fd valid`, proven by holding that instant
+ *        open rather than by racing for it.
  *
- * `slot_server_t::accept_peer` publishes a slot's two sender-visible fields under `write_m_`
- * (the lock `slot_server_t::teardown_slot` resets them under), fd FIRST. Store them unlocked
- * with `open` first — what this server did before #891 — and a broadcast holding
- * `write_m_` can read `open == true`
- * next to `fd == -1` and hand the record to `write_all_iov(-1)`, which drops it on the floor.
- * In production that window is two instructions wide, so a racing test cannot pin it.
+ * `slot_server_t::accept_peer` publishes the fd FIRST, then opens the session's egress, then
+ * `open` (#891, #2144). Open the session first — what this server did before #891 — and a
+ * broadcast can read `open == true` next to `fd == -1` and hand the record to fd -1. In
+ * production that window is two instructions wide, so a racing test cannot pin it.
  *
  * So this test does not race: `detail::tcp_peer_publishing_hook` PARKS the poll thread at the
- * mid-publish instant, the whole broadcast happens inside that parked window, and only then
- * is the park released. With the pair published under the lock the sender blocks, wakes to a
- * whole slot, and the client reads the record; with the two stores unlocked and reordered the
- * identical sequence writes to fd -1 and the client's socket stays empty until the budget
- * expires. Deterministic in both directions.
+ * mid-publish instant and the whole broadcast happens inside that parked window. The slot is
+ * not open yet, so the broadcast skips it and returns at once — before #2144 it blocked on the
+ * shared write mutex for the rest of the accept. Once the park is released the session opens,
+ * and the NEXT broadcast is the first thing the client reads: nothing of the skipped one
+ * reached its socket.
  */
 void test_accept_publish_is_atomic_to_senders() {
-    std::printf("TCP transport — a broadcast inside the accept publish reaches the new peer:\n");
+    std::printf(
+        "TCP transport — a broadcast inside the accept publish skips the half-published peer:\n");
 
     tr::net::transport_tcp_server server(0);
     check(server.ok(), "listen socket bound");
@@ -1321,13 +1321,17 @@ void test_accept_publish_is_atomic_to_senders() {
               "the poll thread reached the instant mid-publish");
     }
 
-    // The whole broadcast happens INSIDE the parked window: under the fix it blocks on
-    // write_m_ and lands on a published slot; without it, it reads the half-published one.
-    const auto payload = test_frame(6, 0x5A);
-    std::thread sender([&] { server.send(payload); });
-    // Give the sender time to reach the send path inside the window. Generous either way:
-    // with the publish locked the send merely waits longer for write_m_ and still lands.
+    // The whole broadcast happens INSIDE the parked window: the slot is not open, so it is
+    // skipped, and the sender returns without waiting for the accept to finish.
+    const auto early = test_frame(6, 0x5A);
+    std::atomic<bool> sent{false};
+    std::thread sender([&] {
+        server.send(early);
+        sent.store(true, std::memory_order_release);
+    });
     std::this_thread::sleep_for(200ms);
+    check(sent.load(std::memory_order_acquire),
+          "the broadcast returned inside the parked window — it never waits on an accept");
     {
         const std::lock_guard lock(m);
         released = true;
@@ -1335,9 +1339,18 @@ void test_accept_publish_is_atomic_to_senders() {
     cv.notify_all();
     sender.join();
 
+    // The session opens once the park is released; the next broadcast reaches it, and is the
+    // FIRST thing on the client's socket.
+    const auto payload = test_frame(6, 0x6B);
     const auto want = record(payload);
-    const auto got = read_within(client.fd, want.size(), 2s);
-    check(got == want, "the frame broadcast in that instant REACHED the accepted peer");
+    std::vector<std::byte> got;
+    for (int i = 0; i < 40 && got.empty(); ++i) {
+        std::this_thread::sleep_for(25ms);
+        server.send(payload);
+        got = read_within(client.fd, want.size(), 100ms);
+    }
+    check(got == want,
+          "the first frame the accepted peer reads is a whole one sent after it opened");
 }
 
 /** @brief A bound+listening raw loopback socket the test drives by hand (accept, write, close). */

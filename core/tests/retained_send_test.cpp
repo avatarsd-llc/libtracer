@@ -124,7 +124,7 @@ void test_default_lowering() {
     const std::array<std::byte, 2> h0{std::byte{0x0F}, std::byte{0x10}};
     const std::array<std::byte, 1> h1{std::byte{0x99}};
     const std::array<span_t, 3> head{span_t(h0), span_t(h1), span_t{}};
-    probe.send(std::span<const span_t>(head), *v);
+    probe.send(std::span<const span_t>(head), *v, tr::graph::delivery_lane_t{});
 
     std::vector<std::byte> want(h0.begin(), h0.end());
     want.insert(want.end(), h1.begin(), h1.end());
@@ -217,7 +217,7 @@ void test_tcp_retained_race() {
                 const value_t& v = *values[t][s];
                 const auto h = race_head(t, s, static_cast<std::uint32_t>(v.total_length()));
                 const std::array<span_t, 1> head{span_t(h)};
-                dialer.send(std::span<const span_t>(head), v);
+                dialer.send(std::span<const span_t>(head), v, tr::graph::delivery_lane_t{});
                 // Returned with the link still holding it: the retained record is queued.
                 if (v.use_count() > 1) queued.fetch_add(1, std::memory_order_relaxed);
             }

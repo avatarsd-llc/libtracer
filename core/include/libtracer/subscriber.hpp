@@ -282,6 +282,17 @@ struct subscriber_remote_t {
      * already uses, guarded binding included (a core with no atomic RMW, #1722).
      */
     view::detail::ref_count_t refs{1};
+    /**
+     * @brief The local vertex's retention depth when this edge was admitted, saturated at
+     *        65535 — the depth of the per-peer ring its deliveries wait in (ADR-0087 §2,
+     *        #2144; @ref delivery_lane_t). `1` is a SAMPLE.
+     *
+     * Rides the tail padding after @ref refs with @ref lane_reliable, so `sizeof` stays the
+     * pinned 120 B. Written once at admission, like every other field here.
+     */
+    std::uint16_t lane_depth = 1;
+    /** @brief The local vertex's §4.4 arm when this edge was admitted (see @ref lane_depth). */
+    bool lane_reliable = false;
 };
 
 /**

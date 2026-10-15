@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory_resource>
 #include <mutex>
@@ -2110,12 +2111,14 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     // the handle is non-null here; assert it rather than re-testing on the hot path.
     const subscriber_remote_t* r = e.remote.get();
     assert(r != nullptr && "dispatch_edge gates the remote leg on a populated cold half");
-    sink.fn(sink.ctx,
-            remote_delivery_t{.link = r->link,
-                              .return_route = r->return_route,
-                              .reverse_route = r->reverse_route,
-                              .caller = r->caller},
-            value);
+    sink.fn(
+        sink.ctx,
+        remote_delivery_t{.link = r->link,
+                          .return_route = r->return_route,
+                          .reverse_route = r->reverse_route,
+                          .caller = r->caller,
+                          .lane = {.key = r, .depth = r->lane_depth, .reliable = r->lane_reliable}},
+        value);
 }
 
 /**
@@ -3813,6 +3816,12 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // canonical-only subscribe, and stored WITHOUT validation beyond what the resolver
     // already did: element 0 is this node's own mint, re-validated on every delivery.
     r->reverse_route = std::move(reverse_route);
+    // The shape of the per-peer ring this edge's deliveries wait in (ADR-0087 §2): the local
+    // vertex's own declaration, read once here so the delivery leg reads nothing new. A vertex
+    // that never declared a depth reads 1, a SAMPLE.
+    r->lane_depth = static_cast<std::uint16_t>(
+        std::min<std::uint32_t>(v->retention_depth(), std::numeric_limits<std::uint16_t>::max()));
+    r->lane_reliable = v->ring_reliable();
     // A wire subscribe carries no host handle back — discard the slot (unsubscribe is the
     // wire :subscribers[N] clear, not this door's return).
     if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx, std::nullopt, link_token); !r2)
