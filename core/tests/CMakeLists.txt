@@ -546,26 +546,27 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     set_tests_properties(httpd_ws_close_peer
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
-    # #949 — the TX SLOT POOL as the link's outstanding-send bound, on the same fake.
-    # It replaces the #944 strand suite: above the component's ESP-IDF floor (>=5.5.5) a
-    # full control mbox refuses the enqueue instead of binning it in silence, so the slot
-    # always comes back, and a send that finds no free slot is dropped and counted rather
-    # than posted from a heap work item.
-    add_executable(httpd_ws_tx_pool_test
-        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_tx_pool_test.cpp"
+    # #2095 — the PER-PEER CONFLATING TX SLOT, on the same fake. It replaces the #949 pool,
+    # #1187 wait and #1218 width suites: one slow peer must not set any other peer's rate.
+    # A stalled peer and a healthy one share a link; the healthy one gets every frame, the
+    # stalled one's waiting frame is replaced (latest wins, counted), a part-written frame
+    # is finished before anything else reaches its socket, and the link keeps ONE flush in
+    # the control queue however many frames it holds.
+    add_executable(httpd_ws_peer_tx_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_peer_tx_test.cpp"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
         "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
-    target_include_directories(httpd_ws_tx_pool_test PRIVATE
+    target_include_directories(httpd_ws_peer_tx_test PRIVATE
         "${LIBTRACER_ESP_DIR}/tests/host"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
-    target_link_libraries(httpd_ws_tx_pool_test PRIVATE libtracer)
-    target_link_options(httpd_ws_tx_pool_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
-    libtracer_test_warnings(httpd_ws_tx_pool_test)
-    add_test(NAME httpd_ws_tx_pool COMMAND httpd_ws_tx_pool_test)
+    target_link_libraries(httpd_ws_peer_tx_test PRIVATE libtracer)
+    target_link_options(httpd_ws_peer_tx_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_peer_tx_test)
+    add_test(NAME httpd_ws_peer_tx COMMAND httpd_ws_peer_tx_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
     # every case here constructs an adopting link — same exemption as the suites above.
-    set_tests_properties(httpd_ws_tx_pool
+    set_tests_properties(httpd_ws_peer_tx
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
     # #1566 — the BOUNDED LARGE TX SIZE CLASS, on the same fake. It borrows the fan-out
@@ -681,52 +682,6 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
     # every case here constructs an adopting link — same exemption as the suites above.
     set_tests_properties(httpd_ws_fanout_alloc
-        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
-
-    # #1187 — the fan-out WAIT: the TX pool is an in-flight bound, not a fan-out ceiling, so
-    # a sweep wider than it costs latency rather than losing the same publish-order tail
-    # every pass. What this target adds over the two suites above is the SCHEDULING model —
-    # its drainer runs only while the producer is blocked, which is the unicore ordering that
-    # made the loss deterministic on silicon and which a free-running host thread hides.
-    add_executable(httpd_ws_fanout_wait_test
-        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_fanout_wait_test.cpp"
-        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
-        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
-    target_include_directories(httpd_ws_fanout_wait_test PRIVATE
-        "${LIBTRACER_ESP_DIR}/tests/host"
-        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
-        "${LIBTRACER_ESP_DIR}/libtracer/include")
-    target_link_libraries(httpd_ws_fanout_wait_test PRIVATE libtracer)
-    target_link_options(httpd_ws_fanout_wait_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
-    libtracer_test_warnings(httpd_ws_fanout_wait_test)
-    add_test(NAME httpd_ws_fanout_wait COMMAND httpd_ws_fanout_wait_test)
-    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
-    # every case here constructs an adopting link — same exemption as the suites above.
-    set_tests_properties(httpd_ws_fanout_wait
-        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
-
-    # #1218 — the fan-out WIDTH: the in-call reserve is a slot of its own, never a slice out
-    # of the pool, so a sweep that FITS tx_slot_capacity() still fits it on every pass and
-    # never waits. The complement of the suite above (which asks what a sweep WIDER than the
-    # pool does): carving the reserve out made the two the same question and starved the
-    # steady-state tail.
-    add_executable(httpd_ws_fanout_width_test
-        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_fanout_width_test.cpp"
-        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
-        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
-    target_include_directories(httpd_ws_fanout_width_test PRIVATE
-        "${LIBTRACER_ESP_DIR}/tests/host"
-        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
-        "${LIBTRACER_ESP_DIR}/libtracer/include")
-    target_link_libraries(httpd_ws_fanout_width_test PRIVATE libtracer)
-    target_link_options(httpd_ws_fanout_width_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
-    libtracer_test_warnings(httpd_ws_fanout_width_test)
-    add_test(NAME httpd_ws_fanout_width COMMAND httpd_ws_fanout_width_test)
-    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
-    # every case here constructs an adopting link — same exemption as the suites above.
-    set_tests_properties(httpd_ws_fanout_width
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
     # #960 — the peer-departure eviction notifier's LOCK DISCIPLINE, on the same fake. The
@@ -2499,17 +2454,15 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_drain_budget_unhooked
     httpd_ws_eviction_lock
     httpd_ws_fanout_alloc
-    httpd_ws_fanout_wait
-    httpd_ws_fanout_width
     httpd_ws_in_call_reply
     httpd_ws_keepalive
     httpd_ws_rx_owned
     httpd_ws_send_stall
+    httpd_ws_peer_tx
     httpd_ws_session_identity
     httpd_ws_session_subject
     httpd_ws_teardown
     httpd_ws_tx_large_class
-    httpd_ws_tx_pool
     # Was the one exemption below until #1670: `httpd_ws_link.cpp` now static_asserts
     # `kBusLinks`, so no httpd_ws suite can exist on a bus-less build at all.
     httpd_ws_counters)

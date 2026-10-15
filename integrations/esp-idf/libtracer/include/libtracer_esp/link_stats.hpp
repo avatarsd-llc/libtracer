@@ -41,7 +41,7 @@
  *     five fields are ABSENT (reading one does not compile), no success path takes a
  *     lock or reads the clock for them, and the client link carries no counter mutex.
  *     @ref tr::net::kLinkTrafficStats reports the setting.
- *   - The DROP half — `tx_drops`, `rx_drops` — and `connected_at_us` are always
+ *   - The DROP half — `tx_drops`, `tx_conflated`, `rx_drops` — and `connected_at_us` are always
  *     there. The drops bump only when a frame is lost, and the server's auth deadline
  *     is computed from `connected_at_us`, so neither is observability the application
  *     can opt out of.
@@ -101,6 +101,12 @@ struct link_counters_t {
     std::uint32_t tx_bytes = 0;  /**< @brief Payload bytes written outbound (traffic half). */
 #endif
     std::uint32_t tx_drops = 0; /**< @brief Frames dropped toward this connection. */
+    /**
+     * @brief Outbound frames a newer frame for this connection REPLACED before its socket
+     *        took them — latest wins (#2095). Counted by the server link, whose peers each
+     *        hold one waiting frame; always 0 on the client link, which has no such slot.
+     */
+    std::uint32_t tx_conflated = 0;
     std::uint32_t rx_drops = 0; /**< @brief Inbound discards (oversize / reassembly). */
 #ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     /** @brief `esp_timer_get_time()` of the last delivered message; -1 = never (traffic

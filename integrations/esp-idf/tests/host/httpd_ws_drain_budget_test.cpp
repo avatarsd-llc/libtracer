@@ -270,7 +270,7 @@ void test_teardown_while_parked_joins_after_idle() {
 // 6 — egress work posted from another task wakes a parked drain: the httpd task is the one
 //     drain of its own control queue, so a park for idle must not hold the link's sends.
 // ---------------------------------------------------------------------------
-/** @brief The directed endpoint of the single peer currently open (see tx_pool_test). */
+/** @brief The directed endpoint of the single peer currently open (see peer_tx_test). */
 tr::net::transport_t* only_peer(httpd_ws_link_t& link) {
     std::string name;
     link.enumerate_peers([&name](std::string_view p) { name = std::string(p); });
@@ -303,65 +303,52 @@ void test_egress_work_is_sent_from_inside_the_park() {
     check(fake_httpd::semaphore_waiters() == 1 && g_payload_reads.load() == kBudget,
           "and the drain is still parked on the same frame: the egress bought no ingress");
     check(link->stats().rx_drain_waits == 1, "one wait, still in progress");
-    check(link->stats().enqueue_drops == 0 && link->stats().tx_pool_misses == 0,
-          "nothing was dropped or missed on the way");
+    check(link->stats().enqueue_drops == 0 && link->stats().tx_conflated == 0,
+          "nothing was dropped or replaced on the way");
 
     // The peer-provoked case: a producer that posts a send per inbound frame (a subscriber
     // over another link, an app replying off-task) pushes faster than any idle step. Every
-    // one of them goes out, and the ingress still reads NOTHING until the core idles.
-    // A slot the park sent stays busy until the loop's copy of its item runs, and the loop
-    // cannot run while the ingress thread is parked, so one park serves at most a pool depth
-    // of pushes. That is the bound the pool always was (#949): the push past it is the
-    // counted pool miss it would have been before any of this, never a silent loss.
-    constexpr std::size_t kPool = httpd_ws_link_t::kDefaultTxPoolSlots;
+    // one of them goes out, and the ingress still reads NOTHING until the core idles. There
+    // is no pool depth to stop at since #2095: each push is the peer's one waiting frame,
+    // and the park writes it as soon as it is stored.
+    constexpr std::size_t kPushes = 8;
     bool each_sent = true;
-    for (std::size_t i = 1; i < kPool && each_sent; ++i) {
+    for (std::size_t i = 1; i < kPushes && each_sent; ++i) {
         peer->send(std::span<const std::byte>(body));
         each_sent =
             wait_until([&] { return fake_httpd::instance().sent_frames().size() == i + 1; });
     }
-    check(each_sent, "a flood of pushes goes out one by one through the park, a pool deep");
-    check(fake_httpd::instance().sent_frames().size() == kPool,
-          "every provoked push that found a slot is on the wire");
-    peer->send(std::span<const std::byte>(body));  // the pool is full; this one waits, then drops
-    check(wait_until([&] { return link->stats().tx_pool_misses == 1; }),
-          "the push past the pool depth is the counted pool miss the pool always imposed");
-    check(link->stats().enqueue_drops == 1 && fake_httpd::instance().sent_frames().size() == kPool,
-          "counted once as an enqueue drop, and not on the wire");
+    check(each_sent, "a flood of pushes goes out one by one through the park");
+    check(link->stats().enqueue_drops == 0, "and none of them was dropped");
     check(fake_httpd::semaphore_waiters() == 1 && g_payload_reads.load() == kBudget,
           "and the ingress has not read one frame for all of them");
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     check(g_payload_reads.load() == kBudget && in.delivered() == kBudget,
           "nothing moves on a quiet gate: the budget stays spent");
 
-    // The core idles: the second budget is read, the loop's copies of the items release
-    // the slots they found already sent, and no push goes out twice.
+    // The core idles: the second budget is read, the loop's flush finds nothing left to
+    // write, and no push goes out twice.
     (void)fake_httpd::run_idle_hooks();
     check(wait_until([&] { return in.delivered() == total; }),
           "after the core idles the second budget is read to the end");
     (void)fake_httpd::instance().run_pending();
-    check(fake_httpd::instance().sent_frames().size() == kPool,
-          "no push was duplicated by the loop's copy of its item");
-    check(link->tx_slots_busy() == 0, "and every slot came back once the copies ran");
+    check(fake_httpd::instance().sent_frames().size() == kPushes,
+          "no push was duplicated by the loop's flush");
     finish(std::move(link));
 }
 
 // ---------------------------------------------------------------------------
-// 7 — the park sends in POST order, not slot order: a later post that landed in a lower slot
-//     (because an earlier item's slot had been released) still goes out after the earlier
-//     ones, as the FIFO control queue would have sent it.
+// 7 — a burst posted before the park conflates to its newest frame, which the park writes
+//     once; a push posted DURING the park goes out from inside it.
 // ---------------------------------------------------------------------------
-void test_park_sends_in_post_order_not_slot_order() {
+void test_park_sends_the_newest_frame_once() {
     constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
-    constexpr std::size_t kPool = httpd_ws_link_t::kDefaultTxPoolSlots;
-    std::printf("a parked drain sends posted items in post order, whatever slot they sit in:\n");
+    std::printf("a parked drain writes a burst's newest frame, once:\n");
     auto link = fresh_link(807);
     // The previous case's link queued its teardown detach and did not wait for it (adopted
     // mode); run whatever is left so the queue below holds this case's items alone.
     (void)fake_httpd::instance().run_pending();
     fake_httpd::instance().clear_sent_frames();
-    // Claim the peer with one frame (no park yet), then post a pool's worth of pushes with
-    // the loop NOT running: they fill slots 0..pool-1 in post order and sit in the queue.
     const std::byte probe[1] = {std::byte{0}};
     (void)fake_httpd::instance().deliver_frame(807, std::span<const std::byte>(probe));
     tr::net::transport_t* const peer = only_peer(*link);
@@ -370,41 +357,33 @@ void test_park_sends_in_post_order_not_slot_order() {
         finish(std::move(link));
         return;
     }
+    // Four posts with the loop NOT running: each replaces the one waiting before it.
     std::vector<std::byte> tag(1);
-    for (std::size_t i = 0; i < kPool; ++i) {
+    for (std::size_t i = 0; i < 4; ++i) {
         tag[0] = static_cast<std::byte>(0x10 + i);
         peer->send(std::span<const std::byte>(tag));
     }
-    // The loop runs exactly ONE item: the first post, which frees slot 0 and nothing else.
-    check(fake_httpd::instance().run_one(), "the loop sent the first item");
-    check(fake_httpd::instance().sent_frames().size() == 1, "and only that one");
-    // The next post is LATER than everything still queued, yet it lands in slot 0, the
-    // lowest. Slot order would send it first; post order sends it last.
+    check(link->stats().tx_conflated == 3, "three were replaced, and counted");
+
+    // Now the flood arrives and the drain parks past one budget; the park writes the newest.
+    ingress_t in(807, kBudget + 1, 8);
+    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 1; }),
+          "the waiting frame went out from inside the park");
     tag[0] = std::byte{0xA0};
     peer->send(std::span<const std::byte>(tag));
-    check(link->tx_slots_busy() == kPool,
-          "the pool is full again, the late post in the freed slot");
-
-    // Now the flood arrives and the drain parks past one budget; the park finds all four
-    // items kQueued at once and must send them 0x11, 0x12, 0x13, then 0xA0.
-    ingress_t in(807, kBudget + 1, 8);
-    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 1 + kPool; }),
-          "every queued item went out from inside the park");
+    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 2; }),
+          "and a push posted during the park follows it");
     check(fake_httpd::semaphore_waiters() == 1, "which is still parked");
     const auto sent = fake_httpd::instance().sent_frames();
-    bool in_order = sent.size() == 1 + kPool;
-    for (std::size_t i = 1; in_order && i < kPool; ++i)
-        in_order =
-            sent[i].payload.size() == 1 && sent[i].payload[0] == static_cast<std::byte>(0x10 + i);
-    in_order =
-        in_order && sent.back().payload.size() == 1 && sent.back().payload[0] == std::byte{0xA0};
-    check(in_order, "and in post order: the late post in the lowest slot went out last");
+    check(sent.size() == 2 && sent[0].payload.size() == 1 &&
+              sent[0].payload[0] == std::byte{0x13} && sent[1].payload.size() == 1 &&
+              sent[1].payload[0] == std::byte{0xA0},
+          "newest of the burst first, then the later push");
 
     (void)fake_httpd::run_idle_hooks();
     check(wait_until([&] { return in.delivered() == kBudget + 1; }), "the parked frame finished");
     (void)fake_httpd::instance().run_pending();
-    check(fake_httpd::instance().sent_frames().size() == 1 + kPool, "no item went out twice");
-    check(link->tx_slots_busy() == 0, "and every slot came back");
+    check(fake_httpd::instance().sent_frames().size() == 2, "no frame went out twice");
     finish(std::move(link));
 }
 
@@ -609,7 +588,7 @@ int main(int argc, char** argv) {
         test_an_idle_core_resets_the_drain();
         test_teardown_while_parked_joins_after_idle();
         test_egress_work_is_sent_from_inside_the_park();
-        test_park_sends_in_post_order_not_slot_order();
+        test_park_sends_the_newest_frame_once();
         test_flood_shape_switches_the_session_to_nagle();
         test_in_call_reply_bytes_end_a_drain();
     }

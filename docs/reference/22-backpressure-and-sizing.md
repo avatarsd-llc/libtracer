@@ -52,7 +52,7 @@ flowchart LR
   GW --> RING["ring admission<br/>byte-accounted"]
   RING --> FAN["fan-out<br/>subscriber snapshot"]
   FAN --> FLAT["flat / egress seams<br/>reply + delivery assembly"]
-  FLAT --> TX["TX pool<br/>slots + reply reserve"]
+  FLAT --> TX["TX slot<br/>one per peer, latest wins"]
 
   classDef stage fill:#dff,stroke:#333
   class RX,ARENA,GW,RING,FAN,FLAT,TX stage
@@ -66,8 +66,8 @@ flowchart LR
 | **ring admission** | a **byte** budget: `try_alloc(retained_bytes)` against the receiving vertex's own source | `vertex_policy_t::ring_source` (`core/include/libtracer/graph.hpp:vertex_policy_t::ring_source`), per vertex, never a shared pool | **arm-dependent** — see §2 | `ring_reserved_bytes()` / `stream_gaps()` (`core/include/libtracer/graph.hpp:graph_t::ring_reserved_bytes`) |
 | **fan-out** | the subscriber snapshot's inline prefix, then a stack frame of `8 * kInlineFanout` views, then one block of the graph's table source | `kInlineFanout`, then the source `graph_t` was given — a wide fan-out sizes it (#1912) | counted shed of the tail past the inline prefix (`fan_out_truncated`) | `graph_t::delivery_drops()` |
 | **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:fwd_router_t::flatten_backend`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
-| **TX pool** | outstanding sends in flight, plus a reserve slots deep held back for replies | the link's ctor (`tx_slot_capacity()` + `tx_reply_reserve()` on the ESP httpd link, `integrations/esp-idf/libtracer/httpd_ws_link.cpp:httpd_ws_link_t::tx_slot_capacity`) | counted `dropped_tx`; a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
-| **TX payload size classes** (ESP httpd link) | which storage a gathered frame is copied into: the work slot's inline buffer, an optional bounded LARGE class, or the exceptional tail drawn from the link's `memory.io` store (#1880) | the link's ctor — `tx_inline_bytes()`, and `tx_large_bytes()` × `tx_large_slot_capacity()` where an integrator declared the second class (#1566, `integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | an exhausted large class is a counted `dropped` — fail-closed, never a heap fallback | `stats().tx_large_dropped` and `stats().tx_large_peak`, against `tx_large_in_use()` |
+| **TX slot** | one frame on the wire and one waiting, per peer; on the ESP httpd link a newer frame REPLACES the waiting one (#2095) | two references per peer to frames gathered once per send into a refcounted block from the link's `memory.io` store, shared by every destination peer (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::peer_tx_bytes`) | a replaced frame is counted `tx_conflated` (a slow peer gets the newest frame, never a backlog); a peer whose socket takes no byte across `kTxStallStrikes` replacements is struck (`tx_stall_strikes`); a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
+| **TX payload size classes** (ESP httpd link) | which storage a send's shared block is drawn from: the link's `memory.io` store, an optional bounded LARGE class, or the exceptional tail (#1880) | the link's ctor — `tx_inline_bytes()`, and `tx_large_bytes()` × `tx_large_slot_capacity()` where an integrator declared the second class (#1566, `integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | an exhausted large class is a counted `dropped` — fail-closed, never a heap fallback | `stats().tx_large_dropped` and `stats().tx_large_peak`, against `tx_large_in_use()` |
 
 Two reading rules for this table:
 
@@ -86,7 +86,7 @@ Two reading rules for this table:
   `read <any-vertex>:stats.link.<child>` — is the whole of the feedback this plane offers.
   **Counted shed IS the transport contract.** Re-opening it is scoped to M5 (a real socket
   transport), where a link owning its own socket buffer would have something to push back with.
-  The two rows this governs are **transport RX** and **TX pool** above; every other row in the
+  The two rows this governs are **transport RX** and **TX slot** above; every other row in the
   table refuses by value and the distinction is deliberate.
 
 ---
@@ -151,10 +151,15 @@ queue or shed — and what every other stage does instead.
   static regions. One slab, whole stack, one cap, tightest RAM; contention-free because the
   target has one thread ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
   §folded).
-- **TX**: depth from the link's `tx_slot_capacity()`, with `tx_reply_reserve()` slots held back
-  past it. The sum is the link's true outstanding-send bound.
+- **TX**: one slot per peer (#2095) — a reference to the frame on the wire and one to the newest
+  frame waiting behind it; each send's frame is one shared block, whatever the peer count. A
+  slow peer holds only its own slot and never the httpd task: its flush writes without
+  waiting, and a newer frame replaces its waiting one. A held frame resumes on the link's own
+  events (a flush that still moves bytes re-posts itself; the next post, an inbound frame, or
+  the app's `flush_held()` resumes it), never on a timer, and a peer whose socket takes no byte
+  across `kTxStallStrikes` replacements is struck. In-call replies bypass the slots.
 - **Designated pressure point**: **two**, one per flow — the receiving vertex's ring on the
-  best-effort arm for sensor streams, the TX pool on the reliable arm for control.
+  best-effort arm for sensor streams, the in-call reply on the reliable arm for control.
 - **Everything else refuses**: the rx arena answers `TLV_NESTING_TOO_DEEP`, the value store
   answers `BACKPRESSURE`, and neither grows.
 - Note the one cost a pooled RX backend adds: a **shared** value borrows its whole inbound
@@ -175,7 +180,7 @@ was read from a fresh boot with the node idle, and counters were differenced wit
 | --- | ---: | ---: | ---: | ---: |
 | free heap (node A) | 79,848 B | −20,076 B vs idle | −16,872 B vs idle | **23,936 B** at the trough |
 | flat-seam peak / 24,576 B budget | 0 | 244 B (1.0 %) | 732 B (3.0 %) | 1,026 B (**4.2 %**) |
-| `tx_pool_waits` / `tx_pool_misses` | 0 / 0 | 0 / 0 | 24 / **358** | — |
+| `tx_pool_waits` / `tx_pool_misses` (removed in #2095) | 0 / 0 | 0 / 0 | 24 / **358** | — |
 | `enqueue_drops` | 0 | 0 | **358** | — |
 | refusals at any other stage | 0 | 0 | **0** | 0 inside the vertex cap |
 
@@ -186,20 +191,15 @@ when it did not. Both were counted at the flat seam as oversize.
 
 Three sizing rules follow. §3.1 is where an embedder should apply them:
 
-1. **Size the TX pool for widest publisher pass × concurrent subscribed sessions.** The pool is
-   `tx_slot_capacity()` slots, with the in-call `tx_reply_reserve()` slot held ON TOP of it
-   (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:httpd_ws_link_t::tx_reply_reserve`). The
-   per-link knob is `httpd_ws_config_t::tx_pool_slots`, which defaults to
-   `httpd_ws_link_t::kDefaultTxPoolSlots`. Demand is multiplied by sessions, and pass width
-   alone hides that. In the run above, a pass 4 posts wide fit 5 slots for one session (demand
-   4). With three sessions, demand was 12 and the pool missed. The arm the fan-out runs on
-   decides how an undersized pool fails. A fan-out issued ON the httpd task (a push provoked by
-   an inbound frame) hits the depth as a hard same-pass limit, while an off-task fan-out waits
-   for the drain and shows up first as `stats_t::tx_pool_waits` (added latency). It becomes
-   `tx_pool_misses` only when the drain has fallen behind
+1. **A slow subscriber costs its own slot, not the other sessions' delivery.** The 3-session
+   run above predates #2095: the link then held one TX pool shared by every session, and a
+   fan-out wider than it missed. Since #2095 each session references one frame on the wire and
+   one waiting, and a newer frame replaces the waiting one, so the count to read is
+   `stats_t::tx_conflated` per session
    (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::stats_t`).
-   Read the two counters as a pair. Waits without misses mean the bound is doing its job;
-   misses mean the pool is too small or the drain has stalled.
+   A peer whose count climbs is a peer that cannot keep up with the publish rate; it receives
+   the newest value and nobody else waits for it. A climbing `enqueue_drops` instead names the
+   shared control queue or the link's memory, as before.
 2. **The seam budgets are not the bound; the heap and the task stacks are.** The flat seam never
    went past 4.2 % of a 24 KiB reservation. Applying §5 literally (`capacity = peak + margin`)
    would size it near 2 KiB and give about 22 KiB back to a heap whose whole idle surplus is
@@ -207,8 +207,9 @@ Three sizing rules follow. §3.1 is where an embedder should apply them:
    thing competing with the flow it protects. Budget the stacks beside it. The tightest platform
    task stacks idled at 0.8–2.3 KiB free, so stacks, not seams, are what a careless slab
    widening actually eats. The link reports its own static cost as
-   `httpd_ws_link_t::buffer_bytes()`: RX scratch, plus
-   (`tx_slot_capacity()` + `tx_reply_reserve()`) × `tx_inline_bytes()`, plus any large class.
+   `httpd_ws_link_t::buffer_bytes()`: RX scratch, plus one in-call scratch frame of
+   `tx_inline_bytes()`, plus any large class; each admitted session adds
+   `httpd_ws_link_t::peer_tx_bytes()` (two inline frames).
 3. **Budget the transient heap, not the idle heap.** Steady-state RAM was never the constraint.
    The constraint was a working-set dip of about 56 KiB under saturating ingest, against about
    80 KiB free. A deployment sized from idle free heap passes every static audit and still fails
@@ -238,7 +239,7 @@ edge.
   costs bytes on the wire (11 B per `PAIR` element, RFC-0029 §5.2), not a table that can fill.
   `label_not_found()` on the receiving side still counts labelled `dst` elements this node
   refused; it moves after a teardown and is not a fault on its own.
-- **Designated pressure point**: the egress TX pool of the busiest link. `rx` is sized so
+- **Designated pressure point**: the egress TX slots of the busiest link. `rx` is sized so
   `arena_dropped` stays zero — and `arena_dropped` is deliberately split from `malformed_rx` so a
   peer sending garbage never reads as a slab that is too small.
 
@@ -252,8 +253,8 @@ The #1491/#1494 topology: one producer streaming into one node as fast as the no
   §Amendment 2). This is the whole point of the archetype — the measurement that forced the
   amendment found throughput peaking at pipeline depth 4 and *degrading* beyond it, depth 4 being
   the async TX pool depth the **replies** travelled through. The writes were not what saturated.
-- **Pipeline depth** therefore derives from the receiver's `tx_slot_capacity()` only for the
-  flows that still request replies; the unacknowledged stream is off the reply queue entirely.
+- **Pipeline depth** therefore matters only for the flows that still request replies; the
+  unacknowledged stream is off the reply queue entirely.
 - **Loss detection is the application's**, because refusal-by-value has been given up
   deliberately: a sequence counter in the payload, plus §6's recipes for the pressure numbers the
   replies would have carried.
@@ -263,22 +264,20 @@ The #1491/#1494 topology: one producer streaming into one node as fast as the no
 
 ### 3.4 Mixed control + stream on one link
 
-- **A streamer must not be able to silence the control plane** — a producer that consumes every
+- **A streamer must not be able to silence the control plane** — a producer that consumed every
   TX slot would otherwise starve the replies that carry every control answer (the #1494 severity
   case).
 - On the ESP httpd link the reply leg does not compete for the pool at all (#1494): a reply
   serviced **in-call**, on the httpd task, is written straight to the socket and claims neither a
-  TX slot nor a control-queue message
+  peer's TX slot nor a control-queue message
   (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:httpd_ws_link_t::send_in_call`). So a fan-out sweep of any width, a
-  full pool and a full control mbox all cost throughput and never the answer.
-- Behind that, `tx_reply_reserve()` slots are still held back **past** `tx_slot_capacity()`
-  (#1218), so a fan-out sweep cannot reach into them however wide it is, and a publish sweep that
-  exceeds the send bound refuses by value rather than borrowing. The reserve now backs the
-  replies a link cannot service in-call rather than the ordinary request/response answer.
+  full TX slot and a full control mbox all cost throughput and never the answer.
+- Behind that, a stream's frames to a peer replace one another in that peer's slot (#2095), so
+  a streamer cannot build a backlog the control answers would queue behind.
 - **Designated pressure point**: the stream's own ring (best-effort), *upstream* of the shared
-  link. Pushing the stream's pressure point onto the link is exactly the mistake the reserve
-  exists to survive; a deployment that relies on the reserve rather than on its own ring bound has
-  chosen its bottleneck by accident.
+  link. Pushing the stream's pressure point onto the link trades every frame but the newest for
+  the link's latest-wins slot; a deployment that relies on that rather than on its own ring bound
+  has chosen its bottleneck by accident.
 - Run the two flows on **different vertices with different sources**. Per-injection-point, never
   a shared pool: one flow running its source dry must not affect another
   (`core/include/libtracer/graph.hpp:vertex_policy_t::ring_source`).
@@ -562,7 +561,7 @@ Three properties hold by construction:
 - **Isolation is by construction, not by privilege.** The read targets whatever vertex the peer
   already addressed and is bounded by that vertex's existing list, and pressure in this model is
   designated per vertex — so a flooded STREAM vertex cannot make a monitoring read of a quiet
-  vertex queue behind it. There is no privileged control arm and none is needed; the reply reserve
+  vertex queue behind it. There is no privileged control arm and none is needed; the in-call reply
   of §3.4 already protects the reply leg.
 - **A timeout is the signal, not a blind spot.** The monitoring READ travels the same fabric it
   measures. If a saturated shared link delays it past its deadline, *that is the hard congestion

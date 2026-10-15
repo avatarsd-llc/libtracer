@@ -27,8 +27,9 @@
  *      the heap arm. This is the baseline that keeps every zero below from being vacuous,
  *      and the pin on "no behaviour change for a link that did not ask";
  *   2. with a class declared, a frame in its band allocates NOTHING;
- *   3. a frame that FITS `tx_inline_bytes` allocates nothing either way — the band the
- *      issue explicitly took off the table is byte-identical to what it was;
+ *   3. a frame that FITS `tx_inline_bytes` costs ONE block from `memory.io` either way — the
+ *      block every destination shares since #2095 (here `memory.io` is the heap, so it is
+ *      counted) — and never reaches for the class;
  *   4. a frame past the class's own slot size still takes the heap arm, which is the
  *      demotion the ruling asked for rather than a removal: one composed-root snapshot is
  *      a heap block worth taking, a stream of them is not;
@@ -168,7 +169,7 @@ std::vector<std::byte> band_frame() {
     return std::vector<std::byte>(httpd_ws_link_t::kDefaultTxInlineBytes + 512, std::byte{0x5A});
 }
 
-/** @brief A payload that fits a work slot's inline buffer — the untouched band. */
+/** @brief A payload that fits the inline capacity — below the class band. */
 std::vector<std::byte> inline_frame() {
     return std::vector<std::byte>(httpd_ws_link_t::kDefaultTxInlineBytes - 8, std::byte{0x3C});
 }
@@ -230,7 +231,7 @@ void reset(tr::mem::poly_ptr_t<httpd_ws_link_t>& link) {
  *
  * Refusing is what keeps the fake's own `std::deque` out of the measured window: the
  * enqueue fails before anything is pushed, so every allocation counted is the link's. The
- * refusal also hands the work slot — and any large buffer bound to it — straight back, so
+ * refusal also hands the frame block — and any large buffer it is built in — straight back, so
  * the window can be repeated without draining.
  */
 std::size_t allocs_for_one_send(tr::net::transport_t* peer, std::span<const std::byte> frame) {
@@ -324,7 +325,8 @@ void test_a_declared_class_costs_no_allocation() {
 // ---------------------------------------------------------------------------
 /**
  * @brief The band the ruling explicitly took off the table: a frame that FITS
- *        `tx_inline_bytes` gathers into its work slot's inline buffer, class or no class.
+ *        `tx_inline_bytes` is gathered once into a shared block from `memory.io`, class or
+ *        no class (#2095), and never into the class.
  *
  * Measured on both link shapes with the same frame, so a regression that routed a fitting
  * frame at the new class (or at anything else) shows up as a non-zero on the right-hand
@@ -340,7 +342,8 @@ void test_the_inline_band_did_not_move() {
     check(peer != nullptr, "the peer resolved on the classless link");
     if (peer == nullptr) return;
     drain();
-    check_eq(allocs_for_one_send(peer, frame), 0, "no class: the fitting frame allocates nothing");
+    check_eq(allocs_for_one_send(peer, frame), 1,
+             "no class: the fitting frame costs one shared block from memory.io");
     reset(plain);
 
     auto classed = make_link(kLargeBytes, kLargeSlots);
@@ -349,8 +352,8 @@ void test_the_inline_band_did_not_move() {
     check(peer != nullptr, "the peer resolved on the classed link");
     if (peer == nullptr) return;
     drain();
-    check_eq(allocs_for_one_send(peer, frame), 0,
-             "with a class: the fitting frame still allocates nothing");
+    check_eq(allocs_for_one_send(peer, frame), 1,
+             "with a class: the fitting frame still costs that one block, and no more");
     check_eq(classed->tx_large_in_use(), 0, "and it never reached for the class at all");
     check_eq(classed->stats().tx_large_peak, 0, "which the class's untouched peak confirms");
     reset(classed);
@@ -396,21 +399,27 @@ void test_past_the_class_the_heap_tail_survives() {
 /**
  * @brief The fail-closed arm (#949's named drop, applied to the new class).
  *
- * The class is declared with ONE buffer and two large frames are offered without a drain
- * between them, so the second finds it empty. Three measurements, and all three are needed:
- * the class's own counter says which resource refused, the link-level `enqueue_drops` says
- * the frame was lost (so the class does not hide a loss from the generic
- * `transport_drop_stats_t` view), and the allocation count says the drop was not quietly
- * served from the heap — which would give back the exact footprint the declaration bounds.
+ * The class is declared with ONE buffer and two large frames, to two peers, are offered
+ * without a drain between them, so the second finds it empty. (Two frames to ONE peer would
+ * not: the second replaces the first in that peer's slot and takes over its buffer, #2095.)
+ * Three measurements, and all three are needed: the class's own counter says which resource
+ * refused, the link-level `enqueue_drops` says the frame was lost (so the class does not hide
+ * a loss from the generic `transport_drop_stats_t` view), and the allocation count says the
+ * drop was not quietly served from the heap — which would give back the exact footprint the
+ * declaration bounds.
  */
 void test_an_exhausted_class_drops_and_counts() {
-    std::printf("two large frames offered to a one-buffer class:\n");
+    std::printf("two large frames, to two peers, offered to a one-buffer class:\n");
     auto link = make_link(kLargeBytes, 1);
     check_eq(link->tx_large_slot_capacity(), 1, "the class holds exactly one buffer");
     claim(kFd);
     tr::net::transport_t* const peer = only_peer(*link);
     check(peer != nullptr, "the peer resolved to a directed endpoint");
     if (peer == nullptr) return;
+    claim(kFd + 1);
+    tr::net::transport_t* const other = link->peer_link("p1");
+    check(other != nullptr, "the second peer resolved to a directed endpoint");
+    if (other == nullptr) return;
     drain();
 
     const std::vector<std::byte> frame = band_frame();
@@ -420,17 +429,16 @@ void test_an_exhausted_class_drops_and_counts() {
 
     const std::uint32_t drops_before = link->enqueue_drops();
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
-    peer->send(std::span<const std::byte>(frame));  // takes the only buffer, stays queued
+    peer->send(std::span<const std::byte>(frame));  // takes the only buffer, stays held
     check_eq(link->tx_large_in_use(), 1, "the first frame holds the class's only buffer");
 
     const std::size_t allocs_before = g_allocs.load(std::memory_order_relaxed);
-    peer->send(std::span<const std::byte>(frame));  // finds it empty
+    other->send(std::span<const std::byte>(frame));  // finds it empty
     const std::size_t allocs_after = g_allocs.load(std::memory_order_relaxed);
 
     check_eq(link->stats().tx_large_dropped, 1, "the exhausted class counted the loss as its own");
     check_eq(link->enqueue_drops() - drops_before, 1, "and the link counted it as a lost frame");
     check_eq(allocs_after - allocs_before, 0, "the drop did NOT fall back to the heap");
-    check_eq(link->tx_slots_busy(), 1, "the dropped frame's work slot came straight back");
 
     drain();
     check_eq(fake_httpd::instance().frames_sent() - sent_before, 1,
@@ -477,8 +485,9 @@ void test_a_rejected_declaration_is_inert_and_reported() {
     reset(countless);
 
     auto real = make_link(kLargeBytes, kLargeSlots);
-    check_eq(real->buffer_bytes(), narrow_bytes + kLargeBytes * kLargeSlots,
-             "while an honoured one IS charged, exactly its own size x count");
+    check(real->buffer_bytes() >= narrow_bytes + kLargeBytes * kLargeSlots &&
+              real->buffer_bytes() <= narrow_bytes + (kLargeBytes + 256) * kLargeSlots,
+          "while an honoured one IS charged: its size x count, plus a block header per buffer");
     reset(real);
 }
 

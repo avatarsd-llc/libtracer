@@ -90,8 +90,8 @@ constexpr int kDrainSliceMs = 5;
  *        — the "this send is a reply being serviced in-call" predicate (#1494).
  *
  * Deliberately NOT `server_task_ == current_task()`, which is the weaker question
- * @ref httpd_ws_link_t::claim_tx_slot_waiting asks (there it only has to know whether
- * waiting for the drain would wait on this very stack frame). Two things a bare task
+ * @ref httpd_ws_link_t::close_gate asks (there it only has to know whether waiting for
+ * the depth would wait on this very stack frame). Two things a bare task
  * identity cannot tell apart, and the reply fork needs both:
  *   - a work item the httpd task is draining (the auth sweep, a close) is ON the task but
  *     inside no handler frame, so nothing holds the gate's `depth` and nothing pins the
@@ -382,10 +382,10 @@ constexpr std::size_t kRxDrainNagleFrames = kTcpSndQueueLen / (2 * kIdfWsWriteLe
  * reach it; a drain of large replies ends sooner and parks more often: the receiver pays.
  *
  * In-call replies only. Pushes posted by other tasks and sent from inside the park
- * (@ref send_posted_in_park) are outside this bound: one pool depth of them can go out
- * while the peer's ACKs are withheld, and four pushes of 1.5 KiB or more exceed
- * @ref kTcpSndBuf, which ends in a counted `tx_send_failed` or a condemned session. A
- * single in-call reply larger than the send buffer has the same caveat (pre-existing).
+ * (@ref httpd_ws_link_t::flush_egress) are outside this bound, and need none since #2095:
+ * they are written without waiting, so a send buffer they fill holds the peer's next push
+ * back (conflated, counted) instead of failing it. A single in-call reply larger than the
+ * send buffer still waits out the send bound (pre-existing).
  */
 constexpr std::size_t kRxDrainTxBytes = kTcpSndBuf / 4;
 
@@ -493,73 +493,36 @@ constexpr int kKeepProbes = 3;          /**< @brief Unanswered probes before dea
     return want < ceiling ? want : ceiling;
 }
 
-/**
- * @brief TX work slots held back for sends issued ON the httpd task — ADDITIONAL to the
- *        configured pool depth, never carved out of it (#1218).
- *
- * A send issued on the httpd task (a request's reply, serviced in-call) is the one sender
- * that cannot wait for a slot: the task that would free one is the task that is asking, so
- * waiting there waits on its own stack frame (#814). Without a reserve, a delivery burst and
- * a subscribe ack raced through the same slots and the ack lost — the requester then timed
- * out against an edge that was already delivering (#1187's secondary effect). One slot is
- * enough for the shape that produced it: one reply per serviced request.
- *
- * That the reserve is EXTRA is the whole of #1218. #1187 implemented it by shortening the
- * scan an off-task claimer was allowed — which cost every producer a slot permanently,
- * whether or not any request was in flight, and turned a fan-out of exactly
- * @ref httpd_ws_link_t::tx_slot_capacity (which had always fit, at the offered rate) into
- * one that had to wait for the drain on every single pass. The reserve is not free — it
- * costs one slot of RAM per link (a shell plus @ref httpd_ws_link_t::tx_inline_bytes) —
- * and that price is the honest one: a guarantee for a claimer that cannot wait has to be a
- * slot nobody else can take, not a narrower bound for everybody else.
- *
- * DELIBERATELY FIXED, and not a ctor argument like the three sizes around it (#1160). It
- * is not a depth an embedder can trade: the shape it answers is "one reply per serviced
- * request", and esp_http_server services requests one at a time on one task, so a second
- * reserved slot could never be claimed and a zeroth would reinstate the #1187 ack loss.
- * Its RAM cost travels with `tx_inline_bytes`, which IS configurable.
- */
-constexpr std::size_t kTxReplySlots = 1;
+/** @brief Longest RFC 6455 §5.2 server frame header: 2 bytes plus a 64-bit length. */
+constexpr std::size_t kWsHeaderMax = 10;
 
 /**
- * @brief One turn a WAITING send spends off the CPU before re-trying the pool,
- *        milliseconds.
+ * @brief Encode the server frame header for one unfragmented BINARY frame of
+ *        @p payload_len bytes (RFC 6455 §5.2: FIN|BINARY, unmasked, 7/16/64-bit length).
  *
- * A send that finds the pool full and is NOT running on the httpd task sleeps in turns of
- * this until a slot frees or the bound below expires (@ref
- * httpd_ws_link_t::claim_tx_slot_waiting). Sleeping — not spinning, and not
- * `taskYIELD` — is what makes it work on the unicore target the defect was found on: the
- * httpd task is the only task that can free a slot, and a producer at a higher priority
- * yields nothing to it by spinning. One tick is the smallest amount of "let the drain
- * run" the scheduler can express; the granularity is the tick period, so this is a floor
- * on the turn, never a promise about it. The BOUND is what is derived
- * (@ref tx_wait_bound_us) — the turn is only how finely that bound is sampled.
- *
- * The waiting frame is the CALLER'S, still in the caller's memory: nothing is copied, no
- * queue of ours grows, and a frame that does not make it is dropped and counted exactly
- * as before. So this stays inside ADR-0081 §1 (never park ingress or egress in a
- * library-owned buffer) — it is the producer's own call that waits, which is the same
- * "hold it in the layer that already owns the memory" answer §2 gives.
+ * The same bytes `httpd_ws_send_frame_async` writes ahead of a gathered frame. The link
+ * writes them itself where IDF cannot: a RETAINED frame (RFC-0028 §6.9), and the rest of a
+ * frame a non-blocking write left part-way (#2095).
+ * @return The header length: 2, 4 or 10.
  */
-constexpr std::uint32_t kTxWaitSliceMs = 1;
-
-/**
- * @brief The longest a send may wait for a TX slot, microseconds — derived, never chosen.
- *
- * One slot is held for exactly as long as the httpd task needs to put its frame on a
- * socket, and that duration already has a bound in hand: the per-socket send bound this
- * link applies at admission, spent once per write leg (@ref kIdfWsWriteLegs). Past it the
- * oldest queued send has either completed or timed out — either way its slot is back, or
- * its peer is accruing the strike that condemns it. Waiting longer than one such
- * occupancy therefore cannot learn anything new; waiting less would give up while the
- * drain is still healthy.
- *
- * It is a per-SEND bound, and the futility latch (@ref
- * httpd_ws_link_t::tx_wait_futile_until_us_) is what keeps a whole fan-out pass from
- * paying it once per destination against a task that is not draining at all.
- */
-[[nodiscard]] constexpr std::int64_t tx_wait_bound_us(std::uint32_t send_timeout_ms) noexcept {
-    return static_cast<std::int64_t>(send_timeout_ms) * kIdfWsWriteLegs * 1000;
+[[nodiscard]] std::size_t encode_ws_header(std::size_t payload_len,
+                                           std::array<std::byte, kWsHeaderMax>& out) noexcept {
+    out[0] = std::byte{0x82};
+    if (payload_len < 126) {
+        out[1] = static_cast<std::byte>(payload_len);
+        return 2;
+    }
+    if (payload_len <= 0xFFFF) {
+        out[1] = std::byte{126};
+        out[2] = static_cast<std::byte>((payload_len >> 8) & 0xFF);
+        out[3] = static_cast<std::byte>(payload_len & 0xFF);
+        return 4;
+    }
+    out[1] = std::byte{127};
+    for (int i = 0; i < 8; ++i)
+        out[2 + i] = static_cast<std::byte>(
+            (static_cast<std::uint64_t>(payload_len) >> (8 * (7 - i))) & 0xFF);
+    return kWsHeaderMax;
 }
 
 /**
@@ -567,7 +530,7 @@ constexpr std::uint32_t kTxWaitSliceMs = 1;
  *        its peer set through, and the reason a broadcast allocates nothing.
  *
  * The snapshot must not be a `std::vector`, and for the reason
- * @ref httpd_ws_link_t::tx_work_t already records: under `-fno-exceptions` the vector's
+ * @ref httpd_ws_link_t::tx_frame_t already records: under `-fno-exceptions` the vector's
  * THROWING allocator turns a failed growth into `abort()` via the bad_alloc stub, which
  * is the same defeat of a nothrow guard that once crashed this link on a reply-sized
  * copy. Here it sat on the FAN-OUT path (#961) — reached by every broadcast, and reached
@@ -854,7 +817,7 @@ struct asm_buf_t {
  * Its lifetime is deliberately longer than the link's in adopted mode: since the set of
  * sessions still holding the pointer is unknowable, the gate is LEAKED there (one small
  * block, teardown-only — the same leak-rather-than-free discipline #815 established for
- * the TX pool). Owning mode frees it: `httpd_stop` deletes every session first.
+ * the TX path). Owning mode frees it: `httpd_stop` deletes every session first.
  *
  * A FIFTH entry point resolves the link through this gate and is NOT one of the latched
  * four: @ref httpd_ws_link_t::ws_pre_handshake, the `ws_pre_handshake_cb` both constructors
@@ -904,6 +867,82 @@ struct httpd_ws_link_t::gate_t {
      * there (see @ref httpd_ws_link_t::detach_sessions).
      */
     int serving_fd = -1;
+};
+
+/**
+ * @brief One outbound frame's bytes, gathered ONCE per send and shared by every peer it goes
+ *        to (#2095): a reference count, the gathered bytes, and a retained frame's value.
+ *
+ * A broadcast gathers its iovec into one of these and every destination's slot takes a
+ * reference, so a fan-out to N peers costs one copy and one block, not N. Drawn from
+ * `memory.io` with its bytes trailing it in the same block, or with them in a buffer
+ * borrowed from the declared LARGE size class where the frame lands in its band (#1566,
+ * bounded, fails closed). The last reference frees it, from whichever task drops it, through
+ * the source recorded in it. Never a `std::vector` for the copy — the vector's THROWING
+ * allocator once defeated a nothrow guard here, and under `-fno-exceptions` a reply-sized
+ * copy hitting heap exhaustion aborted the node (the browser-session crash).
+ */
+struct httpd_ws_link_t::tx_block_t {
+    mem::block_source_t* src = nullptr; /**< @brief Where this block was drawn. */
+    std::size_t alloc_bytes = 0;        /**< @brief Its size there, for the release. */
+    std::atomic<std::uint32_t> refs{1}; /**< @brief Slots (and a builder) holding it. */
+    std::byte* payload = nullptr;       /**< @brief Gathered bytes: trailing, or large-class. */
+    std::size_t len = 0;                /**< @brief Bytes at @ref payload. */
+    /**
+     * @brief A RETAINED frame's value (RFC-0028 §6.9): @ref payload then holds the frame's
+     *        encoded WebSocket header and head, and these bytes follow them on the wire,
+     *        written straight from the published block. Empty for a gathered frame.
+     */
+    graph::value_ref_t value;
+    /** @brief The LARGE-class claimed flag this block holds, or null (#1566). The flag and
+     *         not an index, so the last release needs no link to give it back. */
+    std::atomic<bool>* large_busy = nullptr;
+    /** @brief Bytes the frame accounts for: the gathered payload, or a retained frame's
+     *         header, head and value. */
+    [[nodiscard]] std::size_t total() const noexcept {
+        return len + (value ? value->total_length() : 0);
+    }
+};
+
+std::size_t httpd_ws_link_t::tx_block_header() noexcept {
+    return (sizeof(tx_block_t) + alignof(std::max_align_t) - 1) / alignof(std::max_align_t) *
+           alignof(std::max_align_t);
+}
+
+std::size_t httpd_ws_link_t::large_stride() const noexcept {
+    return tx_block_header() + (tx_large_bytes_ + alignof(std::max_align_t) - 1) /
+                                   alignof(std::max_align_t) * alignof(std::max_align_t);
+}
+
+/**
+ * @brief One peer's reference to an outbound frame, held until its socket takes it (#2095).
+ *
+ * Each session owns two of these (@ref session_t::tx): the frame on the wire and the newest
+ * one waiting behind it. The bytes live in the shared @ref tx_block_t; what is per peer is the
+ * reference, the session it was staged for and how far the socket has taken it — a few words,
+ * whatever the frame size.
+ */
+struct httpd_ws_link_t::tx_frame_t {
+    tx_block_t* blk = nullptr; /**< @brief The shared bytes; null = the frame is empty. */
+    /**
+     * @brief The session generation this frame was staged for.
+     *
+     * A producer resolves its destination, then stores, and the slot can be reclaimed and
+     * claimed again between the two; the generation is what makes a frame stored late for
+     * a departed session skippable at the flush rather than written to its successor (#954).
+     */
+    std::uint32_t gen = 0;
+    /**
+     * @brief Wire bytes of this frame the socket has already taken — its WebSocket header
+     *        included (httpd task only).
+     *
+     * Non-zero on a held frame is a frame part-way on the wire: a non-blocking write took
+     * what the socket had room for and the rest goes on the session's next flush. Nothing
+     * else may be written to that socket in between (@ref httpd_ws_link_t::finish_wire).
+     */
+    std::uint32_t sent = 0;
+    /** @brief True while a frame is held. */
+    [[nodiscard]] bool held() const noexcept { return blk != nullptr; }
 };
 
 /**
@@ -1036,10 +1075,27 @@ struct httpd_ws_link_t::session_t {
      * written for: nothing of it reached the peer.
      */
     std::size_t tx_frame_bytes = 0;
-    /** @brief Open a frame-write window — the bracket @ref httpd_ws_link_t::tx_work opens. */
-    void open_tx_frame() noexcept {
-        tx_frame_bytes = 0;
+    /**
+     * @brief The open window's writes do not wait (#2095): @ref httpd_ws_link_t::send_guarded
+     *        adds `MSG_DONTWAIT`, and a write the socket has no room for, or room for only
+     *        part of, ends the frame's turn instead of failing it (httpd task only).
+     */
+    bool tx_nonblock = false;
+    /** @brief A non-blocking write in the open window found the socket full: the frame is
+     *         held, not failed (httpd task only). */
+    bool tx_frame_blocked = false;
+    /**
+     * @brief Open a frame-write window — the bracket every socket write of a frame sits in.
+     * @param nonblock  Write without waiting (a held frame's flush) or within the send bound
+     *                  (an in-call reply, a close, an auth frame).
+     * @param on_wire   Bytes of this frame already on the wire: non-zero resumes a frame a
+     *                  non-blocking write left part-way, so a failure is a truncation.
+     */
+    void open_tx_frame(bool nonblock = false, std::size_t on_wire = 0) noexcept {
+        tx_frame_bytes = on_wire;
         tx_frame_open = true;
+        tx_nonblock = nonblock;
+        tx_frame_blocked = false;
     }
     /**
      * @brief Close it, and report how many bytes of that frame reached the wire.
@@ -1049,8 +1105,37 @@ struct httpd_ws_link_t::session_t {
      */
     [[nodiscard]] std::size_t close_tx_frame() noexcept {
         tx_frame_open = false;
+        tx_nonblock = false;
         return tx_frame_bytes;
     }
+    /**
+     * @brief This peer's conflating TX slot (#2095): `tx[tx_wire]` is the frame on the wire
+     *        (httpd task only), the other is the newest frame waiting behind it.
+     *
+     * A producer only ever writes the waiting frame, under @ref tx_m, and a newer frame
+     * REPLACES a waiting one instead of queueing behind it or waiting for it: the peer's
+     * stats count the replaced frame (`tx_conflated`). So a slow peer loses its own older
+     * updates and never holds a buffer, a work item or the httpd task that another peer
+     * needs. The httpd task moves the waiting frame onto the wire, under @ref tx_m, only
+     * when the wire frame is empty.
+     */
+    tx_frame_t tx[2];
+    std::uint8_t tx_wire = 0; /**< @brief Index of the frame on the wire (see @ref tx). */
+    /** @brief Guards the waiting frame and @ref tx_wire. Held for a gather or a flip, never
+     *         across a socket write, and never with `peers_m_` taken under it. */
+    std::mutex tx_m;
+    /**
+     * @brief Writes of this session's frames that the socket took nothing of, each followed
+     *        by a newer frame replacing the waiting one (tx_m).
+     *
+     * Bumped by @ref httpd_ws_link_t::stage when it replaces a frame after such a write
+     * (@ref tx_refused), cleared by any write that moves a byte. At
+     * @ref httpd_ws_link_t::kTxStallStrikes the flush condemns the session through the
+     * strike path: a peer whose socket never drains holds no seat for ever.
+     */
+    std::uint32_t tx_stalls = 0;
+    /** @brief The last write of this session's wire frame took zero bytes (tx_m). */
+    bool tx_refused = false;
     /**
      * @brief This session has not authenticated yet — it exists, and it is served NOTHING
      *        (peers_m_).
@@ -1239,143 +1324,6 @@ class httpd_ws_link_t::peer_resolution_t final : public transport_t {
 };
 
 /**
- * @brief One queued outbound frame: the payload is gather-copied ONCE, nothrow, so
- *        it outlives the send() caller's spans until the httpd task drains the work
- *        item.
- *
- * ONE SHELL since #949: the work item IS a @ref tx_slot_t member. There is no
- * shell-on-the-heap arm any more — a send that finds the pool exhausted is dropped and
- * counted, so the number of items this link can have outstanding in the control queue is
- * the pool size and nothing else.
- *
- * Its PAYLOAD has three storages, in the order the gather tries them: the slot's own inline
- * buffer (`tx_inline_bytes`, the common frame, no allocation); a buffer borrowed from the
- * declared LARGE size class where the frame lands in its band and an integrator declared one
- * (#1566, @ref large_busy, still no allocation); and `owned`, the per-frame nothrow heap
- * payload, for the exceptional tail past both. A frame that fits the inline buffer has taken
- * the first of those since #949 and takes it unchanged today. Never a `std::vector` for the copy —
- * the vector's THROWING allocator inside a braced initializer defeated the `new (std::nothrow)`
- * guard on the shell: under `-fno-exceptions` a reply-sized copy hitting heap exhaustion aborted
- * the node (the browser-session crash).
- */
-struct httpd_ws_link_t::tx_work_t {
-    httpd_handle_t handle = nullptr; /**< @brief Owning httpd instance. */
-    /**
-     * @brief The owning link's gate — how @ref httpd_ws_link_t::tx_work reaches the link
-     *        to record the send's outcome, and never the link itself.
-     *
-     * Same reasoning as @ref httpd_ws_link_t::session_t::gate: this item can drain on the
-     * adopted server's task after the link is gone, so the ONE pointer it may follow is
-     * the object designed to outlive it. A null link behind the gate means the teardown
-     * shut it and the outcome has nobody left to inform.
-     */
-    gate_t* gate = nullptr;
-    /**
-     * @brief Destination SESSION — re-validated at drain time, never a bare descriptor.
-     *
-     * The item is enqueued on one task and written on another, arbitrarily later, so the
-     * fd it was gathered for may by then belong to somebody else entirely. Carrying the
-     * session reference is what makes a late item skippable instead of misdeliverable;
-     * @ref httpd_ws_link_t::tx_work resolves it back to a socket through
-     * @ref httpd_ws_link_t::live_fd and sends nothing when that fails (#954).
-     */
-    session_ref_t to;
-    std::byte* payload = nullptr; /**< @brief Gathered frame bytes (slot-inline or `owned`). */
-    std::size_t len = 0;          /**< @brief Frame length, bytes. */
-    /**
-     * @brief The slot this item lives inside — bound once in @ref
-     *        httpd_ws_link_t::alloc_buffers and never rewritten, so it is stable for the
-     *        link's life and never null on a queued item.
-     */
-    tx_slot_t* slot = nullptr;
-    /**
-     * @brief Where this item is between its enqueue and its send (ADR-0085).
-     *
-     * A posted item has TWO possible senders: the httpd loop's copy of it (@ref tx_work)
-     * and the receive context parked inside @ref pace_rx, which runs the link's posted
-     * sends rather than hold them. Whoever moves the state from @ref kQueued to @ref kTaken
-     * sends; the other finds the move done and only releases the slot. @ref kRefused is the
-     * producer's word that the enqueue failed while the park was sending, so no httpd copy
-     * will ever come and the park releases. Zero outside that window.
-     */
-    std::atomic<std::uint8_t> state{0};
-    /**
-     * @brief This item's place in the link's post order: drawn from `egress_ticket_` before
-     *        the @ref kQueued store publishes it. The control queue is FIFO in post order,
-     *        and a parked drain sends the lowest ticket first (@ref send_posted_in_park), so
-     *        two items from one producer reach the wire in the order they were posted
-     *        whichever party sends them. Compared modulo 2^32.
-     */
-    std::uint32_t ticket = 0;
-    static constexpr std::uint8_t kQueued = 1; /**< @brief Complete; posted or being posted. */
-    static constexpr std::uint8_t kTaken = 2;  /**< @brief A sender has it. */
-    static constexpr std::uint8_t kSentInPark =
-        3; /**< @brief The park sent it; the copy releases. */
-    static constexpr std::uint8_t kRefused =
-        4; /**< @brief Enqueue failed mid-send; the park releases. */
-    /** @brief A payload past the inline and large capacities, drawn from `memory.io` (the
-     *         exceptional tail only). */
-    fixed_array_t<std::byte> owned;
-    /**
-     * @brief A RETAINED item's payload (RFC-0028 §6.9): @ref payload then holds the frame's
-     *        encoded WebSocket header and head, and these bytes follow them on the wire,
-     *        written straight from the published block. Empty for a gathered item.
-     *
-     * Dropped by @ref httpd_ws_link_t::release_tx_work, on whichever task drains the item —
-     * the reference is the value's own and needs no link to release.
-     */
-    graph::value_ref_t value;
-    /**
-     * @brief The LARGE-class claimed flag this item holds, or null when it borrowed no
-     *        large buffer (#1566).
-     *
-     * The FLAG and not the bytes, and not an index into the class either: @ref
-     * httpd_ws_link_t::release_tx_work is `static` — it must be, because an item can drain
-     * on an adopted server's task after the link that owns the class is gone — so the
-     * release has to reach the buffer's lifetime bit without a link to ask. The pointer is
-     * safe on exactly the terms @ref payload is: the teardown that cannot drain an
-     * in-flight item LEAKS the class rather than freeing it, so both stay addressable for
-     * as long as this item can run. Written by the claimer before the item is posted and
-     * cleared by the release, so it is single-owner throughout and needs no synchronization
-     * of its own.
-     */
-    std::atomic<bool>* large_busy = nullptr;
-};
-
-/**
- * @brief One pre-allocated TX work slot: claimed lock-free (a CAS on @ref busy) by
- *        any sending task in @ref claim_tx_slot, released by the httpd task once
- *        its send drains (@ref release_tx_work) — so a steady-state send allocates
- *        nothing. The pool (`tx_slots_total_` of these — `tx_pool_slots_` claimable by any
- *        sender plus the in-call reserve) is allocated once per link.
- *
- * A single flag is the WHOLE lifetime, and that is a statement about the ESP-IDF floor
- * rather than about this file. A claimed slot is released only by the work item that was
- * enqueued for it, so the flag is sound exactly while "`httpd_queue_work` returned ESP_OK"
- * implies "this item will run". Below ESP-IDF 5.5.5 it did not: the call was a bare
- * non-blocking `sendto` on the loopback control socket, and an enqueue past
- * CONFIG_LWIP_UDP_RECVMBOX_SIZE was discarded inside lwIP with ESP_OK still returned, so
- * the item never ran and its slot was pinned for the rest of the boot (#944). From 5.5.5
- * the mbox slot is reserved through a counting semaphore BEFORE the `sendto`
- * (esp_http_server `httpd_main.c`), so a full queue is an `ESP_FAIL` the caller sees, and
- * the enqueue that succeeds silently and never runs does not exist. `idf_component.yml`
- * requires that floor, which is what let the four-state lifetime, its age stamp and its
- * sweep be deleted rather than kept for a condition that cannot arise (#949).
- *
- * @note The close path's `shutdown` (@ref httpd_ws_link_t::condemn) is NOT this deletion's
- *       business and stays exactly as it is: it exists because a close asked of a FULL
- *       control queue does not land, and a fail-fast refusal is still a close that did not
- *       land. Only the silent-success case went away.
- */
-struct httpd_ws_link_t::tx_slot_t {
-    std::atomic<bool> busy{false};   /**< @brief Claimed flag (acquire/release). */
-    tx_work_t work;                  /**< @brief The slot's embedded work item. */
-    std::byte* inline_buf = nullptr; /**< @brief This slot's slice of the link's inline
-                                      *          payload block (@ref httpd_ws_link_t::tx_inline_),
-                                      *          bound once in alloc_buffers. */
-};
-
-/**
  * @brief The teardown session-detach work item — everything @ref detach_work needs, and
  *        NOTHING that belongs to the link.
  *
@@ -1413,7 +1361,7 @@ struct httpd_ws_link_t::detach_req_t {
  * no-allocation discipline protects the per-frame paths, and a revocation is not one.
  * Failable, like every allocation here: a refused draw is a `false` to the caller, not an
  * abort. The gate rather than the link for the same reason @ref
- * httpd_ws_link_t::tx_work_t carries one: the item can drain on the adopted server's task
+ * httpd_ws_link_t::tx_work posts one: the item can drain on the adopted server's task
  * after the link is gone, and the gate is the one object designed to outlive it.
  */
 struct httpd_ws_link_t::close_req_t {
@@ -1451,8 +1399,6 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_
       rx_backend_(config.memory.rx),
       rx_scratch_bytes_(resolve_size(config.rx_scratch_bytes, kDefaultRxScratchBytes)),
       tx_inline_bytes_(resolve_size(config.tx_inline_bytes, kDefaultTxInlineBytes)),
-      tx_pool_slots_(resolve_size(config.tx_pool_slots, kDefaultTxPoolSlots)),
-      tx_slots_total_(tx_pool_slots_ + kTxReplySlots),
       tx_large_bytes_(config.tx_large.bytes),
       tx_large_slots_(config.tx_large.slots) {
     const std::size_t max_peers = config.max_peers;
@@ -1530,8 +1476,6 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
       rx_backend_(config.memory.rx),
       rx_scratch_bytes_(resolve_size(config.rx_scratch_bytes, kDefaultRxScratchBytes)),
       tx_inline_bytes_(resolve_size(config.tx_inline_bytes, kDefaultTxInlineBytes)),
-      tx_pool_slots_(resolve_size(config.tx_pool_slots, kDefaultTxPoolSlots)),
-      tx_slots_total_(tx_pool_slots_ + kTxReplySlots),
       tx_large_bytes_(config.tx_large.bytes),
       tx_large_slots_(config.tx_large.slots) {
     const std::size_t max_peers = config.max_peers;
@@ -1632,26 +1576,15 @@ void httpd_ws_link_t::close_gate() {
 
 void httpd_ws_link_t::alloc_buffers() {
     // Once per link, at the sizes the constructor resolved, through the allocation seam
-    // (#1880): the RX scratch is connection state, the TX pool and its inline payload block
-    // are egress. All three are sized by the integrator's own knobs, so a store that cannot
-    // hold them is a sizing bug and aborts here, naming it (ADR-0083) — never a link that
-    // comes up and then drops every frame. That also keeps the size and the pointer from
-    // ever disagreeing: on_data_frame decides "does this frame fit the scratch" from
-    // rx_scratch_bytes_, and a claimable slot always has its inline_buf behind it.
+    // (#1880): the RX scratch is connection state, the in-call scratch frame is egress. Both
+    // are sized by the integrator's own knobs, so a store that cannot hold them is a sizing
+    // bug and aborts here, naming it (ADR-0083) — never a link that comes up and then drops
+    // every frame. No per-peer TX buffer exists at all: a frame's bytes are gathered once per
+    // send into a block every destination shares (make_block, #2095).
     if (!rx_scratch_.assign(*state_src_, rx_scratch_bytes_))
         mem::exhausted_at_init(*state_src_, "httpd_ws_link_t: the RX scratch");
-    if (!tx_pool_.assign(*io_src_, tx_slots_total_) ||
-        !tx_inline_.assign(*io_src_, tx_slots_total_ * tx_inline_bytes_))
-        mem::exhausted_at_init(*io_src_, "httpd_ws_link_t: the TX slot pool");
-    // Bind each slot to its embedded work item ONCE, here, and never again. The
-    // back-pointer is a property of the slot, not of the claim: the work item is how the
-    // httpd task finds the slot to release, and a claimer re-storing the same value into it
-    // while that release is in flight would be a plain data race for no gain. The slot's
-    // slice of the inline block is bound on the same terms and for the same reason.
-    for (std::size_t i = 0; i < tx_slots_total_; ++i) {
-        tx_pool_[i].work.slot = &tx_pool_[i];
-        tx_pool_[i].inline_buf = tx_inline_.data() + i * tx_inline_bytes_;
-    }
+    if (!tx_scratch_block_.assign(*io_src_, tx_inline_bytes_))
+        mem::exhausted_at_init(*io_src_, "httpd_ws_link_t: the TX reply scratch");
     alloc_tx_large();
 }
 
@@ -1682,12 +1615,14 @@ void httpd_ws_link_t::alloc_tx_large() {
     // A VALID declaration is sized by the integrator exactly as the pool is, so a store that
     // cannot hold it is the same sizing bug and aborts the same way (#1880): the pair is
     // drawn together, and each claimed flag starts clear (value-initialized).
-    if (!tx_large_.assign(*io_src_, tx_large_slots_ * tx_large_bytes_) ||
+    // Each buffer is a whole frame block — its header and its bytes — so a frame in the band
+    // draws nothing at all, not even the block header.
+    if (!tx_large_.assign(*io_src_, tx_large_slots_ * large_stride() / sizeof(std::max_align_t)) ||
         !tx_large_busy_.assign(*io_src_, tx_large_slots_))
         mem::exhausted_at_init(*io_src_, "httpd_ws_link_t: the TX large class");
 }
 
-std::byte* httpd_ws_link_t::claim_tx_large(tx_work_t* work) {
+void* httpd_ws_link_t::claim_tx_large(std::atomic<bool>*& flag) {
     // Undeclared, rejected or failed: the caller's band test already excluded that case
     // (tx_large_bytes_ is 0 and no frame is <= 0 bytes past the inline capacity), so this is
     // belt and braces for a future caller rather than a live arm.
@@ -1696,11 +1631,43 @@ std::byte* httpd_ws_link_t::claim_tx_large(tx_work_t* work) {
         bool expected = false;
         if (!tx_large_busy_[i].compare_exchange_strong(expected, true, std::memory_order_acquire))
             continue;
-        work->large_busy = &tx_large_busy_[i];
+        flag = &tx_large_busy_[i];
         note_tx_large_peak();
-        return tx_large_.data() + i * tx_large_bytes_;
+        return reinterpret_cast<std::byte*>(tx_large_.data()) + i * large_stride();
     }
     return nullptr;  // every buffer of the class in flight — the caller drops and counts
+}
+
+void httpd_ws_link_t::note_large_pinned() {
+    // The class is spent, and a peer whose socket took nothing may be what holds it: its frame
+    // pins a block no later large frame can replace, so no replacement ever happens and the
+    // stall count of stage() never moves. Each refused draw therefore counts as a replacement
+    // attempt for every peer that holds a block of the class and whose last write moved no
+    // byte (tx_refused, cleared only by a write that moves one). Reaching kTxStallStrikes
+    // posts the flush that strikes it, which hands the block back. Same chunked walk as the
+    // flush; no timer, no clock.
+    session_t* batch[kFanoutChunk];
+    std::size_t next = 0;
+    bool strike = false;
+    for (bool more = true; more;) {
+        std::size_t n = 0;
+        {
+            const std::lock_guard lock(peers_m_);
+            while (next < slots_.size() && n < kFanoutChunk) batch[n++] = slots_[next++];
+            more = next < slots_.size();
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            session_t* const s = batch[i];
+            const std::lock_guard lock(s->tx_m);
+            const auto pins = [](const tx_frame_t& f) {
+                return f.held() && f.blk->large_busy != nullptr;
+            };
+            if (!s->tx_refused || !(pins(s->tx[0]) || pins(s->tx[1]))) continue;
+            if (++s->tx_stalls >= kTxStallStrikes) strike = true;
+        }
+    }
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    if (strike && h != nullptr) (void)post_flush(h);
 }
 
 void httpd_ws_link_t::note_tx_large_peak() {
@@ -1712,8 +1679,7 @@ void httpd_ws_link_t::note_tx_large_peak() {
     // large band by construction: a frame that fits `tx_inline_bytes_` never reaches this
     // function, so the steady-state send the counting doctrine protects (core/STYLE.md
     // §counting doctrine ¶1) gains no instruction at all. The scan is over a handful of
-    // flags — the class is a small pool by declaration — and is the same shape
-    // @ref tx_slots_busy has always had.
+    // flags — the class is a small pool by declaration.
     //
     // Relaxed throughout, and not a consistent cut: a claim racing this one may or may not
     // be seen, so the peak is a lower bound on the true occupancy. That is the ordinary
@@ -1726,80 +1692,76 @@ void httpd_ws_link_t::note_tx_large_peak() {
     }
 }
 
-httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot(bool in_call) {
-    // Teardown gate: once the dtor is draining, new sends must stop claiming slots or the
-    // drain never converges (unregistering the URI stops RX only — subscription pushers
-    // keep sending until the router detaches the transport). They are dropped and counted,
-    // which is the same answer an exhausted pool gets, so nothing runs past the dtor.
-    if (tx_pool_ == nullptr || stopping_.load(std::memory_order_relaxed)) return nullptr;
-    const auto take = [this](std::size_t i) {
-        bool expected = false;
-        return tx_pool_[i].busy.compare_exchange_strong(expected, true, std::memory_order_acquire);
-    };
-    // The reserve sits PAST the pool (kTxReplySlots, #1218), and an in-call send takes it
-    // FIRST. The asymmetry is the point: a send issued on the httpd task — a request's reply,
-    // serviced in-call — cannot wait for a drain the asking task is itself supposed to
-    // perform, while an off-task producer can, so a slot it does not take costs it latency
-    // and never a frame. Reaching for the reserve before the pool is what keeps that
-    // guarantee from being paid for out of the fan-out width: a reply in flight leaves all
-    // tx_pool_slots_ claimable, so a producer sweep that fits the pool still fits it.
-    if (in_call)
-        for (std::size_t i = tx_pool_slots_; i < tx_slots_total_; ++i)
-            if (take(i)) return &tx_pool_[i];
-    for (std::size_t i = 0; i < tx_pool_slots_; ++i)
-        if (take(i)) return &tx_pool_[i];
-    return nullptr;  // every slot in flight this instant — the caller waits, or drops
-}
-
-httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot_waiting() {
-    // "Am I the drain?" is the whole fork. esp_http_server runs every queued send on ONE
-    // task, so a send issued on it can only be served after the current handler frame
-    // returns: waiting there would wait on this stack frame, which is the #814 shape and a
-    // guaranteed deadlock for the full send bound. In-call sends take their reserve, or the
-    // pool as they find it, and drop when both are full — they never wait.
-    const bool in_call = server_task_.load(std::memory_order_relaxed) == current_task();
-    if (tx_slot_t* const slot = claim_tx_slot(in_call); slot != nullptr) return slot;
-    const std::int64_t bound_us = tx_wait_bound_us(send_timeout_ms_);
-    if (in_call || bound_us <= 0) return nullptr;
-    const std::int64_t started_us = esp_timer_get_time();
-    // The futility latch. The bound below is per SEND, and a fan-out asks per DESTINATION —
-    // so against an httpd task that is not draining at all, a 12-edge sweep would pay it
-    // twelve times over and park its producer for twelve send bounds. Once ONE wait has
-    // expired, the answer for the rest of that sweep is already known, so the pool is taken
-    // as-is (drop and count) until the latch lapses. A pass therefore costs at most one
-    // bound of latency before it goes back to being honest, counted loss.
-    if (started_us < tx_wait_futile_until_us_.load(std::memory_order_relaxed)) return nullptr;
-    tx_pool_waits_.fetch_add(1, std::memory_order_relaxed);
-    const std::int64_t deadline_us = started_us + bound_us;
-    do {
-        // Off the CPU, never a spin: on a unicore target the httpd task is the only task
-        // that can free a slot, and it does not run while this one is runnable.
-        std::this_thread::sleep_for(std::chrono::milliseconds(kTxWaitSliceMs));
-        // A destructor that started while this send was asleep is drained on a bound of its
-        // own, so give up the moment it does rather than extending it by ours.
-        if (stopping_.load(std::memory_order_relaxed)) return nullptr;
-        if (tx_slot_t* const slot = claim_tx_slot(false); slot != nullptr) return slot;
-    } while (esp_timer_get_time() < deadline_us);
-    tx_wait_futile_until_us_.store(esp_timer_get_time() + bound_us, std::memory_order_relaxed);
-    return nullptr;  // the drain is not keeping up — the caller drops and counts it
-}
-
-void httpd_ws_link_t::release_tx_work(tx_work_t* work) {
-    // Every work item is a pool slot's own member since #949 — there is no heap shell to
-    // free, and `slot` is bound once in alloc_buffers, so it is never null here.
-    work->owned.reset();  // drop an exceptional-tail heap payload before the slot recycles
-    work->value.reset();  // and a retained item's value reference (RFC-0028 §6.9)
-    // Hand back the large-class buffer this item borrowed, if it borrowed one (#1566) —
-    // through the flag it carries, because this function has no link to ask (see
-    // tx_work_t::large_busy). Released BEFORE the slot's own flag, so a sender that wins
-    // the slot cannot find the class still holding a buffer this item has finished with.
-    if (work->large_busy != nullptr) {
-        std::atomic<bool>* const flag = work->large_busy;
-        work->large_busy = nullptr;
-        flag->store(false, std::memory_order_release);
+httpd_ws_link_t::tx_block_t* httpd_ws_link_t::make_block(
+    std::span<const std::byte> prefix, std::span<const std::span<const std::byte>> iov,
+    const graph::value_t* value) {
+    std::size_t len = prefix.size();
+    for (const auto& part : iov) len += part.size();
+    // The LARGE band (#1566), and it exists only where an integrator declared it: with no
+    // class, tx_large_bytes_ is 0 and no frame satisfies this test. Exhausted, it fails
+    // CLOSED, never onto the egress store: falling back would hand back the unbounded
+    // footprint the class was declared to remove, under exactly the load that motivated the
+    // declaration — counted, so an operator can size `tx_large_slots` against it.
+    std::atomic<bool>* large = nullptr;
+    void* raw = nullptr;
+    std::size_t bytes = 0;
+    if (len > tx_inline_bytes_ && len <= tx_large_bytes_) {
+        // A whole block of the class: its header leads the buffer (large_stride).
+        raw = claim_tx_large(large);
+        if (raw == nullptr) {
+            tx_large_dropped_.fetch_add(1, std::memory_order_relaxed);
+            note_large_pinned();
+            return nullptr;
+        }
+    } else {
+        // Every other frame: one exact-size block from the egress store, the bytes trailing
+        // the header, failable end to end. A refusal is the caller's counted drop.
+        bytes = tx_block_header() + len;
+        raw = io_src_->try_alloc(bytes, alignof(std::max_align_t));
+        if (raw == nullptr) return nullptr;
     }
-    work->state.store(0, std::memory_order_relaxed);  // every sender is done with it
-    work->slot->busy.store(false, std::memory_order_release);
+    auto* const b = new (raw) tx_block_t;
+    b->src = large != nullptr ? nullptr : io_src_;
+    b->alloc_bytes = bytes;
+    b->large_busy = large;
+    b->payload = static_cast<std::byte*>(raw) + tx_block_header();
+    b->len = len;
+    if (value != nullptr) {
+        b->value = graph::value_ref_t::keep(*value);
+        if (!b->value) {  // a caller-owned value whose links could not be kept
+            drop_block(b);
+            return nullptr;
+        }
+    }
+    std::byte* p = b->payload;
+    if (!prefix.empty()) std::memcpy(p, prefix.data(), prefix.size());
+    p += prefix.size();
+    for (const auto& part : iov) {
+        if (!part.empty()) std::memcpy(p, part.data(), part.size());
+        p += part.size();
+    }
+    return b;
+}
+
+void httpd_ws_link_t::drop_block(tx_block_t* b) {
+    if (b == nullptr || b->refs.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+    // The last reference: whichever task dropped it frees it, through what it recorded, so
+    // this needs no link. The value reference first (RFC-0028 §6.9), then the large-class
+    // buffer, then the block.
+    b->value.reset();
+    mem::block_source_t* const src = b->src;
+    const std::size_t bytes = b->alloc_bytes;
+    std::atomic<bool>* const large = b->large_busy;
+    b->~tx_block_t();
+    if (large != nullptr)
+        large->store(false, std::memory_order_release);  // a block of the class: hand it back
+    else
+        src->release(b, bytes, alignof(std::max_align_t));
+}
+
+void httpd_ws_link_t::release_frame(tx_frame_t& frame) {
+    drop_block(frame.blk);
+    frame = tx_frame_t{};
 }
 
 httpd_ws_link_t::~httpd_ws_link_t() {
@@ -1845,43 +1807,11 @@ httpd_ws_link_t::~httpd_ws_link_t() {
             detach_sessions();
         }
     }
-    // Adopted mode: the caller's server keeps running after our URI is unregistered,
-    // so a queued tx_work may still execute on its task while it references a pool
-    // slot — wait (bounded) for the in-flight slots to drain before tx_pool_ dies.
-    // Owning mode needs no wait: httpd_stop has halted the task, so nothing can touch
-    // the pool afterwards (an undrained work item is simply never run).
-    if (!owns_httpd_ && tx_pool_ != nullptr) {
-        bool busy = true;
-        for (int turn = 0; turn < kDrainTurns && busy; ++turn) {
-            busy = false;
-            for (std::size_t i = 0; i < tx_slots_total_; ++i)
-                if (tx_pool_[i].busy.load(std::memory_order_acquire)) busy = true;
-            if (busy) std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
-        }
-        if (busy) {
-            // The drain bound expired with a send still in flight. That is not a
-            // corner case to power through: httpd_ws_send_frame_async can sit in
-            // SO_SNDTIMEO for several seconds on one large frame, and a dtor running
-            // on the adopting server's OWN task can never see its queued work drain
-            // at all (the work runs on the task that is sleeping here). The in-flight
-            // tx_work still reads the slot's payload and release-stores its busy flag,
-            // so freeing the pool now is a use-after-free — leak it instead: a
-            // bounded, teardown-only loss that the drained path never pays. tx_work
-            // touches only the work item and the caller's still-running server handle,
-            // never this link, so the leaked pool is the one allocation that must outlive
-            // us — BOTH halves of it since #1160: the slot array and the inline payload
-            // block the slots point into, which an in-flight send is still reading from.
-            // Since #1566 the large size class is leaked on the same terms and for the same
-            // reason: an in-flight item's `payload` may point into that block, and its
-            // release stores through the busy flag beside it. Leaking the bytes without the
-            // flags (or the reverse) would leave one half of a live pair dangling.
-            ESP_LOGW(kTag, "tx pool leaked at teardown: a queued send outlived the drain bound");
-            tx_pool_.leak();
-            tx_inline_.leak();
-            tx_large_.leak();
-            tx_large_busy_.leak();
-        }
-    }
+    // No TX drain to wait for (#2095). The one TX work item, the flush, carries the GATE and
+    // nothing of the link's: it reaches the sessions and their frames only through
+    // `gate->link`, which close_gate above has nulled, and it registers on the gate's depth
+    // while it runs, which close_gate has joined. An item still in an adopted server's queue
+    // finds the link gone and does nothing, so neither a wait nor a leak is owed here.
     // The gate outlives the link exactly when the server does. Owning mode: httpd_stop
     // has deleted every session, so nothing holds the pointer any more and it is freed.
     // Adopted mode: the set of sessions that latched it is unknowable (a peer that
@@ -2115,6 +2045,11 @@ esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
     // takes the fork that keeps it off the control queue (#1494 — see t_serving_link and
     // @ref httpd_ws_link_t::send_in_call). The scope restores the previous value on the way
     // out and never touches `self`, which the next comment explains may be gone by then.
+    // An inbound frame is the one socket event ESP-IDF's server hands this link (it selects
+    // for read only), so it is also when a frame held on a full socket — this peer's or any
+    // other's — is offered its socket again (#2095). Before the app runs, while `self` is
+    // provably alive, and only when something is held: one relaxed load otherwise.
+    if (self->tx_held_.load(std::memory_order_relaxed)) (void)self->flush_egress();
     esp_err_t err = ESP_OK;
     {
         const serving_scope_t serving(self);
@@ -2498,7 +2433,7 @@ void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
     // The drain is the run of frames since this core last idled; an epoch that moved since
     // the previous frame starts a new one. Otherwise a spent budget waits for the idle
     // task. While it waits it is still the httpd task, the one drain of this link's queued
-    // sends, so a send posted to it by another task (egress_pending_) is RUN FROM HERE,
+    // sends, so a send posted to it by another task (a held frame) is RUN FROM HERE,
     // on this task, the socket write and all, and the park goes on. The frame stays unread:
     // egress wakes the park, ingress waits for idle, and a peer who can make this link
     // post a send per frame (a subscriber over another link, an app that replies off-task)
@@ -2519,8 +2454,7 @@ void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
         rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
         gate.waiters.fetch_add(1, std::memory_order_seq_cst);
         while (gate.epoch.load(std::memory_order_seq_cst) == epoch) {
-            if (egress_pending_.load(std::memory_order_seq_cst) != 0 && send_posted_in_park())
-                continue;  // more may have been posted while those went out
+            if (flush_egress()) continue;  // more may have been posted while those went out
             (void)xSemaphoreTake(gate.sem, portMAX_DELAY);
         }
         gate.waiters.fetch_sub(1, std::memory_order_seq_cst);
@@ -2554,60 +2488,15 @@ void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
 
 void httpd_ws_link_t::egress_posted() noexcept {
     if constexpr (!kRxDrainPaced) return;
-    // The producer's side of the idle_gate_t handshake, after it has raised the pending
-    // count and marked the item kQueued: a drain that counted itself in before those stores
-    // sees `waiters` here and is given the semaphore; one that counts itself in after them
-    // re-reads the count and runs the item before it sleeps. A give nobody takes saturates
+    // The producer's side of the idle_gate_t handshake, after it has stored its frame under
+    // the session's tx_m: a drain that counted itself in before that store sees `waiters`
+    // here and is given the semaphore; one that counts itself in after it takes the same
+    // mutex in its flush and finds the frame before it sleeps. A give nobody takes saturates
     // the binary semaphore and costs the next waiter one extra pass. Every core's gate is
     // tested, because a producer does not know which core the httpd task is parked on; a
     // gate with no waiter costs one load.
     for (idle_gate_t& gate : g_idle_gates)
         if (gate.waiters.load(std::memory_order_seq_cst) != 0) (void)xSemaphoreGive(gate.sem);
-}
-
-void httpd_ws_link_t::egress_drained() noexcept {
-    if constexpr (!kRxDrainPaced) return;
-    egress_pending_.fetch_sub(1, std::memory_order_seq_cst);
-}
-
-bool httpd_ws_link_t::send_posted_in_park() {
-    // Runs on the httpd task, inside pace_rx's wait, where nothing of this task's is
-    // mid-write: the handler has read a header and nothing since. Every slot whose item is
-    // kQueued is sent here exactly as tx_work would send it, and is left BUSY: the server
-    // loop still holds its copy of the item, which will find kSentInPark and release the
-    // slot. The producer is the one party that can still be racing: an enqueue refused
-    // after this scan took the item leaves kRefused in place of kTaken, and then no copy
-    // is coming and the slot is released here. The pending count is lowered by the send
-    // itself (send_posted), so a loop that finds nothing to send goes back to sleep.
-    //
-    // In POST order, never slot order: the control queue is FIFO, and a session's frames
-    // (an LKV update behind the RETAINED value it supersedes) must reach the wire in the
-    // order they were posted. Each pass finds the kQueued item with the lowest ticket and
-    // sends it, then looks again, so an item posted while one was going out takes its turn
-    // after it. The slot index says nothing about order: a producer takes the lowest FREE
-    // slot, so a later post lands in a lower slot whenever an earlier one was released.
-    bool ran = false;
-    if (tx_pool_ == nullptr) return ran;
-    for (;;) {
-        tx_work_t* next = nullptr;
-        for (std::size_t i = 0; i < tx_slots_total_; ++i) {
-            tx_work_t& work = tx_pool_[i].work;
-            if (work.state.load(std::memory_order_seq_cst) != tx_work_t::kQueued) continue;
-            if (next == nullptr || static_cast<std::int32_t>(work.ticket - next->ticket) < 0)
-                next = &work;
-        }
-        if (next == nullptr) return ran;
-        std::uint8_t expected = tx_work_t::kQueued;
-        if (!next->state.compare_exchange_strong(expected, tx_work_t::kTaken,
-                                                 std::memory_order_seq_cst))
-            continue;  // its producer withdrew it (kRefused) between the scan and the take
-        send_posted(next, false);
-        expected = tx_work_t::kTaken;
-        if (!next->state.compare_exchange_strong(expected, tx_work_t::kSentInPark,
-                                                 std::memory_order_seq_cst))
-            release_tx_work(next);  // kRefused: the enqueue failed; no copy will release it
-        ran = true;
-    }
 }
 
 esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
@@ -3047,9 +2936,12 @@ esp_err_t httpd_ws_link_t::send_now(session_t* slot, int fd, int ws_type,
     // it; the cast is confined to this one call rather than pushed onto the callers.
     f.payload = reinterpret_cast<std::uint8_t*>(const_cast<std::byte*>(payload.data()));
     f.len = payload.size();
-    // Bracket it exactly as tx_work does, so the send override judges a short write on an
-    // auth frame by the same rule it judges every other frame by (#951) — a truncated CLOSE
-    // desynchronises the stream just as thoroughly as a truncated reply.
+    // A held frame part-way on this socket goes out first, or this frame's bytes would land
+    // inside it (#2095). If it cannot be finished the session is condemned with it.
+    if (slot != nullptr && !finish_wire(slot, fd)) return ESP_FAIL;
+    // Bracket it exactly as write_frame does, so the send override judges a short write on
+    // an auth frame by the same rule it judges every other frame by (#951) — a truncated
+    // CLOSE desynchronises the stream just as thoroughly as a truncated reply.
     if (slot != nullptr) slot->open_tx_frame();
     const esp_err_t err = httpd_ws_send_frame_async(h, fd, &f);
     const std::size_t wrote = slot != nullptr ? slot->close_tx_frame() : 0;
@@ -3297,6 +3189,18 @@ httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer
         // as a truncation of a frame that peer was never sent.
         (void)slot->close_tx_frame();
     }
+    {
+        // Both TX frames go with the session (#2095): the one on the wire is this task's own
+        // (no flush can be running — this is the httpd task, inside free_ctx), and the waiting
+        // one is a producer's, so it is taken under tx_m. A producer that resolved the session
+        // before it left may still store one afterwards; it carries the departed generation,
+        // and the next flush skips it.
+        const std::lock_guard lock(slot->tx_m);
+        release_frame(slot->tx[0]);
+        release_frame(slot->tx[1]);
+        slot->tx_stalls = 0;  // the stall count is the departed session's, like its frames
+        slot->tx_refused = false;
+    }
     // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that hung up
     // leaves its subscriber edges behind, so the routing plane's eviction hook
     // (fwd_router_t::link_down via the installed notifier) is owed one call. It is NOT
@@ -3461,142 +3365,99 @@ void httpd_ws_link_t::deliver_owned_copy(peer_handle_t peer, std::span<const std
 
 void httpd_ws_link_t::queue_send(const session_ref_t& to,
                                  std::span<const std::span<const std::byte>> iov) {
-    // ONE load of each member, into a local (#963). The plain reads these replace raced
-    // the destructor's writes outright — UB by the memory model — and re-reading them
-    // across the gather let one send act on two different values of the same member.
+    // One destination, one block: gathered here, referenced by the peer's slot, and this
+    // builder's reference dropped once it is staged.
+    std::size_t total = 0;
+    for (const auto& part : iov) total += part.size();
+    tx_block_t* const blk = make_block({}, iov, nullptr);
+    stage(to, blk, total);
+    drop_block(blk);
+}
+
+void httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_t total) {
+    // ONE load of the handle, into a local (#963): the plain read this replaces raced the
+    // destructor's write outright, and re-reading it across the store let one send act on
+    // two different values of the same member.
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
-    gate_t* const g = gate_.load(std::memory_order_relaxed);
     if (h == nullptr) return;
-    // Re-resolve the destination HERE rather than trusting the fd the caller looked at:
-    // a departed or condemned peer takes no more frames, and is refused at this end of the
-    // queue rather than the far one. Queueing to it would be worse than useless: the
-    // control socket is the scarce resource under this failure (one small UDP mbox, shared
-    // with the close the link is trying to land), so every frame accepted for a doomed
-    // session is a slot the rest of the node does not get. Both production callers below
-    // already skip dead slots from the lock they were holding anyway; this is the locus
-    // that makes it a property of the seam rather than of its callers, and it costs one
-    // uncontended mutex on a path that is about to memcpy a frame and do a syscall.
+    // Re-resolve the destination HERE rather than trusting the fd the caller looked at: a
+    // departed or condemned peer takes no more frames. Counted (#953): normally benign — a
+    // fan-out that snapshotted its destinations racing a departure — but a silent drop here
+    // reads exactly like a delivery from outside.
     const int fd = live_fd(to);
     if (fd < 0) {
-        // Counted (#953). Normally benign — a fan-out that snapshotted its destinations
-        // racing a departure — but silent, and a silent drop here reads exactly like a
-        // delivery from outside.
         tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // Gather-copy the payload ONCE: httpd_queue_work is asynchronous, so the caller's
-    // spans are gone by the time the httpd task runs tx_work. The destination is a
-    // pre-allocated pool slot claimed lock-free (CAS), gathered straight into its inline
-    // buffer — no allocation at all. Past tx_inline_bytes_ the slot keeps its shell and the
-    // payload comes from the declared LARGE size class if the frame is in its band (#1566,
-    // still no allocation), and only past THAT from a per-frame nothrow heap payload — the
-    // exceptional tail, which is the one arm here that can still allocate.
-    //
-    // A pool that has nothing free is where this used to grow a heap work item and post it
-    // anyway, which turned a bounded, observable condition into an unbounded, invisible
-    // one: the outstanding-send count was then capped only by the heap, against a control
-    // mbox of six drained one message per server pass. It is now the drop it should always
-    // have been — the pool IS this link's outstanding-send bound, and exceeding it is
-    // counted (#949, and the exhaustion policy ADR-0039 §4 / ADR-0042 §2 already ruled).
-    //
-    // Nothrow END TO END on the one arm that can still allocate — never a std::vector for
-    // the copy: its THROWING allocator once defeated the `new (std::nothrow)` guard on the
-    // shell, aborting the node under -fno-exceptions on a reply-sized copy.
-    std::size_t total = 0;
-    for (const auto& part : iov) total += part.size();
-    tx_work_t* work = nullptr;
-    std::byte* dst = nullptr;
-    if (tx_slot_t* const slot = claim_tx_slot_waiting(); slot != nullptr) {
-        work = &slot->work;
-        work->handle = h;
-        work->gate = g;
-        work->to = to;
-        work->len = total;
-        if (total <= tx_inline_bytes_) {
-            dst = slot->inline_buf;
-        } else if (total <= tx_large_bytes_) {
-            // The LARGE band (#1566), and it exists only where an integrator declared it:
-            // with no class, tx_large_bytes_ is 0, no frame satisfies this test, and the arm
-            // below is reached exactly as before. A class that IS declared takes the routine
-            // multi-KB frames — the periodic snapshot fanned to several subscribers — off
-            // the heap and onto a bound the node chose, which is the whole point: N
-            // subscribers x rate allocations per second of multi-KB blocks is fragmentation
-            // pressure and an unbounded transient footprint for a working set that was
-            // perfectly predictable.
-            dst = claim_tx_large(work);
-            if (dst == nullptr) {  // the class is exhausted: recycle the slot, drop below
-                // Fail CLOSED, never onto the heap. Falling back would hand back precisely
-                // the unbounded footprint the class was declared to remove, and would do it
-                // under exactly the load that motivated the declaration. It is #949's
-                // named-drop arm — counted at the link, and counted again here so an
-                // operator can size `tx_large_slots` against it rather than guess.
-                tx_large_dropped_.fetch_add(1, std::memory_order_relaxed);
-                release_tx_work(work);
-                work = nullptr;
-            }
-        } else {
-            dst = work->owned.assign(*io_src_, total) ? work->owned.data() : nullptr;
-            if (dst == nullptr) {  // the egress store refused: recycle the slot, drop below
-                release_tx_work(work);
-                work = nullptr;
-            }
-        }
-        if (work != nullptr) work->payload = dst;
-    } else {
-        // The pool had nothing free, AND (off the httpd task) it still had nothing free
-        // after a full drain bound — see claim_tx_slot_waiting. Still an enqueue_drops below
-        // — the total is unchanged — but recorded separately, because it is evidence about
-        // THIS link's outstanding depth against tx_slot_capacity, while the other two causes
-        // name the shared control queue and the heap (#953). Since #1187 it is also evidence
-        // about the DRAIN and not merely about the depth: a miss now means the httpd task
-        // did not free a slot within one send occupancy, which `tx_pool_waits` separates
-        // from the far commoner "waited briefly and was served".
-        tx_pool_misses_.fetch_add(1, std::memory_order_relaxed);
+    // A frame with no block — the large class spent, the egress store refusing, or the value
+    // not keepable — is a counted drop at the link: evidence about this link's memory, not
+    // about the peer. And once the dtor is draining, nothing new is held (teardown gate).
+    if (blk == nullptr || stopping_.load(std::memory_order_relaxed)) {
+        note_enqueue_drop(fd, total);
+        return;
     }
-    bool queued = false;
-    if (work != nullptr) {  // work == nullptr => no slot, or OOM: drop this frame
-        std::byte* p = dst;
-        for (const auto& part : iov) {
-            if (!part.empty()) std::memcpy(p, part.data(), part.size());
-            p += part.size();
-        }
-        // Count it and mark it complete BEFORE the enqueue, in that order: a drain parked
-        // for idle sends kQueued items itself (ADR-0085, send_posted_in_park), and it must
-        // never find one whose count is not yet raised, nor one the httpd loop's copy may
-        // already have started.
-        egress_pending_.fetch_add(1, std::memory_order_seq_cst);
-        work->ticket = egress_ticket_.fetch_add(1, std::memory_order_relaxed);
-        work->state.store(tx_work_t::kQueued, std::memory_order_seq_cst);
-        queued = httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) == ESP_OK;
-        if (queued) {
-            egress_posted();  // a parked drain runs it now rather than hold it
-        } else {
-            // A refused enqueue is the only enqueue failure that exists above the ESP-IDF
-            // floor this component requires. The slot comes straight back unless a parked
-            // drain took the item in the meantime: then it was, or is being, SENT, which is
-            // a delivery and not a drop, and whoever finishes with it releases the slot
-            // (see tx_work_t::state).
-            switch (work->state.exchange(tx_work_t::kRefused, std::memory_order_seq_cst)) {
-                case tx_work_t::kQueued:
-                    egress_drained();
-                    release_tx_work(work);
-                    break;
-                case tx_work_t::kSentInPark:
-                    release_tx_work(work);
-                    queued = true;  // delivered from inside the park
-                    break;
-                default:
-                    queued = true;  // kTaken: the park is sending it and will release it
-                    break;
-            }
+    // Into THIS peer's waiting frame, and nowhere else (#2095): a reference to the shared
+    // block, never a copy. A frame already waiting there is REPLACED and counted, never
+    // queued behind and never waited for: the newest frame is the one a slow peer gets, and a
+    // slow peer holds no buffer, no work item and no part of the httpd task that another peer
+    // needs. A replacement that follows a write the socket took nothing of is a stall
+    // (session_t::tx_stalls), which the flush strikes at kTxStallStrikes.
+    session_t* const s = to.slot;
+    blk->refs.fetch_add(1, std::memory_order_relaxed);
+    tx_frame_t old;
+    {
+        const std::lock_guard lock(s->tx_m);
+        tx_frame_t& f = s->tx[s->tx_wire ^ 1];
+        old = f;
+        f = tx_frame_t{blk, to.gen, 0};
+        // A frame left for this slot's PREVIOUS session is not this peer's loss: released
+        // uncounted, as the flush would have skipped it.
+        if (old.held() && old.gen == to.gen && s->tx_refused) {
+            ++s->tx_stalls;
+            s->tx_refused = false;
         }
     }
-    // A frame that never reached the queue is charged to the LINK, not to this peer: a
-    // refused enqueue is evidence about the shared control queue, and under #835's shape
-    // the peer that saturated it is precisely the one NOT sending here. An exhausted pool
-    // is evidence about the link's own in-flight depth, which is no more this peer's fault.
-    // The session streak is fed from tx_work, where the result names its destination.
-    if (!queued) note_enqueue_drop(fd, total);
+    const bool conflated = old.held() && old.gen == to.gen;
+    release_frame(old);
+    if (conflated) note_tx_conflated(to);
+    egress_posted();  // a parked drain flushes it now rather than hold it
+    if (post_flush(h)) return;
+    // The control queue refused the flush. The frame cannot go out until something else
+    // posts one, so it is taken back (if no newer one replaced it meanwhile) and counted
+    // exactly as a refused enqueue always was — a fact about the shared control queue,
+    // charged to the link and to no peer.
+    tx_frame_t back;
+    {
+        const std::lock_guard lock(s->tx_m);
+        tx_frame_t& f = s->tx[s->tx_wire ^ 1];
+        if (f.blk == blk && f.gen == to.gen) {
+            back = f;
+            f = tx_frame_t{};
+        }
+    }
+    release_frame(back);
+    note_enqueue_drop(fd, total);
+}
+
+bool httpd_ws_link_t::post_flush(httpd_handle_t h) {
+    // ONE flush in the control queue per link, whatever the number of frames held: the flush
+    // walks every session, so a second item would find nothing the first did not. The flag
+    // is cleared by the flush BEFORE it walks (tx_work), so a frame stored after the walk
+    // passed its session always posts a new one.
+    if (flush_posted_.exchange(true, std::memory_order_seq_cst)) return true;
+    if (httpd_queue_work(h, &httpd_ws_link_t::tx_work, gate_.load(std::memory_order_relaxed)) ==
+        ESP_OK)
+        return true;
+    flush_posted_.store(false, std::memory_order_seq_cst);
+    return false;
+}
+
+void httpd_ws_link_t::note_tx_conflated(const session_ref_t& to) {
+    tx_conflated_.fetch_add(1, std::memory_order_relaxed);
+    const std::lock_guard lock(peers_m_);
+    // The identity test live_fd makes: a replaced frame is charged to the session it was
+    // gathered for or to nobody, never to whoever holds the slot now (#954).
+    if (to.slot->gen == to.gen) ++to.slot->st.tx_conflated;
 }
 
 void httpd_ws_link_t::send_in_call(const session_ref_t& to,
@@ -3611,8 +3472,8 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // second trip through the scheduler to arrive at the same `httpd_ws_send_frame_async`
     // this function calls directly. That mbox is the scarcest thing on the link — it is
     // shared with the closes @ref condemn wants landed — and the drain lag is what put
-    // issue #1494's cliff exactly at the pool depth: the in-call reserve (@ref
-    // tx_reply_reserve) is claimable once per DRAIN, not once per request, so a pipelining
+    // issue #1494's cliff exactly at the pool depth of the time: the in-call reserve slot
+    // was claimable once per DRAIN, not once per request, so a pipelining
     // client is serviced again before the previous reply's slot comes back and the reply
     // falls into the general pool, where an in-call send never waits (the #814 deadlock
     // reason) and therefore drops at once. Off the queue, none of that arithmetic applies:
@@ -3623,14 +3484,13 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // verdict is trustworthy — `httpd_queue_work` reserves its mbox slot through a counting
     // semaphore before the `sendto`, so ESP_OK means the item will run and release its slot
     // (#949; @ref condemn records the same floor, and the pre-floor ESP_OK-that-lies it
-    // displaced). Below it, the silent bin was real, and a
-    // dropped `tx_work` item left `tx_slot_t::busy` set forever. A reply that claims no slot
-    // is immune to that whether the verdict lies or not — and it needs no reclamation sweep,
-    // which is the remedy this one displaces: reclaiming a slot from a merely LATE item
-    // hands its buffer to another sender while the httpd task is still reading it.
+    // displaced). Below it, the silent bin was real, and a dropped work item stranded the
+    // buffer it carried. A reply that holds no frame of the session's is immune to that
+    // whether the verdict lies or not.
     //
     // The fan-out/push path is NOT rerouted here. It is issued from producer tasks, which
-    // is precisely the case the queue exists for.
+    // is precisely the case the queue exists for, and it is conflated per peer (#2095),
+    // which a reply must never be: the requester is waiting for THIS frame.
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
     if (h == nullptr) return;
     // The same re-resolve @ref queue_send opens with, for the same reason: a departed or
@@ -3651,9 +3511,8 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     }
     std::size_t total = 0;
     for (const auto& part : iov) total += part.size();
-    // Teardown gate, the one @ref claim_tx_slot applies to every other send: once the dtor
-    // is draining, nothing new goes out. Applied explicitly because the single-span arm
-    // below claims no slot and would otherwise walk past it.
+    // Teardown gate, the one @ref stage applies to every other send: once the dtor is
+    // draining, nothing new goes out.
     if (stopping_.load(std::memory_order_relaxed)) {
         note_enqueue_drop(fd, total);
         return;
@@ -3663,55 +3522,35 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // level up), which is exactly what the asynchronous path could not assume and had to
     // gather-copy to escape. So the common reply now costs zero copies and zero slots.
     std::span<const std::byte> payload = iov.empty() ? std::span<const std::byte>() : iov[0];
-    tx_work_t* scratch = nullptr;
+    tx_block_t* big = nullptr;
     if (iov.size() > 1) {
-        // A rope reply still has to reach the wire as ONE WebSocket frame, so it is
-        // gathered — into a pool slot used as scratch, never into a temporary of its own
-        // (a flatten temp alongside the tx copy is the heap spike behind the on-device OOM
-        // abort). The slot is claimed and released inside this call, on this task, and is
-        // never posted anywhere: no other task can be reading it, so it cannot strand.
-        tx_slot_t* const slot = claim_tx_slot(true);
-        if (slot == nullptr) {
-            tx_pool_misses_.fetch_add(1, std::memory_order_relaxed);
-            note_enqueue_drop(fd, total);
-            return;
-        }
-        scratch = &slot->work;
-        std::byte* dst = slot->inline_buf;
-        if (total > tx_inline_bytes_ && total <= tx_large_bytes_) {
-            // The same large band the queued path takes (#1566) — a rope reply is gathered
-            // out of the declared class rather than off the heap. Exhaustion is the same
-            // fail-closed drop, for the same reason.
-            dst = claim_tx_large(scratch);
-            if (dst == nullptr) {
-                tx_large_dropped_.fetch_add(1, std::memory_order_relaxed);
-                release_tx_work(scratch);
+        // A rope reply still has to reach the wire as ONE WebSocket frame, so it is gathered
+        // — into the link's one reply scratch, never into a temporary of its own (a flatten
+        // temp alongside the tx copy is the heap spike behind the on-device OOM abort). Only
+        // this task uses it and only inside this call, so it is never contended. A rope past
+        // the scratch takes a block, the same make_block a queued frame takes, and exhaustion
+        // is the same counted drop.
+        std::byte* p = tx_scratch_block_.data();
+        if (total > tx_inline_bytes_) {
+            big = make_block({}, iov, nullptr);
+            if (big == nullptr) {
                 note_enqueue_drop(fd, total);
                 return;
             }
-        } else if (total > tx_inline_bytes_) {
-            // Failable END TO END on the one arm that can still allocate — never a
-            // std::vector, whose throwing allocator once aborted the node under
-            // -fno-exceptions on a reply-sized copy. Drawn from `memory.io` (#1880).
-            dst = scratch->owned.assign(*io_src_, total) ? scratch->owned.data() : nullptr;
-            if (dst == nullptr) {  // the egress store refused: recycle the scratch, drop
-                release_tx_work(scratch);
-                note_enqueue_drop(fd, total);
-                return;
+            payload = {big->payload, total};
+        } else {
+            payload = {p, total};
+            for (const auto& part : iov) {
+                if (!part.empty()) std::memcpy(p, part.data(), part.size());
+                p += part.size();
             }
         }
-        std::byte* p = dst;
-        for (const auto& part : iov) {
-            if (!part.empty()) std::memcpy(p, part.data(), part.size());
-            p += part.size();
-        }
-        payload = {dst, total};
     }
     std::size_t on_wire = 0;
     const esp_err_t err = send_now(to.slot, fd, HTTPD_WS_TYPE_BINARY, payload, &on_wire);
-    // Back to the pool BEFORE the accounting, which takes peers_m_ and may close the
-    // session: the scratch has done its job the instant the send returns.
-    if (scratch != nullptr) release_tx_work(scratch);
+    // Released BEFORE the accounting, which takes peers_m_ and may close the session: the
+    // block has done its job the instant the send returns.
+    drop_block(big);
     // No `httpd_sess_update_lru_counter` here, unlike @ref tx_work: that call exists for a
     // push the adopted server's LRU cannot see, and this send is INSIDE `httpd_sess_process`
     // — the one place IDF advances the counter by itself.
@@ -3736,8 +3575,8 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     // front of the send path. Two snapshots differenced is the intended use (#953).
     stats_t s;
     s.enqueue_drops = enqueue_drops_.load(std::memory_order_relaxed);
-    s.tx_pool_misses = tx_pool_misses_.load(std::memory_order_relaxed);
-    s.tx_pool_waits = tx_pool_waits_.load(std::memory_order_relaxed);
+    s.tx_conflated = tx_conflated_.load(std::memory_order_relaxed);
+    s.tx_stall_strikes = tx_stall_strikes_.load(std::memory_order_relaxed);
     s.tx_large_dropped = tx_large_dropped_.load(std::memory_order_relaxed);
     s.tx_large_peak = tx_large_peak_.load(std::memory_order_relaxed);
     s.tx_to_dead_peer = tx_to_dead_peer_.load(std::memory_order_relaxed);
@@ -3752,16 +3591,6 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     s.rx_drain_waits = rx_drain_waits_.load(std::memory_order_relaxed);
     return s;
 }
-
-std::size_t httpd_ws_link_t::tx_slots_busy() const noexcept {
-    if (tx_pool_ == nullptr) return 0;
-    std::size_t busy = 0;
-    for (std::size_t i = 0; i < tx_slots_total_; ++i)
-        if (tx_pool_[i].busy.load(std::memory_order_relaxed)) ++busy;
-    return busy;
-}
-
-std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }
 
 std::size_t httpd_ws_link_t::rx_scratch_bytes() const noexcept { return rx_scratch_bytes_; }
 
@@ -3780,21 +3609,22 @@ std::size_t httpd_ws_link_t::tx_large_in_use() const noexcept {
 }
 
 std::size_t httpd_ws_link_t::buffer_bytes() const noexcept {
-    // What was actually allocated, not what was asked for: rx_scratch_bytes_ is zeroed on a
-    // failed RX allocation, a link whose pool failed reports no pool cost at all, and a
-    // large class that was rejected or could not be allocated has had BOTH its numbers
-    // zeroed, so its term vanishes from this sum without a test of its own.
-    const std::size_t pool =
-        tx_pool_ != nullptr ? tx_slots_total_ * (sizeof(tx_slot_t) + tx_inline_bytes_) : 0;
-    return rx_scratch_bytes_ + pool + tx_large_slots_ * tx_large_bytes_;
+    // What was actually allocated, not what was asked for: a large class that was rejected
+    // or could not be allocated has had BOTH its numbers zeroed, so its term vanishes from
+    // this sum without a test of its own. The frames in flight are not here: each send draws
+    // one shared block that every peer references (@ref peer_tx_bytes).
+    return rx_scratch_bytes_ + tx_scratch_block_.size() + tx_large_slots_ * large_stride();
 }
 
-std::size_t httpd_ws_link_t::tx_reply_reserve() noexcept { return kTxReplySlots; }
+std::size_t httpd_ws_link_t::peer_tx_bytes() const noexcept {
+    return sizeof(session_t::tx) + sizeof(session_t::tx_wire) + sizeof(session_t::tx_stalls);
+}
 
 void httpd_ws_link_t::note_enqueue_drop(int fd, std::size_t bytes) {
     const std::uint32_t total = enqueue_drops_.fetch_add(1, std::memory_order_relaxed) + 1;
-    ESP_LOGW(kTag, "tx enqueue drop (queue refused / pool exhausted / OOM) fd=%d len=%u total=%u",
-             fd, (unsigned)bytes, (unsigned)total);
+    ESP_LOGW(kTag,
+             "tx enqueue drop (queue refused / large class spent / OOM) fd=%d len=%u total=%u", fd,
+             (unsigned)bytes, (unsigned)total);
 }
 
 int httpd_ws_link_t::live_fd(const session_ref_t& to) const {
@@ -3874,7 +3704,8 @@ void httpd_ws_link_t::note_tx_skip(const session_ref_t& to) {
     ++to.slot->st.tx_drops;
 }
 
-void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes) {
+void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes,
+                                     bool stalled) {
     // The link-wide tally first, before any test of the destination: a frame the socket
     // write refused is a frame the peer never got whether or not its session is still here
     // to carry the streak. Until this counter existed the only trace was the WARN line.
@@ -3907,6 +3738,9 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
         // NOW?" and its #835 3-strike semantics are untouched by the addition.
         ++slot->st.tx_drops;
         if (slot->tx_drops < kMaxConsecutiveTxDrops) ++slot->tx_drops;
+        // A peer whose socket took nothing through kTxStallStrikes replacements is the
+        // streak spent in one verdict (#2095): the evidence is already that many frames deep.
+        if (stalled) slot->tx_drops = kMaxConsecutiveTxDrops;
         close_now = slot->tx_drops >= kMaxConsecutiveTxDrops;
         peer = slot->name;
         std::memcpy(addr, slot->endpoint_str, sizeof(addr));
@@ -3923,8 +3757,14 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
     // Never `getpeername` here: the socket is by definition the one that is not working,
     // and naming a peer at the moment it is being struck must not depend on that socket
     // answering — the reason the address is STORED rather than recomputed.
-    ESP_LOGW(kTag, "%u consecutive failed sends peer=%s (%s) fd=%d len=%u - closing session",
-             (unsigned)kMaxConsecutiveTxDrops, peer.c_str(), addr, fd, (unsigned)bytes);
+    if (stalled) {
+        tx_stall_strikes_.fetch_add(1, std::memory_order_relaxed);
+        ESP_LOGW(kTag, "%u frames replaced, socket took none peer=%s (%s) fd=%d - closing session",
+                 (unsigned)kTxStallStrikes, peer.c_str(), addr, fd);
+    } else {
+        ESP_LOGW(kTag, "%u consecutive failed sends peer=%s (%s) fd=%d len=%u - closing session",
+                 (unsigned)kMaxConsecutiveTxDrops, peer.c_str(), addr, fd, (unsigned)bytes);
+    }
     // At the streak cap the session is broken, not bursty: close it so the peer's onclose
     // fires and it reconnects, instead of silently missing frames forever. This is what
     // aims the teardown at the peer that is actually stalled — and the dead mark set above
@@ -4054,7 +3894,21 @@ int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf
     // scan of at most `max_open_sockets` descriptors) immediately before every call it
     // makes to this function, and the bounded `::send` below dominates both.
     auto* const slot = static_cast<session_t*>(httpd_sess_get_ctx(handle, fd));
-    const int ret = static_cast<int>(::send(fd, buf, len, flags));
+    // A held frame's flush writes WITHOUT WAITING (#2095): the httpd task serves every peer,
+    // so a write that waited on this one's window would set every other peer's rate.
+    const bool nonblock = slot != nullptr && slot->tx_frame_open && slot->tx_nonblock;
+    const int ret = static_cast<int>(::send(fd, buf, len, nonblock ? flags | MSG_DONTWAIT : flags));
+    if (nonblock && (ret >= 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+        // A full socket, or room for only part of this buffer, is not a fault here: the
+        // bracket keeps the count of what went out, the failure return stops IDF before it
+        // writes the next part behind a partial one, and the link writes the rest on the
+        // session's next flush (write_rest). A hard error falls through to the verdicts
+        // below, exactly as a bounded write's does.
+        if (ret > 0) slot->tx_frame_bytes += static_cast<std::size_t>(ret);
+        if (ret >= 0 && static_cast<std::size_t>(ret) == len) return ret;
+        slot->tx_frame_blocked = true;
+        return HTTPD_SOCK_ERR_TIMEOUT;
+    }
     // A failed write that is NOT the frame's first one leaves the peer holding a header
     // promising bytes that never arrive (#951). esp_http_server writes one frame as two
     // calls to this function — header, then payload — and reports either failure as one
@@ -4128,293 +3982,277 @@ void httpd_ws_link_t::note_send_desync(session_t* slot, const char* cause, std::
 }
 
 void httpd_ws_link_t::tx_work(void* arg) {
-    auto* const work = static_cast<tx_work_t*>(arg);
-    // The httpd loop's copy of the item. A drain parked for idle may have sent it already
-    // (send_posted_in_park); then the slot is all that is left, and it is released here.
-    // Otherwise this copy takes the item and sends it (see tx_work_t::state).
-    if (work->state.exchange(tx_work_t::kTaken, std::memory_order_seq_cst) ==
-        tx_work_t::kSentInPark) {
-        release_tx_work(work);
-        return;
-    }
-    send_posted(work, true);
-}
-
-void httpd_ws_link_t::send_posted(tx_work_t* work, bool release_slot) {
-    // This item runs exactly once per successful enqueue and owns its slot for the whole
-    // call: the claim marked the slot busy before a byte was written into it, and nothing
-    // clears that flag but the release at the end of this function. `work->slot` is stable
-    // for the link's life (bound once in alloc_buffers; the abandon path leaks the pool
-    // rather than freeing it, exactly so this stays true).
-    //
-    // Resolve the destination SESSION back to a socket, and refuse to invent one. This is
-    // the checkpoint the old bare-fd path had no way to pass: it asked
-    // `httpd_ws_get_fd_info(handle, fd)`, which answers "some websocket lives at this
-    // number" and cannot answer "the session this frame was gathered for" — IDF's session
-    // lookup is purely fd-keyed. A frame queued for a peer that hung up was therefore
-    // written into whichever client had since been accepted onto the recycled descriptor
-    // (#954). live_fd fails that reference instead, and the same call carries the two
-    // skips that were already here: a departed peer, and one condemned after this frame
-    // was queued (attempting that costs the full send bound on a socket already known to
-    // be broken, while the queue behind it holds the close). The gate is taken briefly and
-    // released before the send: holding it across the write would block a concurrent
-    // destructor for the whole bound. Lock order is gate->m then peers_m_, the same order
-    // on_session_closed and the accounting below use.
-    int fd = -1;
-    bool refresh_lru = false;
-    if (work->gate != nullptr) {
-        const std::lock_guard lock(work->gate->m);
-        if (httpd_ws_link_t* const owner = work->gate->link; owner != nullptr) {
-            // The item egress_posted counted is running. A null `link` is a link whose
-            // destructor has completed: its counter is gone with it, and nothing can be
-            // parked on it any more, so there is nothing to lower and no one to wake.
-            owner->egress_drained();
-            fd = owner->live_fd(work->to);
-            // Adopted mode only. In owning mode the purge this defends against is off by
-            // construction (the ctor sets lru_purge_enable = false on the cfg it starts
-            // the server with), so the scan below would be measurable cost buying a
-            // counter nobody reads. Read here because this is the one place the link is
-            // already resolved; owns_httpd_ is ctor-set and never written again.
-            refresh_lru = !owner->owns_httpd_;
-        }
-    }
-    // The server's own verdict, on the socket the LINK just vouched for — kept as the
-    // second opinion it always was (a peer mid-CLOSE is a websocket the link still has
-    // open), never as the identity test it was being asked to be.
-    const bool live =
-        fd >= 0 && httpd_ws_get_fd_info(work->handle, fd) == HTTPD_WS_CLIENT_WEBSOCKET;
-    esp_err_t err = ESP_OK;
-    if (live) {
-        httpd_ws_frame_t f = {};
-        f.final = true;
-        f.fragmented = false;
-        f.type = HTTPD_WS_TYPE_BINARY;
-        f.payload = reinterpret_cast<std::uint8_t*>(work->payload);
-        f.len = work->len;
-        // Bracket the send: everything the override lands between these two calls belongs
-        // to THIS frame, which is what lets it tell a frame that never started from one it
-        // announced and could not finish (#951). Only the caller knows that boundary —
-        // esp_http_server splits the frame into a header write and a payload write and
-        // tells the override nothing about the split. The slot is the one live_fd just
-        // vouched for, so no further identity test is owed here, and both calls run on the
-        // httpd task with the synchronous send between them.
-        session_t* const slot = work->to.slot;
-        if (slot != nullptr) slot->open_tx_frame();
-        err = work->value ? send_retained(work->handle, fd, *work)
-                          : httpd_ws_send_frame_async(work->handle, fd, &f);
-        if (err == ESP_OK && refresh_lru) {
-            // Tell the ADOPTED server this session is not idle (#955). Apart from this very
-            // API, IDF advances a session's LRU counter in one place — the tail of
-            // httpd_sess_process, i.e. inbound request processing — so a server-initiated
-            // push does not touch it. A graph peer that subscribes and thereafter only
-            // RECEIVES therefore ages toward the lowest counter no matter how much this link
-            // is pushing at it, and httpd_accept_conn's victim search (which excludes only
-            // sessions marked for_async_req, never a WS one) picks the lowest. The pure
-            // subscriber was the preferential victim precisely BECAUSE the push stream is
-            // invisible to the counter; refreshing here removes that inversion.
-            //
-            // It is NOT immunity, and must not be described as any: at the host's socket
-            // ceiling some session is still closed, and an evicted peer reaches this link
-            // as an ordinary departure. The inbound direction needs nothing — httpd_sess_process
-            // already covers it, and this handler runs inside it.
-            //
-            // Safe on this task: the function walks hd->hd_sd and bumps hd->lru_counter with
-            // no lock of its own, and tx_work runs on the httpd task (httpd_queue_work put it
-            // there), which is the task that owns that table. The result is dropped on
-            // purpose — ESP_ERR_NOT_FOUND only says the session left between the send and
-            // now, which is neither this frame's business nor actionable.
-            (void)httpd_sess_update_lru_counter(work->handle, fd);
-        }
-        const std::size_t on_wire = slot != nullptr ? slot->close_tx_frame() : 0;
-        // `on_wire != 0` is the OTHER failure, and it is not this one's: the frame was
-        // announced and then cut off, the stream no longer parses, and the session has
-        // already been condemned inside the write (note_send_desync logs it at ERROR with
-        // the byte counts). It must not also be reported below — the two used to produce
-        // the same line, which is why a desynchronised session looked benign in the field.
-        if (err != ESP_OK && on_wire == 0) {
-            // DROP the frame; do NOT close the session on THIS failure alone (#481). One
-            // failed async send means the peer missed ONE frame it can retry — not that
-            // the socket is dead. The load-bearing case: a large reply (e.g. the
-            // composed-root snapshot, ~12.7 KB) whose one contiguous WS frame exhausts
-            // its send bound while the SAME socket still delivers small frames fine.
-            // Closing on it tore the whole session down and killed the peer's follow-on
-            // small requests ("transport closed") — the dead-web-ui churn. Dropping keeps
-            // the socket alive, so the peer's next (small) request succeeds and its own
-            // deadline/retry recovers the missed reply.
-            //
-            // #835 supersedes the OTHER half of that comment, not this one: the result is
-            // now fed to the destination's streak below, so an interleaved success still
-            // resets it (the #481 shape is untouched) while a peer failing
-            // kMaxConsecutiveTxDrops sends in a row — which is the doc's own definition of
-            // a broken session — is finally the one that gets torn down. It used to be
-            // the refused ENQUEUES that closed sessions, and those name the shared control
-            // queue rather than any peer (see note_enqueue_drop).
-            //
-            // #951 supersedes nothing here either, and narrows the GUARD instead: "the peer
-            // missed one frame it can retry" is only true while none of it reached the
-            // wire, and that is now a measured precondition (`on_wire == 0`) rather than a
-            // property assumed of every ESP_FAIL.
-            ESP_LOGW(kTag, "ws send failed (%s) fd=%d len=%u - frame dropped", esp_err_to_name(err),
-                     fd, (unsigned)(work->len + (work->value ? work->value->total_length() : 0)));
-        }
-    }
-    // Copy out everything the accounting needs BEFORE the slot goes back to the pool:
-    // once released, another task may claim it and overwrite the work item.
-    gate_t* const gate = work->gate;
-    const session_ref_t to = work->to;
-    const std::size_t len = work->len + (work->value ? work->value->total_length() : 0);
-    // Recycle the pool slot (and any oversize heap payload) — unless this send ran inside a
-    // park, where the httpd loop's copy of the item still points at the slot and releases it.
-    if (release_slot) release_tx_work(work);
-    // A skipped send is not evidence for the STREAK: no result. Every skip qualifies — the
-    // peer departed, a different session now holds its slot, or it was condemned and the
-    // verdict is already in. It is still a frame the peer never got, so the CUMULATIVE
-    // tally takes it (note_tx_skip): the streak asks "is this session broken?", the tally
-    // asks "how much has this session lost?", and a skip answers only the second.
-    if (!live) {
-        if (gate != nullptr) {
-            const std::lock_guard lock(gate->m);
-            if (httpd_ws_link_t* const owner = gate->link; owner != nullptr)
-                owner->note_tx_skip(to);
-        }
-        return;
-    }
+    // The control-queue item, and the ONE kind of TX work there is (#2095): "flush this
+    // link". It carries the GATE, never a frame or a session, so an item that drains after
+    // the link is gone finds a null link and does nothing — which is what lets the
+    // destructor neither wait for TX nor leak a pool. It registers on the gate's depth while
+    // it runs, so a concurrent destructor joins it instead of freeing the sessions under it.
+    auto* const gate = static_cast<gate_t*>(arg);
     if (gate == nullptr) return;
-    // Resolve the link through the gate — the same contract on_session_closed uses. Held
-    // for the whole call, so a concurrent destructor either waits here or finds the gate
-    // already shut and this outcome has nobody to inform.
-    const std::lock_guard lock(gate->m);
-    if (httpd_ws_link_t* const owner = gate->link; owner != nullptr)
-        owner->note_tx_result(to, err == ESP_OK, len);
+    httpd_ws_link_t* owner = nullptr;
+    {
+        const std::lock_guard lock(gate->m);
+        owner = gate->link;
+        if (owner == nullptr) return;
+        ++gate->depth;
+    }
+    // Cleared BEFORE the walk: a frame stored after the walk has passed its session sees the
+    // flag clear and posts the next flush itself (post_flush).
+    owner->flush_posted_.store(false, std::memory_order_seq_cst);
+    (void)owner->flush_egress();
+    {
+        const std::lock_guard lock(gate->m);
+        --gate->depth;
+    }
+    gate->cv.notify_all();
 }
 
-esp_err_t httpd_ws_link_t::send_retained(httpd_handle_t handle, int fd, const tx_work_t& work) {
-    // The frame as the gathered item would have put it on the wire, in 1 + links writes
-    // instead of 2: the slot's bytes (the WebSocket header this link encoded, then the head),
-    // then each of the value's links straight from the published block. Every write goes
-    // through the session's send override (send_guarded) inside the bracket tx_work opened,
-    // so a failure after the first byte is the #951 truncation it already condemns, and a
-    // short write is the desync it already condemns — the frame is written whole or the
-    // session is closed; no other frame's bytes can follow a partial one.
-    //
-    // A write that returns fewer bytes than asked is a failure here too, not only a negative
-    // one: send_guarded already turns a short write into one, but a session whose override is
-    // not installed would otherwise have the NEXT part written behind a partial one.
-    const auto write_part = [handle, fd](const void* p, std::size_t n) {
-        const int ret = httpd_socket_send(handle, fd, static_cast<const char*>(p), n, 0);
+bool httpd_ws_link_t::flush_egress() {
+    // Runs on the httpd task only — from tx_work, from a drain parked for idle (pace_rx), or
+    // from the handler entry when a frame is held (ws_handler), where nothing of this task's
+    // is mid-write. Every session is offered its turn; one whose socket is full returns at
+    // once, so no peer's socket is waited on here and the slowest peer sets nobody's rate but
+    // its own. The same fixed on-stack chunk and resumable scan the broadcast walks
+    // (kFanoutChunk), for the same reasons.
+    tx_held_.store(false, std::memory_order_relaxed);
+    session_t* batch[kFanoutChunk];
+    std::size_t next = 0;
+    bool progress = false;
+    for (bool more = true; more;) {
+        std::size_t n = 0;
+        {
+            const std::lock_guard lock(peers_m_);
+            while (next < slots_.size() && n < kFanoutChunk) batch[n++] = slots_[next++];
+            more = next < slots_.size();
+        }
+        for (std::size_t i = 0; i < n; ++i) progress = flush_peer(batch[i]) || progress;
+    }
+    return progress;
+}
+
+bool httpd_ws_link_t::flush_peer(session_t* s) {
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    bool progress = false;
+    // The frame on the wire, then at most one newer: a peer whose producer outpaces its
+    // socket would otherwise keep this task on it for as long as the socket keeps up.
+    for (int turn = 0; turn < 2; ++turn) {
+        tx_frame_t* f = &s->tx[s->tx_wire];
+        tx_frame_t superseded;
+        bool stalled = false;
+        {
+            // The waiting frame moves onto the wire when the wire is free — or holds a frame
+            // not one byte of which has gone out yet, which is no more owed to the peer than
+            // a waiting one: it is replaced and counted the same way, so a stalled peer that
+            // recovers gets the NEWEST frame, not the one it stalled on. Under tx_m, the one
+            // moment a producer and this task touch the same index.
+            const std::lock_guard lock(s->tx_m);
+            const bool waiting = s->tx[s->tx_wire ^ 1].held();
+            if (!waiting && !f->held()) return progress;
+            if (waiting && f->sent == 0) {
+                superseded = *f;
+                *f = tx_frame_t{};
+                s->tx_wire ^= 1;
+                f = &s->tx[s->tx_wire];
+                // A replacement after a write the socket took nothing of: a stall, as in stage.
+                if (superseded.held() && s->tx_refused) {
+                    ++s->tx_stalls;
+                    s->tx_refused = false;
+                }
+            }
+            stalled = s->tx_stalls >= kTxStallStrikes;
+        }
+        if (superseded.held()) {
+            const session_ref_t was{s, superseded.gen};
+            release_frame(superseded);
+            note_tx_conflated(was);
+        }
+        // The frame names the session it was staged for (#954), and the server's own verdict
+        // is the second opinion. A skip is not a send result: it feeds the cumulative tally,
+        // never the streak (note_tx_skip).
+        const session_ref_t to{s, f->gen};
+        const int fd = live_fd(to);
+        if (h == nullptr || fd < 0 || httpd_ws_get_fd_info(h, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
+            release_frame(*f);
+            note_tx_skip(to);
+            progress = true;
+            continue;
+        }
+        if (stalled) {
+            // kTxStallStrikes newer frames replaced this peer's, each after a write its socket
+            // took nothing of: the peer is not draining, and a full socket under MSG_DONTWAIT is
+            // never an error, so without this it would hold its seat and its slot for ever.
+            // Through the strike path, as a peer whose writes fail is (note_tx_result).
+            const std::size_t len = f->blk->total();
+            release_frame(*f);
+            note_tx_result(to, false, len, /*stalled=*/true);
+            progress = true;
+            continue;
+        }
+        const std::uint32_t before = f->sent;
+        const tx_outcome_t out = write_frame(h, fd, *s, *f, /*nonblock=*/true);
+        const bool moved = f->sent != before;
+        {
+            // What the stall count is about: a write that moved a byte clears it, one that moved
+            // none arms the next replacement to count (stage).
+            const std::lock_guard lock(s->tx_m);
+            if (moved || out != tx_outcome_t::HELD) {
+                s->tx_stalls = 0;
+                s->tx_refused = false;
+            } else {
+                s->tx_refused = true;
+            }
+        }
+        if (out == tx_outcome_t::HELD) {
+            // The socket is full: the frame stays where it is. ESP-IDF's server selects for
+            // READ only, so there is no writable event to wait on; what moves a held frame on
+            // is this link's own events, and no timer or clock read: a socket that took bytes
+            // now is offered the rest on the next pass (the re-post below); otherwise the next
+            // frame posted on this link, the next frame any of its peers sends (ws_handler), a
+            // parked drain, or the application's flush_held().
+            tx_held_.store(true, std::memory_order_relaxed);
+            if (moved && h != nullptr) (void)post_flush(h);
+            return progress || moved;
+        }
+        if (out == tx_outcome_t::SENT && !owns_httpd_) {
+            // Tell an ADOPTED server this session is not idle (#955): IDF advances a session's
+            // LRU counter only from inbound request processing, so a pure subscriber would
+            // age toward being the purge victim however much this link pushes at it. Not
+            // immunity; owning mode starts its server with the purge off.
+            (void)httpd_sess_update_lru_counter(h, fd);
+        }
+        const std::size_t len = f->blk->total();
+        if (out == tx_outcome_t::FAILED && f->sent == 0) {
+            // DROP the frame, keep the session (#481): one refused write loses the peer one
+            // frame it can recover from; three in a row condemn it (note_tx_result, #835).
+            // A frame that failed part-way is the other fault (#951): send_guarded has
+            // already condemned the session and logged it, so it is not reported twice.
+            ESP_LOGW(kTag, "ws send failed fd=%d len=%u - frame dropped", fd, (unsigned)len);
+        }
+        release_frame(*f);
+        note_tx_result(to, out == tx_outcome_t::SENT, len);
+        progress = true;
+    }
+    // Two frames out and a third may be waiting: the other peers take their turn first, and
+    // a re-posted flush brings this one back.
+    bool more = false;
+    {
+        const std::lock_guard lock(s->tx_m);
+        more = s->tx[s->tx_wire ^ 1].held();
+    }
+    if (more && h != nullptr) (void)post_flush(h);
+    return progress;
+}
+
+void httpd_ws_link_t::flush_held() {
+    // The application's own tick, for a link that has gone quiet with a frame still held on a
+    // full socket: nothing else would offer it the socket again. No clock is read here; the
+    // caller's cadence is the whole policy. One flush, as any post makes.
+    if (!tx_held_.load(std::memory_order_relaxed)) return;
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    if (h != nullptr) (void)post_flush(h);
+}
+
+httpd_ws_link_t::tx_outcome_t httpd_ws_link_t::write_frame(httpd_handle_t h, int fd, session_t& s,
+                                                           tx_frame_t& f, bool nonblock) {
+    // Bracket the writes: everything the override lands between these two calls belongs to
+    // THIS frame, which is what lets it tell a frame that never started from one it
+    // announced and could not finish (#951), and — non-blocking — a full socket from a
+    // broken one (#2095). Only the caller knows that boundary.
+    s.open_tx_frame(nonblock, f.sent);
+    esp_err_t err = ESP_OK;
+    const tx_block_t& b = *f.blk;
+    if (f.sent == 0 && !b.value) {
+        httpd_ws_frame_t wf = {};
+        wf.final = true;
+        wf.fragmented = false;
+        wf.type = HTTPD_WS_TYPE_BINARY;
+        wf.payload = reinterpret_cast<std::uint8_t*>(b.payload);
+        wf.len = b.len;
+        err = httpd_ws_send_frame_async(h, fd, &wf);
+    } else {
+        err = write_rest(h, fd, f);
+    }
+    const bool blocked = s.tx_frame_blocked;
+    f.sent = static_cast<std::uint32_t>(s.close_tx_frame());
+    if (err == ESP_OK) return tx_outcome_t::SENT;
+    return blocked ? tx_outcome_t::HELD : tx_outcome_t::FAILED;
+}
+
+esp_err_t httpd_ws_link_t::write_rest(httpd_handle_t h, int fd, const tx_frame_t& f) {
+    // The frame as one byte sequence — its WebSocket header, its gathered bytes, then a
+    // retained value's links straight from the published block — written from `f.sent` on.
+    // A gathered frame's header is the one httpd_ws_send_frame_async would have written
+    // (encode_ws_header); a retained frame carries its own in `payload`. Every write goes
+    // through the session's send override inside write_frame's bracket, so a part the socket
+    // takes only some of ends this call with the rest still owed.
+    const tx_block_t& b = *f.blk;
+    std::array<std::byte, kWsHeaderMax> hdr{};
+    const std::size_t hdr_len = b.value ? 0 : encode_ws_header(b.len, hdr);
+    std::size_t skip = f.sent;
+    const auto write_part = [&](const std::byte* p, std::size_t n) {
+        if (skip >= n) {
+            skip -= n;
+            return true;
+        }
+        p += skip;
+        n -= skip;
+        skip = 0;
+        const int ret = httpd_socket_send(h, fd, reinterpret_cast<const char*>(p), n, 0);
         return ret >= 0 && static_cast<std::size_t>(ret) == n;
     };
-    if (!write_part(work.payload, work.len)) return ESP_FAIL;
-    for (const view::view_t& l : work.value->links()) {
-        const std::span<const std::byte> b = l.bytes();
-        if (!b.empty() && !write_part(b.data(), b.size())) return ESP_FAIL;
-    }
+    if (!write_part(hdr.data(), hdr_len) || !write_part(b.payload, b.len)) return ESP_FAIL;
+    if (b.value)
+        for (const view::view_t& l : b.value->links())
+            if (!write_part(l.bytes().data(), l.bytes().size())) return ESP_FAIL;
     return ESP_OK;
+}
+
+bool httpd_ws_link_t::finish_wire(session_t* slot, int fd) {
+    // A frame a non-blocking flush left part-way on this socket must be finished before any
+    // other frame is written to it, or the peer parses the new frame's bytes as the rest of
+    // the old one. Called on the httpd task by send_now, ahead of an in-call reply, a close
+    // or an auth frame, so the rest is written within the send bound like the frame it
+    // precedes: that is THIS peer's own request being served, so the wait is its own. A frame
+    // not yet started is no hazard and stays held.
+    tx_frame_t& f = slot->tx[slot->tx_wire];
+    if (!f.held() || f.sent == 0) return true;
+    const session_ref_t to{slot, f.gen};
+    const tx_outcome_t out =
+        write_frame(handle_.load(std::memory_order_relaxed), fd, *slot, f, /*nonblock=*/false);
+    const std::size_t len = f.blk->total();
+    release_frame(f);
+    note_tx_result(to, out == tx_outcome_t::SENT, len);
+    return out == tx_outcome_t::SENT;
+}
+
+httpd_ws_link_t::tx_block_t* httpd_ws_link_t::make_retained(
+    std::span<const std::span<const std::byte>> head, const graph::value_t& value) {
+    // The server frame header, encoded here because the retained frame writes its own: the
+    // block holds header and head, and the value's links follow them on the wire straight
+    // from the published block, by reference.
+    std::size_t head_len = 0;
+    for (const auto& part : head) head_len += part.size();
+    std::array<std::byte, kWsHeaderMax> ws_hdr{};
+    const std::size_t ws_len = encode_ws_header(head_len + value.total_length(), ws_hdr);
+    return make_block(std::span<const std::byte>(ws_hdr.data(), ws_len), head, &value);
 }
 
 void httpd_ws_link_t::queue_send_retained(const session_ref_t& to,
                                           std::span<const std::span<const std::byte>> head,
                                           const graph::value_t& value) {
-    std::size_t head_len = 0;
-    for (const auto& part : head) head_len += part.size();
-    const std::size_t payload_len = head_len + value.total_length();
-    // The server frame header (RFC 6455 §5.2: FIN|BINARY, unmasked, 7/16/64-bit length) —
-    // the bytes httpd_ws_send_frame_async writes for the gathered item, encoded here because
-    // the retained item writes its own frame.
-    std::array<std::byte, 10> ws_hdr{};
-    std::size_t ws_len = 2;
-    ws_hdr[0] = std::byte{0x82};
-    if (payload_len < 126) {
-        ws_hdr[1] = static_cast<std::byte>(payload_len);
-    } else if (payload_len <= 0xFFFF) {
-        ws_hdr[1] = std::byte{126};
-        ws_hdr[2] = static_cast<std::byte>((payload_len >> 8) & 0xFF);
-        ws_hdr[3] = static_cast<std::byte>(payload_len & 0xFF);
-        ws_len = 4;
-    } else {
-        ws_hdr[1] = std::byte{127};
-        for (int i = 0; i < 8; ++i)
-            ws_hdr[2 + i] = static_cast<std::byte>(
-                (static_cast<std::uint64_t>(payload_len) >> (8 * (7 - i))) & 0xFF);
-        ws_len = 10;
-    }
-    const std::size_t slot_len = ws_len + head_len;
-    if (slot_len > tx_inline_bytes_) {
-        // A head wider than a slot's inline buffer: the gathered path, which has the large
-        // class and the heap tail for exactly this. Built on the stack for the common width.
-        std::array<std::span<const std::byte>, 8> iov;
-        if (head.size() + value.link_count() > iov.size()) {
-            note_enqueue_drop(live_fd(to), payload_len);
-            return;
-        }
-        std::size_t n = 0;
-        for (const auto& part : head) iov[n++] = part;
-        for (const view::view_t& l : value.links()) iov[n++] = l.bytes();
-        queue_send(to, std::span<const std::span<const std::byte>>(iov.data(), n));
-        return;
-    }
-    // Everything below mirrors queue_send's single-load, re-resolve and slot discipline; see
-    // there for the reasons. Only the payload differs: header-sized, plus a reference.
-    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
-    gate_t* const g = gate_.load(std::memory_order_relaxed);
-    if (h == nullptr) return;
-    const int fd = live_fd(to);
-    if (fd < 0) {
-        tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    tx_slot_t* const slot = claim_tx_slot_waiting();
-    if (slot == nullptr) {
-        tx_pool_misses_.fetch_add(1, std::memory_order_relaxed);
-        note_enqueue_drop(fd, payload_len);
-        return;
-    }
-    tx_work_t* const work = &slot->work;
-    work->value = graph::value_ref_t::keep(value);
-    if (!work->value) {  // a caller-owned value whose links could not be kept: drop, counted
-        release_tx_work(work);
-        note_enqueue_drop(fd, payload_len);
-        return;
-    }
-    work->handle = h;
-    work->gate = g;
-    work->to = to;
-    work->payload = slot->inline_buf;
-    work->len = slot_len;
-    std::memcpy(work->payload, ws_hdr.data(), ws_len);
-    std::byte* p = work->payload + ws_len;
-    for (const auto& part : head) {
-        if (!part.empty()) std::memcpy(p, part.data(), part.size());
-        p += part.size();
-    }
-    // The same count-mark-enqueue order as queue_send, for the same parked drain.
-    egress_pending_.fetch_add(1, std::memory_order_seq_cst);
-    work->ticket = egress_ticket_.fetch_add(1, std::memory_order_relaxed);
-    work->state.store(tx_work_t::kQueued, std::memory_order_seq_cst);
-    if (httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) == ESP_OK) {
-        egress_posted();
-        return;
-    }
-    switch (work->state.exchange(tx_work_t::kRefused, std::memory_order_seq_cst)) {
-        case tx_work_t::kQueued:
-            egress_drained();
-            release_tx_work(work);
-            note_enqueue_drop(fd, payload_len);
-            break;
-        case tx_work_t::kSentInPark:
-            release_tx_work(work);  // delivered from inside the park: not a drop
-            break;
-        default:
-            break;  // kTaken: the park is sending it and will release it
-    }
+    tx_block_t* const blk = make_retained(head, value);
+    stage(to, blk, value.total_length());
+    drop_block(blk);
 }
 
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
                            const graph::value_t& value) {
-    // The broadcast's snapshot-then-enqueue shape (see the iovec override below), with the
-    // retained enqueue in place of the gathered one.
+    // The broadcast's snapshot-then-stage shape (see the iovec override below), with the
+    // retained block in place of the gathered one: built once, on the first destination.
     session_ref_t targets[kFanoutChunk];
     std::size_t next = 0;
+    tx_block_t* blk = nullptr;
+    bool built = false;
     for (bool more = true; more;) {
         std::size_t n = 0;
         {
@@ -4426,8 +4264,13 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
             }
             more = next < slots_.size();
         }
-        for (std::size_t i = 0; i < n; ++i) queue_send_retained(targets[i], head, value);
+        if (n != 0 && !built) {
+            blk = make_retained(head, value);
+            built = true;
+        }
+        for (std::size_t i = 0; i < n; ++i) stage(targets[i], blk, value.total_length());
     }
+    drop_block(blk);
 }
 
 void httpd_ws_link_t::send(std::span<const std::byte> frame) {
@@ -4438,8 +4281,8 @@ void httpd_ws_link_t::send(std::span<const std::byte> frame) {
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     // Broadcast: snapshot the destinations under the lock, then enqueue unlocked — the
     // per-session drop accounting inside queue_send takes peers_m_ itself. Overriding
-    // the iovec entry point means a rope reply is gathered ONCE per peer, straight
-    // into the queued work buffer — the base default's gather-into-a-temporary would
+    // the iovec entry point means a rope is gathered ONCE for every peer, straight
+    // into the shared block — the base default's gather-into-a-temporary would
     // double-buffer a large reply (flatten temp + tx copy live simultaneously), the
     // heap spike behind the on-device OOM abort.
     //
@@ -4460,8 +4303,12 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     // mid-fan-out lands past `next` and is simply included, which a broadcast (already
     // non-atomic: every enqueue happens outside the lock, and the writes later still) has
     // never promised either way.
+    std::size_t total = 0;
+    for (const auto& part : iov) total += part.size();
     session_ref_t targets[kFanoutChunk];
     std::size_t next = 0;
+    tx_block_t* blk = nullptr;
+    bool built = false;
     for (bool more = true; more;) {
         std::size_t n = 0;
         {
@@ -4479,8 +4326,15 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
             }
             more = next < slots_.size();
         }
-        for (std::size_t i = 0; i < n; ++i) queue_send(targets[i], iov);
+        // ONE block for the whole fan-out (#2095), gathered on the first destination: every
+        // peer's slot takes a reference, so N peers cost one copy and one block.
+        if (n != 0 && !built) {
+            blk = make_block({}, iov, nullptr);
+            built = true;
+        }
+        for (std::size_t i = 0; i < n; ++i) stage(targets[i], blk, total);
     }
+    drop_block(blk);
 }
 
 tr::net::transport_drop_stats_t httpd_ws_link_t::peer_resolution_t::drop_stats() const noexcept {
@@ -4760,9 +4614,9 @@ bool httpd_ws_link_t::close_peer(std::string_view peer) {
     }
     if (to.slot == nullptr) return false;  // no served session answers to that name
     // From `memory.state`, failable, one per call: this is an administrative action, not a
-    // data-path one, so it does not draw on the TX pool whose whole purpose is to bound the
-    // FRAME path's in-flight depth. A revocation competing with the fan-out for slots would
-    // be exactly backwards — it is most needed when that pool is under pressure.
+    // data-path one, so it does not draw on the frame path's storage. A revocation competing
+    // with the fan-out for TX memory would be exactly backwards — it is most needed when the
+    // frame path is under pressure.
     auto* const req = mem::make_in<close_req_t>(*g->src, g, to);
     if (req == nullptr) return false;
     // The honest half of the contract, and the whole reason #1146 was blocked on a transport

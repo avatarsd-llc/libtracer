@@ -40,7 +40,8 @@ namespace fake_httpd {
 enum class send_result_t {
     FULL,    /**< @brief The whole buffer went out: return `buf_len`. */
     TIMEOUT, /**< @brief The bound expired with ZERO bytes written: return -1. */
-    SHORT    /**< @brief The bound expired MID-buffer: return the partial count. */
+    SHORT,   /**< @brief The bound expired MID-buffer: return the partial count. */
+    FAIL     /**< @brief A hard socket error (the peer reset): return -1, `ECONNRESET`. */
 };
 
 /** @brief One entry of the fake session table — httpd's `struct sock_db`, trimmed. */
@@ -295,10 +296,20 @@ class server_t {
      *        through the test binary's `--wrap=send` interposition.
      *
      * Returns @p buf_len (FULL), -1 with `errno == EAGAIN` (TIMEOUT), or half of
-     * @p buf_len (SHORT), per @p fd's script. Sockets the fake knows nothing about are
-     * not its business — see `__wrap_send`.
+     * @p buf_len (SHORT), per @p fd's script — with or without `MSG_DONTWAIT` in @p flags,
+     * which changes only whether the outcome cost a wait (@ref waited_writes). Sockets the fake
+     * knows nothing about are not its business — see `__wrap_send`.
      */
-    int raw_send(int fd, std::size_t buf_len);
+    int raw_send(int fd, std::size_t buf_len, int flags = 0);
+    /**
+     * @brief Writes on @p fd that WAITED: a full or part-full socket met by a write without
+     *        `MSG_DONTWAIT`, i.e. the httpd task parked for the whole `SO_SNDTIMEO` bound.
+     *
+     * The host has no clock to measure a stall by, so the stall is counted where lwIP would
+     * spend it. A write with `MSG_DONTWAIT` that meets the same socket returns at once and
+     * is not counted: that is the whole difference #2095 makes for a slow peer.
+     */
+    [[nodiscard]] std::size_t waited_writes(int fd) const;
     /**
      * @brief The RAW `shutdown` on @p fd, reached through `--wrap=shutdown`.
      *
@@ -341,6 +352,7 @@ class server_t {
     std::size_t frames_sent_ = 0;
     std::vector<sent_frame_t> sent_frames_; /**< @brief See @ref sent_frames. */
     std::map<int, std::size_t> writes_;
+    std::map<int, std::size_t> waited_;          /**< @brief See @ref waited_writes. */
     std::map<int, std::vector<std::byte>> wire_; /**< @brief See @ref wire. */
     bool queue_refusing_ = false;
     std::atomic<bool> sustained_ingress_{false}; /**< @brief See set_sustained_ingress. */

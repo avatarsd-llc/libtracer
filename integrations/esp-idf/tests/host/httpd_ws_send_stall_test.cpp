@@ -20,9 +20,16 @@
  *   2. a SEND that keeps failing IS evidence about its destination — three consecutive
  *      failed sends to one peer, with no success in between, tear that peer's session
  *      down, and only that peer's;
- *   3. a SHORT write is not a drop. Half a frame is on the wire, so the stream is
- *      desynchronised and the session closes at once, bypassing the streak — the one
- *      case where "drop the frame, keep the socket" (#481) is unsound.
+ *   3. a frame cut off part-way is not a drop. Half a frame is on the wire, so a hard
+ *      error before the rest lands desynchronises the stream and the session closes at
+ *      once, bypassing the streak — the one case where "drop the frame, keep the socket"
+ *      (#481) is unsound.
+ *
+ * #2095 changed what counts as a failure on the PUSH path. A held frame's flush writes
+ * without waiting, so a full socket (EAGAIN) or room for only part of a frame is not a
+ * failure at all: the frame is held, resumed on the session's next flush, and the peer is
+ * never struck for being slow (httpd_ws_peer_tx_test pins that). What strikes and condemns
+ * here is a HARD socket error, staged with the fake's `FAIL` outcome.
  *
  * #951 widened the third: "half a frame is on the wire" is not only a partial buffer.
  * `esp_http_server` writes one frame as a header call and a payload call, so a payload
@@ -137,16 +144,16 @@ void test_queue_jam_strikes_nobody() {
 }
 
 // ---------------------------------------------------------------------------
-// 2 — a failing SEND strikes its destination, and only its destination.
+// 2 — a hard-failing SEND strikes its destination, and only its destination.
 // ---------------------------------------------------------------------------
 void test_send_timeout_strikes_the_stalled_peer() {
-    std::printf("one stalled peer under fan-out:\n");
+    std::printf("one failing peer under fan-out:\n");
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(400);
     claim(401);
-    // 400's window is full and stays full; 401 drains normally.
-    fake_httpd::instance().set_send_script(400, {send_result_t::TIMEOUT});
+    // 400's socket errors on every write; 401 drains normally.
+    fake_httpd::instance().set_send_script(400, {send_result_t::FAIL});
     fake_httpd::instance().set_send_script(401, {send_result_t::FULL});
 
     broadcast(*link);
@@ -157,7 +164,7 @@ void test_send_timeout_strikes_the_stalled_peer() {
     drain();
 
     check(!fake_httpd::instance().has_session(400),
-          "three consecutive failed sends tear the STALLED peer down");
+          "three consecutive failed sends tear the FAILING peer down");
     check(fake_httpd::instance().has_session(401), "the healthy peer is untouched");
 
     link.reset();
@@ -172,7 +179,7 @@ void test_interleaved_success_never_closes() {
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(500);
-    // The shipped #481 shape: the big reply times out, the small frames around it go out
+    // The shipped #481 shape: the big reply fails, the small frames around it go out
     // fine. A drop streak is CONSECUTIVE, so this peer must never reach the cap.
     //
     // The script is per WRITE and a frame is two writes, so a frame that fails at its
@@ -181,10 +188,9 @@ void test_interleaved_success_never_closes() {
     // a frame whose first write never landed — nothing of it reached the peer — which is
     // precisely the loss #481's drop-and-keep response is sound for.
     fake_httpd::instance().set_send_script(
-        500,
-        {send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL, send_result_t::FULL,
-         send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL, send_result_t::FULL,
-         send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL, send_result_t::FULL});
+        500, {send_result_t::FAIL, send_result_t::FAIL, send_result_t::FULL, send_result_t::FULL,
+              send_result_t::FAIL, send_result_t::FAIL, send_result_t::FULL, send_result_t::FULL,
+              send_result_t::FAIL, send_result_t::FAIL, send_result_t::FULL, send_result_t::FULL});
     for (int i = 0; i < 9; ++i) broadcast(*link);
 
     check(fake_httpd::instance().has_session(500),
@@ -197,26 +203,31 @@ void test_interleaved_success_never_closes() {
 }
 
 // ---------------------------------------------------------------------------
-// 4 — a SHORT write desynchronises the stream: close at once, no streak.
+// 4 — a SHORT write is held; a hard error before the rest lands closes at once.
 // ---------------------------------------------------------------------------
 void test_short_write_closes_immediately() {
     std::printf("a write that expires MID-frame:\n");
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(600);
-    // Header out in full, payload half-written — where a bounded write actually expires
-    // mid-buffer on silicon, since a 2-byte header either fits the remaining window or
-    // does not. (The short HEADER write is staged by case 6, on fd 700.)
-    fake_httpd::instance().set_send_script(600, {send_result_t::FULL, send_result_t::SHORT});
+    // Header out in full, payload half-written — where a write runs out of window
+    // mid-buffer on silicon. Since #2095 that is not a fault on the push path: the frame is
+    // held part-written and the session's next flush writes the rest. Here the rest meets a
+    // hard error, which leaves the peer holding a frame that never ends.
+    // (The TIMEOUT is the re-post a partial write makes, finding the socket full.)
+    fake_httpd::instance().set_send_script(600, {send_result_t::FULL, send_result_t::SHORT,
+                                                 send_result_t::TIMEOUT, send_result_t::FAIL});
 
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
     broadcast(*link);
-    drain();
+    check(fake_httpd::instance().has_session(600),
+          "a short write alone is held for the next flush, not a desync");
+    broadcast(*link);  // the next post resumes the part-written frame
 
     check(fake_httpd::instance().frames_sent() == sent_before,
           "a half-written frame is NOT reported as delivered");
     check(!fake_httpd::instance().has_session(600),
-          "ONE short write closes the session — framing is destroyed, not a lost frame");
+          "a cut-off frame closes the session — framing is destroyed, not a lost frame");
 
     link.reset();
     fake_httpd::instance().close_all();
@@ -282,10 +293,9 @@ void test_send_bound_derivation() {
  * new frames to it are refused, and the socket is shut so httpd's select arm — the one
  * arm with no control message on it — reaps the session.
  *
- * The backlog is a POOL's worth of frames, not a mailbox's worth (#949): with the heap
- * work-item fallback deleted, `tx_slot_capacity()` is how many sends this link can have
- * outstanding at once, so that is the deepest undrained backlog it can build. The control
- * queue is capped to the same number, which is what makes it full.
+ * Since #2095 a link's whole backlog is ONE flush item in the control queue, whatever the
+ * number of frames behind it, so the control queue is capped to one, which is what makes
+ * it full.
  */
 void test_jammed_queue_still_closes_the_doomed_fd() {
     std::printf("a peer found broken with its backlog already queued, control queue full:\n");
@@ -293,10 +303,10 @@ void test_jammed_queue_still_closes_the_doomed_fd() {
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(700);
     claim(701);
-    // The deepest backlog this link can build: one queued send per TX pool slot.
-    const std::size_t kCtrlDepth = httpd_ws_link_t::kDefaultTxPoolSlots;
+    // A link's whole backlog is one flush item (#2095).
+    const std::size_t kCtrlDepth = 1;
     fake_httpd::instance().set_queue_capacity(kCtrlDepth);
-    fake_httpd::instance().set_send_script(700, {send_result_t::SHORT});
+    fake_httpd::instance().set_send_script(700, {send_result_t::FULL, send_result_t::FAIL});
     fake_httpd::instance().set_send_script(701, {send_result_t::FULL});
 
     // Fill the control queue with frames for the peer that is about to be found
@@ -305,7 +315,7 @@ void test_jammed_queue_still_closes_the_doomed_fd() {
     // was the peer's name only because a fake fd has no `getpeername` to decode.
     auto* const doomed = link->peer_link("p0");
     check(doomed != nullptr, "the doomed peer resolves through the bus facet");
-    for (std::size_t i = 0; i < kCtrlDepth; ++i) doomed->send(std::span<const std::byte>(kBody));
+    for (int i = 0; i < 4; ++i) doomed->send(std::span<const std::byte>(kBody));
     check(fake_httpd::instance().queue_depth() == kCtrlDepth, "the control queue is full");
 
     // From here the control socket takes NOTHING. That is not a contrived extreme: the
@@ -316,9 +326,9 @@ void test_jammed_queue_still_closes_the_doomed_fd() {
     // link REQUESTS of this queue.
     fake_httpd::instance().set_queue_refusing(true);
 
-    // ONE step: the head of the backlog short-writes, and the link decides to close.
-    check(fake_httpd::instance().run_one(), "the first queued send ran");
-    check(fake_httpd::instance().writes(700) == 1, "it reached the socket and short-wrote");
+    // ONE step: the flush cuts the frame off after its header, and the link decides to close.
+    check(fake_httpd::instance().run_one(), "the queued flush ran");
+    check(fake_httpd::instance().writes(700) == 2, "it reached the socket and was cut off");
 
     // (a) a NEW frame to that fd must be refused AT THE LINK, before the control socket
     // is ever asked. An enqueue that reaches the socket and is refused there is counted
@@ -332,8 +342,8 @@ void test_jammed_queue_still_closes_the_doomed_fd() {
     // would otherwise spend the whole send bound on a peer that is already doomed, which
     // is exactly the two-minute stall the on-silicon gate measured.
     drain();
-    check(fake_httpd::instance().writes(700) == 1,
-          "only the send that PROVED the peer broken reaches the socket; the backlog is skipped");
+    check(fake_httpd::instance().writes(700) == 2,
+          "only the send that PROVED the peer broken reaches the socket; nothing follows it");
 
     // (c) and the session is actually gone, with no control message anywhere in the path.
     check(!fake_httpd::instance().has_session(700),
@@ -363,7 +373,7 @@ void test_dead_mark_does_not_outlive_its_session() {
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(800);
-    fake_httpd::instance().set_send_script(800, {send_result_t::TIMEOUT});
+    fake_httpd::instance().set_send_script(800, {send_result_t::FAIL});
     for (int i = 0; i < 3; ++i) broadcast(*link);
     drain();
     check(!fake_httpd::instance().has_session(800), "the struck peer is torn down");
@@ -476,10 +486,10 @@ void test_peer_name_on_an_ipv6_socket() {
  *
  * `httpd_ws_send_frame_async` writes one frame as TWO calls to the session's send function
  * — the header, then the payload — and reports either failure as the same `ESP_FAIL`. The
- * shape staged here is the ordinary one for a stalled peer, not an exotic one: the 2-byte
- * header fits whatever room the send window has left and, with Nagle off, leaves as its own
- * segment; the large payload behind it finds no room, waits out `SO_SNDTIMEO` with nothing
- * written, and comes back `EWOULDBLOCK`.
+ * shape staged here: the 2-byte header leaves as its own segment, and the payload write
+ * behind it meets a hard socket error. (A payload that merely finds no room is held and
+ * resumed since #2095; it is a bounded IN-CALL write that still meets this shape on a full
+ * window, and the verdict is the same one.)
  *
  * What the peer is left holding is a header promising N bytes that will never arrive, so it
  * consumes every LATER frame as this one's payload — an open socket that delivers nothing,
@@ -492,7 +502,7 @@ void test_truncated_frame_closes_the_session() {
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(900);
-    fake_httpd::instance().set_send_script(900, {send_result_t::FULL, send_result_t::TIMEOUT});
+    fake_httpd::instance().set_send_script(900, {send_result_t::FULL, send_result_t::FAIL});
 
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
     broadcast(*link);
@@ -526,7 +536,7 @@ void test_a_frame_that_never_started_is_still_only_dropped() {
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(901);
-    fake_httpd::instance().set_send_script(901, {send_result_t::TIMEOUT});
+    fake_httpd::instance().set_send_script(901, {send_result_t::FAIL});
 
     broadcast(*link);
     drain();
@@ -622,12 +632,12 @@ void test_retained_frame_is_whole() {
 
 /**
  * @brief The partial-write rule for the retained frame: once its first byte is on the wire,
- *        a failed or short write of ANY later part closes the session, and nothing of any
- *        other frame follows the partial one.
+ *        a hard error on ANY later part closes the session, and nothing of any other frame
+ *        follows the partial one. (A short or EAGAIN write is held and resumed, #2095.)
  */
 void test_retained_frame_cut_off_closes() {
     std::printf("a retained frame cut off after its head:\n");
-    for (const send_result_t cut : {send_result_t::TIMEOUT, send_result_t::SHORT}) {
+    for (const send_result_t cut : {send_result_t::FAIL}) {
         auto link = tr::mem::make_poly<httpd_ws_link_t>(
             tr::mem::net_source(), handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true});
         claim(911);
@@ -662,7 +672,7 @@ void test_retained_frame_never_started_is_dropped() {
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(912);
     const tr::graph::value_ref_t v = retained_value(9000);
-    fake_httpd::instance().set_send_script(912, {send_result_t::TIMEOUT});
+    fake_httpd::instance().set_send_script(912, {send_result_t::FAIL});
     send_retained(*link, *v);
     check(fake_httpd::instance().has_session(912), "nothing reached the wire: the session stays");
     check(v->use_count() == 1, "the dropped frame released the value");

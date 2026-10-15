@@ -223,7 +223,8 @@ void test_inherited_failures_do_not_condemn_the_successor() {
     if (to_a == nullptr) return;
     // Enough queued frames to trip the streak cap on whoever ends up being charged.
     for (int i = 0; i < 4; ++i) to_a->send(std::span<const std::byte>(kBody));
-    check(fake_httpd::instance().queue_depth() == 4, "A's four frames are queued");
+    // One flush for the link and A's newest frame in A's slot (#2095).
+    check(fake_httpd::instance().queue_depth() == 1, "A's frames are held behind one flush");
 
     fake_httpd::instance().close_session(kFd);
     claim(kFd);

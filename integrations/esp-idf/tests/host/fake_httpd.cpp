@@ -323,7 +323,13 @@ std::size_t server_t::reap_shut() {
     return fds.size();
 }
 
-int server_t::raw_send(int fd, std::size_t buf_len) {
+std::size_t server_t::waited_writes(int fd) const {
+    const std::lock_guard lock(m_);
+    const auto it = waited_.find(fd);
+    return it == waited_.end() ? 0 : it->second;
+}
+
+int server_t::raw_send(int fd, std::size_t buf_len, int flags) {
     const std::lock_guard lock(m_);
     ++writes_[fd];
     const auto it = sessions_.find(fd);
@@ -345,11 +351,18 @@ int server_t::raw_send(int fd, std::size_t buf_len) {
         outcome = sess.script[i];
         ++sess.script_pos;  // the LAST entry repeats: a stalled peer stays stalled
     }
+    // A blocking write that does not complete has spent the send bound first.
+    if (outcome != send_result_t::FULL && outcome != send_result_t::FAIL &&
+        (flags & MSG_DONTWAIT) == 0)
+        ++waited_[fd];
     switch (outcome) {
         case send_result_t::FULL:
             return static_cast<int>(buf_len);
         case send_result_t::TIMEOUT:
             errno = EAGAIN;  // lwIP: SO_SNDTIMEO expired with NOTHING written
+            return -1;
+        case send_result_t::FAIL:
+            errno = ECONNRESET;  // a hard error: the write is refused whatever the flags
             return -1;
         case send_result_t::SHORT:
             break;
@@ -363,9 +376,8 @@ int server_t::raw_send(int fd, std::size_t buf_len) {
  *         IDF's errno-to-HTTPD_SOCK_ERR mapping. Used for a session with no override. */
 [[nodiscard]] int default_send_fn(httpd_handle_t hd, int fd, const char* buf, std::size_t buf_len,
                                   int flags) {
-    (void)flags;
     if (buf == nullptr) return HTTPD_SOCK_ERR_INVALID;
-    const int ret = static_cast<server_t*>(hd)->raw_send(fd, buf_len);
+    const int ret = static_cast<server_t*>(hd)->raw_send(fd, buf_len, flags);
     if (ret > 0) static_cast<server_t*>(hd)->note_wire(fd, buf, static_cast<std::size_t>(ret));
     if (ret < 0)
         return errno == EAGAIN || errno == EWOULDBLOCK ? HTTPD_SOCK_ERR_TIMEOUT
@@ -751,7 +763,7 @@ esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int sockfd,
 extern "C" ssize_t __real_send(int fd, const void* buf, std::size_t len, int flags);
 extern "C" ssize_t __wrap_send(int fd, const void* buf, std::size_t len, int flags) {
     if (!fake_httpd::instance().owns_socket(fd)) return __real_send(fd, buf, len, flags);
-    const int ret = fake_httpd::instance().raw_send(fd, len);
+    const int ret = fake_httpd::instance().raw_send(fd, len, flags);
     if (ret > 0) fake_httpd::instance().note_wire(fd, buf, static_cast<std::size_t>(ret));
     return ret;
 }
