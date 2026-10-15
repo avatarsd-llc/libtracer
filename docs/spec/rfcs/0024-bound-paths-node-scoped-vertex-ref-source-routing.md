@@ -953,22 +953,22 @@ implementation must answer each **for a bound path**:
 
 ### 8.2 Under the #807 A/B protocol
 
-Every latency figure MUST be taken per `docs/methodology.md` §"The A/B protocol"
-(`docs/methodology.md:400-449`), which is normative for this gate:
+Every latency figure MUST be taken per **The A/B protocol** in `docs/methodology.md`
+§"Reading the numbers (noise & variance)", which is normative for this gate:
 
 1. **Pin both arms identically**, to the same single logical CPU on the same core class
    (`taskset -c 2`) — the recorded confound is large: the same binary reads **+47.0 % to +53.7 %**
-   slower on a compact core than a classic one (`methodology.md:420-424`).
+   slower on a compact core than a classic one (*CPU placement* paragraph).
 2. **Interleave** round-robin in one session, **≥ 10 rounds per arm**, reporting **medians *and*
-   ranges** (`methodology.md:434-437`).
+   ranges** (rule 2).
 3. **Discard the first execution** — a cold first point reads ~313 ns against a 228 ns steady
-   state, **+37 %** (`methodology.md:438-440`).
-4. Prefer **same-directory A/B** (`methodology.md:441-442`).
+   state, **+37 %** (rule 3).
+4. Prefer **same-directory A/B** (rule 4).
 5. Where the expected effect is **below the leg's noise floor**, do not reach for a stopwatch —
-   use **object-file `cmp`** against the baseline tree (`methodology.md:443-447`).
+   use **object-file `cmp`** against the baseline tree (rule 5).
 
 Cross-worktree build layout is **not** a valid explanation for a difference: it was measured and
-refuted, byte-identical output at two paths (`methodology.md:404-418`).
+refuted, byte-identical output at two paths (*Build directory* paragraph).
 
 ### 8.3 The must-not-regress arm
 
