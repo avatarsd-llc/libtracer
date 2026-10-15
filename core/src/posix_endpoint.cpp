@@ -783,13 +783,13 @@ void slot_server_t::run() {
     // (the MCU-shaped choice, #362), bounded to 100 ms so the loop stays
     // shutdown-responsive (the posix_endpoint_t idiom).
     //
-    // The poll set is sized ONCE, to the admission cap plus the listen socket (#1780): the
-    // slot table never outgrows the cap, so no pass below grows it. Should that one sizing be
-    // refused, a pass serves the peers that fit and the listen socket always (it goes first).
+    // The poll set grows with the slot table, never ahead of it (#2156): sizing it to the
+    // admission cap up front charged every idle listener the whole cap (two 100-entry tables).
+    // Slots are recycled, never freed, so the set only grows when admission reaches a new
+    // high-water, and a cleared set keeps its block. A refused growth serves the peers that
+    // fit and the listen socket always (it goes first).
     mem::block_array_t<pollfd> pfds(slots_.source());
     mem::block_array_t<session_base_t*> pslots(slots_.source());
-    (void)pfds.reserve(max_peers_ + 1);
-    (void)pslots.reserve(max_peers_);
     pollfd listen_only{listen_fd_, POLLIN, 0};
     while (!stop_.load(std::memory_order_relaxed)) {
         pfds.clear();
