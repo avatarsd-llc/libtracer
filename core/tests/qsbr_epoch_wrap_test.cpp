@@ -121,10 +121,17 @@ void asymmetric_entry() {
     // A lane that opts in sets LT_EXPECT_MEMBARRIER=1: there, a build without the plain entry
     // or a refused registration (an older kernel, a seccomp filter, a container) is a failure,
     // never a silent fall back to the fenced entry that would leave the lane testing nothing new.
+    // The lane that runs under a seccomp filter refusing membarrier (#2121) sets
+    // LT_EXPECT_MEMBARRIER=refused: there the fence must be compiled in AND its registration
+    // refused, or the lane is not testing the fenced fallback it exists for.
     const char* const want = std::getenv("LT_EXPECT_MEMBARRIER");
     if (want != nullptr && std::strcmp(want, "1") == 0)
         check(q::kMembarrier && q::asym_ready(),
               "LT_EXPECT_MEMBARRIER=1: the asymmetric fence is compiled in and registered");
+    if (want != nullptr && std::strcmp(want, "refused") == 0)
+        check(q::kMembarrier && !q::asym_ready(),
+              "LT_EXPECT_MEMBARRIER=refused: the asymmetric fence is compiled in, its "
+              "registration was refused, and the fenced entry is in use");
     if constexpr (!q::kMembarrier) {
         std::printf(
             "  (not compiled in on this target: the entry is the store and seq_cst fence)\n");
