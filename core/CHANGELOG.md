@@ -68,17 +68,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   entry cannot be reserved is refused `BACKPRESSURE`, with nothing created.
 - **The WebSocket server receives each frame into a segment of its exact length, header first
 - **The WebSocket server receives each frame into a segment of its exact length
+- **The WebSocket server receives each frame into a segment of its exact length, header first
   ([#2140](https://github.com/avatarsd-llc/libtracer/issues/2140)).** A new header-only
-  `frame_ingress_t` (`libtracer/frame_ingress.hpp`) reads ahead into a fixed per-peer window
-  (`ws_server_transport_t::kReadAheadBytes`, 1,152 B, held in the peer's session): a frame that
-  fits completes from that one read and is copied out at its exact length; a larger body keeps
-  the bytes already read and receives the rest straight into a segment drawn at its announced
-  length from the link's `memory.rx`, in one `recvmsg` that also takes what follows. Inbound
-  copies at 4 KiB and 16 KiB fall from 2.8× and 2.2× to about a quarter and a sixteenth, and an
-  idle peer holds no more bytes after a large message than before it (it held its largest frame
-  before). An oversize length still closes the link before anything is drawn.
-  `ws::decode_header`, `ws::header_t` and `ws::kMaxClientFrameHeader` expose the header rules
-  the decoder applies.
+  `frame_ingress_t` (`libtracer/frame_ingress.hpp`) reads a frame's header, draws the body at
+  its announced length from the link's `memory.rx`, and receives the body into it with one
+  `recvmsg` that also takes the next header. An unfragmented message goes up as that segment
+  with no copy, so inbound copies at 1 KiB and above fall from 2.2–3.2× to at most 1×, and an
+  idle peer holds no bytes after a large message (it held its largest frame before). An
+  oversize length still closes the link before anything is drawn. `ws::decode_header`,
+  `ws::header_t` and `ws::kMaxClientFrameHeader` expose the header rules the decoder applies.
 
 - **`subscription_selector_t`: a vertex that switches among named options of subscription refs
   ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** A header-only adapter
