@@ -82,6 +82,9 @@ jobs:
       - name: Measure (bench_peer_counts, bench_conn_ram)
         if: steps.scope.outputs.run == 'true'
         run: |
+          # pipefail: a bench that fails to measure (a refused subscribe in any repetition, a
+          # pushed frame never delivered) exits non-zero, and `tee` must not swallow that.
+          set -o pipefail
           ./bench/build/bench_peer_counts --reps=3 | tee bench/bench_peer_counts_raw.txt
           ./bench/build/bench_conn_ram --no-can --reps=5 | tee bench/bench_conn_ram_raw.txt
       - name: Counted-metrics gate

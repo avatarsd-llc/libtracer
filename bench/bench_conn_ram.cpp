@@ -20,7 +20,7 @@
  *
  *   T0  server constructed, receive thread up, quiesced   (the per-LINK baseline)
  *   TK  K peers established and verified                  (the per-CONNECTION cost)
- *   T16 each peer pushed one 16 KiB frame                 (what a peer KEEPS after it)
+ *   T16 each peer pushed one 16 KiB frame, all delivered   (what a peer KEEPS after it)
  *   THW each peer pushed one large frame                  (the buffer HIGH-WATER)
  *   TD  every peer disconnected and the departure observed (what teardown RETURNS)
  *   TR  the same K peers reconnected                      (the slot-RECYCLE claim)
@@ -413,6 +413,30 @@ bool wait_peers(tr::net::bus_link_t& bus, std::size_t want) {
     return false;
 }
 
+/** @brief Steps whose pushed frames were not all delivered: each fails the run. */
+std::size_t g_undelivered = 0;
+
+/** @brief A peer-named link's frames delivered so far: what @ref wait_delivered polls. */
+void count_delivery(void* ctx, tr::net::peer_handle_t, tr::view::rope_t) {
+    static_cast<std::atomic<std::size_t>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
+}
+
+/**
+ * @brief Poll until @p seen reaches @p want deliveries, or the deadline passes: a balance
+ *        read before the receive threads have handed every pushed frame up would charge
+ *        a frame still in flight to the step (#2171 review).
+ */
+bool wait_delivered(const std::atomic<std::size_t>& seen, std::size_t want) {
+    for (int i = 0; i < 200; ++i) {
+        if (seen.load(std::memory_order_relaxed) >= want) return true;
+        std::this_thread::sleep_for(10ms);
+    }
+    std::fprintf(stderr, "error: %zu of %zu pushed frames delivered\n",
+                 seen.load(std::memory_order_relaxed), want);
+    ++g_undelivered;
+    return false;
+}
+
 // --- the arms ----------------------------------------------------------------
 
 /** @brief Largest peer count an arm may request (the fd table is a fixed stack array). */
@@ -438,6 +462,10 @@ sample_t run_stream_arm(std::size_t k, std::size_t big, Make make, Dial dial, Pu
     const long long pre = live();
     std::unique_ptr<Server> srv(make());
     tr::net::bus_link_t* bus = srv->bus();
+    // Installed before any peer dials (the set_receiver contract), so every frame a step
+    // pushes is counted as it is handed up, and released on return as an unread one is.
+    std::atomic<std::size_t> delivered{0};
+    srv->set_peer_rope_receiver(&count_delivery, &delivered);
     quiesce();
     const long long t0 = live();
     out.link_base = t0 - pre;
@@ -451,12 +479,14 @@ sample_t run_stream_arm(std::size_t k, std::size_t big, Make make, Dial dial, Pu
 
     // --- T16: one 16 KiB frame per peer, and what each keeps once it has passed ---------
     for (std::size_t i = 0; i < k; ++i) push(fds[i], kRetainedFrame);
+    (void)wait_delivered(delivered, k);
     quiesce();
     out.retained_16k = (live() - tk) / static_cast<long long>(k);
 
     // --- THW: one big frame per peer ---------------------------------------
     reset_peak();
     for (std::size_t i = 0; i < k; ++i) push(fds[i], big);
+    (void)wait_delivered(delivered, 2 * k);
     quiesce();
     const long long thw_peak = peak();
     const long long thw = live();
@@ -896,6 +926,9 @@ struct sub_series_t {
         blocks.push_back(s.blocks);
     }
     void emit(const char* name) {
+        if (failed != 0)
+            std::fprintf(stderr, "error: %s: %zu repetition(s) refused a subscription\n", name,
+                         failed);
         report(name, "per_sub", per_sub);
         report(name, "sub_blocks", blocks);
     }
@@ -980,5 +1013,5 @@ int main(int argc, char** argv) {
     std::printf("# allocs=%lld frees=%lld residual_live=%lld\n",
                 g_allocs.load(std::memory_order_relaxed), g_frees.load(std::memory_order_relaxed),
                 g_live.load(std::memory_order_relaxed));
-    return sub_tcp.failed + sub_ws.failed + sub_udp.failed == 0 ? 0 : 1;
+    return sub_tcp.failed + sub_ws.failed + sub_udp.failed + g_undelivered == 0 ? 0 : 1;
 }
