@@ -143,6 +143,69 @@ class NoFalseFails(unittest.TestCase):
         self.assertFalse(v["fail"])
 
 
+class ModeFlipsDoNotFail(unittest.TestCase):
+    """@brief #2168: a bimodal row whose candidate pairs land on the slow mode is not a
+    pullback. Each arm's second-best sample is its fast mode, and it has not moved."""
+
+    KEY = "store-lat-narrow-graph-write/32/1/1"
+    # x1.046, as banked. Pinned here, so a re-bank cannot flip these cases.
+    NULL = {KEY: {"p50_ns": 0.0153}}
+    # #2159's gate shape: base 78.5..109.4, cand mostly on the ~120 ns mode, median pair ratio
+    # x1.40, CI excludes 1. Two candidate pairs on the fast mode: x1.039 against x1.046, a
+    # deliberately narrow margin.
+    BASE = [78.5, 80.1, 82.0, 79.4, 83.0, 109.4, 81.2, 84.3]
+    CAND = [82.5, 121.0, 81.9, 118.4, 125.7, 116.2, 119.8, 117.0]
+
+    def test_slow_mode_pairs_pass_on_a_null_row(self):
+        v, _f, src = pg.leg_verdict(self.KEY, "p50_ns", self.CAND, self.BASE, self.NULL)
+        self.assertEqual(src, "null")
+        self.assertTrue(v["effect"] and v["significant"])
+        self.assertFalse(v["fast_mode_moved"])
+        self.assertFalse(v["fail"])
+
+    def test_the_fast_mode_alone_holds_a_flat_leg(self):
+        """Medians x1.47, ranges disjoint, 6/8 pairs breach: main's flat rule FAILed this. Two
+        candidate pairs on the fast mode (x1.04) are the only thing that passes it now."""
+        base = [99.0, 100, 101, 102, 99.5, 100.5, 101.5, 100]
+        cand = [103.0, 150, 103.5, 150, 150, 150, 150, 150]
+        v = pg.legacy_verdict(cand, base, pg.LAT_REGRESS, False)
+        self.assertTrue(v["effect"])
+        self.assertTrue(v["disjoint"])
+        self.assertTrue(v["majority"])
+        self.assertFalse(v["fast_mode_moved"])
+        self.assertFalse(v["fail"])
+
+    def test_one_lucky_fast_pair_cannot_veto(self):
+        """The second-best sample, not the best: one candidate pair on the fast mode leaves
+        a regression that moved the other seven failing."""
+        cand = [117.3, 121.0, 81.9, 118.4, 125.7, 116.2, 119.8, 117.0]
+        v, _f, _s = pg.leg_verdict(self.KEY, "p50_ns", cand, self.BASE, self.NULL)
+        self.assertTrue(v["fail"])
+
+    def test_slow_mode_share_twenty_to_eighty_percent_is_caught(self):
+        """A change that puts a process on the slow mode 80% of the time instead of 20%:
+        base 2/8 slow, candidate 7/8 slow. The candidate keeps one fast pair, which the
+        second-best sample ignores."""
+        base = [75.0, 120, 76, 75.5, 119, 76.5, 75.2, 75.8]
+        cand = [120.0, 121, 119, 75.4, 120.5, 122, 119.5, 121.5]
+        v, _f, _s = pg.leg_verdict(self.KEY, "p50_ns", cand, base, self.NULL)
+        self.assertTrue(v["fail"])
+
+    def test_a_shift_of_the_same_pairs_still_fails(self):
+        """x1.15 on the null row; x1.16 on the flat rule, whose threshold is a strict x1.15."""
+        v, _f, _s = pg.leg_verdict(self.KEY, "p50_ns", [x * 1.15 for x in self.BASE],
+                                   self.BASE[::-1], self.NULL)
+        self.assertTrue(v["fail"])
+        v = pg.legacy_verdict([x * 1.16 for x in self.BASE[:5]], self.BASE[:5],
+                              pg.LAT_REGRESS, False)
+        self.assertTrue(v["fail"])
+
+    def test_the_fast_mode_is_the_second_best_sample_on_a_throughput_leg(self):
+        v = tput([80, 80, 99, 98], [100, 100, 100, 100])
+        self.assertAlmostEqual(v["fast_mode"], 0.98)
+        self.assertFalse(v["fail"])
+
+
 class RealRegressionsStillFail(unittest.TestCase):
     """@brief Detection is not what was traded away. Each of these must FAIL."""
 

@@ -581,6 +581,20 @@ Details that make these trustworthy:
   is that procedure on the bench host: it waits until no perf run is queued or running
   before each stop (or, with `DRAIN=1`, takes the runner's job label away and waits for its
   current job), and restarts the runner after every window, failures and signals included.
+- **The fast-mode veto (#2168).** Under either rule a leg also needs the arms'
+  **second-best samples** (second-lowest p50 and mean, second-highest deliveries/s across the
+  pairs) to be past the same threshold. Several rows are bimodal per process (`store-lat`
+  graph-write ~75 or ~120 ns, `lkv-store` 16 KiB ~120 or ~180 ns, main included), and a
+  candidate whose pairs landed on the slow mode failed PRs that could not reach the row. A
+  slow mode or contention only slows a process, so the second-best sample is the fast mode;
+  the second rather than the best, so one lucky fast pair cannot clear a leg. The gate now
+  fails only a regression that **moves the fast mode**. A change that only makes processes
+  land on the slow mode more often, or that slows only the slow mode, is invisible within one
+  session unless it leaves at most one candidate pair on the fast mode. This is a departure
+  from the #1874 ruling's "no row looser": on a flat leg it can pass a session main's rule
+  failed. The root-cause fix is the bench host's CPU isolation (bench vCPUs pinned to
+  dedicated host cores with idle siblings), after which the rows are unimodal; the veto is
+  the backstop. The report prints it as `fast mode x…`.
 - **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
   or past the flat threshold, because builds of one source move them by several percent
   (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they are decided
