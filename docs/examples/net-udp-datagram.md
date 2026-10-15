@@ -14,8 +14,9 @@ seeing before wiring a datagram link.
   what the receiver's callback sees, and its *length* came from the datagram rather than from
   anything in the bytes. Two sends are two frames — never one coalesced read the receiver has to
   split apart, which is exactly the work [the TCP page](net-tcp-stream-framing.md) shows.
-- **The bound is hard, and `max_frame` may only tighten it.** `kMaxDatagram` is what a datagram
-  can physically be, so a configured cap above it is inert rather than loosening. A frame larger
+- **The bound is hard past one datagram.** Unset, the cap is `kDefaultMaxFrame`, one Ethernet
+  MTU (1,472 B), and it sizes the receive segment. `max_frame` may raise it up to `kMaxDatagram`,
+  what a datagram can physically be; a configured cap above that is inert rather than loosening. A frame larger
   than a datagram is not a UDP frame; that is what a streaming kind is for.
 - **The listener has no peer until one talks to it.** Constructed with no peer address, the
   transport LEARNS its peer from the source address of the first inbound datagram. That is what

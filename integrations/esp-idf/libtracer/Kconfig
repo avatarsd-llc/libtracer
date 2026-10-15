@@ -440,10 +440,11 @@ menu "libtracer"
             SPEC's max_frame and its rx backend's slot. A link given a bounded rx
             backend (a pool, as the full_node example's listener is) therefore
             draws a slot-sized scratch from this arena. A link left on the
-            default rx backend has no slot bound, so it draws a 64 KiB scratch
-            and 64 KiB receive segments here unless its SPEC sets max_frame; on
-            a 32 KiB arena those draws are refused and every datagram is dropped,
-            counted in the link's dropped_rx. The linux target, which runs the
+            default rx backend has no slot bound, so its SPEC's max_frame alone
+            sizes them: unset, that is one MTU (1,472 B), so it draws 1,473 B
+            buffers here (libtracer #2132). A SPEC that raises max_frame toward
+            64 KiB draws buffers that large; on a 32 KiB arena those draws are
+            refused and every datagram is dropped, counted in dropped_rx. The linux target, which runs the
             examples' host peers on those defaults, defaults to 256 KiB.
 
             The free-list heads are sized from the arena: 3 sub-pools times

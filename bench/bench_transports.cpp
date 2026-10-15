@@ -45,14 +45,20 @@ using namespace bench;
 
 namespace {
 
+/** @brief A UDP link that admits any datagram, not only the one-MTU default (#2132). */
+const tr::net::udp_config_t kWideUdp{.max_frame = tr::net::udp_transport_t::kMaxDatagram};
+
 /** @brief The subscriber binds/listens on `port`; the publisher's own UDP bind is port+1.
  *         Owned through `poly_ptr_t`, the one owner of a link through its base (#2022). */
 tr::mem::poly_ptr_t<transport_t> make_endpoint(std::string_view proto, bool sub,
                                                std::uint16_t port) {
     tr::mem::block_source_t& src = tr::mem::heap_source();
     if (proto == "udp")
-        return sub ? tr::mem::make_poly<tr::net::udp_transport_t>(src, port, "127.0.0.1", port + 1)
-                   : tr::mem::make_poly<tr::net::udp_transport_t>(src, port + 1, "127.0.0.1", port);
+        // The 8 KiB row is over the one-MTU default cap (#2132): admit every datagram size.
+        return sub ? tr::mem::make_poly<tr::net::udp_transport_t>(src, port, "127.0.0.1", port + 1,
+                                                                  kWideUdp)
+                   : tr::mem::make_poly<tr::net::udp_transport_t>(src, port + 1, "127.0.0.1", port,
+                                                                  kWideUdp);
     if (proto == "tcp")
         return sub ? tr::mem::make_poly<tr::net::tcp_transport_t>(src, port)
                    : tr::mem::make_poly<tr::net::tcp_transport_t>(src, "127.0.0.1", port);

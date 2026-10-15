@@ -150,9 +150,12 @@ class pair_t final : public link_pair_t {
  *        installed both sinks.
  */
 [[nodiscard]] std::unique_ptr<link_pair_t> make_udp_pair(rx_state_t& rx) {
-    auto server = std::make_unique<tr::net::udp_transport_t>(0, "", 0);
+    // Admit any datagram size, not only the one-MTU default cap (#2132).
+    const tr::net::udp_config_t kWide{.max_frame = tr::net::udp_transport_t::kMaxDatagram};
+    auto server = std::make_unique<tr::net::udp_transport_t>(0, "", 0, kWide);
     if (!server->ok()) return nullptr;
-    auto client = std::make_unique<tr::net::udp_transport_t>(0, "127.0.0.1", server->local_port());
+    auto client =
+        std::make_unique<tr::net::udp_transport_t>(0, "127.0.0.1", server->local_port(), kWide);
     if (!client->ok()) return nullptr;
     return std::make_unique<pair_t<tr::net::udp_transport_t>>(rx, std::move(server),
                                                               std::move(client));

@@ -62,7 +62,9 @@ int run_sub(int argc, char** argv) {
                                           min_msgs);
     auto rx = [&](std::span<const std::byte> d) { (void)counter.on_message(d); };
     {
-        tr::net::udp_transport_t t(port, "127.0.0.1", static_cast<std::uint16_t>(port + 1));
+        // A composed group is wider than one MTU: lift the default cap (#2132).
+        tr::net::udp_transport_t t(port, "127.0.0.1", static_cast<std::uint16_t>(port + 1),
+                                   {.max_frame = tr::net::udp_transport_t::kMaxDatagram});
         if (!t.ok()) {
             std::fprintf(stderr, "compose sub: bind failed on %u\n", port);
             return 1;

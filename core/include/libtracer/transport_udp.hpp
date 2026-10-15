@@ -55,9 +55,11 @@ struct udp_config_t {
     link_memory_t memory{};
     /**
      * @brief The universal `:settings max_frame` receive cap, bytes — the largest datagram
-     *        accepted (0 → `udp_transport_t::kMaxDatagram`). A longer datagram is refused
+     *        accepted (0 → `udp_transport_t::kDefaultMaxFrame`, one Ethernet MTU; values
+     *        above `udp_transport_t::kMaxDatagram` are inert). A longer datagram is refused
      *        (`malformed_rx` ticks), provided the backend can furnish `max_frame + 1` bytes
-     *        (#1074). It also sizes the RX segment, so a tight cap is a RAM lever.
+     *        (#1074). It also sizes the RX segment and scratch, so a link holds about
+     *        `max_frame` bytes at rest, not 64 KiB (#2132).
      */
     std::size_t max_frame = 0;
     /** @brief Recv-thread stack size in bytes, 0 = platform default. */
@@ -76,10 +78,10 @@ struct udp_config_t {
  * (@ref effective_max_frame), the same key `tcp_transport_t`, the `ws` transports, `quic`
  * and `webtransport` accept. A datagram longer than the configured cap is refused and
  * counted in @ref malformed_rx instead of being delivered, and the RX segment is drawn at
- * the cap rather than at @ref kMaxDatagram. That refusal is unconditional on the
- * borrowed-span path; on the owning path it holds while the injected backend can furnish
- * `max_frame + 1` bytes — a backend bounded tighter than the cap truncates the datagram
- * before the cap is ever consulted (#1074). The borrowed path's scratch, drawn from
+ * the cap rather than at @ref kMaxDatagram. Unset, the cap is @ref kDefaultMaxFrame. That refusal
+ * is unconditional on the borrowed-span path; on the owning path it holds while the injected
+ * backend can furnish `max_frame + 1` bytes — a backend bounded tighter than the cap truncates the
+ * datagram before the cap is ever consulted (#1074). The borrowed path's scratch, drawn from
  * `memory.state`, is bounded by the backend as well: one byte past the smaller of the cap and
  * the backend's `max_segment_size()`, and a datagram longer than either is refused whole
  * (#1783). An injected bounded backend thereby keeps every receive buffer at its slot size.
@@ -92,6 +94,14 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
      *         @ref effective_max_frame — a datagram cannot be larger than this, so a
      *         configured `max_frame` above it is inert rather than loosening. */
     static constexpr std::size_t kMaxDatagram = 65536;
+
+    /** @brief The receive cap of a link whose `max_frame` is unset (#2132): 1,472 bytes, the
+     *         payload of one 1,500-byte Ethernet MTU after the 20-byte IPv4 and 8-byte UDP
+     *         headers. A longer datagram needs IP fragmentation, which lwIP's default
+     *         configuration does not reassemble, so an MCU peer never receives one anyway.
+     *         The RX segment and scratch are drawn one byte past it. A link that carries
+     *         wider datagrams sets `max_frame`, up to @ref kMaxDatagram. */
+    static constexpr std::size_t kDefaultMaxFrame = 1472;
 
     /**
      * @brief Bind a local UDP socket on @p bind_port and target @p peer_host : @p peer_port.
@@ -154,7 +164,7 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
     }
 
     /** @brief The largest datagram accepted: `min(max_frame, kMaxDatagram)`, with 0 meaning
-     *         @ref kMaxDatagram. The RX *segment* is additionally bounded by the injected
+     *         @ref kDefaultMaxFrame. The RX *segment* is additionally bounded by the injected
      *         backend's `max_segment_size()`, which never widens this. */
     [[nodiscard]] std::size_t effective_max_frame() const noexcept { return max_frame_; }
 
@@ -181,7 +191,7 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
     mem::mem_backend_t* backend_;
     /** @brief The receive scratch's store — the link's `memory.state` (#1780). */
     mem::block_source_t* state_src_;
-    std::size_t max_frame_ = kMaxDatagram;  // accepted-datagram cap (:settings; 0 => kMaxDatagram)
+    std::size_t max_frame_ = kDefaultMaxFrame;  // accepted-datagram cap (:settings; 0 => default)
     // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
     // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
     // accessors widen on read; a 32-bit target wraps after 2^32.

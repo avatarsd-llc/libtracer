@@ -226,7 +226,8 @@ Rules that follow:
   path that calls throwing `new`; the full accounting is in
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
-  segments to `min(64 KiB, backend->max_segment_size())`
+  segments to `min(64 KiB, backend->max_segment_size())`, and to one byte past the link's
+  `max_frame` within that; unset, `max_frame` is one MTU (`kDefaultMaxFrame = 1472`, #2132)
   (`core/src/transport_udp.cpp:const std::size_t rx_cap =`; `kMaxDatagram = 65536` at
   `core/include/libtracer/transport_udp.hpp:udp_transport_t::kMaxDatagram`). Give the pool MTU-sized slots and
   datagrams arrive without a 64 KiB scratch buffer on a small thread stack.

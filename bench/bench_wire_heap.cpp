@@ -392,7 +392,8 @@ void arm_tcp_widths() {
 }
 
 void arm_udp_sizes() {
-    tr::net::udp_transport_t server(0, "127.0.0.1", 1);
+    tr::net::udp_transport_t server(0, "127.0.0.1", 1,
+                                    {.max_frame = tr::net::udp_transport_t::kMaxDatagram});
     if (!server.ok()) return;
     rx_probe_t probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &probe);
@@ -410,7 +411,8 @@ void arm_udp_sizes() {
 }
 
 void arm_udp_span_sink() {
-    tr::net::udp_transport_t server(0, "127.0.0.1", 1);
+    tr::net::udp_transport_t server(0, "127.0.0.1", 1,
+                                    {.max_frame = tr::net::udp_transport_t::kMaxDatagram});
     if (!server.ok()) return;
     rx_probe_t probe;
     server.set_receiver(&rx_probe_t::on_span, &probe);
@@ -426,7 +428,8 @@ void arm_udp_span_sink() {
 }
 
 void arm_udp_widths() {
-    tr::net::udp_transport_t server(0, "127.0.0.1", 1);
+    tr::net::udp_transport_t server(0, "127.0.0.1", 1,
+                                    {.max_frame = tr::net::udp_transport_t::kMaxDatagram});
     if (!server.ok()) return;
     rx_probe_t probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &probe);

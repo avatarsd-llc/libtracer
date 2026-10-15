@@ -1407,15 +1407,15 @@ void test_udp_max_frame_reaches_the_transport() {
     transport_vertex_t net(node, router);
     declare_builtin_modules(net);
 
-    // The CONTROL: no max_frame in the config => the transport's own kMaxDatagram ceiling.
+    // The CONTROL: no max_frame in the config => the transport's one-MTU default (#2132).
     const auto plain =
         node.write(path_t("/net/udp-server/conn"), conn_spec("plain", kEphemeral, "udp"));
     check(plain.has_value(), "SPEC{kind=udp} with no max_frame constructs the socket");
     auto* const plain_link =
         dynamic_cast<tr::net::udp_transport_t*>(tr::testing::link_of(net, "net/udp-server/plain"));
     check(plain_link != nullptr &&
-              plain_link->effective_max_frame() == tr::net::udp_transport_t::kMaxDatagram,
-          "without the key the connection carries the full datagram ceiling");
+              plain_link->effective_max_frame() == tr::net::udp_transport_t::kDefaultMaxFrame,
+          "without the key the connection carries the one-MTU default cap");
 
     // The SUBJECT: the same write plus `max_frame = 4096`.
     const auto capped =
