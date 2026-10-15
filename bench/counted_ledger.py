@@ -11,15 +11,18 @@ Five metric families, one JSON pin file each under `bench/ledger/`:
   ram_per_peer  RAM per peer (and the UDP link at rest)
   idle_wakeups  wakeups per second with no traffic
 
-Every row is pinned for one target. WIDE rows (the x86 host) are MEASURED by
-`bench_peer_counts` (or, for RAM, by `bench_conn_ram`); MID rows (the ESP32-C6) are
+Every row is pinned for one target. WIDE rows (the x86 host) are MEASURED by the family's
+`instrument`: `bench_peer_counts`, or for RAM `bench_conn_ram` (a row may name its own
+`instrument`); MID rows (the ESP32-C6) are
 STATIC counts read from the code, each with the reading that produced it in `basis`.
 Every row also carries the goal #2136 sets for it (`goal`, null where the spec gives no
 number and the row only has to hold) and the change that last moved it (`moved_by`).
 
-The WIDE RAM rows are not pinned in the ledger: they name a row of
-`bench/ram_census_pins.json` and read its value, band and enforcement mode from there, so
-one number has one pin.
+The WIDE RAM rows that `bench/ram_census_pins.json` already pins are not pinned again in the
+ledger: they name its row and read its value, band and enforcement mode from there, so one
+number has one pin. A RAM row that file does not pin (a remote subscription, the buffer a
+peer keeps after a large frame) is an ordinary measured row read from the `bench_conn_ram`
+transcript. A row may also carry its own `unit` when it is not counted in the family's.
 
 Subcommands, and what each guarantees:
 
@@ -41,8 +44,8 @@ Subcommands, and what each guarantees:
 
     ./counted_ledger.py gate --raw peer.txt --conn-raw conn.txt
     ./counted_ledger.py diff --base origin/main
-    ./counted_ledger.py pins --raw peer.txt --write
-    ./counted_ledger.py emit --raw peer.txt --merge bench/benchmark_output.json
+    ./counted_ledger.py pins --raw peer.txt --conn-raw conn.txt --write
+    ./counted_ledger.py emit --raw peer.txt --conn-raw conn.txt --merge bench/benchmark_output.json
     ./counted_ledger.py render --history dev/bench-local/data.js
 
 Stdlib only. Transcript rows: `RESULT arm=<arm> metric=<metric> n=N median=V min=V max=V`.
@@ -157,6 +160,11 @@ def load_ledger_at(rev: str, ledger: pathlib.Path = LEDGER, ram_pins: pathlib.Pa
     return load_texts(texts, show(ram_pins))
 
 
+def transcript_for(fam: dict, r: dict, peer: dict, conn: dict) -> dict:
+    """@brief The transcript a measured row is read from: its instrument's, or its family's."""
+    return conn if r.get("instrument", fam.get("instrument")) == "bench_conn_ram" else peer
+
+
 # --- the verdict rules -----------------------------------------------------------------
 
 def band_for(value: float, fam: dict) -> float:
@@ -194,7 +202,8 @@ def gate_rows(ledger: list[dict], peer: dict, conn: dict, ram: dict, toolchain: 
         for r in fam["rows"]:
             if r["source"] == "static":
                 continue
-            src, row_mode = (peer, fam_mode) if r["source"] == "measured" else (conn, "warn")
+            src, row_mode = ((transcript_for(fam, r, peer, conn), fam_mode)
+                             if r["source"] == "measured" else (conn, "warn"))
             if r["source"] == "ram_census":
                 if ram_mode == "fail" and fam_mode == "fail":
                     row_mode = "fail"
@@ -204,7 +213,7 @@ def gate_rows(ledger: list[dict], peer: dict, conn: dict, ram: dict, toolchain: 
                     continue
             got = src.get((r["arm"], r["metric"]))
             if got is None:
-                if r["source"] == "ram_census" and not conn:
+                if src is conn and not conn:
                     table.append(f"  {fam['family']}/{r['id']}\tnot measured in this run (no --conn-raw)")
                     continue
                 hard.append(f"{fam['family']}/{r['id']}: {r['arm']}/{r['metric']} is pinned but "
@@ -303,6 +312,7 @@ def _cmd_pins(args: argparse.Namespace) -> int:
     if not peer:
         print(f"counted_ledger: cannot re-pin: {why}", file=sys.stderr)
         return 2
+    conn, _ = read_transcript(args.conn_raw)
     ledger_dir = pathlib.Path(args.ledger)
     for name in FAMILIES:
         path = ledger_dir / f"{name}.json"
@@ -311,7 +321,8 @@ def _cmd_pins(args: argparse.Namespace) -> int:
         fam = json.loads(path.read_text())
         moved = []
         for r in fam["rows"]:
-            got = peer.get((r.get("arm"), r.get("metric"))) if r["source"] == "measured" else None
+            got = (transcript_for(fam, r, peer, conn).get((r.get("arm"), r.get("metric")))
+                   if r["source"] == "measured" else None)
             if got is None:
                 continue
             v = got["median"]
@@ -337,15 +348,17 @@ def _cmd_emit(args: argparse.Namespace) -> int:
     if not peer:
         print(f"::notice::counted_ledger: no transcript to record ({why})")
         return 0
+    conn, _ = read_transcript(args.conn_raw)
     ledger = load_ledger(pathlib.Path(args.ledger), pathlib.Path(args.ram_pins))
     series = []
     for fam in ledger:
         for r in fam["rows"]:
-            got = peer.get((r.get("arm"), r.get("metric"))) if r["source"] == "measured" else None
+            got = (transcript_for(fam, r, peer, conn).get((r.get("arm"), r.get("metric")))
+                   if r["source"] == "measured" else None)
             # A zero has no ratio for the chart store to trend against; the gate asserts it.
             if got is not None and got["median"] != 0:
                 series.append({"name": series_name(fam["family"], r["arm"], r["metric"]),
-                               "unit": fam["unit"], "value": got["median"]})
+                               "unit": r.get("unit", fam["unit"]), "value": got["median"]})
     merge = pathlib.Path(args.merge)
     existing = json.loads(merge.read_text()) if merge.exists() else []
     have = {m["name"] for m in existing}
@@ -373,6 +386,8 @@ def _fmt(v: float | None, fam: dict, r: dict) -> str:
     """@brief One value as the page prints it: copies as a multiple of the payload."""
     if v is None:
         return "—"
+    if r.get("unit"):
+        return f"{v:g} {r['unit']}"
     if fam.get("per_payload") and r.get("payload"):
         return f"{v / r['payload']:.2f}× ({v:g} B)"
     return f"{v:g}"
@@ -386,6 +401,7 @@ def render_markdown(ledger: list[dict], history: dict | None) -> str:
         lines = [f"### {fam['title']}", "",
                  f"Unit: {fam['unit']}{' (shown as a multiple of the payload)' if fam.get('per_payload') else ''}. "
                  f"Pins: `bench/ledger/{fam['family']}.json`."
+                 + (f" Counts: {fam['_counts']}" if fam.get("_counts") else "")
                  + (f" Goals: {fam['_goal']}" if fam.get("_goal") else ""), "",
                  "| Row | Target | Source | Current | Goal (#2136) | Moved by | Banked on `main` |",
                  "| --- | --- | --- | --- | --- | --- | --- |"]
@@ -430,11 +446,13 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("pins", help="re-pin the measured rows from a transcript")
     p.add_argument("--raw", required=True)
+    p.add_argument("--conn-raw", help="bench_conn_ram transcript (for the measured RAM rows)")
     p.add_argument("--write", action="store_true", help="rewrite the pin files")
     p.set_defaults(func=_cmd_pins)
 
     e = sub.add_parser("emit", help="merge the measured rows into the chart-store JSON")
     e.add_argument("--raw")
+    e.add_argument("--conn-raw", help="bench_conn_ram transcript (for the measured RAM rows)")
     e.add_argument("--merge", default=str(HERE / "benchmark_output.json"))
     e.set_defaults(func=_cmd_emit)
 

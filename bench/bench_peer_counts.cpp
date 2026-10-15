@@ -11,7 +11,7 @@
  * COUNT, not a time: a count does not move with host load, so the ledger can gate it per PR on a
  * hosted runner without an A/A pair.
  *
- * Relay rows. Node B (this process) is measured. It has a server link `in`, a vertex
+ * Relay rows. Node B (this process) is measured. It has an ingress link `in`, a vertex
  * `/sensor/temp` (STORED_VALUE) with one local callback subscriber, and one remote
  * subscriber bound with `subscribe_toward` to node C. Writer A and node C run in a
  * second process (this binary re-executed with `--peer`), so nothing they do lands in
@@ -21,18 +21,29 @@
  * and B's local subscriber has seen it, so every receive reads exactly one frame and a
  * count does not depend on how the kernel batched bytes.
  *
- *   `-cli` rows: B reaches C over a client link (B dials C).
- *   `-srv` rows: C dials a second server link on B, and B forwards over it.
+ *   `<k>-relay-cli` rows: A reaches B over link kind k, and B reaches C over a client
+ *   link of the same kind (B dials C).
+ *   `<k>-relay-srv` rows: C dials a second server link on B, and B forwards over it.
+ *   `udp-relay-<out>` rows: A writes over UDP, and B forwards over `<out>` (tcp-cli,
+ *   tcp-srv, ws-cli, ws-srv or udp). Every UDP link here sets `max_frame` to 32 KiB, so
+ *   the 4 KiB and 16 KiB datagrams are admitted; at the 1,472 B default they are refused.
  *
- * What is counted, inside the armed window only, on B's threads only:
+ * What is counted, inside the armed window only:
  *   - `copy_bytes@N` / `copy_calls@N`: bytes and calls through `memcpy` / `memmove`
  *     (and their fortified `_chk` forms), interposed in this executable. libtracer is a
  *     static archive, so every variable-size copy it makes binds here. Constant-size
  *     copies the compiler inlines are invisible, which hides only headers.
- *   - `syscalls@N`: calls to the socket and I/O wrappers B's threads make (recv, send,
- *     sendmsg, writev, poll, ...), interposed the same way. The harness's own pipe I/O
- *     uses raw `syscall(2)` and is not counted. futex is not interposed (the peer-cost
- *     study measured 0.00 futex calls per frame on every link).
+ *   - `syscalls@N`: calls B's link threads make to every libc syscall wrapper the peer
+ *     path can reach: socket I/O (recv*, send*, read*, write*, recvmmsg, sendmmsg),
+ *     waiting (poll, ppoll, select, pselect, epoll_wait, epoll_pwait, epoll_pwait2,
+ *     epoll_ctl, eventfd_read, eventfd_write), connection setup and teardown (accept,
+ *     accept4, connect, shutdown, close, setsockopt, getsockopt) and yielding or sleeping
+ *     (sched_yield, nanosleep, clock_nanosleep), interposed the same way. The main thread
+ *     is excluded: it is the harness, and it only drives the pacing pipe. NOT counted:
+ *     futex. glibc issues it from inside pthread (mutexes, condition variables) with an
+ *     inline syscall, so no wrapper sees it, and an unprivileged process cannot count it
+ *     from the kernel (`perf_event_paranoid` 2 hides the syscall tracepoints). The
+ *     peer-cost study measured 0.00 futex calls per frame on every link with strace.
  *   - `vcsw@N`: voluntary context switches of every thread except main, read from
  *     `/proc/self/task/<tid>/status`. Main only blocks on the harness pipe.
  *
@@ -50,8 +61,10 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sched.h>
 #include <spawn.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -61,10 +74,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <memory>
 #include <string>
@@ -89,6 +104,8 @@ std::atomic<bool> g_armed{false};
 std::atomic<long long> g_copy_bytes{0};
 std::atomic<long long> g_copy_calls{0};
 std::atomic<long long> g_syscalls{0};
+/** @brief Set on the harness's main thread, whose calls are never charged to node B. */
+thread_local bool t_harness = false;
 
 /** @brief Charge one copy to the window. */
 inline void note_copy(std::size_t n) noexcept {
@@ -97,9 +114,10 @@ inline void note_copy(std::size_t n) noexcept {
     g_copy_calls.fetch_add(1, std::memory_order_relaxed);
 }
 
-/** @brief Charge one socket or I/O syscall to the window. */
+/** @brief Charge one syscall made by one of B's link threads to the window. */
 inline void note_syscall() noexcept {
-    if (g_armed.load(std::memory_order_relaxed)) g_syscalls.fetch_add(1, std::memory_order_relaxed);
+    if (g_armed.load(std::memory_order_relaxed) && !t_harness)
+        g_syscalls.fetch_add(1, std::memory_order_relaxed);
 }
 
 /** @brief A forward byte copy that never calls memcpy itself. */
@@ -161,13 +179,24 @@ extern "C" void* __memmove_chk(void* d, const void* s, std::size_t n, std::size_
     return move_bytes(d, s, n);
 }
 
-#define BENCH_INTERPOSE(ret, name, params, args)          \
-    extern "C" ret name params {                          \
-        static auto real = next_fn<ret(*) params>(#name); \
-        note_syscall();                                   \
-        return real args;                                 \
+// `BENCH_INTERPOSE` wraps a declaration glibc makes without `__THROW`, `BENCH_INTERPOSE_NT`
+// one it makes with it (the definition must repeat the `noexcept`). A wrapper whose libc
+// has no such entry point fails the call with ENOSYS, as the kernel would.
+#define BENCH_INTERPOSE_IMPL(ret, name, params, args, spec) \
+    extern "C" ret name params spec {                       \
+        static auto real = next_fn<ret(*) params>(#name);   \
+        note_syscall();                                     \
+        if (real == nullptr) {                              \
+            errno = ENOSYS;                                 \
+            return static_cast<ret>(-1);                    \
+        }                                                   \
+        return real args;                                   \
     }
+#define BENCH_INTERPOSE(ret, name, params, args) BENCH_INTERPOSE_IMPL(ret, name, params, args, )
+#define BENCH_INTERPOSE_NT(ret, name, params, args) \
+    BENCH_INTERPOSE_IMPL(ret, name, params, args, noexcept)
 
+// Socket and file I/O.
 BENCH_INTERPOSE(ssize_t, read, (int fd, void* b, size_t n), (fd, b, n))
 BENCH_INTERPOSE(ssize_t, write, (int fd, const void* b, size_t n), (fd, b, n))
 BENCH_INTERPOSE(ssize_t, readv, (int fd, const struct iovec* v, int c), (fd, v, c))
@@ -178,11 +207,16 @@ BENCH_INTERPOSE(ssize_t, recvfrom,
                  socklen_t* __restrict l),
                 (fd, b, n, f, a, l))
 BENCH_INTERPOSE(ssize_t, recvmsg, (int fd, struct msghdr* m, int f), (fd, m, f))
+BENCH_INTERPOSE(int, recvmmsg,
+                (int fd, struct mmsghdr* v, unsigned int n, int f, struct timespec* t),
+                (fd, v, n, f, t))
 BENCH_INTERPOSE(ssize_t, send, (int fd, const void* b, size_t n, int f), (fd, b, n, f))
 BENCH_INTERPOSE(ssize_t, sendto,
                 (int fd, const void* b, size_t n, int f, const struct sockaddr* a, socklen_t l),
                 (fd, b, n, f, a, l))
 BENCH_INTERPOSE(ssize_t, sendmsg, (int fd, const struct msghdr* m, int f), (fd, m, f))
+BENCH_INTERPOSE(int, sendmmsg, (int fd, struct mmsghdr* v, unsigned int n, int f), (fd, v, n, f))
+// Waiting.
 BENCH_INTERPOSE(int, poll, (struct pollfd * p, nfds_t n, int t), (p, n, t))
 BENCH_INTERPOSE(int, ppoll,
                 (struct pollfd * p, nfds_t n, const struct timespec* t, const sigset_t* s),
@@ -191,7 +225,38 @@ BENCH_INTERPOSE(int, select,
                 (int n, fd_set* __restrict r, fd_set* __restrict w, fd_set* __restrict e,
                  struct timeval* __restrict t),
                 (n, r, w, e, t))
+BENCH_INTERPOSE(int, pselect,
+                (int n, fd_set* __restrict r, fd_set* __restrict w, fd_set* __restrict e,
+                 const struct timespec* __restrict t, const sigset_t* __restrict s),
+                (n, r, w, e, t, s))
 BENCH_INTERPOSE(int, epoll_wait, (int e, struct epoll_event* v, int m, int t), (e, v, m, t))
+BENCH_INTERPOSE(int, epoll_pwait, (int e, struct epoll_event* v, int m, int t, const sigset_t* s),
+                (e, v, m, t, s))
+BENCH_INTERPOSE(int, epoll_pwait2,
+                (int e, struct epoll_event* v, int m, const struct timespec* t, const sigset_t* s),
+                (e, v, m, t, s))
+BENCH_INTERPOSE_NT(int, epoll_ctl, (int e, int op, int fd, struct epoll_event* v), (e, op, fd, v))
+BENCH_INTERPOSE(int, eventfd_read, (int fd, eventfd_t* v), (fd, v))
+BENCH_INTERPOSE(int, eventfd_write, (int fd, eventfd_t v), (fd, v))
+// Connection setup and teardown.
+BENCH_INTERPOSE(int, accept, (int fd, struct sockaddr* __restrict a, socklen_t* __restrict l),
+                (fd, a, l))
+BENCH_INTERPOSE(int, accept4,
+                (int fd, struct sockaddr* __restrict a, socklen_t* __restrict l, int f),
+                (fd, a, l, f))
+BENCH_INTERPOSE(int, connect, (int fd, const struct sockaddr* a, socklen_t l), (fd, a, l))
+BENCH_INTERPOSE_NT(int, shutdown, (int fd, int how), (fd, how))
+BENCH_INTERPOSE(int, close, (int fd), (fd))
+BENCH_INTERPOSE_NT(int, setsockopt, (int fd, int lv, int nm, const void* v, socklen_t l),
+                   (fd, lv, nm, v, l))
+BENCH_INTERPOSE_NT(int, getsockopt,
+                   (int fd, int lv, int nm, void* __restrict v, socklen_t* __restrict l),
+                   (fd, lv, nm, v, l))
+// Yielding and sleeping.
+BENCH_INTERPOSE_NT(int, sched_yield, (void), ())
+BENCH_INTERPOSE(int, nanosleep, (const struct timespec* r, struct timespec* m), (r, m))
+BENCH_INTERPOSE(int, clock_nanosleep,
+                (clockid_t c, int f, const struct timespec* r, struct timespec* m), (c, f, r, m))
 
 extern "C" ssize_t __read_chk(int fd, void* b, size_t n, size_t) { return read(fd, b, n); }
 extern "C" ssize_t __recv_chk(int fd, void* b, size_t n, size_t, int f) {
@@ -203,7 +268,9 @@ extern "C" ssize_t __recvfrom_chk(int fd, void* __restrict b, size_t n, size_t, 
 }
 extern "C" int __poll_chk(struct pollfd* p, nfds_t n, int t, size_t) { return poll(p, n, t); }
 
+#undef BENCH_INTERPOSE_NT
 #undef BENCH_INTERPOSE
+#undef BENCH_INTERPOSE_IMPL
 
 namespace {
 
@@ -304,22 +371,45 @@ std::vector<std::byte> fwd_write(std::span<const std::byte> value) {
 }
 
 /** @brief The link kinds a relay row can run on. */
-enum class kind_t { TCP, WS };
+enum class kind_t { TCP, WS, UDP };
 
-/** @brief A relay row: ingress kind, and whether B forwards over a server link. */
+/** @brief The `--peer` argument spelling of @p k. */
+const char* kind_name(kind_t k) {
+    return k == kind_t::TCP ? "tcp" : k == kind_t::WS ? "ws" : "udp";
+}
+
+/** @brief @p s parsed back from @ref kind_name. */
+kind_t kind_of(std::string_view s) {
+    return s == "tcp" ? kind_t::TCP : s == "ws" ? kind_t::WS : kind_t::UDP;
+}
+
+/**
+ * @brief A relay row: the ingress kind (A to B), the egress kind (B to C), and whether B
+ *        forwards over a server link C dialed. UDP has no server side, so a UDP egress is
+ *        always B's own link aimed at C.
+ */
 struct relay_t {
     const char* arm;
-    kind_t kind;
+    kind_t in;
+    kind_t out;
     bool srv_egress;
 };
 
 constexpr relay_t kRelays[] = {
-    {"tcp-relay-cli", kind_t::TCP, false},
-    {"tcp-relay-srv", kind_t::TCP, true},
-    {"ws-relay-cli", kind_t::WS, false},
-    {"ws-relay-srv", kind_t::WS, true},
+    {"tcp-relay-cli", kind_t::TCP, kind_t::TCP, false},
+    {"tcp-relay-srv", kind_t::TCP, kind_t::TCP, true},
+    {"ws-relay-cli", kind_t::WS, kind_t::WS, false},
+    {"ws-relay-srv", kind_t::WS, kind_t::WS, true},
+    {"udp-relay-tcp-cli", kind_t::UDP, kind_t::TCP, false},
+    {"udp-relay-tcp-srv", kind_t::UDP, kind_t::TCP, true},
+    {"udp-relay-ws-cli", kind_t::UDP, kind_t::WS, false},
+    {"udp-relay-ws-srv", kind_t::UDP, kind_t::WS, true},
+    {"udp-relay-udp", kind_t::UDP, kind_t::UDP, false},
 };
 constexpr std::size_t kPayloads[] = {64, 1024, 4096, 16384};
+
+/** @brief The UDP receive cap every UDP link here sets, so a 16 KiB frame is admitted. */
+constexpr std::size_t kUdpMaxFrame = 32 * 1024;
 
 /** @brief One relay measurement, per frame. */
 struct relay_sample_t {
@@ -333,26 +423,40 @@ struct count_sink_t {
     void operator()(tr::view::rope_t) const { n->fetch_add(1, std::memory_order_release); }
 };
 
-/** @brief The bound port of a server link of either kind. */
+/** @brief The bound port of a server link of either stream kind, or of a UDP link. */
 std::uint16_t port_of(kind_t k, transport_t& t) {
-    return k == kind_t::TCP ? static_cast<tr::net::tcp_server_transport_t&>(t).local_port()
-                            : static_cast<tr::net::ws_server_transport_t&>(t).local_port();
+    if (k == kind_t::TCP) return static_cast<tr::net::tcp_server_transport_t&>(t).local_port();
+    if (k == kind_t::WS) return static_cast<tr::net::ws_server_transport_t&>(t).local_port();
+    return static_cast<tr::net::udp_transport_t&>(t).local_port();
 }
 
+/** @brief A UDP link bound to an ephemeral port, aimed at @p port (0: learns its peer). */
+tr::mem::poly_ptr_t<transport_t> udp_of(std::uint16_t port) {
+    return tr::mem::make_poly<tr::net::udp_transport_t>(
+        tr::mem::heap_source(), std::uint16_t{0}, port != 0 ? "127.0.0.1" : "", port,
+        tr::net::udp_config_t{.max_frame = kUdpMaxFrame});
+}
+
+/** @brief The listening side of kind @p k: a server link, or a UDP link that learns its peer. */
 tr::mem::poly_ptr_t<transport_t> server_of(kind_t k) {
     if (k == kind_t::TCP)
         return tr::mem::make_poly<tr::net::tcp_server_transport_t>(tr::mem::heap_source(),
                                                                    std::uint16_t{0});
-    return tr::mem::make_poly<tr::net::ws_server_transport_t>(tr::mem::heap_source(),
-                                                              std::uint16_t{0});
+    if (k == kind_t::WS)
+        return tr::mem::make_poly<tr::net::ws_server_transport_t>(tr::mem::heap_source(),
+                                                                  std::uint16_t{0});
+    return udp_of(0);
 }
 
+/** @brief The dialing side of kind @p k, aimed at 127.0.0.1:@p port. */
 tr::mem::poly_ptr_t<transport_t> client_of(kind_t k, std::uint16_t port) {
     if (k == kind_t::TCP)
         return tr::mem::make_poly<tr::net::tcp_transport_t>(tr::mem::heap_source(), "127.0.0.1",
                                                             port);
-    return tr::mem::make_poly<tr::net::ws_client_transport_t>(tr::mem::heap_source(), "127.0.0.1",
-                                                              port);
+    if (k == kind_t::WS)
+        return tr::mem::make_poly<tr::net::ws_client_transport_t>(tr::mem::heap_source(),
+                                                                  "127.0.0.1", port);
+    return udp_of(port);
 }
 
 /**
@@ -360,25 +464,25 @@ tr::mem::poly_ptr_t<transport_t> client_of(kind_t k, std::uint16_t port) {
  *
  * Protocol: peer prints `C <port>` (0 when C dials B instead), reads `B <in> <c_srv>`,
  * dials, prints `R`, then for every `f` it reads sends one frame and answers `a` once
- * C has received it; `q` ends it.
+ * C has received it; `q`, or the pipe closing, ends it.
  */
-int peer_main(kind_t kind, bool srv_egress, std::size_t payload, int in_fd, int out_fd) {
+int peer_main(kind_t in, kind_t out, bool srv_egress, std::size_t payload, int in_fd, int out_fd) {
     std::atomic<std::uint64_t> c_rx{0};
     count_sink_t sink{&c_rx};
     tr::mem::poly_ptr_t<transport_t> c_server;
     if (!srv_egress) {
-        c_server = server_of(kind);
+        c_server = server_of(out);
         c_server->set_rope_receiver(sink);
     }
-    pipe_put(out_fd, "C " + std::to_string(c_server ? port_of(kind, *c_server) : 0) + "\n");
+    pipe_put(out_fd, "C " + std::to_string(c_server ? port_of(out, *c_server) : 0) + "\n");
     unsigned in_port = 0, c_port = 0;
     if (std::sscanf(pipe_line(in_fd).c_str(), "B %u %u", &in_port, &c_port) != 2) return 3;
     tr::mem::poly_ptr_t<transport_t> c_client;
     if (srv_egress) {
-        c_client = client_of(kind, static_cast<std::uint16_t>(c_port));
+        c_client = client_of(out, static_cast<std::uint16_t>(c_port));
         c_client->set_rope_receiver(sink);
     }
-    tr::mem::poly_ptr_t<transport_t> a = client_of(kind, static_cast<std::uint16_t>(in_port));
+    tr::mem::poly_ptr_t<transport_t> a = client_of(in, static_cast<std::uint16_t>(in_port));
     std::this_thread::sleep_for(300ms);
     pipe_put(out_fd, "R\n");
     const std::vector<std::byte> frame = fwd_write(value_tlv(payload));
@@ -396,21 +500,51 @@ int peer_main(kind_t kind, bool srv_egress, std::size_t payload, int in_fd, int 
     std::_Exit(0);  // skip teardown: the parent has its numbers
 }
 
-/** @brief Spawn this binary as the peer process for one relay row. */
-pid_t spawn_peer(const char* self, const relay_t& r, std::size_t payload, int& to_peer,
-                 int& from_peer) {
-    int down[2], up[2];
-    if (::pipe2(down, O_CLOEXEC) != 0 || ::pipe2(up, O_CLOEXEC) != 0) return -1;
+/**
+ * @brief The peer process of one relay row and its two pipe ends, owned: on every exit path
+ *        both ends close and the child is reaped.
+ *
+ * Closing the write end is what stops the child: its next pipe read sees end-of-file and it
+ * exits, so the reap that follows cannot hang on a child still waiting for a command.
+ */
+struct peer_proc_t {
+    pid_t pid = -1;
+    int to_peer = -1;
+    int from_peer = -1;
+
+    peer_proc_t() = default;
+    peer_proc_t(const peer_proc_t&) = delete;
+    peer_proc_t& operator=(const peer_proc_t&) = delete;
+    ~peer_proc_t() {
+        if (to_peer >= 0) ::close(to_peer);
+        if (from_peer >= 0) ::close(from_peer);
+        int status = 0;
+        if (pid > 0) (void)::waitpid(pid, &status, 0);
+    }
+};
+
+/** @brief Spawn this binary as the peer process for one relay row into @p p. */
+bool spawn_peer(const char* self, const relay_t& r, std::size_t payload, peer_proc_t& p) {
+    int down[2] = {-1, -1}, up[2] = {-1, -1};
+    if (::pipe2(down, O_CLOEXEC) != 0) return false;
+    p.to_peer = down[1];
+    if (::pipe2(up, O_CLOEXEC) != 0) {
+        ::close(down[0]);
+        return false;
+    }
+    p.from_peer = up[0];
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_adddup2(&fa, down[0], 3);
     posix_spawn_file_actions_adddup2(&fa, up[1], 4);
-    std::string kind = r.kind == kind_t::TCP ? "tcp" : "ws";
+    std::string in = kind_name(r.in);
+    std::string out = kind_name(r.out);
     std::string egress = r.srv_egress ? "srv" : "cli";
     std::string size = std::to_string(payload);
     char* argv[] = {const_cast<char*>(self),
                     const_cast<char*>("--peer"),
-                    kind.data(),
+                    in.data(),
+                    out.data(),
                     egress.data(),
                     size.data(),
                     nullptr};
@@ -419,9 +553,9 @@ pid_t spawn_peer(const char* self, const relay_t& r, std::size_t payload, int& t
     posix_spawn_file_actions_destroy(&fa);
     ::close(down[0]);
     ::close(up[1]);
-    to_peer = down[1];
-    from_peer = up[0];
-    return rc == 0 ? pid : -1;
+    if (rc != 0) return false;
+    p.pid = pid;
+    return true;
 }
 
 /** @brief Wait until @p n reaches @p want, or give up after @p limit. */
@@ -439,65 +573,57 @@ bool await_count(const std::atomic<std::uint64_t>& n, std::uint64_t want,
 relay_sample_t run_relay(const char* self, const relay_t& r, std::size_t payload,
                          std::size_t frames) {
     relay_sample_t out;
-    int to_peer = -1, from_peer = -1;
-    const pid_t pid = spawn_peer(self, r, payload, to_peer, from_peer);
-    if (pid < 0) return out;
+    // Declared before node B, so B's links are gone before the child is reaped.
+    peer_proc_t peer;
+    if (!spawn_peer(self, r, payload, peer)) return out;
     unsigned c_port = 0;
-    if (std::sscanf(pipe_line(from_peer).c_str(), "C %u", &c_port) != 1) return out;
-    {
-        graph_t gb;
-        tr::net::fwd_router_t rb(gb);
-        tr::mem::poly_ptr_t<transport_t> to_c =
-            r.srv_egress ? server_of(r.kind)
-                         : client_of(r.kind, static_cast<std::uint16_t>(c_port));
-        const std::string mount =
-            std::string("net/") + (r.kind == kind_t::TCP ? "tcp" : "ws") + "/c";
-        tr::mem::poly_ptr_t<transport_t> in = server_of(r.kind);
-        if (!rb.add_child(mount, *to_c) || !rb.add_child("in", *in)) return out;
-        (void)gb.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-        std::atomic<std::uint64_t> local{0};
-        auto on_temp = [&](const tr::graph::value_t&) {
-            local.fetch_add(1, std::memory_order_release);
-        };
-        auto sub = gb.subscribe(path_t("/sensor/temp"), on_temp);
-        if (!sub) return out;
-        auto bound = rb.subscribe_toward(path_t("/sensor/temp"),
-                                         path_t(("/" + mount + "/sink/temp").c_str()));
-        if (!bound) return out;
-        pipe_put(to_peer, "B " + std::to_string(port_of(r.kind, *in)) + " " +
-                              std::to_string(r.srv_egress ? port_of(r.kind, *to_c) : 0) + "\n");
-        if (pipe_line(from_peer) != "R") return out;
+    if (std::sscanf(pipe_line(peer.from_peer).c_str(), "C %u", &c_port) != 1) return out;
+    graph_t gb;
+    tr::net::fwd_router_t rb(gb);
+    tr::mem::poly_ptr_t<transport_t> to_c =
+        r.srv_egress ? server_of(r.out) : client_of(r.out, static_cast<std::uint16_t>(c_port));
+    const std::string mount = std::string("net/") + kind_name(r.out) + "/c";
+    tr::mem::poly_ptr_t<transport_t> in = server_of(r.in);
+    if (!rb.add_child(mount, *to_c) || !rb.add_child("in", *in)) return out;
+    (void)gb.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    std::atomic<std::uint64_t> local{0};
+    auto on_temp = [&](const tr::graph::value_t&) {
+        local.fetch_add(1, std::memory_order_release);
+    };
+    auto sub = gb.subscribe(path_t("/sensor/temp"), on_temp);
+    if (!sub) return out;
+    auto bound =
+        rb.subscribe_toward(path_t("/sensor/temp"), path_t(("/" + mount + "/sink/temp").c_str()));
+    if (!bound) return out;
+    pipe_put(peer.to_peer, "B " + std::to_string(port_of(r.in, *in)) + " " +
+                               std::to_string(r.srv_egress ? port_of(r.out, *to_c) : 0) + "\n");
+    if (pipe_line(peer.from_peer) != "R") return out;
 
-        bool ok = true;
-        auto drive = [&](std::size_t count) {
-            for (std::size_t i = 0; i < count && ok; ++i) {
-                const std::uint64_t want = local.load(std::memory_order_acquire) + 1;
-                pipe_put(to_peer, "f");
-                ok = pipe_byte(from_peer) == 'a' && await_count(local, want, 5000ms);
-            }
-        };
-        drive(16);  // warm-up: lazy draws, slot creation, buffer growth
-        std::this_thread::sleep_for(20ms);
-        g_copy_bytes = 0;
-        g_copy_calls = 0;
-        g_syscalls = 0;
-        const auto s0 = voluntary_switches();
-        g_armed.store(true);
-        drive(frames);
-        g_armed.store(false);
-        const auto s1 = voluntary_switches();
-        pipe_put(to_peer, "q");
-        int status = 0;
-        (void)::waitpid(pid, &status, 0);
-        const double f = static_cast<double>(frames);
-        out.copy_bytes = static_cast<double>(g_copy_bytes.load()) / f;
-        out.copy_calls = static_cast<double>(g_copy_calls.load()) / f;
-        out.syscalls = static_cast<double>(g_syscalls.load()) / f;
-        out.vcsw = static_cast<double>(switches_off_main(s0, s1)) / f;
-        out.ok = ok;
-    }
-    ::close(to_peer);
-    ::close(from_peer);
+    bool ok = true;
+    auto drive = [&](std::size_t count) {
+        for (std::size_t i = 0; i < count && ok; ++i) {
+            const std::uint64_t want = local.load(std::memory_order_acquire) + 1;
+            pipe_put(peer.to_peer, "f");
+            ok = pipe_byte(peer.from_peer) == 'a' && await_count(local, want, 5000ms);
+        }
+    };
+    drive(16);  // warm-up: lazy draws, slot creation, buffer growth
+    std::this_thread::sleep_for(20ms);
+    g_copy_bytes = 0;
+    g_copy_calls = 0;
+    g_syscalls = 0;
+    const auto s0 = voluntary_switches();
+    g_armed.store(true);
+    drive(frames);
+    g_armed.store(false);
+    const auto s1 = voluntary_switches();
+    pipe_put(peer.to_peer, "q");
+    const double f = static_cast<double>(frames);
+    out.copy_bytes = static_cast<double>(g_copy_bytes.load()) / f;
+    out.copy_calls = static_cast<double>(g_copy_calls.load()) / f;
+    out.syscalls = static_cast<double>(g_syscalls.load()) / f;
+    out.vcsw = static_cast<double>(switches_off_main(s0, s1)) / f;
+    out.ok = ok;
     return out;
 }
 
@@ -514,7 +640,7 @@ double run_idle(std::string_view kind, std::size_t peers) {
             links.push_back(std::move(a));
         }
     } else {
-        const kind_t k = kind == "tcp" ? kind_t::TCP : kind_t::WS;
+        const kind_t k = kind_of(kind);
         auto s = server_of(k);
         s->set_rope_receiver(sink);
         const std::uint16_t port = port_of(k, *s);
@@ -542,11 +668,10 @@ void report(const char* arm, const std::string& metric, std::vector<double> v) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc >= 5 && std::string_view(argv[1]) == "--peer") {
-        const kind_t k = std::string_view(argv[2]) == "tcp" ? kind_t::TCP : kind_t::WS;
-        return peer_main(k, std::string_view(argv[3]) == "srv", std::strtoul(argv[4], nullptr, 10),
-                         3, 4);
-    }
+    if (argc >= 6 && std::string_view(argv[1]) == "--peer")
+        return peer_main(kind_of(argv[2]), kind_of(argv[3]), std::string_view(argv[4]) == "srv",
+                         std::strtoul(argv[5], nullptr, 10), 3, 4);
+    t_harness = true;  // this thread drives the pipe; B's own threads are the link threads
     std::size_t reps = 3, frames = 200;
     bool idle = true;
     for (int i = 1; i < argc; ++i) {

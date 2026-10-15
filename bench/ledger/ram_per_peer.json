@@ -1,5 +1,5 @@
 {
-  "_comment": "Counted-metrics ledger, family 'ram_per_peer' (#2137). WIDE rows are NOT pinned here: they read their value from bench/ram_census_pins.json (bench_conn_ram, #2134) and are gated in the mode that file's activation block declares, with its band. MID rows are static counts.",
+  "_comment": "Counted-metrics ledger, family 'ram_per_peer' (#2137). The WIDE rows bench/ram_census_pins.json already pins (bench_conn_ram, #2134) are NOT pinned here: they read their value from that file and are gated in the mode its activation block declares, with its band. The WIDE rows that file does not pin (remote subscriptions, the buffer a peer keeps after a 16 KiB frame, #2171) are measured rows, read from the bench_conn_ram transcript and pinned here. MID rows are static counts.",
   "family": "ram_per_peer",
   "title": "RAM per peer",
   "unit": "bytes",
@@ -7,7 +7,7 @@
   "instrument": "bench_conn_ram",
   "band_abs": 0,
   "band_pct": 0,
-  "_goal": "From #2136 user stories 1, 2, 4 and 27.",
+  "_goal": "From #2136 user stories 1, 2, 4, 27 and 28.",
   "rows": [
     {
       "id": "tcp-server per peer",
@@ -60,6 +60,97 @@
       "note": "Goal: no receive segment at rest; 232 B is what the pool arm reads."
     },
     {
+      "id": "tcp remote subscription",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-remote-sub",
+      "metric": "per_sub",
+      "value": 958,
+      "goal": null,
+      "moved_by": "#2171 (first pin)",
+      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
+    },
+    {
+      "id": "ws remote subscription",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-remote-sub",
+      "metric": "per_sub",
+      "value": 1020,
+      "goal": null,
+      "moved_by": "#2171 (first pin)",
+      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
+    },
+    {
+      "id": "udp remote subscription",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-remote-sub",
+      "metric": "per_sub",
+      "value": 958,
+      "goal": null,
+      "moved_by": "#2171 (first pin)",
+      "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
+    },
+    {
+      "id": "tcp remote subscription, blocks",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-remote-sub",
+      "metric": "sub_blocks",
+      "unit": "blocks",
+      "value": 6,
+      "goal": 2,
+      "moved_by": "#2171 (first pin)",
+      "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
+    },
+    {
+      "id": "ws remote subscription, blocks",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-remote-sub",
+      "metric": "sub_blocks",
+      "unit": "blocks",
+      "value": 6,
+      "goal": 2,
+      "moved_by": "#2171 (first pin)",
+      "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
+    },
+    {
+      "id": "udp remote subscription, blocks",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-remote-sub",
+      "metric": "sub_blocks",
+      "unit": "blocks",
+      "value": 6,
+      "goal": 2,
+      "moved_by": "#2171 (first pin)",
+      "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
+    },
+    {
+      "id": "ws-server peer after a 16 KiB frame",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-server",
+      "metric": "retained@16384",
+      "value": 18432,
+      "goal": 0,
+      "moved_by": "#2171 (first pin)",
+      "note": "Bytes a peer still holds once one 16 KiB frame has passed, above its idle per-peer cost. Goal from #2136 user story 2: it drops back to the idle base."
+    },
+    {
+      "id": "tcp-server peer after a 16 KiB frame",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-server",
+      "metric": "retained@16384",
+      "value": 0,
+      "goal": 0,
+      "moved_by": "#2171 (first pin)",
+      "note": "Bytes a peer still holds once one 16 KiB frame has passed, above its idle per-peer cost. Goal from #2136 user story 2: it drops back to the idle base."
+    },
+    {
       "id": "httpd-ws session",
       "target": "MID",
       "source": "static",
@@ -86,5 +177,7 @@
       "moved_by": "#2137 (seeded from the peer-cost study)",
       "basis": "Worker task + the socket's recv task, 12288 B each. Goal: the wait module (#2136) leaves no per-connection task."
     }
-  ]
+  ],
+  "toolchain": "c++ 13.3.0",
+  "_toolchain": "Byte counts follow sizeof, so a run on another toolchain is reported in warn mode and never turns CI red."
 }

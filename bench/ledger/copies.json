@@ -10,7 +10,7 @@
   "band_abs": 0,
   "band_pct": 0,
   "_band": "0: a copy count is exact. Every pinned row read min = max over 3 repetitions, and its median matched the peer-cost study's TCP figures byte for byte. The WS rows read lower than the study's (3150 against 3266 B at 1 KiB) because this run is paced, so the stream buffer never holds a second frame's tail when it compacts.",
-  "_goal": "From #2136: ingress receives straight into an exact-length segment (0 copies), a server egress is one shared frame (0), a WS client send gathers and masks in one pass (1x), the 48 B TCP client handoff head stays. The stored value is assumed still copied below the 4 KiB share knee: the copy-or-share trait may remove that copy too, and a row that beats its goal is simply re-pinned.",
+  "_goal": "From #2136: ingress receives straight into an exact-length segment (0 copies), a server egress is one shared frame (0), a WS client send gathers and masks in one pass (1x), the 48 B TCP client handoff head stays. The stored value is assumed still copied below the 4 KiB share knee: the copy-or-share trait may remove that copy too, and a row that beats its goal is simply re-pinned. UDP ingress already receives into a max_frame segment (#2136 ingress), so a UDP-in relay row holds only the egress side's goal.",
   "rows": [
     {
       "id": "tcp-relay-srv @64",
@@ -189,6 +189,226 @@
       "moved_by": "#2137 (seeded from the peer-cost study)"
     },
     {
+      "id": "udp-relay-tcp-srv @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-tcp-srv",
+      "metric": "copy_bytes@64",
+      "payload": 64,
+      "value": 68,
+      "goal": 64,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-tcp-srv @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-tcp-srv",
+      "metric": "copy_bytes@1024",
+      "payload": 1024,
+      "value": 1028,
+      "goal": 1024,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-tcp-srv @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-tcp-srv",
+      "metric": "copy_bytes@4096",
+      "payload": 4096,
+      "value": 0,
+      "goal": 0,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-tcp-srv @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-tcp-srv",
+      "metric": "copy_bytes@16384",
+      "payload": 16384,
+      "value": 0,
+      "goal": 0,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-tcp-cli @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-tcp-cli",
+      "metric": "copy_bytes@64",
+      "payload": 64,
+      "value": 116,
+      "goal": 112,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-tcp-cli @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-tcp-cli",
+      "metric": "copy_bytes@1024",
+      "payload": 1024,
+      "value": 1076,
+      "goal": 1072,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-tcp-cli @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-tcp-cli",
+      "metric": "copy_bytes@4096",
+      "payload": 4096,
+      "value": 48,
+      "goal": 48,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-tcp-cli @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-tcp-cli",
+      "metric": "copy_bytes@16384",
+      "payload": 16384,
+      "value": 48,
+      "goal": 48,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-ws-srv @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-ws-srv",
+      "metric": "copy_bytes@64",
+      "payload": 64,
+      "value": 68,
+      "goal": 64,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-ws-srv @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-ws-srv",
+      "metric": "copy_bytes@1024",
+      "payload": 1024,
+      "value": 1028,
+      "goal": 1024,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-ws-srv @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-ws-srv",
+      "metric": "copy_bytes@4096",
+      "payload": 4096,
+      "value": 0,
+      "goal": 0,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-ws-srv @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-ws-srv",
+      "metric": "copy_bytes@16384",
+      "payload": 16384,
+      "value": 0,
+      "goal": 0,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-ws-cli @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-ws-cli",
+      "metric": "copy_bytes@64",
+      "payload": 64,
+      "value": 258,
+      "goal": 128,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-ws-cli @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-ws-cli",
+      "metric": "copy_bytes@1024",
+      "payload": 1024,
+      "value": 3138,
+      "goal": 2048,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-ws-cli @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-ws-cli",
+      "metric": "copy_bytes@4096",
+      "payload": 4096,
+      "value": 8254,
+      "goal": 4096,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-ws-cli @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-ws-cli",
+      "metric": "copy_bytes@16384",
+      "payload": 16384,
+      "value": 32830,
+      "goal": 16384,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-udp @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-udp",
+      "metric": "copy_bytes@64",
+      "payload": 64,
+      "value": 68,
+      "goal": 64,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-udp @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-udp",
+      "metric": "copy_bytes@1024",
+      "payload": 1024,
+      "value": 1028,
+      "goal": 1024,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-udp @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-udp",
+      "metric": "copy_bytes@4096",
+      "payload": 4096,
+      "value": 0,
+      "goal": 0,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
+      "id": "udp-relay-udp @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-relay-udp",
+      "metric": "copy_bytes@16384",
+      "payload": 16384,
+      "value": 0,
+      "goal": 0,
+      "moved_by": "#2171 (first pin)"
+    },
+    {
       "id": "httpd-ws rx @64",
       "target": "MID",
       "source": "static",
@@ -227,6 +447,46 @@
       "goal": 16384,
       "moved_by": "#2137 (seeded from the peer-cost study)",
       "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store copies it again, since kShareThresholdBytes is SIZE_MAX on ESP (1). Unfragmented frame."
+    },
+    {
+      "id": "esp_ws_client send @64",
+      "target": "MID",
+      "source": "static",
+      "payload": 64,
+      "value": 64,
+      "goal": 64,
+      "moved_by": "#2171 (first pin)",
+      "basis": "esp_ws_client_link.cpp send: gather_into copies every span of the frame once, into the tx_ slot when another send is writing or into tx_buf_ when this one writes (1). esp_transport_write then masks the buffer in place and unmasks it after the write: two XOR passes, no copy. Payload bytes only, as the other MID rows count them; the frame's FWD envelope is copied with it. The lwIP pbuf copy is the stack's, like the kernel's on WIDE. Goal from #2136 user story 16: gather and mask in one pass, so the copy stays and the two passes go."
+    },
+    {
+      "id": "esp_ws_client send @1024",
+      "target": "MID",
+      "source": "static",
+      "payload": 1024,
+      "value": 1024,
+      "goal": 1024,
+      "moved_by": "#2171 (first pin)",
+      "basis": "esp_ws_client_link.cpp send: gather_into copies every span of the frame once, into the tx_ slot when another send is writing or into tx_buf_ when this one writes (1). esp_transport_write then masks the buffer in place and unmasks it after the write: two XOR passes, no copy. Payload bytes only, as the other MID rows count them; the frame's FWD envelope is copied with it. The lwIP pbuf copy is the stack's, like the kernel's on WIDE. Goal from #2136 user story 16: gather and mask in one pass, so the copy stays and the two passes go."
+    },
+    {
+      "id": "esp_ws_client send @4096",
+      "target": "MID",
+      "source": "static",
+      "payload": 4096,
+      "value": 4096,
+      "goal": 4096,
+      "moved_by": "#2171 (first pin)",
+      "basis": "esp_ws_client_link.cpp send: gather_into copies every span of the frame once, into the tx_ slot when another send is writing or into tx_buf_ when this one writes (1). esp_transport_write then masks the buffer in place and unmasks it after the write: two XOR passes, no copy. Payload bytes only, as the other MID rows count them; the frame's FWD envelope is copied with it. The lwIP pbuf copy is the stack's, like the kernel's on WIDE. Goal from #2136 user story 16: gather and mask in one pass, so the copy stays and the two passes go."
+    },
+    {
+      "id": "esp_ws_client send @16384",
+      "target": "MID",
+      "source": "static",
+      "payload": 16384,
+      "value": 16384,
+      "goal": 16384,
+      "moved_by": "#2171 (first pin)",
+      "basis": "esp_ws_client_link.cpp send: gather_into copies every span of the frame once, into the tx_ slot when another send is writing or into tx_buf_ when this one writes (1). esp_transport_write then masks the buffer in place and unmasks it after the write: two XOR passes, no copy. Payload bytes only, as the other MID rows count them; the frame's FWD envelope is copied with it. The lwIP pbuf copy is the stack's, like the kernel's on WIDE. Goal from #2136 user story 16: gather and mask in one pass, so the copy stays and the two passes go."
     }
   ]
 }

@@ -12,9 +12,10 @@
 #     `moved_by`, and may not disappear. For a MID row, which is a static count read from
 #     the code, this IS the gate: its pin is the count.
 #   * the measured gate (`counted_ledger.py gate`) runs bench_peer_counts and bench_conn_ram
-#     and compares the WIDE rows with their pins. The RAM rows read their pins, band and
-#     mode from bench/ram_census_pins.json, which is still warn-first, so a RAM drift here
-#     warns and does not fail until that file's activation block says so.
+#     and compares the WIDE rows with their pins. The RAM rows ram_census_pins.json pins
+#     read their pins, band and mode from that file, which is still warn-first, so their
+#     drift warns and does not fail until its activation block says so. The RAM rows the
+#     ledger pins itself (remote subscriptions, a peer's buffer after a 16 KiB frame) fail.
 #
 # History is not written here: perf-local.yml banks one point per row on every merge to
 # main, into the bench-local store the perf page's ledger section reads.

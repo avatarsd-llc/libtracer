@@ -20,9 +20,21 @@
  *
  *   T0  server constructed, receive thread up, quiesced   (the per-LINK baseline)
  *   TK  K peers established and verified                  (the per-CONNECTION cost)
+ *   T16 each peer pushed one 16 KiB frame                 (what a peer KEEPS after it)
  *   THW each peer pushed one large frame                  (the buffer HIGH-WATER)
  *   TD  every peer disconnected and the departure observed (what teardown RETURNS)
  *   TR  the same K peers reconnected                      (the slot-RECYCLE claim)
+ *
+ * `T16 - TK` is `retained@16384`: the bytes a peer still holds once one 16 KiB frame has
+ * passed, above what it held idle. Unlike the high-water columns it is a steady balance,
+ * so it can be pinned (#2171); the #2136 goal is 0, a peer that drops back to its idle base.
+ *
+ * The `<kind>-remote-sub` arms price a REMOTE SUBSCRIPTION (#2171): a node (graph, router
+ * and one server link of that kind, every source counted) and one raw peer that has already
+ * subscribed once, so the link's first-subscription draws are outside the window. The peer
+ * then sends K `:subscribers[]` appends, one per vertex, and the arm reads the live balance
+ * and the block count before and after: `per_sub` is the bytes, `sub_blocks` the blocks one more
+ * remote subscription holds.
  *
  * `TD - T0` is the interesting one: the tcp/ws servers document slots as
  * "recycled in place, never destroyed while the server lives", so a departure is
@@ -92,8 +104,11 @@
 #endif
 
 #include "libtracer/can.hpp"
+#include "libtracer/fwd_router.hpp"
+#include "libtracer/graph.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/mem_source_backend.hpp"
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
@@ -226,6 +241,8 @@ counting_source_t g_values{tr::mem::value_source()};
 tr::mem::source_backend_t g_values_rx{g_values};
 /** @brief The link memory every arm injects: the defaults, through the counters. */
 const tr::net::link_memory_t kCounted{.rx = &g_net_rx, .io = &g_net, .state = &g_net};
+/** @brief The default root, counted: the source the remote-subscription arms' graph draws from. */
+counting_source_t g_graph{tr::mem::default_root()};
 
 }  // namespace
 
@@ -271,9 +288,14 @@ struct sample_t {
     long long after_td = 0;   /**< @brief (TD - T0) / K — what a departure did NOT return. */
     long long recycle = 0;    /**< @brief (TR - TD) / K — cost of reconnecting the same K. */
     long long link_base = 0;  /**< @brief T0 relative to the pre-construction balance. */
+    long long retained_16k = -1; /**< @brief (T16 - TK) / K; -1 where the arm has no T16. */
 };
 
 long long live() { return g_live.load(std::memory_order_relaxed); }
+/** @brief Blocks drawn and not yet returned while armed. */
+long long blocks() {
+    return g_allocs.load(std::memory_order_relaxed) - g_frees.load(std::memory_order_relaxed);
+}
 void reset_peak() { g_peak.store(live(), std::memory_order_relaxed); }
 long long peak() { return g_peak.load(std::memory_order_relaxed); }
 
@@ -307,14 +329,9 @@ bool write_all_fd(int fd, const void* p, std::size_t n) {
     return true;
 }
 
-/** @brief Send one u32-LE length-prefixed record of @p len zero bytes. */
-bool send_tcp_frame(int fd, std::size_t len) {
-    std::array<std::uint8_t, 4> pfx{};
-    pfx[0] = static_cast<std::uint8_t>(len & 0xFFu);
-    pfx[1] = static_cast<std::uint8_t>((len >> 8) & 0xFFu);
-    pfx[2] = static_cast<std::uint8_t>((len >> 16) & 0xFFu);
-    pfx[3] = static_cast<std::uint8_t>((len >> 24) & 0xFFu);
-    if (!write_all_fd(fd, pfx.data(), pfx.size())) return false;
+/** @brief Write @p len bytes of @p data, or @p len zero bytes when @p data is null. */
+bool write_body(int fd, const std::byte* data, std::size_t len) {
+    if (data != nullptr) return write_all_fd(fd, data, len);
     static std::array<std::uint8_t, 4096> zero{};  // static: no allocation inside a window
     std::size_t left = len;
     while (left != 0) {
@@ -323,6 +340,16 @@ bool send_tcp_frame(int fd, std::size_t len) {
         left -= chunk;
     }
     return true;
+}
+
+/** @brief Send one u32-LE length-prefixed record of @p len bytes (@ref write_body). */
+bool send_tcp_frame(int fd, std::size_t len, const std::byte* data = nullptr) {
+    std::array<std::uint8_t, 4> pfx{};
+    pfx[0] = static_cast<std::uint8_t>(len & 0xFFu);
+    pfx[1] = static_cast<std::uint8_t>((len >> 8) & 0xFFu);
+    pfx[2] = static_cast<std::uint8_t>((len >> 16) & 0xFFu);
+    pfx[3] = static_cast<std::uint8_t>((len >> 24) & 0xFFu);
+    return write_all_fd(fd, pfx.data(), pfx.size()) && write_body(fd, data, len);
 }
 
 /** @brief Run the RFC 6455 client opening handshake on an already-connected @p fd. */
@@ -346,8 +373,9 @@ bool ws_upgrade(int fd) {
     return std::string_view(resp.data(), got).find("101") != std::string_view::npos;
 }
 
-/** @brief Send one MASKED client→server BINARY WebSocket frame of @p len zero bytes. */
-bool send_ws_frame(int fd, std::size_t len) {
+/** @brief Send one MASKED client→server BINARY WebSocket frame of @p len bytes
+ *         (@ref write_body). */
+bool send_ws_frame(int fd, std::size_t len, const std::byte* data = nullptr) {
     std::array<std::uint8_t, 14> hdr{};
     std::size_t h = 0;
     hdr[h++] = 0x82;  // FIN | BINARY
@@ -364,15 +392,7 @@ bool send_ws_frame(int fd, std::size_t len) {
                 static_cast<std::uint8_t>((static_cast<std::uint64_t>(len) >> (i * 8)) & 0xFFu);
     }
     for (int i = 0; i < 4; ++i) hdr[h++] = 0;  // all-zero mask key: payload passes through
-    if (!write_all_fd(fd, hdr.data(), h)) return false;
-    static std::array<std::uint8_t, 4096> zero{};
-    std::size_t left = len;
-    while (left != 0) {
-        const std::size_t chunk = std::min(left, zero.size());
-        if (!write_all_fd(fd, zero.data(), chunk)) return false;
-        left -= chunk;
-    }
-    return true;
+    return write_all_fd(fd, hdr.data(), h) && write_body(fd, data, len);
 }
 
 /** @brief Count the peers a bus link currently enumerates (the visitor captures one pointer,
@@ -397,6 +417,8 @@ bool wait_peers(tr::net::bus_link_t& bus, std::size_t want) {
 
 /** @brief Largest peer count an arm may request (the fd table is a fixed stack array). */
 constexpr std::size_t kMaxPeers = 64;
+/** @brief The frame `retained@16384` pushes: the #2136 "one 16 KiB frame". */
+constexpr std::size_t kRetainedFrame = 16384;
 
 /**
  * @brief Drive one server transport through T0 / TK / THW / TD / TR with @p k raw peers.
@@ -426,6 +448,11 @@ sample_t run_stream_arm(std::size_t k, std::size_t big, Make make, Dial dial, Pu
     quiesce();
     const long long tk = live();
     out.per_conn = (tk - t0) / static_cast<long long>(k);
+
+    // --- T16: one 16 KiB frame per peer, and what each keeps once it has passed ---------
+    for (std::size_t i = 0; i < k; ++i) push(fds[i], kRetainedFrame);
+    quiesce();
+    out.retained_16k = (live() - tk) / static_cast<long long>(k);
 
     // --- THW: one big frame per peer ---------------------------------------
     reset_peak();
@@ -467,22 +494,176 @@ sample_t arm_tcp(std::size_t k, std::size_t big) {
         [](int fd, std::size_t n) { (void)send_tcp_frame(fd, n); });
 }
 
+/** @brief Connect a raw client to 127.0.0.1:@p port and complete the WebSocket upgrade. */
+int dial_ws(std::uint16_t port) {
+    const int fd = dial_tcp(port);
+    if (fd >= 0 && !ws_upgrade(fd)) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 sample_t arm_ws(std::size_t k, std::size_t big) {
     return run_stream_arm<tr::net::ws_server_transport_t>(
         k, big,
         [] {
             return new tr::net::ws_server_transport_t(0, {.memory = kCounted, .peer_named = true});
         },
-        [](std::uint16_t p) {
-            const int fd = dial_tcp(p);
-            if (fd < 0) return -1;
-            if (!ws_upgrade(fd)) {
-                ::close(fd);
-                return -1;
-            }
-            return fd;
-        },
+        [](std::uint16_t p) { return dial_ws(p); },
         [](int fd, std::size_t n) { (void)send_ws_frame(fd, n); });
+}
+
+// --- the remote-subscription arms (#2171) --------------------------------------
+
+/** @brief Subscriptions one remote-subscription arm adds inside its window. */
+constexpr std::size_t kRemoteSubs = 8;
+
+/** @brief One remote-subscription reading, per subscription. */
+struct sub_sample_t {
+    long long per_sub = 0; /**< @brief Live bytes one more remote subscription holds. */
+    long long blocks = 0;  /**< @brief Blocks it holds. */
+    bool ok = false;       /**< @brief Every subscription in the window was admitted. */
+};
+
+/** @brief Append the TLV @p type over @p body to @p out. */
+void emit(std::vector<std::byte>& out, tr::wire::type_t type, std::span<const std::byte> body,
+          bool structured) {
+    tr::wire::emit_tlv(out, type, structured ? tr::wire::opt_t{.pl = true} : tr::wire::opt_t{},
+                       body);
+}
+
+/** @brief A PATH TLV over @p segs. */
+std::vector<std::byte> path_tlv(std::initializer_list<std::string_view> segs) {
+    std::vector<std::byte> body;
+    for (const std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
+    std::vector<std::byte> out;
+    emit(out, tr::wire::type_t::PATH, body, false);
+    return out;
+}
+
+/**
+ * @brief The frame a remote peer subscribes with: `FWD{WRITE}` to `/<vertex>:subscribers[]`
+ *        carrying a SUBSCRIBER whose target is the peer's own `/sink/<vertex>`.
+ */
+std::vector<std::byte> subscribe_frame(std::string_view vertex) {
+    std::vector<std::byte> body;
+    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
+    emit(body, tr::wire::type_t::VALUE, std::span<const std::byte>(&op, 1), false);
+    const std::vector<std::byte> dst = path_tlv({vertex});
+    body.insert(body.end(), dst.begin(), dst.end());
+    std::vector<std::byte> field;
+    tr::wire::emit_name(field, "subscribers");
+    const std::byte element{1};  // index_mode ELEMENT, no index: the `[]` append
+    emit(field, tr::wire::type_t::VALUE, std::span<const std::byte>(&element, 1), false);
+    emit(body, tr::wire::type_t::FIELD, field, true);
+    // A non-empty src: an empty one asks for no reply, and a subscribe without a route home
+    // is refused (RFC-0004 Amendment 2).
+    const std::vector<std::byte> src = path_tlv({"c"});
+    body.insert(body.end(), src.begin(), src.end());
+    emit(body, tr::wire::type_t::SUBSCRIBER, path_tlv({"sink", vertex}), true);
+    std::vector<std::byte> frame;
+    emit(frame, tr::wire::type_t::FWD, body, true);
+    return frame;
+}
+
+/**
+ * @brief Price one remote subscription over a link of one kind.
+ *
+ * @param make Constructs the link under test, over the counted link memory.
+ * @param port Its bound port.
+ * @param dial Establishes the raw peer, returning its fd (-1 on failure).
+ * @param push Sends one frame's bytes on that fd.
+ */
+template <typename Make, typename Port, typename Dial, typename Push>
+sub_sample_t run_remote_sub_arm(Make make, Port port, Dial dial, Push push) {
+    sub_sample_t out{};
+    // Every frame and vertex name is built here, before the window opens.
+    std::array<std::string, kRemoteSubs + 1> names;
+    std::array<std::vector<std::byte>, kRemoteSubs + 1> frames;
+    for (std::size_t i = 0; i <= kRemoteSubs; ++i) {
+        names[i] = "s" + std::to_string(i);
+        frames[i] = subscribe_frame(names[i]);
+    }
+    tr::graph::graph_t g(g_graph);
+    tr::net::fwd_router_t router(g);
+    auto link = make();
+    if (!router.add_child("in", *link)) return out;
+    std::vector<tr::graph::vertex_handle_t> v;
+    v.reserve(kRemoteSubs + 1);
+    for (std::size_t i = 0; i <= kRemoteSubs; ++i)
+        v.push_back(g.register_vertex(tr::graph::path_t(("/" + names[i]).c_str()),
+                                      tr::graph::role_t::STORED_VALUE));
+    const int fd = dial(port(*link));
+    if (fd < 0) return out;
+    // The first subscription over this link takes whatever the link draws once; it is
+    // outside the window, which prices the next one.
+    push(fd, frames[0]);
+    quiesce();
+    const long long t0 = live();
+    const long long b0 = blocks();
+    for (std::size_t i = 1; i <= kRemoteSubs; ++i) push(fd, frames[i]);
+    quiesce();
+    out.per_sub = (live() - t0) / static_cast<long long>(kRemoteSubs);
+    out.blocks = (blocks() - b0) / static_cast<long long>(kRemoteSubs);
+    out.ok = true;
+    for (std::size_t i = 0; i <= kRemoteSubs; ++i) out.ok = out.ok && g.has_subscribers(v[i]);
+    if (!out.ok) std::fprintf(stderr, "warn: a remote subscription was not admitted\n");
+    ::close(fd);
+    quiesce();
+    return out;
+}
+
+sub_sample_t arm_remote_sub_tcp() {
+    return run_remote_sub_arm(
+        [] {
+            return std::make_unique<tr::net::tcp_server_transport_t>(
+                0, tr::net::tcp_server_config_t{.memory = kCounted, .peer_named = true});
+        },
+        [](tr::net::tcp_server_transport_t& t) { return t.local_port(); },
+        [](std::uint16_t p) { return dial_tcp(p); },
+        [](int fd, const std::vector<std::byte>& f) {
+            (void)send_tcp_frame(fd, f.size(), f.data());
+        });
+}
+
+sub_sample_t arm_remote_sub_ws() {
+    return run_remote_sub_arm(
+        [] {
+            return std::make_unique<tr::net::ws_server_transport_t>(
+                0, tr::net::ws_server_config_t{.memory = kCounted, .peer_named = true});
+        },
+        [](tr::net::ws_server_transport_t& t) { return t.local_port(); },
+        [](std::uint16_t p) { return dial_ws(p); },
+        [](int fd, const std::vector<std::byte>& f) {
+            (void)send_ws_frame(fd, f.size(), f.data());
+        });
+}
+
+/** @brief A UDP socket connected to 127.0.0.1:@p port: the listener learns it as its peer. */
+int dial_udp(std::uint16_t port) {
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) < 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+sub_sample_t arm_remote_sub_udp() {
+    return run_remote_sub_arm(
+        [] {
+            return std::make_unique<tr::net::udp_transport_t>(
+                0, std::string{}, 0, tr::net::udp_config_t{.memory = kCounted});
+        },
+        [](tr::net::udp_transport_t& t) { return t.local_port(); },
+        [](std::uint16_t p) { return dial_udp(p); },
+        [](int fd, const std::vector<std::byte>& f) { (void)::send(fd, f.data(), f.size(), 0); });
 }
 
 /** @brief Which receive tier / memory seam a UDP arm wires up. */
@@ -667,8 +848,10 @@ void report(const char* name, const char* metric, std::vector<long long>& v) {
 }
 
 struct series_t {
-    std::vector<long long> per_conn, high_water, retained, after_td, recycle, link_base;
+    std::vector<long long> per_conn, high_water, retained, after_td, recycle, link_base,
+        retained_16k;
     void reserve(std::size_t n) {
+        retained_16k.reserve(n);
         per_conn.reserve(n);
         high_water.reserve(n);
         retained.reserve(n);
@@ -683,6 +866,7 @@ struct series_t {
         after_td.push_back(s.after_td);
         recycle.push_back(s.recycle);
         link_base.push_back(s.link_base);
+        if (s.retained_16k >= 0) retained_16k.push_back(s.retained_16k);
     }
     void emit(const char* name) {
         report(name, "link_base", link_base);
@@ -691,6 +875,29 @@ struct series_t {
         report(name, "hw_retained", retained);
         report(name, "after_td", after_td);
         report(name, "recycle", recycle);
+        report(name, "retained@16384", retained_16k);
+    }
+};
+
+/** @brief The remote-subscription readings of one link kind, over repetitions. */
+struct sub_series_t {
+    std::vector<long long> per_sub, blocks;
+    std::size_t failed = 0;
+    void reserve(std::size_t n) {
+        per_sub.reserve(n);
+        blocks.reserve(n);
+    }
+    void push(const sub_sample_t& s) {
+        if (!s.ok) {
+            ++failed;
+            return;
+        }
+        per_sub.push_back(s.per_sub);
+        blocks.push_back(s.blocks);
+    }
+    void emit(const char* name) {
+        report(name, "per_sub", per_sub);
+        report(name, "sub_blocks", blocks);
     }
 };
 
@@ -728,6 +935,10 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
 
     series_t tcp, ws, udp_span, udp_rope, udp_pool, can, can_grp;
+    sub_series_t sub_tcp, sub_ws, sub_udp;
+    sub_tcp.reserve(reps);
+    sub_ws.reserve(reps);
+    sub_udp.reserve(reps);
     std::vector<long long> nulls;
     tcp.reserve(reps);
     ws.reserve(reps);
@@ -749,6 +960,9 @@ int main(int argc, char** argv) {
         if (do_can) can.push(arm_can(k, canif, false));
         udp_pool.push(arm_udp(big, udp_mode_t::ROPE_POOL));
         if (do_can) can_grp.push(arm_can(k, canif, true));
+        sub_tcp.push(arm_remote_sub_tcp());
+        sub_ws.push(arm_remote_sub_ws());
+        sub_udp.push(arm_remote_sub_udp());
     }
     g_armed.store(false, std::memory_order_seq_cst);
 
@@ -760,8 +974,11 @@ int main(int argc, char** argv) {
     udp_pool.emit("udp-rope-pool");
     if (do_can) can.emit("can-bus");
     if (do_can) can_grp.emit("can-bus-grp");
+    sub_tcp.emit("tcp-remote-sub");
+    sub_ws.emit("ws-remote-sub");
+    sub_udp.emit("udp-remote-sub");
     std::printf("# allocs=%lld frees=%lld residual_live=%lld\n",
                 g_allocs.load(std::memory_order_relaxed), g_frees.load(std::memory_order_relaxed),
                 g_live.load(std::memory_order_relaxed));
-    return 0;
+    return sub_tcp.failed + sub_ws.failed + sub_udp.failed == 0 ? 0 : 1;
 }
