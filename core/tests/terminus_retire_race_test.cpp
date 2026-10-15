@@ -26,6 +26,11 @@
  *   by PAIR and by NAME. A WRITE made entirely inside one `retire` call must never reach the
  *   handler. Run under TSan (the `tsan` CI job builds every test with `-fsanitize=thread`),
  *   it is the data-race check of the lock-free registration read.
+ * - **Role flip under a write** (#2115). One thread retires `/t` (its role reverts to
+ *   `STORED_VALUE`) and revives it as a handler vertex; another writes `/t` through the API the
+ *   whole time. A write that read the old role and stored under the new one used to take the
+ *   handler leg's empty "consumed" result for a stored value and dereference it. Every write
+ *   must answer success or `NOT_FOUND`, and none may crash.
  */
 
 #include <atomic>
@@ -301,9 +306,48 @@ void no_terminus_mid_retire(bool pair) {
     check(bad.load() == 0, "no terminus op inside a retire reached the handler");
 }
 
+/** @brief A write racing a retire-and-revive answers a defined status and never crashes. */
+void write_across_role_flip() {
+    std::printf("a write racing a retire-and-revive answers a defined status:\n");
+    graph_t g;
+    const path_t at("/t");
+    auto on_write = [](const tr::graph::value_t&,
+                       const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
+    const auto revive = [&] {
+        tr::graph::handlers_t h;
+        h.on_write = tr::graph::thunk(on_write);
+        (void)g.register_vertex(at, role_t::HANDLER, std::move(h));
+    };
+    revive();
+    const bytes_t frame = value_byte();
+    std::atomic<bool> stop{false};
+    std::atomic<std::size_t> writes{0};
+    std::atomic<std::size_t> undefined{0};
+    std::thread writer([&] {
+        while (!stop.load(std::memory_order_acquire)) {
+            const tr::graph::result_t<void> r = g.write(at, tr::testing::make_value(frame));
+            writes.fetch_add(1, std::memory_order_relaxed);
+            if (!r && r.error() != status_t::NOT_FOUND)
+                undefined.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    constexpr int kCycles = 20000;
+    for (int i = 0; i < kCycles; ++i) {
+        const auto h = g.find(at.key());
+        if (h) (void)g.retire(*h);
+        revive();
+    }
+    stop.store(true, std::memory_order_release);
+    writer.join();
+    std::printf("  (%zu writes, %zu answered an undefined status)\n", writes.load(),
+                undefined.load());
+    check(undefined.load() == 0, "every racing write answered success or NOT_FOUND");
+}
+
 }  // namespace
 
 int main() {
+    write_across_role_flip();
     bracketed_terminus_ops();
     no_terminus_mid_retire(true);
     no_terminus_mid_retire(false);

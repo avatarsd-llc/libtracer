@@ -3001,7 +3001,11 @@ class graph_t {
     // never becomes state and a normalisation is the only value any reader can reach.
     // `take` is the write path's fused drain (#1713), forwarded to publish_value: non-null only
     // from write_impl's STREAM arm, which delivers what the admitting section took.
-    [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, view::rope_t&& value,
+    // `role` is the caller's ONE reading of `v->role()` (#2115), REQUIRED so no store reads it
+    // a second time: a retire-and-revive can flip the role between two reads, and a caller that
+    // read a storing role and got the HANDLER leg's empty "consumed" result back would
+    // dereference it as the stored value.
+    [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, role_t role, view::rope_t&& value,
                                                     vertex_t::store_drops_t& drops,
                                                     std::string_view caller,
                                                     const net::link_kind_t* link,
