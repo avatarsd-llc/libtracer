@@ -31,7 +31,7 @@ for a local `preview.html` of the same charts.
 | `bench_await_wakeup_storm` | **many-core await fan-in**: one writer storms writes while W threads `await` one vertex — condvar/notify_all + vertex-lock scaling (ADR-0032 128-core row). |
 | `bench_chain_delivery` | **steady-state stream delivery over the PAIR chain** (#1951): the Nth `FWD{WRITE}` of an established stream resolved at its terminus (`chain-terminus`) or forwarded one hop (`chain-forward`), over the payload ladder to 64 KiB, plus the per-link state a hop keeps (`mode=link-state`). Gated: `chain-forward` 64 B and 16 KiB, `chain-terminus` 64 B. |
 | `bench_conn_ram` | **per-connection RAM census**: what one connection costs on each transport (TCP / WS / UDP / CAN) — link base, per-connection bytes, what survives teardown. **Gated (warn)** on the pinned host — see [the RAM censuses in CI](#the-ram-censuses-in-ci-1228). |
-| `bench_peer_counts` | **the counted-metrics ledger's WIDE rows** (#2137): copies, socket syscalls and task switches per relayed frame at 64 B to 16 KiB over TCP and WS, and idle wakeups per second with 32 peers. Counts, not times. **Gated (fail) on every PR** — see [the counted-metrics ledger](#the-counted-metrics-ledger-2137). |
+| `bench_peer_counts` | **the counted-metrics ledger's WIDE rows** (#2137): copies, libc-interposed send/recv/poll syscalls and task switches per relayed frame at 64 B to 16 KiB over TCP and WS, and idle wakeups per second with 32 peers. Counts, not times. **Gated (fail) on every PR** — see [the counted-metrics ledger](#the-counted-metrics-ledger-2137). |
 | `bench_ram_census_tcp` | **whole-node RAM census**: the heap a 100-vertex graph (values 4..64 B, mixed int / array / STREAM) holds, staged from an empty `graph_t` through a `/net:children[]`-created TCP listener to steady state under a real remote peer **process**. **Trend-only** on the pinned host. |
 | `bench_path_label` | **RFC-0027 §12.4's normative gate**: what a minted **path label** saves per hop, as a slope over hop count and over registry width, and what it saves on the TERMINUS RESIDUAL against address depth — clause 2's axis, the one §3.3 nominates as deciding. See [the RFC-0027 gate](#bench_path_label--the-rfc-0027-124-gate-1325-car-5). |
 | `bench_forward_rope` | **the forward hop over a MULTI-LINK ROPE** (`on_frame_rope`, ADR-0053 §5), swept over link count — the only bench that instantiates `rope_cursor`, the specialisation `symbol_ratchet.json` pins. Diagnostic, not gated; quote it only off a quiescent host — see [its A/A null](#bench_forward_rope--the-rope-forward-hop-and-what-its-aa-null-is-worth-1358). |
@@ -379,8 +379,9 @@ has one pin file under [`ledger/`](ledger/), and each row is pinned for one targ
 - **WIDE** (x86 host) rows are measured. `bench_peer_counts` relays paced `FWD{WRITE}` frames
   of 64 B, 1 KiB, 4 KiB and 16 KiB from a writer process through node B to a remote
   subscriber, over TCP and WS, with B forwarding over a client link (`-cli`) or a server link
-  (`-srv`). It counts B's `memcpy`/`memmove` bytes and its socket syscalls by interposing
-  them in the executable, and the voluntary switches of B's threads from `/proc`. It then
+  (`-srv`). It counts B's `memcpy`/`memmove` bytes and its send/recv/poll-family syscalls by
+  interposing those libc wrappers in the executable (futex and calls outside the set, such as
+  `epoll_pwait`, `accept4` and `recvmmsg`, are not counted), and the voluntary switches of B's threads from `/proc`. It then
   counts idle wakeups per second with 32 peers and no traffic. The WIDE RAM rows name a row
   of `ram_census_pins.json` (`bench_conn_ram`) and take its value, band and mode from there.
 - **MID** (ESP32-C6) rows are static counts read from the code, with the reading in `basis`.

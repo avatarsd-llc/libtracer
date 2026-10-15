@@ -1,7 +1,7 @@
 {
   "_comment": "Counted-metrics ledger, family 'syscalls' (#2137). See copies.json for the pin rules.",
   "family": "syscalls",
-  "title": "Socket and I/O syscalls per relayed frame (node B only)",
+  "title": "send/recv/poll syscalls per relayed frame (libc-interposed, node B only)",
   "unit": "calls",
   "per_payload": false,
   "instrument": "bench_peer_counts",
@@ -206,5 +206,6 @@
       "moved_by": "#2137 (seeded from the peer-cost study)",
       "basis": "httpd_queue_work: sendto + recvfrom on the control socket (2), then httpd_ws_send_frame_async: 2 lwip_send (header, payload). Goal: one doorbell per burst (#2136 egress), leaving the 2 lwip_send."
     }
-  ]
+  ],
+  "_counted": "The wrappers interposed are read, write, readv, writev, recv, recvfrom, recvmsg, send, sendto, sendmsg, poll, ppoll, select and epoll_wait (and the fortified _chk forms). A syscall outside that set (epoll_pwait, accept4, recvmmsg, futex, ...) is not counted: futex is a disclosed gap (the peer-cost study measured 0.00 per frame), and a link moving to an uncounted call would read as a fall here, so such a change must extend the wrapper set."
 }
