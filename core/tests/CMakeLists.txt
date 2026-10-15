@@ -1308,6 +1308,13 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
     libtracer_test_warnings(collect_test)
     add_test(NAME collect COMMAND collect_test)
+
+    # #2117: every reclaim refusal is answered and counted, and a link teardown is never
+    # refused its park (its entry is reserved when the connection is created).
+    add_executable(reclaim_refusal_test reclaim_refusal_test.cpp)
+    target_link_libraries(reclaim_refusal_test PRIVATE libtracer)
+    libtracer_test_warnings(reclaim_refusal_test)
+    add_test(NAME reclaim_refusal COMMAND reclaim_refusal_test)
     add_executable(qsbr_epoch_wrap_test qsbr_epoch_wrap_test.cpp)
     target_link_libraries(qsbr_epoch_wrap_test PRIVATE libtracer)
     libtracer_test_warnings(qsbr_epoch_wrap_test)

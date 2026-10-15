@@ -49,8 +49,8 @@ delivery hands control back
   deliberately not even declared as an alias.
 - **Parking is bounded.** Retired pairs sit in a per-thread array sized by
   `kDeferredReleaseSlots`; if every slot is taken the pair is dropped and its hook never
-  runs — a deliberate leak in preference to a use-after-free — and
-  `graph_t::deferred_release_drops()` counts it.
+  runs — a deliberate leak in preference to a use-after-free. That `unsubscribe` answers
+  `BACKPRESSURE`, and `graph_t::reclaim_refusals().release_refused` counts it.
 
 ## Source
 

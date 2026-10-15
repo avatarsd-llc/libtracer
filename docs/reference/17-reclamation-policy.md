@@ -79,7 +79,7 @@ The counter is a **per-thread** dispatch depth, incremented once when a fan-out 
 - **depth 0** (the ordinary case — you are not inside a callback): nothing on this thread can be walking a snapshot, so the hook runs **inline** and `unsubscribe()` returns already quiescent. This is `reclaim_strict`'s guarantee, at `reclaim_strict`'s cost, for the case that dominates.
 - **depth > 0** (you are inside a delivery): the pair is **parked** in per-thread storage and the hook runs when the **outermost** delivery unwinds — before the `write()` that started it returns. Not the innermost: an inner fan-out's exit leaves the outer one still walking its own snapshot.
 
-Parking allocates nothing. It uses a bounded per-thread array (`kDeferredReleaseSlots`, default 16), and on overflow the pair is **dropped and its hook never runs** — a deliberate leak, because the alternative is releasing a context a live fan-out still names. `graph_t::deferred_release_drops()` counts every drop, so an undersized bound is visible rather than silent.
+Parking allocates nothing. It uses a bounded per-thread array (`kDeferredReleaseSlots`, default 16), and on overflow the pair is **dropped and its hook never runs** — a deliberate leak, because the alternative is releasing a context a live fan-out still names. That `unsubscribe` answers `BACKPRESSURE` (the edge is gone all the same), and `graph_t::reclaim_refusals()` counts every drop as `release_refused`, so an undersized bound is visible rather than silent.
 
 ### `reclaim_qsbr` — the cross-thread grace period
 

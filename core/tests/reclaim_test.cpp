@@ -297,13 +297,17 @@ struct flood_t {
     graph_t* g{nullptr};                   /**< @brief The graph to unsubscribe on. */
     std::vector<subscription_t> victims{}; /**< @brief All retired from ONE delivery. */
     std::atomic<bool> fired{false};        /**< @brief Only the first delivery floods. */
+    std::size_t refused{0};                /**< @brief Unsubscribes answered BACKPRESSURE. */
 };
 
 /** @brief Retire every victim from inside one delivery — more than the park can hold. */
 void flooding_sink(void* ctx, const tr::graph::value_t&) {
     auto* f = static_cast<flood_t*>(ctx);
     if (f->fired.exchange(true)) return;
-    for (const subscription_t& v : f->victims) (void)f->g->unsubscribe(v, &probe_release);
+    for (const subscription_t& v : f->victims) {
+        const auto r = f->g->unsubscribe(v, &probe_release);
+        if (!r && r.error() == status_t::BACKPRESSURE) ++f->refused;
+    }
 }
 
 void test_park_overflow_drops_rather_than_frees() {
@@ -331,7 +335,6 @@ void test_park_overflow_drops_rather_than_frees() {
     }
     check(driver.victims.size() == kOver, "kDeferredReleaseSlots + 4 victim edges are admitted");
 
-    const std::uint64_t drops_before = graph_t::deferred_release_drops();
     check(write_once(g, src, value_frame()), "one write retires all of them from one delivery");
 
     int released = 0;
@@ -342,9 +345,10 @@ void test_park_overflow_drops_rather_than_frees() {
     }
     check(released == static_cast<int>(tr::graph::kDeferredReleaseSlots),
           "exactly kDeferredReleaseSlots hooks ran — the park held what it promised");
-    check(graph_t::deferred_release_drops() - drops_before ==
-              kOver - tr::graph::kDeferredReleaseSlots,
-          "and every pair beyond the bound is COUNTED as a drop, not silently lost");
+    check(driver.refused == kOver - tr::graph::kDeferredReleaseSlots,
+          "every pair beyond the bound is ANSWERED: its unsubscribe returned BACKPRESSURE");
+    check(g.reclaim_refusals().release_refused == kOver - tr::graph::kDeferredReleaseSlots,
+          "and COUNTED in reclaim_refusals().release_refused, not silently lost (#2117)");
     check(!any_late_hit, "no delivery landed on a released context — the refusal is the safe side");
 }
 

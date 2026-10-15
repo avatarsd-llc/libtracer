@@ -1080,7 +1080,7 @@ class transport_vertex_t {
      *
      * It outlives this object. A retired value seam is freed only at `graph_t::collect`
      * (ADR-0072), so the context the seam names lives as long: it is drawn from the graph's
-     * table source and freed by the graph, through `graph_t::park_release`, at that same
+     * table source and freed by the graph, through `graph_t::park_reserved`, at that same
      * point. Until then a write that arrives finds `self` null and answers `NOT_FOUND`, as
      * the absent path the endpoint now is. `calls` is what the destructor drains before it
      * lets anything go.

@@ -232,14 +232,15 @@ void parse_config(const tlv_node_t* config, conn_settings_t& s) {
  * link up just before the un-route, or a `:children[]` listing that loaded the vertex's seam
  * just before the retire, can still be on its way into the link. So the link is not destroyed
  * at removal: it is shut down there (no frame in either direction, its threads joined) and
- * moved here, and the block is handed to `graph_t::park_release`, so the link is destroyed at
+ * moved here, and the block is handed to `graph_t::park_reserved`, so the link is destroyed at
  * the same point the retired seam is freed. A call that reaches it in between finds a valid,
- * shut-down object. If the retire or the park is refused, the block and the link stay for the
- * graph's lifetime rather than being freed under such a call.
+ * shut-down object. If the retire is refused, the block and the link stay for the graph's
+ * lifetime rather than being freed under such a call.
  *
- * Reserved from the graph's table source when the connection is created, so a removal never
- * needs to allocate one; its other draws (the retire's key, the release park) degrade to
- * keeping the link if refused.
+ * Drawn from the graph's table source when the connection is created, together with its
+ * entry in the graph's park (`graph_t::make_parked`), so a removal never allocates either and
+ * the park cannot refuse it (#2117). Its one other draw, the retire's, degrades to keeping
+ * the link if refused, counted in `graph_t::reclaim_refusals`.
  * For a bus link it is also the `:children[]` hook's context (RFC-0028 D10 `{fn, ctx}`): it
  * lives exactly as long as the link, and names the graph whose sources a listing draws (#2052).
  */
@@ -357,11 +358,15 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
         p->config = std::move(destroy_config_);
         p->link = std::move(destroy_);
         if (p->link) p->link->shut_down();  // JOINS the receive thread — not under `ctl_m_`
+        // Its entry was reserved at creation, so this park cannot be refused. A refused retire
+        // (counted and returned in `out`) keeps the block for the graph's lifetime instead.
         if (retired)
-            (void)owner_.graph_.park_release({p, [](void* c) {
-                                                  auto* const park = static_cast<conn_park_t*>(c);
-                                                  mem::drop_in(park->graph->table_source(), park);
-                                              }});
+            owner_.graph_.park_reserved({p, [](void* c) {
+                                             auto* const park = static_cast<conn_park_t*>(c);
+                                             mem::drop_in(park->graph->table_source(), park);
+                                         }});
+        else
+            owner_.graph_.unreserve_park();
     }
     destroy_.reset();  // a transaction with no park: JOINS the receive thread — same reason
     // The config the socket (or its engine's settings) viewed goes only after the socket.
@@ -448,19 +453,24 @@ transport_vertex_t::~transport_vertex_t() {
     // inside `endpoint_write` has returned; a call that comes in afterwards finds no plane and
     // answers NOT_FOUND. Only then is the endpoint retired, so `<net_root>/<module>/conn`
     // stops resolving, and its context handed to the graph to free once no reader can still
-    // reach it (`graph_t::park_release`). If either is refused, the context is left to the
-    // graph's lifetime rather than freed while the endpoint, or a reader, can still name it.
+    // reach it (`graph_t::park_reserved`, into the entry reserved when the endpoint was
+    // declared, so it cannot be refused). If the retire is refused (counted in
+    // `graph_t::reclaim_refusals`), the context is left to the graph's lifetime rather than
+    // freed while the endpoint, or a reader, can still name it.
     for (endpoint_ctx_t* const e : endpoints_) {
         {
             std::unique_lock lock(e->m);
             e->self = nullptr;
             e->cv.wait(lock, [e] { return e->calls == 0; });
         }
-        if (!graph_.retire(*e->vertex)) continue;
-        (void)graph_.park_release({e, [](void* c) {
-                                       auto* const ctx = static_cast<endpoint_ctx_t*>(c);
-                                       mem::drop_in(*ctx->src, ctx);
-                                   }});
+        if (!graph_.retire(*e->vertex)) {
+            graph_.unreserve_park();
+            continue;
+        }
+        graph_.park_reserved({e, [](void* c) {
+                                  auto* const ctx = static_cast<endpoint_ctx_t*>(c);
+                                  mem::drop_in(*ctx->src, ctx);
+                              }});
     }
     // Then every connection, through the same removal a peer's `remove` takes: un-routed
     // from the router, its engine stopped, its identity vertex retired, and only then its
@@ -679,13 +689,15 @@ result_t<void> transport_vertex_t::mint_module_locked(std::string_view module,
     // seam — which, for a write that loaded it just before the retire, is past this object's
     // own lifetime. So it is drawn from the GRAPH's table source, one block per minted module
     // that never moves, and the graph frees it (`endpoint_ctx_t` has the whole story).
+    // Its park entry is reserved with it (`graph_t::make_parked`), while a refusal changes
+    // nothing, so the destructor's park cannot be refused (#2117).
     mem::block_source_t& ctx_src = graph_.table_source();
     mem::string_t ctx_module(ctx_src);
     if (!ctx_module.assign(module)) return std::unexpected(status_t::BACKPRESSURE);
     endpoint_ctx_t* const ctx =
-        mem::make_in<endpoint_ctx_t>(ctx_src, this, std::move(ctx_module), catalog, &ctx_src);
+        graph_.make_parked<endpoint_ctx_t>(this, std::move(ctx_module), catalog, &ctx_src);
     if (ctx == nullptr || !endpoints_.push_back(ctx)) {
-        mem::drop_in(ctx_src, ctx);
+        graph_.drop_parked(ctx);
         return std::unexpected(status_t::BACKPRESSURE);
     }
     graph::handlers_t handlers;
@@ -732,7 +744,7 @@ result_t<void> transport_vertex_t::mint_module_locked(std::string_view module,
         // above would otherwise let a retried declaration's catalog check find it. No seam
         // was published, so nothing but this frame can reach it.
         endpoints_.pop_back();
-        mem::drop_in(ctx_src, ctx);
+        graph_.drop_parked(ctx);
         return std::unexpected(endpoint.error());
     }
     ctx->vertex = *endpoint;
@@ -1107,8 +1119,9 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // (RFC-0028 D10: nothing captured), which names the bus facet and the graph whose sources
     // the listing draws (#2052), and lives as long as the link: until the graph frees it,
     // past the point it frees this vertex's seam.
-    mem::block_source_t& park_src = graph_.table_source();
-    conn_park_t* const park = mem::make_in<conn_park_t>(park_src, &graph_);
+    // The park's entry for this block is reserved here too, where a refusal still changes
+    // nothing, so the removal that parks it cannot be refused (#2117).
+    conn_park_t* const park = graph_.make_parked<conn_park_t>(&graph_);
     if (park == nullptr) return std::unexpected(status_t::BACKPRESSURE);
     if (bus_link_t* const bus = bus_of(*link)) {
         park->bus = bus;
@@ -1121,7 +1134,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     result_t<vertex_handle_t> v =
         graph_.register_vertex_key(mem::as_span(mount_key), graph::role_t::STORED_VALUE, handlers);
     if (!v) {
-        mem::drop_in(park_src, park);
+        graph_.drop_parked(park);
         return v;  // PATH_IN_USE on a duplicate connection name
     }
 
