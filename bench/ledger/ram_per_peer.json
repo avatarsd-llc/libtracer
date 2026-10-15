@@ -26,8 +26,9 @@
       "arm": "ws-server",
       "metric": "per_conn",
       "goal": 282,
-      "moved_by": "#2167 (idle server link base re-pinned, per-peer rows +10 B)",
-      "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record."
+      "moved_by": "#2140 (WS server frame ingress: the per-peer 1,152 B read-ahead window, 402 -> 1586 B)",
+      "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record.",
+      "waiver": "Maintainer ruling on #2140, 2026-10-16: each WS peer holds a fixed read-ahead window so a frame carrying a 1 KiB value completes from one read (syscalls at or below main on every row); fixed per peer, drawn from the link's own state source, and it replaces a stream buffer that grew to the largest frame and kept it."
     },
     {
       "id": "tcp-server link base",

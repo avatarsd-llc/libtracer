@@ -14,21 +14,18 @@
  * thread — FreeRTOS stacks are the scarce resource on the MCU target). Each
  * peer runs the opening handshake (parse the HTTP Upgrade request, reply 101
  * Switching Protocols with ws::accept_key), then frame ingress (ADR-0087 §1,
- * `%frame_ingress.hpp`) reads each frame's header first (ws::decode_header) and its
- * payload straight into a segment drawn at the exact length from the server's receive
- * source; the client path still decodes a stream buffer with ws::decode_frame_checked.
- * Each BINARY message is one libtracer frame (one
- * TLV) handed to the receiver — tagged with the SENDING peer's name through the
- * bus_link_t facet (ADR-0044), so return routes name the right browser tab; PING
- * is answered with a stack-built PONG. Every connection dies down ONE path
- * (slot_server_t::teardown_slot — one home, shared with tcp_server_transport_t since
- * #871; reached from this server's `on_readable` hook whenever either phase answers
- * false): the
- * peer closing the socket or a read error, at either phase; on an ESTABLISHED
- * stream a CLOSE or an RFC 6455 violation the checked decode reports (an
- * oversized or non-final control frame, §5.5/§7.1.7, or a DATA frame declaring
- * more than the injected receive cap, #872); during the opening
- * HANDSHAKE a request that overruns the deployment's pre-auth budget
+ * `%frame_ingress.hpp`) reads ahead into a fixed per-peer window, completes each frame that
+ * fits there from that read, and receives a larger payload straight into a segment drawn at
+ * the exact length from the server's receive source; the client path still decodes a stream buffer
+ * with ws::decode_frame_checked. Each BINARY message is one libtracer frame (one TLV) handed to the
+ * receiver — tagged with the SENDING peer's name through the bus_link_t facet (ADR-0044), so return
+ * routes name the right browser tab; PING is answered with a stack-built PONG. Every connection
+ * dies down ONE path (slot_server_t::teardown_slot — one home, shared with tcp_server_transport_t
+ * since #871; reached from this server's `on_readable` hook whenever either phase answers false):
+ * the peer closing the socket or a read error, at either phase; on an ESTABLISHED stream a CLOSE or
+ * an RFC 6455 violation the checked decode reports (an oversized or non-final control frame,
+ * §5.5/§7.1.7, or a DATA frame declaring more than the injected receive cap, #872); during the
+ * opening HANDSHAKE a request that overruns the deployment's pre-auth budget
  * (`max_handshake`, #934) or carries no `Sec-WebSocket-Key`.
  *
  * INGRESS IS BOUNDED BY AN INJECTED SEAM, not by the peer. Both roles take the same
@@ -233,6 +230,20 @@ class ws_server_transport_t final : public stream_server_base_t {
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
+     * @brief Each peer's read-ahead window (#2140): a message carrying a 1 KiB value, with its
+     *        FWD envelope and WS header, completes from the one read that lands it here.
+     *
+     * Sized from the counted ledger: 1 KiB is the largest value row that a single read served
+     * before frames were received into exact segments. That row's frame is 1,065 B on the wire
+     * (8 B header, 33 B envelope to `/sensor/temp`); 128 B over 1 KiB covers the header and an
+     * envelope whose paths run to about 80 B. Every row up to it keeps one read per frame, and
+     * a larger body still goes straight into its segment after the window's share. Fixed at
+     * build time and held in the peer's session, drawn from the link's own `memory.state`: no
+     * library-internal buffer, and no per-peer growth.
+     */
+    static constexpr std::size_t kReadAheadBytes = 1024 + 128;
+
+    /**
      * @brief The largest OPENING HANDSHAKE a PRE-AUTH peer may make this node buffer
      *        (16 KiB) — the ceiling `max_handshake` tightens against (#934).
      *
@@ -406,8 +417,8 @@ class ws_server_transport_t final : public stream_server_base_t {
     bool on_accept(session_base_t& s, int fd) override;
 
     /** @brief Read and frame: the opening handshake while the slot is not yet open, then
-     *         frame ingress (ADR-0087 §1) — each header first, each body straight into a
-     *         segment drawn at its exact length from this server's receive source. */
+     *         frame ingress (ADR-0087 §1) — read ahead into @ref kReadAheadBytes, each body
+     *         in a segment drawn at its exact length from this server's receive source. */
     void on_readable(session_base_t& s, int fd) override;
 
     /** @brief Teardown: release the slot's buffers and reset its reassembler. */

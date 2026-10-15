@@ -19,8 +19,9 @@
  * They are 64-bit numbers (block sizes plus the 8-entry first block of a `block_array_t`);
  * on another pointer width the test reports and does not gate.
  *
- * One more arm (#2140) counts a WS peer across one 16 KiB message: it must hold no more
- * after the message than before it, on every pointer width.
+ * One more arm (#2140) counts a WS peer across one 16 KiB message: its connected draw is
+ * pinned like the base, and it must hold no more after the message than before it, on every
+ * pointer width.
  */
 
 #include <arpa/inet.h>
@@ -103,6 +104,11 @@ void run_arm(const char* name) {
     }
     check(src.live.load(std::memory_order_relaxed) == 0, "teardown returned every byte");
 }
+
+/** @brief Pinned draw of one connected, idle WS peer on a 64-bit target (#2140): its session
+ *         with the 1,152-byte read-ahead window (`ws_server_transport_t::kReadAheadBytes`),
+ *         its handshake buffer and its poll entry. Was 784 B with a 14-byte header store. */
+constexpr std::size_t kWsPeerBytes64 = 1928;
 
 /** @brief A receive backend over the platform heap that adds to @p src's live balance. */
 class counting_rx_t final : public tr::mem::mem_backend_t {
@@ -198,6 +204,9 @@ void run_idle_peer_after_16k() {
     }
     std::printf("ws-server idle peer: %zu B before, %zu B after one 16 KiB message\n", before,
                 after);
+    if constexpr (sizeof(void*) == 8) {
+        check(before == kWsPeerBytes64, "the connected peer's draw equals the 64-bit pin");
+    }
     check(frames == 1, "the message was handed up");
     check(after == before, "the idle peer holds 0 B more after it");
     check(src.live.load(std::memory_order_relaxed) == 0, "teardown returned every byte");

@@ -267,8 +267,9 @@ struct ws_server_transport_t::session_t : slot_server_t::session_base_t {
     /** @brief Draw the handshake buffer from @p src — the server's session store (#1780). */
     explicit session_t(mem::block_source_t& src) noexcept : hs_buf(src) {}
     mem::bytes_t hs_buf; /**< @brief HTTP Upgrade request accumulation. */
-    /** @brief Frame ingress (ADR-0087 §1): no stream buffer, the body lands in its segment. */
-    frame_ingress_t<ws::kMaxClientFrameHeader> ingress;
+    /** @brief Frame ingress (ADR-0087 §1): a fixed read-ahead window, then each larger body
+     *         straight into its segment. */
+    frame_ingress_t<kReadAheadBytes> ingress;
     ws::header_t frame;       /**< @brief The header of the frame being received. */
     ws_assembler_t assembler; /**< @brief RFC 6455 fragment reassembly. */
     peer_endpoint_t endpoint; /**< @brief The directed facade `peer_link` returns. */
@@ -520,9 +521,9 @@ void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::span<cons
 void ws_server_transport_t::on_readable(session_base_t& base, int fd) {
     session_t& s = static_cast<session_t&>(base);
     framing_t framing{*this, s};
-    // Past the 101, frame ingress reads each header first and each body straight into its
-    // exact segment (ADR-0087 §1). Either phase answers false for a peer that closed or broke
-    // the protocol, and both tear down through the one teardown.
+    // Past the 101, frame ingress reads ahead into the peer's window and each larger body
+    // straight into its exact segment (ADR-0087 §1). Either phase answers false for a peer that
+    // closed or broke the protocol, and both tear down through the one teardown.
     const bool keep = s.open.load(std::memory_order_relaxed)
                           ? s.ingress.read(fd, *backend_, framing)
                           : read_handshake(s, fd);

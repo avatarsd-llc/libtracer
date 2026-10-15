@@ -1,7 +1,8 @@
 /**
  * @file
- * @brief Frame ingress (ADR-0087 §1): read a frame's header first, draw its body at the exact
- *        length from the receiving link's own source, and receive the body straight into it.
+ * @brief Frame ingress (ADR-0087 §1): read ahead into a small fixed window, complete each frame
+ *        that fits there from that one read, and receive a larger body straight into a segment
+ *        drawn at its exact length from the receiving link's own source.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -18,12 +19,14 @@
  *   link sheds and counts. The link takes the bytes out of `blk` (`blk.take(len)`) to hand
  *   them up. False closes the link.
  *
- * What the module owns is the state between reads: the header bytes read so far (at most
- * `MaxHeader`, the framing's largest header) and the body's segment while it fills. Nothing
- * else is buffered. A socket read lands the body's remaining bytes in the segment and, in the
- * same `recvmsg`, up to one header's worth of whatever follows in the header store, so frames
- * that arrive back to back cost one read each; the few bytes past that header that belong to
- * the next body are the only bytes ever copied (at most `MaxHeader - 2`).
+ * What the module owns is the state between reads: a read-ahead window of `Window` bytes,
+ * fixed at build time and held in the stream's own session state, and the body's segment
+ * while it fills. Nothing else is buffered. Idle, a read lands in the window: every frame
+ * whole in it is drawn at its exact length and copied out (small, so the copy is cheap), and
+ * a lone frame that fits costs one read. A body larger than what the window holds keeps the
+ * bytes already read (copied into its segment) and receives the rest straight into the
+ * segment, with the window taking whatever follows in the same `recvmsg`, so frames that
+ * arrive back to back cost one read each.
  *
  * Native-window hold (ADR-0081 §2) is kept: ingress says "not yet" by not reading, so unread
  * bytes wait in the kernel's window.
@@ -66,9 +69,9 @@ struct ingress_header_t {
  *
  * Used by the stream's one receive context only.
  *
- * @tparam MaxHeader The framing's largest header, in bytes.
+ * @tparam Window The read-ahead window, in bytes: at least the framing's largest header.
  */
-template <std::size_t MaxHeader>
+template <std::size_t Window>
 class frame_ingress_t {
    public:
     /**
@@ -76,7 +79,7 @@ class frame_ingress_t {
      *        frame it completes.
      *
      * Reads again only while a read filled everything it offered and completed no frame, so
-     * a lone frame costs one read for its header and one for its body, and one busy peer
+     * a lone frame that fits the window costs one read, a larger one two, and one busy peer
      * cannot hold the caller past its next frame.
      *
      * @param fd      The stream's socket.
@@ -89,7 +92,7 @@ class frame_ingress_t {
     [[nodiscard]] bool read(int fd, mem::mem_backend_t& rx, Framing& framing) {
         for (bool more = true; more;) {
             // The body's remaining bytes go to its segment (or, for a body the source
-            // refused, to this throwaway space), and whatever follows to the header store.
+            // refused, to this throwaway space), and whatever follows to the window.
             std::array<std::byte, kSkipBytes> skip;
             std::array<::iovec, 2> iov{};
             std::size_t parts = 0;
@@ -97,7 +100,7 @@ class frame_ingress_t {
             if (in_body_)
                 iov[parts++] = blk_.seg ? ::iovec{blk_.frame(body_len_).data() + body_have_, room}
                                         : ::iovec{skip.data(), std::min(room, skip.size())};
-            iov[parts++] = ::iovec{hdr_.data() + hdr_have_, MaxHeader - hdr_have_};
+            iov[parts++] = ::iovec{hdr_.data() + hdr_have_, Window - hdr_have_};
             ::msghdr msg{};
             msg.msg_iov = iov.data();
             msg.msg_iovlen = parts;
@@ -133,7 +136,7 @@ class frame_ingress_t {
                     std::memcpy(blk_.frame(body_len_).data() + body_have_, in.data(), take);
                 body_have_ += take;
             } else {
-                take = std::min(MaxHeader - hdr_have_, in.size());
+                take = std::min(Window - hdr_have_, in.size());
                 std::memcpy(hdr_.data() + hdr_have_, in.data(), take);
                 hdr_have_ += take;
             }
@@ -147,6 +150,7 @@ class frame_ingress_t {
     void reset() noexcept {
         blk_ = {};
         hdr_have_ = 0;
+        hdr_off_ = 0;
         body_len_ = 0;
         body_have_ = 0;
         in_body_ = false;
@@ -157,8 +161,9 @@ class frame_ingress_t {
     static constexpr std::size_t kSkipBytes = 512;
 
     /**
-     * @brief Hand up a body that is whole, then judge the header store: start each body it
-     *        announces, moving the bytes read past its header into it.
+     * @brief Hand up a body that is whole, then judge the window: start each body it
+     *        announces, copying the bytes read past its header into it, and move what is
+     *        left to the window's front once, when it holds no whole header.
      *
      * @return False when the framing closed the stream.
      */
@@ -166,7 +171,13 @@ class frame_ingress_t {
     [[nodiscard]] bool advance(mem::mem_backend_t& rx, Framing& framing) {
         while (true) {
             if (in_body_) {
-                if (body_have_ < body_len_) return true;
+                if (body_have_ < body_len_) {
+                    // A body still filling took every byte the window held (a read gives the
+                    // window only what follows a whole body), so the window is empty.
+                    hdr_have_ = 0;
+                    hdr_off_ = 0;
+                    return true;
+                }
                 in_body_ = false;
                 ++frames_;
                 const bool keep = framing.body(blk_, body_len_);
@@ -174,32 +185,35 @@ class frame_ingress_t {
                 if (!keep) return false;
                 continue;
             }
-            const ingress_header_t h =
-                framing.header(std::span<const std::byte>(hdr_.data(), hdr_have_));
-            if (h.kind != ingress_header_t::kind_t::BODY)
+            const ingress_header_t h = framing.header(
+                std::span<const std::byte>(hdr_.data() + hdr_off_, hdr_have_ - hdr_off_));
+            if (h.kind != ingress_header_t::kind_t::BODY) {
+                hdr_have_ -= hdr_off_;
+                std::memmove(hdr_.data(), hdr_.data() + hdr_off_, hdr_have_);
+                hdr_off_ = 0;
                 return h.kind == ingress_header_t::kind_t::MORE;
+            }
             // Drawn at the exact length, from the receiving link's own source; a refusal
             // leaves `blk_` empty and the body is read past and shed.
             in_body_ = true;
             body_len_ = h.body;
             if (h.body != 0) blk_ = view::alloc_rx(rx, h.body, graph::kShareThresholdBytes);
-            const std::size_t rest = hdr_have_ - h.size;
-            body_have_ = std::min(rest, h.body);
+            hdr_off_ += h.size;
+            body_have_ = std::min(hdr_have_ - hdr_off_, h.body);
             if (blk_.seg && body_have_ != 0)
-                std::memcpy(blk_.frame(body_len_).data(), hdr_.data() + h.size, body_have_);
-            hdr_have_ = rest - body_have_;
-            if (hdr_have_ != 0)
-                std::memmove(hdr_.data(), hdr_.data() + h.size + body_have_, hdr_have_);
+                std::memcpy(blk_.frame(body_len_).data(), hdr_.data() + hdr_off_, body_have_);
+            hdr_off_ += body_have_;
         }
     }
 
-    std::array<std::byte, MaxHeader> hdr_; /**< @brief Header bytes read and not yet judged. */
-    std::size_t hdr_have_ = 0;             /**< @brief How many of `hdr_` are filled. */
-    view::rx_block_t blk_;                 /**< @brief The current body's segment. */
-    std::size_t body_len_ = 0;             /**< @brief The current body's length. */
-    std::size_t body_have_ = 0;            /**< @brief Body bytes received so far. */
-    std::uint32_t frames_ = 0;             /**< @brief Bodies handed up (wraps; compared only). */
-    bool in_body_ = false;                 /**< @brief A body is being received. */
+    std::array<std::byte, Window> hdr_; /**< @brief The read-ahead window. */
+    std::size_t hdr_have_ = 0;          /**< @brief How many of `hdr_` are filled. */
+    std::size_t hdr_off_ = 0;           /**< @brief Where the next unjudged byte of `hdr_` is. */
+    view::rx_block_t blk_;              /**< @brief The current body's segment. */
+    std::size_t body_len_ = 0;          /**< @brief The current body's length. */
+    std::size_t body_have_ = 0;         /**< @brief Body bytes received so far. */
+    std::uint32_t frames_ = 0;          /**< @brief Bodies handed up (wraps; compared only). */
+    bool in_body_ = false;              /**< @brief A body is being received. */
 };
 
 }  // namespace tr::net
