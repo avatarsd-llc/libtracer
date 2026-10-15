@@ -101,7 +101,7 @@ void a_skipped_pass_leaves_its_request() {
         std::printf("  (single flight is not compiled in: the fenced build has no drain gate)\n");
         return;
     } else {
-        auto& flight = q::in_flight;
+        auto& flight = q::registry().in_flight;
         object_t x;
         q::enter();
         (void)q::retire(&x, release);                // this thread's own bracket holds it: parked
@@ -164,7 +164,8 @@ void a_skip_inside_a_pass_is_served() {
     check(g_first.released.load(), "the first pair ran, in the pass");
     check(g_second.released.load(),
           "the pair retired inside the pass ran, though its last reader's drain met that pass");
-    if constexpr (q::kMembarrier) check(q::in_flight.load() == 0, "and no pass is left in flight");
+    if constexpr (q::kMembarrier)
+        check(q::registry().in_flight.load() == 0, "and no pass is left in flight");
 }
 
 /**
