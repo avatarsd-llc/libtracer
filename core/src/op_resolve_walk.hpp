@@ -938,8 +938,8 @@ template <class N, class ReplyError>
     // §Field-write). This holds for EVERY selector, including `:subscribers` and
     // `:acl`, which read and write fine: the field exists, the await does not.
     //
-    // `graph_t::await` takes no field parameter at all, so the local API never
-    // offered this -- only the wire path decoded a selector it could not honour.
+    // The local path-taking `graph_t::await` and `graph_t::subscribe` answer a
+    // `:field` path with the same SCHEMA_NOT_FOUND (#2113).
     //
     // The test is the selector's PRESENCE, not `field.empty()`: a zero-level `FIELD`
     // decodes to an empty path, and answering that as a plain await would be a change

@@ -110,6 +110,13 @@ result_t<path_t> path_t::parse(std::string_view text) {
         }
     }
 
+    // A path carries at most ONE field selector (#2113). The tail was split at the first ':',
+    // so a second one would otherwise land inside a field NAME, where ':' is reserved
+    // (reference/03 §reserved characters), and `/x:schema:subscribers[]` would address a field
+    // called `schema:subscribers` and answer SCHEMA_NOT_FOUND instead of a malformed path.
+    if (field_text.find(':') != std::string_view::npos)
+        return std::unexpected(status_t::INVALID_PATH);
+
     // Parse the field tail: dot-separated steps, each optionally "[N]" or "[]".
     if (!field_text.empty()) {
         std::size_t pos = 0;

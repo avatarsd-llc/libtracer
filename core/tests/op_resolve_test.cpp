@@ -30,6 +30,7 @@
 #include <memory_resource>
 #include <new>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -360,6 +361,56 @@ void test_await_field_selector_is_enotty() {
         check(status_error_code(r.children[4]) == 0x0041 /*tr::flow::timeout*/,
               "control: a field-less AWAIT still answers flow::timeout");
     }
+}
+
+/**
+ * @brief #2113: the LOCAL `subscribe` and `await` on a `:field` path refuse with the status the
+ *        wire AWAIT answers (reference/02 §#585), instead of binding the whole vertex.
+ *
+ * Pre-fix, both doors resolved `path.key()` and dropped `path.field()`: a callback subscribed to
+ * `/x:schema` fired on every value write to `/x`, and an await on it waited on the vertex and
+ * timed out. Every selector is refused, `:subscribers` and `:acl` included — the rule is that a
+ * field has no notification surface, not that the field is unknown. The status compared against
+ * is read from the wire reply, so the two doors cannot drift apart silently.
+ */
+void test_local_subscribe_await_field_path_matches_remote() {
+    std::printf("local subscribe/await on a :field path -> the remote AWAIT's status:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    (void)g.register_vertex(*path_t::parse("/x"), role_t::STORED_VALUE);
+
+    std::vector<std::byte> tbuf(8);
+    tr::detail::store_le<std::uint64_t>(tbuf, 1'000'000ull);  // 1ms
+    std::vector<std::byte> sel;
+    tr::wire::emit_tlv(sel, type_t::FIELD, opt_t{.pl = true}, b_name("schema"));
+    const auto remote = decode_reply(*resolve_bytes(
+        resolver, b_fwd(fwd_op_t::AWAIT, b_path({"x"}), b_path({"reply-ep"}), sel, b_value(tbuf))));
+    check(status_error_code(remote.tlv.children[4]) == 0x0031 /*tr::schema::not_found*/,
+          "baseline: the remote AWAIT on :schema answers SCHEMA_NOT_FOUND");
+
+    int fired = 0;
+    const auto on_value = [](void* c, const tr::graph::value_t&) { ++*static_cast<int*>(c); };
+    for (const char* text : {"/x:schema", "/x:acl", "/x:stats", "/x:settings.app.kp",
+                             "/x:subscribers", "/x:subscribers[]"}) {
+        const path_t p = *path_t::parse(text);
+        const auto sub = g.subscribe(p, on_value, &fired);
+        check(!sub.has_value() && sub.error() == status_t::SCHEMA_NOT_FOUND,
+              (std::string("subscribe(cb) ") + text + " -> SCHEMA_NOT_FOUND"));
+        const auto edge = g.subscribe(p, *path_t::parse("/sink"));
+        check(!edge.has_value() && edge.error() == status_t::SCHEMA_NOT_FOUND,
+              (std::string("subscribe(edge) ") + text + " -> SCHEMA_NOT_FOUND"));
+        const auto w = g.await(p, std::chrono::milliseconds(1));
+        check(!w.has_value() && w.error() == status_t::SCHEMA_NOT_FOUND,
+              (std::string("await ") + text + " -> SCHEMA_NOT_FOUND, not flow::timeout"));
+    }
+    (void)g.write(*path_t::parse("/x"), make_value(b_value({0x07})));
+    check(fired == 0, "no refused field subscription fires on a value write to the vertex");
+
+    // CONTROL — a plain vertex path subscribes and delivers as before.
+    const auto plain = g.subscribe(*path_t::parse("/x"), on_value, &fired);
+    check(plain.has_value(), "control: subscribe(/x) still succeeds");
+    (void)g.write(*path_t::parse("/x"), make_value(b_value({0x08})));
+    check(fired == 1, "control: the plain subscription fires once on a value write");
 }
 
 /**
@@ -1587,6 +1638,7 @@ int main() {
     test_write();
     test_await();
     test_await_field_selector_is_enotty();
+    test_local_subscribe_await_field_path_matches_remote();
     test_await_at_a_handler_replies_with_the_composed_value();
     test_subscribers_field();
     test_write_trailer_sliced();

@@ -2375,7 +2375,9 @@ class graph_t {
 
     /**
      * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
-     *        cloned value to target (spec-faithful). `NOT_FOUND` if src is unknown.
+     *        cloned value to target (spec-faithful). `NOT_FOUND` if src is unknown, and
+     *        `SCHEMA_NOT_FOUND` if @p src carries a `:field` tail: a field has no
+     *        notification surface (docs/reference/02 §#585).
      *
      * These `subscribe(...)` overloads are *host SDK sugar*, not new wire primitives: the
      * wire data API stays read/write/await (ADR-0006). On the wire, subscription is a
@@ -2419,7 +2421,8 @@ class graph_t {
      *               all-zero, i.e. today's behaviour. A callback edge carries no TLV, so
      *               the policy is set on the slot directly rather than parsed out of one.
      * @return A @ref subscription_t handle for @ref unsubscribe; error on an unknown @p src
-     *         or a denied SUBSCRIBE gate.
+     *         or a denied SUBSCRIBE gate, and `SCHEMA_NOT_FOUND` on a @p src with a `:field`
+     *         tail, as for the edge form.
      */
     [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, subscriber_fn_t fn,
                                                      void* ctx, delivery_policy_t policy = {});
@@ -2784,7 +2787,9 @@ class graph_t {
      * std::string_view, const net::link_kind_t*). */
     [[nodiscard]] result_t<void> write(const path_t& path, view::rope_t value);
     /** @brief Await by path — resolve the key once, then @ref await(vertex_handle_t,
-     * std::chrono::nanoseconds, std::string_view). */
+     * std::chrono::nanoseconds, std::string_view). A path with a `:field` tail answers
+     * `SCHEMA_NOT_FOUND`, as a wire AWAIT with a FIELD selector does: nothing wakes a wait
+     * on a field (docs/reference/02 §#585). */
     [[nodiscard]] result_t<value_ref_t> await(const path_t& path, std::chrono::nanoseconds timeout);
 
     /** @brief Resolve a canonical PATH-payload @p key to its vertex handle (`nullopt` if

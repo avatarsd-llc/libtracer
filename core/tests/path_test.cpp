@@ -108,6 +108,14 @@ int main() {
     rejected("/a[b");
     rejected("/a]b");
 
+    std::printf("A path carries at most one ':' field selector (#2113):\n");
+    // The tail splits at the FIRST ':'; a second one used to land inside a field NAME, so
+    // `/x:schema:subscribers[]` addressed a field called `schema:subscribers` and answered
+    // SCHEMA_NOT_FOUND. A path with two selectors is malformed, not an unknown field.
+    rejected("/x:schema:subscribers[]");
+    rejected("/x:settings.app:kp");
+    rejected("/x::schema");
+
     std::printf("The full reserved set is exactly the seven of reference/03 (#996):\n");
     {
         for (const char c : std::string_view{"/:.[]*?"}) {
