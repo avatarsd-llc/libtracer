@@ -581,6 +581,13 @@ Details that make these trustworthy:
   is that procedure on the bench host: it waits until no perf run is queued or running
   before each stop (or, with `DRAIN=1`, takes the runner's job label away and waits for its
   current job), and restarts the runner after every window, failures and signals included.
+- **The fast-mode floor (#2168).** Under either rule a leg also needs the arms' **best
+  samples** (lowest p50 and mean, highest deliveries/s across the pairs) to be past the same
+  threshold. Several rows are bimodal per process on every arm, main included
+  (`store-lat` graph-write ~75 or ~120 ns, `lkv-store` 16 KiB ~120 or ~180 ns), and a
+  candidate whose pairs landed on the slow mode failed PRs that could not reach the row. A
+  slow mode or contention only slows a process, so the best sample is the fast mode: a real
+  regression moves it and a mode flip does not. The report prints it as `floor x…`.
 - **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
   or past the flat threshold, because builds of one source move them by several percent
   (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they are decided

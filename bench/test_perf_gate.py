@@ -143,6 +143,45 @@ class NoFalseFails(unittest.TestCase):
         self.assertFalse(v["fail"])
 
 
+class ModeFlipsDoNotFail(unittest.TestCase):
+    """@brief #2168: a bimodal row whose candidate pairs land on the slow mode is not a
+    pullback. The best sample of each arm is the fast mode, and it has not moved."""
+
+    KEY = "store-lat-narrow-graph-write/32/1/1"
+    NULL = {KEY: {"p50_ns": 0.0153}}  # x1.046, as banked
+    # #2159's gate: base 78.5..109.4, cand 81.9..125.7, median pair ratio x1.40, CI excludes 1.
+    BASE = [78.5, 80.1, 82.0, 79.4, 83.0, 109.4, 81.2, 84.3]
+    CAND = [117.3, 121.0, 81.9, 118.4, 125.7, 116.2, 119.8, 117.0]
+
+    def test_slow_mode_pairs_pass_on_a_null_row(self):
+        v, _f, src = pg.leg_verdict(self.KEY, "p50_ns", self.CAND, self.BASE, self.NULL)
+        self.assertEqual(src, "null")
+        self.assertTrue(v["effect"] and v["significant"])
+        self.assertFalse(v["floor_moved"])
+        self.assertFalse(v["fail"])
+
+    def test_slow_mode_pairs_pass_on_a_flat_row(self):
+        """#2100's cliff row shape at the flat rule: medians, ranges and majority alone."""
+        base = [100.0, 101, 99, 100, 102, 100, 101, 100]
+        cand = [99.5, 150, 152, 151, 149, 153, 150, 151]
+        v = pg.legacy_verdict(cand, base, pg.LAT_REGRESS, False)
+        self.assertTrue(v["effect"] and v["majority"])
+        self.assertFalse(v["fail"])
+
+    def test_a_fifteen_percent_shift_of_the_same_pairs_still_fails(self):
+        v, _f, _s = pg.leg_verdict(self.KEY, "p50_ns", [x * 1.15 for x in self.BASE],
+                                   self.BASE[::-1], self.NULL)
+        self.assertTrue(v["fail"])
+        v = pg.legacy_verdict([x * 1.16 for x in self.BASE[:5]], self.BASE[:5],
+                              pg.LAT_REGRESS, False)
+        self.assertTrue(v["fail"])
+
+    def test_the_floor_is_the_best_sample_on_a_throughput_leg(self):
+        v = tput([80, 80, 99, 80], [100, 100, 100, 100])
+        self.assertAlmostEqual(v["floor"], 0.99)
+        self.assertFalse(v["fail"])
+
+
 class RealRegressionsStillFail(unittest.TestCase):
     """@brief Detection is not what was traded away. Each of these must FAIL."""
 
