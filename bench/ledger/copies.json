@@ -107,9 +107,9 @@
       "arm": "ws-relay-srv",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 268,
+      "value": 76,
       "goal": 64,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-srv @1024",
@@ -118,9 +118,9 @@
       "arm": "ws-relay-srv",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 3150,
+      "value": 1034,
       "goal": 1024,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-srv @4096",
@@ -129,9 +129,9 @@
       "arm": "ws-relay-srv",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 8266,
+      "value": 6,
       "goal": 0,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-srv @16384",
@@ -140,9 +140,9 @@
       "arm": "ws-relay-srv",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 32842,
+      "value": 6,
       "goal": 0,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @64",
@@ -151,9 +151,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 458,
+      "value": 266,
       "goal": 128,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @1024",
@@ -162,9 +162,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 5260,
+      "value": 3144,
       "goal": 2048,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @4096",
@@ -173,9 +173,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 16520,
+      "value": 8260,
       "goal": 4096,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @16384",
@@ -184,9 +184,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 65672,
+      "value": 32836,
       "goal": 16384,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "udp-relay-tcp-srv @64",

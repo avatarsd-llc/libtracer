@@ -176,6 +176,10 @@ class link_rig_t {
                                           std::vector<bytes_t>& whole) = 0;
     /** @brief The peer leaves: its end of the wire closes. */
     virtual void peer_leave() = 0;
+    /** @brief True once the link closed toward its peer (a server answers per peer). */
+    [[nodiscard]] virtual bool link_closed() { return !link().link_up(); }
+    /** @brief False for a kind whose egress the cases cannot drive point to point. */
+    [[nodiscard]] virtual bool egress_cases() const { return true; }
 };
 
 /** @brief A factory for a fresh rig: each case gets its own link, since several end it. */
@@ -313,7 +317,7 @@ inline void case_oversize_length(rig_factory_t make) {
     rig->peer_write(rig->oversize_header());
     check(eventually([&] { return l.drop_stats().malformed_rx > malformed_before; }, kWait),
           "the announced length is counted as malformed");
-    check(eventually([&] { return !l.link_up(); }, kWait), "and the link is closed");
+    check(eventually([&] { return rig->link_closed(); }, kWait), "and the link is closed");
     check(rig->rx_backend().draws() == draws_before,
           "nothing was drawn from the link's receive source for it");
     check(sink.snapshot().empty(), "and nothing was delivered");
@@ -352,6 +356,10 @@ inline void case_stalled_peer(rig_factory_t make) {
     frame_sink_t sink;
     const std::unique_ptr<link_rig_t> rig = make();
     banner(*rig, "stalled peer");
+    if (!rig->egress_cases()) {
+        check(true, "this kind's egress is not point to point: N/A");
+        return;
+    }
     check(rig->ready(), "the rig came up");
     if (!rig->ready()) return;
     attach(*rig, sink);
@@ -395,6 +403,10 @@ inline void case_peer_leaves_mid_send(rig_factory_t make) {
     frame_sink_t sink;
     const std::unique_ptr<link_rig_t> rig = make();
     banner(*rig, "peer leaving mid-send");
+    if (!rig->egress_cases()) {
+        check(true, "this kind's egress is not point to point: N/A");
+        return;
+    }
     check(rig->ready(), "the rig came up");
     if (!rig->ready()) return;
     attach(*rig, sink);

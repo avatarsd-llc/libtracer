@@ -1098,18 +1098,18 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     virtual bool on_accept(session_base_t& s, int fd) = 0;
 
     /**
-     * @brief Per-readable-chunk framing: hand @p len bytes just read off @p s 's socket
-     *        to the derived server's reassembler (or its handshake parser).
+     * @brief @p s 's socket is readable: read it and frame what arrives — the derived
+     *        server's frame reader, or its handshake parser.
      *
-     * Runs on the poll thread with no transport lock held. The hook owns the decision to
-     * @ref teardown_slot on a framing violation; a peer that simply closed is torn down
-     * by the caller before this is reached.
+     * The read is the derived server's, so each kind receives straight into the buffer
+     * its framing draws (ADR-0087 §1) rather than through a chunk of this tier's. Runs on
+     * the poll thread with no transport lock held. The hook owns the decision to
+     * @ref teardown_slot, for a peer that closed as for a framing violation.
      *
-     * @param s    The slot the bytes arrived on.
-     * @param data The chunk (borrowed; valid only for this call).
-     * @param len  The chunk length, always > 0.
+     * @param s  The slot whose socket polled readable.
+     * @param fd Its socket.
      */
-    virtual void on_readable(session_base_t& s, const std::byte* data, std::size_t len) = 0;
+    virtual void on_readable(session_base_t& s, int fd) = 0;
 
     /**
      * @brief Reset the slot's protocol buffers as it is recycled (teardown side).
@@ -1261,15 +1261,8 @@ class flat_slot_server_t : public slot_server_t {
      *       half). Every one of these is dead code under this arm's own `bus_mode()`.
      * @{
      */
-    /** @brief No peer tier, so nothing wants ropes on it. */
-    [[nodiscard]] static bool peer_tier_wants_rope() noexcept { return false; }
     /** @brief No peer tier to deliver an owning view to. */
     static void deliver_to_peer(peer_handle_t peer, view::view_t frame) {
-        (void)peer;
-        (void)frame;
-    }
-    /** @brief No peer tier to deliver a borrowed span to. */
-    static void deliver_to_peer_borrowed(peer_handle_t peer, std::span<const std::byte> frame) {
         (void)peer;
         (void)frame;
     }
@@ -1366,15 +1359,9 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
      *       receive loops reaches `peer_rx_` through exactly these.
      * @{
      */
-    /** @brief True iff the peer-named tier wants OWNING ropes (ADR-0053 §5). */
-    [[nodiscard]] bool peer_tier_wants_rope() const noexcept { return peer_rx_.has_rope(); }
     /** @brief Deliver an owning view up the peer-named tier. */
     void deliver_to_peer(peer_handle_t peer, view::view_t frame) {
         peer_rx_.deliver(peer, std::move(frame));
-    }
-    /** @brief Deliver a borrowed span up the peer-named tier. */
-    void deliver_to_peer_borrowed(peer_handle_t peer, std::span<const std::byte> frame) {
-        peer_rx_.deliver_borrowed(peer, frame);
     }
     /** @brief Deliver an owning rope up the peer-named tier. */
     void deliver_to_peer_rope(peer_handle_t peer, view::rope_t frame) {

@@ -18,14 +18,26 @@
  * that shrinks the link; RAISING one is a reviewed decision that names the bytes it buys.
  * They are 64-bit numbers (block sizes plus the 8-entry first block of a `block_array_t`);
  * on another pointer width the test reports and does not gate.
+ *
+ * One more arm (#2140) counts a WS peer across one 16 KiB message: it must hold no more
+ * after the message than before it, on every pointer width.
  */
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <span>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_ws.hpp"
@@ -92,12 +104,112 @@ void run_arm(const char* name) {
     check(src.live.load(std::memory_order_relaxed) == 0, "teardown returned every byte");
 }
 
+/** @brief A receive backend over the platform heap that adds to @p src's live balance. */
+class counting_rx_t final : public tr::mem::mem_backend_t {
+   public:
+    explicit counting_rx_t(counting_source_t& src) noexcept
+        : mem_backend_t("link_base_ram_rx"), src_(src) {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        return src_.try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        src_.release(p, bytes, align);
+    }
+
+   private:
+    counting_source_t& src_; /**< @brief Where the bytes are drawn and counted. */
+};
+
+/** @brief Counts what a link hands up, and keeps none of it. */
+struct drop_sink_t {
+    std::atomic<std::size_t> frames{0}; /**< @brief Messages handed up. */
+    void operator()(std::span<const std::byte> /*f*/) { frames.fetch_add(1); }
+    void operator()(tr::view::rope_t /*r*/) { frames.fetch_add(1); }
+};
+
+/** @brief Write all of @p b to @p fd. */
+bool write_all(int fd, std::span<const std::byte> b) {
+    while (!b.empty()) {
+        const ssize_t n = ::send(fd, b.data(), b.size(), MSG_NOSIGNAL);
+        if (n <= 0) return false;
+        b = b.subspan(static_cast<std::size_t>(n));
+    }
+    return true;
+}
+
+/**
+ * @brief #2140: a WS peer that sent one 16 KiB message and then went quiet holds nothing
+ *        more than it did before it: the body was received into a segment drawn at its exact
+ *        length and handed up with it, not into a per-peer buffer that keeps its high water.
+ */
+void run_idle_peer_after_16k() {
+    counting_source_t src;
+    counting_rx_t rx(src);
+    std::size_t before = 0;
+    std::size_t after = 0;
+    std::size_t frames = 0;
+    {
+        drop_sink_t sink;
+        tr::net::ws_server_config_t cfg{};
+        cfg.memory.rx = &rx;
+        cfg.memory.io = &src;
+        cfg.memory.state = &src;
+        tr::net::ws_server_transport_t server(0, cfg);
+        if (server.delivers_ropes()) {
+            server.set_rope_receiver(sink);
+        } else {
+            server.set_receiver(sink);
+        }
+        server.start_receiving();
+        check(server.ok(), "ws server bound");
+
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(server.local_port());
+        ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        const bool dialled = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+        constexpr std::string_view kReq =
+            "GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+        bool upgraded = dialled && write_all(fd, std::as_bytes(std::span(kReq)));
+        std::vector<char> resp(512);
+        pollfd p{fd, POLLIN, 0};
+        upgraded = upgraded && ::poll(&p, 1, 3000) == 1 &&
+                   ::recv(fd, resp.data(), resp.size(), 0) > 12 &&
+                   std::string_view(resp.data(), 12) == "HTTP/1.1 101";
+        check(upgraded, "the peer completed the opening handshake");
+        // Settle: the session is set up; its draws so far are the per-peer cost.
+        std::this_thread::sleep_for(50ms);
+        before = src.live.load(std::memory_order_relaxed);
+
+        // One masked 16 KiB BINARY message (a zero key leaves the body as sent).
+        constexpr std::size_t kBody = 16u * 1024u;
+        std::vector<std::byte> frame{
+            std::byte{0x82}, std::byte{0x80 | 126}, std::byte{kBody >> 8}, std::byte{kBody & 0xFF},
+            std::byte{0},    std::byte{0},          std::byte{0},          std::byte{0}};
+        frame.resize(frame.size() + kBody, std::byte{0x5A});
+        check(write_all(fd, frame), "the peer sent one 16 KiB message");
+        for (int i = 0; i < 1500 && sink.frames.load() == 0; ++i) std::this_thread::sleep_for(2ms);
+        frames = sink.frames.load();
+        std::this_thread::sleep_for(50ms);
+        after = src.live.load(std::memory_order_relaxed);
+        ::close(fd);
+    }
+    std::printf("ws-server idle peer: %zu B before, %zu B after one 16 KiB message\n", before,
+                after);
+    check(frames == 1, "the message was handed up");
+    check(after == before, "the idle peer holds 0 B more after it");
+    check(src.live.load(std::memory_order_relaxed) == 0, "teardown returned every byte");
+}
+
 }  // namespace
 
 int main() {
     std::printf("link_base_ram_test (#2156):\n");
     run_arm<tr::net::tcp_server_transport_t, tr::net::tcp_server_config_t>("tcp-server");
     run_arm<tr::net::ws_server_transport_t, tr::net::ws_server_config_t>("ws-server");
+    run_idle_peer_after_16k();
     if (g_failures != 0) {
         std::printf("%d check(s) FAILED\n", g_failures);
         return EXIT_FAILURE;

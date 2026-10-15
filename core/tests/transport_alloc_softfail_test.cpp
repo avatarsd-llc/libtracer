@@ -42,7 +42,7 @@
  * ## What this harness deliberately does NOT gate: three sites, named
  *
  * **The two PING→PONG call sites.** The two PONG replies
- * (`ws_server_transport_t::drain_frames`'s `PING` case — reached only from `on_readable` —
+ * (the server framing's `PING` case — reached only from `on_readable` —
  * and the client `serve` loop's) build
  * their frame with `ws::encode_server_control` / `ws::encode_client_control` into a stack
  * `std::array`. That the ENCODERS allocate nothing is gated — `bench_failable_census guard`

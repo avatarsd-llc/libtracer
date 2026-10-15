@@ -108,9 +108,10 @@
       "arm": "ws-relay-srv",
       "metric": "syscalls@64",
       "payload": 64,
-      "value": 3,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)",
+      "waiver": "#2140, for the maintainer to accept: header-first reading costs a lone paced frame one read for its header and one for its body (3 -> 4 syscalls per relayed frame at 64 B and 1 KiB), bought for receiving the body straight into its segment; 4 KiB and 16 KiB fall to 4. Back-to-back frames still cost one read each."
     },
     {
       "id": "ws-relay-srv @1024",
@@ -119,9 +120,10 @@
       "arm": "ws-relay-srv",
       "metric": "syscalls@1024",
       "payload": 1024,
-      "value": 3,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)",
+      "waiver": "#2140, for the maintainer to accept: header-first reading costs a lone paced frame one read for its header and one for its body (3 -> 4 syscalls per relayed frame at 64 B and 1 KiB), bought for receiving the body straight into its segment; 4 KiB and 16 KiB fall to 4. Back-to-back frames still cost one read each."
     },
     {
       "id": "ws-relay-srv @4096",
@@ -130,9 +132,9 @@
       "arm": "ws-relay-srv",
       "metric": "syscalls@4096",
       "payload": 4096,
-      "value": 5,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-srv @16384",
@@ -141,9 +143,9 @@
       "arm": "ws-relay-srv",
       "metric": "syscalls@16384",
       "payload": 16384,
-      "value": 11,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @64",
@@ -152,9 +154,10 @@
       "arm": "ws-relay-cli",
       "metric": "syscalls@64",
       "payload": 64,
-      "value": 3,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)",
+      "waiver": "#2140, for the maintainer to accept: header-first reading costs a lone paced frame one read for its header and one for its body (3 -> 4 syscalls per relayed frame at 64 B and 1 KiB), bought for receiving the body straight into its segment; 4 KiB and 16 KiB fall to 4. Back-to-back frames still cost one read each."
     },
     {
       "id": "ws-relay-cli @1024",
@@ -163,9 +166,10 @@
       "arm": "ws-relay-cli",
       "metric": "syscalls@1024",
       "payload": 1024,
-      "value": 3,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)",
+      "waiver": "#2140, for the maintainer to accept: header-first reading costs a lone paced frame one read for its header and one for its body (3 -> 4 syscalls per relayed frame at 64 B and 1 KiB), bought for receiving the body straight into its segment; 4 KiB and 16 KiB fall to 4. Back-to-back frames still cost one read each."
     },
     {
       "id": "ws-relay-cli @4096",
@@ -174,9 +178,9 @@
       "arm": "ws-relay-cli",
       "metric": "syscalls@4096",
       "payload": 4096,
-      "value": 5,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @16384",
@@ -185,9 +189,9 @@
       "arm": "ws-relay-cli",
       "metric": "syscalls@16384",
       "payload": 16384,
-      "value": 11,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
     },
     {
       "id": "httpd-ws rx frame",
