@@ -98,6 +98,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   newcomer and evicts no one. The protected `stream_endpoint_t(tx_src)` constructor takes the
   ring depth as an optional second argument. `link_base_ram_test` pins the idle draw, so growth now fails a test.
 
+### Fixed
+
+- **A `:subscribers[N]` edge a link carried in is evicted with the session that wrote it
+  ([#2135](https://github.com/avatarsd-llc/libtracer/issues/2135)).** The replace stored only the
+  writer's ACL subject, and departure found the edge by it. Since #1846 an authenticated
+  session's subject is its bound identity (`admin:alice`), not its session name (`p<slot>`), so
+  the edge outlived its session, and two sessions of one subject shared a key. The replace now
+  stores the arrival link as `subscriber_remote_t::link` with no route, and departure evicts by
+  that; the subject stays the fan-in gate context. Unreleased since #1846, so no shipped
+  behaviour changes. Additive API: `write_ctx_t::session` (the arrival link's name; set on a
+  field write a link carried, empty on a value write) and a trailing `session` parameter on
+  `graph_t::write`'s field overload, which the router fills. `edge_view_t::has_remote_leg` now
+  tests the return route instead of the link; every routed edge has both, so routed delivery
+  is unchanged, and `edge_view_t::link` names the admitting link even on an edge with no remote
+  leg. `sizeof(subscriber_remote_t)` is unchanged (120 B). `graph_t::subscribe_wire` now refuses
+  an empty `link` as `INVALID_PATH`, as it already refused an empty route, so a routed edge has
+  both by construction; no in-tree caller passes one. Out-of-tree code that builds a
+  `write_ctx_t` with designated initializers under `-Wmissing-field-initializers -Werror` must
+  now name `.session` too.
+
 ## [0.19.1] — 2026-10-11
 
 This patch release also carries RFC-0032's deletion of COMPACT delivery, ADVERTISE, HANDLE_NACK and the route-handle tables, which was planned for 0.20.0. A 0.19.0 peer that still sends them gets a counted unknown-member error.

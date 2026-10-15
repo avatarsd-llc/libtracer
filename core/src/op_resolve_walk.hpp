@@ -905,8 +905,11 @@ template <class N, class ReplyError>
         if (value.rope.total_length() == 0) return reply_error(status_t::BACKPRESSURE);
 
         // The arrival link's catalog identity (#1650) rides the token seam the walk already
-        // carries into this frame — no parameter of its own, no lookup, no branch.
-        result_t<void> w = graph.write(v, field, value.rope, subject, link_token.link_kind);
+        // carries into this frame — no parameter of its own, no lookup, no branch. The
+        // arrival link's NAME is the writer's session (#2135): a `:subscribers[N]` replace
+        // stores it so the edge leaves with that session, whatever subject it bound.
+        result_t<void> w =
+            graph.write(v, field, value.rope, subject, link_token.link_kind, inbound_link);
         // RFC-0004 Amendment 2's whole effect, in one line: the write ran (or was
         // refused by the ACL, or failed) and the terminus stays silent either way. The
         // origin loses per-write backpressure feedback — `or_backpressure` never runs on
