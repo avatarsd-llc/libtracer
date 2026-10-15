@@ -195,7 +195,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "if timed work is optimized away. Its `fold-*`, `lkv-*` and "
         "`*alloc-mt*` rows are what the routing and memory chapters chart. The data-path "
         "rows run over a payload ladder up to 64 KiB, and the `cliff-alloc-*` rows time one "
-        "segment alloc/free at every size of the allocator-cliff ladder (#1806).",
+        "segment alloc/free at every size of the allocator-cliff ladder.",
         "ns p50 / p99 / mean · deliveries/s",
         "per-PR + per-push gate, thirty-five canonical points"),
     instrument_t(
@@ -208,7 +208,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
     instrument_t(
         "bench_chain_delivery.cpp", "framed", ("routing",),
         "Drives the Nth `FWD{WRITE}` of an established stream over its PAIR chain — the steady "
-        "state every stream delivery takes since COMPACT was retired (#1951) — resolved at its "
+        "state every stream delivery takes — resolved at its "
         "terminus (`chain-terminus`) or forwarded one hop downstream (`chain-forward`), plus the "
         "per-link state a hop keeps for it.",
         "ns p50 · allocations per frame · RSS",
@@ -294,8 +294,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
     instrument_t(
         "bench_chain_vs_compact.cpp", "framed", (),
         "Stream delivery over the RFC-0029 PAIR chain at 1 and 3 hops, 64 B to 16 KiB, "
-        "unbatched and with BATCH, with the reply leg priced separately. Its COMPACT arm "
-        "went with COMPACT (#1951). A report, not a gate.",
+        "unbatched and with BATCH, with the reply leg priced separately. A report, not a gate.",
         "ns p50 per frame · wire bytes per hop"),
     instrument_t(
         "bench_path_label.cpp", "framed", (),
@@ -403,7 +402,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "ns per write, median with range \u00b7 deliveries and resolutions per write"),
     instrument_t(
         "bench_target_binding.cpp", "inproc", (),
-        "Prices `graph::target_binding_t` (#830) on the LOCAL target-edge delivery leg: the "
+        "Prices `graph::target_binding_t` on the LOCAL target-edge delivery leg: the "
         "same `dispatch_edge_target` in ONE binary, taking its bound `deref_vertex_slot` "
         "spelling or its canonical `find_ptr` fallback according to the shipped mint rule "
         "(a target registered before the subscribe binds; one registered after does not), "
@@ -451,7 +450,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
     instrument_t(
         "bench_noise_link.cpp", "net", (),
         "The Noise link harness's libtracer arms: one warm link pair per arm on loopback — the "
-        "plain UDP link, and the Noise link (#2064) behind a build switch — timed for one "
+        "plain UDP link, and the Noise link behind a build switch — timed for one "
         "request and its echo, for a blast stream with 1-in-64 frames stamped, and for a fresh "
         "pair's setup to first reply (the handshake, on a secured link), at 64 B, 1 KiB, 4 KiB, "
         "16 KiB and the datagram bound, with the heap, resident set and threads one pair costs. "
@@ -504,7 +503,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "high-water; its `calibrate` mode fails the run if any channel served nothing.",
         "ns p50 · ops/s per thread · store bytes",
         "store bytes + the T=1 latency cell recorded per `main` push, occupancy additionally "
-        "warn-ratcheted; the T=1 p50 of every leg on NARROW and WIDE gated per PR (#1869); "
+        "warn-ratcheted; the T=1 p50 of every leg on NARROW and WIDE gated per PR; "
         "the T-sweep stays diagnostic — see bench/README.md"),
     instrument_t(
         "bench_store_escape.cpp", "counted", (),
@@ -520,30 +519,27 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "The same write at a vertex that RETAINS a last-known-value and at one that retains "
         "nothing, swept over subscriber width 0/1/4 and value link count 1/4 — the axis "
         "`inproc-target-*` does not cover, because that pair sweeps the role of the delivery "
-        "TARGET and this one sweeps the role of the vertex being WRITTEN. A `HANDLER` used to build "
-        "a notify clone of the value before storing (removed by #1505); fan-out ZERO is the arm "
-        "that isolated it. Also times the clone term alone across the rope's inline/spill "
-        "boundary.",
+        "TARGET and this one sweeps the role of the vertex being WRITTEN. Fan-out ZERO isolates "
+        "the write from delivery. Also times the clone term alone across the rope's "
+        "inline/spill boundary.",
         "ns p50 · writes/s, per role, fan-out and link count",
         "diagnostic, never gated — its rows are absent from the default sweep the gate joins on"),
     instrument_t(
         "bench_source_role_alloc.cpp", "counted", (),
         "The heap half of that question, in its own binary for the reason bench_store_escape "
-        "gives: how many process-heap blocks one write costs at each role and link count. The "
-        "count was the shed-on-OOM exposure — a HANDLER notify clone past the rope's inline "
-        "capacity drew a block on every write, and it was that block's failure that shed an "
-        "entire fan-out while the write still returned success. #1505 deleted the clone, so "
-        "the HANDLER now reads exactly one block per write below the retaining role at every "
-        "link count and the shed is impossible rather than counted.",
+        "gives: how many process-heap blocks one write costs at each role and link count. A "
+        "block drawn on every write is a shed-on-OOM exposure, so the count is the check: a "
+        "HANDLER reads exactly one block per write below the retaining role at every link "
+        "count.",
         "allocations and frees per write, per role and link count",
         "never gated — a decision input, reported as a count"),
     instrument_t(
         "bench_publish_leg.cpp", "inproc", (),
         "Separates the two halves of a write at 0 and 1 subscribers: `assign`, which performs "
         "RFC-0008's state transition and sends nothing, against `write`, which then delivers. "
-        "The in-tree instrument for the producer-side publish leg RFC-0025 §4.6.2 quoted from a "
-        "harness that was never committed; its `assign` row is the `vertex_t::store`-alone "
-        "figure that section's erratum demotes to a host-stamped basis.",
+        "The in-tree instrument for the producer-side publish leg of RFC-0025 §4.6.2; its "
+        "`assign` row is the `vertex_t::store`-alone figure that section states on a "
+        "host-stamped basis.",
         "ns p50 / p99 / mean · operations/s, per verb and subscriber count",
         "never gated — every arm is a subset of the already-gated `inproc` point"),
     instrument_t(
@@ -551,8 +547,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "N writers on ONE vertex, plain last-writer-wins against a STREAM retaining a bounded "
         "history, swept 1 → 8 writers with the two arms run back to back at each width so the "
         "stream/lock-free ratio is same-run. The committed instrument for §4.6.2's four-writer "
-        "leg; it prices today's receiving-vertex retention, not the producer-side ring that "
-        "figure priced and PR #1490 deleted.",
+        "leg; it prices receiving-vertex retention (RFC-0025 §4.6.1 Amendment 2).",
         "aggregate and per-thread ops/s · the same-run ratio",
         "never gated — a many-thread aggregate rate is a property of the host"),
     instrument_t(
@@ -602,11 +597,11 @@ PROBES: tuple[probe_t, ...] = (
     probe_t("canary_seam_only",
             "a `std::pmr::vector` filled over the INJECTED seam — the seam must serve and "
             "nothing may escape, which is what makes `reg_escape`'s two columns disjoint",
-            "**hard** — instrument self-check, aborts the run (#1420)"),
+            "**hard** — instrument self-check, aborts the run"),
     probe_t("canary_heap_escape",
             "the identical vector filled over the PROCESS HEAP — the escape must be SEEN, "
             "so an operator-new override gone blind cannot hand every zero below a free pass",
-            "**hard** — instrument self-check, aborts the run (#1420)"),
+            "**hard** — instrument self-check, aborts the run"),
     probe_t("forward", "one FWD forward hop, from arrival to egress",
             "**zero** allocations, every CI run (ADR-0038 §16KB-RAM)"),
     probe_t("terminus", "one terminus resolve, which may allocate (ADR-0041)", "report-only"),
@@ -620,7 +615,7 @@ PROBES: tuple[probe_t, ...] = (
     probe_t("fanout_wide", "one publish at a large subscriber count", "report-only"),
     probe_t("reg_escape",
             "a wire-driven `/net/<module>/<name>` registration on a graph with a memory resource "
-            "injected — what the resource never saw. Target: zero (ADR-0065), reached (#1991)",
+            "injected — what the resource never saw. Target: zero (ADR-0065), pinned there",
             "**zero** — any block or byte fails (`MEM_ZERO_POINTS`)"),
 )
 
@@ -791,12 +786,12 @@ a transport that does not override the gather form concatenates once in
 
 `compact-forward`, `compact-terminus` and `route-handle-egress-*` are no longer produced. They
 measured RFC-0004 §E.1's per-link route handle (`ADVERTISE` / `COMPACT` / `HANDLE_NACK`), which
-RFC-0032 removed from the protocol and the router (#1951); delivery became chain delivery: a `FWD{WRITE}` addressed by
+RFC-0032 removed from the protocol and the router; delivery is chain delivery: a `FWD{WRITE}` addressed by
 the subscription edge's chain, one element consumed per hop, no state held. Their history stays in the
 charts as a closed record and is not comparable to later points; `chain-forward` and
-`chain-terminus` (`bench_chain_delivery`) are the rows that replaced them. The cost chain delivery pays is
-bytes on the wire, not time per hop, and the maintainer has ruled that multi-hop byte cost
-accepted: the benches report it and never veto on it. `BATCH` is the application's tool for
+`chain-terminus` (`bench_chain_delivery`) are the standing rows. The cost chain delivery pays is
+bytes on the wire, not time per hop, and RFC-0032 accepts that multi-hop byte cost: the
+benches report it and never veto on it. `BATCH` is the application's tool for
 amortising headers on a steady flow."""
 
 
@@ -975,10 +970,8 @@ release binary that `bench/fetch_zenoh.sh` downloads, so its optimization profil
 upstream's rather than a flag this repo sets. Both are optimized builds. Which rows do equal
 work, why there is no network *throughput* comparison, and which transports are absent and
 why, are all below — as are the three **designated model boundaries**, which say what the
-two engines are respectively buying with the costs these charts show. Topic count was once
-listed there as the one axis where Zenoh was the better engine; the matched
-`topics-bound` / `topics-addr` decomposition retired that reading, and the boundary section
-below states what replaced it."""
+two engines are respectively buying with the costs these charts show, and the matched
+`topics-bound` / `topics-addr` decomposition of topic count."""
 
 
 def raw_data() -> str:
