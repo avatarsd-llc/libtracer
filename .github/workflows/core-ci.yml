@@ -1191,6 +1191,9 @@ jobs:
   # matters most for this policy: it is the first one with real cross-thread ordering (a seq_cst
   # announce paired against the retiring thread's epoch RMW — a Dekker shape), and it must run at
   # BOTH lkv_slot bindings because `hazard_slot_t` is the leg that exercises #897's self-drain.
+  # Both of those run the default fenced bracket entry. A third leg, fence=membarrier, binds
+  # core/tests/presets/reclaim-qsbr-membarrier (the `kQsbrAsymmetricFence` opt-in, #2100) and sets
+  # LT_EXPECT_MEMBARRIER=1, so a runner that refuses membarrier(2) fails the leg loudly.
   tsan-reclaim-qsbr:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
@@ -1198,7 +1201,11 @@ jobs:
     strategy:
       matrix:
         lkv_slot: [single_writer_slot_t, hazard_slot_t]
-    name: tsan qsbr (slot=${{ matrix.lkv_slot }})
+        fence: [fenced]
+        include:
+          - lkv_slot: single_writer_slot_t
+            fence: membarrier
+    name: tsan qsbr (slot=${{ matrix.lkv_slot }}, fence=${{ matrix.fence }})
     steps:
       # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
       # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
@@ -1228,9 +1235,11 @@ jobs:
           LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
           LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
           LT_EXPECT_ACL_POLICY: allow_only_policy_t
+          LT_EXPECT_MEMBARRIER: ${{ matrix.fence == 'membarrier' && '1' || '0' }}
         run: |
           preset="-I$PWD/core/tests/presets/reclaim-qsbr"
           if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/reclaim-qsbr-hazard-slot"; fi
+          if [ "${{ matrix.fence }}" = "membarrier" ]; then preset="-I$PWD/core/tests/presets/reclaim-qsbr-membarrier"; fi
           cmake -S core -B core/build-tsan-qsbr -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 $preset"
           cmake --build core/build-tsan-qsbr --parallel "$BUILD_JOBS"

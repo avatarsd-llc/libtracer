@@ -160,8 +160,15 @@ class pin_t {
     }
     pin_t(const pin_t&) = delete;
     pin_t& operator=(const pin_t&) = delete;
-    /** @brief Release the announcement; idempotent with an explicit @ref release. */
-    ~pin_t() { release(); }
+    /**
+     * @brief Drop the announcement. The pin's scope ends before the caller dispatches, so the
+     *        one clear is the destructor's: a second, explicit one was a second release store
+     *        (a `fence rw,w` and a `sw` on rv32) per fan-out.
+     */
+    ~pin_t() {
+        if (idx_ == kNoIndex) return;
+        registry().cells[idx_].pinned.store(nullptr, std::memory_order_release);
+    }
 
     /** @brief False ⇒ the domain is full; the caller takes the stripe-mutex fallback. */
     [[nodiscard]] bool valid() const noexcept { return idx_ != kNoIndex; }
@@ -188,12 +195,6 @@ class pin_t {
             if (q == p) return p;
             p = q;
         }
-    }
-
-    /** @brief Drop the announcement — called before the first dispatch, never after it. */
-    void release() noexcept {
-        if (idx_ == kNoIndex) return;
-        registry().cells[idx_].pinned.store(nullptr, std::memory_order_release);
     }
 
    private:
