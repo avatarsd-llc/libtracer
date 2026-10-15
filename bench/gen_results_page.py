@@ -117,8 +117,12 @@ def head(cid: str) -> str:
 
 def anchor(cid: str) -> str:
     """@brief The MyST heading anchor a chapter's heading produces."""
-    slug = re.sub(r"[^a-z0-9]+", "-", f"{_CH_NUM[cid]} {_CH_TITLE[cid]}".lower())
-    return "#" + slug.strip("-")
+    # MyST's own rule (`default_slugify`, GitHub style): lowercase, each space becomes
+    # "-", then every character that is not a word character, "-" or a space is dropped.
+    # So "14 · Raw data & provenance" is "14--raw-data--provenance"; collapsing the runs
+    # names an anchor no heading produces.
+    text = f"{_CH_NUM[cid]} · {_CH_TITLE[cid]}".lower().replace(" ", "-")
+    return "#" + re.sub(r"[^\w\- ]", "", text)
 
 
 # ---------------------------------------------------------------------------
