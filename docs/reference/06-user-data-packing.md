@@ -159,11 +159,11 @@ To a subscriber, all three look identical. Tooling such as `tracer-top` enumerat
 
 ## Structured record with named fields
 
-For self-describing data, define a user-range structured TLV (`opt.PL=1`) with NAME + value children. Pick a type code in `0x80–0xFF` and document its layout for the project.
+For self-describing data, define a user-range structured TLV: a type code in `0x81–0xFF` with `opt.PL=1`, whose children are `NAME` + value-TLV pairs. Pick the code for the project and document its layout; `0x80` is already assigned to the BATCH record ([05-protocol-tlvs.md](05-protocol-tlvs.md) §User range).
 
-A structured node is a parent (`POINT`) TLV with `opt.PL=1` carrying `NAME` + `VALUE` children; the encoder emits it under a user-range type code (`0x80+`). See the [wire module](../modules/frame-codec.md).
+The graph stores the record as **one value** and never looks inside it. A write replaces the whole record, a read returns it whole, and a subscriber receives it in one delivery, so no reader ever sees half of an old sample and half of a new one ([24-modelling-granularity.md](24-modelling-granularity.md) §3).
 
-> **Note (informative):** the core refuses the example below today. A structured `POINT` written to a value vertex is a branch write, and a `NAME`/`VALUE` record under `POINT` answers `tr::schema::type_mismatch`. Until [#2114](https://github.com/avatarsd-llc/libtracer/issues/2114) corrects the example, carry the record as a `VALUE` with `opt.PL=1` or under a user-range type code. See [24-modelling-granularity.md](24-modelling-granularity.md) §3.
+Do not build the record under `POINT` (`0x07`). A `POINT` written to a value vertex is a branch write: it is decomposed into the vertex's child vertices, it is not atomic across them ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x07`), and a `NAME`/`VALUE` record under it is refused with `tr::schema::type_mismatch`.
 
 ```cpp
 struct imu_sample {
@@ -171,6 +171,10 @@ struct imu_sample {
     float accel_x, accel_y, accel_z;
     float gyro_x, gyro_y, gyro_z;
 };
+
+// The project's record type: a user-range code, documented for the project.
+// 0x80 is BATCH (reference/05 §User range), so a project record starts at 0x81.
+constexpr auto imu_record_t = static_cast<tr::wire::type_t>(0x81);
 
 // TLV builder helpers.
 tr::wire::tlv_t name_tlv(std::string_view s) {
@@ -186,28 +190,38 @@ tr::wire::tlv_t value_tlv(std::span<const std::byte> b) {
     return t;
 }
 
-void publish_imu(const imu_sample& s, tr::graph::graph_t& g, tr::graph::vertex_handle_t imu) {
+std::vector<std::byte> encode_imu(const imu_sample& s, tr::wire::type_t type) {
     auto bytes = [](const auto& x) {
         return std::span<const std::byte>{reinterpret_cast<const std::byte*>(&x), sizeof x};
     };
 
-    // Parent record: POINT + opt.PL=1, self-describing NAME/VALUE children.
+    // The record: a user-range type with opt.PL=1, self-describing NAME/VALUE children.
     tr::wire::tlv_t rec;
-    rec.type = tr::wire::type_t::POINT;
-    rec.opt  = tr::wire::opt_t{.pl = true};
+    rec.type = type;
+    rec.opt = tr::wire::opt_t{.pl = true};
     rec.children = {
-        name_tlv("ts_ns"), value_tlv(bytes(s.ts_ns)),
-        name_tlv("accel"), value_tlv({reinterpret_cast<const std::byte*>(&s.accel_x), 3 * sizeof(float)}),
-        name_tlv("gyro"),  value_tlv({reinterpret_cast<const std::byte*>(&s.gyro_x), 3 * sizeof(float)}),
+        name_tlv("ts_ns"),
+        value_tlv(bytes(s.ts_ns)),
+        name_tlv("accel"),
+        value_tlv({reinterpret_cast<const std::byte*>(&s.accel_x), 3 * sizeof(float)}),
+        name_tlv("gyro"),
+        value_tlv({reinterpret_cast<const std::byte*>(&s.gyro_x), 3 * sizeof(float)}),
     };
+    return tr::wire::encode(rec);
+}
 
-    // Encode to wire bytes, then publish as a view over those bytes.
-    std::vector<std::byte> wire = tr::wire::encode(rec);
+// Publish the encoded record as one value, through a view over its bytes.
+tr::graph::result_t<void> publish(tr::graph::graph_t& g, tr::graph::vertex_handle_t imu,
+                                  const std::vector<std::byte>& wire) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(wire.size());
     std::memcpy(seg->bytes.data(), wire.data(), wire.size());
-    g.write(imu, tr::view::view_t::over(std::move(seg)));
+    return g.write(imu, tr::view::view_t::over(std::move(seg)));
 }
+
+// publish(g, imu, encode_imu(sample, imu_record_t));
 ```
+
+`core/tests/structured_record_test.cpp` compiles this example and checks it: the record writes, reads back byte-identical, reaches a subscriber as one delivery, and the same children under `POINT` are refused.
 
 A subscriber walks the children iteratively (per [01-data-format.md](01-data-format.md) §iterative parsing) and extracts fields by NAME match. This is **self-describing on the wire**: if the IMU record gains a `mag` field, subscribers built against the older layout ignore it and subscribers built against the newer one read it.
 

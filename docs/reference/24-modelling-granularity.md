@@ -136,8 +136,8 @@ the graph treats them as opaque bytes:
   of `NAME`/`VALUE` pairs under `POINT` is refused with `tr::schema::type_mismatch`. Carry a record
   as a `VALUE` with `opt.PL=1`, or under a user-range type code. A vertex that should ride a
   `FOLD` sweep must store a single `VALUE`. The structured-record example in
-  [06-user-data-packing.md](06-user-data-packing.md) still uses the `POINT` shape and is refused
-  today. This is tracked in [#2114](https://github.com/avatarsd-llc/libtracer/issues/2114).
+  [06-user-data-packing.md](06-user-data-packing.md) uses a user-range type code, and a test
+  compiles it ([#2114](https://github.com/avatarsd-llc/libtracer/issues/2114)).
 
 ## 4. Field change notification
 

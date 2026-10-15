@@ -2896,3 +2896,10 @@ add_executable(subscription_selector_test subscription_selector_test.cpp)
 target_link_libraries(subscription_selector_test PRIVATE libtracer)
 libtracer_test_warnings(subscription_selector_test)
 add_test(NAME subscription_selector COMMAND subscription_selector_test)
+
+# #2114: the reference/06 self-describing record (user-range type, opt.PL=1) round-trips as
+# one value; the POINT shape the page used to show stays refused as a branch write.
+add_executable(structured_record_test structured_record_test.cpp)
+target_link_libraries(structured_record_test PRIVATE libtracer)
+libtracer_test_warnings(structured_record_test)
+add_test(NAME structured_record COMMAND structured_record_test)
