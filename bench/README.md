@@ -327,6 +327,15 @@ term without any design regression. The **high-water** columns are deliberately 
 `tcp-server hw_peak` moved 66% across runs and ~41 KB within one, so a band on it would fire
 on a transient buffer rather than on a connection's cost.
 
+**What it counts on the default build (#2134).** The host default root is the slab pool
+(ADR-0083), which asks the platform heap for whole 256 KiB slabs only, so a counting
+`operator new` alone read 0 per connection, or one slab. Each arm therefore hands its link a
+`link_memory_t` whose `rx`, `io` and `state` are counting wrappers over the default net
+sub-pool (the value sub-pool for the UDP rope arm's heap backend): the link draws from where
+it would by default, each block is charged at its `kSizeClasses` row, and the slab draws
+underneath are not counted. Anything that still goes through `operator new` is counted at
+its usable size, as before.
+
 A **failure to measure is not a budget verdict** (#982's precedent): a missing or unparsable
 transcript, a drifting NULL arm, or a pinned row the run does not produce fails the gate in
 **either** mode. And because the warn path is invisible by construction, every pinned-host

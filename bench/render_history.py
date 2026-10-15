@@ -385,7 +385,8 @@ FAMILIES: list[dict] = [
     # any single run's band.
     dict(id="mem-conn-ram", section="memory", suite="latency",
          title="Per-connection RAM — what one connection costs, by transport",
-         cond="bench_conn_ram · pinned host · live heap bytes one connection adds, and what "
+         cond="bench_conn_ram · pinned host · live bytes one connection adds on the default "
+              "slab root, counted through the link's memory seam (#2134), and what "
               "is still held after it is torn down (target: the same number, and no growth "
               "at all across a connect/disconnect cycle)",
          names=[("conn-ram tcp-server per_conn", "TCP · per connection"),
