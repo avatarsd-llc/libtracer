@@ -11,9 +11,21 @@
  *
  * It is only compiled for chip targets: the `linux` IDF target has no portMUX. Host
  * coverage of the SEAM (as opposed to this one adapter) is core/tests/mem_sync_policy_test.
+ * Being the chip-only TU, it also pins the component's `kSingleCore` against `sdkconfig.h`.
  */
 
 #include "libtracer_esp/critical_pool.hpp"
+
+#include "libtracer/config.hpp"
+#include "sdkconfig.h"
+
+// A chip build binds kSingleCore exactly when FreeRTOS runs on one core (#2126): true on a
+// second core would strip fences the grace period needs, and false here pays fences for nothing.
+#if defined(CONFIG_FREERTOS_UNICORE)
+static_assert(tr::graph::kSingleCore, "CONFIG_FREERTOS_UNICORE must bind kSingleCore = true");
+#else
+static_assert(!tr::graph::kSingleCore, "a multi-core chip build must bind kSingleCore = false");
+#endif
 
 static_assert(tr::guard<tr::esp::critical_guard_t>,
               "the interrupt-masked guard must model the one critical-section trait");

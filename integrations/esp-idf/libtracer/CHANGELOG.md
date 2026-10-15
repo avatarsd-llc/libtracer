@@ -12,6 +12,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A unicore chip build binds `kSingleCore`, so its frame bracket pays no fence
+  ([#2126](https://github.com/avatarsd-llc/libtracer/issues/2126)).** The generated config
+  fragment derives it from `CONFIG_FREERTOS_UNICORE` on a chip target; the `linux` target and
+  the early expansion pass keep `false`. `critical_pool.cpp` static-asserts the value against
+  `sdkconfig.h`. On the ESP32-C6 the outermost bracket goes from 3 fences to 0 and
+  `.flash.text` shrinks by 32 B; a dual-core chip such as the ESP32 or ESP32-S3 is unchanged.
 - **The recommended sdkconfig turns lwIP core locking on
   ([#2131](https://github.com/avatarsd-llc/libtracer/issues/2131)).** The README's new
   *Recommended sdkconfig* section sets `CONFIG_LWIP_TCPIP_CORE_LOCKING=y` and

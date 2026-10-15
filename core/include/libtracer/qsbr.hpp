@@ -135,6 +135,36 @@
  * Going OFFLINE needs only `release`: it must publish that this thread's reads are done, and
  * a release store is exactly "nothing above me moves below me".
  *
+ * @section qsbr_flavours Three fence flavours, one chosen per build
+ *
+ * The fence follows the build, never the policy: who may run a hook, and when, is the same in
+ * all three (ADR-0080 Amendment 1 §2, #2126). `%fence_flavour` picks one at compile time:
+ *
+ * - **COMPILER** where @ref tr::graph::kSingleCore holds. Entry: a relaxed store, then a compiler
+ *   barrier. Exit: a compiler barrier, then a relaxed store. Reclaim side: a compiler barrier
+ *   and relaxed loads. No hardware fence anywhere on the bracket (@ref qsbr_single_hart).
+ * - **FENCED**, the default everywhere else: the release store and `seq_cst` fence above.
+ * - **MEMBARRIER** where `kQsbrAsymmetricFence` meets a Linux target (@ref qsbr_asym). A refused
+ *   registration falls back to FENCED at run time, the one fact no build can know.
+ *
+ * @section qsbr_single_hart The single-hart flavour
+ *
+ * One hart executes one instruction stream, and a context switch is a precise trap, so every
+ * access a descheduled thread made is performed before the next thread's first instruction. The
+ * hart's own accesses are performed in its program order as that hart observes them, so the only
+ * reordering left is the compiler's, and a compiler barrier (`atomic_signal_fence`) removes it:
+ * it keeps the announce above the bracket's reads and those reads above the offline store, and on
+ * the reclaim side it keeps the unpublish and the epoch bump above the scan. The Dekker case
+ * split of @ref qsbr_ordering then holds in hart order, with "precedes in S" read as "runs
+ * earlier on the hart". The loads and stores are `relaxed` (`%kStoreOrder`, `%kLoadOrder`),
+ * because the hart already gives the order a release or acquire would ask the hardware for, and
+ * on rv32 each would cost a `fence`.
+ *
+ * This is a hardware and compiler argument, not one inside the C++ abstract machine, the same
+ * argument as Linux's `smp_mb()` under `CONFIG_SMP=n`. It holds only while nothing but that hart
+ * writes these words: the ESP32-C6's LP core does not run libtracer. On a second core it is a
+ * use-after-free, which is why @ref tr::graph::kSingleCore defaults to false.
+ *
  * @section qsbr_asym The asymmetric fence: a plain entry store, `membarrier` on the reclaim side
  *
  * Where `%kMembarrier` holds (a Linux host, `kQsbrAsymmetricFence`, and a registration the
@@ -256,12 +286,71 @@ inline constexpr bool kHaveMembarrier = true;
 inline constexpr bool kHaveMembarrier = false;
 #endif
 
+/** @brief How the bracket and the reclaim side order the announcement (@ref qsbr_flavours). */
+enum class fence_flavour_t : std::uint8_t {
+    COMPILER = 0,   /**< @brief One hart: compiler barriers only (@ref qsbr_single_hart). */
+    FENCED = 1,     /**< @brief A release store and a `seq_cst` fence (@ref qsbr_ordering). */
+    MEMBARRIER = 2, /**< @brief A plain entry, `membarrier` on the reclaim side (@ref qsbr_asym). */
+};
+
 /**
- * @brief The asymmetric fence is compiled in (@ref qsbr_asym): the build asks for it and the
- *        target has `membarrier`. False on every MCU target, whose entry is the store and `seq_cst`
- * fence.
+ * @brief The flavour a build with these facts compiles: @ref fence_flavour_t::COMPILER on one
+ *        hart, @ref fence_flavour_t::MEMBARRIER where the opt-in meets a target that has
+ *        `membarrier`, and @ref fence_flavour_t::FENCED otherwise.
+ *
+ * One hart wins over the opt-in: with no fence left on the entry, `membarrier` has nothing to
+ * save. A MEMBARRIER build whose registration the kernel refuses still enters FENCED at run time.
  */
-inline constexpr bool kMembarrier = kQsbrAsymmetricFence && kHaveMembarrier;
+[[nodiscard]] constexpr fence_flavour_t fence_flavour(bool single_core, bool asym_opt_in,
+                                                      bool have_membarrier) noexcept {
+    if (single_core) return fence_flavour_t::COMPILER;
+    return asym_opt_in && have_membarrier ? fence_flavour_t::MEMBARRIER : fence_flavour_t::FENCED;
+}
+
+static_assert(fence_flavour(false, false, true) == fence_flavour_t::FENCED &&
+                  fence_flavour(false, true, false) == fence_flavour_t::FENCED,
+              "a multi-core build is FENCED unless it opts in on a target with membarrier");
+static_assert(fence_flavour(false, true, true) == fence_flavour_t::MEMBARRIER,
+              "the opt-in on a target with membarrier is MEMBARRIER");
+static_assert(fence_flavour(true, false, false) == fence_flavour_t::COMPILER &&
+                  fence_flavour(true, true, true) == fence_flavour_t::COMPILER,
+              "one hart is COMPILER, whatever the opt-in says");
+
+/** @brief This build's flavour, from @ref tr::graph::kSingleCore and the asymmetric opt-in. */
+inline constexpr fence_flavour_t kFlavour =
+    fence_flavour(kSingleCore, kQsbrAsymmetricFence, kHaveMembarrier);
+
+/**
+ * @brief The asymmetric fence is compiled in (@ref qsbr_asym): the build asks for it, the target
+ *        has `membarrier` and is not single-hart. False on every MCU target.
+ */
+inline constexpr bool kMembarrier = kFlavour == fence_flavour_t::MEMBARRIER;
+
+/** @brief The single-hart flavour is compiled in (@ref qsbr_single_hart). */
+inline constexpr bool kCompilerFence = kFlavour == fence_flavour_t::COMPILER;
+
+/**
+ * @brief The order of a cell's announce and offline stores and of a scan's loads: `release` /
+ *        `acquire` on more than one core, `relaxed` on one hart, where a compiler barrier gives
+ *        the same order and the hardware ordering would cost a `fence` per access on rv32.
+ */
+inline constexpr std::memory_order kStoreOrder =
+    kCompilerFence ? std::memory_order_relaxed : std::memory_order_release;
+
+/** @copydoc kStoreOrder */
+inline constexpr std::memory_order kLoadOrder =
+    kCompilerFence ? std::memory_order_relaxed : std::memory_order_acquire;
+
+/**
+ * @brief The grace period's full barrier: a `seq_cst` fence, or a compiler barrier on one hart
+ *        (@ref qsbr_single_hart).
+ */
+inline void full_fence() noexcept {
+    if constexpr (kCompilerFence)
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+    else
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+}
 
 /**
  * @brief The domain's padding width: @ref tr::graph::kCacheLineBytes, floored at the
@@ -499,7 +588,7 @@ inline void go_online() noexcept {
     const std::size_t idx = self().index();
     if (idx == kNoIndex) {
         r.ctl.overflow_online.fetch_add(1, std::memory_order_relaxed);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
+        full_fence();
         return;
     }
     // A STALE (smaller) epoch is always the conservative direction — it can only make a scan
@@ -518,8 +607,8 @@ inline void go_online() noexcept {
         }
     }
     // The fence after the store orders it before this bracket's reads (@ref qsbr_ordering).
-    r.cells[idx].state.store(word, std::memory_order_release);
-    std::atomic_thread_fence(std::memory_order_seq_cst);
+    r.cells[idx].state.store(word, kStoreOrder);
+    full_fence();
 }
 
 /**
@@ -537,7 +626,9 @@ inline void go_offline() noexcept {
         r.ctl.overflow_online.fetch_sub(1, std::memory_order_seq_cst);
         return;
     }
-    r.cells[idx].state.store(0, std::memory_order_release);
+    // On one hart the barrier keeps this bracket's reads above the store (@ref qsbr_single_hart).
+    if constexpr (kCompilerFence) std::atomic_signal_fence(std::memory_order_seq_cst);
+    r.cells[idx].state.store(0, kStoreOrder);
 }
 
 /**
@@ -582,7 +673,7 @@ inline void enter() noexcept {
         if (s != 0 && lag >= kStallLag && lag < kEpochWindow) {
             // Re-read after the fence: a concurrent bump since `now` is then in the answer,
             // and a later epoch only makes what the caller parks wait longer.
-            std::atomic_thread_fence(std::memory_order_seq_cst);
+            full_fence();
             return r.ctl.epoch.load(std::memory_order_seq_cst);
         }
     }
@@ -679,8 +770,8 @@ template <std::memory_order MO>
 template <class Wants>
 [[nodiscard]] inline horizon_t horizon([[maybe_unused]] Wants&& wants) noexcept {
     registry_t& r = registry();
-    const std::uint32_t c = r.ctl.epoch.load(std::memory_order_acquire);  // L_c, before F_W
-    std::atomic_thread_fence(std::memory_order_seq_cst);
+    const std::uint32_t c = r.ctl.epoch.load(kLoadOrder);  // L_c, before F_W
+    full_fence();
 #if defined(LIBTRACER_QSBR_MEMBARRIER)
     if constexpr (kMembarrier) {
         if (!wants(scan<std::memory_order_relaxed>(c))) return {};
@@ -689,7 +780,7 @@ template <class Wants>
         std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 #endif
-    return scan<std::memory_order_acquire>(c);
+    return scan<kLoadOrder>(c);
 }
 
 /**

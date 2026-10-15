@@ -63,6 +63,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   and `key_of` renders a vertex's canonical PATH key. None takes a lock or draws from the heap
   (`key_of` draws the key from the caller's own source); the slot-reuse caveat of
   `set_suspended` (#1932) applies.
+- **`default_config_t::kSingleCore`: a single-hart build's frame bracket has no hardware fence
+  ([#2126](https://github.com/avatarsd-llc/libtracer/issues/2126)).** A correctness fact, not a
+  tuning knob, and false by default. Bound `true`, the QSBR fence flavour is `COMPILER`: the
+  bracket's entry and exit are relaxed stores with a compiler barrier, and the reclaim side's
+  fence is a compiler barrier too (ADR-0080 Amendment 1 §2; the single-hart argument is in
+  `qsbr.hpp`). It wins over `kQsbrAsymmetricFence`. On the ESP32-C6 (`full_node`, `-Os`, IDF
+  v6.0) the outermost bracket goes from 3 fences to 0 (entry `fence rw,rw` + `fence rw,w`, exit
+  `fence rw,w`), and `.flash.text` shrinks by 32 B. Host builds are unchanged: the default,
+  `reclaim_qsbr` and `kQsbrAsymmetricFence` builds of `graph.cpp` and `transport_vertex.cpp`
+  disassemble identically. Binding it on a build that runs on more than one core is a
+  use-after-free. The ESP-IDF component derives it from `CONFIG_FREERTOS_UNICORE`.
+  Override fragment: `static constexpr bool kSingleCore = true;`
 - **`default_config_t::kQsbrAsymmetricFence`: an opt-in frame bracket entry with no fence on a
   Linux host ([#2100](https://github.com/avatarsd-llc/libtracer/pull/2100)).** Off by default:
   every target keeps the fenced entry (a release store, then a `seq_cst` fence). Bound `true`
