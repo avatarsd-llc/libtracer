@@ -92,11 +92,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **An idle TCP or WebSocket server link draws 64 B from its memory seam, not 1,992 B
   ([#2156](https://github.com/avatarsd-llc/libtracer/issues/2156)).** A multi-peer server no
   longer carries the single-peer send ring its base class built (8 slots, 384 B, never used: a
-  server sends through its sessions), and its poll set grows with the slot table instead of
-  being sized to the whole admission cap when the poll thread starts (two 100-entry tables,
-  1,608 B). The set grows before a new peer is admitted; a refused growth closes that newcomer
-  and evicts no one. The protected `stream_endpoint_t(tx_src)` constructor takes the ring depth as an
-  optional second argument. `link_base_ram_test` pins the idle draw, so growth now fails a test.
+  server sends through its sessions), and its poll set grows to exactly fit the slot table
+  instead of being sized to the whole admission cap when the poll thread starts (two 100-entry
+  tables, 1,608 B). The set grows before a new peer is admitted; a refused growth closes that
+  newcomer and evicts no one. The protected `stream_endpoint_t(tx_src)` constructor takes the
+  ring depth as an optional second argument. `link_base_ram_test` pins the idle draw, so growth now fails a test.
 
 ## [0.19.1] — 2026-10-11
 

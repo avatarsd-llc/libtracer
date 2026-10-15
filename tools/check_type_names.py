@@ -63,6 +63,7 @@ ALLOWED = {
     "guard_type": "member alias read by spelling (`publishes_under`, #1715)",
     "iovec": "the POSIX `struct iovec`, forward-declared",
     "in_addr": "the POSIX `struct in_addr`, forward-declared (#1780)",
+    "pollfd": "the POSIX `struct pollfd`, forward-declared (#2156)",
 }
 """@brief Names allowed without the suffix, each with the reason it stands."""
 

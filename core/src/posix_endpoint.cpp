@@ -787,8 +787,9 @@ void slot_server_t::run() {
     // (the MCU-shaped choice, #362), bounded to 100 ms so the loop stays
     // shutdown-responsive (the posix_endpoint_t idiom).
     //
-    // The poll set grows with the slot table, never ahead of it (#2156): sizing it to the
-    // admission cap up front charged every idle listener the whole cap (two 100-entry tables).
+    // The poll set grows to exactly fit the slot table, never ahead of it (#2156): sizing it
+    // to the admission cap up front charged every idle listener the whole cap (two 100-entry
+    // tables).
     // accept_peer grows it BEFORE a new slot is admitted and refuses the newcomer when that
     // growth is refused, so every slot always has a place here and no admitted peer goes
     // unpolled. Slots are recycled, never freed, and a cleared set keeps its block.
