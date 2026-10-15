@@ -1545,7 +1545,8 @@ class graph_t {
      * are taken in stack-sized batches under the map lock, which draws nothing, and freed
      * after it is released. So a release may re-enter the graph (drop a handle, `find` a
      * path, retire something else) without deadlocking, and an arbitrarily slow one blocks
-     * no reader or writer. The seams are freed before the releases of the same batch.
+     * no reader or writer. Seams and releases share one park and are freed in the order they
+     * were parked.
      *
      * A no-op when nothing is parked or nothing is ripe. An embedder that never calls it
      * keeps the pre-#576 behaviour — the park grows without bound — which @ref
@@ -1554,12 +1555,9 @@ class graph_t {
      *
      * @note Whatever is still parked when the graph is destroyed is freed by the graph's
      *       own teardown, ripe or not — a backstop against unbounded growth, NOT a substitute
-     *       for this call; by then the embedder has stopped every frame. `retired_seams_`
-     *       is declared before `map_mutex_` and `roots_`, so it destructs **last**, after the
-     *       vertex tree and the map lock are already gone: a seam callback whose destructor
-     *       re-enters the graph re-enters a half-destroyed object and crashes. Such an owner
-     *       is safe HERE and only here — it must be collected explicitly, never left to
-     *       teardown.
+     *       for this call; by then the embedder has stopped every frame. The park is
+     *       drained **first**, before any other member goes: a release still parked then runs
+     *       against a graph that is still whole, and a seam goes back to a source still alive.
      */
     void collect();
 
@@ -1573,9 +1571,10 @@ class graph_t {
      * unpublishes what it is about to free parks the free here instead: this call closes an
      * epoch after the caller's unpublish, and @p release runs exactly once,
      * `release.release(release.ctx)`, on the thread of the first @ref collect call made after
-     * every router frame open at that epoch has left, outside every graph lock, after the
-     * seams that call frees. A release still parked when the graph is destroyed runs in its
-     * teardown, with the same caveat as a parked seam there: it must not re-enter the graph.
+     * every router frame open at that epoch has left, outside every graph lock, in the order
+     * it was parked among the seams that call frees (one park, #2118). A release still parked when
+     * the graph is destroyed runs in its teardown, with the same caveat as a parked seam there: it
+     * must not re-enter the graph.
      *
      * The callback is the ADR-0080 @ref retired_callback_t, the shape `unsubscribe` hands a
      * retired subscription's context back through. Whatever reaches the context in the
@@ -1661,6 +1660,9 @@ class graph_t {
      * connection, plus one per creator endpoint of each `tr::net::transport_vertex_t`
      * destroyed over this graph — so on a default deployment that never destroys its
      * transport vertex this legitimately never leaves 0.
+     *
+     * The seams share the graph's one park with the releases @ref park_release parks (#2118),
+     * so this walks it and counts the seams only: linear in what is parked.
      */
     [[nodiscard]] std::size_t parked_seam_count() const;
 
@@ -3454,55 +3456,15 @@ class graph_t {
     // RFC-0009 §B.6: pre-order re-virginize of @p v's subtree — unwind each vertex's
     // subscriber contribution to its descendants' listeners_above_, revert it to a
     // placeholder, and flip it unregistered. Parks each detached value-seam block
-    // into @ref retired_seams_. Each vertex's subscriber slot table is MOVED into @p gone,
+    // into @ref park_. Each vertex's subscriber slot table is MOVED into @p gone,
     // which the caller reserved one entry per visited vertex, so the walk cannot fail; the
     // caller gives each routed edge's link hold back and drops the tables once the locks are
     // released (#1816, #1778). Call with map_mutex_ held UNIQUE (it flips registered_ and
-    // parks into retired_seams_, both map-lock-guarded).
+    // parks into park_, both map-lock-guarded).
     /** @brief The slot tables a retirement moved out of its vertices. */
     using gone_edges_t = mem::block_array_t<mem::block_array_t<subscriber_t>>;
     void retire_subtree(vertex_t* v, gone_edges_t& gone);
 
-    // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,
-    // so a swapped-out block cannot be freed while a reader might still hold the old
-    // pointer — it is PARKED here (ADR-0057 insert-only, applied to the seam). Kept on the
-    // GRAPH, not per-vertex, so an app-field / leaf vertex pays zero extra bytes. Appended
-    // only under map_mutex_ (unique). #576: the park's other end is the public collect(),
-    // which frees a seam once no router frame open at its epoch is still inside. The graph's own
-    // destructor is a growth backstop only, not a substitute: this member is declared BEFORE
-    // map_mutex_ and roots_, so it destructs LAST — a seam whose destructor re-enters the
-    // graph finds a half-destroyed object. Until collect() runs the size is peer-driven (one
-    // per BUS-link connection teardown; a point-to-point teardown parks nothing, because the
-    // identity vertex only gets an on_children when link->bus() != nullptr), plus one per
-    // creator endpoint of every transport vertex destroyed — hence the public
-    // parked_seam_count().
-    //
-    // A table-source array of the parked blocks (#1778), which also served the seams: `retire`
-    // reserves room for its whole subtree BEFORE it changes anything, so parking itself cannot
-    // fail. A link inside the seam would have avoided the reservation but cost 8 B on every
-    // seam-bearing vertex, and a reader may still be reading every other byte of it.
-    //
-    // Each entry carries the QSBR epoch closed after its unpublish (`%detail_qsbr::advance`):
-    // collect() frees it only once every router frame open at that moment has left.
-    /** @brief One parked seam block and the epoch it was parked at. */
-    struct parked_seam_t {
-        value_handlers_t* seam;  /**< @brief The detached block. */
-        std::uint32_t epoch = 0; /**< @brief Free once every participant is past this. */
-    };
-    struct seam_park_t {
-        mem::block_array_t<parked_seam_t> seams; /**< @brief The parked blocks. */
-        /** @brief An empty park drawing from @p src. */
-        explicit seam_park_t(mem::block_source_t& src) noexcept : seams(src) {}
-        seam_park_t(const seam_park_t&) = delete;
-        seam_park_t& operator=(const seam_park_t&) = delete;
-        /** @brief Frees every seam still parked. */
-        ~seam_park_t() { free_all(seams); }
-        /** @brief Free every block in @p a into the source @p a draws from. */
-        static void free_all(mem::block_array_t<parked_seam_t>& a) noexcept {
-            for (const parked_seam_t& s : a) mem::drop_in(a.source(), s.seam);
-            a.clear();
-        }
-    };
     // The graph's OWN table sub-pool (#1778). A default graph on a `kSlabPool` build derives
     // one from the platform heap instead of sharing the host root's: with one pool for every
     // graph, independent graphs written from different threads paid for each other's blocks
@@ -3523,7 +3485,37 @@ class graph_t {
         }
     };
     own_pool_t own_tables_;
-    seam_park_t retired_seams_;
+
+    // The graph's one park (#2118): every block a lock-free reader may still reach after it
+    // was unpublished, with the QSBR epoch closed after its unpublish. collect() frees an entry
+    // at the first call that no router frame open at its epoch is still inside. Appended only
+    // under map_mutex_ (unique), so epochs grow along the array.
+    //
+    // Two kinds share it. A value seam retire() detached (RFC-0009 §B.6; read lock-free, so a
+    // reader may still hold the old pointer) is an entry whose release is null: its block goes
+    // back to the park's own source, the table source every seam is drawn from. A release
+    // park_release or park_reserved was handed (a removed link, a creator endpoint's context)
+    // runs its hook. Kept on the GRAPH, not per vertex, so an app-field or leaf vertex pays
+    // nothing. Until collect() runs its size is peer-driven, hence parked_seam_count().
+    //
+    // Nothing appends without room: retire() reserves for its whole subtree first, and
+    // reserve_park holds room for a later park_reserved, so the array always keeps capacity for
+    // `size() + park_tail_.reserved` (#1778, #2117). It is drained by `park_tail_t`, at the
+    // other end of the class, so the drain runs before any other member is destroyed.
+    /** @brief One parked entry and the epoch it was parked at. */
+    struct parked_t {
+        /** @brief A release to run, or `{seam, nullptr}` for a value seam to free. */
+        retired_callback_t release;
+        std::uint32_t epoch = 0; /**< @brief Ripe once every participant is past this. */
+    };
+    /** @brief Free one parked entry into @p src: run its release, or free its seam. */
+    static void free_parked(mem::block_source_t& src, const retired_callback_t& e) noexcept {
+        if (e.release != nullptr)
+            e.release(e.ctx);
+        else
+            mem::drop_in(src, static_cast<value_handlers_t*>(e.ctx));
+    }
+    mem::block_array_t<parked_t> park_; /**< @brief The parked entries, oldest first. */
 
     // The node-scoped vertex index (RFC-0024 §6.4) — the ONE new structure a bound path
     // needs, named honestly. The "vertex map" is a Composite tree of non-moving unique_ptr
@@ -4169,35 +4161,25 @@ class graph_t {
     std::atomic<std::size_t> refused_retire_{0};  /**< @brief See `retire_refused`. */
 
     /**
-     * @brief The releases @ref park_release parked: each runs once, at the first @ref collect
-     *        that no router frame open at its epoch is still inside. Appended only under
-     *        `map_mutex_` (unique), so epochs grow along the array.
+     * @brief The graph's own end of `park_`: the reservation count, and the drain that runs
+     *        before any other member goes.
      *
-     * Declared LAST, away from `retired_seams_`, for two reasons. Its size moves no member the
-     * write and fan-out paths address. And it destructs FIRST, so a release still parked when
-     * the graph goes runs against a graph that is still whole.
+     * Declared LAST, so it destructs FIRST: a release still parked when the graph goes runs
+     * against a graph that is still whole, and a seam goes back to a source that is still
+     * alive. The park's array itself stays where the seam park always was, so no member the
+     * write and fan-out paths address moves (#2118).
      */
-    /** @brief One parked release and the epoch it was parked at (see `parked_seam_t`). */
-    struct parked_release_t {
-        retired_callback_t release; /**< @brief Run once, at the first ripe collect(). */
-        std::uint32_t epoch = 0;    /**< @brief Ripe once every participant is past this. */
-    };
-    struct release_park_t {
-        mem::block_array_t<parked_release_t> releases; /**< @brief The parked releases. */
-        /** @brief Entries @ref reserve_park holds room for: `releases` keeps capacity for
-         *         `size() + reserved` at all times. Guarded by `map_mutex_`. */
+    struct park_tail_t {
+        mem::block_array_t<parked_t>* park; /**< @brief The park it drains. */
+        /** @brief Entries @ref reserve_park holds room for. Guarded by `map_mutex_`. */
         std::size_t reserved = 0;
-        /** @brief An empty park drawing from @p src. */
-        explicit release_park_t(mem::block_source_t& src) noexcept : releases(src) {}
-        release_park_t(const release_park_t&) = delete;
-        release_park_t& operator=(const release_park_t&) = delete;
-        /** @brief Runs every release still parked. */
-        ~release_park_t() {
-            for (const parked_release_t& c : releases) c.release.release(c.release.ctx);
-            releases.clear();
+        /** @brief Frees every entry still parked. */
+        ~park_tail_t() {
+            for (const parked_t& e : *park) free_parked(park->source(), e.release);
+            park->clear();
         }
     };
-    release_park_t parked_releases_; /**< @brief See `release_park_t`. */
+    park_tail_t park_tail_{&park_}; /**< @brief See `park_tail_t`. */
 };
 
 namespace detail_qsbr {

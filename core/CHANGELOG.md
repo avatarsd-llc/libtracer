@@ -122,6 +122,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A graph keeps one park for every retired kind
+  ([#2118](https://github.com/avatarsd-llc/libtracer/issues/2118)).** Value seams `retire`
+  detaches and the releases `park_release` / `park_reserved` are handed (a removed link, a
+  creator endpoint's context) now wait in one park and leave at the same `collect()`, in the
+  order they were parked; before, a batch freed its seams before its releases. The park is
+  drained first when the graph goes, so a seam still parked then goes back to a source that is
+  still alive. `parked_seam_count()` still counts seams only, now by walking the park.
 - **A QSBR reclaim pass takes one horizon, fenced once, before the map lock.** `graph_t::collect()`
   and `drain_ripe` read the epoch counter, fence and scan the cells once per pass, and compare
   each entry against that horizon. `collect()` no longer fences per entry under `map_mutex_`.
