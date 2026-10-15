@@ -372,18 +372,18 @@ void tcp_transport_t::serve(int fd) {
             continue;
         }
 
-        view::segment_ptr_t seg = std::move(dec.seg);
-        // The body goes straight into the segment and the NEXT frame's prefix rides the same
-        // read into `prefix` (scatter, no staging copy): a frame that arrives whole behind its
-        // predecessor costs one syscall, not two (#2133).
-        const std::ptrdiff_t ahead = read_exact(fd, seg->bytes.data() + dec.off, len, prefix);
+        // The body goes straight into the accepted segment and the NEXT frame's prefix rides
+        // the same read into `prefix` (scatter, no staging copy): a frame that arrives whole
+        // behind its predecessor costs one syscall, not two (#2133). The segment stays in
+        // `dec` until delivery: a second owning local would add one more release site per exit.
+        const std::ptrdiff_t ahead = read_exact(fd, dec.seg->bytes.data() + dec.off, len, prefix);
         if (ahead < 0) return;
         have = static_cast<std::size_t>(ahead);
 
         // Tier select lives in the slot (receiver_slot.hpp): the rope sink gets the
         // frame OWNING, narrowed by aggregate init (over().subview() would copy the
         // handle, leaving a 2nd ref live across the callback, #845); span sink borrows.
-        rx_.deliver(view::view_t{std::move(seg), dec.off, len});
+        rx_.deliver(view::view_t{std::move(dec.seg), dec.off, len});
     }
 }
 
