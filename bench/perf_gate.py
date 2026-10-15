@@ -885,16 +885,21 @@ def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
 #               leg the null tightens it replaces the disjoint-range rule and the pair-
 #               majority vote: a FAIL needs the median past the threshold AND the interval
 #               to exclude 1.0. A leg at the cap (or with no null) keeps main's WHOLE verdict
-#               — flat threshold, disjoint ranges, majority of pairs — so no row is looser or
-#               more false-fail-prone than before (ruling on #1874; `leg_verdict`).
-#   floor     — on every leg, under either rule, the arms' BEST samples (lowest p50/mean,
-#               highest deliveries/s across the pairs) must breach the threshold too (#2168).
+#               — flat threshold, disjoint ranges, majority of pairs (ruling on #1874;
+#               `leg_verdict`), and adds only the fast-mode veto below.
+#   fast mode — on every leg, under either rule, the arms' SECOND-BEST samples (second-
+#               lowest p50/mean, second-highest deliveries/s across the pairs) must breach the
+#               threshold too (#2168). This departs from #1874's "no row looser": it is a veto
+#               the flat rule did not have, traded for not failing rows on mode flips.
 #               Several rows are bimodal per process (store-lat graph-write ~75 vs ~120 ns,
 #               lkv-store 16 KiB ~120 vs ~180 ns, in every arm, main included), and a
 #               candidate whose pairs land on the slow mode passed both tests above on PRs
 #               that could not reach the row. Contamination and a slow mode only slow a
-#               process, so the best sample is the fast mode; a real regression moves it,
-#               a mode flip does not.
+#               process, so the second-best sample is the fast mode (second, so one lucky
+#               fast pair cannot veto a leg). A regression that moves the fast mode fails; one
+#               that only makes the slow mode more frequent, or slows only the slow mode, is
+#               invisible within one session. The term is not tick-guarded on its own: it only
+#               ever vetoes, and `effect` carries the tick guard.
 #
 # Cost. `PAIRS_DEFAULT` pairs of every family, each arm once per pair. The sweep's families
 # total ~15 s per arm and the sibling binaries ~30 s, so 8 pairs are ~12 min of timed work.
@@ -1062,9 +1067,9 @@ def paired_verdict(cand: list[float], base: list[float], factor: float,
     `factor` is the leg's threshold as a ratio (1.06 for a latency leg at 6%, 1/1.06 for
     throughput); `lower_is_worse` selects the throughput sense. Fails only when the median
     per-pair ratio cand/base is past `factor` (effect) AND its bootstrap interval excludes
-    1.0 (significant) AND the arms' best samples are past `factor` too (`floor`, #2168: a
-    bimodal row's slow mode only ever slows a process, so a regression moves the fast mode
-    and a mode flip does not). The ranges and the per-pair breach count are reported for audit.
+    1.0 (significant) AND the arms' second-best samples are past `factor` too (`fast_mode`,
+    #2168: a bimodal row's slow mode only ever slows a process, so a mode flip leaves the fast
+    mode where it was). The ranges and the per-pair breach count are reported for audit.
     """
     n = min(len(cand), len(base))
     cs, bs = cand[:n], base[:n]
@@ -1078,13 +1083,15 @@ def paired_verdict(cand: list[float], base: list[float], factor: float,
 
     effect = breach(r) and (lower_is_worse or not tick_guard or _tick_ok(cm, bm))
     significant = hi < 1.0 if lower_is_worse else lo > 1.0
-    floor = (max(cs) / max(bs)) if lower_is_worse else (min(cs) / min(bs))
+    k = min(1, n - 1)  # the second-best sample; the only one when n is 1
+    fast = (sorted(cs)[-1 - k] / sorted(bs)[-1 - k] if lower_is_worse
+            else sorted(cs)[k] / sorted(bs)[k])
     return {"n": n, "cand_med": cm, "base_med": bm, "ratio": r, "ci": (lo, hi),
             "factor": factor, "cand_range": (min(cs), max(cs)),
-            "base_range": (min(bs), max(bs)), "floor": floor, "floor_moved": breach(floor),
+            "base_range": (min(bs), max(bs)), "fast_mode": fast, "fast_mode_moved": breach(fast),
             "pairs_breached": sum(1 for x in ratios if breach(x)),
             "effect": effect, "significant": significant,
-            "fail": effect and significant and breach(floor), "rule": "ci"}
+            "fail": effect and significant and breach(fast), "rule": "ci"}
 
 
 def legacy_verdict(cand: list[float], base: list[float], factor: float,
@@ -1093,7 +1100,7 @@ def legacy_verdict(cand: list[float], base: list[float], factor: float,
 
     Fails only when the arms' medians breach @p factor (tick-guarded when asked), their
     [min..max] ranges are disjoint, and a strict majority of the pairs breach on their own
-    (every pair below three), and the arms' best samples breach it too (the floor, #2168). The
+    (every pair below three), and the arms' second-best samples breach it too (#2168). The
     ratio and interval of @ref paired_verdict are kept for the report; they do not decide.
     """
     v = paired_verdict(cand, base, factor, lower_is_worse, tick_guard)
@@ -1109,7 +1116,7 @@ def legacy_verdict(cand: list[float], base: list[float], factor: float,
     majority = pb * 2 > v["n"] if v["n"] >= 3 else pb == v["n"]
     effect = breach(v["cand_med"], v["base_med"])
     v.update(effect=effect, pairs_breached=pb, disjoint=disjoint, majority=majority,
-             fail=effect and disjoint and majority and v["floor_moved"], rule="flat")
+             fail=effect and disjoint and majority and v["fast_mode_moved"], rule="flat")
     return v
 
 
@@ -1119,8 +1126,9 @@ def leg_verdict(k: str, leg: str, cand: list[float], base: list[float], null: di
 
     A leg the null TIGHTENS (source `null`) takes the median-of-ratios + bootstrap rule. A leg
     whose null hits the cap (`cap`), or that has no null (`flat`), keeps main's whole verdict:
-    the flat threshold AND @ref legacy_verdict. No row is looser, or more false-fail-prone,
-    than before #1807. @p tick_ok False drops the tick guard (a picosecond batch row).
+    the flat threshold AND @ref legacy_verdict. Both rules carry the fast-mode veto (#2168),
+    the one way a leg is looser than before #1807. @p tick_ok False drops the tick guard (a
+    picosecond batch row).
     @return (verdict, factor, source).
     """
     factor, tick, source = leg_factor(k, leg, null)
@@ -1146,12 +1154,12 @@ def paired_report(v: dict, label: str, unit: str, fmt: str, source: str = "") ->
             + (f" ({source})" if source else ""))
     if v["effect"] and v.get("rule") == "flat":
         line += (f"  | effect YES, pairs {v['pairs_breached']}/{v['n']}, "
-                 f"ranges {'DISJOINT' if v['disjoint'] else 'OVERLAP'}, floor x{v['floor']:.3f}")
+                 f"ranges {'DISJOINT' if v['disjoint'] else 'OVERLAP'}, fast mode x{v['fast_mode']:.3f}")
     elif v["effect"]:
         line += (f"  | effect YES, pairs {v['pairs_breached']}/{v['n']}, "
-                 f"CI {'excludes' if v['significant'] else 'includes'} 1, floor x{v['floor']:.3f}")
+                 f"CI {'excludes' if v['significant'] else 'includes'} 1, fast mode x{v['fast_mode']:.3f}")
     if v["effect"] and not v["fail"]:
-        line += " -> INDISTINGUISHABLE, not failed"
+        line += " -> INDISTINGUISHABLE, not failed" if v["rule"] == "ci" else " -> not failed"
     return line
 
 
