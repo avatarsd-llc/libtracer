@@ -1,0 +1,90 @@
+# The counted-metrics ledger (#2137): the gate the peer-path work (#2136) is judged by.
+#
+# Copies, syscalls and task switches per relayed frame, RAM per peer and idle wakeups per
+# second, pinned per target in bench/ledger/*.json. Every figure is a COUNT, so it does not
+# move with runner load and needs no A/A pair: it can render a verdict on a hosted runner,
+# on every PR. A raise fails; a fall fails too, with the re-pin instruction, as the symbol
+# ratchet does, so a pin never sits above the truth.
+#
+# Two checks, and why both:
+#   * the pin-file ratchet (`counted_ledger.py diff`) compares the PR's pins with its base.
+#     A pin may not rise without a waiver, may not move without naming the change in
+#     `moved_by`, and may not disappear. For a MID row, which is a static count read from
+#     the code, this IS the gate: its pin is the count.
+#   * the measured gate (`counted_ledger.py gate`) runs bench_peer_counts and bench_conn_ram
+#     and compares the WIDE rows with their pins. The RAM rows read their pins, band and
+#     mode from bench/ram_census_pins.json, which is still warn-first, so a RAM drift here
+#     warns and does not fail until that file's activation block says so.
+#
+# History is not written here: perf-local.yml banks one point per row on every merge to
+# main, into the bench-local store the perf page's ledger section reads.
+#
+# Like symbol-ratchet.yml, no `paths:` filter: a check that never reports blocks a PR
+# forever (the #1614 trap). The job decides for itself whether to build.
+name: counted-ledger
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# One run per PR (a newer push supersedes the older one); on main every push keeps its own run.
+concurrency:
+  group: counted-ledger-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  counted-ledger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Did anything a counted row is built from change?
+        id: scope
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; echo "base=" >> "$GITHUB_OUTPUT"
+            echo "no usable base; measuring"; exit 0
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          if git diff --name-only "$BASE" HEAD | grep -qE '^(core|bench)/|^\.github/workflows/counted-ledger\.yml$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; echo "core/ or bench/ changed; measuring"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"; echo "nothing under core/ or bench/ changed; no count can move"
+          fi
+      - name: Ledger decision-rule tests
+        if: steps.scope.outputs.run == 'true'
+        run: python3 bench/test_counted_ledger.py
+      - name: Pin-file ratchet against the base
+        if: steps.scope.outputs.run == 'true' && steps.scope.outputs.base != ''
+        run: python3 bench/counted_ledger.py diff --base "${{ steps.scope.outputs.base }}"
+      - name: Build the counting instruments (Release)
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build bench/build --target bench_peer_counts bench_conn_ram --parallel "$BUILD_JOBS"
+      # Printed whole, pass or fail: the transcript is the record, and a gate whose numbers
+      # show only when it fails cannot be re-pinned from its own log.
+      - name: Measure (bench_peer_counts, bench_conn_ram)
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          ./bench/build/bench_peer_counts --reps=3 | tee bench/bench_peer_counts_raw.txt
+          ./bench/build/bench_conn_ram --no-can --reps=5 | tee bench/bench_conn_ram_raw.txt
+      - name: Counted-metrics gate
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          python3 bench/counted_ledger.py gate --mode fail \
+            --raw bench/bench_peer_counts_raw.txt --conn-raw bench/bench_conn_ram_raw.txt

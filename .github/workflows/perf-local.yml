@@ -341,7 +341,7 @@ jobs:
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
             bench_forward_demux bench_chain_delivery \
-            bench_conn_ram bench_ram_census_tcp bench_store_sweep -j "$(nproc)"
+            bench_conn_ram bench_ram_census_tcp bench_store_sweep bench_peer_counts -j "$(nproc)"
 
       # QUIESCENCE (#1236). The build above just ran `-j$(nproc)` and the 1-minute load
       # average is still carrying it, so this WAITS for the machine rather than checking
@@ -489,6 +489,18 @@ jobs:
           [ -s bench/bench_conn_ram_raw.txt ] || \
             echo "::warning::no per-connection census transcript — its series will not be recorded"
 
+      # The counted-metrics ledger's WIDE rows (#2137): copies, syscalls and switches per
+      # relayed frame and idle wakeups per second. Counts, so no conditions wrapper; the
+      # relay rows run a node and its peer process with a few threads each, so they get the
+      # multi-threaded CPU set rather than one CPU. The VERDICT is counted-ledger.yml's, on
+      # every PR; this run only banks the point, one per merge, for the ledger's history.
+      - name: Counted-metrics ledger rows (bench_peer_counts)
+        run: |
+          taskset -c "$BENCH_CPU_MULTI" ./bench/build/bench_peer_counts --reps=3 \
+            >bench/bench_peer_counts_raw.txt || \
+            echo "::warning::bench_peer_counts did not complete every row; its points are partial"
+          cat bench/bench_peer_counts_raw.txt
+
       # The whole-node census forks its own remote peer PROCESS (before any graph,
       # socket or thread exists — forking a threaded process under a counting
       # allocator can deadlock in the child) and reaps it itself, so peer lifetime is
@@ -613,6 +625,11 @@ jobs:
             --conn-raw bench/bench_conn_ram_raw.txt \
             --node-raw bench/bench_ram_census_tcp_raw.txt \
             --merge bench/benchmark_output.json
+          # The counted-metrics ledger's measured rows (#2137), same file and stamp: this
+          # is the history the perf page's ledger section reads.
+          python3 bench/counted_ledger.py emit \
+            --raw bench/bench_peer_counts_raw.txt \
+            --merge bench/benchmark_output.json
           # The ADR-0079 sweep's two DETERMINISTIC columns, into the same file for the
           # same reasons: one commit axis, one host/compiler stamp (below), one publish
           # step — and, because they land in the banked store, `store_guard.py drift`
@@ -657,6 +674,7 @@ jobs:
             bench/bench_zenoh_raw.txt
             bench/bench_conn_ram_raw.txt
             bench/bench_ram_census_tcp_raw.txt
+            bench/bench_peer_counts_raw.txt
             bench/bench_store_sweep_raw.txt
             bench/aa_pre.txt
             bench/aa_post.txt

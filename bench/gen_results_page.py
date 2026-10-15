@@ -30,6 +30,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import counted_ledger  # noqa: E402  (sibling module in bench/)
 import render_compare  # noqa: E402  (sibling module in bench/)
 import render_history  # noqa: E402  (sibling module in bench/)
 import step_detect  # noqa: E402  (sibling module in bench/)
@@ -87,6 +88,7 @@ def cross_core_block() -> str:
 CHAPTERS: tuple[tuple[str, str], ...] = (
     ("metrics", "What the metrics mean"),
     ("gates", "What actually stops a regression"),
+    ("ledger", "Counted-metrics ledger (the peer-path gate)"),
     ("noise", "Noise, variance, and what one number is worth"),
     ("surfaces", "The measurement surfaces, and the instruments behind them"),
     ("conformance", "Cross-core conformance (every native core must agree byte-for-byte)"),
@@ -115,8 +117,12 @@ def head(cid: str) -> str:
 
 def anchor(cid: str) -> str:
     """@brief The MyST heading anchor a chapter's heading produces."""
-    slug = re.sub(r"[^a-z0-9]+", "-", f"{_CH_NUM[cid]} {_CH_TITLE[cid]}".lower())
-    return "#" + slug.strip("-")
+    # MyST's own rule (`default_slugify`, GitHub style): lowercase, each space becomes
+    # "-", then every character that is not a word character, "-" or a space is dropped.
+    # So "14 · Raw data & provenance" is "14--raw-data--provenance"; collapsing the runs
+    # names an anchor no heading produces.
+    text = f"{_CH_NUM[cid]} · {_CH_TITLE[cid]}".lower().replace(" ", "-")
+    return "#" + re.sub(r"[^\w\- ]", "", text)
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +334,15 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "per-connection bytes drift past a measured ±8 B / ±0.5% band — WARN-first on the "
         "pinned host (bench/ram_census_pins.json carries the pins and the activation "
         "criterion for the flip to fail)"),
+    instrument_t(
+        "bench_peer_counts.cpp", "counted", ("ledger",),
+        "Relays paced FWD{WRITE} frames from a writer process through one node to a remote "
+        "subscriber over TCP and WS, counting the node's memcpy/memmove bytes, socket syscalls "
+        "and voluntary task switches per frame at 64 B to 16 KiB, then counts idle wakeups per "
+        "second with 32 peers and no traffic.",
+        "bytes copied · syscalls · switches, per frame · wakeups per second",
+        "any counted row past its pin (bench/ledger/) fails every PR (counted-ledger.yml); a "
+        "fall fails too, with a re-pin"),
     instrument_t(
         "bench_ram_census_tcp.cpp", "counted", ("memory",),
         "Prices a 100-vertex node — mixed int, array and stream values, 4–64 B each — stage by "
@@ -1031,6 +1046,26 @@ regression verdict is only ever read from the bench-local store or from a same-h
 interleaved A/B, never from the hosted one."""
 
 
+LEDGER_INTRO = """\
+Every row below is a COUNT, pinned per target in `bench/ledger/*.json`: copies, syscalls and
+task switches per relayed frame, RAM per peer, and idle wakeups per second. WIDE rows (the
+x86 host) are measured on every pull request by `counted-ledger.yml`; a row that rises
+fails it, and a row that falls fails it too until the PR re-pins it, so a pin is always the
+current value. MID rows (the ESP32-C6) are static counts read from the code, with the
+reading recorded beside each pin; for them the pin is the count, and a PR may not raise one
+without a waiver. *Goal* is the value the peer-path spec (#2136) sets for the row (*hold*:
+the spec gives no number, the row must not rise). *Moved by* names the change that last
+moved the pin. *Banked on `main`* is the bench-local history: one point per merge."""
+
+
+def ledger_block(history: dict | None) -> str:
+    """@brief The ledger tables, generated from the pin files and the bench-local history."""
+    try:
+        return counted_ledger.render_markdown(counted_ledger.load_ledger(), history)
+    except SystemExit as e:  # a malformed pin file fails its own CI gate, not the docs build
+        return f"_(the ledger pins could not be read in this build: {e})_"
+
+
 def _load_history(store: str = "dev/bench/data.js") -> dict | None:
     """@brief Load a benchmark-action store (a gh-pages `data.js`) as JSON.
 
@@ -1346,6 +1381,14 @@ every harness in `bench/` drives and reports.
 ### Recent steps on bench-local
 
 {step_detect.page_block(history_local)}
+
+{head("ledger")}
+
+{LEDGER_INTRO}
+
+{ledger_block(history_local)}
+
+{charts_for(charts, "ledger")}
 
 {head("noise")}
 

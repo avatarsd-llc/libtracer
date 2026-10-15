@@ -1,0 +1,211 @@
+{
+  "_comment": "Counted-metrics ledger, family 'syscalls' (#2137). See copies.json for the pin rules.",
+  "family": "syscalls",
+  "title": "send/recv/poll syscalls per relayed frame (libc-interposed, node B only)",
+  "unit": "calls",
+  "per_payload": false,
+  "instrument": "bench_peer_counts",
+  "toolchain": "c++ 13.3.0",
+  "_toolchain": "Copy and syscall counts follow the code, but which copies the compiler inlines does not, so a run on another toolchain is reported in warn mode and never turns CI red.",
+  "band_abs": 0.05,
+  "band_pct": 0,
+  "_band": "0.05 per frame: every pinned row read min = max except three 16 KiB rows at 11.00..11.01 (one extra poll in 200 frames). One more syscall per frame reads +1.00 and trips it.",
+  "_goal": "#2136 states no syscall figure for WIDE, so those rows hold (no rise). MID: one doorbell per burst instead of one control message per frame per peer.",
+  "rows": [
+    {
+      "id": "tcp-relay-srv @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "syscalls@64",
+      "payload": 64,
+      "value": 3,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-srv @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "syscalls@1024",
+      "payload": 1024,
+      "value": 3,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-srv @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "syscalls@4096",
+      "payload": 4096,
+      "value": 5,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-srv @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "syscalls@16384",
+      "payload": 16384,
+      "value": 11,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "syscalls@64",
+      "payload": 64,
+      "value": 3,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "syscalls@1024",
+      "payload": 1024,
+      "value": 3,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "syscalls@4096",
+      "payload": 4096,
+      "value": 5,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "syscalls@16384",
+      "payload": 16384,
+      "value": 11,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "syscalls@64",
+      "payload": 64,
+      "value": 3,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "syscalls@1024",
+      "payload": 1024,
+      "value": 3,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "syscalls@4096",
+      "payload": 4096,
+      "value": 5,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "syscalls@16384",
+      "payload": 16384,
+      "value": 11,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "syscalls@64",
+      "payload": 64,
+      "value": 3,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "syscalls@1024",
+      "payload": 1024,
+      "value": 3,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "syscalls@4096",
+      "payload": 4096,
+      "value": 5,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "syscalls@16384",
+      "payload": 16384,
+      "value": 11,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "httpd-ws rx frame",
+      "target": "MID",
+      "source": "static",
+      "value": 4,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "IDF httpd_req_new reads the first header byte, httpd_ws_recv_frame(req, 0) the second and the 4 B mask key, httpd_ws_recv_frame(req, len) the payload: 4 lwip_recv. The select wake is shared by a burst and not counted."
+    },
+    {
+      "id": "httpd-ws queued send, per peer",
+      "target": "MID",
+      "source": "static",
+      "value": 4,
+      "goal": 2,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "httpd_queue_work: sendto + recvfrom on the control socket (2), then httpd_ws_send_frame_async: 2 lwip_send (header, payload). Goal: one doorbell per burst (#2136 egress), leaving the 2 lwip_send."
+    }
+  ],
+  "_counted": "The wrappers interposed are read, write, readv, writev, recv, recvfrom, recvmsg, send, sendto, sendmsg, poll, ppoll, select and epoll_wait (and the fortified _chk forms). A syscall outside that set (epoll_pwait, accept4, recvmmsg, futex, ...) is not counted: futex is a disclosed gap (the peer-cost study measured 0.00 per frame), and a link moving to an uncounted call would read as a fall here, so such a change must extend the wrapper set."
+}

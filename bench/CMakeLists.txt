@@ -394,6 +394,15 @@ add_executable(bench_conn_ram bench_conn_ram.cpp)
 target_link_libraries(bench_conn_ram PRIVATE libtracer)
 target_compile_options(bench_conn_ram PRIVATE -Wall -Wextra)
 
+# The peer-path counted metrics (#2137): copies, socket syscalls and voluntary switches per
+# relayed frame, and idle wakeups per second. COUNTS, not times — the WIDE rows of the
+# counted-metrics ledger (bench/ledger/, gated by bench/counted_ledger.py on every PR).
+add_executable(bench_peer_counts bench_peer_counts.cpp)
+target_link_libraries(bench_peer_counts PRIVATE libtracer ${CMAKE_DL_LIBS})
+# The interposed memcpy/memmove are byte loops; without this flag GCC recognizes the loop
+# idiom and compiles it back into a call to memcpy, which then recurses into itself.
+target_compile_options(bench_peer_counts PRIVATE -Wall -Wextra -fno-tree-loop-distribute-patterns)
+
 # WHOLE-NODE RAM census: what a 100-vertex graph (values 4..64 B, mixed int / array /
 # STREAM shapes) costs in heap bytes, staged from an empty graph_t through the
 # SPEC-created TCP listener to steady state under a real remote peer PROCESS. Where

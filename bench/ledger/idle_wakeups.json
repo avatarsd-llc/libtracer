@@ -1,0 +1,55 @@
+{
+  "_comment": "Counted-metrics ledger, family 'idle_wakeups' (#2137). See copies.json for the pin rules.",
+  "family": "idle_wakeups",
+  "title": "Idle wakeups per second",
+  "unit": "wakeups/s",
+  "per_payload": false,
+  "instrument": "bench_peer_counts",
+  "toolchain": "c++ 13.3.0",
+  "_toolchain": "Copy and syscall counts follow the code, but which copies the compiler inlines does not, so a run on another toolchain is reported in warn mode and never turns CI red.",
+  "band_abs": 5,
+  "band_pct": 10,
+  "_band": "10 % (at least 5/s): three repetitions read 329.8..329.9 (tcp), 313.8..320.9 (ws) and 319.8..319.9 (udp). The rows are the 100 ms receive timeouts, about 10 per second per thread; a hosted runner can stretch a sleep, so the band is wider than the spread.",
+  "_goal": "0 everywhere (#2136 user story 18): nothing wakes on a timeout.",
+  "rows": [
+    {
+      "id": "tcp-idle-32",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-idle-32",
+      "metric": "wakeups_per_s",
+      "value": 330,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-idle-32",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-idle-32",
+      "metric": "wakeups_per_s",
+      "value": 317,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "udp-idle-32",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "udp-idle-32",
+      "metric": "wakeups_per_s",
+      "value": 320,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "esp_ws_client link",
+      "target": "MID",
+      "source": "static",
+      "value": 5,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "esp_transport_poll_read(ws_, kPollMs = 200) in the recv loop: 5 timeouts per second per link, only to re-check the stop flag."
+    }
+  ]
+}

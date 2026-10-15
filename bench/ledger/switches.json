@@ -1,0 +1,219 @@
+{
+  "_comment": "Counted-metrics ledger, family 'switches' (#2137). See copies.json for the pin rules.",
+  "family": "switches",
+  "title": "Task switches per relayed frame",
+  "unit": "switches",
+  "per_payload": false,
+  "instrument": "bench_peer_counts",
+  "toolchain": "c++ 13.3.0",
+  "_toolchain": "Copy and syscall counts follow the code, but which copies the compiler inlines does not, so a run on another toolchain is reported in warn mode and never turns CI red.",
+  "band_abs": 0.1,
+  "band_pct": 0,
+  "_band": "0.1 per frame: the WIDE rows read 0.94..1.00 (a frame that finds its receive thread still running costs no wake). WIDE counts voluntary switches of node B's threads; one wake per paced frame is the floor, so those rows hold.",
+  "_goal": "WIDE: hold at one wake per frame. MID figures are [est] from code (no board).",
+  "rows": [
+    {
+      "id": "tcp-relay-srv @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "vcsw@64",
+      "payload": 64,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-srv @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "vcsw@1024",
+      "payload": 1024,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-srv @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "vcsw@4096",
+      "payload": 4096,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-srv @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "vcsw@16384",
+      "payload": 16384,
+      "value": 0.99,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "vcsw@64",
+      "payload": 64,
+      "value": 0.97,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "vcsw@1024",
+      "payload": 1024,
+      "value": 0.99,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "vcsw@4096",
+      "payload": 4096,
+      "value": 0.99,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "vcsw@16384",
+      "payload": 16384,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "vcsw@64",
+      "payload": 64,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "vcsw@1024",
+      "payload": 1024,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "vcsw@4096",
+      "payload": 4096,
+      "value": 0.99,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "vcsw@16384",
+      "payload": 16384,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "vcsw@64",
+      "payload": 64,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "vcsw@1024",
+      "payload": 1024,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "vcsw@4096",
+      "payload": 4096,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "vcsw@16384",
+      "payload": 16384,
+      "value": 1,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "httpd-ws rx frame",
+      "target": "MID",
+      "source": "static",
+      "value": 9,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "CONFIG_LWIP_TCPIP_CORE_LOCKING=n: each of the 4 lwip_recv is a tcpip_thread round trip (2 switches), plus the select wake (1)."
+    },
+    {
+      "id": "httpd-ws queued send, per peer",
+      "target": "MID",
+      "source": "static",
+      "value": 8,
+      "goal": null,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "Control-socket round trip and loopback wake (about 3-4), then 2 lwip_send round trips (4). The code reading gives 7 to 8; the pin is the upper reading."
+    },
+    {
+      "id": "httpd-ws broadcast to 8 peers",
+      "target": "MID",
+      "source": "static",
+      "value": 24,
+      "goal": 3,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "One control message per frame per peer, about 3 switches each, times 8. Goal from #2136 user story 15: one doorbell per burst."
+    }
+  ]
+}

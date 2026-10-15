@@ -394,6 +394,24 @@ FAMILIES: list[dict] = [
                 ("conn-ram tcp-server after_td", "TCP · retained after teardown"),
                 ("conn-ram ws-server after_td", "WS · retained after teardown")],
          log=False, fmt="bytes", ylabel="bytes per connection"),
+    dict(id="ledger-copies", section="ledger", suite="latency",
+         title="Counted ledger — copies per relayed 16 KiB frame",
+         cond="bench_peer_counts · pinned host · memcpy/memmove bytes node B makes per paced "
+              "FWD{WRITE}, ingress to a remote subscriber (#2137). Goal (#2136): 0 on a server "
+              "egress, one mask pass on a WS client egress",
+         names=[("ledger copies tcp-relay-srv copy_bytes@16384", "TCP in, server out"),
+                ("ledger copies tcp-relay-cli copy_bytes@16384", "TCP in, client out"),
+                ("ledger copies ws-relay-srv copy_bytes@16384", "WS in, server out"),
+                ("ledger copies ws-relay-cli copy_bytes@16384", "WS in, client out")],
+         log=False, fmt="bytes", ylabel="bytes copied per frame"),
+    dict(id="ledger-idle", section="ledger", suite="latency",
+         title="Counted ledger — idle wakeups per second, 32 peers",
+         cond="bench_peer_counts · pinned host · voluntary switches of every library thread over "
+              "one idle second (#2137). Goal (#2136): 0",
+         names=[("ledger idle_wakeups tcp-idle-32 wakeups_per_s", "TCP, server + 32 dialers"),
+                ("ledger idle_wakeups ws-idle-32 wakeups_per_s", "WS, server + 32 dialers"),
+                ("ledger idle_wakeups udp-idle-32 wakeups_per_s", "UDP, 32 links")],
+         log=False, fmt="count", ylabel="wakeups per second"),
     dict(id="mem-node-census", section="memory", suite="latency",
          title="Whole-node RAM census — a 100-vertex node, stage by stage",
          cond="bench_ram_census_tcp · pinned host · the 4..64 B mixed arm, live heap at each "
@@ -653,6 +671,7 @@ INSTRUMENT_SOURCES: list[tuple[str, list[str]]] = [
      ["bench/bench_forward_heap.cpp", "bench/exact_rows.cpp"]),
     (r"^conn-ram ", ["bench/bench_conn_ram.cpp"]),
     (r"^node-census ", ["bench/bench_ram_census_tcp.cpp"]),
+    (r"^ledger ", ["bench/bench_peer_counts.cpp"]),
 ]
 # Shared harness: a change here can move EVERY series, so it marks all of them.
 HARNESS_SOURCES = ["bench/bench_common.hpp", "bench/CMakeLists.txt",

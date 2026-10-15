@@ -1,0 +1,232 @@
+{
+  "_comment": "Counted-metrics ledger, family 'copies' (#2137). Pins are MEASURED (WIDE) or a STATIC count read from the code (MID), never round ceilings. Re-pin only by a deliberate PR edit: python3 bench/counted_ledger.py pins --raw <bench_peer_counts transcript> --write.",
+  "family": "copies",
+  "title": "User-space copies per relayed frame",
+  "unit": "bytes",
+  "per_payload": true,
+  "instrument": "bench_peer_counts",
+  "toolchain": "c++ 13.3.0",
+  "_toolchain": "Copy and syscall counts follow the code, but which copies the compiler inlines does not, so a run on another toolchain is reported in warn mode and never turns CI red.",
+  "band_abs": 0,
+  "band_pct": 0,
+  "_band": "0: a copy count is exact. Every pinned row read min = max over 3 repetitions, and its median matched the peer-cost study's TCP figures byte for byte. The WS rows read lower than the study's (3150 against 3266 B at 1 KiB) because this run is paced, so the stream buffer never holds a second frame's tail when it compacts.",
+  "_goal": "From #2136: ingress receives straight into an exact-length segment (0 copies), a server egress is one shared frame (0), a WS client send gathers and masks in one pass (1x), the 48 B TCP client handoff head stays. The stored value is assumed still copied below the 4 KiB share knee: the copy-or-share trait may remove that copy too, and a row that beats its goal is simply re-pinned.",
+  "rows": [
+    {
+      "id": "tcp-relay-srv @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "copy_bytes@64",
+      "payload": 64,
+      "value": 165,
+      "goal": 64,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-srv @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "copy_bytes@1024",
+      "payload": 1024,
+      "value": 2085,
+      "goal": 1024,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-srv @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "copy_bytes@4096",
+      "payload": 4096,
+      "value": 4129,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-srv @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-srv",
+      "metric": "copy_bytes@16384",
+      "payload": 16384,
+      "value": 16417,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "copy_bytes@64",
+      "payload": 64,
+      "value": 213,
+      "goal": 112,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "copy_bytes@1024",
+      "payload": 1024,
+      "value": 2133,
+      "goal": 1072,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "copy_bytes@4096",
+      "payload": 4096,
+      "value": 4177,
+      "goal": 48,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "tcp-relay-cli @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "tcp-relay-cli",
+      "metric": "copy_bytes@16384",
+      "payload": 16384,
+      "value": 16465,
+      "goal": 48,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "copy_bytes@64",
+      "payload": 64,
+      "value": 268,
+      "goal": 64,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "copy_bytes@1024",
+      "payload": 1024,
+      "value": 3150,
+      "goal": 1024,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "copy_bytes@4096",
+      "payload": 4096,
+      "value": 8266,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-srv @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-srv",
+      "metric": "copy_bytes@16384",
+      "payload": 16384,
+      "value": 32842,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @64",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "copy_bytes@64",
+      "payload": 64,
+      "value": 458,
+      "goal": 128,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @1024",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "copy_bytes@1024",
+      "payload": 1024,
+      "value": 5260,
+      "goal": 2048,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @4096",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "copy_bytes@4096",
+      "payload": 4096,
+      "value": 16520,
+      "goal": 4096,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "ws-relay-cli @16384",
+      "target": "WIDE",
+      "source": "measured",
+      "arm": "ws-relay-cli",
+      "metric": "copy_bytes@16384",
+      "payload": 16384,
+      "value": 65672,
+      "goal": 16384,
+      "moved_by": "#2137 (seeded from the peer-cost study)"
+    },
+    {
+      "id": "httpd-ws rx @64",
+      "target": "MID",
+      "source": "static",
+      "payload": 64,
+      "value": 128,
+      "goal": 64,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store copies it again, since kShareThresholdBytes is SIZE_MAX on ESP (1). Unfragmented frame."
+    },
+    {
+      "id": "httpd-ws rx @1024",
+      "target": "MID",
+      "source": "static",
+      "payload": 1024,
+      "value": 2048,
+      "goal": 1024,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store copies it again, since kShareThresholdBytes is SIZE_MAX on ESP (1). Unfragmented frame."
+    },
+    {
+      "id": "httpd-ws rx @4096",
+      "target": "MID",
+      "source": "static",
+      "payload": 4096,
+      "value": 8192,
+      "goal": 4096,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store copies it again, since kShareThresholdBytes is SIZE_MAX on ESP (1). Unfragmented frame."
+    },
+    {
+      "id": "httpd-ws rx @16384",
+      "target": "MID",
+      "source": "static",
+      "payload": 16384,
+      "value": 32768,
+      "goal": 16384,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store copies it again, since kShareThresholdBytes is SIZE_MAX on ESP (1). Unfragmented frame."
+    }
+  ]
+}
