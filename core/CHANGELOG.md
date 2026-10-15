@@ -178,7 +178,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   v6.0) the outermost bracket goes from 3 fences to 0 (entry `fence rw,rw` + `fence rw,w`, exit
   `fence rw,w`), and `.flash.text` shrinks by 32 B. Host builds are unchanged: the default,
   `reclaim_qsbr` and `kQsbrAsymmetricFence` builds of `graph.cpp` and `transport_vertex.cpp`
-  disassemble identically. Binding it on a build that runs on more than one core is a
+  disassemble identically. The edge pin's announce, validation, clear and scan follow it too
+  ([#2122](https://github.com/avatarsd-llc/libtracer/issues/2122)): on the ESP32-C6
+  `snapshot_edges` goes from 9 fences to 2, and `.flash.text` shrinks by a further 36 B.
+  Binding it on a build that runs on more than one core is a
   use-after-free. The ESP-IDF component derives it from `CONFIG_FREERTOS_UNICORE`.
   Override fragment: `static constexpr bool kSingleCore = true;`
 - **`default_config_t::kQsbrAsymmetricFence`: an opt-in frame bracket entry with no fence on a

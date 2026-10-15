@@ -23,6 +23,14 @@
  * fan-out, a bubbling ancestor delivery) therefore always finds this thread's cell EMPTY, which
  * `pin_t`'s debug assertion states as a checked invariant rather than a comment.
  *
+ * **On one hart** (@ref tr::graph::kSingleCore) the announce, the validating load, the clear and
+ * the scan are relaxed accesses ordered by compiler barriers (#2126's COMPILER flavour, applied
+ * here by #2122). The argument is `qsbr.hpp`'s, section "The single-hart flavour", unchanged:
+ * with one hart no store buffering is observable across tasks, and a context switch is a full
+ * barrier, so the Dekker pairing below (announce, then validate; exchange, then scan) holds in
+ * hart order once the compiler keeps each pair in program order. Everywhere else the protocol
+ * is the `seq_cst` one, compiled exactly as before.
+ *
  * The announcement is type-erased over `const void*` on purpose: the pinned type
  * (`tr::graph::edge_pub_t`) is declared inside `%vertex.hpp`, which includes THIS header. Erasing
  * the type at the cell keeps the dependency pointing one way and costs a cast.
@@ -70,6 +78,22 @@ struct alignas(kCellAlign) cell_t {
 
 static_assert(alignof(cell_t) == kCellAlign,
               "the cell's alignas was silently dropped — see kCellAlign's derivation");
+
+/**
+ * @brief The order of the pin protocol's accesses: `seq_cst` on more than one core, `relaxed`
+ *        on one hart, where @ref hart_barrier keeps their program order (see the file comment).
+ */
+inline constexpr std::memory_order kPinOrder =
+    kSingleCore ? std::memory_order_relaxed : std::memory_order_seq_cst;
+
+/** @brief The clear's order: `release` on more than one core, `relaxed` on one hart. */
+inline constexpr std::memory_order kClearOrder =
+    kSingleCore ? std::memory_order_relaxed : std::memory_order_release;
+
+/** @brief A compiler barrier on one hart; nothing elsewhere, where the orders above suffice. */
+inline void hart_barrier() noexcept {
+    if constexpr (kSingleCore) std::atomic_signal_fence(std::memory_order_seq_cst);
+}
 
 /** @brief "This thread has not claimed an index" — the fallback reader's signal. */
 inline constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
@@ -174,7 +198,8 @@ class pin_t {
      */
     ~pin_t() {
         if (idx_ == kNoIndex) return;
-        registry().cells[idx_].pinned.store(nullptr, std::memory_order_release);
+        hart_barrier();  // the copy-out stays above the clear
+        registry().cells[idx_].pinned.store(nullptr, kClearOrder);
     }
 
     /** @brief False ⇒ the domain is full; the caller takes the stripe-mutex fallback. */
@@ -188,17 +213,21 @@ class pin_t {
      * so they share ONE total order with the mutator's `exchange` on @p src and its subsequent
      * scan of the cells: if the validating load still saw @p p published, the mutator had not
      * yet displaced it, so the mutator's scan is ordered after this store and observes it.
-     * Writers are control-plane-rare, so the retry is not a loop anybody spins in.
+     * Writers are control-plane-rare, so the retry is not a loop anybody spins in. On one hart
+     * both are relaxed, with a compiler barrier between them and after the validation, which
+     * keeps the copy-out below it (see the file comment).
      *
      * @return The pinned value (possibly null — an edgeless vertex publishes nothing).
      */
     template <class T>
     [[nodiscard]] T* acquire(const std::atomic<T*>& src) noexcept {
         cell_t& c = registry().cells[idx_];
-        T* p = src.load(std::memory_order_seq_cst);
+        T* p = src.load(kPinOrder);
         for (;;) {
-            c.pinned.store(p, std::memory_order_seq_cst);
-            T* q = src.load(std::memory_order_seq_cst);
+            c.pinned.store(p, kPinOrder);
+            hart_barrier();
+            T* q = src.load(kPinOrder);
+            hart_barrier();
             if (q == p) return p;
             p = q;
         }
@@ -212,13 +241,15 @@ class pin_t {
  * @brief Is @p p announced by any participant right now?
  *
  * The scan half, run by the MUTATOR on its own thread outside every lock. `seq_cst` loads for
- * the reason @ref pin_t::acquire gives. O(`kEdgePinSlots`) and reached only on a
- * control-plane verb, so it is never on a delivery path.
+ * the reason @ref pin_t::acquire gives (relaxed after a compiler barrier on one hart, which
+ * keeps the caller's displacing `exchange` above the scan). O(`kEdgePinSlots`) and reached only
+ * on a control-plane verb, so it is never on a delivery path.
  */
 [[nodiscard]] inline bool is_pinned(const void* p) noexcept {
     registry_t& r = registry();
+    hart_barrier();
     for (std::size_t i = 0; i < kEdgePinSlots; ++i)
-        if (r.cells[i].pinned.load(std::memory_order_seq_cst) == p) return true;
+        if (r.cells[i].pinned.load(kPinOrder) == p) return true;
     return false;
 }
 
