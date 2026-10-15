@@ -43,13 +43,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `peer_tier_wants_rope` and `deliver_to_peer_borrowed` are deleted.
 - **A local `subscribe` or `await` on a `:field` path is refused, and a second `:` is a
   malformed path ([#2113](https://github.com/avatarsd-llc/libtracer/issues/2113)).** Both
+- **A local `subscribe` or `await` on a `:field` path is refused, and a field name is held to
+  the segment rules ([#2113](https://github.com/avatarsd-llc/libtracer/issues/2113)).** Both
   `graph_t::subscribe` overloads and the path-taking `graph_t::await` now answer
   `SCHEMA_NOT_FOUND` when the source path has a field tail, the status a wire AWAIT with a FIELD
-  selector already answered (docs/reference/02 §#585). Every field is refused, `:subscribers`
-  and `:acl` included. These calls used to succeed silently: the subscription bound the whole
-  vertex and fired on its value writes, and the await waited on the vertex until it timed out.
-  `path_t::parse` now refuses a path with two field selectors, such as
-  `/x:schema:subscribers[]`, with `INVALID_PATH`; it used to parse the rest as one field named
+  selector already answered (docs/reference/02 §#585), and the edge form answers the same for a
+  `:field` target. Every field is refused, `:subscribers` and `:acl` included. These calls used
+  to succeed silently: the subscription bound the whole vertex (or delivered to the whole target
+  vertex) and the await waited on the vertex until it timed out. `path_t::parse` now checks each
+  field name with `valid_segment`, the predicate address segments already used, so a name with a
+  reserved character (reference/03 §reserved characters) or over 64 bytes is `INVALID_PATH`. That
+  includes a second `:`: `/x:schema:subscribers[]` used to parse as one field named
   `schema:subscribers` and answer `SCHEMA_NOT_FOUND`.
 
 ### Added

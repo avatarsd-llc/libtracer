@@ -2376,8 +2376,9 @@ class graph_t {
     /**
      * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
      *        cloned value to target (spec-faithful). `NOT_FOUND` if src is unknown, and
-     *        `SCHEMA_NOT_FOUND` if @p src carries a `:field` tail: a field has no
-     *        notification surface (docs/reference/02 §#585).
+     *        `SCHEMA_NOT_FOUND` if @p src or @p target carries a `:field` tail: a field
+     *        has no notification surface (docs/reference/02 §#585), and a delivery lands on
+     *        the target vertex, never in one of its fields.
      *
      * These `subscribe(...)` overloads are *host SDK sugar*, not new wire primitives: the
      * wire data API stays read/write/await (ADR-0006). On the wire, subscription is a

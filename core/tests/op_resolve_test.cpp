@@ -403,8 +403,20 @@ void test_local_subscribe_await_field_path_matches_remote() {
         check(!w.has_value() && w.error() == status_t::SCHEMA_NOT_FOUND,
               (std::string("await ") + text + " -> SCHEMA_NOT_FOUND, not flow::timeout"));
     }
+    // The edge form's TARGET is checked too: a delivery lands on a vertex, so a `:field`
+    // target used to be dropped silently and the edge delivered to the whole `/sink`.
+    (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
+    for (const char* text : {"/sink:schema", "/sink:settings.app.kp", "/sink:subscribers[]"}) {
+        const auto edge = g.subscribe(*path_t::parse("/x"), *path_t::parse(text));
+        check(!edge.has_value() && edge.error() == status_t::SCHEMA_NOT_FOUND,
+              (std::string("subscribe(/x -> ") + text + ") -> SCHEMA_NOT_FOUND"));
+    }
+
     (void)g.write(*path_t::parse("/x"), make_value(b_value({0x07})));
     check(fired == 0, "no refused field subscription fires on a value write to the vertex");
+    const auto sink = g.read(*path_t::parse("/sink"));
+    check(!sink.has_value() && sink.error() == status_t::NOT_FOUND,
+          "no refused edge delivered: /sink was never written");
 
     // CONTROL — a plain vertex path subscribes and delivers as before.
     const auto plain = g.subscribe(*path_t::parse("/x"), on_value, &fired);

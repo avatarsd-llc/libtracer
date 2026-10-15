@@ -3482,8 +3482,10 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
     vertex_t* v = find_ptr(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     // A field has no notification surface (reference/02 §#585): refuse a `:field` source as
-    // the wire AWAIT does, rather than binding the whole vertex (#2113).
-    if (!src.field().empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    // the wire AWAIT does, rather than binding the whole vertex (#2113). A delivery lands on a
+    // vertex, never in a field, so a `:field` target is refused alike instead of being dropped.
+    if (!src.field().empty() || !target.field().empty())
+        return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // ADR-0049: the sugar ENCODES the same SUBSCRIBER{PATH} TLV a wire subscribe carries
     // and enters the field-write door — subscribe-time is control-plane-cold, so the
     // encode/parse round-trip is irrelevant, and the edge reads back from :subscribers[]

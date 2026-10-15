@@ -44,7 +44,11 @@ namespace {
             fs.index = static_cast<std::uint16_t>(value);
         }
     }
-    if (fs.name.empty()) return std::unexpected(status_t::INVALID_PATH);
+    // A field name is a NAME like an address segment, held to the same shared predicate
+    // (reference/03 §reserved characters). That is what makes a second ':' malformed (#2113):
+    // the tail was split at the first one, so `/x:schema:subscribers[]` used to name a field
+    // called `schema:subscribers` and answer SCHEMA_NOT_FOUND.
+    if (!valid_segment(fs.name)) return std::unexpected(status_t::INVALID_PATH);
     return fs;
 }
 
@@ -109,13 +113,6 @@ result_t<path_t> path_t::parse(std::string_view text) {
             pos = slash + 1;
         }
     }
-
-    // A path carries at most ONE field selector (#2113). The tail was split at the first ':',
-    // so a second one would otherwise land inside a field NAME, where ':' is reserved
-    // (reference/03 §reserved characters), and `/x:schema:subscribers[]` would address a field
-    // called `schema:subscribers` and answer SCHEMA_NOT_FOUND instead of a malformed path.
-    if (field_text.find(':') != std::string_view::npos)
-        return std::unexpected(status_t::INVALID_PATH);
 
     // Parse the field tail: dot-separated steps, each optionally "[N]" or "[]".
     if (!field_text.empty()) {
