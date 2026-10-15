@@ -297,21 +297,28 @@ void tcp_transport_t::send(std::span<const std::span<const std::byte>> head,
     if (shed != 0) dropped_tx_.fetch_add(shed, std::memory_order_relaxed);
 }
 
-bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {
+std::ptrdiff_t tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len,
+                                           std::span<std::byte> ahead) {
+    // One scatter read fills dst first, then ahead: ahead only takes bytes on the read that
+    // completes dst, so the loop never waits for them (a lone frame is not held back) (#2133).
     std::size_t off = 0;
     while (off < len) {
-        if (stop_.load(std::memory_order_relaxed)) return false;
-        const ssize_t n = ::recv(fd, dst + off, len - off, 0);
+        if (stop_.load(std::memory_order_relaxed)) return -1;
+        std::array<iovec, 2> iov{iovec{dst + off, len - off}, iovec{ahead.data(), ahead.size()}};
+        msghdr msg{};
+        msg.msg_iov = iov.data();
+        msg.msg_iovlen = ahead.empty() ? 1 : 2;
+        const ssize_t n = ::recvmsg(fd, &msg, 0);
         if (n > 0) {
             off += static_cast<std::size_t>(n);
             continue;
         }
-        if (n == 0) return false;  // peer closed the connection
+        if (n == 0) return -1;  // peer closed the connection
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
             continue;  // receive timeout → re-check stop_ and resume the partial read
-        return false;  // hard error
+        return -1;     // hard error
     }
-    return true;
+    return static_cast<std::ptrdiff_t>(off - len);
 }
 
 bool tcp_transport_t::drain(int fd, std::size_t len) {
@@ -320,7 +327,7 @@ bool tcp_transport_t::drain(int fd, std::size_t len) {
     std::array<std::byte, 4096> scratch;
     while (len > 0) {
         const std::size_t chunk = len < scratch.size() ? len : scratch.size();
-        if (!read_exact(fd, scratch.data(), chunk)) return false;
+        if (read_exact(fd, scratch.data(), chunk) < 0) return false;
         len -= chunk;
     }
     return true;
@@ -328,10 +335,13 @@ bool tcp_transport_t::drain(int fd, std::size_t len) {
 
 void tcp_transport_t::serve(int fd) {
     std::array<std::byte, kPrefixBytes> prefix;
+    std::size_t have = 0;  // prefix bytes the previous body read already brought in (#2133)
     while (!stop_.load(std::memory_order_relaxed)) {
-        // Read the 4-byte length prefix, reassembling it across TCP segment
+        // Complete the 4-byte length prefix, reassembling it across TCP segment
         // boundaries (read_exact resumes partial reads through receive timeouts).
-        if (!read_exact(fd, prefix.data(), prefix.size())) return;
+        // A frame that arrived behind its predecessor's body needs no read here.
+        if (read_exact(fd, prefix.data() + have, prefix.size() - have) < 0) return;
+        have = 0;
         const std::size_t len = tr::detail::load_le<std::uint32_t>(prefix);
 
         // The framing rules (empty record, over the protocol cap ⇒ malformed,
@@ -362,13 +372,18 @@ void tcp_transport_t::serve(int fd) {
             continue;
         }
 
-        view::segment_ptr_t seg = std::move(dec.seg);
-        if (!read_exact(fd, seg->bytes.data() + dec.off, len)) return;
+        // The body goes straight into the accepted segment and the NEXT frame's prefix rides
+        // the same read into `prefix` (scatter, no staging copy): a frame that arrives whole
+        // behind its predecessor costs one syscall, not two (#2133). The segment stays in
+        // `dec` until delivery: a second owning local would add one more release site per exit.
+        const std::ptrdiff_t ahead = read_exact(fd, dec.seg->bytes.data() + dec.off, len, prefix);
+        if (ahead < 0) return;
+        have = static_cast<std::size_t>(ahead);
 
         // Tier select lives in the slot (receiver_slot.hpp): the rope sink gets the
         // frame OWNING, narrowed by aggregate init (over().subview() would copy the
         // handle, leaving a 2nd ref live across the callback, #845); span sink borrows.
-        rx_.deliver(view::view_t{std::move(seg), dec.off, len});
+        rx_.deliver(view::view_t{std::move(dec.seg), dec.off, len});
     }
 }
 

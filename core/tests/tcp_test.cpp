@@ -198,6 +198,69 @@ void test_partial_and_coalesced() {
           "stream boundaries honored (both frames byte-identical)");
 }
 
+/**
+ * @brief The body read pulls the NEXT prefix in with it (#2133): every way that prefix can land
+ *        relative to the body before it must still frame — whole behind the body, split across
+ *        the body's read and a later one, an empty record riding behind a body, and a body that
+ *        ends a write alone (the read must not wait for a prefix that is not coming).
+ */
+void test_read_ahead_prefix_boundaries() {
+    std::printf("TCP transport — the prefix read ahead with a body frames at every boundary:\n");
+    frame_sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+    tcp_transport_t listener(std::uint16_t{0});
+    listener.set_receiver(rx);
+    raw_client_t client(listener.local_port());
+    check(client.fd >= 0, "raw client connected");
+
+    // A lone frame: nothing follows its body, so the read completes on the body alone.
+    const auto f1 = test_frame(48, 0x11);
+    client.write(record(f1));
+    check(sink.wait_for_count(1, 2000ms) && sink.at(0) == f1,
+          "a lone frame is delivered without waiting for a next prefix");
+
+    // Body + HALF the next prefix in one write, the rest of that record later: the read ahead
+    // lands 2 bytes, the next prefix read completes the other 2.
+    const auto f2 = test_frame(1024, 0x22);
+    const auto f3 = test_frame(5, 0x33);
+    std::vector<std::byte> w = record(f2);
+    const auto r3 = record(f3);
+    w.insert(w.end(), r3.begin(), r3.begin() + 2);
+    client.write(w);
+    std::this_thread::sleep_for(20ms);
+    client.write(std::span(r3).subspan(2));
+    check(sink.wait_for_count(3, 2000ms) && sink.at(1) == f2 && sink.at(2) == f3,
+          "a prefix split across the body read and the next read frames intact");
+
+    // Body, an EMPTY record, then a frame, all in one write: the read ahead brings in the empty
+    // record's prefix (a no-op), and the frame behind it still frames.
+    const auto f4 = test_frame(4096, 0x44);
+    const auto f5 = test_frame(17, 0x55);
+    std::vector<std::byte> w2 = record(f4);
+    const auto r0 = record({});
+    const auto r5 = record(f5);
+    w2.insert(w2.end(), r0.begin(), r0.end());
+    w2.insert(w2.end(), r5.begin(), r5.end());
+    client.write(w2);
+    check(sink.wait_for_count(5, 2000ms) && sink.at(3) == f4 && sink.at(4) == f5,
+          "an empty record read ahead behind a body is skipped, the next frame delivered");
+
+    // Many frames back to back in one write (each body read carries the next prefix whole),
+    // above and below 1 KiB.
+    std::vector<std::vector<std::byte>> many;
+    std::vector<std::byte> w3;
+    for (std::size_t i = 0; i < 8; ++i) {
+        many.push_back(test_frame(i % 2 == 0 ? 64 : 16384, static_cast<std::uint8_t>(i)));
+        const auto r = record(many.back());
+        w3.insert(w3.end(), r.begin(), r.end());
+    }
+    client.write(w3);
+    check(sink.wait_for_count(13, 4000ms), "eight coalesced frames delivered as eight");
+    bool same = sink.count() == 13;
+    for (std::size_t i = 0; same && i < many.size(); ++i) same = sink.at(5 + i) == many[i];
+    check(same, "every coalesced frame byte-identical, in order");
+}
+
 void test_oversize_prefix() {
     std::printf("TCP transport — an oversize length prefix is malformed:\n");
     std::atomic<int> delivered{0};
@@ -1515,6 +1578,7 @@ int main() {
     test_raw_frame_duplex();
     test_recv_stack_sized();
     test_partial_and_coalesced();
+    test_read_ahead_prefix_boundaries();
     test_oversize_prefix();
     test_settings_max_frame();
     test_settings_max_frame_cannot_raise_the_cap();

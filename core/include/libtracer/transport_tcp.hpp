@@ -339,8 +339,12 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
    private:
     void run_listen();   // accept loop (LISTEN mode)
     void serve(int fd);  // per-connection frame reassembly loop
-    bool read_exact(int fd, std::byte* dst, std::size_t len);  // partial-read reassembly
-    bool drain(int fd, std::size_t len);                       // discard len bytes (backpressure)
+    /** @brief Read exactly @p len bytes into @p dst, resuming partial reads; the read that
+     *         completes @p dst also scatters up to `ahead.size()` further stream bytes into
+     *         @p ahead (#2133). @return the count landed in @p ahead, or -1 on close/error/stop. */
+    std::ptrdiff_t read_exact(int fd, std::byte* dst, std::size_t len,
+                              std::span<std::byte> ahead = {});
+    bool drain(int fd, std::size_t len);  // discard len bytes (backpressure)
 
     bool listen_ = false;
     int listen_fd_ = -1;  // LISTEN mode only
