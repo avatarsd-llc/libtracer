@@ -15,9 +15,9 @@
       "source": "ram_census",
       "arm": "tcp-server",
       "metric": "per_conn",
-      "goal": 160,
-      "moved_by": "#2134 (counted through the memory seam)",
-      "note": "Goal: the per-peer transport_t stand-in (120 B on x86) is deleted (#2136 peer record)."
+      "goal": 170,
+      "moved_by": "#2167 (idle server link base re-pinned, per-peer rows +10 B)",
+      "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record."
     },
     {
       "id": "ws-server per peer",
@@ -25,9 +25,29 @@
       "source": "ram_census",
       "arm": "ws-server",
       "metric": "per_conn",
-      "goal": 272,
-      "moved_by": "#2134 (counted through the memory seam)",
-      "note": "Goal: the per-peer transport_t stand-in (120 B on x86) is deleted (#2136 peer record)."
+      "goal": 282,
+      "moved_by": "#2167 (idle server link base re-pinned, per-peer rows +10 B)",
+      "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record."
+    },
+    {
+      "id": "tcp-server link base",
+      "target": "WIDE",
+      "source": "ram_census",
+      "arm": "tcp-server",
+      "metric": "link_base",
+      "goal": null,
+      "moved_by": "#2167 (idle server link base 2,608 -> 664 B)",
+      "note": "Per link, not per peer: what an idle server link holds before any peer. #2136 sets no number; it holds."
+    },
+    {
+      "id": "ws-server link base",
+      "target": "WIDE",
+      "source": "ram_census",
+      "arm": "ws-server",
+      "metric": "link_base",
+      "goal": null,
+      "moved_by": "#2167 (idle server link base 2,608 -> 664 B)",
+      "note": "Per link, not per peer: what an idle server link holds before any peer. #2136 sets no number; it holds."
     },
     {
       "id": "udp link at rest",
@@ -36,8 +56,8 @@
       "arm": "udp-span",
       "metric": "link_base",
       "goal": 232,
-      "moved_by": "#2134 (counted through the memory seam)",
-      "note": "Goal: no 64 KiB receive segment at rest; 232 B is what the pool arm already reads."
+      "moved_by": "#2167 (UDP link_base re-pinned after #2163)",
+      "note": "Goal: no receive segment at rest; 232 B is what the pool arm reads."
     },
     {
       "id": "httpd-ws session",
