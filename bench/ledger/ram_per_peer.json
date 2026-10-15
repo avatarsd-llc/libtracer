@@ -1,0 +1,70 @@
+{
+  "_comment": "Counted-metrics ledger, family 'ram_per_peer' (#2137). WIDE rows are NOT pinned here: they read their value from bench/ram_census_pins.json (bench_conn_ram, #2134) and are gated in the mode that file's activation block declares, with its band. MID rows are static counts.",
+  "family": "ram_per_peer",
+  "title": "RAM per peer",
+  "unit": "bytes",
+  "per_payload": false,
+  "instrument": "bench_conn_ram",
+  "band_abs": 0,
+  "band_pct": 0,
+  "_goal": "From #2136 user stories 1, 2, 4 and 27.",
+  "rows": [
+    {
+      "id": "tcp-server per peer",
+      "target": "WIDE",
+      "source": "ram_census",
+      "arm": "tcp-server",
+      "metric": "per_conn",
+      "goal": 160,
+      "moved_by": "#2134 (counted through the memory seam)",
+      "note": "Goal: the per-peer transport_t stand-in (120 B on x86) is deleted (#2136 peer record)."
+    },
+    {
+      "id": "ws-server per peer",
+      "target": "WIDE",
+      "source": "ram_census",
+      "arm": "ws-server",
+      "metric": "per_conn",
+      "goal": 272,
+      "moved_by": "#2134 (counted through the memory seam)",
+      "note": "Goal: the per-peer transport_t stand-in (120 B on x86) is deleted (#2136 peer record)."
+    },
+    {
+      "id": "udp link at rest",
+      "target": "WIDE",
+      "source": "ram_census",
+      "arm": "udp-span",
+      "metric": "link_base",
+      "goal": 232,
+      "moved_by": "#2134 (counted through the memory seam)",
+      "note": "Goal: no 64 KiB receive segment at rest; 232 B is what the pool arm already reads."
+    },
+    {
+      "id": "httpd-ws session",
+      "target": "MID",
+      "source": "static",
+      "value": 288,
+      "goal": 85,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "sizeof(httpd_ws_link_t::session_t) on riscv32: subject[128] + endpoint_str[52] + name[23] (203 B of strings), link_counters_t, asm_buf. Goal from #2136 user story 27."
+    },
+    {
+      "id": "client link task stack",
+      "target": "MID",
+      "source": "static",
+      "value": 12288,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "One recv task per esp_ws_client / posix client link at the pthread default stack (CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT in full_node). Goal from #2136 user story 1."
+    },
+    {
+      "id": "self-healing connection stacks",
+      "target": "MID",
+      "source": "static",
+      "value": 24576,
+      "goal": 0,
+      "moved_by": "#2137 (seeded from the peer-cost study)",
+      "basis": "Worker task + the socket's recv task, 12288 B each. Goal: the wait module (#2136) leaves no per-connection task."
+    }
+  ]
+}
