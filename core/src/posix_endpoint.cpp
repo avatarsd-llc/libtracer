@@ -584,7 +584,8 @@ std::size_t slot_server_t::broadcast_iov(std::span<const ::iovec> rec) {
     return shed;
 }
 
-void slot_server_t::accept_peer() {
+void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
+                                mem::block_array_t<session_base_t*>& pslots) {
     sockaddr_in remote{};
     socklen_t rlen = sizeof(remote);
     const int fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&remote), &rlen);
@@ -608,10 +609,13 @@ void slot_server_t::accept_peer() {
                 ::close(fd);  // clean refusal at the deployment cap, not a hung SYN
                 return;
             }
-            // A refused session (the store is exhausted) refuses the peer exactly as the cap
-            // does: a clean close, nothing half-built in the table.
+            // A refused session, or a refused place for it in the poll set (the listen socket
+            // plus every slot, #2156), refuses the peer exactly as the cap does: a clean close,
+            // nothing half-built in the table, and no admitted peer the poll loop cannot see.
+            // The set is grown here, before the slot exists, so a refusal never evicts anyone.
             mem::poly_ptr_t<session_base_t> fresh = make_session();
-            if (!fresh || !slots_.push_back(std::move(fresh))) {
+            if (!pfds.reserve(slots_.size() + 2) || !pslots.reserve(slots_.size() + 1) || !fresh ||
+                !slots_.push_back(std::move(fresh))) {
                 ::close(fd);
                 return;
             }
@@ -783,13 +787,14 @@ void slot_server_t::run() {
     // (the MCU-shaped choice, #362), bounded to 100 ms so the loop stays
     // shutdown-responsive (the posix_endpoint_t idiom).
     //
-    // The poll set is sized ONCE, to the admission cap plus the listen socket (#1780): the
-    // slot table never outgrows the cap, so no pass below grows it. Should that one sizing be
-    // refused, a pass serves the peers that fit and the listen socket always (it goes first).
+    // The poll set grows to exactly fit the slot table, never ahead of it (#2156): sizing it
+    // to the admission cap up front charged every idle listener the whole cap (two 100-entry
+    // tables).
+    // accept_peer grows it BEFORE a new slot is admitted and refuses the newcomer when that
+    // growth is refused, so every slot always has a place here and no admitted peer goes
+    // unpolled. Slots are recycled, never freed, and a cleared set keeps its block.
     mem::block_array_t<pollfd> pfds(slots_.source());
     mem::block_array_t<session_base_t*> pslots(slots_.source());
-    (void)pfds.reserve(max_peers_ + 1);
-    (void)pslots.reserve(max_peers_);
     pollfd listen_only{listen_fd_, POLLIN, 0};
     while (!stop_.load(std::memory_order_relaxed)) {
         pfds.clear();
@@ -815,7 +820,7 @@ void slot_server_t::run() {
         // (which may add a slot).
         for (std::size_t i = 1; i < set_n; ++i)
             if ((set[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0) service_peer(*pslots[i - 1]);
-        if ((set[0].revents & POLLIN) != 0) accept_peer();
+        if ((set[0].revents & POLLIN) != 0) accept_peer(pfds, pslots);
     }
 }
 

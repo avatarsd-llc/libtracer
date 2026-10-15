@@ -1743,6 +1743,76 @@ void test_ws_server_session_store_refusal_closes_the_peer() {
 }
 
 /**
+ * @brief A thread-safe source over the process heap that, once armed, refuses every block
+ *        of exactly @ref size bytes and counts the refusals.
+ */
+class size_refusal_source_t final : public tr::mem::block_source_t {
+   public:
+    size_refusal_source_t() noexcept : block_source_t("size_refusal") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (bytes == size.load(std::memory_order_relaxed)) {
+            refused.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
+        return tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+    std::atomic<std::size_t> size{0};    /**< @brief The refused block size; 0 = serve all. */
+    std::atomic<std::size_t> refused{0}; /**< @brief Requests refused so far. */
+};
+
+/**
+ * @brief A refused poll-set growth refuses the NEWCOMER and evicts no one (#2156).
+ *
+ * The poll set grows with the slot table, inside `accept_peer` and before the new slot is
+ * admitted. With one peer in, the next new slot needs the session list to grow from one
+ * entry to two (`2 * sizeof(void*)` bytes, exact-sized), so refusing that one block size
+ * refuses the growth. The newcomer must then be closed, the first peer must stay open and
+ * enumerated, and once the refusal lifts the SAME server admits the next peer.
+ */
+void test_stream_server_poll_set_refusal_refuses_the_newcomer() {
+    std::printf("stream server poll set — a refused growth refuses the newcomer (#2156):\n");
+    size_refusal_source_t src;
+    tr::net::tcp_server_config_t cfg;
+    cfg.memory.state = &src;
+    tr::net::tcp_server_transport_t server(0, cfg);
+    check(server.ok(), "the tcp server bound");
+    const auto peers_reach = [&server](std::size_t want) {
+        for (int i = 0; i < 1000; ++i) {
+            std::size_t n = 0;
+            server.enumerate_peers([&n](std::string_view) { ++n; });
+            if (n == want) return true;
+            std::this_thread::sleep_for(2ms);
+        }
+        return false;
+    };
+    const int first = tcp_connect(server.local_port());
+    check(first >= 0 && peers_reach(1), "the first peer is admitted");
+
+    src.size.store(2 * sizeof(void*), std::memory_order_relaxed);
+    const int newcomer = tcp_connect(server.local_port());
+    pollfd p{newcomer, POLLIN, 0};
+    char byte = 0;
+    const bool closed =
+        newcomer >= 0 && ::poll(&p, 1, 2000) == 1 && ::recv(newcomer, &byte, 1, 0) == 0;
+    check(closed, "the newcomer is closed, not admitted unpolled");
+    check(src.refused.load(std::memory_order_relaxed) >= 1, "the poll-set growth was refused");
+    std::size_t n = 0;
+    server.enumerate_peers([&n](std::string_view) { ++n; });
+    check(n == 1, "the first peer is still admitted (nobody evicted)");
+    check(::recv(first, &byte, 1, MSG_DONTWAIT) < 0 && errno == EAGAIN,
+          "the first peer's connection is still open");
+
+    src.size.store(0, std::memory_order_relaxed);
+    const int next = tcp_connect(server.local_port());
+    check(next >= 0 && peers_reach(2), "after the refusal the server admits the next peer");
+    for (const int fd : {first, newcomer, next})
+        if (fd >= 0) ::close(fd);
+}
+
+/**
  * @brief A factory whose source refuses the link object answers BACKPRESSURE and dials
  *        nothing — the object is the first thing it draws (#1780).
  */
@@ -1864,6 +1934,7 @@ int main() {
     test_control_encoders_are_byte_identical();
     test_try_encode_client_frame();
     test_ws_server_session_store_refusal_closes_the_peer();
+    test_stream_server_poll_set_refusal_refuses_the_newcomer();
     test_factory_refusal_is_backpressure();
     test_can_reassembly_refusal_is_reported();
     test_can_receive_tables_refusal_is_counted();

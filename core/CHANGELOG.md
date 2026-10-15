@@ -87,6 +87,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   and the destructor cleared it again; `pin_t::release()` is gone and the destructor is the one
   clear.
 
+### Changed
+
+- **An idle TCP or WebSocket server link draws 64 B from its memory seam, not 1,992 B
+  ([#2156](https://github.com/avatarsd-llc/libtracer/issues/2156)).** A multi-peer server no
+  longer carries the single-peer send ring its base class built (8 slots, 384 B, never used: a
+  server sends through its sessions), and its poll set grows to exactly fit the slot table
+  instead of being sized to the whole admission cap when the poll thread starts (two 100-entry
+  tables, 1,608 B). The set grows before a new peer is admitted; a refused growth closes that
+  newcomer and evicts no one. The protected `stream_endpoint_t(tx_src)` constructor takes the
+  ring depth as an optional second argument. `link_base_ram_test` pins the idle draw, so growth now fails a test.
+
 ## [0.19.1] — 2026-10-11
 
 This patch release also carries RFC-0032's deletion of COMPACT delivery, ADVERTISE, HANDLE_NACK and the route-handle tables, which was planned for 0.20.0. A 0.19.0 peer that still sends them gets a counted unknown-member error.

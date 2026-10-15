@@ -46,6 +46,8 @@
 struct iovec;
 /** @brief The POSIX IPv4 address (`<netinet/in.h>`), forward-declared for the same reason. */
 struct in_addr;
+/** @brief The POSIX poll descriptor (`<poll.h>`), forward-declared for the same reason. */
+struct pollfd;
 
 namespace tr::detail {
 
@@ -466,10 +468,13 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * (the WebSocket client, whose frames are masked in place, #1661): the slots are then
      * part of the link's egress store, which the application names.
      *
-     * @param tx_src Where the enqueue-then-write queue's slot storage comes from.
+     * @param tx_src   Where the enqueue-then-write queue's slot storage comes from.
+     * @param tx_depth Records the queue holds behind the write in flight. A multi-peer server
+     *                 passes `0`: its sends go through each session, never through
+     *                 @ref handoff_send, so a ring here would be drawn and never used (#2156).
      */
-    explicit stream_endpoint_t(mem::block_source_t& tx_src)
-        : io_src_(&tx_src), tx_{kTxQueueDepth, tx_src} {}
+    explicit stream_endpoint_t(mem::block_source_t& tx_src, std::size_t tx_depth = kTxQueueDepth)
+        : io_src_(&tx_src), tx_{tx_depth, tx_src} {}
 
     /**
      * @brief Closes a leftover peer fd (one the recv thread never tore down).
@@ -983,7 +988,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     slot_server_t(std::size_t max_peers, bool peer_named, std::uint32_t liveness_window_ms = 0,
                   mem::block_source_t& src = mem::net_source(),
                   mem::block_source_t& state_src = mem::net_source())
-        : stream_endpoint_t(src),
+        : stream_endpoint_t(src, 0),
           slots_(state_src),
           max_peers_(derive_max_peers(liveness_window_ms, max_peers)),
           peer_named_(peer_named) {
@@ -1211,8 +1216,14 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     peer_handle_t delivering_{};
 
    private:
-    /** @brief Admit one inbound connection into a free (or newly grown) slot. */
-    void accept_peer();
+    /**
+     * @brief Admit one inbound connection into a free (or newly grown) slot.
+     *
+     * @param pfds   The poll thread's fd set; grown here to hold a new slot before it is
+     *               admitted, and a refused growth refuses the newcomer (#2156).
+     * @param pslots The session list parallel to @p pfds, grown the same way.
+     */
+    void accept_peer(mem::block_array_t<pollfd>& pfds, mem::block_array_t<session_base_t*>& pslots);
 
     /** @brief One readable pass on @p s: `recv` a chunk, or tear the slot down. */
     void service_peer(session_base_t& s);

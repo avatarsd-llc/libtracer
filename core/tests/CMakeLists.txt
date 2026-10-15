@@ -348,6 +348,15 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_CAN AND LIBTRACER_TRANSPORT_TCP A
     add_test(NAME transport_alloc_softfail COMMAND transport_alloc_softfail_test)
 endif()
 
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+    # #2156 — the per-link base RAM ratchet: an idle stream server's draw from its injected
+    # seam, pinned, so link growth fails a test on every leg instead of a warn-mode bench row.
+    add_executable(link_base_ram_test link_base_ram_test.cpp)
+    target_link_libraries(link_base_ram_test PRIVATE libtracer)
+    libtracer_test_warnings(link_base_ram_test)
+    add_test(NAME link_base_ram COMMAND link_base_ram_test)
+endif()
+
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_CAN)
     # ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over
     # the CAN bus binding: join hellos -> synthesized /net/can0:children[], directed
