@@ -1390,6 +1390,39 @@ class NonZeroBenchExitIsInconclusive(unittest.TestCase):
         self.assertIn("::warning::", out)
 
 
+class GateArmsAreAligned(unittest.TestCase):
+    """@brief #2175: both arms of the PR gate and of the push ratchet build with every function
+    aligned to 64 B, so a layout-only shift cannot move a row past its threshold. The flag is
+    bench-only: no CMakeLists.txt carries it, so shipped and default builds never see it."""
+
+    ROOT = pathlib.Path(__file__).resolve().parents[1]
+    PERF = ROOT / ".github" / "workflows" / "perf.yml"
+    # A configure of a timed arm: the candidate's own tree, or a baseline worktree.
+    CONFIGURE = re.compile(r"cmake -S (bench|\.\./(main|parent)-baseline/bench) -B ")
+
+    def test_the_flag_is_64_byte_function_alignment(self):
+        self.assertRegex(self.PERF.read_text(), r"(?m)^  BENCH_CXX_FLAGS: -falign-functions=64$")
+
+    def test_every_timed_arm_configures_with_it(self):
+        lines = self.PERF.read_text().splitlines()
+        arms = 0
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("#") or not self.CONFIGURE.search(line):
+                continue
+            if any("fetch_zenoh" in x for x in lines[max(0, i - 2):i]):
+                continue  # the Zenoh control re-configures the same tree; its cache keeps the flag
+            if not any("bench_libtracer" in x for x in lines[i:i + 4]):
+                continue  # not a timed arm (the composition audit times nothing)
+            arms += 1
+            self.assertIn('-DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"', " ".join(lines[i:i + 2]),
+                          f"perf.yml:{i + 1} configures a timed arm without the alignment flag")
+        self.assertEqual(arms, 4, "gate-pr's two arms and the ratchet's two")
+
+    def test_no_cmake_file_carries_it(self):
+        for cm in (self.ROOT / "core" / "CMakeLists.txt", self.ROOT / "bench" / "CMakeLists.txt"):
+            self.assertNotIn("falign-functions", cm.read_text(), cm)
+
+
 class WorkflowsDeclareTheirTier(unittest.TestCase):
     """@brief Every CI invocation of the gate must name its tier on the command line.
 
