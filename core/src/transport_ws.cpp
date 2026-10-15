@@ -268,7 +268,7 @@ struct ws_server_transport_t::session_t : slot_server_t::session_base_t {
     explicit session_t(mem::block_source_t& src) noexcept : hs_buf(src) {}
     mem::bytes_t hs_buf; /**< @brief HTTP Upgrade request accumulation. */
     /** @brief Frame ingress (ADR-0087 §1): no stream buffer, the body lands in its segment. */
-    frame_ingress_t<ws::kMaxClientFrameHeader> ingress;
+    frame_ingress_t<ws::kMaxClientFrameHeader, kReadAheadBytes> ingress;
     /** @brief What the body of the frame being received needs from its header (the length
      *         is frame ingress's own). */
     struct rx_frame_t {
@@ -612,9 +612,9 @@ bool ws_server_transport_t::read_handshake(session_t& s, int fd) {
     // Bytes pipelined past the header are the start of the frame stream: frame ingress
     // takes them exactly as if they had come off the socket.
     framing_t framing{*this, s};
-    const bool ok = s.ingress.feed(
-        std::span<const std::byte>(s.hs_buf.data() + hdr_end + 4, s.hs_buf.size() - hdr_end - 4),
-        *backend_, framing);
+    const bool ok = s.ingress.feed(std::span<const std::byte>(s.hs_buf.data() + hdr_end + 4,
+                                                              s.hs_buf.size() - hdr_end - 4),
+                                   *backend_, framing) >= 0;
     s.hs_buf = mem::bytes_t(s.hs_buf.source());
     return ok;
 }

@@ -21,10 +21,14 @@
  *
  * What the module owns is the state between reads: the header bytes read so far (at most
  * `MaxHeader`, the framing's largest header) and the body's segment while it fills. Nothing
- * else is buffered. A socket read lands the body's remaining bytes in the segment and, in the
- * same `recvmsg`, up to one header's worth of whatever follows in the header store, so frames
- * that arrive back to back cost one read each; the few bytes past that header that belong to
- * the next body are the only bytes ever copied (at most `MaxHeader - 2`).
+ * else is kept. Between frames a read offers the header slot and then a stack scratch of
+ * `ReadAhead` bytes: every frame whole in what arrived is copied into its exact segment, a
+ * partial header stays in the slot, and a partial body has its exact segment drawn and its
+ * bytes copied in, all before the call returns, so the scratch holds nothing between reads
+ * and a lone small frame costs one read. A body in progress is read straight into its
+ * segment, with the header slot taking what follows in the same `recvmsg`, so frames that
+ * arrive back to back cost one read each; past that header, at most `MaxHeader - 2` bytes of
+ * the next body are copied.
  *
  * Native-window hold (ADR-0081 §2) is kept: ingress says "not yet" by not reading, so unread
  * bytes wait in the kernel's window.
@@ -68,8 +72,10 @@ struct ingress_header_t {
  * Used by the stream's one receive context only.
  *
  * @tparam MaxHeader The framing's largest header, in bytes.
+ * @tparam ReadAhead The stack scratch a read between frames offers after the header slot, in
+ *                   bytes (it also takes a refused body's bytes, which are shed).
  */
-template <std::size_t MaxHeader>
+template <std::size_t MaxHeader, std::size_t ReadAhead>
 class frame_ingress_t {
    public:
     /**
@@ -77,8 +83,8 @@ class frame_ingress_t {
      *        frame it completes.
      *
      * Reads again only while a read filled everything it offered and completed no frame, so
-     * a lone frame costs one read for its header and one for its body, and one busy peer
-     * cannot hold the caller past its next frame.
+     * a lone frame up to about `ReadAhead` bytes costs one read, a larger one two, and one
+     * busy peer cannot hold the caller past its next frame.
      *
      * @param fd      The stream's socket.
      * @param rx      The receiving link's own source, which every body is drawn from.
@@ -89,42 +95,52 @@ class frame_ingress_t {
     template <class Framing>
     [[nodiscard]] bool read(int fd, mem::mem_backend_t& rx, Framing& framing) {
         for (bool more = true; more;) {
-            // The body's remaining bytes go to its segment (or, for a body the source
-            // refused, to this throwaway space), and whatever follows to the header store.
-            std::array<std::byte, kSkipBytes> skip;
-            std::array<::iovec, 2> iov{};
-            std::size_t parts = 0;
+            // A body in progress takes its remaining bytes (or, refused by the source, this
+            // scratch as throwaway space) and the header slot whatever follows. Between
+            // frames the header slot comes first and the scratch takes up to `ReadAhead`
+            // bytes more, which this call moves into their frames before it returns.
+            std::array<std::byte, ReadAhead> scratch;
+            const bool between = !in_body_;
             const std::size_t room = body_len_ - body_have_;
-            if (in_body_)
-                iov[parts++] = blk_.seg ? ::iovec{blk_.frame(body_len_).data() + body_have_, room}
-                                        : ::iovec{skip.data(), std::min(room, skip.size())};
-            iov[parts++] = ::iovec{hdr_.data() + hdr_have_, MaxHeader - hdr_have_};
+            const ::iovec hdr{hdr_.data() + hdr_have_, MaxHeader - hdr_have_};
+            const ::iovec ahead{scratch.data(), scratch.size()};
+            const ::iovec into = blk_.seg ? ::iovec{blk_.frame(body_len_).data() + body_have_, room}
+                                          : ::iovec{scratch.data(), std::min(room, scratch.size())};
+            std::array<::iovec, 2> iov = between ? std::array{hdr, ahead} : std::array{into, hdr};
             ::msghdr msg{};
             msg.msg_iov = iov.data();
-            msg.msg_iovlen = parts;
+            msg.msg_iovlen = iov.size();
             const ::ssize_t n = ::recvmsg(fd, &msg, MSG_DONTWAIT);
             if (n <= 0) return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
 
             const auto got = static_cast<std::size_t>(n);
-            const std::size_t to_body = in_body_ ? std::min(got, iov[0].iov_len) : 0;
-            body_have_ += static_cast<std::uint32_t>(to_body);
-            hdr_have_ += static_cast<std::uint8_t>(got - to_body);
+            const std::size_t first = std::min(got, iov[0].iov_len);
+            const std::size_t second = got - first;
+            body_have_ += static_cast<std::uint32_t>(between ? 0 : first);
+            hdr_have_ += static_cast<std::uint8_t>(between ? first : second);
             const int done = advance(rx, framing);
-            if (done < 0) return false;
-            more = got == iov[0].iov_len + (parts == 2 ? iov[1].iov_len : 0) && done == 0;
+            const int fed =
+                !between || done < 0
+                    ? 0
+                    : feed(std::span<const std::byte>(scratch.data(), second), rx, framing);
+            if (done < 0 || fed < 0) return false;
+            more = got == iov[0].iov_len + iov[1].iov_len && done + fed == 0;
         }
         return true;
     }
 
     /**
      * @brief Frame bytes that were already read elsewhere (the bytes a handshake read past
-     *        its own end), exactly as if they had arrived on the socket.
+     *        its own end, a wake-up read's scratch), exactly as if they had arrived on the
+     *        socket: each frame whole in them is copied into its exact segment, a partial
+     *        header kept, a partial body's segment drawn now and its bytes copied in.
      *
-     * @return False when the framing closed the stream.
+     * @return How many bodies it handed up, or -1 when the framing closed the stream.
      */
     template <class Framing>
-    [[nodiscard]] bool feed(std::span<const std::byte> in, mem::mem_backend_t& rx,
-                            Framing& framing) {
+    [[nodiscard]] int feed(std::span<const std::byte> in, mem::mem_backend_t& rx,
+                           Framing& framing) {
+        int done = 0;
         while (!in.empty()) {
             std::size_t take = 0;
             if (in_body_) {
@@ -138,9 +154,11 @@ class frame_ingress_t {
                 hdr_have_ += static_cast<std::uint8_t>(take);
             }
             in = in.subspan(take);
-            if (advance(rx, framing) < 0) return false;
+            const int d = advance(rx, framing);
+            if (d < 0) return -1;
+            done += d;
         }
-        return true;
+        return done;
     }
 
     /** @brief Forget the stream: drop a half-read header and release a half-filled body. */
@@ -153,9 +171,6 @@ class frame_ingress_t {
     }
 
    private:
-    /** @brief Throwaway space a refused body is read into, so the stream stays framed. */
-    static constexpr std::size_t kSkipBytes = 512;
-
     /**
      * @brief Hand up a body that is whole, then judge the header store: start each body it
      *        announces, moving the bytes read past its header into it.

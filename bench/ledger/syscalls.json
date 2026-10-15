@@ -108,9 +108,9 @@
       "arm": "ws-relay-srv",
       "metric": "syscalls@64",
       "payload": 64,
-      "value": 4,
+      "value": 3,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
+      "moved_by": "#2137 (seeded from the peer-cost study)"
     },
     {
       "id": "ws-relay-srv @1024",
@@ -119,9 +119,9 @@
       "arm": "ws-relay-srv",
       "metric": "syscalls@1024",
       "payload": 1024,
-      "value": 4,
+      "value": 3,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
+      "moved_by": "#2137 (seeded from the peer-cost study)"
     },
     {
       "id": "ws-relay-srv @4096",
@@ -132,7 +132,7 @@
       "payload": 4096,
       "value": 4,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
+      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
     },
     {
       "id": "ws-relay-srv @16384",
@@ -143,7 +143,7 @@
       "payload": 16384,
       "value": 4,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
+      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @64",
@@ -152,9 +152,9 @@
       "arm": "ws-relay-cli",
       "metric": "syscalls@64",
       "payload": 64,
-      "value": 4,
+      "value": 3,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
+      "moved_by": "#2137 (seeded from the peer-cost study)"
     },
     {
       "id": "ws-relay-cli @1024",
@@ -163,9 +163,9 @@
       "arm": "ws-relay-cli",
       "metric": "syscalls@1024",
       "payload": 1024,
-      "value": 4,
+      "value": 3,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
+      "moved_by": "#2137 (seeded from the peer-cost study)"
     },
     {
       "id": "ws-relay-cli @4096",
@@ -176,7 +176,7 @@
       "payload": 4096,
       "value": 4,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
+      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
     },
     {
       "id": "ws-relay-cli @16384",
@@ -187,7 +187,7 @@
       "payload": 16384,
       "value": 4,
       "goal": null,
-      "moved_by": "#2140 (WS server frame ingress: header first, body into an exact-size segment)"
+      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
     },
     {
       "id": "httpd-ws rx frame",

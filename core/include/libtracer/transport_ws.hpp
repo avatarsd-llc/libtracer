@@ -233,6 +233,21 @@ class ws_server_transport_t final : public stream_server_base_t {
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
+     * @brief The stack scratch a read between frames offers after the 14-byte header slot
+     *        (#2140): a lone message carrying a 1 KiB value lands whole in one read.
+     *
+     * A scratch on the poll thread's stack, not a buffer: every byte it receives is moved into
+     * its frame's exact segment (or the header slot) before the read returns, so it holds
+     * nothing between reads and no peer or link keeps RAM for it. Sized from the counted
+     * ledger: the 1 KiB row is a 1,065 B frame on the wire (8 B header, 33 B FWD envelope to
+     * `/sensor/temp`); 128 B over 1 KiB covers that header and an envelope whose paths run to
+     * about 80 B. Paced small frames, the common telemetry case, then cost one read each,
+     * paid for with a copy of at most about 1 KiB; a larger body is still received straight
+     * into its segment.
+     */
+    static constexpr std::size_t kReadAheadBytes = 1024 + 128;
+
+    /**
      * @brief The largest OPENING HANDSHAKE a PRE-AUTH peer may make this node buffer
      *        (16 KiB) — the ceiling `max_handshake` tightens against (#934).
      *
