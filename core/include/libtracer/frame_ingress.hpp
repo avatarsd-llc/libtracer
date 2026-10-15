@@ -1,7 +1,8 @@
 /**
  * @file
- * @brief Frame ingress (ADR-0087 §1): read a frame's header first, draw its body at the exact
- *        length from the receiving link's own source, and receive the body straight into it.
+ * @brief Frame ingress (ADR-0087 §1): each frame into a segment of its exact length, drawn from
+ *        the receiving link's own source; small frames from one read, large bodies received
+ *        straight into their segment.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC

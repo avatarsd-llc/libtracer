@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Four link kinds run the same six cases:
+ * Four link kinds run the same seven cases:
  *
  * - **fake**: the socket-free adapter of `fake_link.hpp`, deterministic, every case.
  * - **tcp (dial)**: a real `tcp_transport_t` dialled to a raw localhost socket that plays the
