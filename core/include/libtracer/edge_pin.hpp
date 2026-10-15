@@ -34,8 +34,10 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 
 #include "libtracer/config.hpp"
+#include "libtracer/qsbr.hpp"
 
 namespace tr::graph::detail_ep {
 
@@ -76,9 +78,9 @@ inline constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
  * @brief The domain's storage: `kEdgePinSlots` claimable announcements.
  *
  * `constinit` and trivially destructible on purpose. It lands in `.bss` with no guard variable
- * and is never destroyed, so a `thread_local` participant unwinding at process exit can always
- * reach it — the ordering hazard a `std::vector` or a `std::mutex` in here would create. It owns
- * NOTHING (an announcement is a borrowed pointer), so there is no exit sweep to register either.
+ * and is never destroyed, so a thread's exit release can always reach it — the ordering hazard a
+ * `std::vector` or a `std::mutex` in here would create. It owns NOTHING (an announcement is a
+ * borrowed pointer), so there is no exit sweep to register either.
  */
 struct registry_t {
     std::array<cell_t, kEdgePinSlots> cells{}; /**< @brief The announcements. */
@@ -90,55 +92,60 @@ struct registry_t {
     return reg;
 }
 
-/** @brief This thread's claim on a domain index, released when the thread ends. */
-class participant_t {
-   public:
-    participant_t() = default;
-    participant_t(const participant_t&) = delete;
-    participant_t& operator=(const participant_t&) = delete;
-
-    /** @brief Give the index back so a later thread can claim it; the announcement is
-     *         cleared first, so a scan that races this release sees an empty cell. */
-    ~participant_t() {
-        if (idx_ == kNoIndex) return;
-        cell_t& c = registry().cells[idx_];
-        c.pinned.store(nullptr, std::memory_order_seq_cst);
-        c.claimed.store(false, std::memory_order_release);
-    }
-
-    /**
-     * @brief This thread's index, claimed on first use.
-     * @return The claimed index, or @ref kNoIndex when every index is already taken (the
-     *         caller then takes the stripe-mutex fallback — correctness is unaffected).
-     */
-    [[nodiscard]] std::size_t index() noexcept {
-        if (idx_ != kNoIndex || tried_) return idx_;
-        registry_t& r = registry();
-        for (std::size_t i = 0; i < kEdgePinSlots; ++i) {
-            bool expected = false;
-            if (r.cells[i].claimed.compare_exchange_strong(
-                    expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
-                idx_ = i;
-                return idx_;
-            }
+/**
+ * @brief Gives this thread's edge-pin cell back when the thread ends. Constructed only by
+ *        @ref claim_pin, so a pin never touches a guarded object.
+ *
+ * The announcement is cleared first, so a scan that races this release sees an empty cell. The
+ * record's pin is then left at "none", so a pin a later `thread_local` destructor takes uses
+ * the stripe-mutex fallback instead of a cell another thread may own by then.
+ */
+struct pin_release_t {
+    pin_release_t() = default;
+    pin_release_t(const pin_release_t&) = delete;
+    pin_release_t& operator=(const pin_release_t&) = delete;
+    /** @brief Give the cell back; see the class. */
+    ~pin_release_t() {
+        detail_qsbr::thread_record_t& t = detail_qsbr::rec();
+        if (t.pin != 0 && t.pin != detail_qsbr::kNoCell) {
+            cell_t& c = registry().cells[t.pin - 1];
+            c.pinned.store(nullptr, std::memory_order_seq_cst);
+            c.claimed.store(false, std::memory_order_release);
         }
-        // Do not re-walk the table on every publish once it is known full: the fallback
-        // reader is already paying a mutex, and a failed O(N) CAS sweep on top of it would
-        // turn "undersized knob" into a second, larger cost.
-        tried_ = true;
-        return kNoIndex;
+        t.pin = detail_qsbr::kNoCell;
     }
-
-   private:
-    std::size_t idx_ = kNoIndex;
-    bool tried_ = false;
 };
 
-/** @brief This thread's participant. Function-local so nothing is emitted for a TU that
- *         never publishes. */
-[[nodiscard]] inline participant_t& self() noexcept {
-    static thread_local participant_t p;
-    return p;
+/**
+ * @brief Claim an edge-pin cell for this thread, once, into its record: the table walk, out of
+ *        line.
+ * @return The claimed index, or @ref kNoIndex when every index is already taken (the caller
+ *         then takes the stripe-mutex fallback — correctness is unaffected). A full table is
+ *         not re-walked on every publish: the fallback reader already pays a mutex, and an
+ *         O(N) CAS sweep on top would turn "undersized knob" into a second, larger cost.
+ */
+[[gnu::noinline]] inline std::size_t claim_pin(detail_qsbr::thread_record_t& t) noexcept {
+    registry_t& r = registry();
+    for (std::size_t i = 0; i < kEdgePinSlots; ++i) {
+        bool expected = false;
+        if (r.cells[i].claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+                                                       std::memory_order_relaxed)) {
+            [[maybe_unused]] static thread_local pin_release_t release;
+            t.pin = static_cast<std::uint32_t>(i + 1);
+            return i;
+        }
+    }
+    t.pin = detail_qsbr::kNoCell;
+    return kNoIndex;
+}
+
+/** @brief This thread's edge-pin index, claimed on first use, or @ref kNoIndex. */
+[[nodiscard]] inline std::size_t index() noexcept {
+    detail_qsbr::thread_record_t& t = detail_qsbr::rec();
+    const std::uint32_t c = t.pin;
+    if (c == 0) [[unlikely]]
+        return claim_pin(t);
+    return c == detail_qsbr::kNoCell ? kNoIndex : c - 1;
 }
 
 /**
@@ -153,7 +160,7 @@ class participant_t {
 class pin_t {
    public:
     /** @brief Resolve this thread's cell (or none, when the domain is full). */
-    pin_t() noexcept : idx_(self().index()) {
+    pin_t() noexcept : idx_(index()) {
         assert((idx_ == kNoIndex ||
                 registry().cells[idx_].pinned.load(std::memory_order_relaxed) == nullptr) &&
                "an edge pin was still held on re-entry — it must be released before dispatch");

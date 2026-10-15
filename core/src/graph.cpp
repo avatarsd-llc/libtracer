@@ -131,7 +131,8 @@ inline constexpr std::size_t kLocalParkSlots =
  * so `parked` is storage rather than a container.
  */
 struct dispatch_state_t {
-    /** @brief Nesting depth of `fan_out` / latch dispatch on this thread; 0 ⇒ quiescent. */
+    /** @brief Nesting depth of `fan_out` / latch dispatch on this thread; 0 ⇒ quiescent. Stays
+     *         0 under `reclaim_qsbr`, whose count is the QSBR thread record's. */
     unsigned depth;
     /** @brief How many of @ref parked are occupied. Stays 0 under `reclaim_qsbr`. */
     unsigned parked_n;
@@ -181,16 +182,15 @@ struct dispatch_state_t {
 class dispatch_scope_t {
    public:
     dispatch_scope_t() noexcept {
-        if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
-            dispatch_state_t& s = dispatch_state();
-            if constexpr (reclaim_policy_t::kGraceSpansThreads) {
-                // Only the OUTERMOST section announces (`enter` keeps the count, shared with
-                // the router's frame bracket). An inner one is already covered by the
-                // announcement the outer one made, and re-announcing at a NEWER epoch would let
-                // a scan conclude past a retirement the outer snapshot still names.
-                detail_qsbr::enter();
-            }
-            ++s.depth;
+        if constexpr (reclaim_policy_t::kGraceSpansThreads) {
+            // Only the OUTERMOST section announces (`enter` keeps the count, shared with the
+            // router's frame bracket). An inner one is already covered by the announcement the
+            // outer one made, and re-announcing at a NEWER epoch would let a scan conclude past
+            // a retirement the outer snapshot still names. The dispatch bracket IS the frame
+            // bracket here: one count, in the QSBR thread record.
+            detail_qsbr::enter();
+        } else if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
+            ++dispatch_state().depth;
         }
     }
     dispatch_scope_t(const dispatch_scope_t&) = delete;
@@ -199,9 +199,7 @@ class dispatch_scope_t {
     /** @brief Leaving the OUTERMOST dispatch is the grace point; anything inner is a decrement. */
     ~dispatch_scope_t() {
         if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
-            dispatch_state_t& s = dispatch_state();
             if constexpr (reclaim_policy_t::kGraceSpansThreads) {
-                --s.depth;
                 // Go quiescent FIRST, so this thread's own announcement is already withdrawn
                 // when the drain scans — otherwise every drain would see itself as a reason to
                 // defer, and a node with one dispatching thread would reclaim nothing, ever.
@@ -213,6 +211,7 @@ class dispatch_scope_t {
                 // Both fields live in the same thread-local object, so the common case — unwind
                 // to depth 0 with an empty park — is two loads off one base and a branch nobody
                 // takes.
+                dispatch_state_t& s = dispatch_state();
                 if (--s.depth == 0 && s.parked_n != 0) run_parked_releases(s);
             }
         }
@@ -220,13 +219,49 @@ class dispatch_scope_t {
 };
 
 /**
+ * @brief The frame bracket a fan-out opens for its remote edges: once, at the first remote
+ *        edge, so a fan-out over F links pays one outermost bracket instead of F.
+ *
+ * Under `reclaim_qsbr` the dispatch bracket already announces, so there is nothing to open.
+ * Under the other two policies it is the router's frame bracket (`%detail_qsbr::frame_scope_t`),
+ * and each remote delivery's own bracket then nests inside it. A fan-out with no remote edge
+ * never opens it, so an in-process write pays nothing (ADR-0038 §3a). The bracket only grows:
+ * it opens before the first remote edge's reads and closes after the last, which can only
+ * defer a free.
+ */
+class remote_frame_t {
+   public:
+    remote_frame_t() = default;
+    remote_frame_t(const remote_frame_t&) = delete;
+    remote_frame_t& operator=(const remote_frame_t&) = delete;
+    /** @brief Open the bracket if this fan-out has not yet. */
+    void open() noexcept {
+        if constexpr (!reclaim_policy_t::kGraceSpansThreads) {
+            if (open_) return;
+            detail_qsbr::enter();
+            open_ = true;
+        }
+    }
+    /** @brief Close it, if it was opened; the outermost close is a quiescent state. */
+    ~remote_frame_t() {
+        if constexpr (!reclaim_policy_t::kGraceSpansThreads)
+            if (open_ && detail_qsbr::leave()) graph_t::thread_quiescent();
+    }
+
+   private:
+    bool open_ = false; /**< @brief Whether @ref open entered. */
+};
+
+/**
  * @brief Whether this thread is currently inside a delivery — the question `unsubscribe` asks.
  *
  * Under a non-deferring policy the depth is never maintained, so this is a compile-time
- * `false` and `unsubscribe`'s release is unconditionally inline.
+ * `false` and `unsubscribe`'s release is unconditionally inline. Under `reclaim_qsbr` the count
+ * is the QSBR thread record's, and nothing asks this: the domain scans instead.
  */
 [[nodiscard]] inline bool inside_dispatch() noexcept {
-    if constexpr (reclaim_policy_t::kDefersToDispatchExit) return dispatch_state().depth != 0;
+    if constexpr (reclaim_policy_t::kDefersToDispatchExit && !reclaim_policy_t::kGraceSpansThreads)
+        return dispatch_state().depth != 0;
     return false;
 }
 
@@ -2146,10 +2181,16 @@ void graph_t::fan_out(vertex_t* v, const value_t& value) {
     // dispatch re-enters the graph (a callback may publish, and a nested publish must not be
     // able to swallow this tally).
     if (drops.any()) count_snapshot_drops(drops);
+    // Every remote edge after the first nests in one frame bracket (see `remote_frame_t`).
+    remote_frame_t remote_frame;
+    const auto one = [&](const edge_view_t& e) {
+        if (e.has_remote_leg()) remote_frame.open();
+        dispatch_edge(e, value);
+    };
     if (overflow.empty())
-        for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
+        for (std::size_t i = 0; i < n; ++i) one(inline_buf[i]);
     else
-        for (const edge_view_t& e : overflow) dispatch_edge(e, value);
+        for (const edge_view_t& e : overflow) one(e);
 }
 
 result_t<value_ref_t> graph_t::store_value(vertex_t* v, role_t role, view::rope_t&& value,

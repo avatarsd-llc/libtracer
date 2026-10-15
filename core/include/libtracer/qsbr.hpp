@@ -114,15 +114,16 @@
  * 2. `F_R` before `F_W`. `S_R` is sequenced before `F_R` and `L_W` after `F_W`, so `L_W` reads
  *    `S_R` or later. Every later store to the cell is a release made after R's reads: R's
  *    offline store, R's own next announce, or, once R's thread has exited, the first announce
- *    of the thread that claimed the cell next (R's destructor stores the cell and releases
- *    `claimed`; the new owner's `acq_rel` claim reads that, so R's reads happen before its
- *    announce). `L_W` synchronizes with whichever it reads, so R's reads happen before the
- *    free. The counter has only RMWs, so a later value `L_W` reads is in the release sequence
- *    of R's `seq_cst` decrement, and a 0 read after `S_R` means that decrement came first. If
- *    `L_W` reads `S_R` itself, R is online at `L_e`'s value. At `e` or earlier, W does not
- *    free. After `e`, `L_e` read `B` or a later bump, which continues `B`'s release sequence;
- *    `F_R` is an acquire fence sequenced after `L_e`, so `B` synchronizes with `F_R`, `S_W`
- *    happens before `L_R`, and `L_R` reads `S_W` or later.
+ *    of the thread that claimed the cell next (R's thread-exit release stores the cell,
+ *    releases `claimed` and leaves R's record naming no cell, so R never stores to it again
+ *    and a bracket R opens later counts into `overflow_online`; the new owner's `acq_rel`
+ *    claim reads the release, so R's reads happen before its announce). `L_W` synchronizes with
+ * whichever it reads, so R's reads happen before the free. The counter has only RMWs, so a later
+ * value `L_W` reads is in the release sequence of R's `seq_cst` decrement, and a 0 read after `S_R`
+ * means that decrement came first. If `L_W` reads `S_R` itself, R is online at `L_e`'s value. At
+ * `e` or earlier, W does not free. After `e`, `L_e` read `B` or a later bump, which continues `B`'s
+ * release sequence; `F_R` is an acquire fence sequenced after `L_e`, so `B` synchronizes with
+ * `F_R`, `S_W` happens before `L_R`, and `L_R` reads `S_W` or later.
  *
  * Neither way is a reader inside its bracket while what it reads is freed. `%retire`, the
  * drainer and `graph_t::collect` reach `F_W` through `%horizon`, below every early-out on the
@@ -404,9 +405,6 @@ static_assert(epoch_after(kOnlineBit | 5, 4) == epoch_after(5, 4),
               "the online bit and the counter's 32nd bit are outside the compare");
 static_assert(kStallLag < kEpochWindow, "the stall must engage before the compare window ends");
 
-/** @brief "This thread has not claimed a participant index." */
-inline constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
-
 /**
  * @brief One participant's quiescent-state announcement, cache-line isolated.
  *
@@ -475,7 +473,7 @@ struct alignas(kCellAlign) control_t {
     std::atomic<std::uint32_t> epoch{0};
     /** @brief How many @ref retired_slot_t entries are occupied — the drain path's early-out. */
     std::atomic<std::uint32_t> live{0};
-    /** @brief Dispatching threads that could not claim a cell; see @ref participant_t::index. */
+    /** @brief Dispatching threads that could not claim a cell; see @ref claim. */
     std::atomic<std::uint32_t> overflow_online{0};
     /**
      * @brief Non-zero once this process's `membarrier` registration succeeded: readers may
@@ -490,7 +488,7 @@ struct alignas(kCellAlign) control_t {
  *
  * `constinit` and trivially destructible, exactly as `%edge_pin.hpp`'s registry is and for the
  * same reason: it lands in `.bss` with no guard variable and is never destroyed, so a
- * `thread_local` participant unwinding at process exit can always reach it.
+ * thread's exit release can always reach it.
  */
 struct registry_t {
     std::array<cell_t, kQsbrParticipants> cells{}; /**< @brief The announcements. */
@@ -512,78 +510,92 @@ struct registry_t {
  */
 inline constinit std::atomic<std::uint32_t> in_flight{0};
 
-/** @brief This thread's claim on a participant index, released when the thread ends. */
-class participant_t {
-   public:
-    participant_t() = default;
-    participant_t(const participant_t&) = delete;
-    participant_t& operator=(const participant_t&) = delete;
+/** @brief A record field meaning "no cell": every index was taken, or the thread is exiting. */
+inline constexpr std::uint32_t kNoCell = ~std::uint32_t{0};
 
-    /** @brief Go quiescent, then give the index back so a later thread can claim it. */
-    ~participant_t() {
-        if (idx_ == kNoIndex) return;
-        cell_t& c = registry().cells[idx_];
-        c.state.store(0, std::memory_order_seq_cst);
-        c.claimed.store(false, std::memory_order_release);
-    }
+/**
+ * @brief This thread's one record: how many brackets it has open and which cells it claimed.
+ *
+ * Trivially destructible and all-zero, so the access is a bare TLS address with no guard and
+ * no `__cxa_thread_atexit` registration on the bracket path, and its storage stays valid until
+ * the thread is gone, through every other `thread_local`'s destructor. A cell field is 0 before
+ * the thread's first claim, @ref kNoCell when there was none to claim or it has been given
+ * back, and the index plus one otherwise. The cells go back at thread exit through
+ * @ref cell_release_t (and `%edge_pin.hpp`'s `pin_release_t`), a separate `thread_local` that
+ * only the cold claim path constructs.
+ */
+struct thread_record_t {
+    unsigned depth;     /**< @brief Brackets open on this thread; 0 ⇒ quiescent. */
+    std::uint32_t cell; /**< @brief This thread's QSBR cell (see above). */
+    std::uint32_t pin;  /**< @brief This thread's edge-pin cell (`%edge_pin.hpp`). */
+};
+static_assert(std::is_trivially_destructible_v<thread_record_t>);
 
-    /**
-     * @brief This thread's index, claimed on first dispatch.
-     *
-     * @return The claimed index, or @ref kNoIndex when every index is taken. Unlike
-     *         `%edge_pin.hpp`'s equivalent, @ref kNoIndex here is NOT a performance fallback:
-     *         a thread that cannot announce itself is a thread a scan cannot see, which would
-     *         be a use-after-free rather than a slow path. The caller therefore counts itself
-     *         into @ref control_t::overflow_online instead, and any non-zero reading of that
-     *         blocks every reclamation — safe, bounded, and visible as a stall rather than a
-     *         crash. Raise @ref tr::graph::default_config_t::kQsbrParticipants if it happens.
-     */
-    [[nodiscard]] std::size_t index() noexcept {
-        // Fast path only, so the CAS sweep below never lands in an inlined `fan_out`: after the
-        // first dispatch this is one predicted branch on a thread-local field.
-        if (idx_ != kNoIndex || tried_) return idx_;
-        return claim();
-    }
+/** @brief This thread's record. */
+[[nodiscard]] inline thread_record_t& rec() noexcept {
+    static thread_local constinit thread_record_t r{};
+    return r;
+}
 
-   private:
-    /** @brief The once-per-thread table walk, deliberately out of line — see @ref index. */
-    [[gnu::noinline]] std::size_t claim() noexcept {
-        registry_t& r = registry();
-        for (std::size_t i = 0; i < kQsbrParticipants; ++i) {
-            bool expected = false;
-            if (r.cells[i].claimed.compare_exchange_strong(
-                    expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
-                idx_ = i;
-                return idx_;
-            }
+/**
+ * @brief Gives this thread's QSBR cell back when the thread ends. Constructed only by
+ *        @ref claim, so the bracket path never touches a guarded object.
+ *
+ * It goes quiescent, releases `claimed`, and sets the record's cell to @ref kNoCell, so a
+ * bracket a later `thread_local` destructor opens counts itself into
+ * @ref control_t::overflow_online, which blocks every free, instead of announcing on a cell
+ * another thread may own by then.
+ */
+struct cell_release_t {
+    cell_release_t() = default;
+    cell_release_t(const cell_release_t&) = delete;
+    cell_release_t& operator=(const cell_release_t&) = delete;
+    /** @brief Give the cell back; see the class. */
+    ~cell_release_t() {
+        thread_record_t& t = rec();
+        if (t.cell != 0 && t.cell != kNoCell) {
+            cell_t& c = registry().cells[t.cell - 1];
+            c.state.store(0, std::memory_order_seq_cst);
+            c.claimed.store(false, std::memory_order_release);
         }
-        // Do not re-walk a table already known full on every dispatch: the overflow counter is
-        // already correct, and an O(N) CAS sweep per fan-out would turn "undersized knob" into
-        // a far larger cost than the stall it is trying to avoid.
-        tried_ = true;
-        return kNoIndex;
+        t.cell = kNoCell;
     }
-
-    std::size_t idx_ = kNoIndex;
-    bool tried_ = false;
-
-   public:
-    /** @brief How many @ref enter calls this thread has not yet left; 0 ⇒ quiescent. */
-    unsigned depth = 0;
 };
 
-/** @brief This thread's participant. Function-local so nothing is emitted for a TU that never
- *         dispatches under this policy. */
-[[nodiscard]] inline participant_t& self() noexcept {
-    static thread_local participant_t p;
-    return p;
+/**
+ * @brief Claim a QSBR cell for this thread, once: the table walk, out of line so the CAS sweep
+ *        never lands in an inlined `fan_out`.
+ *
+ * @return The record's new cell field. @ref kNoCell, when every index is taken, is NOT a
+ *         performance fallback, unlike `%edge_pin.hpp`'s: a thread that cannot announce
+ *         itself is a thread a scan cannot see. It counts itself into
+ *         @ref control_t::overflow_online instead, and any non-zero reading of that blocks
+ *         every reclamation: safe, bounded, and visible as a stall rather than a crash. Raise
+ *         @ref tr::graph::default_config_t::kQsbrParticipants if it happens. A full table is
+ *         not re-walked on every dispatch: the record keeps @ref kNoCell.
+ */
+[[gnu::noinline]] inline std::uint32_t claim(thread_record_t& t) noexcept {
+    registry_t& r = registry();
+    for (std::size_t i = 0; i < kQsbrParticipants; ++i) {
+        bool expected = false;
+        if (r.cells[i].claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
+                                                       std::memory_order_relaxed)) {
+            [[maybe_unused]] static thread_local cell_release_t release;
+            t.cell = static_cast<std::uint32_t>(i + 1);
+            return t.cell;
+        }
+    }
+    t.cell = kNoCell;
+    return kNoCell;
 }
 
 /** @brief Announce that this thread is entering a dispatch — the read-side half. */
-inline void go_online() noexcept {
+inline void go_online(thread_record_t& t) noexcept {
     registry_t& r = registry();
-    const std::size_t idx = self().index();
-    if (idx == kNoIndex) {
+    std::uint32_t c = t.cell;
+    if (c == 0) [[unlikely]]
+        c = claim(t);
+    if (c == kNoCell) {
         r.ctl.overflow_online.fetch_add(1, std::memory_order_relaxed);
         full_fence();
         return;
@@ -598,34 +610,26 @@ inline void go_online() noexcept {
     const std::uint32_t word = (e & kEpochMask) | kOnlineBit;
     if constexpr (kMembarrier) {
         if (r.ctl.asym.load(std::memory_order_relaxed) != 0) {
-            r.cells[idx].state.store(word, std::memory_order_release);
+            r.cells[c - 1].state.store(word, std::memory_order_release);
             std::atomic_signal_fence(std::memory_order_seq_cst);  // keeps S_R before L_R
             return;
         }
     }
     // The fence after the store orders it before this bracket's reads (@ref qsbr_ordering).
-    r.cells[idx].state.store(word, kStoreOrder);
+    r.cells[c - 1].state.store(word, kStoreOrder);
     full_fence();
 }
 
-/**
- * @brief Announce that this thread now holds no snapshot — the quiescent state itself.
- *
- * Re-resolves `%self()` rather than taking the index @ref go_online found. That costs one more
- * guarded `thread_local` access per outermost fan-out and buys something worth more: the
- * dispatch bracket in `%graph.cpp` needs no per-thread field of its own, so its thread-local
- * keeps byte-for-byte the layout the default build already had.
- */
-inline void go_offline() noexcept {
+/** @brief Announce that this thread now holds no snapshot — the quiescent state itself. */
+inline void go_offline(thread_record_t& t) noexcept {
     registry_t& r = registry();
-    const std::size_t idx = self().index();
-    if (idx == kNoIndex) {
+    if (t.cell == kNoCell) {
         r.ctl.overflow_online.fetch_sub(1, std::memory_order_seq_cst);
         return;
     }
     // On one hart the barrier keeps this bracket's reads above the store (@ref qsbr_single_hart).
     if constexpr (kCompilerFence) std::atomic_signal_fence(std::memory_order_seq_cst);
-    r.cells[idx].state.store(0, kStoreOrder);
+    r.cells[t.cell - 1].state.store(0, kStoreOrder);
 }
 
 /**
@@ -633,7 +637,8 @@ inline void go_offline() noexcept {
  *        nested section never re-announces at a newer epoch than the one it is covered by.
  */
 inline void enter() noexcept {
-    if (self().depth++ == 0) go_online();
+    thread_record_t& t = rec();
+    if (t.depth++ == 0) go_online(t);
 }
 
 /**
@@ -641,8 +646,9 @@ inline void enter() noexcept {
  * @return True when it was the outermost: this thread is now quiescent.
  */
 [[nodiscard]] inline bool leave() noexcept {
-    if (--self().depth != 0) return false;
-    go_offline();
+    thread_record_t& t = rec();
+    if (--t.depth != 0) return false;
+    go_offline(t);
     return true;
 }
 
