@@ -127,21 +127,9 @@
       ],
       "file": "core/src/transport_webtransport.cpp"
     },
-    "tr::net::ws::detail::decode_one": {
-      "ccn": [
-        19
-      ],
-      "file": "core/include/libtracer/ws.hpp"
-    },
     "tr::net::ws_client_transport_t::serve": {
       "ccn": [
         21
-      ],
-      "file": "core/src/transport_ws.cpp"
-    },
-    "tr::net::ws_server_transport_t::drain_frames": {
-      "ccn": [
-        18
       ],
       "file": "core/src/transport_ws.cpp"
     },

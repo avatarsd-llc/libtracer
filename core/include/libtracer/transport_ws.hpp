@@ -13,14 +13,17 @@
  * thread multiplexes the listen socket and every peer socket (no per-peer
  * thread — FreeRTOS stacks are the scarce resource on the MCU target). Each
  * peer runs the opening handshake (parse the HTTP Upgrade request, reply 101
- * Switching Protocols with ws::accept_key), then its byte stream is
- * ws::decode_frame_checked()d into complete frames — the same call on both the
- * server and the client path. Each BINARY message is one libtracer frame (one
+ * Switching Protocols with ws::accept_key), then frame ingress (ADR-0087 §1,
+ * `%frame_ingress.hpp`) reads each frame's header first (ws::decode_header) and its
+ * payload straight into a segment drawn at the exact length from the server's receive
+ * source; the client path still decodes a stream buffer with ws::decode_frame_checked.
+ * Each BINARY message is one libtracer frame (one
  * TLV) handed to the receiver — tagged with the SENDING peer's name through the
  * bus_link_t facet (ADR-0044), so return routes name the right browser tab; PING
  * is answered with a stack-built PONG. Every connection dies down ONE path
  * (slot_server_t::teardown_slot — one home, shared with tcp_server_transport_t since
- * #871; five call sites in this server's `on_readable` framing hook): the
+ * #871; reached from this server's `on_readable` hook whenever either phase answers
+ * false): the
  * peer closing the socket or a read error, at either phase; on an ESTABLISHED
  * stream a CLOSE or an RFC 6455 violation the checked decode reports (an
  * oversized or non-final control frame, §5.5/§7.1.7, or a DATA frame declaring
@@ -230,6 +233,21 @@ class ws_server_transport_t final : public stream_server_base_t {
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
+     * @brief The stack scratch a read between frames offers after the 14-byte header slot
+     *        (#2140): a lone message carrying a 1 KiB value lands whole in one read.
+     *
+     * A scratch on the poll thread's stack, not a buffer: every byte it receives is moved into
+     * its frame's exact segment (or the header slot) before the read returns, so it holds
+     * nothing between reads and no peer or link keeps RAM for it. Sized from the counted
+     * ledger: the 1 KiB row is a 1,065 B frame on the wire (8 B header, 33 B FWD envelope to
+     * `/sensor/temp`); 128 B over 1 KiB covers that header and an envelope whose paths run to
+     * about 80 B. Paced small frames, the common telemetry case, then cost one read each,
+     * paid for with a copy of at most about 1 KiB; a larger body is still received straight
+     * into its segment.
+     */
+    static constexpr std::size_t kReadAheadBytes = 1024 + 128;
+
+    /**
      * @brief The largest OPENING HANDSHAKE a PRE-AUTH peer may make this node buffer
      *        (16 KiB) — the ceiling `max_handshake` tightens against (#934).
      *
@@ -393,7 +411,8 @@ class ws_server_transport_t final : public stream_server_base_t {
         session_t* slot_ = nullptr;              /**< @brief The peer slot this sends to. */
     };
 
-    /** @brief One fresh slot with its handshake/frame buffers, reassembler and facade. */
+    /** @brief One fresh slot with its handshake buffer, frame-ingress state, reassembler and
+     *         facade. */
     mem::poly_ptr_t<session_base_t> make_session() override;
 
     /** @brief Per-accept setup: clear the slot's handshake and frame buffers. Returns
@@ -401,14 +420,19 @@ class ws_server_transport_t final : public stream_server_base_t {
      *         `on_readable` publishes (that ordering is deliberate, not drift). */
     bool on_accept(session_base_t& s, int fd) override;
 
-    /** @brief Framing: the opening handshake while the slot is not yet open, then
-     *         RFC 6455 decode of every complete frame the chunk finished. */
-    void on_readable(session_base_t& s, const std::byte* data, std::size_t len) override;
+    /** @brief Read and frame: the opening handshake while the slot is not yet open, then
+     *         frame ingress (ADR-0087 §1) — each header first, each body straight into a
+     *         segment drawn at its exact length from this server's receive source. */
+    void on_readable(session_base_t& s, int fd) override;
 
     /** @brief Teardown: release the slot's buffers and reset its reassembler. */
     void on_slot_reset(session_base_t& s) override;
 
-    bool drain_frames(session_t& s);  // decode buffered frames; false ⇒ teardown
+    /** @brief Read the opening handshake; answer 101 and feed what was pipelined behind it
+     *         to frame ingress once it is whole. False ⇒ teardown. */
+    bool read_handshake(session_t& s, int fd);
+
+    struct framing_t;  // RFC 6455 framing as frame ingress calls it (defined in the .cpp)
 
     // The slot vector, the listen socket, the accept/poll/teardown machinery and the
     // peer query trio all live in slot_server_t (#871), and the bus FACET one tier
@@ -574,7 +598,8 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      * first frame in that same segment. Those bytes are the start of the frame stream, so
      * they are moved into @p pipelined (cleared first, empty in the common case) for
      * `serve` to decode; dropping them loses that frame silently. The server half has
-     * carried them over since it grew a second peer (`on_readable`'s `s.buf.append`) —
+     * carried them over since it grew a second peer (`read_handshake` feeds them to frame
+     * ingress) —
      * this is the DIAL half of the same rule (#1020).
      */
     bool handshake(int fd, std::string_view host, std::uint16_t port, mem::bytes_t& pipelined);

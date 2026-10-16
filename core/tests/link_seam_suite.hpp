@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief The shared link case suite (#2139): six wire situations every link kind is run
+ * @brief The shared link case suite (#2139): seven wire situations every link kind is run
  *        through, written against the router's receive and send seams only.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -24,6 +24,8 @@
  *  1. **partial frame**: one frame written in three pieces, the first ending inside the
  *     header; nothing is delivered before the last byte, then exactly that frame.
  *  2. **several frames per read**: three frames in one write arrive as three, in order.
+ *  2b. **large then small**: an 8 KiB frame and a 5 B frame in one write arrive as two,
+ *     byte-identical: the small frame's bytes read past the large body are not lost (#2140).
  *  3. **oversize length**: a header announcing more than the link's `max_frame` closes the
  *     link, is counted as malformed, delivers nothing, and draws NOTHING from the link's
  *     receive source.
@@ -77,9 +79,9 @@ inline constexpr std::chrono::milliseconds kQuiet = 60ms;
 
 /**
  * @brief The `max_frame` every rig configures: small enough that "oversize" is cheap to
- *        announce, large enough that the cases' frames fit.
+ *        announce, large enough that the cases' inbound frames (8 KiB at most) fit.
  */
-inline constexpr std::size_t kMaxFrame = 4096;
+inline constexpr std::size_t kMaxFrame = 16384;
 
 /**
  * @brief The peer liveness window every rig configures, in ms: how long a send may wait on a
@@ -176,6 +178,10 @@ class link_rig_t {
                                           std::vector<bytes_t>& whole) = 0;
     /** @brief The peer leaves: its end of the wire closes. */
     virtual void peer_leave() = 0;
+    /** @brief True once the link closed toward its peer (a server answers per peer). */
+    [[nodiscard]] virtual bool link_closed() { return !link().link_up(); }
+    /** @brief False for a kind whose egress the cases cannot drive point to point. */
+    [[nodiscard]] virtual bool egress_cases() const { return true; }
 };
 
 /** @brief A factory for a fresh rig: each case gets its own link, since several end it. */
@@ -298,6 +304,32 @@ inline void case_several_frames_per_read(rig_factory_t make) {
           "as three separate frames, in order, byte-identical");
 }
 
+/**
+ * @brief Case 2b: a large frame and a small one in one write arrive as two, byte-identical.
+ *
+ * A link that receives a large body straight into its segment and reads the next header
+ * after it must keep whatever of the small frame came with that read (#2140).
+ */
+inline void case_large_then_small(rig_factory_t make) {
+    frame_sink_t sink;
+    const std::unique_ptr<link_rig_t> rig = make();
+    banner(*rig, "large then small");
+    check(rig->ready(), "the rig came up");
+    if (!rig->ready()) return;
+    attach(*rig, sink);
+
+    const bytes_t big = payload(8192, 40), small = payload(5, 50);
+    bytes_t wire = rig->encode(big);
+    const bytes_t tail = rig->encode(small);
+    wire.insert(wire.end(), tail.begin(), tail.end());
+    rig->peer_write(wire);
+    check(sink.wait_for(2, kWait), "both frames are delivered");
+    std::this_thread::sleep_for(kQuiet);
+    const std::vector<bytes_t> got = sink.snapshot();
+    check(got.size() == 2 && got[0] == big && got[1] == small,
+          "as two frames, in order, byte-identical");
+}
+
 /** @brief Case 3: an oversize length closes the link before anything is drawn. */
 inline void case_oversize_length(rig_factory_t make) {
     frame_sink_t sink;
@@ -313,7 +345,7 @@ inline void case_oversize_length(rig_factory_t make) {
     rig->peer_write(rig->oversize_header());
     check(eventually([&] { return l.drop_stats().malformed_rx > malformed_before; }, kWait),
           "the announced length is counted as malformed");
-    check(eventually([&] { return !l.link_up(); }, kWait), "and the link is closed");
+    check(eventually([&] { return rig->link_closed(); }, kWait), "and the link is closed");
     check(rig->rx_backend().draws() == draws_before,
           "nothing was drawn from the link's receive source for it");
     check(sink.snapshot().empty(), "and nothing was delivered");
@@ -352,6 +384,10 @@ inline void case_stalled_peer(rig_factory_t make) {
     frame_sink_t sink;
     const std::unique_ptr<link_rig_t> rig = make();
     banner(*rig, "stalled peer");
+    if (!rig->egress_cases()) {
+        check(true, "this kind's egress is not point to point: N/A");
+        return;
+    }
     check(rig->ready(), "the rig came up");
     if (!rig->ready()) return;
     attach(*rig, sink);
@@ -395,6 +431,10 @@ inline void case_peer_leaves_mid_send(rig_factory_t make) {
     frame_sink_t sink;
     const std::unique_ptr<link_rig_t> rig = make();
     banner(*rig, "peer leaving mid-send");
+    if (!rig->egress_cases()) {
+        check(true, "this kind's egress is not point to point: N/A");
+        return;
+    }
     check(rig->ready(), "the rig came up");
     if (!rig->ready()) return;
     attach(*rig, sink);
@@ -439,6 +479,7 @@ inline void case_peer_leaves_mid_send(rig_factory_t make) {
 inline void run_suite(rig_factory_t make) {
     case_partial_frame(make);
     case_several_frames_per_read(make);
+    case_large_then_small(make);
     case_oversize_length(make);
     case_fragmented_message(make);
     case_stalled_peer(make);

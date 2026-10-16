@@ -333,6 +333,22 @@ struct decode_result_t {
     std::size_t consumed{}; /**< @brief Bytes taken off the front of the buffer, on `OK`. */
 };
 
+/**
+ * @brief One decoded RFC 6455 frame HEADER (@ref decode_header): what a receiver needs to
+ *        draw the payload's buffer before a payload byte is read.
+ */
+struct header_t {
+    decode_status_t status = decode_status_t::NEED_MORE; /**< @brief Which outcome. */
+    opcode_t op = opcode_t::CONT;                        /**< @brief Frame opcode. */
+    bool fin = false;                                    /**< @brief FIN bit. */
+    bool masked = false;                                 /**< @brief MASK bit. */
+    std::array<std::uint8_t, 4> mask_key{}; /**< @brief Masking key, on `OK` when @ref masked. */
+    std::size_t len = 0;                    /**< @brief Declared payload length, on `OK`. */
+    /** @brief The header's size in bytes: on `OK` the bytes it took, on `NEED_MORE` the bytes
+     *         the header needs in all, as far as the bytes so far tell (2 before the second). */
+    std::size_t size = 2;
+};
+
 namespace detail {
 
 /**
@@ -378,29 +394,29 @@ inline void xor_mask(std::span<std::byte> data, const std::array<std::uint8_t, 4
 }
 
 /**
- * @brief The ONE RFC 6455 frame-decode implementation, shared by @ref ws::decode_frame and
- *        @ref ws::decode_frame_checked — they differ only in @p fail_on_violation and
- *        the DATA-frame bound @p max_payload.
+ * @brief The ONE RFC 6455 frame-HEADER decode, shared by @ref ws::decode_header and
+ *        @ref decode_one: the length ladder, the masking key and every rule a header alone
+ *        can break.
  *
- * @param buf                The peer's byte stream.
+ * @param buf                The front of a peer's byte stream; only the header is read.
  * @param fail_on_violation  Diagnose the RFC 6455 breaches whose remedy is *Fail the
  *                           WebSocket Connection* — §5.5's control-frame bounds and §5.2's
  *                           reserved opcodes — as `PROTOCOL_ERROR` rather than decoding the
- *                           frame (see @ref ws::decode_frame_checked). Only a caller that
+ *                           header (see @ref ws::decode_frame_checked). Only a caller that
  *                           owns a connection it can shed passes true.
  * @param max_payload        The receive cap a declared payload length may not exceed
  *                           (@ref ws::kNoPayloadCap = unbounded).
  */
-[[nodiscard]] inline decode_result_t decode_one(std::span<std::byte> buf, bool fail_on_violation,
-                                                std::size_t max_payload) noexcept {
-    if (buf.size() < 2) return {};
+[[nodiscard]] inline header_t decode_header(std::span<const std::byte> buf, bool fail_on_violation,
+                                            std::size_t max_payload) noexcept {
+    header_t h;
+    if (buf.size() < 2) return h;
 
     const std::uint8_t b0 = std::to_integer<std::uint8_t>(buf[0]);
     const std::uint8_t b1 = std::to_integer<std::uint8_t>(buf[1]);
-
-    const bool fin = (b0 & 0x80u) != 0;
-    const auto op = static_cast<opcode_t>(b0 & 0x0Fu);
-    const bool masked = (b1 & 0x80u) != 0;
+    h.fin = (b0 & 0x80u) != 0;
+    h.op = static_cast<opcode_t>(b0 & 0x0Fu);
+    h.masked = (b1 & 0x80u) != 0;
     std::uint64_t len = b1 & 0x7Fu;
 
     // RFC 6455 §5.2: "If an unknown opcode is received, the receiving endpoint MUST Fail the
@@ -411,69 +427,74 @@ inline void xor_mask(std::span<std::byte> data, const std::array<std::uint8_t, 4
     // ordinary frames and were dropped by each transport's `default:` arm — which kept a
     // stream that had already broken the protocol alive, and let a reserved frame slip
     // BETWEEN two fragments without the assembler seeing it (#1060).
-    if (fail_on_violation && !is_defined_opcode(op))
-        return {decode_status_t::PROTOCOL_ERROR, {}, 0};
+    if (fail_on_violation && !is_defined_opcode(h.op)) {
+        h.status = decode_status_t::PROTOCOL_ERROR;
+        return h;
+    }
 
-    std::size_t pos = 2;
-    if (len == 126) {
-        if (buf.size() < pos + 2) return {};
-        len = (static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(buf[pos])) << 8) |
-              static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(buf[pos + 1]));
-        pos += 2;
-    } else if (len == 127) {
-        if (buf.size() < pos + 8) return {};
+    // The header's whole size is known from its second byte: the extended-length field the
+    // 7-bit length names, then the masking key when the MASK bit is set.
+    constexpr std::array<std::size_t, 2> kExtBytes{2, 8};  // 7-bit length 126, then 127
+    const std::size_t ext = len < 126 ? 0 : kExtBytes[len - 126];
+    h.size = 2 + ext + (h.masked ? 4 : 0);
+    if (buf.size() < 2 + ext) return h;
+    if (ext != 0) {
         len = 0;
-        for (std::size_t i = 0; i < 8; ++i) {
-            len = (len << 8) | std::to_integer<std::uint8_t>(buf[pos + i]);
-        }
-        pos += 8;
+        for (std::size_t i = 0; i < ext; ++i)
+            len = (len << 8) | std::to_integer<std::uint8_t>(buf[2 + i]);
     }
 
     // RFC 6455 §5.5: a control frame is at most 125 bytes and is never fragmented.
     // Checked off the HEADER, so an absurd declared length is rejected without ever
     // buffering (or echoing) the payload it claims.
-    if (fail_on_violation && is_control_opcode(op) && (len > kMaxControlPayload || !fin))
-        return {decode_status_t::PROTOCOL_ERROR, {}, 0};
-
-    // The DATA-path twin of the §5.5 rule above, diagnosed at the same place and for the
-    // same reason (#872): `max_payload` is the caller's effective receive cap — the injected
-    // backend's real capacity, tightened by `:settings max_frame` — so a frame announcing
-    // more can never be delivered whatever arrives next. Rejecting it off the HEADER is what
-    // bounds ingress: the alternative is to answer NEED_MORE and let the caller accumulate
-    // the announced 64-bit length, which is a peer naming the receiver's memory budget.
-    if (len > max_payload) return {decode_status_t::PROTOCOL_ERROR, {}, 0};
-
-    std::array<std::uint8_t, 4> mask_key{};
-    if (masked) {
-        if (buf.size() < pos + 4) return {};
-        for (std::size_t i = 0; i < 4; ++i) {
-            mask_key[i] = std::to_integer<std::uint8_t>(buf[pos + i]);
-        }
-        pos += 4;
+    //
+    // The DATA-path twin of that rule, diagnosed at the same place and for the same reason
+    // (#872): `max_payload` is the caller's effective receive cap — the injected backend's
+    // real capacity, tightened by `:settings max_frame` — so a frame announcing more can never
+    // be delivered whatever arrives next. Rejecting it off the HEADER is what bounds ingress:
+    // the alternative is to answer NEED_MORE and let the caller accumulate the announced
+    // 64-bit length, which is a peer naming the receiver's memory budget.
+    const bool control_breach =
+        fail_on_violation && is_control_opcode(h.op) && (len > kMaxControlPayload || !h.fin);
+    if (control_breach || len > max_payload) {
+        h.status = decode_status_t::PROTOCOL_ERROR;
+        return h;
     }
 
-    // Overflow-safe length check: `pos + len` can wrap (a 64-bit-length frame of
-    // 0xFFFF...FF), bypassing `buf.size() < pos + len` and causing an OOB read in the
-    // unmask loop. `pos <= buf.size()` is guaranteed by the header/mask checks above, so
-    // `buf.size() - pos` is non-negative and `len > buf.size() - pos` cannot overflow.
-    if (len > buf.size() - pos) return {};
+    if (buf.size() < h.size) return h;
+    // The key's 4 bytes when masked; none otherwise, and the key stays zero.
+    std::memcpy(h.mask_key.data(), buf.data() + 2 + ext, h.size - 2 - ext);
+    h.len = static_cast<std::size_t>(len);
+    h.status = decode_status_t::OK;
+    return h;
+}
+
+/**
+ * @brief The ONE RFC 6455 frame-decode implementation, shared by @ref ws::decode_frame and
+ *        @ref ws::decode_frame_checked — they differ only in @p fail_on_violation and
+ *        the DATA-frame bound @p max_payload. The header is @ref decode_header 's.
+ *
+ * @param buf                The peer's byte stream.
+ * @param fail_on_violation  As @ref decode_header.
+ * @param max_payload        As @ref decode_header.
+ */
+[[nodiscard]] inline decode_result_t decode_one(std::span<std::byte> buf, bool fail_on_violation,
+                                                std::size_t max_payload) noexcept {
+    const header_t h = decode_header(buf, fail_on_violation, max_payload);
+    if (h.status != decode_status_t::OK) return {h.status, {}, 0};
+    // `h.size <= buf.size()` holds on OK, so the subtraction cannot wrap; written as one so a
+    // 64-bit length cannot wrap `size + len` past the end of the buffer either.
+    if (h.len > buf.size() - h.size) return {};
 
     // Unmask IN PLACE, then zero the masking key (#1780): the frame's payload is a view into
     // @p buf, nothing is copied, and the buffer is left a frame that decodes to the same
     // payload again (x ^ 0 = x), so decoding one buffer twice gives one answer.
-    const std::span<std::byte> payload = buf.subspan(pos, static_cast<std::size_t>(len));
-    if (masked) {
-        xor_mask(payload, mask_key);
-        std::memset(buf.data() + pos - 4, 0, 4);
+    const std::span<std::byte> payload = buf.subspan(h.size, h.len);
+    if (h.masked) {
+        xor_mask(payload, h.mask_key);
+        std::memset(buf.data() + h.size - 4, 0, 4);
     }
-
-    decode_result_t out;
-    out.status = decode_status_t::OK;
-    out.frame.op = op;
-    out.frame.fin = fin;
-    out.frame.payload = payload;
-    out.consumed = pos + static_cast<std::size_t>(len);
-    return out;
+    return {decode_status_t::OK, frame_t{h.op, h.fin, payload}, h.size + h.len};
 }
 
 }  // namespace detail
@@ -524,6 +545,23 @@ inline void xor_mask(std::span<std::byte> data, const std::array<std::uint8_t, 4
 }
 
 /**
+ * @brief Decode only the HEADER at the front of @p buf, under every rule
+ *        @ref decode_frame_checked applies to a header — the form a receiver uses that reads
+ *        the header first and then the payload straight into a buffer drawn for it.
+ *
+ * Nothing is unmasked and no payload byte is looked at: on `OK` the payload is the next
+ * @ref header_t::len bytes of the stream after @ref header_t::size header bytes. On
+ * `NEED_MORE`, @ref header_t::size says how many header bytes to have before asking again.
+ *
+ * @param buf         The front of a peer's byte stream.
+ * @param max_payload The transport's effective receive cap, as @ref decode_frame_checked.
+ */
+[[nodiscard]] inline header_t decode_header(std::span<const std::byte> buf,
+                                            std::size_t max_payload) noexcept {
+    return detail::decode_header(buf, /*fail_on_violation=*/true, max_payload);
+}
+
+/**
  * @brief Decode exactly one RFC 6455 frame from the front of @p buf — the pure
  *        outcome-collapsing decoder, byte-for-byte the behaviour it has always had.
  *
@@ -560,6 +598,14 @@ inline void xor_mask(std::span<std::byte> data, const std::array<std::uint8_t, 4
  * egress rides ahead of the payload spans.
  */
 inline constexpr std::size_t kMaxServerFrameHeader = 10;
+
+/**
+ * @brief The largest a client→server frame HEADER can be: @ref kMaxServerFrameHeader plus
+ *        the 4-byte masking key every client frame carries (RFC 6455 §5.3).
+ *
+ * What a server reads a header into before it knows the payload's length.
+ */
+inline constexpr std::size_t kMaxClientFrameHeader = kMaxServerFrameHeader + 4;
 
 /**
  * @brief Encode ONLY a server→client RFC 6455 frame header into @p out, UNMASKED.

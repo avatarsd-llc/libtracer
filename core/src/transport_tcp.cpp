@@ -520,9 +520,16 @@ void tcp_server_transport_t::peer_endpoint_t::send(
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void tcp_server_transport_t::on_readable(session_base_t& base, const std::byte* data,
-                                         std::size_t len) {
+void tcp_server_transport_t::on_readable(session_base_t& base, int fd) {
     session_t& s = static_cast<session_t&>(base);
+    // One chunk per readable pass, fed through the slot's reassembler (frame ingress, ADR-0087
+    // §1, reaches this server in its own change).
+    std::array<std::byte, 4096> chunk;
+    const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
+    if (n <= 0) {  // peer closed the TCP connection, or error
+        teardown_slot(s);
+        return;
+    }
     // Feed the chunk through the slot's reassembler; each completed frame is
     // delivered inline.  Tier select per frame: the constructed MODE picks the
     // slot (#889) — peer-named servers deliver tagged with the sending peer's
@@ -538,7 +545,7 @@ void tcp_server_transport_t::on_readable(session_base_t& base, const std::byte* 
     // direct call either way, because which arm this server derives from is a
     // compile-time fact, so the per-frame path gained no dispatch.
     const auto res = s.framer.feed(
-        *backend_, max_frame_, data, len,
+        *backend_, max_frame_, chunk.data(), static_cast<std::size_t>(n),
         [this, &s](view::segment_ptr_t seg, std::size_t flen) {
             // aggregate init — no handle copy (#845)
             view::view_t frame{std::move(seg), 0, flen};

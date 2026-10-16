@@ -6,18 +6,22 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Three link kinds run the same six cases:
+ * Four link kinds run the same seven cases:
  *
  * - **fake**: the socket-free adapter of `fake_link.hpp`, deterministic, every case.
  * - **tcp (dial)**: a real `tcp_transport_t` dialled to a raw localhost socket that plays the
  *   peer. Its wire has no fragments, so that case is N/A.
  * - **ws (dial)**: a real `ws_client_transport_t` dialled to a raw socket that answers the
  *   opening handshake and then speaks RFC 6455 server frames, fragments included.
+ * - **ws server**: a real `ws_server_transport_t` (flat, one peer) dialled by a raw socket
+ *   that speaks masked client frames (#2140). The ingress cases only: the server's listener
+ *   stays up when its peer goes, so "closed" is the peer's wire closing, and its egress cases
+ *   are N/A here.
  *
  * Not here, and why: UDP has no partial frame, no several-per-read and no stall on a
- * datagram socket; the server links are buses (`ctest -LE bus` deselects them) and their peers
- * reach the router through the peer facet, not the point-to-point seam this suite drives; the
- * device WebSocket link is not built on a host. Each joins by adding a rig.
+ * datagram socket; the other server links are buses (`ctest -LE bus` deselects them) whose
+ * peers reach the router through the peer facet; the device WebSocket link is not built on a
+ * host. Each joins by adding a rig.
  *
  * The real-socket peer shrinks its receive buffer before accepting, so a peer that stops
  * reading fills the link's window in a few frames. Built under ASan+UBSan and TSan with the
@@ -105,6 +109,23 @@ class socket_peer_t {
         if (::poll(&p, 1, static_cast<int>(budget.count())) != 1) return false;
         fd_ = ::accept(listen_fd_, nullptr, nullptr);
         if (fd_ < 0) return false;
+        const int one = 1;
+        (void)::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        return true;
+    }
+
+    /** @brief Dial a link listening on localhost @p port, in place of accepting one. */
+    bool dial(std::uint16_t port) {
+        fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd_ < 0) return false;
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        if (::connect(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+            leave();
+            return false;
+        }
         const int one = 1;
         (void)::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         return true;
@@ -370,12 +391,121 @@ class ws_rig_t final : public link_rig_t {
     tr::net::ws_client_transport_t link_;
 };
 
+// --- ws server ------------------------------------------------------------------------------
+
+/**
+ * @brief A `ws_server_transport_t` (flat, one peer) and a raw client that dials it, sends the
+ *        opening handshake, and then speaks masked RFC 6455 client frames.
+ *
+ * Ingress cases only: the server is a bus whose listener stays up when one peer goes, so its
+ * "link closed" is the peer's wire closing, and its egress cases belong to the shared egress.
+ */
+class ws_server_rig_t final : public link_rig_t {
+   public:
+    ws_server_rig_t()
+        : link_(0, tr::net::ws_server_config_t{.memory = {.rx = &rx_}, .max_frame = kMaxFrame}) {
+        handshaken_ = link_.ok() && peer_.dial(link_.local_port()) && handshake();
+    }
+
+    [[nodiscard]] std::string_view name() const override { return "ws server"; }
+    [[nodiscard]] bool ready() const override { return handshaken_; }
+    [[nodiscard]] tr::net::transport_t& link() override { return link_; }
+    [[nodiscard]] const counting_backend_t& rx_backend() const override { return rx_; }
+    [[nodiscard]] bool link_closed() override {
+        bytes_t in;
+        bool closed = false;
+        peer_.read(in, 5ms, [](const bytes_t&) { return false; }, closed);
+        return closed;
+    }
+    [[nodiscard]] bool egress_cases() const override { return false; }
+
+    [[nodiscard]] bytes_t encode(std::span<const std::byte> body) const override {
+        return frame(tr::net::ws::opcode_t::BINARY, true, body.size(), body);
+    }
+    [[nodiscard]] bool supports_fragments() const override { return true; }
+    [[nodiscard]] bytes_t encode_fragments(std::span<const std::byte> body,
+                                           std::size_t pieces) const override {
+        bytes_t out;
+        const std::size_t step = (body.size() + pieces - 1) / pieces;
+        for (std::size_t at = 0; at < body.size(); at += step) {
+            const std::span<const std::byte> part =
+                body.subspan(at, std::min(step, body.size() - at));
+            const bool last = at + part.size() == body.size();
+            const bytes_t one =
+                frame(at == 0 ? tr::net::ws::opcode_t::BINARY : tr::net::ws::opcode_t::CONT, last,
+                      part.size(), part);
+            out.insert(out.end(), one.begin(), one.end());
+        }
+        return out;
+    }
+    [[nodiscard]] bytes_t oversize_header() const override {
+        return frame(tr::net::ws::opcode_t::BINARY, true, kMaxFrame + 1, {});
+    }
+
+    void peer_write(std::span<const std::byte> bytes) override { (void)peer_.write(bytes); }
+    void peer_stall() override {}
+    [[nodiscard]] bool peer_drain(std::chrono::milliseconds /*budget*/,
+                                  std::vector<bytes_t>& /*whole*/) override {
+        return true;
+    }
+    void peer_leave() override { peer_.leave(); }
+
+   private:
+    /** @brief Send the upgrade request and read the `101` back. */
+    bool handshake() {
+        const std::string req =
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+        if (!peer_.write(as_bytes(req))) return false;
+        bytes_t resp;
+        bool closed = false;
+        const auto has_end = [](const bytes_t& b) {
+            return std::string_view(reinterpret_cast<const char*>(b.data()), b.size())
+                       .find("\r\n\r\n") != std::string_view::npos;
+        };
+        peer_.read(resp, kWait, has_end, closed);
+        return std::string_view(reinterpret_cast<const char*>(resp.data()), resp.size())
+            .starts_with("HTTP/1.1 101");
+    }
+
+    /** @brief One masked client frame announcing @p len and carrying @p body. */
+    [[nodiscard]] static bytes_t frame(tr::net::ws::opcode_t op, bool fin, std::size_t len,
+                                       std::span<const std::byte> body) {
+        constexpr std::array<std::byte, 4> kKey{std::byte{0x37}, std::byte{0xFA}, std::byte{0x21},
+                                                std::byte{0x3D}};
+        bytes_t out;
+        out.push_back(static_cast<std::byte>((fin ? 0x80u : 0u) | static_cast<std::uint8_t>(op)));
+        if (len < 126) {
+            out.push_back(static_cast<std::byte>(0x80u | len));
+        } else if (len <= 0xFFFFu) {
+            out.push_back(std::byte{0x80u | 126u});
+            out.push_back(static_cast<std::byte>(len >> 8));
+            out.push_back(static_cast<std::byte>(len & 0xFFu));
+        } else {
+            out.push_back(std::byte{0x80u | 127u});
+            for (int i = 7; i >= 0; --i)
+                out.push_back(
+                    static_cast<std::byte>((static_cast<std::uint64_t>(len) >> (i * 8)) & 0xFFu));
+        }
+        out.insert(out.end(), kKey.begin(), kKey.end());
+        for (std::size_t i = 0; i < body.size(); ++i) out.push_back(body[i] ^ kKey[i % 4]);
+        return out;
+    }
+
+    counting_backend_t rx_;
+    socket_peer_t peer_;
+    bool handshaken_ = false;
+    tr::net::ws_server_transport_t link_;
+};
+
 /** @brief The fake link, as a factory. */
 std::unique_ptr<link_rig_t> make_fake() { return std::make_unique<fake_rig_t>(); }
 /** @brief A dialled tcp link, as a factory. */
 std::unique_ptr<link_rig_t> make_tcp() { return std::make_unique<tcp_rig_t>(); }
 /** @brief A dialled ws link, as a factory. */
 std::unique_ptr<link_rig_t> make_ws() { return std::make_unique<ws_rig_t>(); }
+/** @brief A ws server with one dialled peer, as a factory. */
+std::unique_ptr<link_rig_t> make_ws_server() { return std::make_unique<ws_server_rig_t>(); }
 
 }  // namespace
 
@@ -384,5 +514,6 @@ int main() {
     run_suite(make_fake);
     run_suite(make_tcp);
     run_suite(make_ws);
+    run_suite(make_ws_server);
     return tr::testing::summary("link_seam");
 }

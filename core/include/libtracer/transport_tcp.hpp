@@ -502,9 +502,10 @@ class tcp_server_transport_t final : public stream_server_base_t {
      *         stream peer has no handshake, so it is open the moment it is accepted. */
     bool on_accept(session_base_t& s, int fd) override;
 
-    /** @brief Framing: feed the chunk through the slot's u32-LE reassembler and deliver
-     *         each completed frame (tearing the slot down on a desynced stream). */
-    void on_readable(session_base_t& s, const std::byte* data, std::size_t len) override;
+    /** @brief Framing: read one chunk, feed it through the slot's u32-LE reassembler and
+     *         deliver each completed frame (tearing the slot down on a close or a desynced
+     *         stream). */
+    void on_readable(session_base_t& s, int fd) override;
 
     /** @brief Teardown: reset the slot's framer as it is recycled. */
     void on_slot_reset(session_base_t& s) override;

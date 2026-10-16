@@ -106,6 +106,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/grammar.hpp \
                          core/include/libtracer/path_label_table.hpp \
                          core/include/libtracer/ws.hpp \
+                         core/include/libtracer/frame_ingress.hpp \
                          core/include/libtracer/crc.hpp \
                          core/include/libtracer/loopback.hpp \
                          core/include/libtracer/builtin_transports.hpp \

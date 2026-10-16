@@ -76,9 +76,9 @@
       "source": "measured",
       "arm": "ws-remote-sub",
       "metric": "per_sub",
-      "value": 1020,
+      "value": 958,
       "goal": null,
-      "moved_by": "#2171 (first pin)",
+      "moved_by": "#2176 (WS exact-size ingress)",
       "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
     },
     {
@@ -134,9 +134,9 @@
       "source": "measured",
       "arm": "ws-server",
       "metric": "retained@16384",
-      "value": 18432,
+      "value": 0,
       "goal": 0,
-      "moved_by": "#2171 (first pin)",
+      "moved_by": "#2176 (WS exact-size ingress)",
       "note": "Bytes a peer still holds once one 16 KiB frame has passed, above its idle per-peer cost. Goal from #2136 user story 2: it drops back to the idle base."
     },
     {

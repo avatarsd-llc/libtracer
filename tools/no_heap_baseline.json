@@ -606,7 +606,7 @@
           "_ZN2tr3net15tcp_transport_tD2Ev": {"via _ZN2tr3net17stream_endpoint_tD2Ev": 1},
           "_ZN2tr3net17stream_endpoint_tC2Ev": {"via _ZN2tr3net12tx_handoff_tC1EjRNS_3mem14block_source_tEj": 1},
           "_ZN2tr3net22length_prefix_framer_t9on_prefixERNS_3mem13mem_backend_tEjjj": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
-          "_ZN2tr3net22tcp_server_transport_t11on_readableERNS0_13slot_server_t14session_base_tEPKSt4bytej": {"via _ZN2tr3net22length_prefix_framer_t9on_prefixERNS_3mem13mem_backend_tEjjj": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 10, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 1, "via _ZN2tr4view6rope_tD1Ev": 1, "via _ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": 1},
+          "_ZN2tr3net22tcp_server_transport_t11on_readableERNS0_13slot_server_t14session_base_tEi": {"via _ZN2tr3net22length_prefix_framer_t9on_prefixERNS_3mem13mem_backend_tEjjj": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 10, "via _ZN2tr4view6rope_t6appendENS0_6view_tE": 1, "via _ZN2tr4view6rope_tD1Ev": 1, "via _ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": 1},
           "_ZN2tr3net22tcp_server_transport_t12make_sessionEv": {"via _ZZN2tr3mem9make_polyINS_3net22tcp_server_transport_t9session_tEJEEENS0_10poly_ptr_tIT_EERNS0_14block_source_tEDpOT0_ENUlPvE_4_FUNESD_": 2},
           "_ZN2tr3net22tcp_server_transport_t13on_slot_resetERNS0_13slot_server_t14session_base_tE": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},
           "_ZN2tr3net22tcp_server_transport_t9on_acceptERNS0_13slot_server_t14session_base_tEi": {"via _ZN2tr4view13segment_ptr_t5resetEv": 1},

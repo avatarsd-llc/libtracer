@@ -35,6 +35,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   a link on a 1,536-byte pool slot now refuses an oversize datagram by default, because the
   default cap plus its sentinel byte fits the slot. A link that carries wider datagrams sets `max_frame`, which on `udp` may now raise
   the cap above the default, up to `kMaxDatagram`.
+- **`slot_server_t::on_readable` takes the socket, not bytes read from it
+  ([#2140](https://github.com/avatarsd-llc/libtracer/issues/2140)).** The stream-server hook is
+  now `on_readable(session_base_t&, int fd)`: each server reads its own socket, so a framing that
+  knows a frame's length receives the body straight into its segment. The shared 4 KiB chunk
+  read moved into `tcp_server_transport_t::on_readable`. The unused peer-tier seams
+  `peer_tier_wants_rope` and `deliver_to_peer_borrowed` are deleted.
 
 ### Added
 
@@ -60,6 +66,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   refused its park. Before, a refused `park_release` there kept the shut-down link for the
   graph's lifetime and counted it nowhere. A connection or a module declaration whose park
   entry cannot be reserved is refused `BACKPRESSURE`, with nothing created.
+- **The WebSocket server receives each frame into a segment of its exact length, header first
+- **The WebSocket server receives each frame into a segment of its exact length
+- **The WebSocket server receives each frame into a segment of its exact length, header first
+
+- **The WebSocket server receives each frame into a segment of its exact length
+  ([#2140](https://github.com/avatarsd-llc/libtracer/issues/2140)).** A new header-only
+  `frame_ingress_t` (`libtracer/frame_ingress.hpp`) reads between frames into a 14-byte header
+  slot and a stack scratch of `ws_server_transport_t::kReadAheadBytes` (1,152 B): every frame
+  whole in it is copied into a segment drawn at its exact length from the link's `memory.rx`,
+  and the rest moves into the slot or a freshly drawn segment before the read returns, so a
+  lone small frame costs one read and the scratch holds nothing between reads. A body in
+  progress is received straight into its segment, with the slot taking the next header in the
+  same `recvmsg`. Per-peer RAM is unchanged, an idle peer holds no more after a large message
+  than before it (it held its largest frame before), and an oversize length still closes the
+  link before anything is drawn. `ws::decode_header`, `ws::header_t` and
+  `ws::kMaxClientFrameHeader` expose the header rules the decoder applies.
 
 - **`subscription_selector_t`: a vertex that switches among named options of subscription refs
   ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** A header-only adapter

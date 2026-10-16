@@ -698,15 +698,9 @@ void slot_server_t::publish_peer_up(const session_base_t& s) {
 void slot_server_t::service_peer(session_base_t& s) {
     const int fd = s.fd.load(std::memory_order_relaxed);
     if (fd < 0) return;
-    std::array<std::byte, 4096> chunk;
-    const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
-    if (n <= 0) {  // peer closed the TCP connection, or error
-        teardown_slot(s);
-        return;
-    }
-    // Framing is the derived server's: a length-prefix framer feed, or the WS
-    // handshake-then-decode path. Both may tear this slot down from inside the hook.
-    on_readable(s, chunk.data(), static_cast<std::size_t>(n));
+    // The read and the framing are the derived server's: a length-prefix framer feed, or
+    // the WS handshake and then frame ingress. Either may tear this slot down in the hook.
+    on_readable(s, fd);
 }
 
 void slot_server_t::teardown_slot(session_base_t& s) {

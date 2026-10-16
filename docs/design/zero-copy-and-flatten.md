@@ -179,9 +179,9 @@ A stack budget for that task counts four such buffers, not one. The decode arena
 this document covers; the other three are transport receive and chunk scratch, each a 4096-byte
 `std::array` — `core/src/transport_tcp.cpp:tcp_transport_t::drain` (the backpressure drain),
 `core/src/transport_ws.cpp:ws_client_transport_t::serve` (the WS client's receive loop), and
-`core/src/posix_endpoint.cpp:slot_server_t::service_peer` — the ONE per-chunk scratch both multi-peer servers now
-share, since #871 folded their duplicated poll loops into `slot_server_t::service_peer` (it
-was two buffers, one apiece, before that). They are not decode arenas and carry no structure,
+`core/src/transport_tcp.cpp:tcp_server_transport_t::on_readable` — the TCP server's per-chunk
+scratch. The WS server has none: frame ingress (ADR-0087 §1) receives each payload straight
+into its segment, and keeps only a 512-byte throwaway for a payload the source refused. They are not decode arenas and carry no structure,
 but they occupy the same frames and none of the four has a measured per-task high-water.
 
 That receive task is the binding constraint on a single-core, RAM-constrained node. In the ESP-IDF
