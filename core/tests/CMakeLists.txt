@@ -274,6 +274,13 @@ target_link_libraries(frame_test PRIVATE libtracer)
 libtracer_test_warnings(frame_test)
 add_test(NAME frame COMMAND frame_test)
 
+# Both software CRC-32C folds (one table and slice-by-8) against the compile-time Sarwate CRC,
+# called directly so the hardware path never stands in for them (#2116).
+add_executable(crc_soft_test crc_soft_test.cpp)
+target_link_libraries(crc_soft_test PRIVATE libtracer)
+libtracer_test_warnings(crc_soft_test)
+add_test(NAME crc_soft COMMAND crc_soft_test)
+
 add_executable(rope_test rope_test.cpp)
 target_link_libraries(rope_test PRIVATE libtracer)
 libtracer_test_warnings(rope_test)
