@@ -702,7 +702,7 @@ void vertex_value(httpd_ws_link_t& link, std::size_t tag) {
     const auto b = tagged(tag);
     const tr::graph::value_ref_t v =
         tr::graph::value_ref_t::adopt(tr::graph::value_t::make_copy(b, tr::mem::heap_source()));
-    link.send(std::span<const std::span<const std::byte>>(), *v);
+    link.send(std::span<const std::span<const std::byte>>(), *v, tr::graph::delivery_lane_t{});
 }
 
 /** @brief The one-byte payloads of the retained frames on @p fd's wire, in wire order. */
