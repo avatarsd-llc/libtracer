@@ -313,6 +313,17 @@ if(CONFIG_FREERTOS_UNICORE)
 else()
     set(LIBTRACER_CACHE_LINE_BYTES 64)
 endif()
+# One hart (#2126, ADR-0080 Amendment 1 §2) — DERIVED, like the padding above, but a CORRECTNESS
+# fact rather than a RAM one: true makes the QSBR bracket's fences compiler barriers, which is a
+# use-after-free on a second core. So it is true only where the build knows there is none, a chip
+# built with CONFIG_FREERTOS_UNICORE, and it fails safe to false: in the early expansion pass
+# (CONFIG_* undefined) and on the `linux` host target, whose tasks are host threads on however
+# many cores the host has. critical_pool.cpp pins the value against sdkconfig.h.
+if(CONFIG_FREERTOS_UNICORE AND NOT IDF_TARGET STREQUAL "linux")
+    set(LIBTRACER_SINGLE_CORE true)
+else()
+    set(LIBTRACER_SINGLE_CORE false)
+endif()
 # Spin-wait safety (#1158, #963.3) — DERIVED from the target, like the padding above, and for
 # the same reason: the chip already knows and asking would only invite the wrong answer. FALSE
 # on every chip target, because the hazard is priority-preemptive scheduling and not core
@@ -443,6 +454,7 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kEdgePinSlots = ${LIBTRACER_EDGE_PIN_SLOTS};
     static constexpr std::size_t kInlineFanout = ${LIBTRACER_INLINE_FANOUT};
     static constexpr bool kSpinWaitSafe = ${LIBTRACER_SPIN_WAIT_SAFE};
+    static constexpr bool kSingleCore = ${LIBTRACER_SINGLE_CORE};
     static constexpr bool kBusLinks = ${LIBTRACER_BUS_LINKS};
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
     static constexpr bool kCreationHooks = ${LIBTRACER_CREATION_HOOKS};

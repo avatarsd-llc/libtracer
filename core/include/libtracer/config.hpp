@@ -677,6 +677,28 @@ struct default_config_t {
     static constexpr bool kQsbrAsymmetricFence = false;
 
     /**
+     * @brief Whether this build runs on ONE hart: every thread that touches the library shares a
+     *        single core, so the QSBR bracket's fences become compiler barriers.
+     *
+     * A **correctness fact, not a tuning knob**, and it fails safe to false. Under it the frame
+     * bracket's entry and exit are plain stores with a compiler barrier (no `fence` on rv32, no
+     * `dmb` on Cortex-M), and the reclaim side's fence is a compiler barrier too. The argument is
+     * the single hart's (`qsbr.hpp`, section "The single-hart flavour"): one instruction stream,
+     * and a context switch is a precise trap, so a descheduled task's accesses are all performed
+     * before the next task's first instruction. Setting it on a build that runs on more than one
+     * core removes fences the grace-period proof needs, which is a use-after-free.
+     *
+     * Each integration derives it from a build fact and never asks: the ESP-IDF component from
+     * `CONFIG_FREERTOS_UNICORE` (on a chip target), a Zephyr integration from `!CONFIG_SMP`, a
+     * bare-metal board preset by itself. It is never inferred from @ref kCacheLineBytes (a padding
+     * knob an integrator may zero to save RAM) or from the target triple (a dual-core part shares
+     * an architecture with a single-core one). It wins over @ref kQsbrAsymmetricFence, which then
+     * has nothing left to save. ADR-0080 Amendment 1 §2 (#2126).
+     * Override fragment: `static constexpr bool kSingleCore = true;`
+     */
+    static constexpr bool kSingleCore = false;
+
+    /**
      * @brief How many `DEVICE`-space memory backends may register a transfer hook at once
      *        (#1381) — the bound on `tr::mem::register_device_backend`'s table.
      *
@@ -1155,6 +1177,8 @@ inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseS
 inline constexpr std::size_t kQsbrParticipants = config_t::kQsbrParticipants;
 /** @brief @ref default_config_t::kQsbrAsymmetricFence for this build. */
 inline constexpr bool kQsbrAsymmetricFence = config_t::kQsbrAsymmetricFence;
+/** @brief @ref default_config_t::kSingleCore for this build. */
+inline constexpr bool kSingleCore = config_t::kSingleCore;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
 using acl_policy_t = config_t::acl_policy_t;
 /** @brief @ref default_config_t::kInstrumentCounters for this build. */
