@@ -55,8 +55,8 @@ one (~90 B). The gap the issue attributes to headers looks like the ext block �
   stream. That path is already behind `mr_` and ADR-0060's `value_backend_` — covered
   twice over.
 - The **handler seam is parked, not freed**: `retire()` swaps `e->handlers` to null and
-  parks the old block in `graph_t::retired_seams_` for lock-free readers. A bump arena
-  would leak every parked seam.
+  parks the old block in the graph's one park (`graph_t::park_`) for lock-free readers,
+  freed by `collect()`. A bump arena would leak every parked seam.
 
 Honest saving from the whole mechanism: **4 B/vertex bare, ~16 B handler-bearing
 (4.5–6%)** — against a change that must not break the parked-seam or per-write-swap

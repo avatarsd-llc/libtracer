@@ -1328,6 +1328,9 @@ void graph_t::park_reserved(retired_callback_t release) noexcept {
     const std::unique_lock lock(map_mutex_);
     assert(park_tail_.reserved != 0 && "park_reserved without a reservation");
     --park_tail_.reserved;
+    // A null hook has nothing to run, so nothing is parked. It must not be: a null hook is how
+    // `retire` marks a value seam, and collect() would free the caller's context as one.
+    if (release.release == nullptr) return;
     // The caller has unpublished what @p release frees; this closes the epoch after it. The
     // reservation kept room for it, so the append cannot be refused.
     (void)park_.push_back({release, detail_qsbr::advance()});

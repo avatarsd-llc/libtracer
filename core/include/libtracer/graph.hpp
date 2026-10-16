@@ -1584,6 +1584,9 @@ class graph_t {
      * context instead (@ref reserve_park) and parks it with @ref park_reserved, which cannot be
      * refused.
      *
+     * A null `release.release` has nothing to run, so nothing is parked and the call answers
+     * `{}`; the graph never frees `release.ctx` itself.
+     *
      * @retval BACKPRESSURE The park could not grow; nothing is parked and @p release will
      *         never run, so the context must stay valid for as long as the graph lives.
      *         Counted in @ref reclaim_refusals_t::park_refused.
@@ -1613,7 +1616,8 @@ class graph_t {
      * @brief @ref park_release into a slot @ref reserve_park reserved: the same epoch and the
      *        same release point, and it cannot be refused. Consumes the reservation.
      *
-     * Precondition: the caller holds a reservation it has not used or given back.
+     * Precondition: the caller holds a reservation it has not used or given back. A null
+     * `release.release` consumes the reservation and parks nothing, as in @ref park_release.
      */
     void park_reserved(retired_callback_t release) noexcept;
 
@@ -2491,8 +2495,9 @@ class graph_t {
      * @return `{}` on success; `NOT_FOUND` when @p sub names no active edge — and then
      *         @p release is *not* called.
      * @retval BACKPRESSURE The edge IS removed, but its deferred hook found no parking slot,
-     *         so @p release will never run and the context stays the caller's for the life of
-     *         the process. A deferred hook needs one of the
+     *         so @p release will never run and the caller must not free the context: a live
+     *         fan-out may still name it, for the life of the process. A deferred hook needs one of
+     * the
      *         @ref tr::graph::default_config_t::kDeferredReleaseSlots slots — this thread's, or
      *         under `reclaim_qsbr_t` the shared table's — and running it with every slot taken
      *         would free a context a live fan-out still names: a deliberate leak in preference
