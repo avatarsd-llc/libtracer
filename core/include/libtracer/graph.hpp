@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <concepts>
 #include <cstdint>
@@ -2496,13 +2497,13 @@ class graph_t {
      *         @p release is *not* called.
      * @retval BACKPRESSURE The edge IS removed, but its deferred hook found no parking slot,
      *         so @p release will never run and the caller must not free the context: a live
-     *         fan-out may still name it, for the life of the process. A deferred hook needs one of
-     * the
-     *         @ref tr::graph::default_config_t::kDeferredReleaseSlots slots — this thread's, or
-     *         under `reclaim_qsbr_t` the shared table's — and running it with every slot taken
-     *         would free a context a live fan-out still names: a deliberate leak in preference
-     *         to a use-after-free. Counted in @ref reclaim_refusals_t::release_refused. Do not
-     *         retry: the edge is gone, and a second call answers `NOT_FOUND`.
+     *         fan-out may still name it, for the life of the process. A deferred hook needs
+     *         one of the @ref tr::graph::default_config_t::kDeferredReleaseSlots slots —
+     *         this thread's, or under `reclaim_qsbr_t` the shared table's — and running it
+     *         with every slot taken would free a context a live fan-out still names: a
+     *         deliberate leak in preference to a use-after-free. Counted in
+     *         @ref reclaim_refusals_t::release_refused. Do not retry: the edge is gone,
+     *         and a second call answers `NOT_FOUND`.
      */
     [[nodiscard]] result_t<void> unsubscribe(const subscription_t& sub,
                                              subscriber_release_fn_t release);
@@ -4178,8 +4179,10 @@ class graph_t {
         mem::block_array_t<parked_t>* park; /**< @brief The park it drains. */
         /** @brief Entries @ref reserve_park holds room for. Guarded by `map_mutex_`. */
         std::size_t reserved = 0;
-        /** @brief Frees every entry still parked. */
+        /** @brief Frees every entry still parked. Every reservation must have been parked
+         *         or given back by now: an owner that outlives its graph is a bug. */
         ~park_tail_t() {
+            assert(reserved == 0 && "graph destroyed with a park reservation outstanding");
             for (const parked_t& e : *park) free_parked(park->source(), e.release);
             park->clear();
         }
