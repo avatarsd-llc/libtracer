@@ -19,9 +19,11 @@
  *     the control lane (depth `kEgressControlDepth`, best-effort).
  *  4. A frame the socket took only part of resumes from its offset; a failed write that cut
  *     a frame mid-way condemns the peer.
- *  5. Offers past a full lane that move nothing are strikes; the cap times the lane's depth
- *     condemns the peer, inside the writer role; an offer the lane still had room for is none, a
- * turn that moves a byte clears them, and no offer means no strike.
+ *  5. Offers past a full STREAM lane that move nothing are strikes; the cap times the lane's
+ *     depth condemns the peer, inside the writer role; an offer the lane still had room for is
+ *     none, a turn that moves a byte clears them, and no offer means no strike. A SAMPLE lane
+ *     never strikes: a fast publisher to a briefly stalled peer condemns nothing, and the peer
+ *     gets the latest value when it drains.
  *  6. Close waits the writer out and releases every frame and lane; a refused lane sheds the
  *     frame, counted, and leaves the peer open.
  *  7. A peer whose writer is stuck inside a write does not delay a send to another peer of the
@@ -302,47 +304,73 @@ void test_part_write_resumes() {
 }
 
 void test_strikes_count_offers() {
-    std::printf("offers past a full lane that move nothing are strikes; whole rings condemn:\n");
+    std::printf(
+        "offers past a full STREAM lane that move nothing are strikes; whole rings "
+        "condemn:\n");
     counting_source_t src;
     egress_t eg(src, /*strike_cap=*/3);
     egress_peer_t p;
     eg.open(p);
-    const delivery_lane_t a = lane_of(&vertex_a, 1);
+    const delivery_lane_t a = lane_of(&vertex_a, 2);
     fake_sock_t sock;
     sock.room = 0;
     std::uint32_t stalled = 0;
-    for (std::uint8_t m = 1; m <= 2; ++m) stalled += send(eg, p, sock, src, m, a).stalled;
+    for (std::uint8_t m = 1; m <= 3; ++m) stalled += send(eg, p, sock, src, m, a).stalled;
     check(stalled == 0, "one held and the lane's depth waiting: the lane absorbs it, no strike");
-    egress_result_t r = send(eg, p, sock, src, 3, a);
+    egress_result_t r = send(eg, p, sock, src, 4, a);
     check(r.stalled == 1 && r.displaced == 1,
           "an offer past the full lane that moved nothing: one");
-    r = send(eg, p, sock, src, 4, a);
+    r = send(eg, p, sock, src, 5, a);
     check(r.stalled == 1 && !r.condemn, "the next: two");
     sock.room = 1;  // one byte moves: the strikes clear
-    r = send(eg, p, sock, src, 5, a);
+    r = send(eg, p, sock, src, 6, a);
     check(r.stalled == 0, "a turn that moved a byte is no strike");
     sock.room = 0;
-    r = send(eg, p, sock, src, 6, a);
-    r = send(eg, p, sock, src, 7, a);
-    check(!r.condemn && sock.condemned == 0, "two strikes after a moved byte: still open");
-    r = send(eg, p, sock, src, 8, a);
-    check(r.condemn && sock.condemned == 1, "the cap's third ring of a depth-1 lane condemns");
+    stalled = 0;
+    for (std::uint8_t m = 7; m <= 11; ++m) stalled += send(eg, p, sock, src, m, a).stalled;
+    check(stalled == 5 && sock.condemned == 0, "five strikes after a moved byte: still open");
+    r = send(eg, p, sock, src, 12, a);
+    check(r.condemn && sock.condemned == 1,
+          "the sixth, the cap's three whole rings of a depth-2 lane, condemns");
     eg.close(p);
     r = flush(eg, p, sock);
     check(r.stalled == 0, "a closed peer is no strike");
-
-    // A deeper lane tolerates a longer burst: the verdict is the cap times its depth.
-    eg.open(p);
-    sock.condemned = 0;
-    const delivery_lane_t deep = lane_of(&vertex_b, 2);
-    for (std::uint8_t m = 1; m <= 3; ++m) (void)send(eg, p, sock, src, m, deep);
-    stalled = 0;
-    for (std::uint8_t m = 4; m <= 8; ++m) stalled += send(eg, p, sock, src, m, deep).stalled;
-    check(stalled == 5 && sock.condemned == 0, "five strikes on a depth-2 lane: still open");
-    r = send(eg, p, sock, src, 9, deep);
-    check(r.condemn && sock.condemned == 1, "the sixth, three whole rings, condemns");
-    eg.close(p);
     check(src.live.load() == 0, "closing released every waiting frame and lane");
+}
+
+/**
+ * @brief A SAMPLE lane never strikes (maintainer ruling on #2144): its overwrite is its
+ *        contract, bounded at one slot, so a fast publisher to a peer whose socket stalls
+ *        for a while condemns nothing, and the peer reads the latest value once it drains.
+ */
+void test_sample_never_strikes() {
+    std::printf("a fast SAMPLE publisher never condemns a briefly stalled peer:\n");
+    counting_source_t src;
+    egress_t eg(src, /*strike_cap=*/3);
+    egress_peer_t p;
+    eg.open(p);
+    const delivery_lane_t telemetry = lane_of(&vertex_a, 1);
+    fake_sock_t sock;
+    sock.room = 0;  // the stall
+    egress_result_t sum;
+    for (int i = 1; i <= 1000; ++i) {
+        const egress_result_t r =
+            send(eg, p, sock, src, static_cast<std::uint8_t>(1 + i % 250), telemetry);
+        sum.stalled += r.stalled;
+        sum.displaced += r.displaced;
+        sum.condemn |= r.condemn;
+    }
+    check(sum.stalled == 0 && !sum.condemn && sock.condemned == 0 && !p.closed(),
+          "a thousand overwrites, far past cap x depth: no strike, still open");
+    check(sum.displaced == 998, "each newer value overwrote the one waiting, counted");
+    check(src.live.load() == 3, "the cost stayed bounded: the held frame, one slot, its lane");
+    sock.room = SIZE_MAX;  // the socket drains
+    (void)flush(eg, p, sock);
+    check(
+        marks(sock.got) == std::vector<std::uint8_t>{2, static_cast<std::uint8_t>(1 + 1000 % 250)},
+        "it drains the held frame, then the latest value");
+    eg.close(p);
+    check(src.live.load() == 0, "nothing leaked");
 }
 
 void test_close_and_refusal() {
@@ -369,7 +397,9 @@ void test_close_and_refusal() {
     sock.room = 0;
     (void)send(eg, p, sock, src, 5, a);  // held on the wire
     src.refuse.store(true);
-    check(send(eg, p, sock, src, 6, lane_of(&vertex_b, 4)).shed == 1, "a refused lane: shed");
+    const egress_result_t refused = send(eg, p, sock, src, 6, lane_of(&vertex_b, 4));
+    check(refused.shed == 1 && refused.stalled == 0,
+          "a refused lane: shed, and the source's verdict is no strike");
     src.refuse.store(false);
     check(!p.closed(), "and the peer is still open");
     sock.room = SIZE_MAX;
@@ -573,6 +603,7 @@ int main() {
     test_one_ring_per_vertex();
     test_part_write_resumes();
     test_strikes_count_offers();
+    test_sample_never_strikes();
     test_close_and_refusal();
     test_stalled_peer_does_not_delay_others();
     test_concurrent_handoff();

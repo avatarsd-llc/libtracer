@@ -152,8 +152,8 @@ inline constexpr std::uint32_t kBoundedWaitMs = 100;
 
 /**
  * @brief Whole rings of consecutive strikes that mark a one-peer link's connection broken
- *        (#838): offers that found the peer's lane full and whose bounded write turn moved
- *        NOTHING, counted in rings of the lane's depth.
+ *        (#838): offers that found the peer's STREAM lane full and whose bounded write turn
+ *        moved NOTHING, counted in rings of the lane's depth. A SAMPLE lane never strikes.
  *
  * The brokenness-detector trichotomy #837 established: one ring is transient backpressure,
  * and any turn that moves a byte resets the count. Two can straddle a burst. Three in a row,

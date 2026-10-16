@@ -42,10 +42,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - A write the socket cuts short is kept and finished when the socket is writable again,
     on the link's own wait; it no longer abandons the record and condemns the peer.
   - Server writes never block, the WebSocket `101` included: it is the session's first egress
-    frame. A strike is an offer that found its lane full and whose turn moved no byte; a peer
+    frame. A strike is an offer that found its STREAM lane full and whose turn moved no byte; a peer
     is condemned after `kEgressStallStrikes` (`kMaxConsecutiveStalls` on a dialer) whole
     rings of strikes in a row, counted in the depth of the lane being offered. A burst that
-    only fills rings strikes nothing, and a poll timeout is not an offer.
+    only fills rings strikes nothing, and a poll timeout is not an offer. A SAMPLE lane
+    (depth 1) never strikes: its overwrite is bounded at one slot, so a fast publisher cannot
+    condemn a briefly stalled peer, and a peer stuck behind SAMPLE lanes alone is left to
+    the link's own down detection.
   - A full delivery ring now sheds its oldest frame by default, where the one link queue
     refused the newest. A vertex that wants the old arm declares it reliable
     (`vertex_policy_t::ring_reliable`). Frames from no vertex (replies, control) ride a

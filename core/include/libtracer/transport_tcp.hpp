@@ -152,8 +152,8 @@ struct tcp_server_config_t {
     /**
      * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). It
      *        SIZES the peer cap. A server's egress writes never wait (#2144): a session that
-     *        is offered `kEgressStallStrikes` rings of frames in a row past a full lane, its
-     *        socket moving nothing, is closed.
+     *        is offered `kEgressStallStrikes` rings of frames in a row past a full STREAM lane,
+     *        its socket moving nothing, is closed. A SAMPLE lane never strikes.
      */
     std::uint32_t liveness_window_ms = 0;
 };
@@ -317,8 +317,8 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
         return dropped_tx_.load(std::memory_order_relaxed);
     }
 
-    /** @brief Strikes a STALLED peer cost (#838, #2144): offers past a full lane whose turn
-     *         moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of them in a
+    /** @brief Strikes a STALLED peer cost (#838, #2144): offers past a full STREAM lane whose
+     *         turn moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of them in a
      *         row close the connection, so a non-zero count with @ref link_up still true is a peer
      * that is falling behind but recovering. */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {

@@ -149,8 +149,8 @@ struct ws_server_config_t {
      * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). It
      *        SIZES the peer cap and bounds the `101` reply. A server's egress writes never
      *        wait (#2144), so a tab that stops reading cannot freeze the sending thread; a
-     *        session offered `kEgressStallStrikes` rings of frames in a row past a full lane,
-     *        its socket moving nothing, is closed.
+     *        session offered `kEgressStallStrikes` rings of frames in a row past a full STREAM
+     *        lane, its socket moving nothing, is closed. A SAMPLE lane never strikes.
      */
     std::uint32_t liveness_window_ms = 0;
     /**
@@ -595,9 +595,9 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
         return dropped_tx_.load(std::memory_order_relaxed);
     }
 
-    /** @brief Strikes a STALLED server cost (#838, #2144): offers past a full lane whose
-     *         turn moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of them
-     *         in a row close the connection. */
+    /** @brief Strikes a STALLED server cost (#838, #2144): offers past a full STREAM lane
+     *         whose turn moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of
+     * them in a row close the connection. */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
         return stalled_tx_.load(std::memory_order_relaxed);
     }

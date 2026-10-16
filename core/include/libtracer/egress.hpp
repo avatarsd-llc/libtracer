@@ -45,15 +45,19 @@
  * its frame on the wire with its offset: the rest goes on the peer's next turn, so a part
  * write never desyncs the stream.
  *
- * **The stall strike.** A strike is an offer the peer could not take: its lane was full, so
- * the offer cost a frame (the ring's arm shed one), and the turn it took moved no byte of the
- * held frame. Any byte moved clears the count. The verdict is in whole rings: a peer is
- * condemned when its strikes in a row reach the link's cap times the depth of the lane being
- * offered, so a peer that let that many rings of a vertex go by without taking a byte. A peer
- * whose lane still has room is inside the depth its vertex declared, so a burst that only
- * fills rings strikes nothing, and a deeper ring tolerates a longer burst. Turns run only
- * on events — a new frame offered to the peer (its sender resumes the held frame first) or the
- * socket reporting writability (@ref tr::net::egress_t::flush) — so the count is of offers the
+ * **The stall strike.** A strike is an offer the peer could not take: its STREAM lane was
+ * full, so the offer cost a frame (the ring's arm shed one), and the turn it took moved no
+ * byte of the held frame. Any byte moved clears the count. A SAMPLE lane (depth 1) never
+ * strikes: its overwrite is its contract and costs one slot by construction, so a fast
+ * publisher cannot condemn a peer whose socket stalls briefly. A peer that is truly stuck
+ * behind SAMPLE lanes alone is left to the link's own down detection (`POLLHUP`, `POLLERR`,
+ * the liveness window). A refused lane draw is the source's verdict and never strikes. The verdict
+ * is in whole rings: a peer is condemned when its strikes in a row reach the link's cap times the
+ * depth of the lane being offered, so a peer that let that many rings of a vertex go by without
+ * taking a byte. A peer whose lane still has room is inside the depth its vertex declared, so a
+ * burst that only fills rings strikes nothing, and a deeper ring tolerates a longer burst. Turns
+ * run only on events — a new frame offered to the peer (its sender resumes the held frame first) or
+ * the socket reporting writability (@ref tr::net::egress_t::flush) — so the count is of offers the
  * peer refused, never of time.
  * At the link's cap the peer is condemned: the call that reached the verdict says so, and the
  * link closes the session. Anything else — a peer that is gone — is the socket's own event
@@ -94,7 +98,8 @@ inline constexpr std::uint16_t kEgressControlDepth = 8;
 
 /**
  * @brief Whole rings that condemn a peer whose writes move nothing: each strike is one offer
- *        that found the peer's lane full and whose turn moved no byte of the held frame, and
+ *        that found the peer's STREAM lane full and whose turn moved no byte of the held
+ *        frame (a SAMPLE lane never strikes), and
  *        the verdict is this many times the lane's depth in a row. Turns run only on events —
  *        a new frame offered to the peer, or the socket reporting writability — never on a
  *        clock. The #2130 figure.
@@ -247,8 +252,9 @@ struct egress_result_t {
     std::uint32_t displaced = 0; /**< @brief Of @ref shed, waiting frames a newer one pushed
                                              out (the SAMPLE overwrite, the best-effort
                                              drop-oldest). */
-    std::uint32_t stalled = 0;   /**< @brief Offers that found the peer's lane full and whose
-                                             turn moved nothing — each one a strike. */
+    std::uint32_t stalled = 0;   /**< @brief Offers that found the peer's STREAM lane full
+                                             and whose turn moved nothing — each one a
+                                             strike. A SAMPLE lane never strikes. */
     bool condemn = false;        /**< @brief The peer reached the strike cap, or a failed
                                              write cut a frame mid-way: the link closes it. */
 };
@@ -444,7 +450,7 @@ class egress_t {
         }
         egress_frame_t* const f = frame();
         egress_frame_t* out = f;
-        std::uint16_t lost = 0;  // the lane was full: this offer cost a frame of a ring this deep
+        std::uint16_t lost = 0;  // the depth of the full lane this offer cost a frame of
         if (f == nullptr) {
             ++r.shed;
         } else {
@@ -453,10 +459,7 @@ class egress_t {
             if ((p.role_.load(std::memory_order_relaxed) & egress_peer_t::kClosed) != 0)
                 ++r.shed;
             else
-                out = admit(p, lane, f, r);
-            if (r.shed != 0)
-                lost = lane.key == nullptr ? kEgressControlDepth
-                                           : std::max<std::uint16_t>(lane.depth, 1);
+                out = admit(p, lane, f, r, lost);
         }
         egress_frame_t::release(out);  // outside the queue mutex: it may free a block
         // The store-buffering pair: the push above, then the claim. A holder that let the
@@ -528,11 +531,18 @@ class egress_t {
     /**
      * @brief Put @p f in its lane of @p p under the lane's shape, drawing the lane if it is
      *        the vertex's first waiting frame (queue mutex held).
+     * @param lost Set to the lane's depth when the lane was full, so the offer cost one of its
+     *             frames; left alone otherwise. A refused draw is the source's verdict, not
+     *             the peer's, and sets nothing. Its frame is shed, counted: keeping it for the
+     *             next drain would need the storage the source just refused (the peer's slot
+     *             has no room to name a vertex, and parking it in another lane could let a
+     *             stale SAMPLE overtake a newer one), so the vertex's next publish is what
+     *             reaches the peer.
      * @return The reference the call must release: a displaced frame, @p f itself when the
      *         reliable arm or the source refused it, or null.
      */
     egress_frame_t* admit(egress_peer_t& p, const graph::delivery_lane_t& lane, egress_frame_t* f,
-                          egress_result_t& r) noexcept {
+                          egress_result_t& r, std::uint16_t& lost) noexcept {
         lane_t* l = p.tail_;
         if (l != nullptr) do
                 l = l->next;  // the round, from the lane served next
@@ -546,6 +556,7 @@ class egress_t {
         }
         egress_frame_t* out = nullptr;
         if (l->count == l->depth) {
+            lost = l->depth;
             if (l->reliable && l->depth > 1) {
                 ++r.shed;  // the reliable arm: the newest is refused, nothing waiting is lost
                 return f;
@@ -600,8 +611,9 @@ class egress_t {
      * Ends with the role released. A frame the socket would not finish stays on the wire
      * (@ref egress_peer_t::wants_write) for the next turn. A step is held or failed, never
      * both. Any byte moved clears the strikes;
-     * a turn that moved nothing, taken by an offer that found its lane full, is one, and the
-     * cap times that lane's depth (@p lost; 0: the offer cost nothing) condemns the peer.
+     * a turn that moved nothing, taken by an offer that found its STREAM lane full, is one,
+     * and the cap times that lane's depth (@p lost) condemns the peer. A SAMPLE lane
+     * (@p lost 1) and an offer that cost nothing (0) never strike.
      */
     template <class Write>
     void drain_owned(egress_peer_t& p, Write&& write, function_ref_t<void()> condemn,
@@ -628,10 +640,11 @@ class egress_t {
                 egress_frame_t::release(std::exchange(p.wire_, nullptr));
                 p.off_ = 0;
             }
-            // A strike: an offer that cost a frame of a full lane, on a turn that moved
-            // nothing. Any byte moved clears the run; the verdict is whole rings of it.
+            // A strike: an offer that cost a frame of a full STREAM lane, on a turn that
+            // moved nothing. A SAMPLE's overwrite is its contract, bounded at one slot, so
+            // depth 1 never strikes. Any byte moved clears the run; the verdict is whole rings.
             const std::uint32_t depth = std::exchange(lost, 0);
-            const bool strike = (moved == 0) & (depth != 0);
+            const bool strike = (moved == 0) & (depth > 1);
             r.stalled += strike;
             p.strikes_ = static_cast<std::uint16_t>(
                 std::min<std::uint32_t>((p.strikes_ + strike) * (moved == 0), UINT16_MAX));
