@@ -69,6 +69,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **The WebSocket server receives each frame into a segment of its exact length, header first
 - **The WebSocket server receives each frame into a segment of its exact length
 - **The WebSocket server receives each frame into a segment of its exact length, header first
+
 - **The WebSocket server receives each frame into a segment of its exact length
   ([#2140](https://github.com/avatarsd-llc/libtracer/issues/2140)).** A new header-only
   `frame_ingress_t` (`libtracer/frame_ingress.hpp`) reads between frames into a 14-byte header
