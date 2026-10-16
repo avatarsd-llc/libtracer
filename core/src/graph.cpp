@@ -227,29 +227,47 @@ class dispatch_scope_t {
  * and each remote delivery's own bracket then nests inside it. A fan-out with no remote edge
  * never opens it, so an in-process write pays nothing (ADR-0038 §3a). The bracket only grows:
  * it opens before the first remote edge's reads and closes after the last, which can only
- * defer a free.
+ * defer a free. It also stays open across any in-process callback that runs between the first
+ * and the last remote edge; under `reclaim_local` `thread_quiescent` is a no-op, so a router
+ * retirement such a callback makes waits for the router's next drain, not for the end of that
+ * remote delivery.
+ *
+ * The open and the close are out of line: a fan-out pays one flag test per edge inline, and
+ * the bracket's body is emitted once instead of in each of `fan_out`'s two loops.
  */
 class remote_frame_t {
    public:
     remote_frame_t() = default;
     remote_frame_t(const remote_frame_t&) = delete;
     remote_frame_t& operator=(const remote_frame_t&) = delete;
-    /** @brief Open the bracket if this fan-out has not yet. */
-    void open() noexcept {
-        if constexpr (!reclaim_policy_t::kGraceSpansThreads) {
-            if (open_) return;
-            detail_qsbr::enter();
-            open_ = true;
-        }
+    /** @brief Open the bracket before @p e's delivery if @p e is remote and it is not open yet. */
+    void cover(const edge_view_t& e) noexcept {
+        if constexpr (!reclaim_policy_t::kGraceSpansThreads)
+            if (!open_ && e.has_remote_leg()) open(open_);
     }
     /** @brief Close it, if it was opened; the outermost close is a quiescent state. */
     ~remote_frame_t() {
         if constexpr (!reclaim_policy_t::kGraceSpansThreads)
-            if (open_ && detail_qsbr::leave()) graph_t::thread_quiescent();
+            if (open_) close();
     }
 
    private:
-    bool open_ = false; /**< @brief Whether @ref open entered. */
+    /**
+     * @brief Enter the frame bracket and set @p opened.
+     *
+     * The flag goes by reference on purpose: once it has escaped into an out-of-line call, the
+     * compiler cannot know it across the deliveries that follow, so it keeps one copy of each
+     * `fan_out` loop instead of splitting it into a before-open and an after-open copy.
+     */
+    [[gnu::noinline]] static void open(bool& opened) noexcept {
+        detail_qsbr::enter();
+        opened = true;
+    }
+    /** @brief Leave the frame bracket; the outermost leave is a quiescent state. */
+    [[gnu::noinline]] static void close() noexcept {
+        if (detail_qsbr::leave()) graph_t::thread_quiescent();
+    }
+    bool open_ = false; /**< @brief Whether @ref cover entered. */
 };
 
 /**
@@ -2183,14 +2201,16 @@ void graph_t::fan_out(vertex_t* v, const value_t& value) {
     if (drops.any()) count_snapshot_drops(drops);
     // Every remote edge after the first nests in one frame bracket (see `remote_frame_t`).
     remote_frame_t remote_frame;
-    const auto one = [&](const edge_view_t& e) {
-        if (e.has_remote_leg()) remote_frame.open();
-        dispatch_edge(e, value);
-    };
     if (overflow.empty())
-        for (std::size_t i = 0; i < n; ++i) one(inline_buf[i]);
+        for (std::size_t i = 0; i < n; ++i) {
+            remote_frame.cover(inline_buf[i]);
+            dispatch_edge(inline_buf[i], value);
+        }
     else
-        for (const edge_view_t& e : overflow) one(e);
+        for (const edge_view_t& e : overflow) {
+            remote_frame.cover(e);
+            dispatch_edge(e, value);
+        }
 }
 
 result_t<value_ref_t> graph_t::store_value(vertex_t* v, role_t role, view::rope_t&& value,

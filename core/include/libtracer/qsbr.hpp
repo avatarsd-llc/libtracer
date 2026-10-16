@@ -523,6 +523,9 @@ inline constexpr std::uint32_t kNoCell = ~std::uint32_t{0};
  * back, and the index plus one otherwise. The cells go back at thread exit through
  * @ref cell_release_t (and `%edge_pin.hpp`'s `pin_release_t`), a separate `thread_local` that
  * only the cold claim path constructs.
+ *
+ * `pin` belongs to the edge pin but lives here so both cells come off one TLS base. The include
+ * runs one way: `%edge_pin.hpp` includes this header, and this header must never include it.
  */
 struct thread_record_t {
     unsigned depth;     /**< @brief Brackets open on this thread; 0 ⇒ quiescent. */
