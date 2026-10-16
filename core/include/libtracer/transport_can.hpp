@@ -673,14 +673,15 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // Retire every same-node binding whose endpoint run overlaps the one a fresh
     // advertise claims, and discard the reassembly group each was feeding (#909).
     // The 12-bit endpoint space wraps, so a base RECURS; without this a stale run
-    // shadows the live binding in the process_data scan and a recurring key merges
+    // shadows the live binding in the process_data lookup and a recurring key merges
     // stale slices into the fresh group. Holds the invariant "one binding per slot,
     // and a group lives exactly as long as the binding that feeds it".
     void invalidate_overlapping(const can::can_id_fields_t& base,
                                 std::uint16_t slice_count);  // requires rx_m_ held
     // Mark every binding of `node` as belonging to a prior lap — the producer's
-    // endpoint allocator has come round (#1011). Runs only on a detected lap, and
-    // walks the same map invalidate_overlapping already walks per advertise.
+    // endpoint allocator has come round (#1011). Runs only on a detected lap; it is the
+    // one walk of the whole binding table, where invalidate_overlapping and process_data
+    // touch only the entries around one run (#2049).
     void mark_prior_lap(std::uint16_t node);           // requires rx_m_ held
     void process_data(const can_frame_data_t& frame);  // requires rx_m_ held
     void park_pending(const can_frame_data_t& frame);  // requires rx_m_ held

@@ -220,6 +220,43 @@ int main() {
         check(!no_total.contains(key), "erase() drops the group");
     }
 
+    // --- 3a. The group's own count (#2049): a re-sent slice counts once, and dropping a group
+    //         that sits between two others takes exactly its own slices. ---
+    {
+        using tr::net::can::can_frame_mode_t;
+        const std::vector<std::byte> payload = ramp(20);  // 3 classic slices.
+        const auto pv = view_over(payload);
+        const auto slice = [&](std::size_t i) {
+            return tr::net::can::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
+        };
+        const auto key_ts = [](std::uint64_t ts) {
+            tr::net::reassembly_key_t k;
+            k.ts = ts;
+            return k;
+        };
+        tr::net::can_reassembly_t reasm;
+        for (const std::uint64_t ts : {1u, 2u, 3u}) {
+            (void)reasm.set_expected_count(key_ts(ts), 3);
+            (void)reasm.add_slice(key_ts(ts), 0, slice(0));
+            (void)reasm.add_slice(key_ts(ts), 1, slice(1));
+        }
+        (void)reasm.add_slice(key_ts(2), 1, slice(1));  // a duplicate of slice 1
+        check(reasm.slice_count(key_ts(2)) == 2, "a re-sent slice replaces, and counts once");
+        check(!reasm.is_complete(key_ts(2)), "... so two distinct slices of three stay incomplete");
+        check(!reasm.has_interior_gap(key_ts(2)), "... and slices 0,1 have no interior gap");
+
+        reasm.erase(key_ts(2));  // the middle group of the three
+        check(!reasm.contains(key_ts(2)) && reasm.slice_count(key_ts(2)) == 0,
+              "erase drops the middle group and its slices");
+        check(reasm.slice_count(key_ts(1)) == 2 && reasm.slice_count(key_ts(3)) == 2,
+              "... and leaves both neighbours' slices in place");
+        for (const std::uint64_t ts : {1u, 3u}) (void)reasm.add_slice(key_ts(ts), 2, slice(2));
+        const auto a = reasm.assemble(key_ts(1));
+        const auto b = reasm.assemble(key_ts(3));
+        check(a && rope_bytes(*a) == payload && b && rope_bytes(*b) == payload,
+              "both neighbours still assemble byte-exact");
+    }
+
     // --- 3b. can_reassembly bounding: evict-oldest + dropped_groups counter. ---
     {
         using tr::net::can::can_frame_mode_t;
