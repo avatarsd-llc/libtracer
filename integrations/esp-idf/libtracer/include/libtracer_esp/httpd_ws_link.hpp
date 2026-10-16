@@ -348,21 +348,33 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     static constexpr std::size_t kDefaultTxInlineBytes = 1600;
 
     /**
-     * @brief Replacements of a peer's waiting frame, each after a write its socket took zero
-     *        bytes of, that strike the peer (#2095).
+     * @brief Refused large frames, each while a peer pinned a block of the large class
+     *        after a write its socket took zero bytes of, that strike the peer (#2095).
      *
-     * The flush writes without waiting, so a full socket is never an error, and a peer that
-     * never drains would otherwise hold its seat, its slot and a reference to a frame for as
-     * long as it stayed connected. Counted in publishes, not time — this link reads no clock:
-     * at 100 updates/s the default strikes a peer whose socket took nothing for about 0.6 s of
-     * them, at 1/s after about a minute. Any byte the socket takes clears the count. The
-     * strike closes the session through the ordinary strike path (@ref stats_t::
-     * tx_stall_strikes counts it, @ref stats_t::sessions_condemned too). A large frame
-     * refused because the large class is spent counts as a replacement attempt for each peer
-     * holding a block of that class with no byte moved, so a peer pinning the class's last
-     * block is struck the same way. Compile-time.
+     * A frame refused at the full queue (@ref kTxWaitDepth) never counts: a healthy peer
+     * subscribed to many vertices fills its queue in one burst while its TCP window is shut,
+     * and striking it would loop it through reconnects (#2195). So a peer that receives only
+     * small frames and whose socket never drains holds its seat, and at most
+     * 1 + @ref kTxWaitDepth frames, until the transport fails it (a failed write strikes).
+     *
+     * The flush writes without waiting, so a full socket is never an error. What this bound
+     * stops is a peer that never drains pinning the large class's blocks, which every other
+     * peer's large frames need. Counted in refused publishes, not time — this link reads no
+     * clock. Any byte the socket takes clears the count. The strike closes the session
+     * through the ordinary strike path (@ref stats_t::tx_stall_strikes counts it,
+     * @ref stats_t::sessions_condemned too). Compile-time.
      */
     static constexpr std::uint32_t kTxStallStrikes = 64;
+    /**
+     * @brief Frames that may wait behind one session's wire frame (#2195), in order.
+     *
+     * No frame replaces another: a frame from one vertex never stands in for a frame from
+     * another, and an event, an ANNOUNCE or a reply is never overwritten. The first waiting
+     * frame takes a node inside the session slot; each further one draws a node from
+     * `memory.io` while it waits (receiver pays). A frame offered to a full queue, or whose
+     * node draw is refused, is the counted refusal (@ref stats_t::enqueue_drops). Compile-time.
+     */
+    static constexpr std::size_t kTxWaitDepth = 8;
 
     /**
      * @brief Start an `esp_http_server` instance on @p bind_port with a WebSocket
@@ -749,24 +761,23 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      */
     struct stats_t {
         /** @brief Frames never handed to a socket; the sum of the three causes below.
-         *         Same number @ref enqueue_drops returns. */
+         *         Same number @ref enqueue_drops returns. Includes a frame offered to a
+         *         session whose queue already holds @ref kTxWaitDepth (#2195). */
         std::uint32_t enqueue_drops = 0;
         /**
          * @brief Waiting frames a newer frame for the same peer REPLACED before the peer's
          *        socket took them (#2095): the link's total of every session's
          *        `link_counters_t::tx_conflated`.
          *
-         * Each peer holds one frame on the wire and one waiting; a producer never waits for
-         * a slow peer and never queues behind it, it overwrites the waiting frame, so the
-         * peer gets the newest data at its own pace. A climbing count names a peer that
-         * drains slower than it is fed (read which one per peer, @ref
-         * enumerate_peer_stats). Not part of @ref enqueue_drops: the frame was superseded,
-         * not refused.
+         * Reads 0 since #2195: no frame replaces another any more (a frame from one vertex
+         * is not a newer value of another), so a peer that drains slower than it is fed
+         * shows in @ref enqueue_drops instead. Kept, in place, for the per-path latest-wins
+         * that returns once the link knows a frame's lane.
          */
         std::uint32_t tx_conflated = 0;
-        /** @brief Sessions closed because @ref kTxStallStrikes newer frames replaced theirs
-         *         while their socket took nothing (#2095); a subset of
-         *         @ref sessions_condemned. */
+        /** @brief Sessions closed after @ref kTxStallStrikes refused large frames while they
+         *         pinned the class and their socket took nothing (#2095); never because their
+         *         queue was full (#2195). A subset of @ref sessions_condemned. */
         std::uint32_t tx_stall_strikes = 0;
         /**
          * @brief Of @ref enqueue_drops, the ones that found the LARGE size class exhausted
@@ -1017,8 +1028,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *        bookkeeping (#2095). A per-ABI `sizeof`, so the figure differs by target.
      *
      * Part of the slot itself: a peer holds a reference to the frame on the wire and to the
-     * newest one waiting, never a copy; the bytes are in a block shared by every peer the
-     * send went to, freed by the last of them to let go. A departing peer lets go of both.
+     * first one waiting, never a copy; the bytes are in a block shared by every peer the
+     * send went to, freed by the last of them to let go. Each further frame waiting, up to
+     * @ref kTxWaitDepth in all (#2195), draws one small node from `memory.io` while it waits;
+     * this figure does not include them. A departing peer lets go of all of them.
      */
     [[nodiscard]] std::size_t peer_tx_bytes() const noexcept;
 
@@ -1368,6 +1381,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     struct session_ref_t;     // a session identity that survives fd reuse (defined in the .cpp)
     struct tx_block_t;        // one outbound frame's bytes, shared by its peers (the .cpp)
     struct tx_frame_t;        // one peer's reference to a frame (defined in the .cpp)
+    struct tx_wait_t;         // one frame waiting behind a peer's wire frame (the .cpp)
     struct detach_req_t;      // the teardown session-detach work item (defined in the .cpp)
     struct close_req_t;       // the close_peer work item (defined in the .cpp)
     struct refusal_req_t;     // a refusal-after-upgrade work item (defined in the .cpp)
@@ -1626,9 +1640,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Post this link's ONE flush to the httpd task unless one is already posted.
      *  @return False when the control queue refused it. */
     bool post_flush(httpd_handle_t h);
-    /** @brief Count a waiting frame a newer one replaced, on the link and on the session it
-     *         was gathered for (takes @ref peers_m_). */
-    void note_tx_conflated(const session_ref_t& to);
 
     /**
      * @brief Send a directed reply to @p to RIGHT NOW — the fork @ref queue_send is not
@@ -1665,6 +1676,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Empty @p frame, dropping its block reference. Needs no link, so it is safe on
      *         any task that owns the frame. */
     static void release_frame(tx_frame_t& frame);
+    /** @brief Return @p w, its frame already moved out or released, to where stage took
+     *         it from: @p s's spare, or the egress store (#2195). Under `tx_m`. */
+    void free_waiting(session_t& s, tx_wait_t* w);
 
     /**
      * @brief Per-session SEND accounting (takes @ref peers_m_ — callers must not hold

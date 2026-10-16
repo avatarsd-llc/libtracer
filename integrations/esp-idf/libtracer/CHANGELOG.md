@@ -10,6 +10,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`httpd_ws_link_t` no longer lets one frame replace another
+  ([#2195](https://github.com/avatarsd-llc/libtracer/issues/2195)).** Since #2095 a newer frame
+  replaced whatever frame was waiting for the peer, and even a wire frame not one byte of which
+  had gone out. A session subscribed to two vertices lost one of them, and one-shot frames
+  (events, ANNOUNCE, replies) were overwritten by whatever came next.
+  - Each session now holds its wire frame and up to `kTxWaitDepth` (8) frames waiting behind
+    it, in order, and none is ever replaced.
+  - A frame offered to a full queue is refused and counted in `stats_t::enqueue_drops`. That
+    refusal is counted, not logged per frame. A refused node draw also counts there, and logs.
+  - `stats_t::tx_conflated` keeps its place and reads 0. `stats_t`'s layout is unchanged and
+    pinned by `static_assert`.
+  - A full-queue refusal is never a stall strike, so a healthy peer subscribed to many
+    vertices is not disconnected by a burst. `tx_stall_strikes` now comes only from a peer
+    that pins the large class while its socket takes nothing. A peer that receives only
+    small frames and never drains holds its seat and at most 9 frames until the transport
+    fails it.
+  - The 8 is per peer, across every vertex: a burst to more than 8 vertices on a busy socket
+    loses its tail, counted. Same-path latest-wins returns with #2196 (per-path
+    conflation). The refusal is counted link-wide only; a per-session count would change
+    the pinned `stats_t` layout and is a follow-up.
+  - The first waiting frame uses a node inside the session slot. Each further one draws a
+    16 B node (on 32-bit targets) from `memory.io` while it waits.
+  - A slow peer now gets its held frames oldest first, not the newest value. Same-path
+    latest-wins returns once the link learns each frame's lane (#2174).
+
 ### Changed
 
 - **A unicore chip build binds `kSingleCore`, so its frame bracket pays no fence
