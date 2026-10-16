@@ -381,11 +381,11 @@ class op_resolver_t {
      *
      * A non-null @p frame_view marks the frame as OWNING (delivered as a
      * refcounted `view_t` over the same bytes the arena borrows — the ADR-0042
-     * receiver seam). Then a WRITE whose payload TLV (`node.wire`) is at least the
-     * target vertex's copy-or-share threshold (RFC-0028 §5.3,
-     * `graph_t::share_threshold_bytes`) and whose opt byte carries no trailer bits is
+     * receiver seam). Then a WRITE whose payload TLV (`node.wire`) the target vertex's
+     * copy-or-share hint and the build's block source share (RFC-0022 Amendment 3,
+     * `graph_t::share_hint`) and whose opt byte carries no trailer bits is
      * stored as a SUBVIEW of the frame — a refcount bump that holds the whole frame,
-     * zero copy. Smaller, trailered, or span-delivered payloads take the one-copy
+     * zero copy. Copied, trailered, or span-delivered payloads take the one-copy
      * trailer-sliced store, into ONE inline `value_t` block (header plus bytes); the
      * remote-subscriber return route always keeps its subscription-scoped one-copy
      * behavior.

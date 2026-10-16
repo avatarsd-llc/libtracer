@@ -2,7 +2,7 @@
  * @file
  * @brief pin_bench — RFC-0022 §6's MCU half, ON SILICON: what sharing an RX segment instead of
  *        copying the payload costs an ESP32-C6 in store latency, receive-pool occupancy and
- *        free heap, swept over RFC-0028 §5.3 copy-or-share thresholds.
+ *        free heap, swept over the RFC-0022 Amendment 3 copy-or-share hints.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -29,22 +29,24 @@
  *
  * @section pinb_arms Arms, and why they interleave inside one boot
  *
- * The threshold is declared per vertex through `vertex_policy_t::share_threshold_bytes` rather
- * than through `config_t::kShareThresholdBytes`, exactly as in the host bench, so every arm
- * rotates inside ONE image and ONE boot. Building one flash image per threshold and running
+ * The hint is declared per vertex through `vertex_policy_t::share_hint`, exactly as in the host
+ * bench, so every arm rotates inside ONE image and ONE boot. Building one flash image per arm
+ * and running
  * them back to back would reintroduce the sequential-run confound at the worst possible place
  * — a reflash changes heap layout, and heap layout is half of what this app measures.
  *
- * **The control arm is `A-copy`, copy-always (`SIZE_MAX`) on this same image** — the one-copy
- * store branch, which is also this component's build default. Every arm's figure is read as a
- * paired per-round delta against `A-copy` on the same boot.
+ * **The control arm is `A-copy`, the `COPY` hint on this same image** — the one-copy store
+ * branch. `D-default` follows this build's block source (the static arena shares), and
+ * `C-share` declares `SHARE`. Every arm's figure is read as a paired per-round delta against
+ * `A-copy` on the same boot. Rows report the hint as its value: 0 `DEFAULT`, 1 `SHARE`,
+ * 2 `COPY`.
  *
  * @section pinb_reach Reachability
  *
  * Every row carries `pins`/`copies` decided by segment-pointer identity between the stored
  * value and the pool's own slots, and the app refuses to print a table at all if its
- * calibration line-break fails: a CRC-trailered payload and a payload below the threshold
- * must both report zero pins, and a share-always arm must report all of them.
+ * calibration line-break fails: a CRC-trailered payload and the `COPY` arm must both report
+ * zero pins, and a share-always arm must report all of them.
  */
 
 #include <cinttypes>
@@ -225,23 +227,22 @@ std::uint32_t quantile(std::vector<std::uint32_t>& v, double q) {
 }
 
 /**
- * @brief Run one (threshold, vertices) cell.
+ * @brief Run one (hint, vertices) cell.
  *
  * The frame is copied into a POOL segment each iteration — the transport's own cost, paid in
  * every arm — and the copy is untimed. Only `resolve` is timed. If the pool refuses (every
  * slot pinned), the iteration is counted as backpressure and skipped, which is exactly what a
  * transport does with the datagram.
  */
-cell_t run_cell(rx_pool_t& pool, std::size_t threshold, std::size_t vertices, std::size_t payload,
-                bool crc = false) {
+cell_t run_cell(rx_pool_t& pool, tr::graph::share_hint_t hint, std::size_t vertices,
+                std::size_t payload, bool crc = false) {
     graph_t g;
     op_resolver_t resolver(g);
     std::vector<tr::graph::vertex_handle_t> handles;
     for (std::size_t i = 0; i < vertices; ++i) {
         handles.push_back(
             g.register_vertex(path_t("/s/b" + std::to_string(i)), role_t::STORED_VALUE));
-        (void)g.set_policy(handles.back(),
-                           {.share_threshold_bytes = threshold});  // the arm's threshold
+        (void)g.set_policy(handles.back(), {.share_hint = hint});  // the arm's hint
     }
 
     std::vector<bytes_t> frames;
@@ -302,19 +303,20 @@ cell_t run_cell(rx_pool_t& pool, std::size_t threshold, std::size_t vertices, st
     return out;
 }
 
-/** @brief Copy always — the CONTROL arm (RFC-0028 §5.3's `SIZE_MAX` end). */
-constexpr std::size_t kCopyAlways = SIZE_MAX;
+/** @brief Copy always — the CONTROL arm. */
+constexpr tr::graph::share_hint_t kCopyAlways = tr::graph::share_hint_t::COPY;
+/** @brief Share whatever can be shared. */
+constexpr tr::graph::share_hint_t kShareAlways = tr::graph::share_hint_t::SHARE;
 
 /** @brief The arms, rotated per round inside this one boot; `A-copy` is the CONTROL. */
 struct arm_t {
     const char* label;
-    std::size_t threshold;
+    tr::graph::share_hint_t hint;
 };
 constexpr arm_t kArms[] = {
     {"A-copy", kCopyAlways},
-    {"T64", 64},
-    {"T512", 512},
-    {"C-share", 0},
+    {"D-default", tr::graph::share_hint_t::DEFAULT},
+    {"C-share", kShareAlways},
 };
 constexpr std::size_t kVertexSet[] = {1, 8, 32};
 constexpr std::size_t kPayloads[] = {64, 512};
@@ -329,16 +331,15 @@ bool calibrate(rx_pool_t& pool) {
                  what, got, want);
         if (!good) ok = false;
     };
-    const cell_t pos = run_cell(pool, 0, 1, 512);
+    const cell_t pos = run_cell(pool, kShareAlways, 1, 512);
     expect("share-always shares every store", pos.copies, 0);
     expect("share-always share count is the store count", pos.pins, pos.stores);
     const cell_t ctl = run_cell(pool, kCopyAlways, 1, 512);
     expect("the control arm (copy-always) never shares", ctl.pins, 0);
-    const cell_t crc = run_cell(pool, 0, 1, 512, /*crc=*/true);
+    const cell_t crc = run_cell(pool, kShareAlways, 1, 512, /*crc=*/true);
     expect("CRC-trailered payload never shares", crc.pins, 0);
-    // A 64 B payload (68 B TLV) is below a 512 B threshold.
-    const cell_t below = run_cell(pool, 512, 1, 64);
-    expect("threshold 512 at a 64 B payload never shares", below.pins, 0);
+    const cell_t small = run_cell(pool, kCopyAlways, 1, 64);
+    expect("the COPY arm at a 64 B payload never shares", small.pins, 0);
     return ok;
 }
 
@@ -357,7 +358,7 @@ extern "C" void app_main() {
         return;
     }
     ESP_LOGI(kTag,
-             "# PINROW round arm threshold payload vertices p50ns p99ns meanns pins copies stores "
+             "# PINROW round arm hint payload vertices p50ns p99ns meanns pins copies stores "
              "free_floor refused min_free");
 
     for (int r = 0; r < kRounds; ++r) {
@@ -367,11 +368,11 @@ extern "C" void app_main() {
             const arm_t& arm = kArms[(static_cast<std::size_t>(r) + j) % nA];
             for (std::size_t payload : kPayloads) {
                 for (std::size_t V : kVertexSet) {
-                    const cell_t c = run_cell(pool, arm.threshold, V, payload);
+                    const cell_t c = run_cell(pool, arm.hint, V, payload);
                     ESP_LOGI(kTag,
                              "PINROW %d %s %u %u %u %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32
                              " %" PRIu32 " %" PRIu32 " %u %" PRIu32 " %u",
-                             r, arm.label, static_cast<unsigned>(arm.threshold),
+                             r, arm.label, static_cast<unsigned>(arm.hint),
                              static_cast<unsigned>(payload), static_cast<unsigned>(V), c.p50_ns,
                              c.p99_ns, c.mean_ns, c.pins, c.copies, c.stores,
                              static_cast<unsigned>(c.free_floor), c.refused,

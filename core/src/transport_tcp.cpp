@@ -319,10 +319,9 @@ void tcp_transport_t::serve(int fd) {
         // the socket into the accepted segment (ADR-0042 §2/§4 — no library
         // buffer, no copy; feeding recv chunks through feed() would add one).
         using kind_t = length_prefix_framer_t::prefix_decision_t::kind_t;
-        // Large frames come with the ingress-loan reserve (RFC-0028 §6.9): the terminus that
-        // shares the value out of this frame builds its record in the block, not beside it.
-        auto dec = length_prefix_framer_t::on_prefix(*backend_, max_frame_, len,
-                                                     graph::kShareThresholdBytes);
+        // A frame comes with the ingress-loan reserve where it is free (RFC-0028 §6.9): the
+        // terminus that shares the value out of this frame builds its record in the block.
+        auto dec = length_prefix_framer_t::on_prefix(*backend_, max_frame_, len, true);
         if (dec.kind == kind_t::EMPTY) continue;  // an empty record carries no TLV — a no-op
         if (dec.kind == kind_t::MALFORMED) {
             // Beyond the protocol cap (corrupt/hostile): count it and tear the

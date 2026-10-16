@@ -114,14 +114,13 @@ struct ws_assembler_t {
                               mem::mem_backend_t& backend, std::size_t cap) {
         if (op == ws::opcode_t::CONT && !assembling) return {};  // stray: copy nothing
         // A whole message in ONE frame is the common case, and its block is the frame's
-        // receive block: large enough to be shared, it carries the ingress-loan reserve
-        // (RFC-0028 §6.9), so the terminus that stores the value builds its record in it.
+        // receive block: it carries the ingress-loan reserve where that is free (RFC-0028
+        // §6.9), so the terminus that shares the value builds its record in it.
         // A fragmented message's links stay plain — its value is a multi-link rope, which the
         // graph links rather than places.
         std::optional<tr::view::view_t> piece;
         if (op == ws::opcode_t::BINARY && fin && !payload.empty()) {
-            tr::view::rx_block_t blk =
-                tr::view::alloc_rx(backend, payload.size(), tr::graph::kShareThresholdBytes);
+            tr::view::rx_block_t blk = tr::view::alloc_rx(backend, payload.size());
             if (blk.seg) {
                 std::memcpy(blk.frame(payload.size()).data(), payload.data(), payload.size());
                 piece = blk.take(payload.size());

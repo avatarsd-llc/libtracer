@@ -1,18 +1,18 @@
 /**
  * @file
  * @brief The WRITE store leg, copy versus shared subview, over a (payload_bytes x
- *        segment_bytes) grid, with every copy-or-share threshold arm interleaved inside one
- *        process (RFC-0022 §6; arms re-cut as RFC-0028 §5.3 thresholds).
+ *        segment_bytes) grid, with every copy-or-share hint arm interleaved inside one process
+ *        (RFC-0022 §6; arms re-cut as RFC-0022 Amendment 3 hints).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * RFC-0022 §6 measured §3.D's pin ratio here and Amendment 2 kept it off by default; RFC-0028
- * D3 then replaced the ratio with an absolute copy-or-share threshold
- * (`vertex_policy_t::share_threshold_bytes`, default `config_t::kShareThresholdBytes`), because the
- * variable this grid showed to matter is the absolute payload size. The arms are now
- * thresholds. This is the host half's store-leg microbench; `bench_pin_net` is the two-process
- * delivery-counted half.
+ * D3 then replaced the ratio with an absolute copy-or-share threshold, because the variable this
+ * grid showed to matter is the absolute payload size, and RFC-0022 Amendment 3 replaced the
+ * threshold with a trait of the build's block source plus a per-vertex hint
+ * (`vertex_policy_t::share_hint`). The arms are now hints. This is the host half's store-leg
+ * microbench; `bench_pin_net` is the two-process delivery-counted half.
  *
  * @section pin_bench_unit What one timed sample is
  *
@@ -28,8 +28,8 @@
  *
  * ADR-0041 §Brick-2 and ADR-0042 §3 already measured that a copy beats pinning under a few
  * hundred bytes even at amplification ~1 — `view::borrow`'s ~32 B control block against a
- * ~30 B `memcpy`. The grid includes small-absolute cells so the threshold's knee is measured
- * rather than inherited, and large segments so the RAM a share holds is visible beside it.
+ * ~30 B `memcpy`. The grid includes small-absolute cells so the knee is measured rather than
+ * inherited, and large segments so the RAM a share holds is visible beside it.
  *
  * @section pin_bench_reach The reachability instrument, and how to break its line
  *
@@ -45,17 +45,18 @@
  *
  * @section pin_bench_arms The arms, and why they share one process
  *
- * **The control arm is arm B, COPY-ALWAYS (`SIZE_MAX`), and it is this same binary.** It takes
+ * **The control arm is arm B, `COPY`, and it is this same binary.** It takes
  * the one-copy store at every size — since RFC-0028 slice 5 into the value's own inline block —
  * on the same binary the sharing arms run on; the standing interleave rule exists because
  * cross-invocation comparisons on identical code swung 2.8x.
  *
- * Arms B (copy-always), C (share-always, threshold 0) and T<n> (the threshold sweep) therefore
- * all live in this one process and rotate per round. The threshold reaches the decision site
- * through the owner-declared per-vertex `vertex_policy_t::share_threshold_bytes`.
+ * Arms B (`COPY`), D (`DEFAULT`, the build's trait) and C (`SHARE`) therefore all live in this
+ * one process and rotate per round. The hint reaches the decision site through the
+ * owner-declared per-vertex `vertex_policy_t::share_hint`; the transcript's third column is
+ * the hint's value (0 `DEFAULT`, 1 `SHARE`, 2 `COPY`).
  *
  * Usage:
- *   bench_pin_ratio --rounds=N [--arms=B,C,T64,T256,T1024,T4096] [--calibrate] [--round0=i]
+ *   bench_pin_ratio --rounds=N [--arms=B,D,C] [--calibrate] [--round0=i]
  */
 #include <algorithm>
 #include <cstddef>
@@ -154,15 +155,17 @@ tr::view::view_t frame_view_over(std::span<const std::byte> frame, std::size_t s
     return tr::view::view_t::over(std::move(seg)).subview(0, frame.size());
 }
 
-/** @brief Copy always — this bench's CONTROL arm (RFC-0028 §5.3's `SIZE_MAX` end). */
-constexpr std::size_t kCopyAlways = SIZE_MAX;
-/** @brief Share whatever can be shared (§5.3's `0` end). */
-constexpr std::size_t kShareAlways = 0;
+/** @brief Copy always — this bench's CONTROL arm. */
+constexpr tr::graph::share_hint_t kCopyAlways = tr::graph::share_hint_t::COPY;
+/** @brief Share whatever can be shared. */
+constexpr tr::graph::share_hint_t kShareAlways = tr::graph::share_hint_t::SHARE;
+/** @brief Follow the build's block source. */
+constexpr tr::graph::share_hint_t kTrait = tr::graph::share_hint_t::DEFAULT;
 
-/** @brief One arm: a label and the threshold it drives the decision site with. */
+/** @brief One arm: a label and the hint it drives the decision site with. */
 struct arm_t {
     const char* label;
-    std::size_t threshold;
+    tr::graph::share_hint_t hint;
 };
 
 /** @brief One grid cell's outcome for one arm in one round. */
@@ -180,20 +183,18 @@ struct cell_result_t {
 constexpr std::size_t kItersPerCell = 20000;
 
 /**
- * @brief Drive `kItersPerCell` FWD{WRITE} resolutions at one (payload, segment, threshold)
- *        point.
+ * @brief Drive `kItersPerCell` FWD{WRITE} resolutions at one (payload, segment, hint) point.
  *
  * @param borrowed Deliver the frame as a BORROWED span (no owning view) — the definitionally
  *                 inert negative control the `--calibrate` line-break needs.
  */
-cell_result_t run_cell(std::size_t payload_bytes, std::size_t segment_bytes, std::size_t threshold,
-                       bool crc = false, bool borrowed = false) {
+cell_result_t run_cell(std::size_t payload_bytes, std::size_t segment_bytes,
+                       tr::graph::share_hint_t hint, bool crc = false, bool borrowed = false) {
     graph_t g;
     op_resolver_t resolver(g);
     const tr::graph::vertex_handle_t v =
         g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
-    (void)g.set_policy(
-        v, {.share_threshold_bytes = threshold});  // the arm's threshold, owner-declared
+    (void)g.set_policy(v, {.share_hint = hint});  // the arm's hint, owner-declared
 
     const std::vector<std::byte> frame = b_fwd_write(b_value(payload_bytes, crc));
     const std::size_t seg_bytes = std::max(segment_bytes, frame.size());
@@ -243,14 +244,14 @@ constexpr std::size_t kPayloads[] = {8, 32, 64, 256, 1024, 4096, 16384};
 constexpr std::size_t kSegments[] = {0, 2048, 65536};
 
 /** @brief `RESULT_PIN` — one arm at one grid cell in one round. Tab-separated, own tag. */
-void emit_pin(int round, const char* arm, std::size_t threshold, std::size_t payload,
+void emit_pin(int round, const char* arm, tr::graph::share_hint_t hint, std::size_t payload,
               std::size_t segment, const cell_result_t& r) {
-    std::printf("RESULT_PIN\t%d\t%s\t%zu\t%zu\t%zu\t%llu\t%llu\t%llu\t%llu\t%llu\t%zu", round, arm,
-                threshold, payload, segment, static_cast<unsigned long long>(r.lat.p50),
-                static_cast<unsigned long long>(r.lat.p99),
-                static_cast<unsigned long long>(r.lat.mean),
-                static_cast<unsigned long long>(r.pins), static_cast<unsigned long long>(r.copies),
-                r.lat.n);
+    std::printf(
+        "RESULT_PIN\t%d\t%s\t%u\t%zu\t%zu\t%llu\t%llu\t%llu\t%llu\t%llu\t%zu", round, arm,
+        static_cast<unsigned>(hint), payload, segment, static_cast<unsigned long long>(r.lat.p50),
+        static_cast<unsigned long long>(r.lat.p99), static_cast<unsigned long long>(r.lat.mean),
+        static_cast<unsigned long long>(r.pins), static_cast<unsigned long long>(r.copies),
+        r.lat.n);
     if constexpr (tr::graph::kInstrumentCounters) {
         std::printf("\t%llu\t%llu\t%llu", static_cast<unsigned long long>(r.site_pins),
                     static_cast<unsigned long long>(r.site_copies),
@@ -269,8 +270,9 @@ void emit_pin(int round, const char* arm, std::size_t threshold, std::size_t pay
  * delta against it — see @ref pin_bench_arms.
  */
 const arm_t kAllArms[] = {
-    {"B-copy", kCopyAlways}, {"T64", 64},     {"T256", 256},
-    {"T1024", 1024},         {"T4096", 4096}, {"C-share", kShareAlways},
+    {"B-copy", kCopyAlways},
+    {"D-default", kTrait},
+    {"C-share", kShareAlways},
 };
 
 /**
@@ -300,7 +302,7 @@ int calibrate() {
     expect("copy-always (the control arm B) never shares", control.pins, 0);
     expect("copy-always copies every store", control.copies, control.lat.n);
 
-    // The arm that intends to share everything: threshold 0.
+    // The arm that intends to share everything: SHARE.
     const cell_result_t pos = run_cell(1024, 0, kShareAlways);
     expect("share-always arm on a trailer-less owning frame shares every store", pos.copies, 0);
     expect("... and its share count is the sample count", pos.pins, pos.lat.n);
@@ -311,13 +313,16 @@ int calibrate() {
     expect("span-delivered (borrowed) frame never shares", borrowed.pins, 0);
 
     // --- the predicate's own declining direction ------------------------------------------
-    // Threshold: a 64 B payload (68 B TLV) is below a 4,096 B threshold.
-    expect("threshold 4096 never shares a 64 B payload", run_cell(64, 65536, 4096).pins, 0);
+    // The slab pool's trait: a 64 B payload in a 64 KiB receive segment is copied, because a
+    // copy draws a far smaller class than the block it would otherwise hold.
+    if constexpr (tr::mem::kSlabPool)
+        expect("DEFAULT on the slab pool never shares a 64 B payload in a 64 KiB segment",
+               run_cell(64, 65536, kTrait).pins, 0);
 
     if constexpr (tr::graph::kInstrumentCounters) {
         expect("decision-site counter agrees with the outcome (positive)", pos.site_pins, pos.pins);
         expect("decision-site counter agrees with the outcome (CRC)", crc.site_pins, 0);
-        // A borrowed frame clears the threshold, so the predicate asks `pin_wire` — which has no
+        // A borrowed frame on a SHARE arm makes the predicate ask `pin_wire` — which has no
         // owning segment to share and refuses. Every store is therefore a REFUSAL that falls
         // through to a copy; the two counters must agree on that, sample for sample.
         expect("borrowed frame is REFUSED by pin_wire at share-always", borrowed.site_refused,
@@ -367,7 +372,7 @@ int main(int argc, char** argv) {
     if (do_calibrate) return 0;
 
     std::printf(
-        "# RESULT_PIN round arm threshold payload segment p50ns p99ns meanns pins copies n "
+        "# RESULT_PIN round arm hint payload segment p50ns p99ns meanns pins copies n "
         "site_pins site_copies site_refused\n");
     for (int r = 0; r < rounds; ++r) {
         // Rotate the arm order every round: arm i leads round i. Interleaving is the whole
@@ -378,8 +383,8 @@ int main(int argc, char** argv) {
             const arm_t& arm = arms[(static_cast<std::size_t>(r + round0) + j) % n];
             for (std::size_t payload : kPayloads)
                 for (std::size_t segment : kSegments)
-                    emit_pin(r + round0, arm.label, arm.threshold, payload, segment,
-                             run_cell(payload, segment, arm.threshold));
+                    emit_pin(r + round0, arm.label, arm.hint, payload, segment,
+                             run_cell(payload, segment, arm.hint));
         }
     }
     return 0;

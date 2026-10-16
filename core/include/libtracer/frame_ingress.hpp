@@ -200,7 +200,7 @@ class frame_ingress_t {
             // a body under 4 GiB, so its length fits the 32-bit count.
             in_body_ = true;
             body_len_ = static_cast<std::uint32_t>(h.body);
-            if (h.body != 0) blk_ = view::alloc_rx(rx, h.body, graph::kShareThresholdBytes);
+            if (h.body != 0) blk_ = view::alloc_rx(rx, h.body);
             const std::size_t rest = hdr_have_ - h.size;
             body_have_ = static_cast<std::uint32_t>(std::min(rest, h.body));
             if (blk_.seg && body_have_ != 0)

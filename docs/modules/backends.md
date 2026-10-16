@@ -303,6 +303,23 @@ class block and the platform allocator sees only whole slabs.
 :project: libtracer
 ```
 
+The same module answers the copy-or-share question for the block source the build composes
+(RFC-0022 Amendment 3): whether a stored value may keep the receive block it arrived in, and
+whether a receive block takes the loan reserve. Both are compile-time traits of the build, read
+off the size-class table; neither is a runtime member.
+
+```{doxygenfunction} tr::mem::class_ceiling
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::share_fits
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::rx_loan_free
+:project: libtracer
+```
+
 ### The heap backend and the space tags
 
 ```{doxygenclass} tr::mem::heap_backend_t

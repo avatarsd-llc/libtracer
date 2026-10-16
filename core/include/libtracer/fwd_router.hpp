@@ -1574,9 +1574,9 @@ class fwd_router_t {
      * A single-link rope (every current producer) runs the same routing as
      * @ref on_frame over the link's bytes span — the forward hop is untouched
      * (offset-dispatch, zero heap) — and threads the owning view to the
-     * terminus, where a big trailer-less WRITE payload may be stored as a
+     * terminus, where a trailer-less WRITE payload may be stored as a
      * subview of it (refcount share, zero copy) under the vertex's
-     * `share_threshold_bytes`. A multi-link rope routes a FORWARD hop
+     * `share_hint` and the build's block source. A multi-link rope routes a FORWARD hop
      * directly over the rope cursor (ADR-0053 ④b): the dispatch offsets are read
      * through the link-walking @ref wire::grammar::rope_cursor and the egress
      * scatter-gathers the untouched links — no flatten. Only a terminus / reply /
