@@ -397,7 +397,12 @@ target_compile_options(bench_conn_ram PRIVATE -Wall -Wextra)
 # The peer-path counted metrics (#2137): copies, socket syscalls and voluntary switches per
 # relayed frame, and idle wakeups per second. COUNTS, not times — the WIDE rows of the
 # counted-metrics ledger (bench/ledger/, gated by bench/counted_ledger.py on every PR).
-add_executable(bench_peer_counts bench_peer_counts.cpp)
+# The executable compiles its own transport_ws.cpp, built so that the client's masking pass
+# reports its size (the copy a memcpy interposer cannot see, #2145). Every symbol of that TU
+# is then defined here, so the archive's transport_ws.cpp.o is never pulled; if it were, the
+# link would fail on a duplicate definition rather than count the wrong copy.
+add_executable(bench_peer_counts bench_peer_counts.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../core/src/transport_ws.cpp)
+target_compile_definitions(bench_peer_counts PRIVATE LIBTRACER_COUNT_MASK_COPY=bench_note_mask_copy)
 target_link_libraries(bench_peer_counts PRIVATE libtracer ${CMAKE_DL_LIBS})
 # The interposed memcpy/memmove are byte loops; without this flag GCC recognizes the loop
 # idiom and compiles it back into a call to memcpy, which then recurses into itself.

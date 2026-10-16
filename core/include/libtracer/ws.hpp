@@ -351,6 +351,13 @@ struct header_t {
 
 namespace detail {
 
+#ifdef LIBTRACER_COUNT_MASK_COPY
+// A build that defines LIBTRACER_COUNT_MASK_COPY to a function name is told the size of every
+// copying mask pass (bench/bench_peer_counts.cpp counts it as a copy, which a memcpy
+// interposer cannot see). No library build defines it, so the default build has no call here.
+extern "C" void LIBTRACER_COUNT_MASK_COPY(std::size_t n) noexcept;
+#endif
+
 /**
  * @brief Write @p src into @p dst XORed with the RFC 6455 masking key @p key (§5.3), in one
  *        pass: byte `i` takes key byte `(phase + i) % 4` — eight bytes per step, not one
@@ -377,6 +384,9 @@ inline std::size_t mask_copy(std::byte* dst, std::span<const std::byte> src,
                              const std::array<std::uint8_t, 4>& key, std::size_t phase) noexcept {
     const std::byte* const in = src.data();
     const std::size_t n = src.size();
+#ifdef LIBTRACER_COUNT_MASK_COPY
+    if (dst != in && n != 0) LIBTRACER_COUNT_MASK_COPY(n);
+#endif
     const std::size_t to_aligned = (8u - reinterpret_cast<std::uintptr_t>(dst) % 8u) % 8u;
     const std::size_t head = to_aligned < n ? to_aligned : n;
     std::size_t i = 0;
