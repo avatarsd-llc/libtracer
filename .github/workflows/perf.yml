@@ -85,8 +85,9 @@ on:
 # merge queue wait on. Push-to-main runs never cancel each other: each is a commit's ratchet
 # and history point, so a push is grouped by its SHA (one run per group). A ref-wide group
 # would not do: GitHub keeps one PENDING run per group and drops the rest even with
-# cancel-in-progress off, which would cost queued commits their points. A cancelled gate-pr still runs its `if: always()` affinity-restore step,
-# and this workflow takes no host-side bench lock, so cancelling leaves nothing held.
+# cancel-in-progress off, which would cost queued commits their points. A cancelled gate-pr
+# still runs its `if: always()` affinity-restore step, and this workflow takes no host-side
+# bench lock, so cancelling leaves nothing held.
 concurrency:
   group: perf-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

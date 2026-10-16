@@ -219,6 +219,10 @@ calibrates its own batch size against the host clock rather than hardcoding a nu
 routing operation costs the same order as `clock_gettime`, so timing one operation at a time
 measures the clock instead of the code.
 
+The build-to-build history is measured on the bench-only aligned build
+(`-falign-functions=64`) from the commit that merges #2188 (the aligned bench build) on,
+so every series steps at that commit because of the flag, not a code change (see the
+gate's alignment rule below).
 `bench_forward_demux` and `bench_chain_delivery` are recorded into the build-to-build
 history alongside the in-process series, so a routing or delivery regression shows up as a
 trend rather than being noticed later. They emit the same `RESULT` rows as `bench_libtracer`,
@@ -555,7 +559,11 @@ Details that make these trustworthy:
   regression that adds work, or that changes data layout (a new cache miss, false sharing),
   still moves the aligned build. The flag is bench-only: no `CMakeLists.txt` carries it, the
   shipped and default builds never see it, and `perf-local`'s published series stays on the
-  default build. `test_perf_gate.py` checks that every timed arm in `perf.yml` takes it.
+  default build. The ratchet's HEAD arm *is* aligned, and it feeds the push history at
+  `/dev/bench/`: every series there steps at the commit that merges #2188 (the aligned bench
+  build) and from then on describes the aligned build, not the shipped one, so a step at that
+  commit is the flag and not a code change. `test_perf_gate.py` checks that every timed arm
+  in `perf.yml` takes it.
 - A point's leg fails only when **both** of these hold, and the gate prints each, with the
   numbers: the **median of the per-pair ratios** candidate/baseline is past the row's
   threshold (the effect is big enough), and a **bootstrap 95% confidence interval** on
