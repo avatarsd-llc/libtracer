@@ -18,7 +18,11 @@
  *   (b) `retire` with no room for its key or its seam — `retire_refused`;
  *   (c) a link teardown, swept over every budget the source could have left: the park is
  *       never refused (its entry was reserved when the connection was created), and every
- *       removal that completes gives back every block it drew.
+ *       removal that completes gives back every block it drew;
+ *   (d) a creation (a module's endpoint, a connection) swept over every budget: a refusal,
+ *       the park reservation's among them, answers `BACKPRESSURE` and creates nothing;
+ *   (e) a null release hook handed to `park_release` / `park_reserved` parks nothing, so
+ *       `collect()` never frees the caller's context into the table source as a seam.
  *
  * The unsubscribe refusal (`release_refused`) is reclaim_test's (f).
  */
@@ -262,11 +266,94 @@ void test_link_teardown_cannot_be_refused_its_park() {
     check(bus.no_leak, "bus: every completed removal leaked nothing");
 }
 
+/** @brief Sweep one creation over every budget: each refusal answers `BACKPRESSURE` and
+ *         creates nothing, and some refusal is the park reservation's own. */
+template <class Create, class Exists>
+void sweep_creation(const char* what, Create create, Exists exists) {
+    bool answered = true, nothing_created = true, reservation_refused = false, done = false;
+    for (std::size_t allow = 0; allow < 512 && !done; ++allow) {
+        gate_source_t src;
+        {
+            graph_t g{src};
+            fwd_router_t router(g);
+            transport_vertex_t net(g, router);
+            p2p_link_t link;
+            const auto r = create(g, net, link, src, allow);
+            if (r) {
+                done = true;
+                continue;
+            }
+            answered = answered && r.error() == status_t::BACKPRESSURE;
+            nothing_created = nothing_created && !exists(g);
+            reservation_refused = reservation_refused || g.reclaim_refusals().park_refused != 0;
+        }
+        nothing_created = nothing_created && src.live() == 0;
+    }
+    std::printf("  %s:\n", what);
+    check(done, "some budget lets the creation complete");
+    check(answered, "every refused creation answered BACKPRESSURE");
+    check(nothing_created, "every refused creation created nothing and leaked nothing");
+    check(reservation_refused, "some refusal was the park reservation's");
+}
+
+/** @brief Whether @p path names a vertex in @p g. */
+bool exists_at(graph_t& g, const char* path) {
+    const auto p = path_t::parse(path);
+    return p && g.find(p->key()).has_value();
+}
+
+void test_creation_refused_its_reservation() {
+    std::printf("#2118 (d): a creation whose park entry cannot be reserved is refused whole:\n");
+    sweep_creation(
+        "a module declaration (its creator endpoint)",
+        [](graph_t&, transport_vertex_t& net, p2p_link_t&, gate_source_t& src, std::size_t allow) {
+            src.arm(allow);
+            const auto r = net.register_module("ws-client", "", tr::net::conn_role_t::DIAL);
+            src.disarm();
+            return r;
+        },
+        [](graph_t& g) { return exists_at(g, "/net/ws-client/conn"); });
+    sweep_creation(
+        "a connection",
+        [](graph_t& g, transport_vertex_t& net, p2p_link_t& link, gate_source_t& src,
+           std::size_t allow) -> tr::graph::result_t<void> {
+            if (!net.register_module("ws-client", "", tr::net::conn_role_t::DIAL))
+                return std::unexpected(status_t::NOT_FOUND);
+            net.provide_link("ws-client", "c", link);
+            const auto p = path_t::parse("/net/ws-client/conn");
+            src.arm(allow);
+            const auto r = g.write(*p, tr::net::conn_spec_t("c").view());
+            src.disarm();
+            return r;
+        },
+        [](graph_t& g) { return exists_at(g, "/net/ws-client/c"); });
+}
+
+void test_null_hook_is_never_freed() {
+    std::printf("#2118 (e): a null release hook parks nothing and is never freed as a seam:\n");
+    gate_source_t src;
+    {
+        graph_t g{src};
+        int not_from_the_pool = 0;
+        check(g.park_release({&not_from_the_pool, nullptr}).has_value(),
+              "park_release with a null hook answers {}");
+        check(g.reserve_park().has_value(), "a reservation ...");
+        g.park_reserved({&not_from_the_pool, nullptr});
+        check(g.parked_seam_count() == 0, "... and park_reserved with one: neither parks a seam");
+        const std::size_t live = src.live();
+        g.collect();
+        check(src.live() == live, "collect() frees nothing into the table source");
+    }
+    check(src.live() == 0, "the graph gave back every block it drew");
+}
+
 }  // namespace
 
 int main() {
     test_park_refusals();
     test_retire_refusal();
     test_link_teardown_cannot_be_refused_its_park();
+    test_creation_refused_its_reservation();
+    test_null_hook_is_never_freed();
     return tr::testing::summary("reclaim_refusal");
 }

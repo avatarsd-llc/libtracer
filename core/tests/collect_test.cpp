@@ -29,7 +29,9 @@
  *       seam per teardown and `collect()` drains it, while the point-to-point control
  *       (`bus() == nullptr` — every dial link, UDP, loopback, a default-wired server) parks
  *       ZERO. Both halves matter: a default-transport embedder needs no quiescent point, and
- *       a bus node is the one that leaks without one.
+ *       a bus node is the one that leaks without one;
+ *   (e) the graph keeps ONE park for every kind (#2118): seams, a removed link's block, a
+ *       creator endpoint's context and an embedder's release, all drained by one collect().
  */
 
 #include <algorithm>
@@ -38,6 +40,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <span>
 #include <string>
 #include <string_view>
@@ -353,6 +356,64 @@ void test_churn_is_bounded_by_collect() {
     check(g.parked_seam_count() == 0, "and ends empty after 64 connect/teardown cycles");
 }
 
+// ---------------------------------------------------------------------------
+// (e) ONE park for every kind (#2118): value seams, a removed link's block, a creator
+// endpoint's context and an embedder's own release all wait in the same park and leave at
+// the same collect().
+
+/** @brief A heap source that counts the blocks it has out, so a drain is a number. */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    counting_source_t() noexcept : tr::mem::block_source_t("counting") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        void* const p = ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+        live += p != nullptr;
+        return p;
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        --live;
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+    [[nodiscard]] tr::mem::source_stats_t stats() const noexcept override { return {}; }
+    std::size_t live = 0; /**< @brief Blocks handed out and not given back. */
+};
+
+/** @brief A release that counts its runs. */
+void count_runs(void* c) { ++*static_cast<int*>(c); }
+
+void test_one_park_drains_every_kind() {
+    std::printf("#2118(e): one park holds every kind, and one collect() drains them all:\n");
+    counting_source_t src;
+    graph_t g(src);
+    int runs = 0;
+    {
+        fwd_router_t router(g);
+        transport_vertex_t net(g, router);
+        bus_capable_link_t link;
+        // A bus connection's teardown parks a seam AND its link block.
+        check(create_conn(g, net, link, "bus"), "created a bus connection");
+        check(net.remove_connection(mount_of("bus")).has_value(), "and removed it");
+        // An embedder's own release, between the two transport teardowns.
+        check(g.park_release({&runs, &count_runs}).has_value(), "park an embedder release");
+        // The plane's destructor parks its creator endpoint's seam AND its context.
+    }
+    check(g.retire(make_handler_vertex(g, "/dev/mixed")).has_value(), "retire a seam vertex");
+    const std::size_t seams = g.parked_seam_count();
+    std::printf("  %zu seams parked beside 3 releases, %zu blocks out\n", seams, src.live);
+    check(seams == 3, "the identity, endpoint and handler seams are parked");
+    check(runs == 0, "and nothing has run before collect()");
+    const std::size_t before = src.live;
+    g.collect();
+    check(g.parked_seam_count() == 0, "one collect() frees every seam");
+    check(runs == 1, "and runs the embedder release exactly once");
+    // Three seam blocks, the link's park block and the endpoint's context (its module
+    // string included) are back in the source.
+    check(before - src.live >= seams + 2, "and frees the link block and the endpoint context");
+    const std::size_t after = src.live;
+    g.collect();
+    check(src.live == after && runs == 1, "a second collect() finds nothing left");
+}
+
 }  // namespace
 
 int main() {
@@ -361,6 +422,7 @@ int main() {
     test_park_is_keyed_on_handler_presence_not_role();
     test_remove_connection_parks_only_over_a_bus_link();
     test_churn_is_bounded_by_collect();
+    test_one_park_drains_every_kind();
 
     return tr::testing::summary("collect");
 }

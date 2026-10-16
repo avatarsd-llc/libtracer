@@ -577,7 +577,7 @@ void graph_t::trim_tables() noexcept {
 
 graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     : own_tables_(src),
-      retired_seams_(own_tables_.or_root(src)),
+      park_(own_tables_.or_root(src)),
       vertex_slots_(own_tables_.or_root(src)),
       src_backend_(src),
       child_types_(own_tables_.or_root(src)),
@@ -586,8 +586,7 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
       unconditional_(own_tables_.or_root(src)),
       ctl_(&src),
       values_(sub_pool(src, mem::value_source())),
-      tables_(&own_tables_.or_root(src)),
-      parked_releases_(own_tables_.or_root(src)) {
+      tables_(&own_tables_.or_root(src)) {
     // The process-default FOLD, resolved in the BODY: `&src_backend_` is only taken once its
     // lifetime has started. A few stores at construction, never read again.
     // On the host default root (#1777) values and rings draw from the value sub-pool and
@@ -922,13 +921,12 @@ void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
         // at registration, whatever the role): a lock-free reader may still hold the old
         // pointer, so it is never freed here. The park's other end is the public collect(),
         // which the embedder calls at a moment it knows no reader holds a seam (#576); the
-        // graph's own teardown is a growth backstop only — retired_seams_ destructs LAST, so
-        // a seam that re-enters the graph must be collected explicitly. Under map_mutex_.
+        // graph's own teardown is a growth backstop only. Under map_mutex_.
         // Parking links the seam into an intrusive chain, and the slot table moves into room
         // `retire` reserved, so neither step can fail mid-walk (#1778).
         mem::block_array_t<subscriber_t> table(*tables_);
         if (value_handlers_t* seam = x.revert_to_placeholder(table))
-            (void)retired_seams_.seams.push_back({seam});            // reserved: cannot fail
+            (void)park_.push_back({{seam, nullptr}});                // reserved: cannot fail
         if (!table.empty()) (void)gone.push_back(std::move(table));  // reserved: cannot fail
     };
     v->mark_unregistered();
@@ -1217,17 +1215,17 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         // refusal retires nothing and the walk below cannot fail halfway (#1778).
         std::size_t n = 1;
         root->for_each_descendant([&n](vertex_t&) { ++n; });
-        if (!gone.reserve(n) || !retired_seams_.seams.reserve(retired_seams_.seams.size() + n)) {
+        // Past the entries other owners hold reservations for (`reserve_park`).
+        if (!gone.reserve(n) || !park_.reserve(park_.size() + park_tail_.reserved + n)) {
             refused_retire_.fetch_add(1, std::memory_order_relaxed);
             return std::unexpected(status_t::BACKPRESSURE);
         }
-        const std::size_t parked_before = retired_seams_.seams.size();
+        const std::size_t parked_before = park_.size();
         retire_subtree(root, gone);
         // Close the epoch AFTER every seam above is unpublished: a router frame that loaded
         // one of them is online at this epoch or older, and collect() waits it out.
         const std::uint32_t epoch = detail_qsbr::advance();
-        for (std::size_t i = parked_before; i < retired_seams_.seams.size(); ++i)
-            retired_seams_.seams[i].epoch = epoch;
+        for (std::size_t i = parked_before; i < park_.size(); ++i) park_[i].epoch = epoch;
     }
     // Each dropped routed edge gives its link hold back, outside every graph lock: an edge
     // is reported exactly twice over its life, and retirement is one of its ends (#1816).
@@ -1274,40 +1272,30 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
  * One QSBR horizon covers the whole call, taken BEFORE the map lock: its fence is paid once
  * and never under the lock (with the asymmetric fence, its `membarrier` only when a scan after
  * the fence finds a ripe front). An entry parked after it waits for the next call (qsbr.hpp
- * §qsbr_horizon). Epochs grow in park order, so the ripe entries are a prefix of each park. They
+ * §qsbr_horizon). Epochs grow in park order, so the ripe entries are a prefix of the park. They
  * are taken in stack-sized batches under the map lock, which draws nothing, and freed outside it.
  */
 void graph_t::collect() {
     constexpr std::size_t kBatch = 16;
     const detail_qsbr::horizon_t h = detail_qsbr::horizon([this](const detail_qsbr::horizon_t& h0) {
         const std::shared_lock lock(map_mutex_);
-        const auto& s = retired_seams_.seams;
-        const auto& r = parked_releases_.releases;
-        return (s.size() != 0 && h0.past(s[0].epoch)) || (r.size() != 0 && h0.past(r[0].epoch));
+        return park_.size() != 0 && h0.past(park_[0].epoch);
     });
     for (;;) {
-        std::array<value_handlers_t*, kBatch> seams{};
-        std::array<retired_callback_t, kBatch> releases{};
-        std::size_t ns = 0;
-        std::size_t nr = 0;
+        std::array<retired_callback_t, kBatch> taken{};
+        std::size_t n = 0;
         {
             // Under the map lock: nothing but the take, one compare per entry. The lock is what
             // serialises us against retire_subtree's append; no user code runs under it.
             const std::unique_lock lock(map_mutex_);
-            auto& s = retired_seams_.seams;
-            for (; ns < kBatch && ns < s.size() && h.past(s[ns].epoch); ++ns)
-                seams[ns] = s[ns].seam;
-            s.erase_front(ns);
-            auto& r = parked_releases_.releases;
-            for (; nr < kBatch && nr < r.size() && h.past(r[nr].epoch); ++nr)
-                releases[nr] = r[nr].release;
-            r.erase_front(nr);
+            auto& p = park_;
+            for (; n < kBatch && n < p.size() && h.past(p[n].epoch); ++n) taken[n] = p[n].release;
+            p.erase_front(n);
         }
         // Freed HERE — outside every graph lock, on the caller's thread. So a release may
         // re-enter the graph, and a slow one blocks no reader or writer.
-        for (std::size_t i = 0; i < ns; ++i) mem::drop_in(retired_seams_.seams.source(), seams[i]);
-        for (std::size_t i = 0; i < nr; ++i) releases[i].release(releases[i].ctx);
-        if (ns < kBatch && nr < kBatch) return;
+        for (std::size_t i = 0; i < n; ++i) free_parked(park_.source(), taken[i]);
+        if (n < kBatch) return;
     }
 }
 
@@ -1319,38 +1307,40 @@ result_t<void> graph_t::park_release(retired_callback_t release) {
 
 result_t<void> graph_t::reserve_park() {
     const std::unique_lock lock(map_mutex_);
-    auto& park = parked_releases_;
     // Room for every entry parked or reserved, plus this one; doubling, so an owner that
     // reserves per context (one per connection) does not regrow the park per context.
-    const std::size_t want = park.releases.size() + park.reserved + 1;
-    if (want > park.releases.capacity() &&
-        !park.releases.reserve(std::max(want, 2 * park.releases.capacity()))) {
+    const std::size_t want = park_.size() + park_tail_.reserved + 1;
+    if (want > park_.capacity() && !park_.reserve(std::max(want, 2 * park_.capacity()))) {
         refused_park_.fetch_add(1, std::memory_order_relaxed);
         return std::unexpected(status_t::BACKPRESSURE);
     }
-    ++park.reserved;
+    ++park_tail_.reserved;
     return {};
 }
 
 void graph_t::unreserve_park() noexcept {
     const std::unique_lock lock(map_mutex_);
-    assert(parked_releases_.reserved != 0 && "unreserve_park without a reservation");
-    --parked_releases_.reserved;
+    assert(park_tail_.reserved != 0 && "unreserve_park without a reservation");
+    --park_tail_.reserved;
 }
 
 void graph_t::park_reserved(retired_callback_t release) noexcept {
     const std::unique_lock lock(map_mutex_);
-    auto& park = parked_releases_;
-    assert(park.reserved != 0 && "park_reserved without a reservation");
-    --park.reserved;
+    assert(park_tail_.reserved != 0 && "park_reserved without a reservation");
+    --park_tail_.reserved;
+    // A null hook has nothing to run, so nothing is parked. It must not be: a null hook is how
+    // `retire` marks a value seam, and collect() would free the caller's context as one.
+    if (release.release == nullptr) return;
     // The caller has unpublished what @p release frees; this closes the epoch after it. The
     // reservation kept room for it, so the append cannot be refused.
-    (void)park.releases.push_back({release, detail_qsbr::advance()});
+    (void)park_.push_back({release, detail_qsbr::advance()});
 }
 
 std::size_t graph_t::parked_seam_count() const {
     const std::shared_lock lock(map_mutex_);
-    return retired_seams_.seams.size();
+    std::size_t n = 0;
+    for (const parked_t& e : park_) n += e.release.release == nullptr;
+    return n;
 }
 
 // ---- The per-link departure index's doors (#1071). The index itself — its slots, the
