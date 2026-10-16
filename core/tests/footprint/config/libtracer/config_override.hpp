@@ -18,6 +18,9 @@
  * The default root is the MCU one (`kSlabPool = false`): a static arena of `kArenaBytes`, which
  * the sentinel's RAM figure therefore includes. 2 KiB is what the fixture needs, not a
  * recommendation.
+ *
+ * The CRC-32C fold reads one table (`kCrc32cSlices = 1`, #2116): this is the NARROW node, whose
+ * 16 KiB flash budget cannot carry slice-by-8's 8 KiB of tables. The library default stays 8.
  */
 #pragma once
 
@@ -31,6 +34,7 @@ struct footprint_config_t : default_config_t {
     using guard_t = ::tr::no_guard_t;
     static constexpr bool kSlabPool = false;
     static constexpr std::size_t kArenaBytes = 2048;
+    static constexpr std::size_t kCrc32cSlices = 1;
 };
 
 using config_t = footprint_config_t;

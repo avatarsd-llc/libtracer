@@ -203,8 +203,8 @@ job step summary and a `footprint-<target>` artifact, and reviewed run to run.
 The Cortex-M0 sentinel is a hard gate (`--mode fail`, #2116): a node over 16 KiB reds the job.
 It ran in warn mode while the node was over budget, which the slice-by-8 CRC-32C tables alone
 explained: 7,168 B of the 8 KiB they took were the seven tables beyond the single one the
-constant-evaluated CRC already carries. `kCrc32cSlices` (below) now picks the single table on a
-32-bit-or-narrower core, and the node measures under the budget. The per-translation-unit
+constant-evaluated CRC already carries. The sentinel's fragment now binds `kCrc32cSlices = 1` (below), the
+NARROW choice, and the node measures under the budget; the library default stays slice-by-8. The per-translation-unit
 attribution that found it is in the pull request that flipped the gate; the run-to-run record is
 the `footprint-cortexm0` artifact series. The gate is a referee for
 the compile-time doctrine
@@ -226,7 +226,7 @@ is a knob the fragment does not state at all (#1244).
 | --- | --- | --- | --- |
 | `kVertexLockStripes` (`config.hpp:default_config_t::kVertexLockStripes`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})`) |
 | `kCacheLineBytes` (`config.hpp:default_config_t::kCacheLineBytes`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:if(CONFIG_FREERTOS_UNICORE)`) |
-| `kCrc32cSlices` (`config.hpp:default_config_t::kCrc32cSlices`) | table count | 8 on a 64-bit target, 1 below — the portable CRC-32C fold's tables (slice-by-8, 8 KiB, or the single 1 KiB Sarwate table); a hardware-CRC CPU reads neither (#2116) | inherited — 1 on a chip, 8 on `linux` |
+| `kCrc32cSlices` (`config.hpp:default_config_t::kCrc32cSlices`) | table count | 8 — the portable CRC-32C fold's tables: slice-by-8 (8 KiB) or 1, the single 1 KiB Sarwate table a NARROW node binds (the Cortex-M0 sentinel does). Indicative host figure, one run: 1.1 / 2.3 / 2.2 GB/s at 64 B / 1 KiB / 16 KiB for 8, 0.33 / 0.40 / 0.44 GB/s for 1. A hardware-CRC CPU reads neither (#2116) | inherited — 8 |
 | `kHazardReaderSlots` (`config.hpp:default_config_t::kHazardReaderSlots`) | count | 64 | inherited — unused on a chip, which binds the single-writer slot and never builds the domain |
 | `kEdgePinSlots` (`config.hpp:default_config_t::kEdgePinSlots`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_EDGE_PIN_SLOTS 8)`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`config.hpp:default_config_t::kMaxVertexBytes64` / `config.hpp:default_config_t::kMaxVertexBytes32`) | RAM ratchet | 88 / 64 | the preset — deliberately not overridable |

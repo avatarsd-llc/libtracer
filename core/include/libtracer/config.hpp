@@ -193,15 +193,16 @@ struct default_config_t {
      * CRC, byte for byte (a frozen-vector requirement), so this is an optimization choice,
      * never a correctness one.
      *
-     * The default follows the target's word size, so the right value is not a question the
-     * integrator has to be asked: a 64-bit host keeps slice-by-8, and a 32-bit-or-narrower
-     * core gets the single table. On the Cortex-M0 P0 node the seven extra tables were
-     * 7,168 B of its 16 KiB flash budget (#2116), and a core that small also has no cache
-     * for the extra tables to stay in. Override fragment:
-     * `static constexpr std::size_t kCrc32cSlices = 8;` on a 32-bit core with flash to spare
-     * and a frame rate that needs the faster fold.
+     * The default is 8 on every target: a MID or WIDE node with no CRC instruction (an rv32
+     * ESP32-C6, a 32-bit Linux board) keeps the fast fold on every frame. A NARROW node binds
+     * 1 explicitly; on the Cortex-M0 P0 node the seven extra tables were 7,168 B of its 16 KiB
+     * flash budget (#2116), and the footprint sentinel's fragment pins that choice.
+     * The trade, indicative only (one isolated run of the portable fold under `nice`, host
+     * x86-64, GCC 13.3, `-O2`): slice-by-8 folds 1.1 / 2.3 / 2.2 GB/s at 64 B / 1 KiB / 16 KiB,
+     * the single table 0.33 / 0.40 / 0.44 GB/s, about 3.4x to 5.6x slower.
+     * Override fragment: `static constexpr std::size_t kCrc32cSlices = 1;`.
      */
-    static constexpr std::size_t kCrc32cSlices = sizeof(void*) >= 8 ? 8 : 1;
+    static constexpr std::size_t kCrc32cSlices = 8;
 
     /**
      * @brief How many threads may hold a hazard announcement at once (ADR-0069 §3).

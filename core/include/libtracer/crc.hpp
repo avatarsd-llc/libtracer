@@ -73,8 +73,8 @@ inline constexpr auto kCrc16 = crc16_table();
 // Slice-by-8 tables for the portable (no-hardware) CRC-32C path: table[0] is the
 // single-byte Sarwate table; table[k][i] folds `i` forward `k` extra bytes. Built
 // at compile time from the base table; used only on the runtime fallback path, and
-// only where config_t::kCrc32cSlices is 8, so its 8 KiB of rodata reaches neither a
-// hardware-CRC CPU nor a single-table build (#2116).
+// only where config_t::kCrc32cSlices is 8 (the default), so its 8 KiB of rodata
+// reaches neither a hardware-CRC CPU nor a NARROW build that binds 1 (#2116).
 constexpr std::array<std::array<std::uint32_t, 256>, 8> crc32c_slice_tables() noexcept {
     std::array<std::array<std::uint32_t, 256>, 8> t{};
     t[0] = crc32c_table();

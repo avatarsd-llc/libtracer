@@ -27,7 +27,7 @@ budget is the one footprint gate):
     referee catches any regression past the ceiling. The node was over the bound from
     the sentinel's first run until #2116 attributed the overage per translation unit:
     the slice-by-8 CRC-32C tables (8 KiB of `.rodata`) were the standing excess, and
-    `config_t::kCrc32cSlices` now picks the single table on a 32-bit core.
+    the sentinel's config fragment binds `kCrc32cSlices = 1`, the NARROW choice.
   * warn — over budget prints `::warning::` and exits 0. For a local run that wants
     the report without the verdict; no workflow uses it.
 
