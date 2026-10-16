@@ -348,19 +348,21 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     static constexpr std::size_t kDefaultTxInlineBytes = 1600;
 
     /**
-     * @brief Replacements of a peer's waiting frame, each after a write its socket took zero
-     *        bytes of, that strike the peer (#2095).
+     * @brief Refused large frames, each while a peer pinned a block of the large class
+     *        after a write its socket took zero bytes of, that strike the peer (#2095).
      *
-     * The flush writes without waiting, so a full socket is never an error, and a peer that
-     * never drains would otherwise hold its seat, its slot and a reference to a frame for as
-     * long as it stayed connected. Counted in publishes, not time — this link reads no clock:
-     * at 100 updates/s the default strikes a peer whose socket took nothing for about 0.6 s of
-     * them, at 1/s after about a minute. Any byte the socket takes clears the count. The
-     * strike closes the session through the ordinary strike path (@ref stats_t::
-     * tx_stall_strikes counts it, @ref stats_t::sessions_condemned too). A large frame
-     * refused because the large class is spent counts as a replacement attempt for each peer
-     * holding a block of that class with no byte moved, so a peer pinning the class's last
-     * block is struck the same way. Compile-time.
+     * A frame refused at the full queue (@ref kTxWaitDepth) never counts: a healthy peer
+     * subscribed to many vertices fills its queue in one burst while its TCP window is shut,
+     * and striking it would loop it through reconnects (#2195). So a peer that receives only
+     * small frames and whose socket never drains holds its seat, and at most
+     * 1 + @ref kTxWaitDepth frames, until the transport fails it (a failed write strikes).
+     *
+     * The flush writes without waiting, so a full socket is never an error. What this bound
+     * stops is a peer that never drains pinning the large class's blocks, which every other
+     * peer's large frames need. Counted in refused publishes, not time — this link reads no
+     * clock. Any byte the socket takes clears the count. The strike closes the session
+     * through the ordinary strike path (@ref stats_t::tx_stall_strikes counts it,
+     * @ref stats_t::sessions_condemned too). Compile-time.
      */
     static constexpr std::uint32_t kTxStallStrikes = 64;
     /**
@@ -773,9 +775,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          * that returns once the link knows a frame's lane.
          */
         std::uint32_t tx_conflated = 0;
-        /** @brief Sessions closed because @ref kTxStallStrikes newer frames were refused at
-         *         their full queue while their socket took nothing (#2095, #2195); a subset
-         *         of @ref sessions_condemned. */
+        /** @brief Sessions closed after @ref kTxStallStrikes refused large frames while they
+         *         pinned the class and their socket took nothing (#2095); never because their
+         *         queue was full (#2195). A subset of @ref sessions_condemned. */
         std::uint32_t tx_stall_strikes = 0;
         /**
          * @brief Of @ref enqueue_drops, the ones that found the LARGE size class exhausted
@@ -1638,9 +1640,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Post this link's ONE flush to the httpd task unless one is already posted.
      *  @return False when the control queue refused it. */
     bool post_flush(httpd_handle_t h);
-    /** @brief Count a waiting frame a newer one replaced, on the link and on the session it
-     *         was gathered for (takes @ref peers_m_). */
-    void note_tx_conflated(const session_ref_t& to);
 
     /**
      * @brief Send a directed reply to @p to RIGHT NOW — the fork @ref queue_send is not

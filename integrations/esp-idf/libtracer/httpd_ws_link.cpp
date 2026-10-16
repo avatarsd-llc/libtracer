@@ -1149,11 +1149,13 @@ struct httpd_ws_link_t::session_t {
      *         write, and never with `peers_m_` taken under it. */
     std::mutex tx_m;
     /**
-     * @brief Writes of this session's frames that the socket took nothing of, each followed
-     *        by a newer frame refused at the full queue (tx_m).
+     * @brief Refused large draws while this session pinned the class and its last write
+     *        moved no byte (tx_m).
      *
-     * Bumped by @ref httpd_ws_link_t::stage when it refuses a frame after such a write
-     * (@ref tx_refused), cleared by any write that moves a byte. At
+     * Bumped by @ref httpd_ws_link_t::note_large_pinned for a peer pinning a large block
+     * after such a write (@ref tx_refused), and by nothing else; cleared by any write that
+     * moves a byte. A frame refused at the full queue never bumps it: a healthy peer
+     * subscribed to many vertices fills its queue in one burst (#2195). At
      * @ref httpd_ws_link_t::kTxStallStrikes the flush condemns the session through the
      * strike path: a peer whose socket never drains holds no seat for ever.
      */
@@ -1664,12 +1666,11 @@ void* httpd_ws_link_t::claim_tx_large(std::atomic<bool>*& flag) {
 
 void httpd_ws_link_t::note_large_pinned() {
     // The class is spent, and a peer whose socket took nothing may be what holds it: its frame
-    // pins a block no later large frame can replace, so no replacement ever happens and the
-    // stall count of stage() never moves. Each refused draw therefore counts as a replacement
-    // attempt for every peer that holds a block of the class and whose last write moved no
-    // byte (tx_refused, cleared only by a write that moves one). Reaching kTxStallStrikes
-    // posts the flush that strikes it, which hands the block back. Same chunked walk as the
-    // flush; no timer, no clock.
+    // pins a block no later large frame can have, and a full queue never strikes (#2195).
+    // Each refused draw therefore counts against every peer that holds a block of the class and
+    // whose last write moved no byte (tx_refused, cleared only by a write that moves one). Reaching
+    // kTxStallStrikes posts the flush that strikes it, which hands the block back. Same chunked
+    // walk as the flush; no timer, no clock.
     session_t* batch[kFanoutChunk];
     std::size_t next = 0;
     bool strike = false;
@@ -3444,9 +3445,9 @@ void httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
     // from one vertex is not a newer value of another, and an event or an ANNOUNCE is owed to
     // the peer once. A full queue, or a refused node draw, refuses the NEW frame — the link's
     // counted drop — and a slow peer holds no more than its own few frames and no part of the
-    // httpd task that another peer needs. A refusal that follows a write the socket took
-    // nothing of is a stall (session_t::tx_stalls), which the flush strikes at
-    // kTxStallStrikes.
+    // httpd task that another peer needs. A refusal is never a stall strike: a healthy peer
+    // subscribed to many vertices fills its queue in one burst while its TCP window is shut
+    // for an RTT, and striking it would loop it through reconnects (#2174 rules the same).
     session_t* const s = to.slot;
     bool refused = false;
     bool full = false;
@@ -3465,11 +3466,7 @@ void httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
             node = raw != nullptr ? new (raw) tx_wait_t : nullptr;
         }
         if (node == nullptr) {
-            refused = true;
-            if (s->tx_refused) {
-                ++s->tx_stalls;
-                s->tx_refused = false;
-            }
+            refused = true;  // counted below, and never a stall strike
         } else {
             blk->refs.fetch_add(1, std::memory_order_relaxed);
             node->frame = tx_frame_t{blk, to.gen, 0};
@@ -3478,8 +3475,9 @@ void httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
             s->tx_tail = node;
         }
     }
-    // A refused frame still posts the flush: the socket is offered the wire frame again, and
-    // that offer is what a stalled peer's strike count is made of. A full queue is this
+    // A refused frame still posts the flush, at most one per link (post_flush): a socket that
+    // reopened is offered its held frames on this link's own traffic, and the zero-byte write
+    // it may meet only arms tx_refused, which no refusal reads. A full queue is this
     // peer's own pace, as a replacement was before it, so it is counted and not logged per
     // frame (a stalled peer at 100 updates/s would otherwise log 100 lines a second); a
     // refused node draw is the link's memory, and logs like every other refused enqueue.
@@ -3520,14 +3518,6 @@ bool httpd_ws_link_t::post_flush(httpd_handle_t h) {
         return true;
     flush_posted_.store(false, std::memory_order_seq_cst);
     return false;
-}
-
-void httpd_ws_link_t::note_tx_conflated(const session_ref_t& to) {
-    tx_conflated_.fetch_add(1, std::memory_order_relaxed);
-    const std::lock_guard lock(peers_m_);
-    // The identity test live_fd makes: a replaced frame is charged to the session it was
-    // gathered for or to nobody, never to whoever holds the slot now (#954).
-    if (to.slot->gen == to.gen) ++to.slot->st.tx_conflated;
 }
 
 void httpd_ws_link_t::send_in_call(const session_ref_t& to,
@@ -4137,10 +4127,10 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
             continue;
         }
         if (stalled) {
-            // kTxStallStrikes newer frames replaced this peer's, each after a write its socket
-            // took nothing of: the peer is not draining, and a full socket under MSG_DONTWAIT is
-            // never an error, so without this it would hold its seat and its slot for ever.
-            // Through the strike path, as a peer whose writes fail is (note_tx_result).
+            // kTxStallStrikes large frames were refused while this peer pinned the class and
+            // its socket took nothing: the peer is not draining, and a full socket under
+            // MSG_DONTWAIT is never an error, so without this it would hold its seat and its slot
+            // for ever. Through the strike path, as a peer whose writes fail is (note_tx_result).
             const std::size_t len = f->blk->total();
             release_frame(*f);
             note_tx_result(to, false, len, /*stalled=*/true);
@@ -4152,7 +4142,8 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
         const bool moved = f->sent != before;
         {
             // What the stall count is about: a write that moved a byte clears it, one that moved
-            // none arms the next replacement to count (stage).
+            // none arms the next refused large draw to count (note_large_pinned). A full queue
+            // never counts: it is the peer's pace, and a burst fills it on a healthy socket.
             const std::lock_guard lock(s->tx_m);
             if (moved || out != tx_outcome_t::HELD) {
                 s->tx_stalls = 0;

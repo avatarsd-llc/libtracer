@@ -26,8 +26,9 @@
  *   8. the RAM: per-link and per-peer costs are reported and bind to the constructor sizes;
  *   9. a producer that posts once and goes quiet: the newest frame still arrives whole, moved
  *      by the link's own events (a write that took bytes, an inbound frame, flush_held);
- *  10. a peer whose socket never drains is struck after kTxStallStrikes refusals, and
- *      so is one that pins the large class's only block (refused draws count against it);
+ *  10. a burst past the full queue into a shut TCP window is counted and never a strike
+ *      (#2195), but a peer that pins the large class's only block is struck (refused
+ *      draws count against it);
  *  11. producers racing session close and reclaim on the httpd task (the TSan lane);
  *  12. no frame replaces another (#2195): two vertices written back to back on a busy wire
  *      both deliver, frames from no vertex are never replaced, and a frame offered to a full
@@ -506,15 +507,15 @@ void test_a_quiet_producer_still_delivers_the_newest_frame() {
 }
 
 // ---------------------------------------------------------------------------
-// 10 — a peer that never drains is struck.
+// 10 — a full queue never strikes; pinning the large class does.
 // ---------------------------------------------------------------------------
 /**
- * @brief kTxStallStrikes replacements, each after a write the socket took nothing of, close
- *        the session through the strike path; a frame a socket takes ANY byte of clears the
- *        count, so a slow peer that drains is never struck.
+ * @brief More than kTxWaitDepth + kTxStallStrikes frames into a peer whose socket takes
+ *        nothing, with a flush between each, are counted refusals and no strike: the peer
+ *        stays connected. A slow peer that drains a little at a time is never struck either.
  */
-void test_a_peer_that_never_drains_is_struck() {
-    std::printf("a peer whose socket never drains:\n");
+void test_a_full_queue_never_strikes() {
+    std::printf("a burst into a peer whose TCP window is shut:\n");
     auto link = make_link();
     claim(kStalled);
     claim(kHealthy);
@@ -523,22 +524,30 @@ void test_a_peer_that_never_drains_is_struck() {
     const auto push = [&](std::size_t i) {
         const auto frame = tagged(i);
         link->send(std::span<const std::byte>(frame));
-        drain();
+        drain();  // the httpd task preempts the producer: a flush runs between stages
     };
-    // The first frame goes on the wire and kTxWaitDepth wait behind it; each one after that is
-    // refused at the full queue, and N refusals are a strike.
+    // A subtree subscribe or a many-field settings write fans one frame per vertex out in a
+    // step, and the first KiB fill the send buffer until the next ACK. The first frame goes on
+    // the wire, kTxWaitDepth wait, and every later one is refused, each followed by a flush
+    // whose write moves no byte. None of that is a stall strike (#2195, as #2174 rules).
     constexpr std::size_t kFill = 1 + httpd_ws_link_t::kTxWaitDepth;
-    for (std::size_t i = 0; i < kFill + httpd_ws_link_t::kTxStallStrikes - 1; ++i) push(i);
-    check_eq(link->stats().tx_stall_strikes, 0, "one refusal short of the bound: not struck");
+    constexpr std::size_t kBurst = kFill + httpd_ws_link_t::kTxStallStrikes + 16;
+    const std::uint32_t drops_before = link->stats().enqueue_drops;
+    for (std::size_t i = 0; i < kBurst; ++i) push(i);
+    check_eq(link->stats().enqueue_drops - drops_before, kBurst - kFill,
+             "every frame past the queue is a counted refusal");
+    check_eq(link->stats().tx_stall_strikes, 0, "and none of them is a stall strike");
+    check_eq(link->stats().sessions_condemned, 0, "no session condemned");
+    check(fake_httpd::instance().has_session(kStalled), "the peer stays connected");
     std::size_t census = 0;
     link->enumerate_peers([&census](std::string_view) { ++census; });
     check_eq(census, 2, "both peers are still served");
-    push(kFill + httpd_ws_link_t::kTxStallStrikes);
-    check_eq(link->stats().tx_stall_strikes, 1, "the bound reached: struck, and counted");
-    check_eq(link->stats().sessions_condemned, 1, "through the strike path (condemned)");
-    census = 0;
-    link->enumerate_peers([&census](std::string_view) { ++census; });
-    check_eq(census, 1, "the stalled peer left the census; the healthy one stays");
+    // The window opens: the held frames go out, oldest first, and the peer is served again.
+    fake_httpd::instance().clear_sent_frames();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
+    link->flush_held();
+    drain();
+    check_eq(frames_to(kStalled).size(), kFill, "its held frames all go out once it drains");
 
     // A peer that drains a little at a time is not struck, however long it is slow.
     reset(link);
@@ -803,7 +812,7 @@ int main() {
     test_producers_and_the_drain_race_without_wedging();
     test_the_ram_is_reported_and_binds();
     test_a_quiet_producer_still_delivers_the_newest_frame();
-    test_a_peer_that_never_drains_is_struck();
+    test_a_full_queue_never_strikes();
     test_a_peer_pinning_the_last_large_block_is_struck();
     test_producers_race_close_and_reclaim();
     test_two_vertices_both_deliver();

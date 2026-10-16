@@ -23,8 +23,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     refusal is counted, not logged per frame. A refused node draw also counts there, and logs.
   - `stats_t::tx_conflated` keeps its place and reads 0. `stats_t`'s layout is unchanged and
     pinned by `static_assert`.
-  - `tx_stall_strikes` now counts refusals after a zero-byte write, not replacements, so a peer
-    that never drains is struck after `kTxWaitDepth + kTxStallStrikes` frames.
+  - A full-queue refusal is never a stall strike, so a healthy peer subscribed to many
+    vertices is not disconnected by a burst. `tx_stall_strikes` now comes only from a peer
+    that pins the large class while its socket takes nothing. A peer that receives only
+    small frames and never drains holds its seat and at most 9 frames until the transport
+    fails it.
+  - The 8 is per peer, across every vertex: a burst to more than 8 vertices on a busy socket
+    loses its tail, counted. Same-path latest-wins returns with #2196 (per-path
+    conflation). The refusal is counted link-wide only; a per-session count would change
+    the pinned `stats_t` layout and is a follow-up.
   - The first waiting frame uses a node inside the session slot. Each further one draws a
     16 B node (on 32-bit targets) from `memory.io` while it waits.
   - A slow peer now gets its held frames oldest first, not the newest value. Same-path
