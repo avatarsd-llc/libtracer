@@ -131,7 +131,8 @@ inline constexpr std::size_t kLocalParkSlots =
  * so `parked` is storage rather than a container.
  */
 struct dispatch_state_t {
-    /** @brief Nesting depth of `fan_out` / latch dispatch on this thread; 0 ⇒ quiescent. */
+    /** @brief Nesting depth of `fan_out` / latch dispatch on this thread; 0 ⇒ quiescent. Stays
+     *         0 under `reclaim_qsbr`, whose count is the QSBR thread record's. */
     unsigned depth;
     /** @brief How many of @ref parked are occupied. Stays 0 under `reclaim_qsbr`. */
     unsigned parked_n;
@@ -181,16 +182,15 @@ struct dispatch_state_t {
 class dispatch_scope_t {
    public:
     dispatch_scope_t() noexcept {
-        if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
-            dispatch_state_t& s = dispatch_state();
-            if constexpr (reclaim_policy_t::kGraceSpansThreads) {
-                // Only the OUTERMOST section announces (`enter` keeps the count, shared with
-                // the router's frame bracket). An inner one is already covered by the
-                // announcement the outer one made, and re-announcing at a NEWER epoch would let
-                // a scan conclude past a retirement the outer snapshot still names.
-                detail_qsbr::enter();
-            }
-            ++s.depth;
+        if constexpr (reclaim_policy_t::kGraceSpansThreads) {
+            // Only the OUTERMOST section announces (`enter` keeps the count, shared with the
+            // router's frame bracket). An inner one is already covered by the announcement the
+            // outer one made, and re-announcing at a NEWER epoch would let a scan conclude past
+            // a retirement the outer snapshot still names. The dispatch bracket IS the frame
+            // bracket here: one count, in the QSBR thread record.
+            detail_qsbr::enter();
+        } else if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
+            ++dispatch_state().depth;
         }
     }
     dispatch_scope_t(const dispatch_scope_t&) = delete;
@@ -199,9 +199,7 @@ class dispatch_scope_t {
     /** @brief Leaving the OUTERMOST dispatch is the grace point; anything inner is a decrement. */
     ~dispatch_scope_t() {
         if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
-            dispatch_state_t& s = dispatch_state();
             if constexpr (reclaim_policy_t::kGraceSpansThreads) {
-                --s.depth;
                 // Go quiescent FIRST, so this thread's own announcement is already withdrawn
                 // when the drain scans — otherwise every drain would see itself as a reason to
                 // defer, and a node with one dispatching thread would reclaim nothing, ever.
@@ -213,6 +211,7 @@ class dispatch_scope_t {
                 // Both fields live in the same thread-local object, so the common case — unwind
                 // to depth 0 with an empty park — is two loads off one base and a branch nobody
                 // takes.
+                dispatch_state_t& s = dispatch_state();
                 if (--s.depth == 0 && s.parked_n != 0) run_parked_releases(s);
             }
         }
@@ -220,13 +219,67 @@ class dispatch_scope_t {
 };
 
 /**
+ * @brief The frame bracket a fan-out opens for its remote edges: once, at the first remote
+ *        edge, so a fan-out over F links pays one outermost bracket instead of F.
+ *
+ * Under `reclaim_qsbr` the dispatch bracket already announces, so there is nothing to open.
+ * Under the other two policies it is the router's frame bracket (`%detail_qsbr::frame_scope_t`),
+ * and each remote delivery's own bracket then nests inside it. A fan-out with no remote edge
+ * never opens it, so an in-process write pays nothing (ADR-0038 §3a). The bracket only grows:
+ * it opens before the first remote edge's reads and closes after the last, which can only
+ * defer a free. It also stays open across any in-process callback that runs between the first
+ * and the last remote edge; under `reclaim_local` `thread_quiescent` is a no-op, so a router
+ * retirement such a callback makes waits for the router's next drain, not for the end of that
+ * remote delivery.
+ *
+ * The open and the close are out of line: a fan-out pays one flag test per edge inline, and
+ * the bracket's body is emitted once instead of in each of `fan_out`'s two loops.
+ */
+class remote_frame_t {
+   public:
+    remote_frame_t() = default;
+    remote_frame_t(const remote_frame_t&) = delete;
+    remote_frame_t& operator=(const remote_frame_t&) = delete;
+    /** @brief Open the bracket before @p e's delivery if @p e is remote and it is not open yet. */
+    void cover(const edge_view_t& e) noexcept {
+        if constexpr (!reclaim_policy_t::kGraceSpansThreads)
+            if (!open_ && e.has_remote_leg()) open(open_);
+    }
+    /** @brief Close it, if it was opened; the outermost close is a quiescent state. */
+    ~remote_frame_t() {
+        if constexpr (!reclaim_policy_t::kGraceSpansThreads)
+            if (open_) close();
+    }
+
+   private:
+    /**
+     * @brief Enter the frame bracket and set @p opened.
+     *
+     * The flag goes by reference on purpose: once it has escaped into an out-of-line call, the
+     * compiler cannot know it across the deliveries that follow, so it keeps one copy of each
+     * `fan_out` loop instead of splitting it into a before-open and an after-open copy.
+     */
+    [[gnu::noinline]] static void open(bool& opened) noexcept {
+        detail_qsbr::enter();
+        opened = true;
+    }
+    /** @brief Leave the frame bracket; the outermost leave is a quiescent state. */
+    [[gnu::noinline]] static void close() noexcept {
+        if (detail_qsbr::leave()) graph_t::thread_quiescent();
+    }
+    bool open_ = false; /**< @brief Whether @ref cover entered. */
+};
+
+/**
  * @brief Whether this thread is currently inside a delivery — the question `unsubscribe` asks.
  *
  * Under a non-deferring policy the depth is never maintained, so this is a compile-time
- * `false` and `unsubscribe`'s release is unconditionally inline.
+ * `false` and `unsubscribe`'s release is unconditionally inline. Under `reclaim_qsbr` the count
+ * is the QSBR thread record's, and nothing asks this: the domain scans instead.
  */
 [[nodiscard]] inline bool inside_dispatch() noexcept {
-    if constexpr (reclaim_policy_t::kDefersToDispatchExit) return dispatch_state().depth != 0;
+    if constexpr (reclaim_policy_t::kDefersToDispatchExit && !reclaim_policy_t::kGraceSpansThreads)
+        return dispatch_state().depth != 0;
     return false;
 }
 
@@ -2146,10 +2199,18 @@ void graph_t::fan_out(vertex_t* v, const value_t& value) {
     // dispatch re-enters the graph (a callback may publish, and a nested publish must not be
     // able to swallow this tally).
     if (drops.any()) count_snapshot_drops(drops);
+    // Every remote edge after the first nests in one frame bracket (see `remote_frame_t`).
+    remote_frame_t remote_frame;
     if (overflow.empty())
-        for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
+        for (std::size_t i = 0; i < n; ++i) {
+            remote_frame.cover(inline_buf[i]);
+            dispatch_edge(inline_buf[i], value);
+        }
     else
-        for (const edge_view_t& e : overflow) dispatch_edge(e, value);
+        for (const edge_view_t& e : overflow) {
+            remote_frame.cover(e);
+            dispatch_edge(e, value);
+        }
 }
 
 result_t<value_ref_t> graph_t::store_value(vertex_t* v, role_t role, view::rope_t&& value,

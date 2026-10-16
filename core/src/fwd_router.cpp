@@ -2175,11 +2175,17 @@ bool fwd_router_t::door_allows(const child_registry_t::child_t* door, std::strin
     return v && graph_.allows(*v, caller, *right);
 }
 
+// `always_inline`, and the reason is measured: each of its two callers (`on_frame_impl`,
+// `on_frame_rope_impl`) is its only call site for that cursor, and GCC's choice to inline it
+// there is a unit-wide budget decision, not a local one. When #2124 shrank every frame bracket
+// in this TU by the guard check and `__cxa_thread_atexit` registration it no longer needs,
+// the freed budget went elsewhere and the span instance fell out of `on_frame_impl` as an
+// 8 KB function of its own, one more call on every received frame. The attribute keeps the
+// receive path's shape off that budget.
 template <class Cursor, class Observe, class Reject, class Terminus, class Reply>
-bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor& cur,
-                                     const child_rx_ctx_t* inbound_ctx, bool from_peer,
-                                     Observe&& observe, Reject&& reject, Terminus&& terminus,
-                                     Reply&& reply) {
+[[gnu::always_inline]] inline bool fwd_router_t::route_fwd_ingress(
+    std::string_view inbound_name, const Cursor& cur, const child_rx_ctx_t* inbound_ctx,
+    bool from_peer, Observe&& observe, Reject&& reject, Terminus&& terminus, Reply&& reply) {
     // The classification gate is the frame's own TYPE byte, and that is the whole of it: a
     // FWD frame is data-plane, and no peek failure below can turn it back into a control
     // frame. The rope arm used to gate on `peek_fwd_dst_any` and then on `peek_fwd_op`

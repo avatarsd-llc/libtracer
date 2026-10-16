@@ -158,6 +158,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **The edge pin clears its cell once per fan-out.** `snapshot_edges` cleared the pin explicitly
   and the destructor cleared it again; `pin_t::release()` is gone and the destructor is the one
   clear.
+- **One trivially destructible per-thread record for the QSBR and edge-pin cells
+  ([#2124](https://github.com/avatarsd-llc/libtracer/issues/2124)).** `detail_qsbr::participant_t`,
+  both `self()` accessors and `detail_ep::participant_t` are replaced by
+  `detail_qsbr::thread_record_t {depth, cell, pin}`, a `constinit` `thread_local` with no guard
+  and no destructor on the bracket path. A companion `thread_local`, built only on the cold
+  claim, gives the cells back at thread exit and leaves the record at "no cell", so a bracket or
+  pin opened from a later `thread_local` destructor takes the overflow (QSBR) or stripe-mutex
+  (edge pin) path instead of announcing on a cell another thread may own. Under `reclaim_qsbr`
+  the dispatch bracket's depth is the record's. Under the other policies `fan_out` opens one
+  frame bracket at its first remote edge, and every later remote edge nests in it.
 
 ### Changed
 
