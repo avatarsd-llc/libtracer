@@ -8,7 +8,10 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <iterator>
 #include <new>
 #include <span>
 
@@ -154,6 +157,55 @@ inline constexpr std::size_t kRxLoanValueOffset = sizeof(void*);
 [[nodiscard]] constexpr bool rx_loan_fits(std::size_t len, std::size_t cap,
                                           std::size_t align) noexcept {
     return cap >= kRxLoanBytes && len <= cap - kRxLoanBytes && align >= alignof(void*);
+}
+
+/**
+ * @brief The size-class ceiling of a @p bytes request in this build's classed roots (the slab
+ *        pool and the static arena both carve by `config_t::kSizeClasses`): the smallest row
+ *        that holds it, or `SIZE_MAX` for a request above the last row.
+ */
+[[nodiscard]] constexpr std::size_t class_ceiling(std::size_t bytes) noexcept {
+    const auto& t = graph::config_t::kSizeClasses;
+    const auto* const it = std::lower_bound(std::begin(t), std::end(t), bytes);
+    return it == std::end(t) ? SIZE_MAX : *it;
+}
+
+/**
+ * @brief Whether this build's composed block source shares a stored value by default
+ *        (RFC-0022 Amendment 3): the copy-or-share trait, decided at compile time.
+ *
+ * - **Static arena and heap root: always.** The heap draws every block at its exact size, so a
+ *   copy never draws a block smaller than the one the value already sits in (the heap-root
+ *   default, resolved in #2143); the arena's fixed RAM is what both draws share.
+ * - **Slab pool: on a class fit.** It shares when a copy, a @p copy_block -byte block, would
+ *   take a class no smaller than the @p held_block -byte block the value already sits in, and
+ *   copies otherwise.
+ *
+ * On every source, `SIZE_MAX` for @p held_block means the value does not sit in one block (it
+ * spans several links, or its bytes are borrowed): it copies, so a default value is always one
+ * link. One `lower_bound` over the class table on the slab build; the other builds fold it to
+ * one compare.
+ */
+[[nodiscard]] constexpr bool share_fits(std::size_t held_block, std::size_t copy_block) noexcept {
+    return held_block != SIZE_MAX && (!kSlabPool || held_block <= class_ceiling(copy_block));
+}
+
+/**
+ * @brief Whether a receive block for a @p len-byte frame carries the receive-loan reserve
+ *        (RFC-0028 §6.9): only where it costs nothing, that is, when the frame plus
+ *        @ref kRxLoanBytes lands in the same size class as the frame alone (resolved in #2143).
+ *
+ * Never on the heap root, whose blocks are exact, and never above the last class row.
+ */
+[[nodiscard]] constexpr bool rx_loan_free(std::size_t len, std::size_t align) noexcept {
+    if constexpr (kHeapRoot) {
+        (void)len;
+        (void)align;
+        return false;
+    } else {
+        const std::size_t c = class_ceiling(segment_block_bytes(len, align));
+        return c != SIZE_MAX && c == class_ceiling(segment_block_bytes(len + kRxLoanBytes, align));
+    }
 }
 
 /** @brief The one-block layout (see the declaration in `%backend.hpp`). */

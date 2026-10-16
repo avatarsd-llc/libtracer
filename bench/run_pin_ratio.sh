@@ -9,10 +9,10 @@
 # that produced the recorded 55.2 / 53.0 / 149.8 M deliv/s swing on identical code, and nothing
 # here does that.
 #
-# THE CONTROL ARM IS B-copy (copy-always, threshold SIZE_MAX), in this same binary: the one-copy
-# store branch, on the same binary as every sharing arm. The other arms are RFC-0028 §5.3
-# copy-or-share thresholds (T<n>) and share-always (C-share). collate_pin.py takes every other
-# arm's verdict as a paired per-round delta against B-copy.
+# THE CONTROL ARM IS B-copy (the `COPY` hint), in this same binary: the one-copy store branch,
+# on the same binary as every sharing arm. The other arms are the RFC-0022 Amendment 3 hints:
+# D-default (the build's block-source trait) and C-share (`SHARE`). collate_pin.py takes every
+# other arm's verdict as a paired per-round delta against B-copy.
 #
 #   run_pin_ratio.sh <bench-dir> [rounds] > raw.tsv
 #
@@ -23,7 +23,7 @@ set -euo pipefail
 BIN="${1:?bench build dir}"
 ROUNDS="${2:-10}"
 
-ARMS="B-copy,T64,T256,T1024,T4096,C-share"
+ARMS="B-copy,D-default,C-share"
 
 # Reachability before numbers, every run.
 "$BIN/bench_pin_ratio" --calibrate || { echo "calibration FAILED" >&2; exit 2; }

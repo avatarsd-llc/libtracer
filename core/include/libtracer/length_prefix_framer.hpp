@@ -150,21 +150,23 @@ class length_prefix_framer_t {
      *                  this backend produces) comes back as `DROP`, so a legitimate peer is
      *                  backpressured rather than disconnected over OUR local capacity (#932).
      * @param len       The decoded length prefix.
-     * @param loan_min  Frames at or above this size are drawn with the ingress-loan reserve
-     *                  (`view::alloc_rx`, RFC-0028 §6.9) — a pull-mode reader that delivers
-     *                  from `off` passes its build's share threshold; the default never loans,
-     *                  which keeps @ref feed (whose `on_frame` contract is offset 0) unchanged.
+     * @param loan      Draw through `view::alloc_rx`, which takes the ingress-loan reserve
+     *                  where it is free (RFC-0028 §6.9) — a pull-mode reader that delivers
+     *                  from `off` passes `true`; the default never loans, which keeps @ref feed
+     *                  (whose `on_frame` contract is offset 0) unchanged.
      * @return The @ref prefix_decision_t; `ACCEPT` carries the freshly allocated segment.
      */
     [[nodiscard]] static prefix_decision_t on_prefix(mem::mem_backend_t& backend,
                                                      std::size_t max_frame, std::size_t len,
-                                                     std::size_t loan_min = SIZE_MAX) {
+                                                     bool loan = false) {
         if (len == 0) return {prefix_decision_t::kind_t::EMPTY, {}};
         if (len > max_frame) return {prefix_decision_t::kind_t::MALFORMED, {}};
         // Undeliverable-but-in-spec is backpressure, not a framing error: ask the
         // backend, and let a refusal (exhaustion OR a too-small slot) be the DROP.
         if (len > backend.max_segment_size()) return {prefix_decision_t::kind_t::DROP, {}};
-        tr::view::rx_block_t blk = tr::view::alloc_rx(backend, len, loan_min);
+        tr::view::rx_block_t blk =
+            loan ? tr::view::alloc_rx(backend, len)
+                 : tr::view::rx_block_t{tr::view::segment_alloc(backend, len)};
         if (!blk.seg) return {prefix_decision_t::kind_t::DROP, {}};
         return {prefix_decision_t::kind_t::ACCEPT, std::move(blk.seg), blk.off};
     }

@@ -106,9 +106,9 @@ void late_declaration_allocates_lazily() {
     graph_t g;
     const auto h = g.register_vertex(path_t("/diet/late"), role_t::STORED_VALUE);
     require(!has_ext(h), "the leaf starts extension-less");
-    (void)g.set_policy(h, {.share_threshold_bytes = 64});
+    (void)g.set_policy(h, {.share_hint = tr::graph::share_hint_t::COPY});
     require(has_ext(h), "the declaration allocated the cold block");
-    require(g.share_threshold_bytes(h) == 64, "g.share_threshold_bytes(h) == 64");
+    require(g.share_hint(h) == tr::graph::share_hint_t::COPY, "g.share_hint(h) == COPY");
 }
 
 }  // namespace

@@ -168,9 +168,10 @@ queue or shed — and what every other stage does instead.
 - Note the one cost a pooled RX backend adds: a **shared** value borrows its whole inbound
   segment — receive capacity — until it is displaced, not merely for the delivery window. Size
   against `live shared values × segment_bytes`; no per-value knob bounds the number of values
-  (`core/include/libtracer/graph.hpp:vertex_policy_t::share_threshold_bytes`). A low copy-or-share threshold on a long-held vertex
-  (a config vertex, a rarely-updated setpoint) is exactly the shape that starves a small pool —
-  which is why a NARROW build copies always.
+  (`core/include/libtracer/graph.hpp:vertex_policy_t::share_hint`). A shared value on a long-held
+  vertex (a config vertex, a rarely-updated setpoint) is exactly the shape that starves a small
+  pool, which is why such a vertex declares `share_hint_t::COPY`; the static arena a NARROW build
+  composes shares by default, because its receive blocks are drawn at the frame's exact length.
 
 **Measured on silicon.** The wiring above, run on the hardware it describes: an ESP32-C6
 (RISC-V, one application core) on the adopted `esp_http_server` WebSocket link, library at

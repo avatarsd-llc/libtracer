@@ -335,43 +335,6 @@ struct default_config_t {
     static constexpr std::size_t kMaxVertexBytes32 = 64;
 
     /**
-     * @brief The copy-or-share threshold (RFC-0028 §5.3, D3): a written value of AT LEAST this
-     *        many bytes is SHARED, one below it is COPIED into the value's own block.
-     *
-     * The default every vertex answers until its `vertex_policy_t::share_threshold_bytes` gives it
-     * its own. At ingress, "shared" means the stored value links the inbound receive segment
-     * (refcount, zero copy) and "copied" means the bytes land inline in the one `value_t` block
-     * the publish costs (`value_t::make_inline`: one allocation, one `memcpy`). A payload whose
-     * TLV carries a CRC/TS trailer is always copied — a shared frame's opt byte cannot be
-     * patched — and so is one whose reader cannot share (a borrowed, span-delivered frame).
-     *
-     * `0` shares always; `SIZE_MAX` copies always. The two ends are the old `kPinNever` and
-     * "pin unconditionally", now edge cases of one comparison on the absolute payload size —
-     * the variable that was actually measured (RFC-0028 R6); the retired ratio was the
-     * measurement rig's rotation knob (#774).
-     *
-     * @section share_borrow Sharing BORROWS the receive segment, and this is the knob that prices
-     * it
-     *
-     * A shared value holds its whole inbound RX **segment** for as long as it is the vertex's
-     * last-known value (or sits in a STREAM ring). On a pooled RX backend that is a **pool
-     * slot** — receive capacity the transport cannot use until the value is displaced. The
-     * library makes the deferred release *safe*; only the application knows its pool geometry
-     * and retention pattern, so the budget is the consumer's number (RFC-0022 Amendment 2).
-     * Size against `live shared values x segment_bytes`; `bench/README.md` §"RFC-0022 §6 —
-     * receive-pool occupancy" measured a 29-slot ESP32-C6 pool collapsing once the live shared
-     * set crossed the slot count.
-     *
-     * Target-class defaults (§11 ruling 2):
-     * - **host (WIDE / MID)** — 4,096 B, RFC-0022 Amendment 2's knee: below it the copy is
-     *   cheaper than the borrow, above it the zero-copy share wins.
-     * - **NARROW** — a per-build trait: a fixed, small RX pool states its own value in its
-     *   `config_override.hpp` (the ESP-IDF component binds `SIZE_MAX`, copy always, which is
-     *   exactly the posture it shipped before this knob).
-     */
-    static constexpr std::size_t kShareThresholdBytes = 4096;
-
-    /**
      * @brief The size-class table of the host slab pool (ADR-0083 Decisions 4 and 5, #1775,
      *        #1777): the block sizes a class serves, ascending.
      *
@@ -1209,8 +1172,6 @@ static_assert(kInlineFanout >= 1,
               "an array of that many edge views");
 /** @brief @ref default_config_t::kEdgePinSlots for this build. */
 inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
-/** @brief @ref default_config_t::kShareThresholdBytes for this build. */
-inline constexpr std::size_t kShareThresholdBytes = config_t::kShareThresholdBytes;
 /** @brief @ref default_config_t::kDeferredReleaseSlots for this build. */
 inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
 /** @brief @ref default_config_t::kQsbrParticipants for this build. */

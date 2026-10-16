@@ -11,9 +11,9 @@ carries the same sign in EVERY round.  One flip prints `indistinguishable`, and 
 median separation upgrades that.  See `verdict` for why the test is paired and not an
 unpaired range overlap.
 
-THE CONTROL ARM IS `B-copy` (`kControlArm`), the copy-always (threshold `SIZE_MAX`) arm of the
-SAME binary.  The arms are RFC-0028 §5.3 copy-or-share thresholds (the RFC-0022 §3.D pin ratio
-they replaced is gone).  Rows whose arm is the control print `control` in the verdict column
+THE CONTROL ARM IS `B-copy` (`kControlArm`), the `COPY`-hint arm of the SAME binary.  The arms
+are RFC-0022 Amendment 3 copy-or-share hints (0 `DEFAULT`, 1 `SHARE`, 2 `COPY`; the RFC-0022
+§3.D pin ratio and the RFC-0028 §5.3 byte threshold they replaced are gone).  Rows whose arm is the control print `control` in the verdict column
 instead of a delta against themselves.
 """
 import sys
@@ -73,7 +73,7 @@ def main(argv):
     byround = defaultdict(dict)    # (arm, payload, segment) -> {round: p50}
     reach = defaultdict(lambda: [0, 0])  # (arm, payload, segment) -> [pins, copies]
     ks = {}
-    net = defaultdict(list)        # (label, threshold, payload, slot) -> [(deliv/s, pins, copies, floor, drops)]
+    net = defaultdict(list)        # (label, hint, payload, slot) -> [(deliv/s, pins, copies, floor, drops)]
 
     for ln in lines:
         f = ln.split("\t")
@@ -95,7 +95,7 @@ def main(argv):
         rounds = max(len(v) for v in grid.values())
         arms = sorted({a for a, _, _ in grid}, key=lambda a: (a != kControlArm, a))
         print(f"\n## Store leg — p50 ns, min/median/max across {rounds} interleaved rounds\n")
-        print("| payload B | segment B | arm | threshold B | p50 min/med/max ns | pins | copies "
+        print("| payload B | segment B | arm | hint | p50 min/med/max ns | pins | copies "
               f"| paired delta vs {kControlArm} min/med/max ns | verdict |")
         print("| ---: | ---: | --- | ---: | --- | ---: | ---: | --- | --- |")
         cells = sorted({(p, s) for _, p, s in grid})
@@ -120,7 +120,7 @@ def main(argv):
 
     if net:
         print("\n## Delivered throughput — counted by the RECEIVER process\n")
-        print("| vertices | pool slots | arm | threshold B | payload B | slot B "
+        print("| vertices | pool slots | arm | hint | payload B | slot B "
               "| receiver deliv/s min/med/max | delivered | pins | copies "
               "| free-slot floor | rx drops |")
         print("| ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |")

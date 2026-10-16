@@ -404,10 +404,12 @@ segment_ptr_t segment_alloc(mem::mem_backend_t& backend, std::size_t size) {
     return segment_ptr_t::adopt(backend.alloc(size, mem::alloc_hint_t::NONE));
 }
 
-rx_block_t alloc_rx(mem::mem_backend_t& backend, std::size_t len, std::size_t loan_min) noexcept {
-    // The loan pays only where the value would be SHARED, and only on memory the graph can
-    // lay a record in: host bytes, aligned for the record's words, with room for both.
-    const bool loan = len >= loan_min && backend.space() == mem::mem_space_t::HOST &&
+rx_block_t alloc_rx(mem::mem_backend_t& backend, std::size_t len) noexcept {
+    // The loan is taken only where it is free (the reserve lands in the frame's own size
+    // class), and only on memory the graph can lay a record in: host bytes, aligned for the
+    // record's words, with room for both.
+    const bool loan = backend.space() == mem::mem_space_t::HOST &&
+                      mem::rx_loan_free(len, backend.alignment()) &&
                       mem::rx_loan_fits(len, backend.max_segment_size(), backend.alignment());
     if (!loan) return {segment_ptr_t::adopt(backend.alloc(len)), 0};
     // ONE request either way: a backend that refuses the reserved block is exhausted, and a

@@ -60,6 +60,7 @@ Retention is vertex state. A subscription's latch (`durability_request`) and its
 ```cpp
 enum class role_t { STORED_VALUE, STREAM, HANDLER };
 enum class retention_t { NONE, LAST, N };  // RFC-0028 §5.4 — per vertex AND per app field
+enum class share_hint_t { DEFAULT, SHARE, COPY };  // RFC-0022 Amendment 3 — owner-side
 enum class delivery_mode_t { IF_NEWER, UNCONDITIONAL, EXPLICIT };
 
 // There is NO per-vertex settings type. RFC-0022 §3.B deleted `settings_t` outright: four
@@ -114,7 +115,7 @@ struct graph_hooks_t {        // the graph-wide seams as ONE aggregate (RFC-0028
 struct vertex_policy_t {      // everything the OWNER declares about one vertex (RFC-0028 D12)
     std::optional<retention_t> retention;          // unset ⇒ the role's default (§5.4)
     std::uint32_t              depth = 1;          // ring depth under retention_t::N
-    std::size_t                share_threshold_bytes = kShareThresholdBytes;  // §5.3
+    share_hint_t               share_hint = share_hint_t::DEFAULT;  // RFC-0022 Am. 3
     mem::block_source_t*       ring_source = nullptr;   // RFC-0025 §4.6.1; null ⇒ graph default
     bool                       ring_reliable = false;   // §4.4 pressure arm
     delivery_mode_t            delivery_mode = delivery_mode_t::IF_NEWER;
@@ -174,7 +175,7 @@ class graph_t {
     retention_t   retention             (vertex_handle_t) const noexcept;
     result_t<std::size_t>   ring_reserved_bytes(vertex_handle_t) const;
     result_t<std::uint64_t> stream_gaps        (vertex_handle_t) const;
-    std::size_t   share_threshold_bytes    (vertex_handle_t) const noexcept;
+    share_hint_t  share_hint            (vertex_handle_t) const noexcept;
 
     // graph-wide seams — read-modify-write, for a party wired after construction (the router)
     void          set_hooks(const graph_hooks_t&) noexcept;
@@ -362,7 +363,7 @@ vertex answers an `await` with its `on_read`-composed value instead of `NOT_FOUN
 
 `vertex_policy_t::delivery_mode` sets that per-vertex policy, declared at `register_vertex` or
 through `set_policy`. It is a wiring-time host declaration, stated alongside retention, the
-share threshold, the ring source and the app field table — an owner declaration with no wire
+share hint, the ring source and the app field table — an owner declaration with no wire
 surface.
 
 | `delivery_mode_t` | An ancestor's sweep includes this vertex |
@@ -719,6 +720,10 @@ under — admission, not placement: the payload stays where the publish put it.
 :project: libtracer
 ```
 
+```{doxygenenum} tr::graph::share_hint_t
+:project: libtracer
+```
+
 ### The node-scoped vertex index
 
 `graph_t` keeps one dense, append-only `vertex_t*` slot per vertex ever allocated, in
@@ -957,10 +962,6 @@ it binds to a temporary lambda.
 ```
 
 ```{doxygenfunction} tr::graph::inline_value_backend
-:project: libtracer
-```
-
-```{doxygenfunction} tr::graph::saturate_threshold
 :project: libtracer
 ```
 

@@ -8,13 +8,13 @@
 # leaves this script is the count the SUBSCRIBER observed landing in its graph, never the
 # publisher's send rate. Arms rotate per round, for the same reason as run_pin_ratio.sh.
 #
-# THE CONTROL ARM IS B-copy, run from the same binary at the copy-always threshold (SIZE_MAX):
-# the one-copy store branch on the same binary, pool and transport as every sharing arm. The
-# other arms are RFC-0028 §5.3 copy-or-share thresholds (T<n>) and share-always (C-share).
+# THE CONTROL ARM IS B-copy, run from the same binary with the `COPY` hint: the one-copy store
+# branch on the same binary, pool and transport as every sharing arm. The other arms are the
+# RFC-0022 Amendment 3 hints: D-default (the build's block-source trait) and C-share (`SHARE`).
 #
 # The subscriber's RX backend is a bounded pool, so a shared value holds a whole RX SLOT for
 # its lifetime and `available()` becomes a measurable free-slot floor — the retention hazard
-# the threshold prices. On the default heap backend the RX segment is `kMaxDatagram`
+# `COPY` exists for. On the default heap backend the RX segment is `kMaxDatagram`
 # (65,536 B) whatever the datagram's length.
 #
 # VERTICES is the RAM axis. A single STORED_VALUE vertex holds one value, so pinning it holds
@@ -37,25 +37,22 @@ COUNT="${COUNT:-200000}"
 WINDOW_MS="${WINDOW_MS:-6000}"
 
 # THE A/A NULL IS AN ARM, NOT A POST-HOC ESTIMATE. `B2-null` is a byte-for-byte duplicate of
-# `B-copy` — same threshold, same binary, same pool, same transport — rotated through the same
+# `B-copy` — same hint, same binary, same pool, same transport — rotated through the same
 # interleave. The B-copy-vs-B2-null spread at a given (vertices, payload, slot) cell IS the
 # instrument's null, and no pinning-arm delta narrower than it may be quoted. It has to be an
 # in-band arm here because collate_pin.py's paired sign test covers only the store-leg table:
 # RESULT_PINNET carries no round index, so the net table is unpaired min/med/max and per-round
 # pairing is unavailable on this leg.
 #
-# The threshold is absolute, so an arm shares a payload iff the payload TLV is at least its
-# threshold: T64 shares every payload in the default sweep, T512 the 512 B and larger ones, and
-# T4096 (the host default) only the largest.
+# On the slab pool, D-default shares a payload only when its copy would draw a size class no
+# smaller than the RX slot it sits in; on a pool slot much larger than the payload it copies.
 #
-# arm : threshold (18446744073709551615 = SIZE_MAX, copy always)
+# arm : hint (0 DEFAULT, 1 SHARE, 2 COPY)
 ARMS=(
-    "B-copy:18446744073709551615"
-    "B2-null:18446744073709551615"
-    "T64:64"
-    "T512:512"
-    "T4096:4096"
-    "C-share:0"
+    "B-copy:2"
+    "B2-null:2"
+    "D-default:0"
+    "C-share:1"
 )
 
 VERTEX_SET="${VERTEX_SET:-1 8 32 128}"

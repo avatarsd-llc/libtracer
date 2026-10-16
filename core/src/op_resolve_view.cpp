@@ -165,6 +165,18 @@ class view_node {
     [[nodiscard]] std::size_t wire_size() const noexcept { return header_size() + v_->body_size(); }
 
     /**
+     * @brief The block this TLV already sits in, for @ref tr::mem::share_fits: its one link's
+     *        segment block, or `SIZE_MAX` when it spans more than one link.
+     */
+    [[nodiscard]] std::size_t held_block(const view::view_t*) const noexcept {
+        const std::span<const view::view_t> links = v_->wire().links();
+        if (links.empty() || links.front().length < wire_size() || !links.front().owner)
+            return SIZE_MAX;
+        return mem::segment_block_bytes(links.front().owner->bytes.size(),
+                                        alignof(std::max_align_t));
+    }
+
+    /**
      * @brief Pin this TLV as a subrope of the delivery's own scatter-gather segments (ADR-0042 §3
      *        on the rope tier, ADR-0053 ⑤): the stored value refcounts the frame's links — a multi-
      *        link payload is stored with ZERO copy.

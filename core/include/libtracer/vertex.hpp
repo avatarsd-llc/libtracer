@@ -726,15 +726,6 @@ struct ring_state_t {
 };
 
 /**
- * @brief A share threshold (RFC-0028 §5.3) as the 32-bit word `%vertex_ext_t` stores:
- *        anything from `UINT32_MAX` up saturates to `UINT32_MAX`, which reads back as
- *        `SIZE_MAX` — copy always.
- */
-[[nodiscard]] constexpr std::uint32_t saturate_threshold(std::size_t bytes) noexcept {
-    return bytes >= UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(bytes);
-}
-
-/**
  * @brief A vertex's `:acl` state — its parsed ACEs, the cached effective merge and the cache
  *        word — LAZILY allocated on the first `:acl` write (#1640).
  *
@@ -847,22 +838,17 @@ struct vertex_ext_t {
      */
     std::uint32_t retention_depth = 1;
     /**
-     * @brief This vertex's copy-or-share threshold (RFC-0028 §5.3, D3), SATURATED to 32 bits:
-     *        a written value of at least this many bytes is shared, one below it is copied
-     *        into the value's own block. `UINT32_MAX` reads back as `SIZE_MAX` (copy always).
+     * @brief This vertex's copy-or-share hint (RFC-0022 Amendment 3), a @ref share_hint_t.
      *
      * Owner-side like @ref retention_depth, and for the same reason: it is a deployment
      * copy/share trade, not a quality-of-service property, so it has no wire surface.
-     * Declared through `graph_t::set_share_threshold_bytes`; a vertex that never declared one
-     * answers `config_t::kShareThresholdBytes`, which is also what this member starts at. Read
-     * on every view-delivered write (`%op_resolve_walk.hpp`) with no lock, so it stays ONE
-     * inline load off this block, a relaxed atomic one because a retire or a declaration
-     * stores it under that read. 32 bits because it shares a word with
-     * @ref retention_depth — a `size_t` here would grow the block by 8 B on the host for a
-     * range no frame can reach.
+     * Declared through @ref vertex_policy_t::share_hint; a vertex that never declared one
+     * answers `DEFAULT`, which is also what this member starts at. Read on every
+     * view-delivered write (`%op_resolve_walk.hpp`) with no lock, so it stays ONE inline load
+     * off this block, a relaxed atomic one because a retire or a declaration stores it under
+     * that read. One byte, in the word it shares with @ref retention_depth.
      */
-    std::atomic<std::uint32_t> share_threshold_bytes{
-        saturate_threshold(config_t::kShareThresholdBytes)};
+    std::atomic<std::uint8_t> share_hint{0};
     /** @brief The RFC-0010 APP-FIELD group (ADR-0058 Step 2) — the descriptor table plus
      *         its `on_app_field_write` apply seam, LAZILY allocated: a vertex with no app
      *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
@@ -1046,19 +1032,18 @@ class vertex_t {
     }
 
     /**
-     * @brief This vertex's copy-or-share threshold in bytes (RFC-0028 §5.3):
-     *        `config_t::kShareThresholdBytes` unless it declared its own.
+     * @brief This vertex's copy-or-share hint (RFC-0022 Amendment 3): `DEFAULT` unless it
+     *        declared its own.
      *
      * ONE inline load and nothing more: it is read on EVERY view-delivered write
      * (`%op_resolve_walk.hpp`), so it may never become an ancestor walk. Nothing is
-     * inherited (RFC-0022 §3.F) — a vertex that was never given a threshold answers the
-     * build's default, whatever its ancestors hold.
+     * inherited (RFC-0022 §3.F) — a vertex that was never given a hint follows the build's
+     * trait, whatever its ancestors hold.
      */
-    [[nodiscard]] std::size_t share_threshold_bytes() const noexcept {
+    [[nodiscard]] share_hint_t share_hint() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e == nullptr) return config_t::kShareThresholdBytes;
-        const std::uint32_t t = e->share_threshold_bytes.load(std::memory_order_relaxed);
-        return t == UINT32_MAX ? SIZE_MAX : t;
+        if (e == nullptr) return share_hint_t::DEFAULT;
+        return static_cast<share_hint_t>(e->share_hint.load(std::memory_order_relaxed));
     }
     /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam);
      *         an all-empty shared constant when no extension block. */
@@ -2636,8 +2621,7 @@ class vertex_t {
         tr::mem::drop_in(*e->src, e->ring);
         e->ring = nullptr;
         e->retention_depth = 1;
-        e->share_threshold_bytes.store(saturate_threshold(config_t::kShareThresholdBytes),
-                                       std::memory_order_relaxed);
+        e->share_hint.store(0, std::memory_order_relaxed);
         tr::mem::drop_in(*e->src, e->app);
         e->app = nullptr;
     }
@@ -3222,20 +3206,18 @@ class vertex_t {
     }
 
     /**
-     * @brief Set this vertex's copy-or-share threshold (RFC-0028 §5.3) — owner-side, never
-     *        over the wire. `0` shares always; `SIZE_MAX` (or anything from `UINT32_MAX` up)
-     *        copies always.
+     * @brief Set this vertex's copy-or-share hint (RFC-0022 Amendment 3) — owner-side, never
+     *        over the wire.
      *
-     * Published under the vertex mutex; the write-path reader (@ref share_threshold_bytes)
-     * takes no lock, because a threshold changing under a concurrent write only decides
-     * WHICH correct store shape that write takes.
+     * Published under the vertex mutex; the write-path reader (@ref share_hint) takes no
+     * lock, because a hint changing under a concurrent write only decides WHICH correct store
+     * shape that write takes.
      */
-    [[nodiscard]] bool set_share_threshold_bytes(std::size_t bytes,
-                                                 tr::mem::block_source_t& tables) {
+    [[nodiscard]] bool set_share_hint(share_hint_t hint, tr::mem::block_source_t& tables) {
         vertex_ext_t* const e = ensure_ext(tables);
         if (e == nullptr) return false;
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e->share_threshold_bytes.store(saturate_threshold(bytes), std::memory_order_relaxed);
+        e->share_hint.store(static_cast<std::uint8_t>(hint), std::memory_order_relaxed);
         return true;
     }
 
@@ -3717,7 +3699,7 @@ class vertex_t {
      * (graph map lock) and the field-write verbs (vertex mutex) resolve by
      * compare-exchange — the loser frees its candidate and adopts the winner's block.
      * The pointer is never cleared once published (ADR-0057 insert-only lifetime), so
-     * lock-free readers (@ref share_threshold_bytes / @ref handlers) stay valid forever.
+     * lock-free readers (@ref share_hint / @ref handlers) stay valid forever.
      * @return The block, or null when @p src refused it (#1778) — nothing changed.
      */
     [[nodiscard]] vertex_ext_t* ensure_ext(tr::mem::block_source_t& src) noexcept {
