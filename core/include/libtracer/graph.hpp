@@ -3066,12 +3066,15 @@ class graph_t {
     /**
      * @brief The storing tail every non-HANDLER store shares: publish @p sp to @p v's slot,
      *        then admit it into @p v's ring when @p v is a STREAM.
+     * @param role The store's ONE reading of `v->role()` (#2115): it alone decides whether
+     *           the ring admission runs, so a write that read a storing role and raced a revive
+     *           as STREAM neither queues an entry nor delivers it twice.
      * @param sp The value to publish; EMPTY means the block could not be minted, and is
      *           answered as BACKPRESSURE like a declined slot.
      * @param take Optional (#1713): the stack-first buffer the ring admission takes the
      *           unflushed window into, in the SAME stripe section — the write path's one lock.
      */
-    [[nodiscard]] result_t<value_ref_t> publish_value(vertex_t* v, value_ref_t sp,
+    [[nodiscard]] result_t<value_ref_t> publish_value(vertex_t* v, role_t role, value_ref_t sp,
                                                       vertex_t::store_drops_t& drops,
                                                       vertex_t::ring_take_t* take = nullptr);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands

@@ -31,8 +31,14 @@
  *   whole time. A write that read the old role and stored under the new one used to take the
  *   handler leg's empty "consumed" result for a stored value and dereference it. Every write
  *   must answer success or `NOT_FOUND`, and none may crash.
+ * - **Ring arm follows the write's role** (#2115). An admission filter parks a write after it
+ *   read the role. Retiring `/s` and reviving it as a STREAM under a write that read
+ *   STORED_VALUE must deliver the value exactly once (it used to be queued AND delivered, so
+ *   the next drain delivered it again). Retiring a STREAM `/s` under a write that read STREAM,
+ *   with no revive, must push nothing and create no ring on the placeholder.
  */
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -344,9 +350,167 @@ void write_across_role_flip() {
     check(undefined.load() == 0, "every racing write answered success or NOT_FOUND");
 }
 
+/** @brief An admission filter that holds one write inside it, after the write read the role. */
+struct admit_park_t {
+    std::mutex m;               /**< @brief Guards the two flags. */
+    std::condition_variable cv; /**< @brief Signals each flag change. */
+    bool parked = false;        /**< @brief The write is inside the filter. */
+    bool released = false;      /**< @brief The write may go on. */
+
+    /** @brief The filter: park until released, then admit unchanged. */
+    tr::graph::admission_t operator()(const tr::graph::value_t&, const tr::graph::write_ctx_t&) {
+        std::unique_lock lk(m);
+        parked = true;
+        cv.notify_all();
+        cv.wait(lk, [this] { return released; });
+        return std::nullopt;
+    }
+};
+
+/** @brief The single payload byte of @p v, or 0 when it is not one byte. */
+std::uint8_t only_byte(const tr::graph::value_t& v) {
+    const tr::view::view_t flat = v.flatten();
+    const std::span<const std::byte> b = flat.bytes();
+    return b.size() == 1 ? std::to_integer<std::uint8_t>(b[0]) : 0;
+}
+
+/** @brief Register @p at as @p role with a filter that parks the first write in @p park. */
+std::optional<vertex_handle_t> register_parking(graph_t& g, const path_t& at, role_t role,
+                                                admit_park_t& park) {
+    tr::graph::handlers_t h;
+    h.on_admit = tr::graph::thunk(park);
+    (void)g.register_vertex(at, role, std::move(h));
+    return g.find(at.key());
+}
+
+/**
+ * @brief Write 0x0A to @p h on a thread, run @p meanwhile while it is parked in its filter,
+ *        then let it finish.
+ */
+tr::graph::result_t<void> write_parked(graph_t& g, vertex_handle_t h, admit_park_t& park,
+                                       const std::function<void()>& meanwhile) {
+    tr::graph::result_t<void> r{};
+    std::thread t([&] { r = g.write(h, tr::testing::make_value({0x0A})); });
+    {
+        std::unique_lock lk(park.m);
+        check(park.cv.wait_for(lk, 5s, [&park] { return park.parked; }),
+              "the write parked inside its admission filter");
+    }
+    meanwhile();
+    {
+        const std::lock_guard lk(park.m);
+        park.released = true;
+    }
+    park.cv.notify_all();
+    t.join();
+    return r;
+}
+
+/** @brief A write that read STORED_VALUE, overlapped by a revive as STREAM, delivers once. */
+void stored_to_stream_delivers_once() {
+    std::printf("a STORED_VALUE write overlapped by a revive as STREAM delivers once:\n");
+    graph_t g;
+    const path_t at("/s");
+    admit_park_t park;
+    const auto h = register_parking(g, at, role_t::STORED_VALUE, park);
+    check(h.has_value(), "/s registered as STORED_VALUE");
+    if (!h) return;
+    std::size_t seen_a = 0;
+    std::size_t seen_b = 0;
+    auto on_value = [&](const tr::graph::value_t& v) {
+        const std::uint8_t b = only_byte(v);
+        seen_a += b == 0x0A ? 1 : 0;
+        seen_b += b == 0x0B ? 1 : 0;
+    };
+    std::optional<tr::graph::subscription_t> sub;
+    const tr::graph::result_t<void> r = write_parked(g, *h, park, [&] {
+        check(g.retire(*h).has_value(), "/s retired under the parked write");
+        (void)g.register_vertex(at, role_t::STREAM);
+        // Depth above one, so a stray entry would survive into the next write's drain window.
+        check(g.set_policy(*h, {.retention = tr::graph::retention_t::N, .depth = 4}).has_value(),
+              "the revived STREAM keeps four entries");
+        auto s = g.subscribe(at, on_value);
+        check(s.has_value(), "subscribed to the revived STREAM");
+        if (s) sub.emplace(std::move(*s));
+    });
+    check(r.has_value(), "the overlapped write succeeds under the role it read");
+    check(g.write(*h, tr::testing::make_value({0x0B})).has_value(), "a second write succeeds");
+    check(seen_a == 1, "the overlapped value was delivered exactly once");
+    check(seen_b == 1, "the second value was delivered exactly once");
+}
+
+/**
+ * @brief A malloc-backed source that counts the blocks it has out — the graph's own source,
+ *        so a ring the write created, and the entry it reserved, both show up as live blocks.
+ */
+class live_count_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Named for the census, like every other source. */
+    live_count_source_t() noexcept : block_source_t("test-live-count") {}
+    /** @brief Serve from `aligned_alloc`; count the block as live. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        const std::size_t a = align < alignof(std::max_align_t) ? alignof(std::max_align_t) : align;
+        const std::size_t rounded = ((bytes == 0 ? 1 : bytes) + a - 1) / a * a;
+        void* const p = std::aligned_alloc(a, rounded);
+        if (p != nullptr) live.fetch_add(1, std::memory_order_relaxed);
+        return p;
+    }
+    /** @brief Sized reclaim matching @ref try_alloc. */
+    void release(void* p, std::size_t /*bytes*/, std::size_t /*align*/) noexcept override {
+        std::free(p);
+        live.fetch_sub(1, std::memory_order_relaxed);
+    }
+    std::atomic<std::ptrdiff_t> live{0}; /**< @brief Blocks out right now. */
+};
+
+/**
+ * @brief Retire a STREAM `/s` and write it, the write either parked across the retire (it
+ *        read STREAM) or made after it (it reads the placeholder's STORED_VALUE).
+ * @return The source's live blocks once both are done.
+ */
+std::ptrdiff_t live_after_retired_write(bool overlapped) {
+    live_count_source_t src;  // MUST outlive the graph: its blocks are released into it
+    std::ptrdiff_t live = 0;
+    {
+        graph_t g(src);
+        const path_t at("/s");
+        admit_park_t park;
+        const auto h = register_parking(g, at, role_t::STREAM, park);
+        check(h.has_value(), "/s registered as STREAM");
+        if (!h) return -1;
+        if (overlapped) {
+            const tr::graph::result_t<void> r = write_parked(g, *h, park, [&] {
+                check(g.retire(*h).has_value(), "/s retired under the parked write");
+            });
+            check(r.has_value(), "the overlapped write succeeds under the role it read");
+        } else {
+            check(g.retire(*h).has_value(), "/s retired before the write");
+            park.released = true;
+            check(g.write(*h, tr::testing::make_value({0x0A})).has_value(),
+                  "the write after the retire succeeds");
+        }
+        live = src.live.load();
+    }
+    return live;
+}
+
+/** @brief A write that read STREAM, overlapped by a retire, pushes nothing onto a ring. */
+void stream_write_across_retire_pushes_nothing() {
+    std::printf("a STREAM write overlapped by a retire pushes nothing:\n");
+    // The control writes the placeholder after the retire, so it never reaches a ring. A write
+    // that pushed onto the retired vertex would hold more: a lazily created ring and its entry.
+    const std::ptrdiff_t control = live_after_retired_write(false);
+    const std::ptrdiff_t raced = live_after_retired_write(true);
+    std::printf("  (live blocks: %td after the control, %td after the overlapped write)\n", control,
+                raced);
+    check(raced == control, "no ring was created and no entry pushed on the retired vertex");
+}
+
 }  // namespace
 
 int main() {
+    stored_to_stream_delivers_once();
+    stream_write_across_retire_pushes_nothing();
     write_across_role_flip();
     bracketed_terminus_ops();
     no_terminus_mid_retire(true);

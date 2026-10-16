@@ -2193,7 +2193,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, role_t role, view::rope_
         // the point: nothing downstream can reach the spelling the filter rejected.
         if (*decided) block = value_ref_t::adopt(value_t::make(std::move(**decided), *values_));
     }
-    return publish_value(v, std::move(block), drops, take);
+    return publish_value(v, role, std::move(block), drops, take);
 }
 
 [[gnu::noinline]] result_t<value_ref_t> graph_t::handler_write(vertex_t* v, const value_t& value,
@@ -2310,12 +2310,12 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
         if (!decided) return std::unexpected(decided.error());
         if (*decided)
             return publish_value(
-                v, value_ref_t::adopt(value_t::make(std::move(**decided), *values_)), drops);
+                v, role, value_ref_t::adopt(value_t::make(std::move(**decided), *values_)), drops);
     }
     // ADOPT (RFC-0028 D2): one more reference on the block that is already the value. Zero
     // allocations, zero copies — the target's slot and the source's hold the same block, which
     // is released through the source it was drawn from when the last of them lets go.
-    return publish_value(v, value_ref_t::share(&value), drops);
+    return publish_value(v, role, value_ref_t::share(&value), drops);
 }
 
 admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view caller,
@@ -2329,7 +2329,7 @@ admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view c
     return a->on_admit(value, ctx);
 }
 
-result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
+result_t<value_ref_t> graph_t::publish_value(vertex_t* v, role_t role, value_ref_t sp,
                                              vertex_t::store_drops_t& drops,
                                              vertex_t::ring_take_t* take) {
     // The storage verb has ONE tail for every role now (RFC-0025 §4.6.1 clause 1): publish the
@@ -2350,7 +2350,10 @@ result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
         v->note_write();
         return sp;
     }
-    const bool receives = v->role() == role_t::STREAM;
+    // The store's own role reading decides the ring arm (#2115), never a second load: a write
+    // that read STORED_VALUE and raced a revive as STREAM used to queue an entry here AND
+    // deliver the value directly, so the next drain delivered it a second time.
+    const bool receives = role == role_t::STREAM;
     const std::size_t retained = receives && sp ? sp->total_length() + kRingEntryOverhead : 0;
     if (sp && !v->store(sp)) sp.reset();  // the slot declined: nothing published (#477)
     // vertex_t::store soft-fails its LKV allocation nothrow (#477): null here (a

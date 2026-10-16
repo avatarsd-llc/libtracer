@@ -1653,6 +1653,18 @@ class vertex_t {
     bool ring_admit(const value_ref_t& sp, std::size_t bytes, tr::mem::block_source_t& src,
                     store_drops_t& drops, ring_take_t* take = nullptr) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
+        // The caller decided STREAM from its own role reading, taken before this lock (#2115).
+        // The ring teardown runs under this same lock and after the vertex is marked
+        // unregistered, so a vertex retired since that reading fails `registered()` here, and
+        // one revived as another role fails the role test: either way nothing is pushed, and
+        // no ring is lazily created on a vertex that no longer receives. The take stays
+        // disengaged, so the write falls back to delivering what is current. Only the STREAM
+        // arm pays these two relaxed loads, inside a section it already holds.
+        //
+        // A retire-then-REVIVE as STREAM passes both tests and pushes onto the new occupant's
+        // ring. That is a legal outcome of an unordered write/retire pair: under the #1477
+        // write-vs-retire ruling the calling plane serialises the two, not the graph.
+        if (!registered() || role() != role_t::STREAM) return true;
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (take != nullptr) take->engaged_ = true;
         if (e == nullptr) return true;  // no ext, no ring — nothing to admit into, nothing shed
