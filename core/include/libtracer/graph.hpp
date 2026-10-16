@@ -3001,7 +3001,11 @@ class graph_t {
     // never becomes state and a normalisation is the only value any reader can reach.
     // `take` is the write path's fused drain (#1713), forwarded to publish_value: non-null only
     // from write_impl's STREAM arm, which delivers what the admitting section took.
-    [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, view::rope_t&& value,
+    // `role` is the caller's ONE reading of `v->role()` (#2115), REQUIRED so no store reads it
+    // a second time: a retire-and-revive can flip the role between two reads, and a caller that
+    // read a storing role and got the HANDLER leg's empty "consumed" result back would
+    // dereference it as the stored value.
+    [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, role_t role, view::rope_t&& value,
                                                     vertex_t::store_drops_t& drops,
                                                     std::string_view caller,
                                                     const net::link_kind_t* link,
@@ -3062,12 +3066,15 @@ class graph_t {
     /**
      * @brief The storing tail every non-HANDLER store shares: publish @p sp to @p v's slot,
      *        then admit it into @p v's ring when @p v is a STREAM.
+     * @param role The store's ONE reading of `v->role()` (#2115): it alone decides whether
+     *           the ring admission runs, so a write that read a storing role and raced a revive
+     *           as STREAM neither queues an entry nor delivers it twice.
      * @param sp The value to publish; EMPTY means the block could not be minted, and is
      *           answered as BACKPRESSURE like a declined slot.
      * @param take Optional (#1713): the stack-first buffer the ring admission takes the
      *           unflushed window into, in the SAME stripe section — the write path's one lock.
      */
-    [[nodiscard]] result_t<value_ref_t> publish_value(vertex_t* v, value_ref_t sp,
+    [[nodiscard]] result_t<value_ref_t> publish_value(vertex_t* v, role_t role, value_ref_t sp,
                                                       vertex_t::store_drops_t& drops,
                                                       vertex_t::ring_take_t* take = nullptr);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands

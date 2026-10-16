@@ -2151,12 +2151,12 @@ void graph_t::fan_out(vertex_t* v, const value_t& value) {
         for (const edge_view_t& e : overflow) dispatch_edge(e, value);
 }
 
-result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
+result_t<value_ref_t> graph_t::store_value(vertex_t* v, role_t role, view::rope_t&& value,
                                            vertex_t::store_drops_t& drops, std::string_view caller,
                                            const net::link_kind_t* link,
                                            vertex_t::ring_take_t* take) {
     drops = vertex_t::store_drops_t{};
-    if (v->role() == role_t::HANDLER) return handler_write_rope(v, std::move(value), caller, link);
+    if (role == role_t::HANDLER) return handler_write_rope(v, std::move(value), caller, link);
     // ADMISSION (the retaining roles' pre-store seam). It sits HERE — inside the one function
     // every store goes through, and above the tail every storing role shares — because that is
     // the only placement under which the filter cannot be bypassed: `write`, `assign`, a
@@ -2193,7 +2193,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
         // the point: nothing downstream can reach the spelling the filter rejected.
         if (*decided) block = value_ref_t::adopt(value_t::make(std::move(**decided), *values_));
     }
-    return publish_value(v, std::move(block), drops, take);
+    return publish_value(v, role, std::move(block), drops, take);
 }
 
 [[gnu::noinline]] result_t<value_ref_t> graph_t::handler_write(vertex_t* v, const value_t& value,
@@ -2280,7 +2280,10 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
     // the delivered block itself — no clone of its links, no block of its own — exactly as a
     // stored target adopts it below. What it keeps past the call it keeps through
     // `value_ref_t::keep`, which is also what makes caller-owned storage safe to hand it.
-    if (v->role() == role_t::HANDLER) {
+    // One role reading for both arms (#2115): the clone arm below hands it to the rope overload
+    // rather than letting that overload read the role again.
+    const role_t role = v->role();
+    if (role == role_t::HANDLER) {
         drops = vertex_t::store_drops_t{};
         return handler_write(v, value, caller, link);
     }
@@ -2295,7 +2298,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
             drops = vertex_t::store_drops_t{};
             return std::unexpected(status_t::BACKPRESSURE);
         }
-        return store_value(v, std::move(clone), drops, caller, link);
+        return store_value(v, role, std::move(clone), drops, caller, link);
     }
     drops = vertex_t::store_drops_t{};
     // The admission filter still runs, on the SHARED block itself — no clone of its links —
@@ -2307,12 +2310,12 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
         if (!decided) return std::unexpected(decided.error());
         if (*decided)
             return publish_value(
-                v, value_ref_t::adopt(value_t::make(std::move(**decided), *values_)), drops);
+                v, role, value_ref_t::adopt(value_t::make(std::move(**decided), *values_)), drops);
     }
     // ADOPT (RFC-0028 D2): one more reference on the block that is already the value. Zero
     // allocations, zero copies — the target's slot and the source's hold the same block, which
     // is released through the source it was drawn from when the last of them lets go.
-    return publish_value(v, value_ref_t::share(&value), drops);
+    return publish_value(v, role, value_ref_t::share(&value), drops);
 }
 
 admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view caller,
@@ -2326,7 +2329,7 @@ admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view c
     return a->on_admit(value, ctx);
 }
 
-result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
+result_t<value_ref_t> graph_t::publish_value(vertex_t* v, role_t role, value_ref_t sp,
                                              vertex_t::store_drops_t& drops,
                                              vertex_t::ring_take_t* take) {
     // The storage verb has ONE tail for every role now (RFC-0025 §4.6.1 clause 1): publish the
@@ -2347,7 +2350,10 @@ result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
         v->note_write();
         return sp;
     }
-    const bool receives = v->role() == role_t::STREAM;
+    // The store's own role reading decides the ring arm (#2115), never a second load: a write
+    // that read STORED_VALUE and raced a revive as STREAM used to queue an entry here AND
+    // deliver the value directly, so the next drain delivered it a second time.
+    const bool receives = role == role_t::STREAM;
     const std::size_t retained = receives && sp ? sp->total_length() + kRingEntryOverhead : 0;
     if (sp && !v->store(sp)) sp.reset();  // the slot declined: nothing published (#477)
     // vertex_t::store soft-fails its LKV allocation nothrow (#477): null here (a
@@ -2483,7 +2489,10 @@ result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_
     // more to the point — three reads of a member a concurrent retire can store to could
     // DISAGREE with each other, letting one write take the branch-POINT decision of the
     // retiring occupant and the storage decision of the placeholder. A single snapshot makes
-    // the frame internally consistent whichever of the two it caught.
+    // the frame internally consistent whichever of the two it caught. `store_value` takes this
+    // same snapshot rather than reading the role again (#2115): a write that read a storing
+    // role and stored under a revived HANDLER got the handler's empty "consumed" result back
+    // and dereferenced it below.
     const role_t role = v->role();
     if (is_branch_point(value, role)) return write_branch(v, value, caller, link, /*notify=*/true);
     if (role == role_t::HANDLER) return handler_write_deliver(v, std::move(value), caller, link);
@@ -2497,8 +2506,9 @@ result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_
     // The STREAM arm's drain buffer, filled by the ring admission itself (#1713): stack-first,
     // so the common write — whose window is its own entry — allocates nothing for it.
     vertex_t::ring_take_t taken(*values_);
-    const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller, link,
-                                                     role == role_t::STREAM ? &taken : nullptr);
+    const result_t<value_ref_t> stored =
+        store_value(v, role, std::move(value), store_drops, caller, link,
+                    role == role_t::STREAM ? &taken : nullptr);
     if (!stored) return std::unexpected(stored.error());
     if (role == role_t::STREAM) {
         // Drain this RECEIVER's ring and advance its cursor, so a later propagate over the
@@ -2602,7 +2612,7 @@ result_t<void> graph_t::assign(vertex_handle_t vh, view::rope_t value, std::stri
         return write_branch(v, value, caller, nullptr, /*notify=*/false);
     vertex_t::store_drops_t store_drops;
     const result_t<value_ref_t> stored =
-        store_value(v, std::move(value), store_drops, caller, nullptr);
+        store_value(v, role, std::move(value), store_drops, caller, nullptr);
     if (!stored) return std::unexpected(stored.error());
     // A shed ring append here loses the delivery the NEXT covering sweep would have drained
     // — deferred, not eager, but lost all the same, and the sweep has no way to know an
@@ -2707,7 +2717,8 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     // §atomicity non-promise; each leaf is its own consistent refcounted snapshot).
     for (branch_node_t* const site : sites) {
         vertex_t::store_drops_t store_drops;
-        result_t<value_ref_t> r = store_value(site->vx, site->store, store_drops, caller, link);
+        result_t<value_ref_t> r =
+            store_value(site->vx, site->vx->role(), site->store, store_drops, caller, link);
         // A landing site's own admission filter may refuse its slice, and per the
         // non-transaction rule above that un-lands nothing else. Record it so the notify
         // half skips THIS site: the branch's per-site refusal is worth exactly as much as
