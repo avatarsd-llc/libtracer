@@ -719,24 +719,29 @@ std::uint32_t ws_client_transport_t::next_mask_key() {
     return static_cast<std::uint32_t>(z);
 }
 
-void ws_client_transport_t::send(std::span<const std::byte> frame) { send_masked(frame, {}); }
+void ws_client_transport_t::send(std::span<const std::byte> frame) {
+    const std::span<const std::byte> one[1] = {frame};
+    send_masked(one, {});
+}
+
+void ws_client_transport_t::send(std::span<const std::span<const std::byte>> iov) {
+    send_masked(iov, {});
+}
 
 void ws_client_transport_t::send(std::span<const std::span<const std::byte>> head,
                                  const graph::value_t& value, const graph::delivery_lane_t& lane) {
-    std::size_t total = value.total_length();
-    for (const std::span<const std::byte>& h : head) total += h.size();
-    mem::block_array_t<std::byte> flat(*io_src_);
-    if (!flat.reserve(total)) {
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // the store refused: shed, counted
+    // The record's spans on the stack, masked as they are gathered (#2145): never flattened
+    // first. An unusually wide record takes the base's general lowering (the copy path).
+    std::array<std::span<const std::byte>, kMaxInlineIov> parts;
+    const std::size_t n = retained_parts(parts, head, value);
+    if (n > parts.size()) {
+        transport_t::send(head, value, lane);
         return;
     }
-    for (const std::span<const std::byte>& h : head) (void)flat.append(h.data(), h.size());
-    for (const view::view_t& l : value.links())
-        (void)flat.append(l.bytes().data(), l.bytes().size());  // reserved: cannot grow
-    send_masked(std::span<const std::byte>(flat.data(), flat.size()), lane);
+    send_masked(std::span<const std::span<const std::byte>>(parts.data(), n), lane);
 }
 
-void ws_client_transport_t::send_masked(std::span<const std::byte> frame,
+void ws_client_transport_t::send_masked(std::span<const std::span<const std::byte>> frame,
                                         const graph::delivery_lane_t& lane) {
     // One MASKED record per frame, through the link's egress (ADR-0087 §2). A client frame
     // MUST be masked (RFC 6455 §5.1), so unlike every server-side send this one cannot gather
@@ -744,14 +749,19 @@ void ws_client_transport_t::send_masked(std::span<const std::byte> frame,
     // a REUSED buffer (#848): steady state allocates nothing, and exhaustion drops the frame
     // instead of aborting under -fno-exceptions.
     //
+    // The payload's spans are gathered and masked in ONE pass (`ws::detail::mask_copy`,
+    // #2145): the caller's bytes are written once, straight into the masked frame.
+    //
     // The writer encodes into tx_buf_, which only the thread holding the writer role touches;
     // a publisher that arrives while a write is in flight encodes ONE shared frame with the
     // same key — the same bytes — and returns rather than waiting for the rest of that write.
     // Each writer turn is still bounded by the liveness window (#838).
     const std::uint32_t key = next_mask_key();
+    std::size_t len = 0;
+    for (const std::span<const std::byte>& part : frame) len += part.size();
     egress_once_t once([&] {
         return egress_frame_t::make(
-            *io_src_, ws::detail::client_frame_bytes(frame.size()), [&](std::span<std::byte> out) {
+            *io_src_, ws::detail::client_frame_bytes(len), [&](std::span<std::byte> out) {
                 return ws::detail::put_client_frame(out, ws::opcode_t::BINARY, frame, key, true);
             });
     });

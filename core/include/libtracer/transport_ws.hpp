@@ -532,9 +532,16 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     void send(std::span<const std::byte> frame) override;
 
     /**
+     * @brief Gathered send: @p iov's spans as one MASKED BINARY message, gathered and masked
+     *        in one pass (#2145) — never flattened into a temporary first.
+     */
+    void send(std::span<const std::span<const std::byte>> iov) override;
+
+    /**
      * @brief Retained send: @p head then @p value as one MASKED BINARY message, waiting in
-     *        @p lane's ring if it waits (ADR-0087 §2). A client frame is masked, so it is a
-     *        copy either way: the record is flattened into the link's egress store first.
+     *        @p lane's ring if it waits (ADR-0087 §2). A client frame is masked, so the payload
+     *        is written once, gathered from @p head and the value's links and masked in the
+     *        same pass (#2145); it is never flattened first.
      */
     void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
               const graph::delivery_lane_t& lane) override;
@@ -638,9 +645,10 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      *         (`pipelined_`, which it takes over). */
     void serve(int fd);
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
-    /** @brief The one send body: @p frame as one masked message through the egress, in
-     *         @p lane. */
-    void send_masked(std::span<const std::byte> frame, const graph::delivery_lane_t& lane);
+    /** @brief The one send body: @p frame's spans as one masked message through the egress,
+     *         gathered and masked in one pass, in @p lane. */
+    void send_masked(std::span<const std::span<const std::byte>> frame,
+                     const graph::delivery_lane_t& lane);
 
     // conn_fd_, dropped_tx_ and the egress (and their teardown discipline) live in
     // stream_endpoint_t.

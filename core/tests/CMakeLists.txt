@@ -2187,6 +2187,17 @@ if(LIBTRACER_NET_PLANE)
 endif()
 
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+    # #2145 — a dialer send takes at most one mutex: none to an idle peer, the queue mutex
+    # once when the record waits. Counted by interposing pthread_mutex_lock; skips (77) under
+    # a sanitizer or wherever the interposer is not reached.
+    add_executable(egress_lock_count_test egress_lock_count_test.cpp)
+    target_link_libraries(egress_lock_count_test PRIVATE libtracer ${CMAKE_DL_LIBS})
+    libtracer_test_warnings(egress_lock_count_test)
+    add_test(NAME egress_lock_count COMMAND egress_lock_count_test)
+    set_tests_properties(egress_lock_count PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
+
+if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
     # #2139 — the shared link case suite (partial frame, several frames per read, oversize
     # length, fragmented message, stalled peer, peer leaving mid-send), written against the
     # router's receive and send seams only, over the socket-free fake link adapter and the

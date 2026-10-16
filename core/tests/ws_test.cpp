@@ -293,6 +293,39 @@ int main() {
         check(all_restored, "  unmasking twice restores the input");
     }
 
+    // #2145 — a client frame gathered from several spans is masked in the one pass that
+    // copies it: every split of a payload into three parts masks to the byte-wise reference,
+    // the key phase carried across each part boundary.
+    {
+        constexpr std::uint32_t kKey = 0x37FA213Du;
+        bool all_equal = true;
+        for (std::size_t len = 0; len <= 40; ++len) {
+            std::vector<std::byte> payload(len + 1);  // +1: the parts start unaligned
+            for (std::size_t i = 0; i < payload.size(); ++i)
+                payload[i] = static_cast<std::byte>((i * 41 + len) & 0xFFu);
+            const std::span<const std::byte> whole = std::span(payload).subspan(1);
+            // The header from the encoder, the payload masked byte by byte (RFC 6455 §5.3).
+            std::vector<std::byte> want = client_frame_ref(opcode_t::BINARY, whole, kKey);
+            const std::size_t at = want.size() - len;
+            for (std::size_t i = 0; i < len; ++i)
+                want[at + i] =
+                    whole[i] ^ static_cast<std::byte>((kKey >> (24 - 8 * (i % 4))) & 0xFFu);
+            for (std::size_t a = 0; a <= len; ++a) {
+                for (std::size_t b = a; b <= len; ++b) {
+                    const std::array<std::span<const std::byte>, 3> parts{
+                        whole.first(a), whole.subspan(a, b - a), whole.subspan(b)};
+                    std::vector<std::byte> got(detail::client_frame_bytes(len));
+                    const std::size_t n = tr::net::ws::detail::put_client_frame(
+                        got, opcode_t::BINARY, parts, kKey, true);
+                    all_equal = all_equal && n == got.size() && got == want;
+                }
+            }
+        }
+        check(all_equal,
+              "a client frame gathered from three parts, every split point, masks to the "
+              "byte-wise reference");
+    }
+
     // ...and through the decoder: a masked frame whose payload starts at every offset from an
     // 8-byte boundary still decodes to its plaintext.
     {
