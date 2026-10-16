@@ -445,7 +445,7 @@ class egress_t {
                 }
             }
             if (s.moved != 0) p.strikes_ = 0;
-            drain_owned(p, std::forward<Write>(write), condemn, r, held);
+            drain_owned(p, std::forward<Write>(write), condemn, r, held, 0, true);
             return r;
         }
         egress_frame_t* const f = frame();
@@ -614,13 +614,18 @@ class egress_t {
      * a turn that moved nothing, taken by an offer that found its STREAM lane full, is one,
      * and the cap times that lane's depth (@p lost) condemns the peer. A SAMPLE lane
      * (@p lost 1) and an offer that cost nothing (0) never strike.
+     *
+     * @p drained skips the first drain pass: the caller took the role over empty lanes and
+     * wrote its own record. A frame pushed since is found by the re-check after the role is
+     * let go, so the pass would only take the queue mutex to find nothing.
      */
     template <class Write>
     void drain_owned(egress_peer_t& p, Write&& write, function_ref_t<void()> condemn,
-                     egress_result_t& r, bool held = false, std::uint16_t lost = 0) {
+                     egress_result_t& r, bool held = false, std::uint16_t lost = 0,
+                     bool drained = false) {
         for (;;) {
             std::size_t moved = 0;
-            while (!held &&
+            while (!held && !std::exchange(drained, false) &&
                    (p.role_.load(std::memory_order_relaxed) & egress_peer_t::kClosed) == 0) {
                 if (p.wire_ == nullptr) {
                     p.wire_ = pop(p);
