@@ -19,6 +19,8 @@
 #include <span>
 #include <type_traits>
 
+#include "libtracer/config.hpp"
+
 // CRC-32C (Castagnoli) IS the SSE4.2 `_mm_crc32_*` / ARMv8 `__crc32c*` instruction
 // (same reflected poly 0x82F63B78). We dispatch to it at RUNTIME when the CPU has it,
 // and fall back to a portable slice-by-8 table otherwise — all three paths (hardware,
@@ -70,8 +72,9 @@ inline constexpr auto kCrc16 = crc16_table();
 
 // Slice-by-8 tables for the portable (no-hardware) CRC-32C path: table[0] is the
 // single-byte Sarwate table; table[k][i] folds `i` forward `k` extra bytes. Built
-// at compile time from the base table; used only on the runtime fallback path, so
-// this costs 8 KiB of rodata that a hardware-CRC CPU never touches.
+// at compile time from the base table; used only on the runtime fallback path, and
+// only where config_t::kCrc32cSlices is 8 (the default), so its 8 KiB of rodata
+// reaches neither a hardware-CRC CPU nor a NARROW build that binds 1 (#2116).
 constexpr std::array<std::array<std::uint32_t, 256>, 8> crc32c_slice_tables() noexcept {
     std::array<std::array<std::uint32_t, 256>, 8> t{};
     t[0] = crc32c_table();
@@ -99,21 +102,31 @@ namespace detail {
            (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(p[3])) << 24);
 }
 
-// Portable slice-by-8 CRC-32C fold of a running state — 8 bytes per iteration off the
-// table, then the trailing bytes byte-at-a-time. Byte-identical to the Sarwate loop.
-[[nodiscard]] inline std::uint32_t crc32c_slice8(std::uint32_t c, const std::byte* p,
-                                                 std::size_t n) noexcept {
-    const auto& t = kCrc32cSlice;
-    while (n >= 8) {
-        const std::uint32_t lo = c ^ crc_load_le32(p);
-        const std::uint32_t hi = crc_load_le32(p + 4);
-        c = t[7][lo & 0xFFu] ^ t[6][(lo >> 8) & 0xFFu] ^ t[5][(lo >> 16) & 0xFFu] ^
-            t[4][(lo >> 24) & 0xFFu] ^ t[3][hi & 0xFFu] ^ t[2][(hi >> 8) & 0xFFu] ^
-            t[1][(hi >> 16) & 0xFFu] ^ t[0][(hi >> 24) & 0xFFu];
-        p += 8;
-        n -= 8;
+// Portable CRC-32C fold of a running state over @p Slices tables: 1 is the byte-at-a-time
+// Sarwate loop over the base table; 8 is slice-by-8, 8 bytes per iteration and then the
+// trailing bytes byte-at-a-time. Both are byte-identical to the Sarwate loop. The build's
+// choice is config_t::kCrc32cSlices; the parameter exists so a host test can run BOTH folds
+// whatever the build picked, bypassing the hardware path (#2116).
+template <std::size_t Slices>
+[[nodiscard]] inline std::uint32_t crc32c_soft(std::uint32_t c, const std::byte* p,
+                                               std::size_t n) noexcept {
+    static_assert(Slices == 1 || Slices == 8,
+                  "config_t::kCrc32cSlices is 1 (the Sarwate table) or 8 (slice-by-8)");
+    if constexpr (Slices == 1) {
+        while (n-- > 0) c = kCrc32c[(c ^ std::to_integer<std::uint8_t>(*p++)) & 0xFFu] ^ (c >> 8);
+    } else {
+        const auto& t = kCrc32cSlice;
+        while (n >= 8) {
+            const std::uint32_t lo = c ^ crc_load_le32(p);
+            const std::uint32_t hi = crc_load_le32(p + 4);
+            c = t[7][lo & 0xFFu] ^ t[6][(lo >> 8) & 0xFFu] ^ t[5][(lo >> 16) & 0xFFu] ^
+                t[4][(lo >> 24) & 0xFFu] ^ t[3][hi & 0xFFu] ^ t[2][(hi >> 8) & 0xFFu] ^
+                t[1][(hi >> 16) & 0xFFu] ^ t[0][(hi >> 24) & 0xFFu];
+            p += 8;
+            n -= 8;
+        }
+        while (n-- > 0) c = t[0][(c ^ std::to_integer<std::uint8_t>(*p++)) & 0xFFu] ^ (c >> 8);
     }
-    while (n-- > 0) c = t[0][(c ^ std::to_integer<std::uint8_t>(*p++)) & 0xFFu] ^ (c >> 8);
     return c;
 }
 
@@ -175,11 +188,11 @@ inline std::uint32_t crc32c_hw(std::uint32_t c, const std::byte* p, std::size_t 
     const std::size_t n = data.size();
 #if TR_CRC_X86
     static const bool have_hw = __builtin_cpu_supports("sse4.2");
-    return have_hw ? crc32c_hw(c, p, n) : crc32c_slice8(c, p, n);
+    return have_hw ? crc32c_hw(c, p, n) : crc32c_soft<graph::config_t::kCrc32cSlices>(c, p, n);
 #elif TR_CRC_ARM
     return crc32c_hw(c, p, n);
 #else
-    return crc32c_slice8(c, p, n);
+    return crc32c_soft<graph::config_t::kCrc32cSlices>(c, p, n);
 #endif
 }
 

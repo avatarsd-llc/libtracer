@@ -184,6 +184,27 @@ struct default_config_t {
     static constexpr std::size_t kCacheLineBytes = 64;
 
     /**
+     * @brief How many 256-entry tables the portable CRC-32C fold reads per step: **8**
+     *        (slice-by-8, 8 KiB of `.rodata`) or **1** (the byte-at-a-time Sarwate loop over
+     *        the 1 KiB base table the constant-evaluated CRC already uses).
+     *
+     * Only the no-hardware path reads it: x86 with SSE4.2 and ARMv8 with the CRC extension
+     * fold in the instruction and never touch either table. Every value produces the same
+     * CRC, byte for byte (a frozen-vector requirement), so this is an optimization choice,
+     * never a correctness one.
+     *
+     * The default is 8 on every target: a MID or WIDE node with no CRC instruction (an rv32
+     * ESP32-C6, a 32-bit Linux board) keeps the fast fold on every frame. A NARROW node binds
+     * 1 explicitly; on the Cortex-M0 P0 node the seven extra tables were 7,168 B of its 16 KiB
+     * flash budget (#2116), and the footprint sentinel's fragment pins that choice.
+     * The trade, indicative only (one isolated run of the portable fold under `nice`, host
+     * x86-64, GCC 13.3, `-O2`): slice-by-8 folds 1.1 / 2.3 / 2.2 GB/s at 64 B / 1 KiB / 16 KiB,
+     * the single table 0.33 / 0.40 / 0.44 GB/s, about 3.4x to 5.6x slower.
+     * Override fragment: `static constexpr std::size_t kCrc32cSlices = 1;`.
+     */
+    static constexpr std::size_t kCrc32cSlices = 8;
+
+    /**
      * @brief How many threads may hold a hazard announcement at once (ADR-0069 §3).
      *
      * Read this as "threads that concurrently touch a vertex's LKV" — readers announce, writers

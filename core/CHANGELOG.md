@@ -30,6 +30,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`config_t::kCrc32cSlices` picks the portable CRC-32C fold's tables
+  ([#2116](https://github.com/avatarsd-llc/libtracer/issues/2116)).** 8, the default on every
+  target, is slice-by-8 (8 KiB of `.rodata`); 1 is the byte-at-a-time loop over the 1 KiB base
+  table, 7,168 B less flash and roughly 3–6x slower on the portable path. A NARROW node binds
+  `static constexpr std::size_t kCrc32cSlices = 1;` in its `config_override.hpp`, as the
+  Cortex-M0 footprint sentinel does. Every value gives the same CRC; a CPU with a CRC
+  instruction reads neither.
+
 - **`subscription_selector_t`: a vertex that switches among named options of subscription refs
   ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** A header-only adapter
   beside the core (`libtracer/subscription_selector.hpp`): a build that does not include it
