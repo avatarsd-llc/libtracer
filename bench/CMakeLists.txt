@@ -401,6 +401,23 @@ target_compile_options(bench_conn_ram PRIVATE -Wall -Wextra)
 # reports its size (the copy a memcpy interposer cannot see, #2145). Every symbol of that TU
 # is then defined here, so the archive's transport_ws.cpp.o is never pulled; if it were, the
 # link would fail on a duplicate definition rather than count the wrong copy.
+# That holds only while transport_ws.cpp is the one core file that includes ws.hpp: a second
+# includer would instantiate mask_copy without the hook (an ODR split, and uncounted copies).
+# Checked here, at configure time, so the bench cannot build on a tree that breaks it.
+file(GLOB_RECURSE _ws_includers_candidates
+     "${CMAKE_CURRENT_SOURCE_DIR}/../core/src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/../core/src/*.hpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/../core/include/*.hpp")
+foreach(_f IN LISTS _ws_includers_candidates)
+    get_filename_component(_name "${_f}" NAME)
+    if(_name STREQUAL "transport_ws.cpp" OR _name STREQUAL "ws.hpp")
+        continue()
+    endif()
+    file(STRINGS "${_f}" _hit REGEX "#[ \t]*include[ \t]*[<\"]libtracer/ws\\.hpp[>\"]")
+    if(_hit)
+        message(FATAL_ERROR "bench_peer_counts: ${_f} includes libtracer/ws.hpp; only "
+                            "core/src/transport_ws.cpp may (see the note above bench_peer_counts)")
+    endif()
+endforeach()
 add_executable(bench_peer_counts bench_peer_counts.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../core/src/transport_ws.cpp)
 target_compile_definitions(bench_peer_counts PRIVATE LIBTRACER_COUNT_MASK_COPY=bench_note_mask_copy)
 target_link_libraries(bench_peer_counts PRIVATE libtracer ${CMAKE_DL_LIBS})
