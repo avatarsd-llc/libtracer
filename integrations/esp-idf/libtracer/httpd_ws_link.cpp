@@ -23,9 +23,11 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <utility>
 
@@ -51,6 +53,14 @@ static_assert(kBusLinks,
               "CONFIG_LIBTRACER_WS_SERVER, which selects CONFIG_LIBTRACER_BUS_LINKS. Otherwise "
               "bind `static constexpr bool kBusLinks = true;` in libtracer/config_override.hpp, "
               "or do not compile this TU.");
+
+// stats_t's layout is what a dashboard or a pinned integrator reads (#2195): the #2195
+// hotfix stops replacing frames, so tx_conflated reads 0, but it keeps its place. Fifteen
+// 32-bit tallies, in this order; a field added, moved or widened fails here first.
+static_assert(sizeof(httpd_ws_link_t::stats_t) == 15 * sizeof(std::uint32_t));
+static_assert(offsetof(httpd_ws_link_t::stats_t, enqueue_drops) == 0);
+static_assert(offsetof(httpd_ws_link_t::stats_t, tx_conflated) == 4);
+static_assert(offsetof(httpd_ws_link_t::stats_t, rx_drain_waits) == 56);
 
 namespace {
 
@@ -946,6 +956,15 @@ struct httpd_ws_link_t::tx_frame_t {
 };
 
 /**
+ * @brief One frame waiting behind a session's wire frame (#2195): the session's own spare,
+ *        or a node drawn from the link's egress store while the frame waits.
+ */
+struct httpd_ws_link_t::tx_wait_t {
+    tx_frame_t frame;
+    tx_wait_t* next = nullptr;
+};
+
+/**
  * @brief One peer slot: a single inbound WebSocket client's connection state.
  *
  * Slots are recycled in place across connections (never freed before the link), so a
@@ -1109,26 +1128,31 @@ struct httpd_ws_link_t::session_t {
         return tx_frame_bytes;
     }
     /**
-     * @brief This peer's conflating TX slot (#2095): `tx[tx_wire]` is the frame on the wire
-     *        (httpd task only), the other is the newest frame waiting behind it.
+     * @brief This peer's frame on the wire (httpd task only, #2095).
      *
-     * A producer only ever writes the waiting frame, under @ref tx_m, and a newer frame
-     * REPLACES a waiting one instead of queueing behind it or waiting for it: the peer's
-     * stats count the replaced frame (`tx_conflated`). So a slow peer loses its own older
-     * updates and never holds a buffer, a work item or the httpd task that another peer
-     * needs. The httpd task moves the waiting frame onto the wire, under @ref tx_m, only
-     * when the wire frame is empty.
+     * Behind it wait up to @ref httpd_ws_link_t::kTxWaitDepth newer frames, in order
+     * (@ref tx_head), and none ever replaces another (#2195): a frame from one vertex is not
+     * a newer value of another, and an event or an ANNOUNCE is owed to the peer once. A frame
+     * offered to a full queue is the link's counted refusal. So a slow peer holds at most its
+     * own few frames and never a work item or the httpd task that another peer needs. The
+     * httpd task moves the oldest waiting frame onto the wire, under @ref tx_m, when the wire
+     * frame is empty.
      */
-    tx_frame_t tx[2];
-    std::uint8_t tx_wire = 0; /**< @brief Index of the frame on the wire (see @ref tx). */
-    /** @brief Guards the waiting frame and @ref tx_wire. Held for a gather or a flip, never
-     *         across a socket write, and never with `peers_m_` taken under it. */
+    tx_frame_t tx;
+    tx_wait_t* tx_head = nullptr; /**< @brief The oldest waiting frame (tx_m). */
+    tx_wait_t* tx_tail = nullptr; /**< @brief The newest waiting frame (tx_m). */
+    /** @brief The node the first waiting frame takes, so a peer with one frame waiting costs
+     *         no draw (tx_m). */
+    tx_wait_t tx_spare;
+    bool tx_spare_used = false; /**< @brief @ref tx_spare is in the queue (tx_m). */
+    /** @brief Guards the waiting frames. Held for a gather or a flip, never across a socket
+     *         write, and never with `peers_m_` taken under it. */
     std::mutex tx_m;
     /**
      * @brief Writes of this session's frames that the socket took nothing of, each followed
-     *        by a newer frame replacing the waiting one (tx_m).
+     *        by a newer frame refused at the full queue (tx_m).
      *
-     * Bumped by @ref httpd_ws_link_t::stage when it replaces a frame after such a write
+     * Bumped by @ref httpd_ws_link_t::stage when it refuses a frame after such a write
      * (@ref tx_refused), cleared by any write that moves a byte. At
      * @ref httpd_ws_link_t::kTxStallStrikes the flush condemns the session through the
      * strike path: a peer whose socket never drains holds no seat for ever.
@@ -1662,7 +1686,10 @@ void httpd_ws_link_t::note_large_pinned() {
             const auto pins = [](const tx_frame_t& f) {
                 return f.held() && f.blk->large_busy != nullptr;
             };
-            if (!s->tx_refused || !(pins(s->tx[0]) || pins(s->tx[1]))) continue;
+            bool pinned = pins(s->tx);
+            for (const tx_wait_t* w = s->tx_head; w != nullptr && !pinned; w = w->next)
+                pinned = pins(w->frame);
+            if (!s->tx_refused || !pinned) continue;
             if (++s->tx_stalls >= kTxStallStrikes) strike = true;
         }
     }
@@ -1762,6 +1789,17 @@ void httpd_ws_link_t::drop_block(tx_block_t* b) {
 void httpd_ws_link_t::release_frame(tx_frame_t& frame) {
     drop_block(frame.blk);
     frame = tx_frame_t{};
+}
+
+void httpd_ws_link_t::free_waiting(session_t& s, tx_wait_t* w) {
+    // A waiting node goes back where stage took it from — the session's own spare, or the
+    // egress store. Its frame has been moved out or released already: this frees no block.
+    if (w == &s.tx_spare) {
+        s.tx_spare_used = false;
+        return;
+    }
+    w->~tx_wait_t();
+    io_src_->release(w, sizeof(tx_wait_t), alignof(tx_wait_t));
 }
 
 httpd_ws_link_t::~httpd_ws_link_t() {
@@ -3190,14 +3228,19 @@ httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer
         (void)slot->close_tx_frame();
     }
     {
-        // Both TX frames go with the session (#2095): the one on the wire is this task's own
+        // Every TX frame goes with the session (#2095): the one on the wire is this task's own
         // (no flush can be running — this is the httpd task, inside free_ctx), and the waiting
-        // one is a producer's, so it is taken under tx_m. A producer that resolved the session
-        // before it left may still store one afterwards; it carries the departed generation,
-        // and the next flush skips it.
+        // ones are producers', so they are taken under tx_m. A producer that resolved the
+        // session before it left may still store one afterwards; it carries the departed
+        // generation, and the next flush skips it.
         const std::lock_guard lock(slot->tx_m);
-        release_frame(slot->tx[0]);
-        release_frame(slot->tx[1]);
+        release_frame(slot->tx);
+        while (tx_wait_t* const w = slot->tx_head) {
+            slot->tx_head = w->next;
+            release_frame(w->frame);
+            free_waiting(*slot, w);
+        }
+        slot->tx_tail = nullptr;
         slot->tx_stalls = 0;  // the stall count is the departed session's, like its frames
         slot->tx_refused = false;
     }
@@ -3396,43 +3439,70 @@ void httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
         note_enqueue_drop(fd, total);
         return;
     }
-    // Into THIS peer's waiting frame, and nowhere else (#2095): a reference to the shared
-    // block, never a copy. A frame already waiting there is REPLACED and counted, never
-    // queued behind and never waited for: the newest frame is the one a slow peer gets, and a
-    // slow peer holds no buffer, no work item and no part of the httpd task that another peer
-    // needs. A replacement that follows a write the socket took nothing of is a stall
-    // (session_t::tx_stalls), which the flush strikes at kTxStallStrikes.
+    // Into THIS peer's queue, and nowhere else (#2095): a reference to the shared block,
+    // never a copy. Behind the frames already waiting, never in place of one (#2195): a frame
+    // from one vertex is not a newer value of another, and an event or an ANNOUNCE is owed to
+    // the peer once. A full queue, or a refused node draw, refuses the NEW frame — the link's
+    // counted drop — and a slow peer holds no more than its own few frames and no part of the
+    // httpd task that another peer needs. A refusal that follows a write the socket took
+    // nothing of is a stall (session_t::tx_stalls), which the flush strikes at
+    // kTxStallStrikes.
     session_t* const s = to.slot;
-    blk->refs.fetch_add(1, std::memory_order_relaxed);
-    tx_frame_t old;
+    bool refused = false;
+    bool full = false;
     {
         const std::lock_guard lock(s->tx_m);
-        tx_frame_t& f = s->tx[s->tx_wire ^ 1];
-        old = f;
-        f = tx_frame_t{blk, to.gen, 0};
-        // A frame left for this slot's PREVIOUS session is not this peer's loss: released
-        // uncounted, as the flush would have skipped it.
-        if (old.held() && old.gen == to.gen && s->tx_refused) {
-            ++s->tx_stalls;
-            s->tx_refused = false;
+        std::size_t waiting = 0;  // this session's; a departed one's frames are skipped later
+        for (const tx_wait_t* w = s->tx_head; w != nullptr; w = w->next)
+            waiting += w->frame.gen == to.gen ? 1 : 0;
+        tx_wait_t* node = nullptr;
+        full = waiting >= kTxWaitDepth;
+        if (!full && !s->tx_spare_used) {  // one waiting frame: no draw
+            s->tx_spare_used = true;
+            node = &s->tx_spare;
+        } else if (!full) {
+            void* const raw = io_src_->try_alloc(sizeof(tx_wait_t), alignof(tx_wait_t));
+            node = raw != nullptr ? new (raw) tx_wait_t : nullptr;
+        }
+        if (node == nullptr) {
+            refused = true;
+            if (s->tx_refused) {
+                ++s->tx_stalls;
+                s->tx_refused = false;
+            }
+        } else {
+            blk->refs.fetch_add(1, std::memory_order_relaxed);
+            node->frame = tx_frame_t{blk, to.gen, 0};
+            node->next = nullptr;
+            (s->tx_tail != nullptr ? s->tx_tail->next : s->tx_head) = node;
+            s->tx_tail = node;
         }
     }
-    const bool conflated = old.held() && old.gen == to.gen;
-    release_frame(old);
-    if (conflated) note_tx_conflated(to);
+    // A refused frame still posts the flush: the socket is offered the wire frame again, and
+    // that offer is what a stalled peer's strike count is made of. A full queue is this
+    // peer's own pace, as a replacement was before it, so it is counted and not logged per
+    // frame (a stalled peer at 100 updates/s would otherwise log 100 lines a second); a
+    // refused node draw is the link's memory, and logs like every other refused enqueue.
+    if (full)
+        enqueue_drops_.fetch_add(1, std::memory_order_relaxed);
+    else if (refused)
+        note_enqueue_drop(fd, total);
     egress_posted();  // a parked drain flushes it now rather than hold it
-    if (post_flush(h)) return;
+    if (post_flush(h) || refused) return;
     // The control queue refused the flush. The frame cannot go out until something else
-    // posts one, so it is taken back (if no newer one replaced it meanwhile) and counted
+    // posts one, so it is taken back (if a flush has not taken it meanwhile) and counted
     // exactly as a refused enqueue always was — a fact about the shared control queue,
     // charged to the link and to no peer.
     tx_frame_t back;
     {
         const std::lock_guard lock(s->tx_m);
-        tx_frame_t& f = s->tx[s->tx_wire ^ 1];
-        if (f.blk == blk && f.gen == to.gen) {
-            back = f;
-            f = tx_frame_t{};
+        for (tx_wait_t *w = s->tx_head, *prev = nullptr; w != nullptr; prev = w, w = w->next) {
+            if (w->frame.blk != blk || w->frame.gen != to.gen) continue;
+            (prev != nullptr ? prev->next : s->tx_head) = w->next;
+            if (s->tx_tail == w) s->tx_tail = prev;
+            back = std::exchange(w->frame, tx_frame_t{});
+            free_waiting(*s, w);
+            break;
         }
     }
     release_frame(back);
@@ -3617,7 +3687,9 @@ std::size_t httpd_ws_link_t::buffer_bytes() const noexcept {
 }
 
 std::size_t httpd_ws_link_t::peer_tx_bytes() const noexcept {
-    return sizeof(session_t::tx) + sizeof(session_t::tx_wire) + sizeof(session_t::tx_stalls);
+    return sizeof(session_t::tx) + sizeof(session_t::tx_head) + sizeof(session_t::tx_tail) +
+           sizeof(session_t::tx_spare) + sizeof(session_t::tx_spare_used) +
+           sizeof(session_t::tx_stalls);
 }
 
 void httpd_ws_link_t::note_enqueue_drop(int fd, std::size_t bytes) {
@@ -4036,35 +4108,22 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
     // The frame on the wire, then at most one newer: a peer whose producer outpaces its
     // socket would otherwise keep this task on it for as long as the socket keeps up.
     for (int turn = 0; turn < 2; ++turn) {
-        tx_frame_t* f = &s->tx[s->tx_wire];
-        tx_frame_t superseded;
+        tx_frame_t* const f = &s->tx;
         bool stalled = false;
         {
-            // The waiting frame moves onto the wire when the wire is free — or holds a frame
-            // not one byte of which has gone out yet, which is no more owed to the peer than
-            // a waiting one: it is replaced and counted the same way, so a stalled peer that
-            // recovers gets the NEWEST frame, not the one it stalled on. Under tx_m, the one
-            // moment a producer and this task touch the same index.
+            // The oldest waiting frame moves onto the wire when the wire is free, and only
+            // then: a wire frame is never replaced, started or not (#2195). Under tx_m, the
+            // one moment a producer and this task touch the same frames.
             const std::lock_guard lock(s->tx_m);
-            const bool waiting = s->tx[s->tx_wire ^ 1].held();
-            if (!waiting && !f->held()) return progress;
-            if (waiting && f->sent == 0) {
-                superseded = *f;
-                *f = tx_frame_t{};
-                s->tx_wire ^= 1;
-                f = &s->tx[s->tx_wire];
-                // A replacement after a write the socket took nothing of: a stall, as in stage.
-                if (superseded.held() && s->tx_refused) {
-                    ++s->tx_stalls;
-                    s->tx_refused = false;
-                }
+            if (!f->held() && s->tx_head != nullptr) {
+                tx_wait_t* const w = s->tx_head;
+                s->tx_head = w->next;
+                if (s->tx_tail == w) s->tx_tail = nullptr;
+                *f = std::exchange(w->frame, tx_frame_t{});
+                free_waiting(*s, w);
             }
+            if (!f->held()) return progress;
             stalled = s->tx_stalls >= kTxStallStrikes;
-        }
-        if (superseded.held()) {
-            const session_ref_t was{s, superseded.gen};
-            release_frame(superseded);
-            note_tx_conflated(was);
         }
         // The frame names the session it was staged for (#954), and the server's own verdict
         // is the second opinion. A skip is not a send result: it feeds the cumulative tally,
@@ -4137,7 +4196,7 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
     bool more = false;
     {
         const std::lock_guard lock(s->tx_m);
-        more = s->tx[s->tx_wire ^ 1].held();
+        more = s->tx_head != nullptr;
     }
     if (more && h != nullptr) (void)post_flush(h);
     return progress;
@@ -4214,7 +4273,7 @@ bool httpd_ws_link_t::finish_wire(session_t* slot, int fd) {
     // or an auth frame, so the rest is written within the send bound like the frame it
     // precedes: that is THIS peer's own request being served, so the wait is its own. A frame
     // not yet started is no hazard and stays held.
-    tx_frame_t& f = slot->tx[slot->tx_wire];
+    tx_frame_t& f = slot->tx;
     if (!f.held() || f.sent == 0) return true;
     const session_ref_t to{slot, f.gen};
     const tx_outcome_t out =

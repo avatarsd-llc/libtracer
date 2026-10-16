@@ -338,12 +338,12 @@ void test_egress_work_is_sent_from_inside_the_park() {
 }
 
 // ---------------------------------------------------------------------------
-// 7 — a burst posted before the park conflates to its newest frame, which the park writes
-//     once; a push posted DURING the park goes out from inside it.
+// 7 — a burst posted before the park waits in order, and the park writes each frame once;
+//     a push posted DURING the park goes out from inside it.
 // ---------------------------------------------------------------------------
-void test_park_sends_the_newest_frame_once() {
+void test_park_sends_each_frame_once() {
     constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
-    std::printf("a parked drain writes a burst's newest frame, once:\n");
+    std::printf("a parked drain writes each frame of a burst, once, in order:\n");
     auto link = fresh_link(807);
     // The previous case's link queued its teardown detach and did not wait for it (adopted
     // mode); run whatever is left so the queue below holds this case's items alone.
@@ -357,33 +357,35 @@ void test_park_sends_the_newest_frame_once() {
         finish(std::move(link));
         return;
     }
-    // Four posts with the loop NOT running: each replaces the one waiting before it.
+    // Four posts with the loop NOT running: all four wait, in order (#2195).
     std::vector<std::byte> tag(1);
     for (std::size_t i = 0; i < 4; ++i) {
         tag[0] = static_cast<std::byte>(0x10 + i);
         peer->send(std::span<const std::byte>(tag));
     }
-    check(link->stats().tx_conflated == 3, "three were replaced, and counted");
+    check(link->stats().tx_conflated == 0, "none was replaced");
 
-    // Now the flood arrives and the drain parks past one budget; the park writes the newest.
+    // Now the flood arrives and the drain parks past one budget; the park writes all four.
     ingress_t in(807, kBudget + 1, 8);
-    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 1; }),
-          "the waiting frame went out from inside the park");
+    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 4; }),
+          "the waiting frames went out from inside the park");
     tag[0] = std::byte{0xA0};
     peer->send(std::span<const std::byte>(tag));
-    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 2; }),
-          "and a push posted during the park follows it");
+    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 5; }),
+          "and a push posted during the park follows them");
     check(fake_httpd::semaphore_waiters() == 1, "which is still parked");
     const auto sent = fake_httpd::instance().sent_frames();
-    check(sent.size() == 2 && sent[0].payload.size() == 1 &&
-              sent[0].payload[0] == std::byte{0x13} && sent[1].payload.size() == 1 &&
-              sent[1].payload[0] == std::byte{0xA0},
-          "newest of the burst first, then the later push");
+    bool in_order = sent.size() == 5;
+    for (std::size_t i = 0; in_order && i < 5; ++i)
+        in_order =
+            sent[i].payload.size() == 1 &&
+            sent[i].payload[0] == (i < 4 ? static_cast<std::byte>(0x10 + i) : std::byte{0xA0});
+    check(in_order, "the burst in order, then the later push");
 
     (void)fake_httpd::run_idle_hooks();
     check(wait_until([&] { return in.delivered() == kBudget + 1; }), "the parked frame finished");
     (void)fake_httpd::instance().run_pending();
-    check(fake_httpd::instance().sent_frames().size() == 2, "no frame went out twice");
+    check(fake_httpd::instance().sent_frames().size() == 5, "no frame went out twice");
     finish(std::move(link));
 }
 
@@ -588,7 +590,7 @@ int main(int argc, char** argv) {
         test_an_idle_core_resets_the_drain();
         test_teardown_while_parked_joins_after_idle();
         test_egress_work_is_sent_from_inside_the_park();
-        test_park_sends_the_newest_frame_once();
+        test_park_sends_each_frame_once();
         test_flood_shape_switches_the_session_to_nagle();
         test_in_call_reply_bytes_end_a_drain();
     }

@@ -195,12 +195,12 @@ void test_refusal_and_conflation_are_told_apart() {
     check(after.tx_to_dead_peer == before.tx_to_dead_peer,
           "nor a dead-peer drop — the destination was alive");
 
-    // Do NOT drain: on this fake a queued flush runs only when the test pumps it, so every
-    // send past the first replaces the one waiting before it.
+    // Do NOT drain: on this fake a queued flush runs only when the test pumps it, so all three
+    // wait in the peer's queue, in order; none replaces another (#2195).
     for (int i = 0; i < 3; ++i) to->send(std::span<const std::byte>(kBody));
     after = link->stats();
-    check(after.tx_conflated == before.tx_conflated + 2,
-          "two of the three were replaced before the flush ran, and counted");
+    check(after.tx_conflated == before.tx_conflated,
+          "none of the three replaced another before the flush ran");
     check(after.enqueue_drops == before.enqueue_drops + 1, "and none of them is an enqueue drop");
 
     drain();

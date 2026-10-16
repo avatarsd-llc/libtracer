@@ -66,7 +66,7 @@ flowchart LR
 | **ring admission** | a **byte** budget: `try_alloc(retained_bytes)` against the receiving vertex's own source | `vertex_policy_t::ring_source` (`core/include/libtracer/graph.hpp:vertex_policy_t::ring_source`), per vertex, never a shared pool | **arm-dependent** — see §2 | `ring_reserved_bytes()` / `stream_gaps()` (`core/include/libtracer/graph.hpp:graph_t::ring_reserved_bytes`) |
 | **fan-out** | the subscriber snapshot's inline prefix, then a stack frame of `8 * kInlineFanout` views, then one block of the graph's table source | `kInlineFanout`, then the source `graph_t` was given — a wide fan-out sizes it (#1912) | counted shed of the tail past the inline prefix (`fan_out_truncated`) | `graph_t::delivery_drops()` |
 | **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:fwd_router_t::flatten_backend`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
-| **TX slot** | one frame on the wire and one waiting, per peer; on the ESP httpd link a newer frame REPLACES the waiting one (#2095) | two references per peer to frames gathered once per send into a refcounted block from the link's `memory.io` store, shared by every destination peer (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::peer_tx_bytes`) | a replaced frame is counted `tx_conflated` (a slow peer gets the newest frame, never a backlog); a peer whose socket takes no byte across `kTxStallStrikes` replacements is struck (`tx_stall_strikes`); a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
+| **TX slot** | one frame on the wire per peer and up to `kTxWaitDepth` (8) waiting behind it, in order; on the ESP httpd link no frame replaces another (#2195) | references per peer to frames gathered once per send into a refcounted block from the link's `memory.io` store, shared by every destination peer; the first waiting frame's node is in the slot, each further one draws a node from `memory.io` (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::peer_tx_bytes`) | a frame offered to a full queue is refused and counted in `enqueue_drops` (a slow peer holds a bounded backlog of its own); a peer whose socket takes no byte across `kTxStallStrikes` refusals is struck (`tx_stall_strikes`); a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
 | **TX payload size classes** (ESP httpd link) | which storage a send's shared block is drawn from: the link's `memory.io` store, an optional bounded LARGE class, or the exceptional tail (#1880) | the link's ctor — `tx_inline_bytes()`, and `tx_large_bytes()` × `tx_large_slot_capacity()` where an integrator declared the second class (#1566, `integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | an exhausted large class is a counted `dropped` — fail-closed, never a heap fallback | `stats().tx_large_dropped` and `stats().tx_large_peak`, against `tx_large_in_use()` |
 
 Two reading rules for this table:
@@ -151,13 +151,14 @@ queue or shed — and what every other stage does instead.
   static regions. One slab, whole stack, one cap, tightest RAM; contention-free because the
   target has one thread ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
   §folded).
-- **TX**: one slot per peer (#2095) — a reference to the frame on the wire and one to the newest
-  frame waiting behind it; each send's frame is one shared block, whatever the peer count. A
-  slow peer holds only its own slot and never the httpd task: its flush writes without
-  waiting, and a newer frame replaces its waiting one. A held frame resumes on the link's own
-  events (a flush that still moves bytes re-posts itself; the next post, an inbound frame, or
-  the app's `flush_held()` resumes it), never on a timer, and a peer whose socket takes no byte
-  across `kTxStallStrikes` replacements is struck. In-call replies bypass the slots.
+- **TX**: one slot per peer (#2095) — a reference to the frame on the wire and up to
+  `kTxWaitDepth` (8) waiting behind it, in order (#2195); each send's frame is one shared
+  block, whatever the peer count. A slow peer holds only its own slot and never the httpd
+  task: its flush writes without waiting, no frame replaces another, and a frame offered to
+  its full queue is refused and counted. A held frame resumes on the link's own events (a
+  flush that still moves bytes re-posts itself; the next post, an inbound frame, or the app's
+  `flush_held()` resumes it), never on a timer, and a peer whose socket takes no byte across
+  `kTxStallStrikes` refusals is struck. In-call replies bypass the slots.
 - **Designated pressure point**: **two**, one per flow — the receiving vertex's ring on the
   best-effort arm for sensor streams, the in-call reply on the reliable arm for control.
 - **Everything else refuses**: the rx arena answers `TLV_NESTING_TOO_DEEP`, the value store
@@ -194,12 +195,12 @@ Three sizing rules follow. §3.1 is where an embedder should apply them:
 1. **A slow subscriber costs its own slot, not the other sessions' delivery.** The 3-session
    run above predates #2095: the link then held one TX pool shared by every session, and a
    fan-out wider than it missed. Since #2095 each session references one frame on the wire and
-   one waiting, and a newer frame replaces the waiting one, so the count to read is
-   `stats_t::tx_conflated` per session
-   (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::stats_t`).
-   A peer whose count climbs is a peer that cannot keep up with the publish rate; it receives
-   the newest value and nobody else waits for it. A climbing `enqueue_drops` instead names the
-   shared control queue or the link's memory, as before.
+   (since #2195) up to `kTxWaitDepth` waiting behind it, in order, and a frame offered to a full
+   queue is refused, so the count to read is `stats_t::enqueue_drops`
+   (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::stats_t`),
+   a link total. A climbing count means a peer that cannot keep up with the publish rate
+   (`tx_stall_strikes` counts the ones that never drain), and nobody else waits for it.
+   `tx_conflated` reads 0 until per-path latest-wins returns.
 2. **The seam budgets are not the bound; the heap and the task stacks are.** The flat seam never
    went past 4.2 % of a 24 KiB reservation. Applying §5 literally (`capacity = peak + margin`)
    would size it near 2 KiB and give about 22 KiB back to a heap whose whole idle surplus is
@@ -272,11 +273,12 @@ The #1491/#1494 topology: one producer streaming into one node as fast as the no
   peer's TX slot nor a control-queue message
   (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:httpd_ws_link_t::send_in_call`). So a fan-out sweep of any width, a
   full TX slot and a full control mbox all cost throughput and never the answer.
-- Behind that, a stream's frames to a peer replace one another in that peer's slot (#2095), so
-  a streamer cannot build a backlog the control answers would queue behind.
+- Behind that, a stream's frames to a peer wait in that peer's bounded queue (#2195) and are
+  refused past its depth, so a streamer cannot build an unbounded backlog the control answers
+  would queue behind.
 - **Designated pressure point**: the stream's own ring (best-effort), *upstream* of the shared
-  link. Pushing the stream's pressure point onto the link trades every frame but the newest for
-  the link's latest-wins slot; a deployment that relies on that rather than on its own ring bound
+  link. Pushing the stream's pressure point onto the link trades every frame past its depth for
+  the link's counted refusal; a deployment that relies on that rather than on its own ring bound
   has chosen its bottleneck by accident.
 - Run the two flows on **different vertices with different sources**. Per-injection-point, never
   a shared pool: one flow running its source dry must not affect another

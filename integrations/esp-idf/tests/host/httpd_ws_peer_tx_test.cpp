@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief #2095 — one conflating TX slot per peer: a slow WebSocket client loses its own
- *        older updates and never sets any other peer's rate.
+ * @brief #2095 / #2195 — one bounded, in-order TX queue per peer: a slow WebSocket client
+ *        is refused past its own queue's depth and never sets any other peer's rate.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -14,8 +14,9 @@
  * a link-wide pool of TX slots that every peer shared, a bounded wait for one, and a blocking
  * socket write: together, the slowest peer set everyone's delivery rate. What is pinned now:
  *   1. a stalled peer and a healthy peer on one link: the healthy one receives every update,
- *      the stalled one's frame is replaced and counted, and no write waits on a socket;
- *   2. latest wins: a peer that recovers is sent the newest frame, not the one it stalled on;
+ *      the stalled one's past its queue's depth are refused and counted, and no write waits
+ *      on a socket;
+ *   2. a peer that recovers is sent every frame it held, oldest first;
  *   3. a frame a non-blocking write left part-way is finished on the next flush, byte-exact,
  *      and is not a desync;
  *   4. anything else written to that socket first finishes it (a close here);
@@ -25,9 +26,12 @@
  *   8. the RAM: per-link and per-peer costs are reported and bind to the constructor sizes;
  *   9. a producer that posts once and goes quiet: the newest frame still arrives whole, moved
  *      by the link's own events (a write that took bytes, an inbound frame, flush_held);
- *  10. a peer whose socket never drains is struck after kTxStallStrikes replacements, and
+ *  10. a peer whose socket never drains is struck after kTxStallStrikes refusals, and
  *      so is one that pins the large class's only block (refused draws count against it);
- *  11. producers racing session close and reclaim on the httpd task (the TSan lane).
+ *  11. producers racing session close and reclaim on the httpd task (the TSan lane);
+ *  12. no frame replaces another (#2195): two vertices written back to back on a busy wire
+ *      both deliver, frames from no vertex are never replaced, and a frame offered to a full
+ *      queue is refused and counted.
  */
 
 #include <atomic>
@@ -164,11 +168,13 @@ void test_a_stalled_peer_sets_only_its_own_rate() {
              "the stalled peer received nothing (its socket is full)");
     check_eq(fake_httpd::instance().waited_writes(kStalled) - waited_before, 0,
              "no write ever WAITED on the stalled socket");
-    check_eq(conflated(*link, 0), kUpdates - 1,
-             "every update but the newest was replaced, and counted on the stalled peer");
-    check_eq(conflated(*link, 1), 0, "the healthy peer conflated nothing");
-    check_eq(link->stats().tx_conflated, kUpdates - 1, "the link total agrees");
-    check(link->drop_stats().dropped_tx >= kUpdates - 1, "and the generic drop seam sees them");
+    // One on the wire and kTxWaitDepth behind it are held; every later one is refused at the
+    // full queue and counted, never put in a held frame's place (#2195).
+    constexpr std::size_t kRefused = kUpdates - 1 - httpd_ws_link_t::kTxWaitDepth;
+    check_eq(link->stats().enqueue_drops, kRefused,
+             "every update past the stalled peer's queue was refused, and counted");
+    check_eq(link->stats().tx_conflated, 0, "none replaced another");
+    check(link->drop_stats().dropped_tx >= kRefused, "and the generic drop seam sees them");
     check(fake_httpd::instance().has_session(kStalled),
           "a full socket is not a fault: the stalled peer is still connected");
     check_eq(link->stats().tx_send_failed, 0, "and nothing was counted as a failed send");
@@ -179,11 +185,11 @@ void test_a_stalled_peer_sets_only_its_own_rate() {
 }
 
 // ---------------------------------------------------------------------------
-// 2 — latest wins.
+// 2 — a recovered peer gets what it held, in order.
 // ---------------------------------------------------------------------------
 /**
- * @brief A peer whose socket drains again is sent the newest frame, not the one it stalled
- *        on: a frame not one byte of which went out is replaced like a waiting one.
+ * @brief A peer whose socket drains again is sent every frame it held, oldest first: no
+ *        frame stands in for another (#2195).
  */
 void test_a_recovered_peer_gets_the_newest_frame() {
     std::printf("a stalled peer that recovers:\n");
@@ -204,10 +210,12 @@ void test_a_recovered_peer_gets_the_newest_frame() {
     link->send(std::span<const std::byte>(last));
     drain();
     const auto got = frames_to(kStalled);
-    check_eq(got.size(), 1, "exactly one frame went out once the socket drained");
-    check(got.size() == 1 && got[0].size() == 1 && got[0][0] == last[0],
-          "and it is the NEWEST one");
-    check_eq(conflated(*link, 0), 5, "the five it superseded are counted");
+    check_eq(got.size(), 6, "every held frame went out once the socket drained");
+    bool in_order = got.size() == 6;
+    for (std::size_t i = 0; in_order && i < 6; ++i)
+        in_order = got[i].size() == 1 && got[i][0] == tagged(i)[0];
+    check(in_order, "oldest first, each one intact");
+    check_eq(conflated(*link, 0), 0, "and none was replaced");
 
     reset(link);
 }
@@ -288,9 +296,9 @@ void test_a_close_finishes_the_part_written_frame() {
 // 5 — one flush per link in the shared control queue.
 // ---------------------------------------------------------------------------
 /**
- * @brief A burst to several peers posts ONE control-queue item, and each peer gets the newest
- *        frame of the burst. The pool posted one item per frame per peer into a six-deep mbox
- *        it shared with the closes `condemn` needs landed.
+ * @brief A burst to several peers posts ONE control-queue item, and each peer gets every
+ *        frame of the burst, in order. The pool posted one item per frame per peer into a six-deep
+ * mbox it shared with the closes `condemn` needs landed.
  */
 void test_one_flush_per_link() {
     std::printf("a burst of eight frames to three peers:\n");
@@ -305,13 +313,14 @@ void test_one_flush_per_link() {
     }
     check_eq(fake_httpd::instance().queue_depth(), 1, "one flush in the control queue");
     drain();
-    bool newest = true;
+    bool all = true;
     for (const int fd : kFds) {
         const auto got = frames_to(fd);
-        newest = newest && got.size() == 1 && got[0][0] == tagged(7)[0];
+        all = all && got.size() == 8;
+        for (std::size_t i = 0; all && i < 8; ++i) all = got[i][0] == tagged(i)[0];
     }
-    check(newest, "each peer received the burst's newest frame, once");
-    check_eq(link->stats().tx_conflated, 3 * 7, "the seven older frames per peer are counted");
+    check(all, "each peer received all eight, in order, once");
+    check_eq(link->stats().tx_conflated, 0, "none replaced another");
 
     reset(link);
 }
@@ -516,13 +525,15 @@ void test_a_peer_that_never_drains_is_struck() {
         link->send(std::span<const std::byte>(frame));
         drain();
     };
-    // The first frame is staged with nothing to replace, so N replacements are N + 1 frames.
-    for (std::size_t i = 0; i < httpd_ws_link_t::kTxStallStrikes; ++i) push(i);
-    check_eq(link->stats().tx_stall_strikes, 0, "one replacement short of the bound: not struck");
+    // The first frame goes on the wire and kTxWaitDepth wait behind it; each one after that is
+    // refused at the full queue, and N refusals are a strike.
+    constexpr std::size_t kFill = 1 + httpd_ws_link_t::kTxWaitDepth;
+    for (std::size_t i = 0; i < kFill + httpd_ws_link_t::kTxStallStrikes - 1; ++i) push(i);
+    check_eq(link->stats().tx_stall_strikes, 0, "one refusal short of the bound: not struck");
     std::size_t census = 0;
     link->enumerate_peers([&census](std::string_view) { ++census; });
     check_eq(census, 2, "both peers are still served");
-    push(httpd_ws_link_t::kTxStallStrikes);
+    push(kFill + httpd_ws_link_t::kTxStallStrikes);
     check_eq(link->stats().tx_stall_strikes, 1, "the bound reached: struck, and counted");
     check_eq(link->stats().sessions_condemned, 1, "through the strike path (condemned)");
     census = 0;
@@ -667,6 +678,118 @@ void test_producers_race_close_and_reclaim() {
     check(v->use_count() == 1, "every retained frame released its value reference");
 }
 
+// ---------------------------------------------------------------------------
+// 12 — no frame replaces another; a full queue is a counted refusal (#2195).
+// ---------------------------------------------------------------------------
+/** @brief Deliver the one-byte value @p tag to every peer as a vertex value, the way a
+ *         subscription delivery does (the retained send). */
+void vertex_value(httpd_ws_link_t& link, std::size_t tag) {
+    const auto b = tagged(tag);
+    const tr::graph::value_ref_t v =
+        tr::graph::value_ref_t::adopt(tr::graph::value_t::make_copy(b, tr::mem::heap_source()));
+    link.send(std::span<const std::span<const std::byte>>(), *v);
+}
+
+/** @brief The one-byte payloads of the retained frames on @p fd's wire, in wire order. */
+std::vector<std::byte> values_on_wire(int fd) {
+    std::vector<std::byte> out;
+    const auto w = fake_httpd::instance().wire(fd);
+    for (std::size_t i = 0; i + 2 < w.size() && w[i] == std::byte{0x82} && w[i + 1] == std::byte{1};
+         i += 3)
+        out.push_back(w[i + 2]);
+    return out;
+}
+
+/**
+ * @brief The acceptance case: one session subscribed to two vertices, both written back to
+ *        back while its wire is busy, and BOTH deliver. Before the fix the frame for B
+ *        replaced the one for A (on the waiting slot, or on the wire before a byte of it went
+ *        out), and the peer never saw A's value at all.
+ */
+void test_two_vertices_both_deliver() {
+    std::printf("one session, two vertices, written back to back on a busy wire:\n");
+    auto link = make_link();
+    claim(kStalled);
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_wire(kStalled);
+    vertex_value(*link, 0xA1);
+    drain();
+    vertex_value(*link, 0xB1);
+    drain();
+    check_eq(fake_httpd::instance().wire(kStalled).size(), 0, "the wire is busy: nothing out");
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
+    link->flush_held();
+    drain();
+    const auto got = values_on_wire(kStalled);
+    check(got.size() == 2 && got[0] == std::byte{0xA1} && got[1] == std::byte{0xB1},
+          "both values delivered, A then B");
+    check_eq(link->stats().tx_conflated, 0, "neither was counted as conflated");
+    check_eq(link->stats().enqueue_drops, 0, "nor dropped");
+
+    reset(link);
+}
+
+/** @brief Frames from no vertex (a reply, an event, an ANNOUNCE) are one-shots: never
+ *         replaced, each delivered in order. */
+void test_one_shots_are_never_replaced() {
+    std::printf("one-shot frames on a busy wire:\n");
+    auto link = make_link();
+    claim(kStalled);
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_sent_frames();
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto frame = tagged(0x10 + i);
+        link->send(std::span<const std::byte>(frame));
+        drain();
+    }
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
+    link->flush_held();
+    drain();
+    const auto got = frames_to(kStalled);
+    bool in_order = got.size() == 3;
+    for (std::size_t i = 0; in_order && i < 3; ++i)
+        in_order = got[i].size() == 1 && got[i][0] == tagged(0x10 + i)[0];
+    check(in_order, "all three delivered, in order");
+    check_eq(conflated(*link, 0), 0, "none conflated");
+
+    reset(link);
+}
+
+/** @brief A frame offered to a full queue is refused and counted in `enqueue_drops`, never
+ *         dropped silently and never put in another frame's place; the held ones go out
+ *         whole and in order once the socket drains. */
+void test_a_full_queue_is_a_counted_refusal() {
+    std::printf("a peer whose queue is full:\n");
+    auto link = make_link();
+    claim(kStalled);
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_sent_frames();
+    const std::uint32_t drops_before = link->stats().enqueue_drops;
+    constexpr std::size_t kHeld = 1 + httpd_ws_link_t::kTxWaitDepth;  // the wire + the queue
+    constexpr std::size_t kOver = 3;
+    for (std::size_t i = 0; i < kHeld + kOver; ++i) {
+        const auto frame = tagged(0x20 + i);
+        link->send(std::span<const std::byte>(frame));
+        drain();
+    }
+    check_eq(link->stats().enqueue_drops - drops_before, kOver,
+             "every frame past the queue's depth is refused, and counted");
+    check_eq(link->stats().tx_conflated, 0, "none replaced a held frame");
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
+    link->flush_held();
+    drain();
+    const auto got = frames_to(kStalled);
+    bool in_order = got.size() == kHeld;
+    for (std::size_t i = 0; in_order && i < kHeld; ++i)
+        in_order = got[i].size() == 1 && got[i][0] == tagged(0x20 + i)[0];
+    check(in_order, "the held frames all went out, oldest first");
+
+    reset(link);
+}
+
 }  // namespace
 
 int main() {
@@ -683,6 +806,9 @@ int main() {
     test_a_peer_that_never_drains_is_struck();
     test_a_peer_pinning_the_last_large_block_is_struck();
     test_producers_race_close_and_reclaim();
+    test_two_vertices_both_deliver();
+    test_one_shots_are_never_replaced();
+    test_a_full_queue_is_a_counted_refusal();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
