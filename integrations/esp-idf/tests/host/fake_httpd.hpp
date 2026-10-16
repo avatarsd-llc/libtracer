@@ -173,6 +173,15 @@ class server_t {
      * which reported success and lost the datagram, is not modelled any more (#949).
      */
     void set_queue_capacity(std::size_t cap);
+    /**
+     * @brief Model an httpd task that PREEMPTS the poster (#2146): each item
+     *        `httpd_queue_work` accepts runs at once, on the posting thread, before the call
+     *        returns — what a higher-priority httpd task does on silicon, where each post is
+     *        a hand-off to it and back. Off (the default), items wait for @ref run_pending.
+     */
+    void set_preempting(bool on);
+    /** @brief Items `httpd_queue_work` has accepted, ever: the link's doorbells. */
+    [[nodiscard]] std::size_t work_posted() const;
 
     /**
      * @brief Deliver one WebSocket frame to @p fd's LATCHED handler, as the server task
@@ -356,9 +365,11 @@ class server_t {
     std::map<int, std::vector<std::byte>> wire_; /**< @brief See @ref wire. */
     bool queue_refusing_ = false;
     std::atomic<bool> sustained_ingress_{false}; /**< @brief See set_sustained_ingress. */
-    std::size_t queue_cap_ = 0;   /**< @brief 0 = unbounded; see set_queue_capacity. */
-    std::size_t queue_drops_ = 0; /**< @brief Enqueues a full mbox refused. */
-    std::uint64_t lru_clock_ = 0; /**< @brief httpd's `httpd_data::lru_counter`. */
+    std::size_t queue_cap_ = 0;           /**< @brief 0 = unbounded; see set_queue_capacity. */
+    std::size_t queue_drops_ = 0;         /**< @brief Enqueues a full mbox refused. */
+    std::uint64_t lru_clock_ = 0;         /**< @brief httpd's `httpd_data::lru_counter`. */
+    std::size_t work_posted_ = 0;         /**< @brief See @ref work_posted. */
+    std::atomic<bool> preempting_{false}; /**< @brief See @ref set_preempting. */
 };
 
 /**

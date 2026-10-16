@@ -3414,16 +3414,16 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
     std::size_t total = 0;
     for (const auto& part : iov) total += part.size();
     tx_block_t* const blk = make_block({}, iov, nullptr);
-    stage(to, blk, total);
+    if (stage(to, blk, total)) ring_doorbell(blk, total);
     drop_block(blk);
 }
 
-void httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_t total) {
+bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_t total) {
     // ONE load of the handle, into a local (#963): the plain read this replaces raced the
     // destructor's write outright, and re-reading it across the store let one send act on
     // two different values of the same member.
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
-    if (h == nullptr) return;
+    if (h == nullptr) return false;
     // Re-resolve the destination HERE rather than trusting the fd the caller looked at: a
     // departed or condemned peer takes no more frames. Counted (#953): normally benign — a
     // fan-out that snapshotted its destinations racing a departure — but a silent drop here
@@ -3431,14 +3431,14 @@ void httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
     const int fd = live_fd(to);
     if (fd < 0) {
         tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
-        return;
+        return false;
     }
     // A frame with no block — the large class spent, the egress store refusing, or the value
     // not keepable — is a counted drop at the link: evidence about this link's memory, not
     // about the peer. And once the dtor is draining, nothing new is held (teardown gate).
     if (blk == nullptr || stopping_.load(std::memory_order_relaxed)) {
         note_enqueue_drop(fd, total);
-        return;
+        return false;
     }
     // Into THIS peer's queue, and nowhere else (#2095): a reference to the shared block,
     // never a copy. Behind the frames already waiting, never in place of one (#2195): a frame
@@ -3475,36 +3475,69 @@ void httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
             s->tx_tail = node;
         }
     }
-    // A refused frame still posts the flush, at most one per link (post_flush): a socket that
-    // reopened is offered its held frames on this link's own traffic, and the zero-byte write
-    // it may meet only arms tx_refused, which no refusal reads. A full queue is this
-    // peer's own pace, as a replacement was before it, so it is counted and not logged per
-    // frame (a stalled peer at 100 updates/s would otherwise log 100 lines a second); a
-    // refused node draw is the link's memory, and logs like every other refused enqueue.
+    // A refused frame still rings the doorbell, at most one flush per link (post_flush): a
+    // socket that reopened is offered its held frames on this link's own traffic, and the
+    // zero-byte write it may meet only arms tx_refused, which no refusal reads. A full queue
+    // is this peer's own pace, as a replacement was before it, so it is counted and not
+    // logged per frame (a stalled peer at 100 updates/s would otherwise log 100 lines a
+    // second); a refused node draw is the link's memory, and logs like every other refused
+    // enqueue.
     if (full)
         enqueue_drops_.fetch_add(1, std::memory_order_relaxed);
     else if (refused)
         note_enqueue_drop(fd, total);
-    egress_posted();  // a parked drain flushes it now rather than hold it
-    if (post_flush(h) || refused) return;
-    // The control queue refused the flush. The frame cannot go out until something else
-    // posts one, so it is taken back (if a flush has not taken it meanwhile) and counted
-    // exactly as a refused enqueue always was — a fact about the shared control queue,
-    // charged to the link and to no peer.
-    tx_frame_t back;
-    {
-        const std::lock_guard lock(s->tx_m);
-        for (tx_wait_t *w = s->tx_head, *prev = nullptr; w != nullptr; prev = w, w = w->next) {
-            if (w->frame.blk != blk || w->frame.gen != to.gen) continue;
-            (prev != nullptr ? prev->next : s->tx_head) = w->next;
-            if (s->tx_tail == w) s->tx_tail = prev;
-            back = std::exchange(w->frame, tx_frame_t{});
-            free_waiting(*s, w);
-            break;
+    return true;
+}
+
+void httpd_ws_link_t::ring_doorbell(tx_block_t* blk, std::size_t total) {
+    // The burst's ONE doorbell (#2146), rung after every destination's frame is stored: a
+    // parked drain is woken once and the flush posted once, whatever the peer count. Rung
+    // per frame, as it was, each store could hand the core to the httpd task (higher
+    // priority than most producers) and back: a broadcast to 8 peers cost about 24 task
+    // switches where it now costs about 3 (the post, the httpd task's flush of all 8, the
+    // return to the producer).
+    egress_posted();  // a parked drain flushes them now rather than hold them
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    if (h != nullptr && post_flush(h)) return;
+    // The control queue refused the flush. The frames cannot go out until something else
+    // posts one, so every one still holding this burst's block (none a flush already took)
+    // is taken back and counted exactly as a refused enqueue always was — a fact about the
+    // shared control queue, charged to the link and to no peer. The caller still holds its
+    // reference, so @p blk names this burst's block and no other. Same chunked walk as the
+    // fan-out.
+    session_t* batch[kFanoutChunk];
+    int fds[kFanoutChunk];
+    std::size_t next = 0;
+    for (bool more = true; more;) {
+        std::size_t n = 0;
+        {
+            const std::lock_guard lock(peers_m_);
+            for (; next < slots_.size() && n < kFanoutChunk; ++n) {
+                batch[n] = slots_[next++];
+                fds[n] = batch[n]->fd;
+            }
+            more = next < slots_.size();
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            session_t* const s = batch[i];
+            tx_frame_t back;
+            {
+                const std::lock_guard lock(s->tx_m);
+                for (tx_wait_t *w = s->tx_head, *prev = nullptr; w != nullptr;
+                     prev = w, w = w->next) {
+                    if (w->frame.blk != blk) continue;
+                    (prev != nullptr ? prev->next : s->tx_head) = w->next;
+                    if (s->tx_tail == w) s->tx_tail = prev;
+                    back = std::exchange(w->frame, tx_frame_t{});
+                    free_waiting(*s, w);
+                    break;
+                }
+            }
+            if (!back.held()) continue;
+            release_frame(back);
+            note_enqueue_drop(fds[i], total);
         }
     }
-    release_frame(back);
-    note_enqueue_drop(fd, total);
 }
 
 bool httpd_ws_link_t::post_flush(httpd_handle_t h) {
@@ -4291,37 +4324,15 @@ void httpd_ws_link_t::queue_send_retained(const session_ref_t& to,
                                           std::span<const std::span<const std::byte>> head,
                                           const graph::value_t& value) {
     tx_block_t* const blk = make_retained(head, value);
-    stage(to, blk, value.total_length());
+    if (stage(to, blk, value.total_length())) ring_doorbell(blk, value.total_length());
     drop_block(blk);
 }
 
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
                            const graph::value_t& value, const graph::delivery_lane_t& lane) {
     (void)lane;  // the ESP-IDF link keeps tx_handoff_t's one queue for now (#2144)
-    // The broadcast's snapshot-then-stage shape (see the iovec override below), with the
-    // retained block in place of the gathered one: built once, on the first destination.
-    session_ref_t targets[kFanoutChunk];
-    std::size_t next = 0;
-    tx_block_t* blk = nullptr;
-    bool built = false;
-    for (bool more = true; more;) {
-        std::size_t n = 0;
-        {
-            const std::lock_guard lock(peers_m_);
-            while (next < slots_.size() && n < kFanoutChunk) {
-                session_t* const s = slots_[next++];
-                if (s->open && !s->dead && !s->auth_pending)
-                    targets[n++] = session_ref_t{s, s->gen};
-            }
-            more = next < slots_.size();
-        }
-        if (n != 0 && !built) {
-            blk = make_retained(head, value);
-            built = true;
-        }
-        for (std::size_t i = 0; i < n; ++i) stage(targets[i], blk, value.total_length());
-    }
-    drop_block(blk);
+    // The broadcast's fan-out with the retained block in place of the gathered one.
+    fan_out([&] { return make_retained(head, value); }, value.total_length());
 }
 
 void httpd_ws_link_t::send(std::span<const std::byte> frame) {
@@ -4330,12 +4341,19 @@ void httpd_ws_link_t::send(std::span<const std::byte> frame) {
 }
 
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
+    // A broadcast: the iovec gathered ONCE for every peer, straight into the shared block
+    // (see fan_out). Overriding the iovec entry point is what keeps the base default's
+    // gather-into-a-temporary away: it would double-buffer a large reply (flatten temp + tx
+    // copy live simultaneously), the heap spike behind the on-device OOM abort.
+    std::size_t total = 0;
+    for (const auto& part : iov) total += part.size();
+    fan_out([&] { return make_block({}, iov, nullptr); }, total);
+}
+
+void httpd_ws_link_t::fan_out(function_ref_t<tx_block_t*()> build, std::size_t total) {
     // Broadcast: snapshot the destinations under the lock, then enqueue unlocked — the
-    // per-session drop accounting inside queue_send takes peers_m_ itself. Overriding
-    // the iovec entry point means a rope is gathered ONCE for every peer, straight
-    // into the shared block — the base default's gather-into-a-temporary would
-    // double-buffer a large reply (flatten temp + tx copy live simultaneously), the
-    // heap spike behind the on-device OOM abort.
+    // per-session drop accounting inside stage takes peers_m_ itself — and ring the
+    // doorbell ONCE, after every destination's frame is stored (#2146).
     //
     // What the snapshot holds is a SESSION reference per peer, not a bare fd: the lock is
     // released before the first enqueue and the frames are written later still, so a
@@ -4354,12 +4372,11 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     // mid-fan-out lands past `next` and is simply included, which a broadcast (already
     // non-atomic: every enqueue happens outside the lock, and the writes later still) has
     // never promised either way.
-    std::size_t total = 0;
-    for (const auto& part : iov) total += part.size();
     session_ref_t targets[kFanoutChunk];
     std::size_t next = 0;
     tx_block_t* blk = nullptr;
     bool built = false;
+    bool staged = false;
     for (bool more = true; more;) {
         std::size_t n = 0;
         {
@@ -4380,11 +4397,12 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
         // ONE block for the whole fan-out (#2095), gathered on the first destination: every
         // peer's slot takes a reference, so N peers cost one copy and one block.
         if (n != 0 && !built) {
-            blk = make_block({}, iov, nullptr);
+            blk = build();
             built = true;
         }
-        for (std::size_t i = 0; i < n; ++i) stage(targets[i], blk, total);
+        for (std::size_t i = 0; i < n; ++i) staged = stage(targets[i], blk, total) || staged;
     }
+    if (staged) ring_doorbell(blk, total);
     drop_block(blk);
 }
 

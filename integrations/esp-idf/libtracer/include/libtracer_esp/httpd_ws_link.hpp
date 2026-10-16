@@ -1601,8 +1601,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      */
     [[nodiscard]] bool any_open_session() const;
     void deliver(peer_handle_t peer, std::span<const std::byte> frame);
-    // ONE gather-copy into the destination's waiting frame, replacing (and counting) one
-    // already there, then one flush posted for the link (#2095). Drops the frame (counted,
+    // ONE gather-copy behind the destination's waiting frames (a full queue refuses it,
+    // counted), then the one doorbell (#2095, #2195, #2146). Drops the frame (counted,
     // never aborting) when the large class is spent, on OOM, or when the flush cannot be
     // posted. The destination is a SESSION, never a bare fd — see @ref session_ref_t.
     void queue_send(const session_ref_t& to, std::span<const std::span<const std::byte>> iov);
@@ -1620,11 +1620,27 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
                              std::span<const std::span<const std::byte>> head,
                              const graph::value_t& value);
     /**
-     * @brief The one store every queued send ends in: a reference to @p blk into @p to's
-     *        waiting frame under its `tx_m`, counting a frame it replaces, then the link's
-     *        flush (#2095). A null @p blk is the counted drop of a @p total -byte frame.
+     * @brief The one store every queued send makes: a reference to @p blk behind @p to's
+     *        waiting frames under its `tx_m` (#2095, #2195). A full queue or a refused node
+     *        draw refuses it, counted. A null @p blk is the counted drop of a @p total -byte
+     *        frame.
+     * @return True when the frame reached @p to's queue, stored or refused there: the caller
+     *         then rings @ref ring_doorbell, once for the whole burst (#2146), so a socket
+     *         that reopened is offered what it holds.
      */
-    void stage(const session_ref_t& to, tx_block_t* blk, std::size_t total);
+    [[nodiscard]] bool stage(const session_ref_t& to, tx_block_t* blk, std::size_t total);
+    /**
+     * @brief A burst's ONE doorbell (#2146), after every frame of it is stored: wake a
+     *        parked drain and post the link's flush. When the control queue refuses the
+     *        flush, every waiting frame still holding @p blk is taken back and counted.
+     */
+    void ring_doorbell(tx_block_t* blk, std::size_t total);
+    /**
+     * @brief The broadcast: snapshot every open, authenticated peer in on-stack chunks,
+     *        store one shared block, built by @p build on the first destination, behind each
+     *        one's waiting frames, then @ref ring_doorbell once.
+     */
+    void fan_out(function_ref_t<tx_block_t*()> build, std::size_t total);
     /** @brief Gather @p prefix then @p iov once into a new block (one reference, the
      *         caller's), keeping @p value when given; null when the large class is spent
      *         (counted) or `memory.io` refuses. */

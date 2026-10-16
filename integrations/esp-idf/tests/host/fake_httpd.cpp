@@ -505,9 +505,23 @@ bool server_t::enqueue_locked(std::function<void()> item) {
 }
 
 esp_err_t server_t::queue_work(httpd_work_fn_t work, void* arg) {
-    const std::lock_guard lock(m_);
-    if (!enqueue_locked([work, arg]() { work(arg); })) return ESP_FAIL;
+    {
+        const std::lock_guard lock(m_);
+        if (!enqueue_locked([work, arg]() { work(arg); })) return ESP_FAIL;
+        ++work_posted_;
+    }
+    // A preempting httpd task runs what was posted before the poster's next instruction.
+    if (preempting_.load(std::memory_order_relaxed))
+        while (run_one()) {
+        }
     return ESP_OK;
+}
+
+void server_t::set_preempting(bool on) { preempting_.store(on, std::memory_order_relaxed); }
+
+std::size_t server_t::work_posted() const {
+    const std::lock_guard lock(m_);
+    return work_posted_;
 }
 
 esp_err_t server_t::trigger_close(int fd) {
