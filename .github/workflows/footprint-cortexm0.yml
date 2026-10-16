@@ -10,11 +10,10 @@
 # gate stays green (it catches vtable/erasure bloat AND template-instantiation
 # bloat). Complements the ESP-IDF whole-image sentinel in esp-idf.yml.
 #
-# `--mode warn` governs the BUDGET VERDICT only. The node has been over the
-# 16 KiB bound continuously and the standing overage is not re-attributed
-# (#1138 item 4 — the old std::pmr soft-float attribution died when #588
-# removed the arena decoder's `memory_resource&` seam), so a hard budget gate
-# would red main. Flip `--mode fail` only after the overage is understood.
+# `--mode fail` governs the BUDGET VERDICT only: a node over 16 KiB reds this job
+# (#2116). It ran in warn mode while the node was over the bound; #2116 attributed the
+# overage per translation unit (the slice-by-8 CRC-32C tables) and cut it, so the
+# ceiling is a hard gate now.
 #
 # The RECORD of what the node measures is the `footprint-cortexm0` artifact
 # series each run uploads (toolchain-labeled JSON) — NOT this comment. Numbers
@@ -116,7 +115,7 @@ jobs:
       - name: Cortex-M0 required-modules footprint gate
         run: |
           python3 tools/cortexm0_footprint.py \
-            --mode warn \
+            --mode fail \
             --max-flash-bytes 16384 \
             --baseline-json baseline/footprint-cortexm0.json \
             --drift-mode warn \

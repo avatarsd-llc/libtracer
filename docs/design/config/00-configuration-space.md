@@ -200,13 +200,13 @@ either: that image is one deployment's composition, not a budget the library owe
 there would constrain how thin a client this library can serve. Its numbers are published to the
 job step summary and a `footprint-<target>` artifact, and reviewed run to run.
 
-The Cortex-M0 sentinel runs in warn mode because the measured node is **20,937 B, about 4.5 KiB
-over the 16 KiB budget** (re-measured 2026-07-27; `.github/workflows/footprint-cortexm0.yml:governs the BUDGET VERDICT only`).
-**The overage is not attributed to a module.** An attribution of roughly 2.7 KiB to `std::pmr`
-soft-float reaching the image through the arena decoder's `std::pmr::memory_resource&` seam does
-not survive the removal of that seam — the decoder takes a `tr::mem::block_source_t&`
-([ADR-0065 — failable allocation gets its own seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md))
-— and the residue has not been re-measured against that seam. The gate is a referee for
+The Cortex-M0 sentinel is a hard gate (`--mode fail`, #2116): a node over 16 KiB reds the job.
+It ran in warn mode while the node was over budget, which the slice-by-8 CRC-32C tables alone
+explained: 7,168 B of the 8 KiB they took were the seven tables beyond the single one the
+constant-evaluated CRC already carries. `kCrc32cSlices` (below) now picks the single table on a
+32-bit-or-narrower core, and the node measures under the budget. The per-translation-unit
+attribution that found it is in the pull request that flipped the gate; the run-to-run record is
+the `footprint-cortexm0` artifact series. The gate is a referee for
 the compile-time doctrine
 ([ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) §5):
 templating techniques are admissible exactly as far as it stays green, because it catches
@@ -226,6 +226,7 @@ is a knob the fragment does not state at all (#1244).
 | --- | --- | --- | --- |
 | `kVertexLockStripes` (`config.hpp:default_config_t::kVertexLockStripes`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})`) |
 | `kCacheLineBytes` (`config.hpp:default_config_t::kCacheLineBytes`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:if(CONFIG_FREERTOS_UNICORE)`) |
+| `kCrc32cSlices` (`config.hpp:default_config_t::kCrc32cSlices`) | table count | 8 on a 64-bit target, 1 below — the portable CRC-32C fold's tables (slice-by-8, 8 KiB, or the single 1 KiB Sarwate table); a hardware-CRC CPU reads neither (#2116) | inherited — 1 on a chip, 8 on `linux` |
 | `kHazardReaderSlots` (`config.hpp:default_config_t::kHazardReaderSlots`) | count | 64 | inherited — unused on a chip, which binds the single-writer slot and never builds the domain |
 | `kEdgePinSlots` (`config.hpp:default_config_t::kEdgePinSlots`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_EDGE_PIN_SLOTS 8)`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`config.hpp:default_config_t::kMaxVertexBytes64` / `config.hpp:default_config_t::kMaxVertexBytes32`) | RAM ratchet | 88 / 64 | the preset — deliberately not overridable |

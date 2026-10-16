@@ -22,17 +22,14 @@ module-set work (Waves 1-3) lands, the delta on this number is the evidence.
 `--mode` governs the BUDGET VERDICT and nothing else (the ESP-IDF footprint in
 tools/esp_size_gate.py is reported only — it carries no ceiling; this Cortex-M0
 budget is the one footprint gate):
-  * warn — over budget prints `::warning::` and exits 0. The default *today*:
-    the measured node has been over the 16 KiB bound continuously, so a hard
-    gate would red main. Per the PR #193 precedent, no over-budget number reds
-    main until the required modules are genuinely under the ceiling. The
-    standing overage is NOT attributed (#1138 item 4): the old note blamed
-    `std::pmr` soft-float reaching the image through the ADR-0041 arena
-    decoder's `memory_resource&` seam, but #588 removed that seam and the
-    remainder has not been re-attributed since.
-  * fail — over budget prints `::error::` and exits 1. Flip the workflow to this
-    once the overage is understood and closed — then the doctrine's hard gate
-    (ADR-0047 §5) is in force and this referee catches any regression.
+  * fail — over budget prints `::error::` and exits 1. The default, and what the
+    workflow runs (#2116): the doctrine's hard gate (ADR-0047 §5) is in force, and this
+    referee catches any regression past the ceiling. The node was over the bound from
+    the sentinel's first run until #2116 attributed the overage per translation unit:
+    the slice-by-8 CRC-32C tables (8 KiB of `.rodata`) were the standing excess, and
+    `config_t::kCrc32cSlices` now picks the single table on a 32-bit core.
+  * warn — over budget prints `::warning::` and exits 0. For a local run that wants
+    the report without the verdict; no workflow uses it.
 
 **The record of what the node measures is the `footprint-cortexm0` artifact
 series, not any comment.** Hand-maintained figures in headers go stale and mix
@@ -241,7 +238,7 @@ def main() -> int:
     ap.add_argument("--mcpu", default="cortex-m0", help="target core (default: cortex-m0)")
     ap.add_argument("--max-flash-bytes", type=int, default=DEFAULT_BUDGET,
                     help=f"hard flash budget (default: {DEFAULT_BUDGET} = 16 KiB)")
-    ap.add_argument("--mode", choices=("warn", "fail"), default="warn")
+    ap.add_argument("--mode", choices=("warn", "fail"), default="fail")
     ap.add_argument("--baseline-json", default=None,
                     help="previous main run's --out-json artifact; enables the drift gate")
     ap.add_argument("--drift-mode", choices=("warn", "fail"), default="warn",

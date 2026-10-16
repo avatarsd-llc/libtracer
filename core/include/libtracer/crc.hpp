@@ -19,6 +19,8 @@
 #include <span>
 #include <type_traits>
 
+#include "libtracer/config.hpp"
+
 // CRC-32C (Castagnoli) IS the SSE4.2 `_mm_crc32_*` / ARMv8 `__crc32c*` instruction
 // (same reflected poly 0x82F63B78). We dispatch to it at RUNTIME when the CPU has it,
 // and fall back to a portable slice-by-8 table otherwise — all three paths (hardware,
@@ -70,8 +72,9 @@ inline constexpr auto kCrc16 = crc16_table();
 
 // Slice-by-8 tables for the portable (no-hardware) CRC-32C path: table[0] is the
 // single-byte Sarwate table; table[k][i] folds `i` forward `k` extra bytes. Built
-// at compile time from the base table; used only on the runtime fallback path, so
-// this costs 8 KiB of rodata that a hardware-CRC CPU never touches.
+// at compile time from the base table; used only on the runtime fallback path, and
+// only where config_t::kCrc32cSlices is 8, so its 8 KiB of rodata reaches neither a
+// hardware-CRC CPU nor a single-table build (#2116).
 constexpr std::array<std::array<std::uint32_t, 256>, 8> crc32c_slice_tables() noexcept {
     std::array<std::array<std::uint32_t, 256>, 8> t{};
     t[0] = crc32c_table();
@@ -103,6 +106,12 @@ namespace detail {
 // table, then the trailing bytes byte-at-a-time. Byte-identical to the Sarwate loop.
 [[nodiscard]] inline std::uint32_t crc32c_slice8(std::uint32_t c, const std::byte* p,
                                                  std::size_t n) noexcept {
+    static_assert(graph::config_t::kCrc32cSlices == 1 || graph::config_t::kCrc32cSlices == 8,
+                  "config_t::kCrc32cSlices is 1 (the Sarwate table) or 8 (slice-by-8)");
+    if constexpr (graph::config_t::kCrc32cSlices == 1) {
+        while (n-- > 0) c = kCrc32c[(c ^ std::to_integer<std::uint8_t>(*p++)) & 0xFFu] ^ (c >> 8);
+        return c;
+    }
     const auto& t = kCrc32cSlice;
     while (n >= 8) {
         const std::uint32_t lo = c ^ crc_load_le32(p);
