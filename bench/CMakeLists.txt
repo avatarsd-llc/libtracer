@@ -133,6 +133,11 @@ add_executable(bench_chain_vs_compact bench_chain_vs_compact.cpp)
 target_link_libraries(bench_chain_vs_compact PRIVATE libtracer)
 target_compile_options(bench_chain_vs_compact PRIVATE -Wall -Wextra)
 
+# CAN send + reassembly CPU per frame size, and the receiver's RX-store RAM (#2049).
+add_executable(bench_can_reassembly bench_can_reassembly.cpp)
+target_link_libraries(bench_can_reassembly PRIVATE libtracer)
+target_compile_options(bench_can_reassembly PRIVATE -Wall -Wextra)
+
 # Terminus tier comparison (ADR-0053): the eager arena reader vs the lazy view reader on
 # the SAME frame. Replaces argument with measurement on whether the single-link
 # short-circuit in on_frame_rope_impl is a fast path or a missed one.

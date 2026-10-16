@@ -34,6 +34,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -118,13 +119,20 @@ class can_reassembly_t {
      */
     [[nodiscard]] bool add_slice(const reassembly_key_t& key, std::uint32_t index,
                                  tr::view::view_t slice) noexcept {
-        if (touch_group(key) == nullptr) return false;
-        const slice_id_t id{key, index};
-        if (tr::view::view_t* const held = slices_.find(id)) {
-            *held = std::move(slice);
+        group_meta_t* const g = touch_group(key);
+        if (g == nullptr) return false;
+        const auto placed = slices_.try_emplace(slice_id_t{key, index}, std::move(slice));
+        if (placed.value == nullptr) return false;
+        // A re-sent index replaces the slice it repeats and is counted once (#2049): the group
+        // keeps its slice count and highest index here, so no question about the group walks
+        // its slices.
+        if (!placed.inserted) {
+            *placed.value = std::move(slice);
             return true;
         }
-        return slices_.try_emplace(id, std::move(slice)).value != nullptr;
+        ++g->count;
+        g->highest = std::max(g->highest, index);
+        return true;
     }
 
     /**
@@ -149,9 +157,8 @@ class can_reassembly_t {
 
     /** @brief Number of slices currently buffered for group @p key (0 if unknown). */
     [[nodiscard]] std::size_t slice_count(const reassembly_key_t& key) const noexcept {
-        std::size_t n = 0;
-        for (std::size_t i = first_slice(key); in_group(i, key); ++i) ++n;
-        return n;
+        const group_meta_t* const g = groups_.find(key);
+        return g == nullptr ? 0 : g->count;
     }
 
     /**
@@ -161,14 +168,9 @@ class can_reassembly_t {
      * *trailing* slice is not an interior gap (ADR-0011).
      */
     [[nodiscard]] bool has_interior_gap(const reassembly_key_t& key) const noexcept {
-        std::size_t n = 0;
-        std::uint32_t highest = 0;
-        for (std::size_t i = first_slice(key); in_group(i, key); ++i) {
-            ++n;
-            highest = slices_.at(i).key.index;  // ordered by index — the last is the highest
-        }
-        if (n == 0) return false;
-        return n != static_cast<std::size_t>(highest) + 1;
+        const group_meta_t* const g = groups_.find(key);
+        return g != nullptr && g->count != 0 &&
+               g->count != static_cast<std::size_t>(g->highest) + 1;
     }
 
     /**
@@ -178,17 +180,12 @@ class can_reassembly_t {
      * is undecidable (a trailing drop is invisible) and this returns false.
      */
     [[nodiscard]] bool is_complete(const reassembly_key_t& key) const noexcept {
+        // Distinct indices, as many as expected, the highest one `expected - 1`: exactly
+        // `0..expected-1`. O(1) — this runs once per arriving slice, and the walk it replaces
+        // made a group's reassembly quadratic in its slice count (#2049).
         const group_meta_t* const g = groups_.find(key);
-        if (g == nullptr || !g->expected) return false;
-        const std::uint32_t expected = *g->expected;
-        std::size_t n = 0;
-        std::uint32_t highest = 0;
-        for (std::size_t i = first_slice(key); in_group(i, key); ++i) {
-            ++n;
-            highest = slices_.at(i).key.index;
-        }
-        if (n != static_cast<std::size_t>(expected)) return false;
-        return expected == 0 || highest == expected - 1;
+        return g != nullptr && g->expected && g->count == *g->expected &&
+               (g->count == 0 || g->highest == g->count - 1);
     }
 
     /**
@@ -200,7 +197,8 @@ class can_reassembly_t {
     [[nodiscard]] std::optional<tr::view::rope_t> assemble(const reassembly_key_t& key) const {
         if (!is_complete(key)) return std::nullopt;
         tr::view::rope_t r;
-        for (std::size_t i = first_slice(key); in_group(i, key); ++i) r.append(slices_.at(i).value);
+        const std::size_t lo = first_slice(key);
+        for (std::size_t i = lo; i < lo + slice_count(key); ++i) r.append(slices_.at(i).value);
         return r;
     }
 
@@ -288,6 +286,8 @@ class can_reassembly_t {
 
     struct group_meta_t {
         std::optional<std::uint32_t> expected;  // totality opt-in.
+        std::uint32_t count = 0;                // distinct slices buffered (the run's length).
+        std::uint32_t highest = 0;              // highest slice index buffered.
         std::uint64_t seq = 0;                  // insertion order, for evict-oldest.
         std::uint64_t last_touch = 0;           // caller's stamp at the last progress.
     };
@@ -303,8 +303,11 @@ class can_reassembly_t {
         }
         if (max_groups_ != 0 && groups_.size() >= max_groups_) evict_oldest();
         return groups_
-            .try_emplace(
-                key, group_meta_t{.expected = std::nullopt, .seq = next_seq_++, .last_touch = now_})
+            .try_emplace(key, group_meta_t{.expected = std::nullopt,
+                                           .count = 0,
+                                           .highest = 0,
+                                           .seq = next_seq_++,
+                                           .last_touch = now_})
             .value;
     }
 
@@ -312,16 +315,11 @@ class can_reassembly_t {
     [[nodiscard]] std::size_t first_slice(const reassembly_key_t& key) const noexcept {
         return slices_.lower_bound(slice_id_t{key, 0});
     }
-    // True when slice entry @p i exists and belongs to group @p key.
-    [[nodiscard]] bool in_group(std::size_t i, const reassembly_key_t& key) const noexcept {
-        return i < slices_.size() && slices_.at(i).key.group == key;
-    }
-
-    // Erase a group's metadata and its slice run (the flat-map range for the group).
+    // Erase a group's slice run, in one range erase (one shift of the entries above it, where
+    // erasing them one at a time shifted those entries once per slice), then its metadata.
     void drop_group(const reassembly_key_t& key) noexcept {
+        slices_.erase_at(first_slice(key), slice_count(key));
         (void)groups_.erase(key);
-        const std::size_t lo = first_slice(key);
-        while (in_group(lo, key)) slices_.erase_at(lo);
     }
 
     // Evict the oldest-inserted group to make room (bounded drop, counted).

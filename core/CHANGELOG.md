@@ -232,6 +232,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   tables, 1,608 B). The set grows before a new peer is admitted; a refused growth closes that
   newcomer and evicts no one. The protected `stream_endpoint_t(tx_src)` constructor takes the
   ring depth as an optional second argument. `link_base_ram_test` pins the idle draw, so growth now fails a test.
+- **CAN reassembly is linear in the slice count, and a small send no longer pays for the size
+  of the binding table ([#2049](https://github.com/avatarsd-llc/libtracer/issues/2049)).**
+  `can_reassembly_t` keeps each group's slice count and highest index, so `is_complete`,
+  `has_interior_gap` and `slice_count` answer in O(1), and a group is dropped with one range
+  erase. Before, each arriving slice walked its group's slices, which made a group quadratic in
+  its slice count. On the receive side, `can_transport_t` finds the binding of a data frame by
+  binary search, retires overlapping runs by walking only the entries around the fresh run, and
+  rewrites a binding re-issued under the same id in place. It no longer erases and re-inserts
+  it, which shifted every binding above it. No API changes. A group's metadata grows by 8 B.
 
 ### Fixed
 
