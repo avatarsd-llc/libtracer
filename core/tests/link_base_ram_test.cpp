@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -105,10 +106,17 @@ void run_arm(const char* name) {
     check(src.live.load(std::memory_order_relaxed) == 0, "teardown returned every byte");
 }
 
-/** @brief Pinned draw of one connected, idle WS peer on a 64-bit target (#2140): its session
- *         (with frame ingress's 14-byte next-header slot), its handshake buffer and its poll
- *         entry. The session is 16 B over the stream-buffer design it replaced. */
-constexpr std::size_t kWsPeerBytes64 = 744;
+/**
+ * @brief Pinned draw of one connected, idle WS peer on a 64-bit target (#2140): its session
+ *        (with frame ingress's 14-byte next-header slot), its slot entries and its poll
+ *        entry. The session is 16 B over the stream-buffer design it replaced.
+ *
+ * The session's `peer_endpoint_t` is a `transport_t`, whose receiver slot holds a
+ * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 704 B plus that
+ * mutex, exact on each target: 744 B on x86_64, 752 B on aarch64. Every other byte is
+ * pointers, sizes and block counts, the same on any 64-bit target.
+ */
+constexpr std::size_t kWsPeerBytes64 = 704 + sizeof(std::mutex);
 
 /** @brief A receive backend over the platform heap that adds to @p src's live balance. */
 class counting_rx_t final : public tr::mem::mem_backend_t {
