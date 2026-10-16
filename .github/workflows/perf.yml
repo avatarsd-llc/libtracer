@@ -80,6 +80,17 @@ on:
       - 'docs/methodology.md'
       - '.github/workflows/perf*.yml'
 
+# A newer push to a PR supersedes its running gate: its verdict would describe a head that is
+# no longer the PR's, and queued behind it it holds the bench CPUs that local benches and the
+# merge queue wait on. Push-to-main runs never cancel each other: each is a commit's ratchet
+# and history point, so a push is grouped by its SHA (one run per group). A ref-wide group
+# would not do: GitHub keeps one PENDING run per group and drops the rest even with
+# cancel-in-progress off, which would cost queued commits their points. A cancelled gate-pr still runs its `if: always()` affinity-restore step,
+# and this workflow takes no host-side bench lock, so cancelling leaves nothing held.
+concurrency:
+  group: perf-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # The gate's and the ratchet's bench builds align every function to 64 B (#2175), both arms
 # alike. A change that only moves code, so that a hot function crosses a 64 B boundary,
 # then cannot move a row past its threshold: on #2165 a fan-out loop shifted 16-48 B and
