@@ -219,6 +219,10 @@ calibrates its own batch size against the host clock rather than hardcoding a nu
 routing operation costs the same order as `clock_gettime`, so timing one operation at a time
 measures the clock instead of the code.
 
+The build-to-build history is measured on the bench-only aligned build
+(`-falign-functions=64`) from the commit that merges #2188 (the aligned bench build) on,
+so every series steps at that commit because of the flag, not a code change (see the
+gate's alignment rule below).
 `bench_forward_demux` and `bench_chain_delivery` are recorded into the build-to-build
 history alongside the in-process series, so a routing or delivery regression shows up as a
 trend rather than being noticed later. They emit the same `RESULT` rows as `bench_libtracer`,
@@ -544,6 +548,22 @@ Details that make these trustworthy:
   thread count from that affinity mask, and runs after every single-threaded one. Because
   the baseline is *the same PR's `main` rebuilt on the same runner in the same pass*, the
   comparison is machine-neutral.
+- **The gate measures an aligned build (#2175).** Both arms of the PR gate, and both arms of
+  the push ratchet, are configured with `-DCMAKE_CXX_FLAGS=-falign-functions=64` (`perf.yml`'s
+  `BENCH_CXX_FLAGS`): library and bench binaries alike start every function on a 64 B
+  boundary. A change that only moves code (a hot loop that crosses a 64 B boundary because
+  something before it grew) then cannot move a row past its threshold. On #2165 such a shift
+  failed `inproc/64/1024` at x1.034 against x1.030 with no instruction added to the loop.
+  What this does not catch: a layout-only regression *in the shipped build*, which is
+  unaligned. That is invisible to the gate by design, as is a layout-only speed-up. A
+  regression that adds work, or that changes data layout (a new cache miss, false sharing),
+  still moves the aligned build. The flag is bench-only: no `CMakeLists.txt` carries it, the
+  shipped and default builds never see it, and `perf-local`'s published series stays on the
+  default build. The ratchet's HEAD arm *is* aligned, and it feeds the push history at
+  `/dev/bench/`: every series there steps at the commit that merges #2188 (the aligned bench
+  build) and from then on describes the aligned build, not the shipped one, so a step at that
+  commit is the flag and not a code change. `test_perf_gate.py` checks that every timed arm
+  in `perf.yml` takes it.
 - A point's leg fails only when **both** of these hold, and the gate prints each, with the
   numbers: the **median of the per-pair ratios** candidate/baseline is past the row's
   threshold (the effect is big enough), and a **bootstrap 95% confidence interval** on

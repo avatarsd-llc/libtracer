@@ -80,6 +80,28 @@ on:
       - 'docs/methodology.md'
       - '.github/workflows/perf*.yml'
 
+# A newer push to a PR supersedes its running gate: its verdict would describe a head that is
+# no longer the PR's, and queued behind it it holds the bench CPUs that local benches and the
+# merge queue wait on. Push-to-main runs never cancel each other: each is a commit's ratchet
+# and history point, so a push is grouped by its SHA (one run per group). A ref-wide group
+# would not do: GitHub keeps one PENDING run per group and drops the rest even with
+# cancel-in-progress off, which would cost queued commits their points. A cancelled gate-pr
+# still runs its `if: always()` affinity-restore step, and this workflow takes no host-side
+# bench lock, so cancelling leaves nothing held.
+concurrency:
+  group: perf-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The gate's and the ratchet's bench builds align every function to 64 B (#2175), both arms
+# alike. A change that only moves code, so that a hot function crosses a 64 B boundary,
+# then cannot move a row past its threshold: on #2165 a fan-out loop shifted 16-48 B and
+# failed inproc/64/1024 at x1.034, and aligned it measured +0.1%. The flag is bench-only
+# and passed on the configure line, so a baseline's own bench/CMakeLists.txt takes it too;
+# shipped builds and the library's default flags never see it. A layout-only regression
+# in the shipped build is invisible here by design (docs/methodology.md).
+env:
+  BENCH_CXX_FLAGS: -falign-functions=64
+
 jobs:
   # --- PR gate: same-runner baseline against main --------------------------------
   gate-pr:
@@ -130,7 +152,8 @@ jobs:
           fetch-depth: 0  # need origin/main history to build the same-runner baseline
       - name: Build the PR (candidate) benchmark (Release)
         run: |
-          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
             bench_chain_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
       # A hard, absolute gate (no baseline needed): the FWD forward hop MUST allocate
@@ -171,7 +194,8 @@ jobs:
             printf '\nadd_executable(bench_chain_delivery bench_chain_delivery.cpp)\ntarget_link_libraries(bench_chain_delivery PRIVATE libtracer)\n' \
               >>../main-baseline/bench/CMakeLists.txt
           fi
-          cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"
           cmake --build ../main-baseline/bench/build --target bench_libtracer bench_forward_heap \
             bench_chain_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
       # The gate's OWN decision rules, unit-tested before anything is timed: #763 was a
@@ -409,7 +433,8 @@ jobs:
           fetch-depth: 0  # need the parent commit for the ratchet baseline
       - name: Build HEAD's benchmark (Release)
         run: |
-          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
             bench_forward_demux bench_chain_delivery bench_store_sweep --parallel "$BUILD_JOBS"
       # The zero-heap gate is deterministic (allocation counts, not time) — running it
@@ -484,7 +509,8 @@ jobs:
               printf '\nadd_executable(bench_chain_delivery bench_chain_delivery.cpp)\ntarget_link_libraries(bench_chain_delivery PRIVATE libtracer)\n' \
                 >>../parent-baseline/bench/CMakeLists.txt
             fi
-            cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
+            cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CXX_FLAGS="$BENCH_CXX_FLAGS"
             cmake --build ../parent-baseline/bench/build --target bench_libtracer \
               bench_forward_heap bench_chain_delivery bench_forward_demux bench_store_sweep --parallel "$BUILD_JOBS"
           else
