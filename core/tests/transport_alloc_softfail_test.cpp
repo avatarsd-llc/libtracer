@@ -413,17 +413,22 @@ bool raw_handshake(int cfd) {
  * the peer's writer role for an instant after the client has read it. A send in that instant
  * queues, which needs a frame: so a test that counts a send's allocations first settles the
  * peer. A one-byte send that finds it idle allocates nothing, and the sender lets the role go
- * itself; every probe arrives (nothing is refused here), and they are read off and dropped.
+ * itself. Each probe is read off the socket before the next is sent, so a probe that queued has
+ * been written and the poll thread has had its turn to let the role go: probes sent back to back
+ * would all queue behind the one the poll thread is still writing. Nothing is refused here, so
+ * every probe arrives, three bytes each (a 2-byte header and its one byte), and is dropped.
  */
 template <class Send>
 [[nodiscard]] bool settle(int cfd, Send&& send) {
     const std::array<std::byte, 1> one{std::byte{0x5A}};
-    for (std::size_t sent = 1; sent <= 100; ++sent) {
-        if (count_allocs([&] { send(std::span<const std::byte>(one)); }) != 0) continue;
-        const std::size_t want = sent * 3;  // each probe: a 2-byte header and its one byte
-        return read_until(
-                   cfd, [want](const std::vector<std::byte>& b) { return b.size() >= want; }, 2s)
-                   .size() == want;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const bool idle = count_allocs([&] { send(std::span<const std::byte>(one)); }) == 0;
+        if (read_until(
+                cfd, [](const std::vector<std::byte>& b) { return b.size() >= 3; }, 2s)
+                .size() != 3)
+            return false;
+        if (idle) return true;
+        std::this_thread::sleep_for(1ms);
     }
     return false;
 }
