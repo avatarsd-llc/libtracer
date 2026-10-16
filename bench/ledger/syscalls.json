@@ -1,7 +1,8 @@
 {
   "_comment": "Counted-metrics ledger, family 'syscalls' (#2137). See copies.json for the pin rules.",
   "family": "syscalls",
-  "title": "send/recv/poll syscalls per relayed frame (libc-interposed, node B only)",
+  "title": "Syscalls per relayed frame (libc wrappers, node B's link threads; futex not counted)",
+  "_counts": "Every call node B's link threads make to the libc wrappers bench_peer_counts interposes: socket I/O (read, write, readv, writev, recv, recvfrom, recvmsg, recvmmsg, send, sendto, sendmsg, sendmmsg), waiting (poll, ppoll, select, pselect, epoll_wait, epoll_pwait, epoll_pwait2, epoll_ctl, eventfd_read, eventfd_write), connection setup and teardown (accept, accept4, connect, shutdown, close, setsockopt, getsockopt) and yielding or sleeping (sched_yield, nanosleep, clock_nanosleep). Not counted: futex, which glibc issues inline from pthread, where no wrapper sees it, and which an unprivileged process cannot count from the kernel (perf_event_paranoid 2). Widening the set from send/recv/poll to this one (#2171) moved no pinned row.",
   "unit": "calls",
   "per_payload": false,
   "instrument": "bench_peer_counts",

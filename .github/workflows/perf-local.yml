@@ -629,6 +629,7 @@ jobs:
           # is the history the perf page's ledger section reads.
           python3 bench/counted_ledger.py emit \
             --raw bench/bench_peer_counts_raw.txt \
+            --conn-raw bench/bench_conn_ram_raw.txt \
             --merge bench/benchmark_output.json
           # The ADR-0079 sweep's two DETERMINISTIC columns, into the same file for the
           # same reasons: one commit axis, one host/compiler stamp (below), one publish

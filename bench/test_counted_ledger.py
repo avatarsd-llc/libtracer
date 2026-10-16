@@ -48,6 +48,13 @@ RAM_FAM = {
     "rows": [{"id": "tcp per peer", "target": "WIDE", "source": "ram_census", "arm": "tcp-server",
               "metric": "per_conn", "goal": 160, "moved_by": "#2134"}],
 }
+RAM_MEASURED = {
+    "family": "ram_per_peer", "title": "ram", "unit": "bytes", "per_payload": False,
+    "instrument": "bench_conn_ram", "band_abs": 0, "band_pct": 0,
+    "rows": [{"id": "tcp remote subscription, blocks", "target": "WIDE", "source": "measured",
+              "arm": "tcp-remote-sub", "metric": "sub_blocks", "unit": "blocks", "value": 6, "goal": 2,
+              "moved_by": "#2171"}],
+}
 RAM = {"band_bytes": 8, "band_pct": 0.5, "activation": {"mode": "warn"},
        "pins": [{"arm": "tcp-server", "metric": "per_conn", "value": 280}]}
 
@@ -129,6 +136,15 @@ class gate_tests(unittest.TestCase):
         self.assertEqual(len(warns), 1)
         _, fails, warns = run_gate(led, peer(x__y=1), peer(tcp_server__per_conn=286))
         self.assertEqual((fails, warns), ([], []))  # inside ram_census's own 8 B band
+
+    def test_measured_ram_rows_read_the_conn_transcript_and_fail(self):
+        led = ledger(RAM_MEASURED)
+        _, fails, _ = run_gate(led, peer(tcp_remote_sub__sub_blocks=6), peer(tcp_remote_sub__sub_blocks=7))
+        self.assertEqual(len(fails), 1)  # read from conn, not peer; a ledger pin, so it fails
+        _, fails, warns = run_gate(led, peer(x__y=1), peer(tcp_remote_sub__sub_blocks=6))
+        self.assertEqual((fails, warns), ([], []))
+        _, fails, _ = run_gate(led, peer(x__y=1), peer(other__sub_blocks=6))
+        self.assertEqual(len(fails), 1)  # a conn transcript without the row: not measured
 
     def test_ram_rows_without_a_transcript_are_skipped(self):
         table, fails, _ = run_gate(ledger(RAM_FAM), peer(x__y=1))
@@ -216,6 +232,10 @@ class render_tests(unittest.TestCase):
         self.assertIn("3.08× (3150 B)", page)
         self.assertIn("`aaaaaaaa` → 3.08× (3150 B), 2 point(s)", page)
         self.assertIn("| tcp per peer | WIDE | measured (`ram_census_pins.json`) | 280 | 160 |", page)
+
+    def test_a_row_unit_overrides_the_family_unit(self):
+        page = cl.render_markdown(ledger(RAM_MEASURED), None)
+        self.assertIn("| 6 blocks | 2 blocks |", page)
 
 
 if __name__ == "__main__":
