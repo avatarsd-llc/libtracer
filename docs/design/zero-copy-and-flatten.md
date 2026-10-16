@@ -23,7 +23,7 @@ byte source is the wrong shape:
 
 | Structural copy | Site | Why it cannot go |
 |---|---|---|
-| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:rope_t::flatten_core`), `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:tcp_transport_t::serve`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
+| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:rope_t::flatten_core`), frame ingress into the accepted segment (`core/src/transport_tcp.cpp:tcp_transport_t::serve`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
 | Mutation ownership | `own_wire` (`core/src/op_resolve_view.cpp:view_node::own_wire`) | A mutated multi-link value must own a contiguous, patchable, trailer-cleared segment |
 | WS TX gather | `httpd_ws_link_t::queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; destination is a pre-allocated tx work slot — no slot free means a counted drop, not a heap item) | `httpd_ws_send_frame_async` takes one contiguous buffer and `httpd_queue_work` runs later, after the rope links are gone |
 
@@ -83,7 +83,7 @@ identifiers for the rest of this page.
 
 | # | Site | Single-link? | Multi-link? | Kind | Removed by the rope cursor? |
 |---|------|:--:|:--:|---------|---------|
-| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:rope_t::flatten_core`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:tcp_transport_t::serve`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
+| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:rope_t::flatten_core`), pull-path frame ingress into the accepted segment (`core/src/transport_tcp.cpp:tcp_transport_t::serve`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
 | ② | Branch write — `value.try_materialize(*value_backend_)` (`core/src/graph.cpp:graph_t::write_branch`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
 | ③ | Field write — the twin of ② (`core/src/graph.cpp:graph_t::write(vertex_handle_t vh,`) | no — refcount bump | yes | Fallback | Same as ② |
 | ④ | 4096-byte decode arena (`core/src/graph.cpp:graph_t::write_branch`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
@@ -175,14 +175,14 @@ injected pool or heap. **Net device RAM is unchanged.** What drops is the scarce
 a flat 4096 bytes — a `std::array` reserves its whole frame slot whether filled or not — off the
 deep receive task.
 
-A stack budget for that task counts four such buffers, not one. The decode arena is the only one
-this document covers; the other three are transport receive and chunk scratch, each a 4096-byte
-`std::array` — `core/src/transport_tcp.cpp:tcp_transport_t::drain` (the backpressure drain),
-`core/src/transport_ws.cpp:ws_client_transport_t::serve` (the WS client's receive loop), and
-`core/src/transport_tcp.cpp:tcp_server_transport_t::on_readable` — the TCP server's per-chunk
-scratch. The WS server has none: frame ingress (ADR-0087 §1) receives each payload straight
-into its segment, and keeps only a 512-byte throwaway for a payload the source refused. They are not decode arenas and carry no structure,
-but they occupy the same frames and none of the four has a measured per-task high-water.
+A stack budget for that task counts two such buffers, not one. The decode arena is the only one
+this document covers; the other is frame ingress's stack scratch
+(`core/include/libtracer/frame_ingress.hpp:frame_ingress_t::read`, ADR-0087 §1): 1,152 B
+(`kIngressReadAheadBytes`) on the stream servers' poll thread and in the WS client's receive
+loop, and 256 B on the TCP dial loop, which reads no further than each prefix and uses it only to
+read past a body the source refused. Every byte it takes is moved into its frame's exact segment
+before the read returns, so it holds nothing between reads. It is not a decode arena and carries
+no structure, but it occupies the same frames, and neither has a measured per-task high-water.
 
 That receive task is the binding constraint on a single-core, RAM-constrained node. In the ESP-IDF
 WS integration, servicing a graph request in-call was measured overflowing an 8 KB stack and needing
@@ -312,15 +312,16 @@ call returns, while the rope outlives it — pinned in a last-known-value slot, 
 asynchronously, awaited. A borrowed view of that buffer would dangle. Ingress must therefore land
 bytes in an owned segment.
 
-**Why the pull path pays nothing extra.** The TCP `serve` loop reads the body straight into the
-accepted segment: `read_exact(fd, seg->bytes.data() + dec.off, len)` (`core/src/transport_tcp.cpp:tcp_transport_t::serve`,
-`read_exact` defined at `core/src/transport_tcp.cpp:tcp_transport_t::read_exact`) fills a segment freshly allocated from the injected backend by
-`length_prefix_framer_t::on_prefix`. The pooled receive target *is* the owned segment — one kernel
-copy and zero user-space copies. The in-source rationale names the trade explicitly: feeding recv
-chunks through `feed()` "would add one" copy, so the pull loop shares framing *rules* with the
-chunk-fed transports rather than their state machine (`core/src/transport_tcp.cpp:tcp_transport_t::serve`). The
-only stack scratch left on this path is `drain()`'s 4096-byte backpressure discard buffer
-(`core/src/transport_tcp.cpp:tcp_transport_t::drain`), which runs when a frame is dropped, not when one is delivered.
+**Why the pull path pays nothing extra.** The TCP `serve` loop runs frame ingress with no
+read-ahead (`core/src/transport_tcp.cpp:tcp_transport_t::serve`): the prefix is read alone, then
+the body straight into a segment drawn at its exact length from the injected backend
+(`core/include/libtracer/frame_ingress.hpp:frame_ingress_t::read`), and the next frame's prefix
+rides that same read. The pooled receive target *is* the owned segment — one kernel copy and zero
+user-space copies. The stream servers and the WS client run the same module with a read-ahead
+scratch between frames, so a lone small frame costs one read and is copied once, while a body
+larger than the scratch still lands in its segment. The only stack scratch on the dial path is
+frame ingress's 256-byte throwaway for a body the source refused, which runs when a frame is
+dropped, not when one is delivered.
 
 **Where the pull-path shape is not followed**, the residual costs are pool-recv questions, not
 flatten questions:

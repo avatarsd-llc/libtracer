@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Four link kinds run the same seven cases:
+ * Five link kinds run the same eight cases:
  *
  * - **fake**: the socket-free adapter of `fake_link.hpp`, deterministic, every case.
  * - **tcp (dial)**: a real `tcp_transport_t` dialled to a raw localhost socket that plays the
@@ -17,6 +17,9 @@
  *   that speaks masked client frames (#2140). The ingress cases only: the server's listener
  *   stays up when its peer goes, so "closed" is the peer's wire closing, and its egress cases
  *   are N/A here.
+ * - **tcp server**: a real `tcp_server_transport_t` (flat, one peer) dialled by a raw socket
+ *   that speaks length-prefixed records (#2141). The ingress cases only, for the same reason
+ *   as the ws server; no fragments on its wire.
  *
  * Not here, and why: UDP has no partial frame, no several-per-read and no stall on a
  * datagram socket; the other server links are buses (`ctest -LE bus` deselects them) whose
@@ -186,6 +189,21 @@ class socket_peer_t {
 
 // --- tcp -----------------------------------------------------------------------------------
 
+/** @brief One record on the tcp wire: a u32-LE length, then @p body. */
+[[nodiscard]] bytes_t prefixed(std::span<const std::byte> body) {
+    bytes_t out(4 + body.size());
+    tr::wire::store_le<std::uint32_t>(out, static_cast<std::uint32_t>(body.size()));
+    std::copy(body.begin(), body.end(), out.begin() + 4);
+    return out;
+}
+
+/** @brief A tcp prefix announcing `kMaxFrame + 1` bytes, with no body after it. */
+[[nodiscard]] bytes_t oversize_prefix() {
+    bytes_t out(4);
+    tr::wire::store_le<std::uint32_t>(out, static_cast<std::uint32_t>(kMaxFrame + 1));
+    return out;
+}
+
 /** @brief A dialled `tcp_transport_t` and its raw peer. Wire: u32-LE length, then the body. */
 class tcp_rig_t final : public link_rig_t {
    public:
@@ -201,24 +219,17 @@ class tcp_rig_t final : public link_rig_t {
     [[nodiscard]] std::string_view name() const override { return "tcp"; }
     [[nodiscard]] bool ready() const override { return link_.ok() && peer_.connected(); }
     [[nodiscard]] tr::net::transport_t& link() override { return link_; }
-    [[nodiscard]] const counting_backend_t& rx_backend() const override { return rx_; }
+    [[nodiscard]] counting_backend_t& rx_backend() override { return rx_; }
 
     [[nodiscard]] bytes_t encode(std::span<const std::byte> body) const override {
-        bytes_t out(4 + body.size());
-        tr::wire::store_le<std::uint32_t>(out, static_cast<std::uint32_t>(body.size()));
-        std::copy(body.begin(), body.end(), out.begin() + 4);
-        return out;
+        return prefixed(body);
     }
     [[nodiscard]] bool supports_fragments() const override { return false; }
     [[nodiscard]] bytes_t encode_fragments(std::span<const std::byte> body,
                                            std::size_t /*pieces*/) const override {
-        return encode(body);
+        return prefixed(body);
     }
-    [[nodiscard]] bytes_t oversize_header() const override {
-        bytes_t out(4);
-        tr::wire::store_le<std::uint32_t>(out, static_cast<std::uint32_t>(kMaxFrame + 1));
-        return out;
-    }
+    [[nodiscard]] bytes_t oversize_header() const override { return oversize_prefix(); }
 
     void peer_write(std::span<const std::byte> bytes) override { (void)peer_.write(bytes); }
     void peer_stall() override {}  // the raw peer reads only inside peer_drain
@@ -246,6 +257,54 @@ class tcp_rig_t final : public link_rig_t {
     tr::net::tcp_transport_t link_;
 };
 
+/**
+ * @brief A flat, one-peer `tcp_server_transport_t` dialled by a raw socket that speaks
+ *        length-prefixed records (#2141). The ingress cases only, as for the ws server.
+ */
+class tcp_server_rig_t final : public link_rig_t {
+   public:
+    tcp_server_rig_t()
+        : link_(0, tr::net::tcp_server_config_t{.memory = {.rx = &rx_}, .max_frame = kMaxFrame}) {
+        dialled_ = link_.ok() && peer_.dial(link_.local_port());
+    }
+
+    [[nodiscard]] std::string_view name() const override { return "tcp server"; }
+    [[nodiscard]] bool ready() const override { return dialled_; }
+    [[nodiscard]] tr::net::transport_t& link() override { return link_; }
+    [[nodiscard]] counting_backend_t& rx_backend() override { return rx_; }
+    [[nodiscard]] bool link_closed() override {
+        bytes_t in;
+        bool closed = false;
+        peer_.read(in, 5ms, [](const bytes_t&) { return false; }, closed);
+        return closed;
+    }
+    [[nodiscard]] bool egress_cases() const override { return false; }
+
+    [[nodiscard]] bytes_t encode(std::span<const std::byte> body) const override {
+        return prefixed(body);
+    }
+    [[nodiscard]] bool supports_fragments() const override { return false; }
+    [[nodiscard]] bytes_t encode_fragments(std::span<const std::byte> body,
+                                           std::size_t /*pieces*/) const override {
+        return prefixed(body);
+    }
+    [[nodiscard]] bytes_t oversize_header() const override { return oversize_prefix(); }
+
+    void peer_write(std::span<const std::byte> bytes) override { (void)peer_.write(bytes); }
+    void peer_stall() override {}
+    [[nodiscard]] bool peer_drain(std::chrono::milliseconds /*budget*/,
+                                  std::vector<bytes_t>& /*whole*/) override {
+        return true;
+    }
+    void peer_leave() override { peer_.leave(); }
+
+   private:
+    counting_backend_t rx_;
+    socket_peer_t peer_;
+    bool dialled_ = false;
+    tr::net::tcp_server_transport_t link_;
+};
+
 // --- ws ------------------------------------------------------------------------------------
 
 /**
@@ -267,7 +326,7 @@ class ws_rig_t final : public link_rig_t {
     [[nodiscard]] std::string_view name() const override { return "ws"; }
     [[nodiscard]] bool ready() const override { return link_.ok() && handshaken_; }
     [[nodiscard]] tr::net::transport_t& link() override { return link_; }
-    [[nodiscard]] const counting_backend_t& rx_backend() const override { return rx_; }
+    [[nodiscard]] counting_backend_t& rx_backend() override { return rx_; }
 
     [[nodiscard]] bytes_t encode(std::span<const std::byte> body) const override {
         return frame(tr::net::ws::opcode_t::BINARY, true, body.size(), body);
@@ -410,7 +469,7 @@ class ws_server_rig_t final : public link_rig_t {
     [[nodiscard]] std::string_view name() const override { return "ws server"; }
     [[nodiscard]] bool ready() const override { return handshaken_; }
     [[nodiscard]] tr::net::transport_t& link() override { return link_; }
-    [[nodiscard]] const counting_backend_t& rx_backend() const override { return rx_; }
+    [[nodiscard]] counting_backend_t& rx_backend() override { return rx_; }
     [[nodiscard]] bool link_closed() override {
         bytes_t in;
         bool closed = false;
@@ -502,6 +561,8 @@ class ws_server_rig_t final : public link_rig_t {
 std::unique_ptr<link_rig_t> make_fake() { return std::make_unique<fake_rig_t>(); }
 /** @brief A dialled tcp link, as a factory. */
 std::unique_ptr<link_rig_t> make_tcp() { return std::make_unique<tcp_rig_t>(); }
+
+std::unique_ptr<link_rig_t> make_tcp_server() { return std::make_unique<tcp_server_rig_t>(); }
 /** @brief A dialled ws link, as a factory. */
 std::unique_ptr<link_rig_t> make_ws() { return std::make_unique<ws_rig_t>(); }
 /** @brief A ws server with one dialled peer, as a factory. */
@@ -513,6 +574,7 @@ int main() {
     std::printf("link seam suite: one case set over the fake link and today's stream links\n");
     run_suite(make_fake);
     run_suite(make_tcp);
+    run_suite(make_tcp_server);
     run_suite(make_ws);
     run_suite(make_ws_server);
     return tr::testing::summary("link_seam");

@@ -26,6 +26,10 @@
  *  2. **several frames per read**: three frames in one write arrive as three, in order.
  *  2b. **large then small**: an 8 KiB frame and a 5 B frame in one write arrive as two,
  *     byte-identical: the small frame's bytes read past the large body are not lost (#2140).
+ *  2c. **refused then small**: an 8 KiB frame the exhausted receive source refuses is
+ *     counted as one drop and skipped whole; the 5 B frame written after it
+ *     arrives byte-identical once the source recovers (a refused body larger than the read
+ *     scratch must not be read into the next header).
  *  3. **oversize length**: a header announcing more than the link's `max_frame` closes the
  *     link, is counted as malformed, delivers nothing, and draws NOTHING from the link's
  *     receive source.
@@ -117,8 +121,12 @@ class counting_backend_t final : public mem::mem_backend_t {
         return draws_.load(std::memory_order_relaxed);
     }
 
-    /** @brief Draw @p bytes from the heap and count the grant. */
+    /** @brief While @p on, every draw is refused (the source is exhausted). */
+    void refuse(bool on) noexcept { refuse_.store(on, std::memory_order_relaxed); }
+
+    /** @brief Draw @p bytes from the heap and count the grant, or refuse while asked to. */
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (refuse_.load(std::memory_order_relaxed)) return nullptr;
         draws_.fetch_add(1, std::memory_order_relaxed);
         return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
     }
@@ -129,6 +137,7 @@ class counting_backend_t final : public mem::mem_backend_t {
 
    private:
     std::atomic<std::size_t> draws_{0}; /**< @brief Grants counted. */
+    std::atomic<bool> refuse_{false};   /**< @brief Set by @ref refuse. */
 };
 
 /**
@@ -149,7 +158,7 @@ class link_rig_t {
     /** @brief The link under test. */
     [[nodiscard]] virtual net::transport_t& link() = 0;
     /** @brief The receive source the link was given (`link_memory_t::rx`). */
-    [[nodiscard]] virtual const counting_backend_t& rx_backend() const = 0;
+    [[nodiscard]] virtual counting_backend_t& rx_backend() = 0;
 
     /** @brief @p body as one whole message on this kind's wire, peer to link. */
     [[nodiscard]] virtual bytes_t encode(std::span<const std::byte> body) const = 0;
@@ -330,6 +339,34 @@ inline void case_large_then_small(rig_factory_t make) {
           "as two frames, in order, byte-identical");
 }
 
+/**
+ * @brief Case 2c: a frame the receive source refuses is dropped whole, and the stream stays
+ *        in step: the small frame behind it is delivered intact.
+ */
+inline void case_refused_then_small(rig_factory_t make) {
+    frame_sink_t sink;
+    const std::unique_ptr<link_rig_t> rig = make();
+    banner(*rig, "refused then small");
+    check(rig->ready(), "the rig came up");
+    if (!rig->ready()) return;
+    attach(*rig, sink);
+
+    net::transport_t& l = rig->link();
+    const std::uint64_t dropped_before = l.drop_stats().dropped_rx;
+    const bytes_t big = payload(8192, 60), small = payload(5, 70);
+    rig->rx_backend().refuse(true);
+    rig->peer_write(rig->encode(big));
+    check(eventually([&] { return l.drop_stats().dropped_rx > dropped_before; }, kWait),
+          "the refused frame is counted as dropped");
+    rig->rx_backend().refuse(false);
+    rig->peer_write(rig->encode(small));
+    check(sink.wait_for(1, kWait), "the frame behind it is delivered");
+    std::this_thread::sleep_for(kQuiet);
+    const std::vector<bytes_t> got = sink.snapshot();
+    check(got.size() == 1 && got[0] == small, "alone and byte-identical");
+    check(!rig->link_closed(), "and the link stays up");
+}
+
 /** @brief Case 3: an oversize length closes the link before anything is drawn. */
 inline void case_oversize_length(rig_factory_t make) {
     frame_sink_t sink;
@@ -480,6 +517,7 @@ inline void run_suite(rig_factory_t make) {
     case_partial_frame(make);
     case_several_frames_per_read(make);
     case_large_then_small(make);
+    case_refused_then_small(make);
     case_oversize_length(make);
     case_fragmented_message(make);
     case_stalled_peer(make);

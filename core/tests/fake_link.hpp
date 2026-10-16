@@ -214,7 +214,7 @@ class fake_rig_t final : public link_rig_t {
     [[nodiscard]] std::string_view name() const override { return "fake"; }
     [[nodiscard]] bool ready() const override { return true; }
     [[nodiscard]] net::transport_t& link() override { return link_; }
-    [[nodiscard]] const counting_backend_t& rx_backend() const override { return rx_; }
+    [[nodiscard]] counting_backend_t& rx_backend() override { return rx_; }
 
     [[nodiscard]] bytes_t encode(std::span<const std::byte> body) const override {
         return record(body, false);

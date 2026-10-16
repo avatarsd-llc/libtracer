@@ -42,9 +42,9 @@
       "arm": "tcp-relay-srv",
       "metric": "syscalls@4096",
       "payload": 4096,
-      "value": 5,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2141 (TCP server and self-healing links on frame ingress: header and body in one recvmsg, the body drawn at its exact size)"
     },
     {
       "id": "tcp-relay-srv @16384",
@@ -53,9 +53,9 @@
       "arm": "tcp-relay-srv",
       "metric": "syscalls@16384",
       "payload": 16384,
-      "value": 11,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2141 (TCP server and self-healing links on frame ingress: header and body in one recvmsg, the body drawn at its exact size)"
     },
     {
       "id": "tcp-relay-cli @64",
@@ -86,9 +86,9 @@
       "arm": "tcp-relay-cli",
       "metric": "syscalls@4096",
       "payload": 4096,
-      "value": 5,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2141 (TCP server and self-healing links on frame ingress: header and body in one recvmsg, the body drawn at its exact size)"
     },
     {
       "id": "tcp-relay-cli @16384",
@@ -97,9 +97,9 @@
       "arm": "tcp-relay-cli",
       "metric": "syscalls@16384",
       "payload": 16384,
-      "value": 11,
+      "value": 4,
       "goal": null,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2141 (TCP server and self-healing links on frame ingress: header and body in one recvmsg, the body drawn at its exact size)"
     },
     {
       "id": "ws-relay-srv @64",

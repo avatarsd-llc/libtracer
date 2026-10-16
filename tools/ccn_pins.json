@@ -127,12 +127,6 @@
       ],
       "file": "core/src/transport_webtransport.cpp"
     },
-    "tr::net::ws_client_transport_t::serve": {
-      "ccn": [
-        21
-      ],
-      "file": "core/src/transport_ws.cpp"
-    },
     "tr::net::wt_h3::decode_field_section": {
       "ccn": [
         25

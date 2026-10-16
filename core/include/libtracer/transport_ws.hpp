@@ -15,8 +15,8 @@
  * peer runs the opening handshake (parse the HTTP Upgrade request, reply 101
  * Switching Protocols with ws::accept_key), then frame ingress (ADR-0087 §1,
  * `%frame_ingress.hpp`) reads each frame's header first (ws::decode_header) and its
- * payload straight into a segment drawn at the exact length from the server's receive
- * source; the client path still decodes a stream buffer with ws::decode_frame_checked.
+ * payload straight into a segment drawn at the exact length from the link's receive
+ * source, on the server and the dial-out client alike (#2141).
  * Each BINARY message is one libtracer frame (one
  * TLV) handed to the receiver — tagged with the SENDING peer's name through the
  * bus_link_t facet (ADR-0044), so return routes name the right browser tab; PING
@@ -233,21 +233,6 @@ class ws_server_transport_t final : public stream_server_base_t {
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
-     * @brief The stack scratch a read between frames offers after the 14-byte header slot
-     *        (#2140): a lone message carrying a 1 KiB value lands whole in one read.
-     *
-     * A scratch on the poll thread's stack, not a buffer: every byte it receives is moved into
-     * its frame's exact segment (or the header slot) before the read returns, so it holds
-     * nothing between reads and no peer or link keeps RAM for it. Sized from the counted
-     * ledger: the 1 KiB row is a 1,065 B frame on the wire (8 B header, 33 B FWD envelope to
-     * `/sensor/temp`); 128 B over 1 KiB covers that header and an envelope whose paths run to
-     * about 80 B. Paced small frames, the common telemetry case, then cost one read each,
-     * paid for with a copy of at most about 1 KiB; a larger body is still received straight
-     * into its segment.
-     */
-    static constexpr std::size_t kReadAheadBytes = 1024 + 128;
-
-    /**
      * @brief The largest OPENING HANDSHAKE a PRE-AUTH peer may make this node buffer
      *        (16 KiB) — the ceiling `max_handshake` tightens against (#934).
      *
@@ -456,7 +441,7 @@ class ws_server_transport_t final : public stream_server_base_t {
      *         to frame ingress once it is whole. False ⇒ teardown. */
     bool read_handshake(session_t& s, int fd);
 
-    struct framing_t;  // RFC 6455 framing as frame ingress calls it (defined in the .cpp)
+    struct framing_t;  // this end of the RFC 6455 receive rules (defined in the .cpp)
 
     // The slot vector, the listen socket, the accept/poll/teardown machinery and the
     // peer query trio all live in slot_server_t (#871), and the bus FACET one tier
@@ -642,8 +627,11 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      */
     bool handshake(int fd, std::string_view host, std::uint16_t port, mem::bytes_t& pipelined);
     /** @brief Frame recv loop, seeded with the bytes `handshake` found behind the 101
-     *         (`pipelined_`, which it takes over). */
+     *         (`pipelined_`, which it releases once they are fed): frame ingress (ADR-0087
+     *         §1, #2141) reads each frame's header first and its payload straight into a
+     *         segment drawn at the exact length from `memory.rx`, with no stream buffer. */
     void serve(int fd);
+    struct framing_t;               // this end of the RFC 6455 receive rules (defined in the .cpp)
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
     /** @brief The one send body: @p frame's spans as one masked message through the egress,
      *         gathered and masked in one pass, in @p lane. */
@@ -696,7 +684,8 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      *        and @ref start_receiving (moved into the recv thread there, empty after).
      *
      * Written by the constructor; the recv thread `start_receiving` spawns takes it over
-     * (`serve` moves it into its own buffer before reading), and nothing else touches it.
+     * (`serve` feeds it to frame ingress and releases it before reading), and nothing else
+     * touches it.
      * Drawn from the link's egress store (#1780).
      */
     mem::bytes_t pipelined_;

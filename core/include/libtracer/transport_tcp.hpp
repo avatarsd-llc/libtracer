@@ -336,14 +336,10 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     }
 
    private:
-    void run_listen();   // accept loop (LISTEN mode)
-    void serve(int fd);  // per-connection frame reassembly loop
-    /** @brief Read exactly @p len bytes into @p dst, resuming partial reads; the read that
-     *         completes @p dst also scatters up to `ahead.size()` further stream bytes into
-     *         @p ahead (#2133). @return the count landed in @p ahead, or -1 on close/error/stop. */
-    std::ptrdiff_t read_exact(int fd, std::byte* dst, std::size_t len,
-                              std::span<std::byte> ahead = {});
-    bool drain(int fd, std::size_t len);  // discard len bytes (backpressure)
+    void run_listen();  // accept loop (LISTEN mode)
+    /** @brief The per-connection receive loop: frame ingress with no read-ahead (#2141), so
+     *         each body lands in its exact segment with no copy. */
+    void serve(int fd);
     /** @brief The one send body: prefix @p parts into one record and put it through the
      *         egress, in @p lane, keeping @p value (whose links end @p parts) if it waits. */
     void send_record(std::span<const std::span<const std::byte>> parts, const graph::value_t* value,
@@ -385,12 +381,11 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
  * concurrently; peers occupy SLOTS recycled on departure, so steady-state
  * memory is bounded by the maximum concurrent peers ever reached (or @p
  * max_peers, the RFC-0006 injected bound).  What this class adds to that base
- * is its FRAMING: the shared u32-LE length prefix (one chunk-fed
- * length_prefix_framer_t per slot) where WS has RFC 6455 packaging.  There is NO
- * handshake phase: a peer is open (named `p<slot>`, ADR-0073 §2 / #426) from
- * the moment its connection is accepted.  The board↔board listener shape:
- * leaner than WS packaging (no HTTP upgrade, no frame masking) with the same
- * per-peer return-route identity when @p peer_named.
+ * is its FRAMING: the shared u32-LE length prefix, read by frame ingress
+ * (`%frame_ingress.hpp`, #2141) with no stream buffer, where WS has RFC 6455 packaging.  There is
+ * NO handshake phase: a peer is open (named `p<slot>`, ADR-0073 §2 / #426) from the moment its
+ * connection is accepted.  The board↔board listener shape: leaner than WS packaging (no HTTP
+ * upgrade, no frame masking) with the same per-peer return-route identity when @p peer_named.
  */
 class tcp_server_transport_t final : public stream_server_base_t {
    public:
@@ -521,19 +516,20 @@ class tcp_server_transport_t final : public stream_server_base_t {
     void send_retained(session_base_t* to, std::span<const std::span<const std::byte>> head,
                        const graph::value_t& value, const graph::delivery_lane_t& lane);
 
-    /** @brief One fresh slot with its length-prefix framer and directed facade. */
+    /** @brief One fresh slot with its frame-ingress state and directed facade. */
     mem::poly_ptr_t<session_base_t> make_session() override;
 
-    /** @brief Per-accept setup: TCP_NODELAY + a reset framer.  Returns true — a raw
+    /** @brief Per-accept setup: TCP_NODELAY + reset ingress state.  Returns true — a raw
      *         stream peer has no handshake, so it is open the moment it is accepted. */
     bool on_accept(session_base_t& s, int fd) override;
 
-    /** @brief Framing: read one chunk, feed it through the slot's u32-LE reassembler and
-     *         deliver each completed frame (tearing the slot down on a close or a desynced
-     *         stream). */
+    /** @brief Framing: frame ingress (ADR-0087 §1, #2141) reads each u32-LE prefix first and
+     *         each body straight into a segment drawn at its exact length from this server's
+     *         receive source, delivering each frame (tearing the slot down on a close or a
+     *         desynced stream). */
     void on_readable(session_base_t& s, int fd) override;
 
-    /** @brief Teardown: reset the slot's framer as it is recycled. */
+    /** @brief Teardown: reset the slot's ingress state as it is recycled. */
     void on_slot_reset(session_base_t& s) override;
 
     /** @brief Fire `detail::tcp_peer_publishing_hook` with the fd published and the slot not

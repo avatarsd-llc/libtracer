@@ -13,12 +13,14 @@
 #include <unistd.h>
 
 #include <array>
-#include <cerrno>
+#include <atomic>
 #include <cstring>
 #include <mutex>
+#include <span>
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/frame_ingress.hpp"
 #include "libtracer/iov_table.hpp"
 #include "libtracer/length_prefix_framer.hpp"
 
@@ -97,6 +99,55 @@ struct prefixed_iov_t {
         return std::span<const ::iovec>(vec, n);
     }
 };
+
+/**
+ * @brief The u32-LE length prefix, as frame ingress calls it (`frame_ingress.hpp`): one set
+ *        of rules for the dialled, the one-peer listening and the multi-peer server link.
+ *
+ * A length above `max_frame` is corrupt or hostile, and a desynced stream cannot re-frame,
+ * so it closes the stream before anything is drawn and is counted as malformed. An empty
+ * record carries no TLV and is skipped. A frame the receive source refused (exhausted, or
+ * larger than any segment it produces) is backpressure: it was read past, and is dropped and
+ * counted, never a disconnect for a peer that stayed inside the cap (#932). Every other frame
+ * goes to @p Deliver as the one owning view over its exact segment, with no copy.
+ */
+template <class Deliver>
+struct prefix_framing_t {
+    std::size_t max_frame;                  /**< @brief The link's receive cap. */
+    std::atomic<std::size_t>& malformed_rx; /**< @brief The link's malformed counter. */
+    std::atomic<std::size_t>& dropped_rx;   /**< @brief The link's shed counter. */
+    Deliver deliver;                        /**< @brief Hands one frame up. */
+
+    /** @brief Judge the prefix bytes read so far. */
+    [[nodiscard]] ingress_header_t header(std::span<const std::byte> have) const {
+        if (have.size() < kPrefixBytes) return {ingress_header_t::kind_t::MORE, kPrefixBytes, 0};
+        const std::size_t len = tr::detail::load_le<std::uint32_t>(have.first(kPrefixBytes));
+        if (len > max_frame) {
+            malformed_rx.fetch_add(1, std::memory_order_relaxed);
+            return {ingress_header_t::kind_t::CLOSE, 0, 0};
+        }
+        return {ingress_header_t::kind_t::BODY, kPrefixBytes, len};
+    }
+
+    /** @brief One whole frame, in its exact segment: empty for an empty record (skipped) or
+     *         a refused draw (shed and counted). */
+    [[nodiscard]] bool body(tr::view::rx_block_t& blk, std::size_t len) {
+        if (!blk.seg) {
+            dropped_rx.fetch_add(static_cast<std::size_t>(len != 0), std::memory_order_relaxed);
+            return true;
+        }
+        deliver(blk.take(len));
+        return true;
+    }
+};
+
+/** @brief A @ref prefix_framing_t over @p deliver. */
+template <class Deliver>
+prefix_framing_t<Deliver> prefix_framing(std::size_t max_frame,
+                                         std::atomic<std::size_t>& malformed_rx,
+                                         std::atomic<std::size_t>& dropped_rx, Deliver deliver) {
+    return {max_frame, malformed_rx, dropped_rx, std::move(deliver)};
+}
 
 }  // namespace
 
@@ -258,100 +309,27 @@ void tcp_transport_t::send_record(std::span<const std::span<const std::byte>> pa
         lane);
 }
 
-std::ptrdiff_t tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len,
-                                           std::span<std::byte> ahead) {
-    // One scatter read fills dst first, then ahead: ahead only takes bytes on the read that
-    // completes dst, so the loop never waits for them (a lone frame is not held back) (#2133).
-    std::size_t off = 0;
-    while (off < len) {
-        if (stop_.load(std::memory_order_relaxed)) return -1;
+void tcp_transport_t::serve(int fd) {
+    // Frame ingress with no read-ahead (ADR-0087 §1): the prefix is read alone, then the body
+    // straight into a segment drawn at its exact length, and the NEXT frame's prefix rides the
+    // same read (#2133), so a frame of any size is received with no copy. The read blocks
+    // under the receive timeout, which is how the loop gets back to `stop_`.
+    frame_ingress_t<kPrefixBytes, 0> ingress;
+    // Tier select lives in the slot (receiver_slot.hpp): the rope sink gets the frame OWNING,
+    // the span sink borrows it.
+    auto framing = prefix_framing(max_frame_, malformed_rx_, dropped_rx_,
+                                  [this](view::view_t frame) { rx_.deliver(std::move(frame)); });
+    while (!stop_.load(std::memory_order_relaxed)) {
         // A frame the socket cut short waits for writability, so this thread waits for both
-        // and resumes it (#2144); otherwise the read itself is the wait.
+        // and resumes it (#2144), then reads without blocking; otherwise the read is the wait.
+        int flags = 0;
         if (peer_.wants_write()) {
             const int pr = poll_io(fd);
-            if (pr < 0) return -1;
+            if (pr < 0) return;
             if (pr == 0) continue;
+            flags = MSG_DONTWAIT;
         }
-        std::array<iovec, 2> iov{iovec{dst + off, len - off}, iovec{ahead.data(), ahead.size()}};
-        msghdr msg{};
-        msg.msg_iov = iov.data();
-        msg.msg_iovlen = ahead.empty() ? 1 : 2;
-        const ssize_t n = ::recvmsg(fd, &msg, 0);
-        if (n > 0) {
-            off += static_cast<std::size_t>(n);
-            continue;
-        }
-        if (n == 0) return -1;  // peer closed the connection
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
-            continue;  // receive timeout → re-check stop_ and resume the partial read
-        return -1;     // hard error
-    }
-    return static_cast<std::ptrdiff_t>(off - len);
-}
-
-bool tcp_transport_t::drain(int fd, std::size_t len) {
-    // Backpressure discard: the frame must still leave the stream (the next
-    // prefix sits right behind it), so it is read into a stack scratch and dropped.
-    std::array<std::byte, 4096> scratch;
-    while (len > 0) {
-        const std::size_t chunk = len < scratch.size() ? len : scratch.size();
-        if (read_exact(fd, scratch.data(), chunk) < 0) return false;
-        len -= chunk;
-    }
-    return true;
-}
-
-void tcp_transport_t::serve(int fd) {
-    std::array<std::byte, kPrefixBytes> prefix;
-    std::size_t have = 0;  // prefix bytes the previous body read already brought in (#2133)
-    while (!stop_.load(std::memory_order_relaxed)) {
-        // Complete the 4-byte length prefix, reassembling it across TCP segment
-        // boundaries (read_exact resumes partial reads through receive timeouts).
-        // A frame that arrived behind its predecessor's body needs no read here.
-        if (read_exact(fd, prefix.data() + have, prefix.size() - have) < 0) return;
-        have = 0;
-        const std::size_t len = tr::detail::load_le<std::uint32_t>(prefix);
-
-        // The framing rules (empty record, over the protocol cap ⇒ malformed,
-        // undeliverable ⇒ backpressure drain) live in length_prefix_framer_t — one
-        // home shared with the chunk-fed transports (quic/webtransport). Only the
-        // byte source differs: this pull-mode loop reads the body straight off
-        // the socket into the accepted segment (ADR-0042 §2/§4 — no library
-        // buffer, no copy; feeding recv chunks through feed() would add one).
-        using kind_t = length_prefix_framer_t::prefix_decision_t::kind_t;
-        // Large frames come with the ingress-loan reserve (RFC-0028 §6.9): the terminus that
-        // shares the value out of this frame builds its record in the block, not beside it.
-        auto dec = length_prefix_framer_t::on_prefix(*backend_, max_frame_, len,
-                                                     graph::kShareThresholdBytes);
-        if (dec.kind == kind_t::EMPTY) continue;  // an empty record carries no TLV — a no-op
-        if (dec.kind == kind_t::MALFORMED) {
-            // Beyond the protocol cap (corrupt/hostile): count it and tear the
-            // connection down — a desynced stream can't re-frame.
-            malformed_rx_.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-        if (dec.kind == kind_t::DROP) {
-            // Undeliverable (exhausted backend, or a frame larger than any segment
-            // it produces) is backpressure: drain the frame off the stream (framing
-            // sync survives), drop it, tick the counter — never an OOM, and never a
-            // disconnect for a peer that stayed inside the protocol cap (#932).
-            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
-            if (!drain(fd, len)) return;
-            continue;
-        }
-
-        // The body goes straight into the accepted segment and the NEXT frame's prefix rides
-        // the same read into `prefix` (scatter, no staging copy): a frame that arrives whole
-        // behind its predecessor costs one syscall, not two (#2133). The segment stays in
-        // `dec` until delivery: a second owning local would add one more release site per exit.
-        const std::ptrdiff_t ahead = read_exact(fd, dec.seg->bytes.data() + dec.off, len, prefix);
-        if (ahead < 0) return;
-        have = static_cast<std::size_t>(ahead);
-
-        // Tier select lives in the slot (receiver_slot.hpp): the rope sink gets the
-        // frame OWNING, narrowed by aggregate init (over().subview() would copy the
-        // handle, leaving a 2nd ref live across the callback, #845); span sink borrows.
-        rx_.deliver(view::view_t{std::move(dec.seg), dec.off, len});
+        if (!ingress.read(fd, *backend_, framing, flags)) return;
     }
 }
 
@@ -385,13 +363,15 @@ void tcp_transport_t::run_listen() {
 /**
  * @brief One peer slot: the protocol-agnostic half (fd/open/name/endpoint,
  *        and the threading rule that governs them) is slot_server_t's; this
- *        adds the per-stream framer and the directed facade object.
+ *        adds the frame-ingress state and the directed facade object.
  *
- * The framer is poll-thread-only, like every protocol buffer a slot carries.
+ * The ingress state is poll-thread-only, like every protocol buffer a slot carries.
  */
 struct tcp_server_transport_t::session_t : slot_server_t::session_base_t {
-    length_prefix_framer_t framer; /**< @brief Per-stream u32-LE frame reassembly. */
-    peer_endpoint_t endpoint;      /**< @brief The directed facade `peer_link` returns. */
+    /** @brief Frame ingress (ADR-0087 §1, #2141): no stream buffer, the body lands in its
+     *         segment. */
+    frame_ingress_t<kPrefixBytes> ingress;
+    peer_endpoint_t endpoint; /**< @brief The directed facade `peer_link` returns. */
 };
 
 tcp_server_transport_t::tcp_server_transport_t(std::uint16_t bind_port,
@@ -424,7 +404,7 @@ mem::poly_ptr_t<slot_server_t::session_base_t> tcp_server_transport_t::make_sess
 
 bool tcp_server_transport_t::on_accept(session_base_t& s, int fd) {
     set_nodelay(fd);
-    static_cast<session_t&>(s).framer.reset();
+    static_cast<session_t&>(s).ingress.reset();
     // No handshake phase: the peer is open the moment it is accepted.
     return true;
 }
@@ -436,7 +416,7 @@ void tcp_server_transport_t::on_slot_publishing() {
 }
 
 void tcp_server_transport_t::on_slot_reset(session_base_t& s) {
-    static_cast<session_t&>(s).framer.reset();
+    static_cast<session_t&>(s).ingress.reset();
 }
 
 void tcp_server_transport_t::send(std::span<const std::byte> frame) {
@@ -505,54 +485,22 @@ void tcp_server_transport_t::peer_endpoint_t::send(std::span<const std::span<con
 
 void tcp_server_transport_t::on_readable(session_base_t& base, int fd) {
     session_t& s = static_cast<session_t&>(base);
-    // One chunk per readable pass, fed through the slot's reassembler (frame ingress, ADR-0087
-    // §1, reaches this server in its own change).
-    std::array<std::byte, 4096> chunk;
-    const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
-    if (n <= 0) {  // peer closed the TCP connection, or error
-        teardown_slot(s);
-        return;
-    }
-    // Feed the chunk through the slot's reassembler; each completed frame is
-    // delivered inline.  Tier select per frame: the constructed MODE picks the
-    // slot (#889) — peer-named servers deliver tagged with the sending peer's
-    // name (the ADR-0044 bus precedence, what the router wires), flat servers
-    // deliver point-to-point under the link's own registered name.  Reading the
-    // stored flag, not `peer_rx_.has_any()`: a mode is a wiring-time fact, not a
-    // per-frame consequence of which sink someone happened to install — and this
-    // reads a member instead of taking the slot's mutex once per frame. `bus_mode()`
-    // is that member conjoined with whether this BUILD carries a bus module at all
-    // (#375 deliverable 3); at the default binding it IS the member load. The
-    // peer-named arm goes through `deliver_to_peer`, the STATIC seam whose live half
-    // is `bus_slot_server_t`'s and whose inert half is the flat arm's (#1438) — a
-    // direct call either way, because which arm this server derives from is a
-    // compile-time fact, so the per-frame path gained no dispatch.
-    const auto res = s.framer.feed(
-        *backend_, max_frame_, chunk.data(), static_cast<std::size_t>(n),
-        [this, &s](view::segment_ptr_t seg, std::size_t flen) {
-            // aggregate init — no handle copy (#845)
-            view::view_t frame{std::move(seg), 0, flen};
-            // The FLAT tier's WHO (#375 Part 2) — see the ws server's twin of this store:
-            // the peer-named tier passes the handle as an argument, the flat tier has no
-            // per-frame tag at all, and one unconditional 8-byte store serves both. Cleared
-            // once the frame is handed up, so the field names a session only while that
-            // session's frame is being delivered (#1915).
-            delivering_ = s.handle;
-            if (bus_mode())
-                deliver_to_peer(s.handle, std::move(frame));
-            else
-                rx_.deliver(std::move(frame));
-            delivering_ = {};
-        },
-        // At decision time, so a frame delivered later in this same chunk cannot reach
-        // an observer before the drop that preceded it is counted (#1255).
-        [this] { dropped_rx_.fetch_add(1, std::memory_order_relaxed); });
-    if (res.malformed) {
-        // Malformed (corrupt/hostile) or undeliverable: a desynced stream
-        // cannot be re-framed — count it and tear this one peer down.
-        malformed_rx_.fetch_add(1, std::memory_order_relaxed);
-        teardown_slot(s);
-    }
+    // Tier select per frame: the constructed MODE picks the slot (#889), and `bus_mode()` is
+    // that member conjoined with whether this BUILD carries a bus module at all (#375
+    // deliverable 3), so the per-frame path reads a member and gains no dispatch (#1438). The
+    // FLAT tier's WHO (#375 Part 2) is one 8-byte store, cleared once the frame is handed up,
+    // so the field names a session only while its frame is being delivered (#1915).
+    auto framing = prefix_framing(max_frame_, malformed_rx_, dropped_rx_, [&](view::view_t f) {
+        delivering_ = s.handle;
+        if (bus_mode())
+            deliver_to_peer(s.handle, std::move(f));
+        else
+            rx_.deliver(std::move(f));
+        delivering_ = {};
+    });
+    // Frame ingress reads each prefix first and each body straight into its exact segment
+    // (ADR-0087 §1); false is a peer that closed, a read error, or a desynced stream.
+    if (!s.ingress.read(fd, *backend_, framing)) teardown_slot(s);
 }
 
 }  // namespace tr::net

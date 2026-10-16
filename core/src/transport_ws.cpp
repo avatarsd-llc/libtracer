@@ -32,18 +32,15 @@ namespace tr::net {
 
 namespace {
 
-/** @brief What feeding one data frame to @ref ws_assembler_t produced. */
+/** @brief What chaining one data fragment into @ref ws_assembler_t produced. */
 enum class assemble_status_t : std::uint8_t {
     PENDING,  /**< @brief Mid-message (or a stray CONT) — nothing to deliver yet. */
     COMPLETE, /**< @brief @ref assemble_result_t::message holds the finished message. */
-    DROPPED,  /**< @brief The RX backend refused a fragment — the message is shed
-                          (backpressure); the connection lives and re-syncs at the next
-                          BINARY. Count it as `dropped_rx`. */
     OVERSIZE, /**< @brief The reassembled message grew past the receive cap — FAIL the
                           connection (§7.1.7) and count it as `malformed_rx`. */
 };
 
-/** @brief One @ref ws_assembler_t::on_data outcome: a status, and (on `COMPLETE`) the rope. */
+/** @brief One @ref ws_assembler_t::on_piece outcome: a status, and (on `COMPLETE`) the rope. */
 struct assemble_result_t {
     assemble_status_t status = assemble_status_t::PENDING; /**< @brief Which outcome. */
     tr::view::rope_t message; /**< @brief The finished message — meaningful only on `COMPLETE`. */
@@ -53,7 +50,7 @@ struct assemble_result_t {
  * @brief RFC 6455 fragmented-message reassembly as ROPE CHAINING (ADR-0053 §5): each data
  *        fragment is one owning link and chaining them is pointer-linking, never a memcpy.
  *
- * Only a fragmented message needs it: the server hands an unfragmented frame up as the one
+ * Only a fragmented message needs it: either end hands an unfragmented frame up as the one
  * view over the segment it was received into (ADR-0087 §1). One assembler per connection,
  * used only on its receive thread.
  */
@@ -98,42 +95,93 @@ struct ws_assembler_t {
         reset();
         return done;
     }
+};
+
+/** @brief What the body of the frame being received needs from its header (the length is
+ *         frame ingress's own). */
+struct ws_rx_frame_t {
+    ws::opcode_t op = ws::opcode_t::CONT;   /**< @brief Its opcode. */
+    bool fin = false;                       /**< @brief Its FIN bit. */
+    bool masked = false;                    /**< @brief Its MASK bit. */
+    std::array<std::uint8_t, 4> mask_key{}; /**< @brief Its masking key, when masked. */
+};
+
+/**
+ * @brief The RFC 6455 receive rules both ends share, as frame ingress calls them
+ *        (`frame_ingress.hpp`): the header rules on the way in, then unmasking, fragment
+ *        chaining and the opcode's answer on each whole body.
+ *
+ * What differs between the server and the dial-out client is reached through @p End, the
+ * end's own adapter: `cap()` (the live receive cap), `malformed()` and `dropped()` (its
+ * counters), `pong(bytes)` (its PONG, masked or not) and `hand_up(message)` (its delivery),
+ * plus the `frame` and `assembler` state of the stream being read.
+ */
+template <class End>
+struct ws_framing_t {
+    End& end; /**< @brief The receiving end. */
+
+    /** @brief Judge the header bytes read so far; an over-cap length or a protocol breach
+     *         closes the stream before anything is drawn. */
+    [[nodiscard]] ingress_header_t header(std::span<const std::byte> have) const {
+        const ws::header_t h = ws::decode_header(have, end.cap());
+        if (h.status == ws::decode_status_t::NEED_MORE)
+            return {ingress_header_t::kind_t::MORE, h.size, 0};
+        if (h.status == ws::decode_status_t::PROTOCOL_ERROR) {
+            // An over-cap length, a §5.5 control breach or a §5.2 reserved opcode: a stream
+            // we refuse to keep reading. Count it; the stream is torn down (§7.1.7).
+            end.malformed();
+            return {ingress_header_t::kind_t::CLOSE, 0, 0};
+        }
+        end.frame = {h.op, h.fin, h.masked, h.mask_key};
+        return {ingress_header_t::kind_t::BODY, h.size, h.len};
+    }
+
+    /** @brief One whole body, in its exact segment (empty when the source refused it). */
+    [[nodiscard]] bool body(tr::view::rx_block_t& blk, std::size_t len) const {
+        if (len != 0 && !blk.seg) {
+            // The receiving link's source refused the body (backpressure): the message is
+            // shed and counted, the connection lives and re-syncs at the next BINARY. A
+            // PING shed here goes unanswered.
+            end.dropped();
+            if (!ws::is_control_opcode(end.frame.op)) end.assembler.reset();
+            return end.frame.op != ws::opcode_t::CLOSE;
+        }
+        const std::span<std::byte> bytes = blk.seg ? blk.frame(len) : std::span<std::byte>{};
+        if (end.frame.masked) ws::detail::xor_mask(bytes, end.frame.mask_key);
+        switch (end.frame.op) {
+            case ws::opcode_t::BINARY:
+            case ws::opcode_t::CONT:
+                return data(len != 0 ? blk.take(len) : tr::view::view_t{});
+            case ws::opcode_t::PING:
+                end.pong(bytes);  // the header rules held it to <= 125 bytes (§5.5)
+                return true;
+            case ws::opcode_t::CLOSE:
+                return false;  // tear this one connection down
+            default:
+                return true;  // TEXT / PONG: ignored (a RESERVED opcode never gets here: #1060)
+        }
+    }
 
     /**
-     * @brief Feed one data frame (BINARY or CONT) whose payload sits in a reused read buffer:
-     *        own a copy of it, then chain it (@ref on_piece). The dial-out half's path.
-     *
-     * An allocation failure drops the whole message (backpressure).
-     *
-     * @param backend Where each fragment's owning link is drawn from (ADR-0042 §2) — the
-     *                transport's injected seam, never the global heap, so a bounded host
-     *                bounds reassembly by its own pool.
-     * @param cap     As @ref on_piece.
+     * @brief One data frame's bytes: an unfragmented message goes up as the one view over its
+     *        segment, a fragment is chained by the assembler until its message completes.
      */
-    assemble_result_t on_data(ws::opcode_t op, bool fin, std::span<const std::byte> payload,
-                              mem::mem_backend_t& backend, std::size_t cap) {
-        if (op == ws::opcode_t::CONT && !assembling) return {};  // stray: copy nothing
-        // A whole message in ONE frame is the common case, and its block is the frame's
-        // receive block: large enough to be shared, it carries the ingress-loan reserve
-        // (RFC-0028 §6.9), so the terminus that stores the value builds its record in it.
-        // A fragmented message's links stay plain — its value is a multi-link rope, which the
-        // graph links rather than places.
-        std::optional<tr::view::view_t> piece;
-        if (op == ws::opcode_t::BINARY && fin && !payload.empty()) {
-            tr::view::rx_block_t blk =
-                tr::view::alloc_rx(backend, payload.size(), tr::graph::kShareThresholdBytes);
-            if (blk.seg) {
-                std::memcpy(blk.frame(payload.size()).data(), payload.data(), payload.size());
-                piece = blk.take(payload.size());
-            }
-        } else {
-            piece = tr::view::over_bytes(payload, backend);
+    [[nodiscard]] bool data(tr::view::view_t piece) const {
+        if (end.frame.op == ws::opcode_t::BINARY && end.frame.fin) {
+            end.assembler.reset();  // a BINARY mid-assembly drops the stale message (§5.4)
+            end.hand_up(tr::view::rope_t{std::move(piece)});
+            return true;
         }
-        if (!piece) {  // backend refused => drop the message (backpressure)
-            reset();
-            return {assemble_status_t::DROPPED, {}};
+        assemble_result_t r =
+            end.assembler.on_piece(end.frame.op, end.frame.fin, std::move(piece), end.cap());
+        // Fragments summing past the cap get the answer a single over-cap frame gets, so the
+        // fragmented route is not a way around the bound.
+        if (r.status == assemble_status_t::OVERSIZE) {
+            end.malformed();
+            return false;
         }
-        return on_piece(op, fin, std::move(*piece), cap);
+        if (r.status == assemble_status_t::COMPLETE) end.hand_up(std::move(r.message));
+        return true;
     }
 };
 
@@ -267,126 +315,70 @@ struct ws_server_transport_t::session_t : slot_server_t::session_base_t {
     explicit session_t(mem::block_source_t& src) noexcept : hs_buf(src) {}
     mem::bytes_t hs_buf; /**< @brief HTTP Upgrade request accumulation. */
     /** @brief Frame ingress (ADR-0087 §1): no stream buffer, the body lands in its segment. */
-    frame_ingress_t<ws::kMaxClientFrameHeader, kReadAheadBytes> ingress;
-    /** @brief What the body of the frame being received needs from its header (the length
-     *         is frame ingress's own). */
-    struct rx_frame_t {
-        ws::opcode_t op = ws::opcode_t::CONT;   /**< @brief Its opcode. */
-        bool fin = false;                       /**< @brief Its FIN bit. */
-        bool masked = false;                    /**< @brief Its MASK bit. */
-        std::array<std::uint8_t, 4> mask_key{}; /**< @brief Its masking key, when masked. */
-    } frame;
+    frame_ingress_t<ws::kMaxClientFrameHeader> ingress;
+    ws_rx_frame_t frame;      /**< @brief The header of the frame being received. */
     ws_assembler_t assembler; /**< @brief RFC 6455 fragment reassembly. */
     peer_endpoint_t endpoint; /**< @brief The directed facade `peer_link` returns. */
 };
 
 /**
- * @brief The WS server's framing, as frame ingress calls it (`frame_ingress.hpp`): the
- *        RFC 6455 header rules on the way in, then unmasking, fragment chaining and the
- *        opcode's answer on each whole body.
+ * @brief The WS server's end of the shared receive rules (@ref ws_framing_t): one peer's
+ *        stream state, this server's cap and counters, an unmasked PONG, and delivery
+ *        tagged by the constructed mode.
  */
 struct ws_server_transport_t::framing_t {
     ws_server_transport_t& link; /**< @brief The server (its counters, sinks and lock). */
     session_t& s;                /**< @brief The peer the bytes came from. */
+    ws_rx_frame_t& frame;        /**< @brief That peer's frame header in progress. */
+    ws_assembler_t& assembler;   /**< @brief That peer's fragment reassembly. */
 
-    /** @brief Judge the header bytes read so far; an over-cap length or a protocol breach
-     *         closes the peer before anything is drawn. */
-    [[nodiscard]] ingress_header_t header(std::span<const std::byte> have) const {
-        // The cap resolves from the two INJECTED resources on every header (one virtual call,
-        // the tcp_transport_t::serve idiom) rather than being cached: it is what stops a
-        // declared 64-bit length from naming the receiver's memory, so it must be the live
-        // answer, not a snapshot.
-        const ws::header_t h = ws::decode_header(
-            have, length_prefix_framer_t::effective_cap(*link.backend_, link.max_frame_));
-        if (h.status == ws::decode_status_t::NEED_MORE)
-            return {ingress_header_t::kind_t::MORE, h.size, 0};
-        if (h.status == ws::decode_status_t::PROTOCOL_ERROR) {
-            // An over-cap length, a §5.5 control breach or a §5.2 reserved opcode: a stream
-            // we refuse to keep reading. Count it; the peer is torn down (§7.1.7).
-            link.malformed_rx_.fetch_add(1, std::memory_order_relaxed);
-            return {ingress_header_t::kind_t::CLOSE, 0, 0};
-        }
-        s.frame = {h.op, h.fin, h.masked, h.mask_key};
-        return {ingress_header_t::kind_t::BODY, h.size, h.len};
+    /** @brief The receive cap, resolved from the two INJECTED resources on every header
+     *         (one virtual call, the tcp_transport_t::serve idiom) rather than cached: it is
+     *         what stops a declared 64-bit length from naming the receiver's memory, so it
+     *         must be the live answer, not a snapshot. */
+    [[nodiscard]] std::size_t cap() const {
+        return length_prefix_framer_t::effective_cap(*link.backend_, link.max_frame_);
     }
+    /** @brief Count a frame that broke the rules. */
+    void malformed() const { link.malformed_rx_.fetch_add(1, std::memory_order_relaxed); }
+    /** @brief Count a body the source refused. */
+    void dropped() const { link.dropped_rx_.fetch_add(1, std::memory_order_relaxed); }
 
-    /** @brief One whole body, in its exact segment (empty when the source refused it). */
-    [[nodiscard]] bool body(tr::view::rx_block_t& blk, std::size_t len) const {
-        const bool shed = len != 0 && !blk.seg;
-        if (shed) {
-            // The receiving link's source refused the body (backpressure): the message is
-            // shed and counted, the connection lives and re-syncs at the next BINARY. A
-            // PING shed here goes unanswered.
-            link.dropped_rx_.fetch_add(1, std::memory_order_relaxed);
-            if (!ws::is_control_opcode(s.frame.op)) s.assembler.reset();
-            return s.frame.op != ws::opcode_t::CLOSE;
-        }
-        const std::span<std::byte> bytes = blk.seg ? blk.frame(len) : std::span<std::byte>{};
-        if (s.frame.masked) ws::detail::xor_mask(bytes, s.frame.mask_key);
-        switch (s.frame.op) {
-            case ws::opcode_t::BINARY:
-            case ws::opcode_t::CONT:
-                return data(len != 0 ? blk.take(len) : tr::view::view_t{});
-            case ws::opcode_t::PING: {
-                // Built on the STACK: the header rules already enforced RFC 6455 §5.5, so the
-                // payload is <= 125 bytes and the reply cannot fail to be built (#848).
-                std::array<std::byte, ws::kMaxServerControlFrame> pong{};
-                const std::size_t plen = ws::encode_server_control(pong, ws::opcode_t::PONG, bytes);
-                // Through the session's egress like any other frame (#2144): never a wait on
-                // the poll thread, and never interleaved with a frame in flight.
-                const ::iovec pv{pong.data(), plen};
-                link.send_to(s, std::span<const ::iovec>(&pv, 1));
-                return true;
-            }
-            case ws::opcode_t::CLOSE:
-                return false;  // tear this one connection down
-            default:
-                return true;  // TEXT / PONG: ignored (a RESERVED opcode never gets here: #1060)
-        }
+    /** @brief Answer a PING with a PONG built on the STACK: the payload is <= 125 bytes, so
+     *         the reply cannot fail to be built (#848). */
+    void pong(std::span<const std::byte> payload) const {
+        std::array<std::byte, ws::kMaxServerControlFrame> pong{};
+        const std::size_t plen = ws::encode_server_control(pong, ws::opcode_t::PONG, payload);
+        // Through the session's egress like any other frame (#2144): never a wait on the
+        // poll thread, and never interleaved with a frame in flight.
+        const ::iovec pv{pong.data(), plen};
+        link.send_to(s, std::span<const ::iovec>(&pv, 1));
     }
 
     /**
-     * @brief One data frame's bytes: an unfragmented message goes up as the one view over its
-     *        segment, a fragment is chained by the assembler until its message completes.
+     * @brief Hand one whole message up.
+     *
+     * The constructed MODE picks the slot (#889): peer-named servers deliver tagged with the
+     * sending peer's handle (the ADR-0044 bus precedence, what the router wires), flat
+     * servers deliver point-to-point under the link's own registered name. `bus_mode()` is
+     * that flag conjoined with whether this BUILD carries a bus module at all (#375
+     * deliverable 3), and the peer-tier call is the STATIC seam of #1438, so the per-frame
+     * path gained no dispatch. A single-link rope reaches a span-only sink borrowed, so the
+     * tier needs no choosing here.
+     *
+     * The FLAT tier carries no per-frame tag by construction, so the WHO the subject seam
+     * needs is stamped here instead (#375 Part 2, ADR-0082): the session's handle, on the
+     * poll thread, immediately before the delivery that consumes it, and cleared once it is
+     * handed up, so the field names a session only while that session's frame is being
+     * delivered (#1915).
      */
-    [[nodiscard]] bool data(tr::view::view_t piece) const {
-        tr::view::rope_t message;
-        if (s.frame.op == ws::opcode_t::BINARY && s.frame.fin) {
-            s.assembler.reset();  // a BINARY mid-assembly drops the stale message (§5.4)
-            message = tr::view::rope_t{std::move(piece)};
-        } else {
-            assemble_result_t r = s.assembler.on_piece(
-                s.frame.op, s.frame.fin, std::move(piece),
-                length_prefix_framer_t::effective_cap(*link.backend_, link.max_frame_));
-            // Fragments summing past the cap get the answer a single over-cap frame gets, so
-            // the fragmented route is not a way around the bound.
-            if (r.status == assemble_status_t::OVERSIZE) {
-                link.malformed_rx_.fetch_add(1, std::memory_order_relaxed);
-                return false;
-            }
-            if (r.status != assemble_status_t::COMPLETE) return true;  // mid-message
-            message = std::move(r.message);
-        }
-        // The constructed MODE picks the slot (#889): peer-named servers deliver tagged with
-        // the sending peer's handle (the ADR-0044 bus precedence, what the router wires), flat
-        // servers deliver point-to-point under the link's own registered name. `bus_mode()`
-        // is that flag conjoined with whether this BUILD carries a bus module at all (#375
-        // deliverable 3), and the peer-tier call is the STATIC seam of #1438, so the
-        // per-frame path gained no dispatch. A single-link rope reaches a span-only sink
-        // borrowed, so the tier needs no choosing here.
-        //
-        // The FLAT tier carries no per-frame tag by construction, so the WHO the subject seam
-        // needs is stamped here instead (#375 Part 2, ADR-0082): the session's handle, on the
-        // poll thread, immediately before the delivery that consumes it, and cleared once it
-        // is handed up, so the field names a session only while that session's frame is
-        // being delivered (#1915).
+    void hand_up(tr::view::rope_t message) const {
         link.delivering_ = s.handle;
         if (link.bus_mode())
             link.deliver_to_peer_rope(s.handle, std::move(message));
         else
             link.rx_.deliver_rope(std::move(message));
         link.delivering_ = {};
-        return true;
     }
 };
 
@@ -528,7 +520,8 @@ void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::span<cons
 
 void ws_server_transport_t::on_readable(session_base_t& base, int fd) {
     session_t& s = static_cast<session_t&>(base);
-    framing_t framing{*this, s};
+    framing_t end{*this, s, s.frame, s.assembler};
+    ws_framing_t<framing_t> framing{end};
     // Past the 101, frame ingress reads each header first and each body straight into its
     // exact segment (ADR-0087 §1). Either phase answers false for a peer that closed or broke
     // the protocol, and both tear down through the one teardown.
@@ -597,7 +590,8 @@ bool ws_server_transport_t::read_handshake(session_t& s, int fd) {
     publish_peer_up(s);
     // Bytes pipelined past the header are the start of the frame stream: frame ingress
     // takes them exactly as if they had come off the socket.
-    framing_t framing{*this, s};
+    framing_t end{*this, s, s.frame, s.assembler};
+    ws_framing_t<framing_t> framing{end};
     const bool ok = s.ingress.feed(std::span<const std::byte>(s.hs_buf.data() + hdr_end + 4,
                                                               s.hs_buf.size() - hdr_end - 4),
                                    *backend_, framing) >= 0;
@@ -855,113 +849,77 @@ bool ws_client_transport_t::handshake(int fd, std::string_view host, std::uint16
     return pipelined.append(resp.data() + hdr_end + 4, resp.size() - hdr_end - 4);
 }
 
+/**
+ * @brief The dial-out client's end of the shared receive rules (@ref ws_framing_t): the one
+ *        connection's stream state, this link's cap and counters, a masked PONG, and
+ *        delivery to its one slot.
+ */
+struct ws_client_transport_t::framing_t {
+    ws_client_transport_t& link; /**< @brief The client (its counters, sink and egress). */
+    ws_rx_frame_t frame;         /**< @brief The header of the frame being received. */
+    ws_assembler_t assembler;    /**< @brief Fragment reassembly. */
+
+    /** @brief The receive cap, resolved from the injected backend and `max_frame` exactly as
+     *         the server resolves it: a dialled peer gets no more credit than an accepted
+     *         one. */
+    [[nodiscard]] std::size_t cap() const {
+        return length_prefix_framer_t::effective_cap(*link.backend_, link.max_frame_);
+    }
+    /** @brief Count a frame that broke the rules (#872, #1060). */
+    void malformed() const { link.malformed_rx_.fetch_add(1, std::memory_order_relaxed); }
+    /** @brief Count a body the source refused (receiver pays). */
+    void dropped() const { link.dropped_rx_.fetch_add(1, std::memory_order_relaxed); }
+
+    /** @brief Answer a PING: a client PONG is masked like client data frames, and built on
+     *         the STACK, so the reply cannot fail to be built (#848). */
+    void pong(std::span<const std::byte> payload) const {
+        std::array<std::byte, ws::kMaxClientControlFrame> pong{};
+        const std::size_t plen =
+            ws::encode_client_control(pong, ws::opcode_t::PONG, payload, link.next_mask_key());
+        // Through the egress like any frame (#2144): never interleaved with a publisher's
+        // record, and bounded per turn (#838).
+        const ::iovec pv{pong.data(), plen};
+        const std::span<const ::iovec> rec(&pv, 1);
+        egress_once_t once([&] { return link.frame_of(rec); });
+        link.egress_send(once, [&](int wfd, std::uint32_t bound) {
+            return link.write_gather(wfd, rec, bound, false);
+        });
+    }
+
+    /** @brief Hand one whole message up: a single-link rope reaches a span-only sink
+     *         borrowed, a fragmented one materializes once, in the slot. */
+    void hand_up(tr::view::rope_t message) const { link.rx_.deliver_rope(std::move(message)); }
+};
+
 void ws_client_transport_t::serve(int fd) {
-    ws_assembler_t asm_state;  // per-connection fragment assembly (recv thread only)
-    mem::bytes_t buf = std::move(pipelined_);
-    std::array<std::byte, 4096> chunk;
-    // The ingress bound, resolved from the injected backend and `max_frame` exactly as the
-    // server resolves it — a dialled peer gets no more credit than an accepted one.
-    const std::size_t cap = length_prefix_framer_t::effective_cap(*backend_, max_frame_);
+    framing_t end{*this, {}, {}};
+    ws_framing_t<framing_t> framing{end};
+    // Stack state, not a member: the header being read and the body's segment while it fills
+    // live on this receive thread for the life of the connection (ADR-0087 §1).
+    // Sized for a masked header too: RFC 6455 forbids a masked server frame, but the shared
+    // rules unmask one rather than stall on a header the slot could not hold.
+    frame_ingress_t<ws::kMaxClientFrameHeader> ingress;
+    // The bytes the server pipelined behind its 101 are the start of the frame stream: a peer
+    // that pushes its state on connect and then goes quiet must still get that message
+    // delivered, so they are fed before the first wait, then released.
+    bool alive = ingress.feed(std::span<const std::byte>(pipelined_.data(), pipelined_.size()),
+                              *backend_, framing) >= 0;
+    pipelined_ = mem::bytes_t(pipelined_.source());
 
     // The local stop is checked once per pass, here: a `continue` on a poll timeout comes
     // straight back to it.
-    while (!stop_.load(std::memory_order_relaxed)) {
-        // Drain BEFORE touching the socket: the loop starts with whatever the server
-        // pipelined behind its 101 already in `buf`, and a peer that pushes its state on
-        // connect and then goes quiet must still get that message delivered — a
-        // poll-first loop would sit on a complete frame until the peer spoke again.
-        // Leftover partial bytes stay for the next read.
-        // Payloads are views into `buf`: the consumed prefix goes once, after the drain.
-        std::size_t off = 0;
-        while (true) {
-            const ws::decode_result_t decoded = ws::decode_frame_checked(
-                std::span<std::byte>(buf.data() + off, buf.size() - off), cap);
-            if (decoded.status == ws::decode_status_t::NEED_MORE) break;
-            // RFC 6455 §7.1.7: a protocol violation FAILS the connection — the same
-            // teardown a peer CLOSE takes, not an unbounded wait for legal bytes. That
-            // now covers a declared length past the receive cap, which is what stops the
-            // server we dialled from naming our memory budget (#872), and §5.2 (#1060).
-            if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) {
-                malformed_rx_.fetch_add(1, std::memory_order_relaxed);
-                goto teardown;
-            }
-            const ws::frame_t& frame = decoded.frame;
-            off += decoded.consumed;
-
-            switch (frame.op) {
-                case ws::opcode_t::BINARY:
-                case ws::opcode_t::CONT: {
-                    // Sink snapshot/tier select lives in the slot (receiver_slot.hpp);
-                    // rx_.has_rope() is the per-frame tier query, so a sink installed
-                    // mid-stream takes effect on the next data frame.
-                    // Unfragmented fast path on the span tier: the borrowed
-                    // payload is delivered directly, no owning copy (as before).
-                    if (frame.op == ws::opcode_t::BINARY && frame.fin && !asm_state.assembling &&
-                        !rx_.has_rope()) {
-                        rx_.deliver_borrowed(frame.payload);
-                        break;
-                    }
-                    auto msg =
-                        asm_state.on_data(frame.op, frame.fin, frame.payload, *backend_, cap);
-                    if (msg.status == assemble_status_t::DROPPED) {
-                        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
-                        break;  // backpressure: shed the message, keep the connection
-                    }
-                    if (msg.status == assemble_status_t::OVERSIZE) {
-                        malformed_rx_.fetch_add(1, std::memory_order_relaxed);
-                        goto teardown;  // fragments summing past the cap fail the connection
-                    }
-                    if (msg.status != assemble_status_t::COMPLETE) break;  // mid-message
-                    // The reassembled message IS a rope — one owning link per
-                    // fragment (ADR-0053 §5): the rope sink takes it as-is; only
-                    // a span-only sink pays the one materialize (in the slot).
-                    rx_.deliver_rope(std::move(msg.message));
-                    break;
-                }
-                case ws::opcode_t::PING: {
-                    // A client PONG must be masked, just like client data frames — and,
-                    // like the server's, it is built on the STACK: §5.5 was enforced at
-                    // decode, so the payload is <= 125 bytes and the reply cannot fail
-                    // to be built (#848).
-                    std::array<std::byte, ws::kMaxClientControlFrame> pong{};
-                    const std::size_t plen = ws::encode_client_control(
-                        pong, ws::opcode_t::PONG, frame.payload, next_mask_key());
-                    // Through the egress like any frame (#2144): never interleaved with a
-                    // publisher's record, and bounded per turn (#838).
-                    const ::iovec pv{pong.data(), plen};
-                    const std::span<const ::iovec> rec(&pv, 1);
-                    egress_once_t once([&] { return frame_of(rec); });
-                    egress_send(once, [&](int wfd, std::uint32_t bound) {
-                        return write_gather(wfd, rec, bound, false);
-                    });
-                    break;
-                }
-                case ws::opcode_t::CLOSE:
-                    goto teardown;  // peer asked to close
-                default:
-                    break;  // TEXT / PONG: ignored (a RESERVED opcode dies at decode: #1060)
-            }
-        }
-
-        buf.erase_front(off);  // once, after the frames (views into it) are used
-
+    while (alive && !stop_.load(std::memory_order_relaxed)) {
         // One bounded 100 ms wait: readable, and writable too while a frame the socket cut
-        // short is held — that resumes it here (#2144).
+        // short is held, which resumes it here (#2144).
         const int pr = poll_io(fd);
         if (pr < 0) break;
         if (pr == 0) continue;  // timeout → re-check stop_
-
-        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
-        if (n <= 0) break;  // peer closed / error
-        if (!buf.append(chunk.data(), static_cast<std::size_t>(n))) {
-            // The link's store refused the read: the stream can no longer be framed, so
-            // the connection is failed and counted (receiver pays).
-            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
-            break;
-        }
+        // False for a peer that closed, a read error, a CLOSE, or an RFC 6455 breach
+        // (§7.1.7), which is what stops the server we dialled from naming our memory
+        // budget (#872).
+        alive = ingress.read(fd, *backend_, framing);
     }
 
-teardown:
     teardown_peer(fd);  // close the egress, then reset and close (stream_endpoint_t)
     // Liveness (#1059): every death of the one connection lands here — peer CLOSE, remote
     // hangup, receive error, RFC 6455 breach, and the local stop — so this is the ONE
