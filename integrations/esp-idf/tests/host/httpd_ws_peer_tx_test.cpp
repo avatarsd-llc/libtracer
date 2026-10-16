@@ -670,7 +670,12 @@ void test_producers_race_close_and_reclaim() {
     httpd_task.join();
     drain();
 
+    // Every socket drains now. A peer whose socket took nothing through the race may still
+    // hold a full queue (a full queue never strikes it, #2195), so its held frames go out
+    // first, as the application's flush_held() sends them; then the final frame has room.
     for (const int fd : kFds) fake_httpd::instance().set_send_script(fd, {send_result_t::FULL});
+    link->flush_held();
+    drain();
     fake_httpd::instance().clear_sent_frames();
     const auto last = tagged(0x6B);
     link->send(std::span<const std::byte>(last));
