@@ -180,9 +180,10 @@ ssize_t send_gather(int fd, const msghdr* msg, int flags) {
         errno = fake;
         return -1;
     }
-    // One entry goes out as send(2): the kernel's sendmsg path first copies the msghdr and
-    // imports the iovec from user memory, a cost a small record pays in full.
-    if (msg->msg_iovlen == 1)
+    // One entry with no address and no ancillary data goes out as send(2): the kernel's
+    // sendmsg path first copies the msghdr and imports the iovec from user memory, a cost a
+    // small record pays in full.
+    if (msg->msg_iovlen == 1 && msg->msg_name == nullptr && msg->msg_controllen == 0)
         return ::send(fd, msg->msg_iov[0].iov_base, msg->msg_iov[0].iov_len, MSG_NOSIGNAL | flags);
     return ::sendmsg(fd, msg, MSG_NOSIGNAL | flags);
 }
