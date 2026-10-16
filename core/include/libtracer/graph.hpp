@@ -1521,8 +1521,8 @@ class graph_t {
      * synthesizes the live peer listing (ADR-0044). That seam is peer-driven: a bus node
      * parks one `value_handlers_t` per connection teardown, and a point-to-point teardown
      * (a dial link, UDP, loopback, a default-wired server) parks no seam. EVERY connection
-     * teardown parks one @ref park_release, though: the removed link, shut down, which this
-     * call destroys. Destroying a `tr::net::transport_vertex_t` also parks one seam per
+     * teardown parks one release, though (@ref park_reserved): the removed link, shut down,
+     * which this call destroys. Destroying a `tr::net::transport_vertex_t` also parks one seam per
      * declared module's `<module>/conn` creator endpoint, plus one release for that
      * endpoint's context. So a node whose connections come and go needs a collect point, or
      * the park grows by that much per teardown until the graph goes; until it runs, a
@@ -1581,10 +1581,69 @@ class graph_t {
      * retired subscription's context back through. Whatever reaches the context in the
      * meantime is the owner's to answer; it stays valid until the release runs.
      *
+     * An owner that cannot take a refusal at teardown reserves its entry when it creates the
+     * context instead (@ref reserve_park) and parks it with @ref park_reserved, which cannot be
+     * refused.
+     *
      * @retval BACKPRESSURE The park could not grow; nothing is parked and @p release will
      *         never run, so the context must stay valid for as long as the graph lives.
+     *         Counted in @ref reclaim_refusals_t::park_refused.
      */
     [[nodiscard]] result_t<void> park_release(retired_callback_t release);
+
+    /**
+     * @brief Reserve room in the park for one later @ref park_reserved, so the teardown that
+     *        parks it cannot be refused (#2117).
+     *
+     * Taken when an owner creates a context it will one day hand to the park, at the point its
+     * creation can still be refused with nothing changed. The reservation holds park capacity,
+     * not an entry: it costs one park slot of the graph's table source while it is held, and
+     * @ref collect frees nothing for it. Give it back with @ref unreserve_park when the context
+     * is never parked.
+     *
+     * @retval BACKPRESSURE The park could not grow; nothing is reserved. Counted in
+     *         @ref reclaim_refusals_t::park_refused.
+     */
+    [[nodiscard]] result_t<void> reserve_park();
+
+    /** @brief Give back one reservation @ref reserve_park took, for a context that will never
+     *         be parked (a creation rolled back, or a retirement refused). */
+    void unreserve_park() noexcept;
+
+    /**
+     * @brief @ref park_release into a slot @ref reserve_park reserved: the same epoch and the
+     *        same release point, and it cannot be refused. Consumes the reservation.
+     *
+     * Precondition: the caller holds a reservation it has not used or given back.
+     */
+    void park_reserved(retired_callback_t release) noexcept;
+
+    /**
+     * @brief Make a `T` in @ref table_source together with the park reservation it will be
+     *        parked into: both, or neither.
+     *
+     * The one way an owner creates a context its teardown hands to @ref park_reserved, so a
+     * creation answers one refusal for either shortage. Undo it with @ref drop_parked.
+     *
+     * @return The new object, or null when the park could not grow (counted in
+     *         @ref reclaim_refusals_t::park_refused) or the source refused the block.
+     */
+    template <class T, class... Args>
+    [[nodiscard]] T* make_parked(Args&&... args) noexcept {
+        if (!reserve_park()) return nullptr;
+        T* const made = mem::make_in<T>(table_source(), std::forward<Args>(args)...);
+        if (made == nullptr) unreserve_park();
+        return made;
+    }
+
+    /** @brief Undo one @ref make_parked that will never be parked: free @p made and give back
+     *         its reservation. A null @p made is a no-op. */
+    template <class T>
+    void drop_parked(T* made) noexcept {
+        if (made == nullptr) return;
+        mem::drop_in(table_source(), made);
+        unreserve_park();
+    }
 
     /**
      * @brief How many retired value seams are currently parked, awaiting @ref collect.
@@ -2429,11 +2488,14 @@ class graph_t {
      *                thread reached the grace point.
      * @return `{}` on success; `NOT_FOUND` when @p sub names no active edge — and then
      *         @p release is *not* called.
-     * @note A deferred hook needs one of the
-     *       @ref tr::graph::default_config_t::kDeferredReleaseSlots parking slots — this
-     *       thread's, or under `reclaim_qsbr_t` the shared table's. If every one is taken the
-     *       pair is DROPPED and the hook never runs — a deliberate leak in preference to a
-     *       use-after-free — and @ref deferred_release_drops counts it.
+     * @retval BACKPRESSURE The edge IS removed, but its deferred hook found no parking slot,
+     *         so @p release will never run and the context stays the caller's for the life of
+     *         the process. A deferred hook needs one of the
+     *         @ref tr::graph::default_config_t::kDeferredReleaseSlots slots — this thread's, or
+     *         under `reclaim_qsbr_t` the shared table's — and running it with every slot taken
+     *         would free a context a live fan-out still names: a deliberate leak in preference
+     *         to a use-after-free. Counted in @ref reclaim_refusals_t::release_refused. Do not
+     *         retry: the edge is gone, and a second call answers `NOT_FOUND`.
      */
     [[nodiscard]] result_t<void> unsubscribe(const subscription_t& sub,
                                              subscriber_release_fn_t release);
@@ -2529,26 +2591,6 @@ class graph_t {
      * @retval NOT_FOUND No live edge @p sub names.
      */
     [[nodiscard]] result_t<bool> is_suspended(const subscription_t& sub) const;
-
-    /**
-     * @brief How many retired `{ctx, release}` pairs this PROCESS has dropped for want of a
-     *        parking slot — each one a release hook that will never run (ADR-0080).
-     *
-     * The observability half of the bounded park: a leak is the safe answer to an exhausted
-     * bound, but a silent one is not. A non-zero reading means
-     * @ref tr::graph::default_config_t::kDeferredReleaseSlots is undersized for how many
-     * subscriptions this node retires from inside a single delivery stack — raise it in the
-     * override fragment. It is process-wide (summed across threads) and monotonic, and it
-     * stays 0 forever on a node that never unsubscribes re-entrantly, which is most of them.
-     *
-     * Under @ref tr::graph::reclaim_qsbr_t it counts the SHARED retired table's drops and means
-     * something sharper: that domain republishes and rescans before it gives up, so a non-zero
-     * reading says a participant thread genuinely never reached a quiescent state while the
-     * table filled. That is an embedder defect — a dispatching thread that never returns to its
-     * event loop, or more concurrent dispatchers than
-     * @ref tr::graph::default_config_t::kQsbrParticipants — and this counter is how it surfaces.
-     */
-    [[nodiscard]] static std::uint64_t deferred_release_drops() noexcept;
 
     /**
      * @brief Declare that this thread holds no in-flight delivery — the OPT-IN quiescent point
@@ -2914,6 +2956,33 @@ class graph_t {
      * monotonic counters whose useful reading is "is this growing", not an instant.
      */
     [[nodiscard]] delivery_drops_t delivery_drops() const noexcept;
+
+    /**
+     * @brief The per-cause counters of this graph's reclaim refusals: each a retirement that
+     *        could not be parked, answered to its caller by value (#2117).
+     *
+     * Every refusal on a reclaim path answers a status the caller sees and counts here, so
+     * none is silent. They are sizing signals, not defects: each says the source a park draws
+     * from, or the per-thread / shared slot bound, was too small at that moment. Counted,
+     * never enforced, and sampled per the `core/STYLE.md` §Introspection snapshot-coherence clause.
+     */
+    struct reclaim_refusals_t {
+        /** @brief An @ref unsubscribe whose deferred release hook found no parking slot: the
+         *         edge went, the hook will never run, and the call answered `BACKPRESSURE`. A
+         *         non-zero reading means @ref tr::graph::default_config_t::kDeferredReleaseSlots
+         *         is undersized for this node's re-entrant (or, under `reclaim_qsbr_t`,
+         *         cross-thread) unsubscribes. */
+        std::uint64_t release_refused = 0;
+        /** @brief A @ref park_release or @ref reserve_park the park's source refused: nothing
+         *         was parked or reserved, and the call answered `BACKPRESSURE`. */
+        std::uint64_t park_refused = 0;
+        /** @brief A @ref retire refused for want of room (its key, or the seam park): nothing
+         *         was retired, and the call answered `BACKPRESSURE`. */
+        std::uint64_t retire_refused = 0;
+    };
+
+    /** @brief Snapshot the reclaim-refusal counters (@ref reclaim_refusals_t). */
+    [[nodiscard]] reclaim_refusals_t reclaim_refusals() const noexcept;
 
    private:
     /**
@@ -4091,6 +4160,14 @@ class graph_t {
      *         `config_t::kCreationHooks`. */
     [[nodiscard]] creation_hook_t creation_hook_for(const vertex_t* v) const noexcept;
 
+    // The reclaim-refusal counters behind reclaim_refusals() (#2117). Here at the end, so they
+    // move no member the write and fan-out paths address; touched only on a refusal. Word-wide
+    // and relaxed (core/STYLE.md §Introspection clause 5): the unsubscribe and retire refusals
+    // are counted outside the map lock.
+    std::atomic<std::size_t> refused_release_{0}; /**< @brief See `release_refused`. */
+    std::atomic<std::size_t> refused_park_{0};    /**< @brief See `park_refused`. */
+    std::atomic<std::size_t> refused_retire_{0};  /**< @brief See `retire_refused`. */
+
     /**
      * @brief The releases @ref park_release parked: each runs once, at the first @ref collect
      *        that no router frame open at its epoch is still inside. Appended only under
@@ -4107,6 +4184,9 @@ class graph_t {
     };
     struct release_park_t {
         mem::block_array_t<parked_release_t> releases; /**< @brief The parked releases. */
+        /** @brief Entries @ref reserve_park holds room for: `releases` keeps capacity for
+         *         `size() + reserved` at all times. Guarded by `map_mutex_`. */
+        std::size_t reserved = 0;
         /** @brief An empty park drawing from @p src. */
         explicit release_park_t(mem::block_source_t& src) noexcept : releases(src) {}
         release_park_t(const release_park_t&) = delete;

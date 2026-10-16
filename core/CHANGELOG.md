@@ -16,6 +16,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **Every reclaim refusal is answered and counted; `graph_t::deferred_release_drops()` is
+  gone ([#2117](https://github.com/avatarsd-llc/libtracer/issues/2117)).** An `unsubscribe`
+  whose deferred release hook finds no parking slot now answers `BACKPRESSURE` instead of `{}`:
+  the edge is removed all the same and the hook never runs, as before, but the caller is told.
+  Do not retry it; a second call answers `NOT_FOUND`. The process-wide static
+  `graph_t::deferred_release_drops()` and the QSBR domain's own drop tally it summed are deleted;
+  the count is per graph now, `graph_t::reclaim_refusals().release_refused`.
+
 - **A UDP link with no `max_frame` accepts one MTU, not 64 KiB
   ([#2132](https://github.com/avatarsd-llc/libtracer/issues/2132)).** The unset receive cap of
   `udp_transport_t` is the new `udp_transport_t::kDefaultMaxFrame` (1,472 B, the payload of one
@@ -37,6 +45,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `static constexpr std::size_t kCrc32cSlices = 1;` in its `config_override.hpp`, as the
   Cortex-M0 footprint sentinel does. Every value gives the same CRC; a CPU with a CRC
   instruction reads neither.
+- **`graph_t::reclaim_refusals()`
+  ([#2117](https://github.com/avatarsd-llc/libtracer/issues/2117)).**
+  Three per-graph counters, one per refusal on a reclaim path, each of which also answers its
+  caller `BACKPRESSURE`: `release_refused` (an unsubscribe's release hook found no slot),
+  `park_refused` (`park_release` or `reserve_park` could not grow the park) and
+  `retire_refused` (a `retire` had no room for its key or its seam).
+- **`graph_t::reserve_park()`, `unreserve_park()`, `park_reserved()`, `make_parked<T>()` and
+  `drop_parked()` ([#2117](https://github.com/avatarsd-llc/libtracer/issues/2117)).** An owner
+  reserves a context's park entry when it creates the context, while a refusal still changes
+  nothing (`make_parked` makes the context in the table source and reserves its entry, both or
+  neither), and parks it later with `park_reserved`, which cannot be refused. `transport_vertex_t` now
+  reserves one for each connection and each creator endpoint, so a link teardown is never
+  refused its park. Before, a refused `park_release` there kept the shut-down link for the
+  graph's lifetime and counted it nowhere. A connection or a module declaration whose park
+  entry cannot be reserved is refused `BACKPRESSURE`, with nothing created.
 
 - **`subscription_selector_t`: a vertex that switches among named options of subscription refs
   ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** A header-only adapter

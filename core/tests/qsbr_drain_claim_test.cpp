@@ -197,11 +197,11 @@ void collided_passes_strand_nothing() {
             }
         });
     }
-    const std::uint64_t drops_before = q::drops();
     int stranded = 0;
+    int refused = 0;
     for (int round = 0; round < kRounds; ++round) {
         sync.arrive_and_wait();
-        (void)q::retire(&pool[round], release);
+        refused += !q::retire(&pool[round], release);
         sync.arrive_and_wait();
         sync.arrive_and_wait();
         stranded += !pool[round].released.load(std::memory_order_acquire);
@@ -213,7 +213,7 @@ void collided_passes_strand_nothing() {
                 kReaders, kRounds, q::kMembarrier ? "single-flight drain" : "no drain gate",
                 stranded);
     check(stranded == 0, "no colliding drain pass leaves a ripe pair parked");
-    check(q::drops() == drops_before, "and the table never filled");
+    check(refused == 0, "and the table never filled");
 }
 
 }  // namespace

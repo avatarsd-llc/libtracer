@@ -630,9 +630,9 @@ struct default_config_t {
      * Overflow is a REFUSAL, not a failure: a pair that finds every slot taken is DROPPED and
      * its hook is never run — a leak, deliberately, because the alternative is running a
      * release hook while the fan-out that is still walking the snapshot names that context.
-     * `graph_t::deferred_release_drops()` counts every one, so an undersized bound is
-     * observable rather than silent. Override fragment:
-     * `static constexpr std::size_t kDeferredReleaseSlots = 64;`
+     * The `unsubscribe` answers `BACKPRESSURE` and `graph_t::reclaim_refusals()` counts every
+     * one (`release_refused`), so an undersized bound is observable rather than silent. Override
+     * fragment: `static constexpr std::size_t kDeferredReleaseSlots = 64;`
      *
      * **Under `reclaim_qsbr_t` read it differently.** There the pairs are held across a
      * cross-thread GRACE PERIOD rather than a dispatch stack, in ONE shared table rather than
@@ -642,7 +642,7 @@ struct default_config_t {
      * threads dispatch. The overflow rule is identical, and so is its observability: a QSBR
      * build retries the scan once after publishing the pair, so a drop means a participant
      * thread genuinely never reached a quiescent state — an embedder defect
-     * @ref tr::graph::graph_t::deferred_release_drops now names.
+     * @ref tr::graph::graph_t::reclaim_refusals now names.
      */
     static constexpr std::size_t kDeferredReleaseSlots = 16;
 
@@ -660,7 +660,7 @@ struct default_config_t {
      * and a thread a scan cannot see is one no grace period may conclude past; so it counts
      * itself into an overflow tally instead, and any non-zero reading blocks all reclamation
      * until it clears. The failure mode is therefore deferred frees (visible as
-     * @ref tr::graph::graph_t::deferred_release_drops rising), never a use-after-free.
+     * @ref tr::graph::graph_t::reclaim_refusals rising), never a use-after-free.
      *
      * Its `.bss` is `N * max(kCacheLineBytes, alignof(std::uint64_t))` bytes — at N = 32 that
      * is 2,048 B on a host — plus the shared retired table. The transport plane uses the same

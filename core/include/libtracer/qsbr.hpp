@@ -496,9 +496,6 @@ struct registry_t {
     std::array<cell_t, kQsbrParticipants> cells{}; /**< @brief The announcements. */
     control_t ctl{};                               /**< @brief The read-mostly words. */
     std::array<retired_slot_t, kDeferredReleaseSlots> retired{}; /**< @brief Deferred releases. */
-    /** @brief Pairs dropped for want of a slot. Word-wide, as every drop counter is
-     *         (core/STYLE.md §Introspection clause 5, #1697). */
-    std::atomic<std::size_t> drops{0};
 };
 
 /** @brief The one domain. */
@@ -866,7 +863,7 @@ inline void drain() noexcept {
  * true under this policy exactly as it is under the other two. Otherwise the pair is deferred
  * into the shared table and freed by whichever participant next completes the grace period.
  *
- * @return False when the pair was DROPPED for want of a slot; the caller counts it. Dropping
+ * @return False when the pair was REFUSED a slot; the caller counts it and says so. Refusing
  *         is the same deliberate leak the per-thread park makes, for the same reason: running
  *         the hook here would free a context a live fan-out still names.
  */
@@ -898,13 +895,7 @@ inline bool retire(void* ctx, void (*release)(void*)) noexcept {
         drain();
         return true;
     }
-    r.drops.fetch_add(1, std::memory_order_relaxed);
     return false;
-}
-
-/** @brief How many pairs this domain has dropped for want of a slot. */
-[[nodiscard]] inline std::uint64_t drops() noexcept {
-    return registry().drops.load(std::memory_order_relaxed);
 }
 
 }  // namespace tr::graph::detail_qsbr

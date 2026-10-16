@@ -109,19 +109,10 @@ std::string_view session_of(const remote_ptr_t& remote) noexcept {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * @brief The count of retired pairs dropped for want of a parking slot, process-wide.
- *
- * Behind `graph_t::deferred_release_drops`, which sums this with the QSBR domain's own tally.
- * Relaxed: it is a diagnostic that orders nothing, exactly like the graph's snapshot-drop
- * counters. Word-wide, as they are (#1697): a 64-bit atomic is a libatomic call on rv32.
- */
-std::atomic<std::size_t> g_deferred_release_drops{0};
-
-/**
  * @brief How many pairs one thread parks locally — @ref kDeferredReleaseSlots, or none under a
  *        policy whose retired pairs live in the SHARED table instead.
  *
- * A QSBR build never calls @ref park_release, so the full array would be dead TLS on every
+ * A QSBR build never parks on this thread, so the full array would be dead TLS on every
  * dispatching thread (256 B a piece on a 64-bit host); it collapses to one unused entry, a
  * zero-length array being an extension rather than standard C++. Collapsing the BOUND rather
  * than the struct is what lets the default build's thread-local keep byte-for-byte the layout
@@ -240,47 +231,33 @@ class dispatch_scope_t {
 }
 
 /**
- * @brief Park @p pair until this thread unwinds to depth 0, or DROP it if there is no room.
- *
- * The OOM rule, stated once: on a full park the entry is discarded and its hook is **never**
- * run. That is a deliberate leak, and it is the only safe answer — running the hook here would
- * release a context the fan-out one frame up is still holding in its snapshot, which is the
- * very use-after-free this whole seam exists to close. The drop is counted so an undersized
- * `kDeferredReleaseSlots` is visible instead of silent.
- */
-[[maybe_unused]] void park_release(const retired_callback_t& pair) {
-    dispatch_state_t& s = dispatch_state();
-    if (s.parked_n >= kLocalParkSlots) {
-        g_deferred_release_drops.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    s.parked[s.parked_n++] = pair;
-}
-
-/**
  * @brief Retire one `{ctx, release}` pair at the bound policy's grace point — the whole of
  *        `unsubscribe`'s policy body, in one place.
  *
  * Every branch releases INLINE in the case where nothing can still be holding the pair, which is
  * why "quiescent on return" is true of an ordinary unsubscribe under all three policies.
+ *
+ * @return False when the pair was REFUSED a parking slot (this thread's, or the QSBR domain's
+ *         shared table). The OOM rule, stated once: the hook is then **never** run. That is a
+ *         deliberate leak and the only safe answer — running it here would release a context a
+ *         fan-out up the stack, or on another thread, still holds in its snapshot, the very
+ *         use-after-free this seam exists to close. The caller counts it and says so.
  */
-inline void retire_pair(const retired_callback_t& pair) {
+[[nodiscard]] inline bool retire_pair(const retired_callback_t& pair) {
     if constexpr (reclaim_policy_t::kGraceSpansThreads) {
         // The domain decides inline-vs-defer by SCANNING, not by asking about this thread: a
-        // sibling thread's live snapshot is exactly what the depth counter cannot see. It counts
-        // its own drops, which `deferred_release_drops` folds back in below.
-        detail_qsbr::retire(pair.ctx, pair.release);
+        // sibling thread's live snapshot is exactly what the depth counter cannot see.
+        return detail_qsbr::retire(pair.ctx, pair.release);
     } else if (inside_dispatch()) {
-        park_release(pair);
+        // Parked until this thread unwinds to depth 0.
+        dispatch_state_t& s = dispatch_state();
+        if (s.parked_n >= kLocalParkSlots) return false;
+        s.parked[s.parked_n++] = pair;
+        return true;
     } else {
         pair.release(pair.ctx);
+        return true;
     }
-}
-
-/** @brief The QSBR domain's drop tally, or a compile-time 0 for a policy that has no domain. */
-[[nodiscard]] inline std::uint64_t qsbr_drops() noexcept {
-    if constexpr (reclaim_policy_t::kGraceSpansThreads) return detail_qsbr::drops();
-    return 0;
 }
 
 /**
@@ -1227,7 +1204,10 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     // parent's key is a byte-prefix of every descendant's), so one rendered key is the whole
     // cleanup list — rendered BEFORE anything changes, so a refusal retires nothing (#1778).
     mem::bytes_t lo(*tables_);
-    if (!try_build_key(root, lo)) return std::unexpected(status_t::BACKPRESSURE);
+    if (!try_build_key(root, lo)) {
+        refused_retire_.fetch_add(1, std::memory_order_relaxed);
+        return std::unexpected(status_t::BACKPRESSURE);
+    }
     gone_edges_t gone(*tables_);  // the slot tables the retirement dropped (#1816, #1778)
     {
         const std::unique_lock lock(map_mutex_);
@@ -1237,8 +1217,10 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         // refusal retires nothing and the walk below cannot fail halfway (#1778).
         std::size_t n = 1;
         root->for_each_descendant([&n](vertex_t&) { ++n; });
-        if (!gone.reserve(n) || !retired_seams_.seams.reserve(retired_seams_.seams.size() + n))
+        if (!gone.reserve(n) || !retired_seams_.seams.reserve(retired_seams_.seams.size() + n)) {
+            refused_retire_.fetch_add(1, std::memory_order_relaxed);
             return std::unexpected(status_t::BACKPRESSURE);
+        }
         const std::size_t parked_before = retired_seams_.seams.size();
         retire_subtree(root, gone);
         // Close the epoch AFTER every seam above is unpublished: a router frame that loaded
@@ -1330,11 +1312,40 @@ void graph_t::collect() {
 }
 
 result_t<void> graph_t::park_release(retired_callback_t release) {
-    const std::unique_lock lock(map_mutex_);
-    // The caller has unpublished what @p release frees; this closes the epoch after it.
-    if (!parked_releases_.releases.push_back({release, detail_qsbr::advance()}))
-        return std::unexpected(status_t::BACKPRESSURE);
+    if (const result_t<void> r = reserve_park(); !r) return r;
+    park_reserved(release);
     return {};
+}
+
+result_t<void> graph_t::reserve_park() {
+    const std::unique_lock lock(map_mutex_);
+    auto& park = parked_releases_;
+    // Room for every entry parked or reserved, plus this one; doubling, so an owner that
+    // reserves per context (one per connection) does not regrow the park per context.
+    const std::size_t want = park.releases.size() + park.reserved + 1;
+    if (want > park.releases.capacity() &&
+        !park.releases.reserve(std::max(want, 2 * park.releases.capacity()))) {
+        refused_park_.fetch_add(1, std::memory_order_relaxed);
+        return std::unexpected(status_t::BACKPRESSURE);
+    }
+    ++park.reserved;
+    return {};
+}
+
+void graph_t::unreserve_park() noexcept {
+    const std::unique_lock lock(map_mutex_);
+    assert(parked_releases_.reserved != 0 && "unreserve_park without a reservation");
+    --parked_releases_.reserved;
+}
+
+void graph_t::park_reserved(retired_callback_t release) noexcept {
+    const std::unique_lock lock(map_mutex_);
+    auto& park = parked_releases_;
+    assert(park.reserved != 0 && "park_reserved without a reservation");
+    --park.reserved;
+    // The caller has unpublished what @p release frees; this closes the epoch after it. The
+    // reservation kept room for it, so the append cannot be refused.
+    (void)park.releases.push_back({release, detail_qsbr::advance()});
 }
 
 std::size_t graph_t::parked_seam_count() const {
@@ -3545,15 +3556,19 @@ result_t<void> graph_t::unsubscribe(const subscription_t& sub, subscriber_releas
     // every ordinary unsubscribe, and every unsubscribe at all under `reclaim_strict`. Only the
     // cases that genuinely overlap a live snapshot defer; either way the library decided by
     // itself, and the caller was told rather than asked.
-    if (release != nullptr) retire_pair({.ctx = retired_ctx, .release = release});
+    // A pair refused a slot is the one refusal that cannot leave nothing changed: the edge is
+    // already gone. So it is answered and counted, and the hook is never run (`retire_pair`).
+    if (release != nullptr && !retire_pair({.ctx = retired_ctx, .release = release})) {
+        refused_release_.fetch_add(1, std::memory_order_relaxed);
+        return std::unexpected(status_t::BACKPRESSURE);
+    }
     return {};
 }
 
-std::uint64_t graph_t::deferred_release_drops() noexcept {
-    // Two tallies, one reading: the per-thread park's and — under `reclaim_qsbr` — the shared
-    // retired table's. The second term folds to a literal 0 under the other two policies, so
-    // this stays a single relaxed load in the build that is not paying for a grace period.
-    return g_deferred_release_drops.load(std::memory_order_relaxed) + qsbr_drops();
+graph_t::reclaim_refusals_t graph_t::reclaim_refusals() const noexcept {
+    return {.release_refused = refused_release_.load(std::memory_order_relaxed),
+            .park_refused = refused_park_.load(std::memory_order_relaxed),
+            .retire_refused = refused_retire_.load(std::memory_order_relaxed)};
 }
 
 std::expected<void, wire::err_t> graph_t::lookup_via_resolver(void* ctx, std::string_view caller,
