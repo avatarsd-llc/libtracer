@@ -352,45 +352,64 @@ struct header_t {
 namespace detail {
 
 /**
- * @brief XOR @p data in place with the RFC 6455 masking key @p key (§5.3): byte `i` takes key
- *        byte `i % 4` — eight bytes per step, not one (#1922).
+ * @brief Write @p src into @p dst XORed with the RFC 6455 masking key @p key (§5.3), in one
+ *        pass: byte `i` takes key byte `(phase + i) % 4` — eight bytes per step, not one
+ *        (#1922, #2145).
  *
- * Up to seven head bytes reach the first 8-byte-aligned address, the key is rotated to that
- * offset and widened to a 64-bit word, the aligned middle is XORed a word at a time, and the
- * tail finishes byte-wise. Every word load and store goes through `std::memcpy` on an address
- * known to be aligned, so a target without unaligned access (riscv32, xtensa) gets whole-word
- * loads and none of them traps; the word is built from bytes, so endianness never enters.
- * Applying the same key twice restores the input (x ^ k ^ k = x), so this one loop both
- * unmasks a received frame (`decode_one`) and masks a client frame's copied payload
- * (@ref put_client_frame, @ref ws::encode_client_control).
+ * The one masking loop. A client frame's payload is gathered and masked in the same pass, a
+ * span at a time, with @p phase carrying the key's position from one span to the next, so the
+ * caller's bytes are written once and never copied first (#2145). With @p dst equal to
+ * `src.data()` it masks in place (@ref xor_mask). Up to seven head bytes reach the first
+ * 8-byte-aligned destination, the key is rotated to that offset and widened to a 64-bit word,
+ * the aligned middle goes a word at a time, and the tail finishes byte-wise. Every word load
+ * and store is a fixed-size `std::memcpy`, and every store lands on an aligned address, so a
+ * target without unaligned access (riscv32, xtensa) gets whole-word stores and none traps;
+ * the word is built from bytes, so endianness never enters. Applying the same key twice
+ * restores the input (x ^ k ^ k = x).
  *
- * @param data The bytes to mask or unmask, in place.
- * @param key  The four key bytes, in wire order.
+ * @param dst   Where the masked bytes go: `src.size()` bytes, or `src.data()` itself.
+ * @param src   The bytes to mask.
+ * @param key   The four key bytes, in wire order.
+ * @param phase The key byte the first byte of @p src takes (the bytes masked before it).
+ * @return The phase after @p src: @p phase plus its size.
  */
-inline void xor_mask(std::span<std::byte> data, const std::array<std::uint8_t, 4>& key) noexcept {
-    std::byte* const p = data.data();
-    const std::size_t n = data.size();
-    const std::size_t to_aligned = (8u - reinterpret_cast<std::uintptr_t>(p) % 8u) % 8u;
+inline std::size_t mask_copy(std::byte* dst, std::span<const std::byte> src,
+                             const std::array<std::uint8_t, 4>& key, std::size_t phase) noexcept {
+    const std::byte* const in = src.data();
+    const std::size_t n = src.size();
+    const std::size_t to_aligned = (8u - reinterpret_cast<std::uintptr_t>(dst) % 8u) % 8u;
     const std::size_t head = to_aligned < n ? to_aligned : n;
     std::size_t i = 0;
-    for (; i < head; ++i) p[i] ^= static_cast<std::byte>(key[i % 4]);
+    for (; i < head; ++i) dst[i] = in[i] ^ static_cast<std::byte>(key[(phase + i) % 4]);
 
     // The key rotated to byte i, twice over: the word every aligned step XORs with.
-    const std::size_t r = i % 4;
+    const std::size_t r = (phase + i) % 4;
     const std::array<std::uint8_t, 8> rotated{key[r],           key[(r + 1) % 4], key[(r + 2) % 4],
                                               key[(r + 3) % 4], key[r],           key[(r + 1) % 4],
                                               key[(r + 2) % 4], key[(r + 3) % 4]};
     std::uint64_t word_key = 0;
     std::memcpy(&word_key, rotated.data(), sizeof word_key);
     for (; n - i >= 8; i += 8) {
-        std::byte* const w = std::assume_aligned<8>(p + i);
         std::uint64_t word = 0;
-        std::memcpy(&word, w, sizeof word);
+        std::memcpy(&word, in + i, sizeof word);
         word ^= word_key;
-        std::memcpy(w, &word, sizeof word);
+        std::memcpy(std::assume_aligned<8>(dst + i), &word, sizeof word);
     }
 
-    for (; i < n; ++i) p[i] ^= static_cast<std::byte>(key[i % 4]);
+    for (; i < n; ++i) dst[i] = in[i] ^ static_cast<std::byte>(key[(phase + i) % 4]);
+    return phase + n;
+}
+
+/**
+ * @brief XOR @p data in place with the RFC 6455 masking key @p key (§5.3): @ref mask_copy
+ *        over itself. Unmasks a received frame (`decode_one`) and masks a client control
+ *        frame's copied payload (@ref ws::encode_client_control).
+ *
+ * @param data The bytes to mask or unmask, in place.
+ * @param key  The four key bytes, in wire order.
+ */
+inline void xor_mask(std::span<std::byte> data, const std::array<std::uint8_t, 4>& key) noexcept {
+    (void)mask_copy(data.data(), data, key, 0);
 }
 
 /**
@@ -770,7 +789,8 @@ namespace detail {
 }
 
 /**
- * @brief Write one whole MASKED client frame into @p out — the one client-side
+ * @brief Write one whole MASKED client frame into @p out, its payload gathered from @p parts
+ *        and masked in the same pass (@ref mask_copy, #2145) — the one client-side
  *        length-encoding + masking implementation for DATA frames, used by
  *        @ref ws::try_encode_client_frame.
  *
@@ -786,16 +806,18 @@ namespace detail {
  * Writes through an already-sized buffer by index rather than appending, so the store it
  * fills is the caller's and this function allocates nothing at all.
  *
- * @pre @p out.size() >= `client_frame_bytes(payload.size())`.
- * @return The number of bytes written (exactly `client_frame_bytes(payload.size())`).
+ * @param parts The payload, in order: its spans are one payload, masked as one.
+ * @pre @p out.size() >= `client_frame_bytes(` the parts' total size `)`.
+ * @return The number of bytes written (exactly `client_frame_bytes(` that total `)`).
  */
 inline std::size_t put_client_frame(std::span<std::byte> out, opcode_t op,
-                                    std::span<const std::byte> payload, std::uint32_t mask_key,
-                                    bool fin) noexcept {
+                                    std::span<const std::span<const std::byte>> parts,
+                                    std::uint32_t mask_key, bool fin) noexcept {
     std::size_t n = 0;
     out[n++] = static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op));
 
-    const std::size_t len = payload.size();
+    std::size_t len = 0;
+    for (const std::span<const std::byte>& part : parts) len += part.size();
     if (len < 126) {
         out[n++] = static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(len));  // MASK=1
     } else if (len <= 0xFFFF) {
@@ -814,9 +836,18 @@ inline std::size_t put_client_frame(std::span<std::byte> out, opcode_t op,
                                          static_cast<std::uint8_t>((mask_key >> 8) & 0xFFu),
                                          static_cast<std::uint8_t>(mask_key & 0xFFu)};
     for (std::uint8_t m : mk) out[n++] = static_cast<std::byte>(m);
-    if (len > 0) std::memcpy(out.data() + n, payload.data(), len);
-    xor_mask(out.subspan(n, len), mk);
+    std::size_t at = 0;
+    for (const std::span<const std::byte>& part : parts)
+        at = mask_copy(out.data() + n + at, part, mk, at);
     return n + len;
+}
+
+/** @brief @ref put_client_frame over one contiguous @p payload. */
+inline std::size_t put_client_frame(std::span<std::byte> out, opcode_t op,
+                                    std::span<const std::byte> payload, std::uint32_t mask_key,
+                                    bool fin) noexcept {
+    const std::span<const std::byte> one[1] = {payload};
+    return put_client_frame(out, op, one, mask_key, fin);
 }
 
 }  // namespace detail
@@ -843,22 +874,34 @@ inline std::size_t put_client_frame(std::span<std::byte> out, opcode_t op,
  *
  * @param out      The reusable frame buffer; its capacity is retained across calls.
  * @param op       The frame opcode.
- * @param payload  The application payload to send.
+ * @param parts    The application payload, in order: gathered and masked in one pass, so
+ *                 a retained send's head and value links are never flattened first (#2145).
  * @param mask_key The 32-bit masking key (its 4 bytes form the RFC 6455 key).
  * @param fin      The FIN bit (default true — a complete, unfragmented message).
  * @retval 0 The frame buffer could not be grown — nothing was written, drop the frame.
  * @return The number of frame bytes written to `out.data()` (never 0 on success: a client
  *         frame is at least a 2-byte header plus the 4-byte masking key).
  */
+[[nodiscard]] inline std::size_t try_encode_client_frame(
+    mem::block_array_t<std::byte>& out, opcode_t op,
+    std::span<const std::span<const std::byte>> parts, std::uint32_t mask_key,
+    bool fin = true) noexcept {
+    std::size_t len = 0;
+    for (const std::span<const std::byte>& part : parts) len += part.size();
+    const std::size_t want = detail::client_frame_bytes(len);
+    if (!out.reserve(want)) return 0;
+    return detail::put_client_frame(std::span<std::byte>(out.data(), want), op, parts, mask_key,
+                                    fin);
+}
+
+/** @brief @ref try_encode_client_frame over one contiguous @p payload. */
 [[nodiscard]] inline std::size_t try_encode_client_frame(mem::block_array_t<std::byte>& out,
                                                          opcode_t op,
                                                          std::span<const std::byte> payload,
                                                          std::uint32_t mask_key,
                                                          bool fin = true) noexcept {
-    const std::size_t want = detail::client_frame_bytes(payload.size());
-    if (!out.reserve(want)) return 0;
-    return detail::put_client_frame(std::span<std::byte>(out.data(), want), op, payload, mask_key,
-                                    fin);
+    const std::span<const std::byte> one[1] = {payload};
+    return try_encode_client_frame(out, op, one, mask_key, fin);
 }
 
 }  // namespace tr::net::ws

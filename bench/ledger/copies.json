@@ -151,9 +151,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 355,
+      "value": 165,
       "goal": 128,
-      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
+      "moved_by": "#2145 (flatten copy gone; the frame copy is now fused into the masking pass, which the memcpy counter does not see)"
     },
     {
       "id": "ws-relay-cli @1024",
@@ -162,9 +162,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 4195,
+      "value": 2085,
       "goal": 2048,
-      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
+      "moved_by": "#2145 (flatten copy gone; the frame copy is now fused into the masking pass, which the memcpy counter does not see)"
     },
     {
       "id": "ws-relay-cli @4096",
@@ -173,9 +173,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 9412,
+      "value": 1158,
       "goal": 4096,
-      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
+      "moved_by": "#2145 (flatten copy gone; the frame copy is now fused into the masking pass, which the memcpy counter does not see)"
     },
     {
       "id": "ws-relay-cli @16384",
@@ -184,9 +184,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 33988,
+      "value": 1158,
       "goal": 16384,
-      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
+      "moved_by": "#2145 (flatten copy gone; the frame copy is now fused into the masking pass, which the memcpy counter does not see)"
     },
     {
       "id": "udp-relay-tcp-srv @64",
@@ -327,9 +327,9 @@
       "arm": "udp-relay-ws-cli",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 258,
+      "value": 68,
       "goal": 128,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2145 (flatten copy gone; the frame copy is now fused into the masking pass, which the memcpy counter does not see)"
     },
     {
       "id": "udp-relay-ws-cli @1024",
@@ -338,9 +338,9 @@
       "arm": "udp-relay-ws-cli",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 3138,
+      "value": 1028,
       "goal": 2048,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2145 (flatten copy gone; the frame copy is now fused into the masking pass, which the memcpy counter does not see)"
     },
     {
       "id": "udp-relay-ws-cli @4096",
@@ -349,9 +349,9 @@
       "arm": "udp-relay-ws-cli",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 8254,
+      "value": 0,
       "goal": 4096,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2145 (flatten copy gone; the frame copy is now fused into the masking pass, which the memcpy counter does not see)"
     },
     {
       "id": "udp-relay-ws-cli @16384",
@@ -360,9 +360,9 @@
       "arm": "udp-relay-ws-cli",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 32830,
+      "value": 0,
       "goal": 16384,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2145 (flatten copy gone; the frame copy is now fused into the masking pass, which the memcpy counter does not see)"
     },
     {
       "id": "udp-relay-udp @64",
