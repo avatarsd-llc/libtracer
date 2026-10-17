@@ -644,8 +644,10 @@ inline void go_online(registry_t& r, std::uint32_t cell) noexcept {
     // A STALE (smaller) epoch is always the conservative direction — it can only make a scan
     // decide this thread is not yet past a retirement it is in fact past, which defers a free
     // rather than permitting one. Relaxed where the fence follows; acquire for the plain
-    // store, whose proof needs it (@ref qsbr_asym case 2). Both stores are releases, so a scan
-    // that reads one also sees this thread's earlier brackets done (@ref qsbr_ordering).
+    // store, whose proof needs it (@ref qsbr_asym case 2). On more than one core both stores
+    // are releases, so a scan that reads one also sees this thread's earlier brackets done
+    // (@ref qsbr_ordering); on one hart they are relaxed and hart order does that instead
+    // (@ref qsbr_single_hart).
     const std::uint32_t e =
         r.ctl.epoch.load(kMembarrier ? std::memory_order_acquire : std::memory_order_relaxed);
     const std::uint32_t word = (e & kEpochMask) | kOnlineBit;
