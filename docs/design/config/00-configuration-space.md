@@ -292,8 +292,8 @@ Amendment 3, #2143). The byte threshold `kShareThresholdBytes` was deleted: whet
 written value is stored as a subview of its inbound receive block (shared, zero copy) or copied
 into the value's own block is a trait of the block source the build composes, read from
 `kSlabPool`, `kArenaBytes` and `kSizeClasses` (`tr::mem::share_fits`). The static arena and the
-heap root always share; the slab pool shares when a copy would draw a size class no smaller than
-the receive block already held. An owner whose value is long-lived declares
+heap root always share; the slab pool shares when a copy would draw a block no smaller than the one
+the value already sits in (above the last class row, where blocks are exact, no fewer bytes). An owner whose value is long-lived declares
 `vertex_policy_t::share_hint = COPY` (or `SHARE`), the one per-vertex say in it.
 
 The ESP-IDF component exposes exactly five options — `LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}` and

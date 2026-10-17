@@ -10,7 +10,7 @@
   "band_abs": 0,
   "band_pct": 0,
   "_band": "0: a copy count is exact. Every pinned row read min = max over 3 repetitions, and its median matched the peer-cost study's TCP figures byte for byte. The WS rows read lower than the study's (3150 against 3266 B at 1 KiB) because this run is paced, so the stream buffer never holds a second frame's tail when it compacts.",
-  "_goal": "From #2136: ingress receives straight into an exact-length segment (0 copies), a server egress is one shared frame (0), a WS client send gathers and masks in one pass (1x), the 48 B TCP client handoff head stays. The copy-or-share trait (#2143) removed the stored-value copy wherever the receive segment fits the value's size class. UDP ingress already receives into a max_frame segment (#2136 ingress), and on the slab pool a value whose size class is smaller than that segment's is copied out of it (RFC-0022 Am.3), so a UDP-in relay row at 4 and 16 KiB carries that copy under a waiver.",
+  "_goal": "From #2136: ingress receives straight into an exact-length segment (0 copies), a server egress is one shared frame (0), a WS client send gathers and masks in one pass (1x), the 48 B TCP client handoff head stays. The copy-or-share trait (#2143) removed the stored-value copy wherever the receive segment fits the value's size class. UDP ingress already receives into a max_frame segment (#2136 ingress), and on the slab pool a value whose size class is smaller than that segment's is copied out of it (RFC-0022 Am.3), so a UDP-in relay row at 4 and 16 KiB carries that copy under a waiver until #2142 (right-sized UDP receive segment) lands and restores the share.",
   "rows": [
     {
       "id": "tcp-relay-srv @64",
@@ -220,7 +220,7 @@
       "value": 4100,
       "goal": 0,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-tcp-srv @16384",
@@ -232,7 +232,7 @@
       "value": 16388,
       "goal": 0,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-tcp-cli @64",
@@ -266,7 +266,7 @@
       "value": 4148,
       "goal": 48,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-tcp-cli @16384",
@@ -278,7 +278,7 @@
       "value": 16436,
       "goal": 48,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-ws-srv @64",
@@ -312,7 +312,7 @@
       "value": 4100,
       "goal": 0,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-ws-srv @16384",
@@ -324,7 +324,7 @@
       "value": 16388,
       "goal": 0,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-ws-cli @64",
@@ -358,7 +358,7 @@
       "value": 12354,
       "goal": 4096,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-ws-cli @16384",
@@ -370,7 +370,7 @@
       "value": 49218,
       "goal": 16384,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-udp @64",
@@ -404,7 +404,7 @@
       "value": 4100,
       "goal": 0,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-udp @16384",
@@ -416,7 +416,7 @@
       "value": 16388,
       "goal": 0,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
-      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit): a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block"
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "httpd-ws rx @64",
