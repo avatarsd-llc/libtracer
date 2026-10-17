@@ -57,9 +57,10 @@
  *     documented async-send pattern), so every socket write happens on the one httpd
  *     task: NO cross-thread write to a socket the task may be closing, and no write
  *     interleave. Since #2095 each PEER owns its TX slot: one frame on the wire and
- *     at most one waiting behind it, drawn from `memory.io` with the session. A newer
- *     frame REPLACES the waiting one (latest wins, counted per peer as
- *     `link_counters_t::tx_conflated`), and the httpd task writes each peer's frame
+ *     up to `kTxWaitDepth` waiting behind it, by lane (#2195). A newer SAMPLE of a
+ *     path REPLACES that path's waiting frame (latest wins, counted per peer as
+ *     `link_counters_t::tx_conflated`); frames of other paths, STREAM frames and frames
+ *     from no vertex wait in order. The httpd task writes each peer's frame
  *     WITHOUT WAITING (`MSG_DONTWAIT`): a socket with no room keeps its frame held, a
  *     socket with room for part of it takes that part and the rest goes on the
  *     session's next flush. So the slowest peer sets its own rate and nobody else's —
@@ -366,13 +367,18 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      */
     static constexpr std::uint32_t kTxStallStrikes = 64;
     /**
-     * @brief Frames that may wait behind one session's wire frame (#2195), in order.
+     * @brief Frames that may wait behind one session's wire frame (#2195), in order, across
+     *        every lane.
      *
-     * No frame replaces another: a frame from one vertex never stands in for a frame from
-     * another, and an event, an ANNOUNCE or a reply is never overwritten. The first waiting
-     * frame takes a node inside the session slot; each further one draws a node from
-     * `memory.io` while it waits (receiver pays). A frame offered to a full queue, or whose
-     * node draw is refused, is the counted refusal (@ref stats_t::enqueue_drops). Compile-time.
+     * Only a newer SAMPLE of the same path replaces a waiting frame (counted as
+     * @ref stats_t::tx_conflated): a frame from one vertex never stands in for a frame from
+     * another, and an event, an ANNOUNCE or a reply is never overwritten. Each lane is also
+     * bounded by its own depth (`kEgressControlDepth` for frames from no vertex). The first
+     * waiting frame takes a node inside the session slot; each further one draws a node from
+     * `memory.io` while it waits (receiver pays). A frame offered to a full queue, a full
+     * reliable or control lane, or whose node draw is refused, is the counted refusal
+     * (@ref stats_t::enqueue_drops); a full best-effort STREAM sheds its oldest instead.
+     * Compile-time.
      */
     static constexpr std::size_t kTxWaitDepth = 8;
 
@@ -732,8 +738,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * being enqueued at that instant. Charging it to that peer closed HEALTHY sessions
      * while the culprit never accrued a strike; the per-session streak now counts failed
      * SENDS, which do name their peer. A spent large class or a refused payload says the
-     * same thing about this link's memory. A frame a newer one replaced is not here: that
-     * is the peer's own loss, counted as @ref stats_t::tx_conflated (#2095).
+     * same thing about this link's memory. A frame a newer one replaced or shed is not here:
+     * that is the peer's own loss, counted as @ref stats_t::tx_conflated (#2095, #2195).
      *
      * This is the whole TX-loss surface above the component's ESP-IDF floor. Below that
      * floor it was not: a full control mbox discarded the datagram inside lwIP while
@@ -762,17 +768,18 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     struct stats_t {
         /** @brief Frames never handed to a socket; the sum of the three causes below.
          *         Same number @ref enqueue_drops returns. Includes a frame offered to a
-         *         session whose queue already holds @ref kTxWaitDepth (#2195). */
+         *         session whose queue already holds @ref kTxWaitDepth, or whose reliable or
+         *         control lane is full (#2195). */
         std::uint32_t enqueue_drops = 0;
         /**
-         * @brief Waiting frames a newer frame for the same peer REPLACED before the peer's
-         *        socket took them (#2095): the link's total of every session's
-         *        `link_counters_t::tx_conflated`.
+         * @brief Frames of one peer's path that a newer one REPLACED (a SAMPLE) or SHED (a
+         *        full best-effort STREAM) before the peer's socket took them (#2095, #2195):
+         *        the link's total of every session's `link_counters_t::tx_conflated`.
          *
-         * Reads 0 since #2195: no frame replaces another any more (a frame from one vertex
-         * is not a newer value of another), so a peer that drains slower than it is fed
-         * shows in @ref enqueue_drops instead. Kept, in place, for the per-path latest-wins
-         * that returns once the link knows a frame's lane.
+         * Per path only: a frame from one vertex never replaces another's, and a frame from
+         * no vertex is never replaced, so a peer that drains slower than its paths are fed
+         * shows here, and one fed more paths than its queue holds shows in
+         * @ref enqueue_drops.
          */
         std::uint32_t tx_conflated = 0;
         /** @brief Sessions closed after @ref kTxStallStrikes refused large frames while they
@@ -1024,8 +1031,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     [[nodiscard]] std::size_t buffer_bytes() const noexcept;
 
     /**
-     * @brief The TX cost of ONE session slot, bytes: two frame references and their
-     *        bookkeeping (#2095). A per-ABI `sizeof`, so the figure differs by target.
+     * @brief The TX cost of ONE session slot, bytes: two frame references, their lanes and
+     *        their bookkeeping (#2095, #2195). A per-ABI `sizeof`, so the figure differs by
+     *        target.
      *
      * Part of the slot itself: a peer holds a reference to the frame on the wire and to the
      * first one waiting, never a copy; the bytes are in a block shared by every peer the
@@ -1618,17 +1626,20 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      */
     void queue_send_retained(const session_ref_t& to,
                              std::span<const std::span<const std::byte>> head,
-                             const graph::value_t& value);
+                             const graph::value_t& value, const graph::delivery_lane_t& lane);
     /**
      * @brief The one store every queued send makes: a reference to @p blk behind @p to's
-     *        waiting frames under its `tx_m` (#2095, #2195). A full queue or a refused node
-     *        draw refuses it, counted. A null @p blk is the counted drop of a @p total -byte
-     *        frame.
+     *        waiting frames under its `tx_m`, by @p lane (#2095, #2195). A SAMPLE replaces
+     *        its path's waiting frame and a full best-effort STREAM sheds its oldest, both
+     *        counted as `tx_conflated`; a full reliable or control lane, a full queue or a
+     *        refused node draw refuses it, counted. A null @p blk is the counted drop of a
+     *        @p total -byte frame.
      * @return True when the frame reached @p to's queue, stored or refused there: the caller
      *         then rings @ref ring_doorbell, once for the whole burst (#2146), so a socket
      *         that reopened is offered what it holds.
      */
-    [[nodiscard]] bool stage(const session_ref_t& to, tx_block_t* blk, std::size_t total);
+    [[nodiscard]] bool stage(const session_ref_t& to, tx_block_t* blk, std::size_t total,
+                             const graph::delivery_lane_t& lane);
     /**
      * @brief A burst's ONE doorbell (#2146), after every frame of it is stored: wake a
      *        parked drain and post the link's flush. When the control queue refuses the
@@ -1640,7 +1651,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *        store one shared block, built by @p build on the first destination, behind each
      *        one's waiting frames, then @ref ring_doorbell once.
      */
-    void fan_out(function_ref_t<tx_block_t*()> build, std::size_t total);
+    void fan_out(function_ref_t<tx_block_t*()> build, std::size_t total,
+                 const graph::delivery_lane_t& lane);
     /** @brief Gather @p prefix then @p iov once into a new block (one reference, the
      *         caller's), keeping @p value when given; null when the large class is spent
      *         (counted) or `memory.io` refuses. */
@@ -1656,6 +1668,9 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Post this link's ONE flush to the httpd task unless one is already posted.
      *  @return False when the control queue refused it. */
     bool post_flush(httpd_handle_t h);
+    /** @brief Count a frame of @p to's that a newer one replaced or shed, on the link and on
+     *         the session it was gathered for (takes @ref peers_m_). */
+    void note_tx_conflated(const session_ref_t& to);
 
     /**
      * @brief Send a directed reply to @p to RIGHT NOW — the fork @ref queue_send is not

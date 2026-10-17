@@ -30,9 +30,13 @@
  *      (#2195), but a peer that pins the large class's only block is struck (refused
  *      draws count against it);
  *  11. producers racing session close and reclaim on the httpd task (the TSan lane);
- *  12. no frame replaces another (#2195): two vertices written back to back on a busy wire
- *      both deliver, frames from no vertex are never replaced, and a frame offered to a full
- *      queue is refused and counted.
+ *  12. latest wins per PATH, never across paths (#2195): two vertices written back to back
+ *      on a busy wire both deliver, one path still conflates to its newest value (counted in
+ *      `tx_conflated`), frames from no vertex are never replaced, and a frame offered to a
+ *      full queue is refused and counted;
+ *  13. the lanes' refusal paths: a SAMPLE still replaces in a full queue while a new path is
+ *      refused, a full best-effort STREAM sheds its oldest, a full reliable STREAM refuses
+ *      the newest, and a refused node draw is a counted refusal.
  */
 
 #include <atomic>
@@ -47,6 +51,7 @@
 #include <vector>
 
 #include "fake_httpd.hpp"
+#include "libtracer/egress.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/value.hpp"
@@ -410,8 +415,9 @@ void test_the_ram_is_reported_and_binds() {
         check_eq(stock->buffer_bytes(),
                  httpd_ws_link_t::kDefaultRxScratchBytes + httpd_ws_link_t::kDefaultTxInlineBytes,
                  "per link: the RX scratch and one reply scratch");
-        check(stock->peer_tx_bytes() <= 64,
-              "per peer: two frame references, no copy (a few words, whatever the frame)");
+        check(stock->peer_tx_bytes() <= 96,
+              "per peer: the wire frame and one waiting frame by reference, with their lanes, "
+              "no copy (a few words, whatever the frame)");
         std::printf("    buffer_bytes=%zu peer_tx_bytes=%zu\n", stock->buffer_bytes(),
                     stock->peer_tx_bytes());
         reset(stock);
@@ -422,7 +428,7 @@ void test_the_ram_is_reported_and_binds() {
     check_eq(link->rx_scratch_bytes(), kRx, "a sized link reports its RX scratch");
     check_eq(link->tx_inline_bytes(), kInline, "and its inline capacity");
     check_eq(link->buffer_bytes(), kRx + kInline, "and the per-link cost they make");
-    check(link->peer_tx_bytes() <= 64, "and the per-peer cost does not grow with them");
+    check(link->peer_tx_bytes() <= 96, "and the per-peer cost does not grow with them");
     claim(kHealthy);
     drain();
     fake_httpd::instance().clear_sent_frames();
@@ -694,15 +700,24 @@ void test_producers_race_close_and_reclaim() {
 }
 
 // ---------------------------------------------------------------------------
-// 12 — no frame replaces another; a full queue is a counted refusal (#2195).
+// 12 — latest wins per path, never across paths; a full queue is a counted refusal (#2195).
 // ---------------------------------------------------------------------------
-/** @brief Deliver the one-byte value @p tag to every peer as a vertex value, the way a
- *         subscription delivery does (the retained send). */
-void vertex_value(httpd_ws_link_t& link, std::size_t tag) {
+/** @brief Subscription edges of one session: what a delivery lane's key names. Compared,
+ *         never dereferenced, so any distinct addresses serve. */
+const int kPaths[16] = {};
+
+/** @brief Deliver the one-byte value @p tag to every peer on @p lane, the way a subscription
+ *         delivery does (the retained send). */
+void vertex_value(httpd_ws_link_t& link, std::size_t tag, const tr::graph::delivery_lane_t& lane) {
     const auto b = tagged(tag);
     const tr::graph::value_ref_t v =
         tr::graph::value_ref_t::adopt(tr::graph::value_t::make_copy(b, tr::mem::heap_source()));
-    link.send(std::span<const std::span<const std::byte>>(), *v, tr::graph::delivery_lane_t{});
+    link.send(std::span<const std::span<const std::byte>>(), *v, lane);
+}
+
+/** @brief A SAMPLE of path @p i: lane depth 1, latest wins. */
+tr::graph::delivery_lane_t sample_of(std::size_t i) {
+    return tr::graph::delivery_lane_t{.key = &kPaths[i], .depth = 1};
 }
 
 /** @brief The one-byte payloads of the retained frames on @p fd's wire, in wire order. */
@@ -716,10 +731,10 @@ std::vector<std::byte> values_on_wire(int fd) {
 }
 
 /**
- * @brief The acceptance case: one session subscribed to two vertices, both written back to
- *        back while its wire is busy, and BOTH deliver. Before the fix the frame for B
- *        replaced the one for A (on the waiting slot, or on the wire before a byte of it went
- *        out), and the peer never saw A's value at all.
+ * @brief The acceptance case: one session subscribed to two vertices (two SAMPLE paths), both
+ *        written back to back while its wire is busy, and BOTH deliver. Before the fix the
+ *        frame for B replaced the one for A (on the waiting slot, or on the wire before a byte
+ *        of it went out), and the peer never saw A's value at all.
  */
 void test_two_vertices_both_deliver() {
     std::printf("one session, two vertices, written back to back on a busy wire:\n");
@@ -728,9 +743,9 @@ void test_two_vertices_both_deliver() {
     drain();
     fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
     fake_httpd::instance().clear_wire(kStalled);
-    vertex_value(*link, 0xA1);
+    vertex_value(*link, 0xA1, sample_of(0));
     drain();
-    vertex_value(*link, 0xB1);
+    vertex_value(*link, 0xB1, sample_of(1));
     drain();
     check_eq(fake_httpd::instance().wire(kStalled).size(), 0, "the wire is busy: nothing out");
     fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
@@ -741,6 +756,33 @@ void test_two_vertices_both_deliver() {
           "both values delivered, A then B");
     check_eq(link->stats().tx_conflated, 0, "neither was counted as conflated");
     check_eq(link->stats().enqueue_drops, 0, "nor dropped");
+
+    reset(link);
+}
+
+/** @brief Writes to the SAME path still conflate to the newest value, on the waiting frame and
+ *         on a wire frame not one byte of which went out, and each replaced one is counted in
+ *         `tx_conflated`, per peer and link-wide; a second path in between is untouched. */
+void test_one_path_still_conflates() {
+    std::printf("one session, the same path written three times on a busy wire:\n");
+    auto link = make_link();
+    claim(kStalled);
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_wire(kStalled);
+    for (const auto& [tag, path] : {std::pair{0xA1, 0}, {0xB1, 1}, {0xA2, 0}, {0xA3, 0}}) {
+        vertex_value(*link, tag, sample_of(path));
+        drain();
+    }
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
+    link->flush_held();
+    drain();
+    const auto got = values_on_wire(kStalled);
+    check(got.size() == 2 && got[0] == std::byte{0xA3} && got[1] == std::byte{0xB1},
+          "A's newest value and B's value went out, nothing else");
+    check_eq(conflated(*link, 0), 2, "the two older A values are counted on the peer");
+    check_eq(link->stats().tx_conflated, 2, "and in the link's tx_conflated");
+    check_eq(link->stats().enqueue_drops, 0, "and neither is a refusal");
 
     reset(link);
 }
@@ -805,6 +847,149 @@ void test_a_full_queue_is_a_counted_refusal() {
     reset(link);
 }
 
+// ---------------------------------------------------------------------------
+// 13 — the lanes' refusal paths (#2195).
+// ---------------------------------------------------------------------------
+/** @brief Open a stalled peer's socket and return the one-byte values that went out. */
+std::vector<std::byte> release_held(httpd_ws_link_t& link) {
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
+    link.flush_held();
+    drain();
+    return values_on_wire(kStalled);
+}
+
+/** @brief The per-peer cap is kTxWaitDepth across every lane: a ninth path waiting is
+ *         refused, while a newer SAMPLE of a path already waiting still replaces it (it takes
+ *         no node). */
+void test_a_sample_replaces_in_a_full_queue() {
+    std::printf("a full queue of eight paths:\n");
+    static_assert(httpd_ws_link_t::kTxWaitDepth == 8, "the per-peer cap");
+    auto link = make_link();
+    claim(kStalled);
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_wire(kStalled);
+    for (std::size_t i = 0; i <= httpd_ws_link_t::kTxWaitDepth + 1; ++i) {  // wire + 8 + one
+        vertex_value(*link, 0x30 + i, sample_of(i));
+        drain();
+    }
+    check_eq(link->stats().enqueue_drops, 1, "a ninth path waiting is refused, counted");
+    vertex_value(*link, 0x53, sample_of(3));
+    drain();
+    check_eq(link->stats().enqueue_drops, 1, "a newer value of a waiting path is not refused");
+    check_eq(link->stats().tx_conflated, 1, "it replaced the older one, counted");
+    const auto got = release_held(*link);
+    bool ok = got.size() == 1 + httpd_ws_link_t::kTxWaitDepth;
+    for (std::size_t i = 0; ok && i < got.size(); ++i)
+        ok = got[i] == std::byte(i == 3 ? 0x53 : 0x30 + i);
+    check(ok, "every held path went out in order, path 3 with its newest value");
+
+    reset(link);
+}
+
+/** @brief A STREAM of depth 3 on a stalled peer: best-effort sheds the oldest waiting frame
+ *         (counted in `tx_conflated`), reliable refuses the newest (counted in
+ *         `enqueue_drops`); the control lane's ninth waiting frame is refused like a reliable
+ *         one (kEgressControlDepth). */
+void test_a_full_stream_sheds_or_refuses() {
+    std::printf("full STREAM lanes and the control lane:\n");
+    for (const bool reliable : {false, true}) {
+        auto link = make_link();
+        claim(kStalled);
+        drain();
+        fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+        fake_httpd::instance().clear_wire(kStalled);
+        const tr::graph::delivery_lane_t lane{.key = &kPaths[0], .depth = 3, .reliable = reliable};
+        for (std::size_t i = 0; i < 5; ++i) {  // the wire, three waiting, and one more
+            vertex_value(*link, 0x60 + i, lane);
+            drain();
+        }
+        const auto got = release_held(*link);
+        if (!reliable) {
+            check_eq(link->stats().tx_conflated, 1, "best-effort: the oldest waiting is shed");
+            check_eq(link->stats().enqueue_drops, 0, "    and nothing refused");
+            check(got == std::vector<std::byte>{std::byte{0x60}, std::byte{0x62}, std::byte{0x63},
+                                                std::byte{0x64}},
+                  "    the wire frame, then the newest three, in order");
+        } else {
+            check_eq(link->stats().enqueue_drops, 1, "reliable: the newest is refused, counted");
+            check_eq(link->stats().tx_conflated, 0, "    and nothing waiting is lost");
+            check(got == std::vector<std::byte>{std::byte{0x60}, std::byte{0x61}, std::byte{0x62},
+                                                std::byte{0x63}},
+                  "    the four held frames, in order");
+        }
+        reset(link);
+    }
+    auto link = make_link();
+    claim(kStalled);
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_wire(kStalled);
+    vertex_value(*link, 0x70, sample_of(0));  // a path's frame on the wire, so the control
+    drain();                                  // lane's own depth is what fills
+    for (std::size_t i = 0; i <= tr::net::kEgressControlDepth; ++i) {
+        vertex_value(*link, 0x71 + i, tr::graph::delivery_lane_t{});
+        drain();
+    }
+    check_eq(link->stats().enqueue_drops, 1, "the control lane's ninth waiting frame is refused");
+    check_eq(link->stats().tx_conflated, 0, "and no control frame is replaced");
+    check_eq(release_held(*link).size(), 1 + tr::net::kEgressControlDepth,
+             "the path's frame and eight control frames went out");
+
+    reset(link);
+}
+
+/** @brief A store that refuses every draw of one size once armed: the lever that refuses a
+ *         waiting node and nothing else. */
+class node_refusing_source_t final : public tr::mem::block_source_t {
+   public:
+    node_refusing_source_t() noexcept : tr::mem::block_source_t("node_refusing") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        draws.push_back(bytes);
+        if (bytes == refuse) return nullptr;
+        return tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+    std::vector<std::size_t> draws; /**< @brief The size of every draw, in order. */
+    std::size_t refuse = 0;         /**< @brief Draws of this size are refused; 0 none. */
+};
+
+/** @brief A waiting frame whose node `memory.io` refuses is the link's counted refusal: the
+ *         frames already held are untouched and go out in order. */
+void test_a_refused_node_draw_is_a_counted_refusal() {
+    std::printf("a refused waiting-node draw:\n");
+    node_refusing_source_t io;
+    tr::net::httpd_ws_config_t config{};
+    config.memory.io = &io;
+    auto link = make_link(config);
+    claim(kStalled);
+    drain();
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    fake_httpd::instance().clear_wire(kStalled);
+    for (std::size_t i = 0; i < 2; ++i) {  // the wire, then the in-slot spare: no node drawn
+        vertex_value(*link, 0x80 + i, sample_of(i));
+        drain();
+    }
+    io.draws.clear();
+    vertex_value(*link, 0x82, sample_of(2));  // its block, then a drawn node
+    drain();
+    check(io.draws.size() == 2 && io.draws[0] != io.draws[1],
+          "a third waiting frame draws its block and then its node");
+    io.refuse = io.draws.back();
+    vertex_value(*link, 0x83, sample_of(3));
+    drain();
+    io.refuse = 0;
+    check_eq(link->stats().enqueue_drops, 1, "the frame whose node was refused is counted");
+    check_eq(link->stats().tx_conflated, 0, "and nothing was replaced");
+    const auto got = release_held(*link);
+    check(got == std::vector<std::byte>{std::byte{0x80}, std::byte{0x81}, std::byte{0x82}},
+          "the held frames went out, in order");
+
+    reset(link);
+}
+
 }  // namespace
 
 int main() {
@@ -822,8 +1007,12 @@ int main() {
     test_a_peer_pinning_the_last_large_block_is_struck();
     test_producers_race_close_and_reclaim();
     test_two_vertices_both_deliver();
+    test_one_path_still_conflates();
     test_one_shots_are_never_replaced();
     test_a_full_queue_is_a_counted_refusal();
+    test_a_sample_replaces_in_a_full_queue();
+    test_a_full_stream_sheds_or_refuses();
+    test_a_refused_node_draw_is_a_counted_refusal();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
