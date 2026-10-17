@@ -35,8 +35,9 @@
  *      `tx_conflated`), frames from no vertex are never replaced, and a frame offered to a
  *      full queue is refused and counted;
  *  13. the lanes' refusal paths: a SAMPLE still replaces in a full queue while a new path is
- *      refused, a full best-effort STREAM sheds its oldest, a full reliable STREAM refuses
- *      the newest, and a refused node draw is a counted refusal.
+ *      refused, a full best-effort STREAM sheds its oldest (at its depth or at the peer's
+ *      cap), a full reliable STREAM refuses the newest, and a refused node draw is a counted
+ *      refusal.
  */
 
 #include <atomic>
@@ -918,6 +919,30 @@ void test_a_full_stream_sheds_or_refuses() {
                                                 std::byte{0x63}},
                   "    the four held frames, in order");
         }
+        reset(link);
+    }
+    // A STREAM deeper than the peer's cap meets the cap first: best-effort still sheds its
+    // own oldest (its §4.4 arm, and no node drawn), reliable still refuses the newest.
+    constexpr std::size_t kCap = httpd_ws_link_t::kTxWaitDepth;
+    for (const bool reliable : {false, true}) {
+        auto link = make_link();
+        claim(kStalled);
+        drain();
+        fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+        fake_httpd::instance().clear_wire(kStalled);
+        const tr::graph::delivery_lane_t deep{.key = &kPaths[0], .depth = 16, .reliable = reliable};
+        for (std::size_t i = 0; i <= kCap + 1; ++i) {  // the wire, the cap, and one more
+            vertex_value(*link, 0x90 + i, deep);
+            drain();
+        }
+        const auto got = release_held(*link);
+        std::vector<std::byte> want{std::byte{0x90}};
+        for (std::size_t i = reliable ? 1 : 2; want.size() < 1 + kCap; ++i)
+            want.push_back(std::byte(0x90 + i));
+        check(got == want, reliable ? "a deep reliable STREAM at the cap keeps its held frames"
+                                    : "a deep best-effort STREAM at the cap sheds its oldest");
+        check_eq(link->stats().tx_conflated, reliable ? 0 : 1, "    counted as conflated");
+        check_eq(link->stats().enqueue_drops, reliable ? 1 : 0, "    or as refused");
         reset(link);
     }
     auto link = make_link();

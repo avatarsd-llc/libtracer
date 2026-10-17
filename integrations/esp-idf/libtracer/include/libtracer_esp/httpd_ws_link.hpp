@@ -375,9 +375,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * another, and an event, an ANNOUNCE or a reply is never overwritten. Each lane is also
      * bounded by its own depth (`kEgressControlDepth` for frames from no vertex). The first
      * waiting frame takes a node inside the session slot; each further one draws a node from
-     * `memory.io` while it waits (receiver pays). A frame offered to a full queue, a full
-     * reliable or control lane, or whose node draw is refused, is the counted refusal
-     * (@ref stats_t::enqueue_drops); a full best-effort STREAM sheds its oldest instead.
+     * `memory.io` while it waits (receiver pays). A frame offered to a full reliable or
+     * control lane, to a full queue with nothing of its lane waiting, or whose node draw is
+     * refused, is the counted refusal (@ref stats_t::enqueue_drops); a best-effort STREAM at
+     * its depth or at this cap sheds its own oldest instead.
      * Compile-time.
      */
     static constexpr std::size_t kTxWaitDepth = 8;
@@ -1630,9 +1631,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /**
      * @brief The one store every queued send makes: a reference to @p blk behind @p to's
      *        waiting frames under its `tx_m`, by @p lane (#2095, #2195). A SAMPLE replaces
-     *        its path's waiting frame and a full best-effort STREAM sheds its oldest, both
-     *        counted as `tx_conflated`; a full reliable or control lane, a full queue or a
-     *        refused node draw refuses it, counted. A null @p blk is the counted drop of a
+     *        its path's waiting frame and a best-effort STREAM at its depth or the peer's
+     *        cap sheds its oldest, both counted as `tx_conflated`; a full reliable or control
+     *        lane, a full queue or a refused node draw refuses it, counted. A null @p blk is the
+     * counted drop of a
      *        @p total -byte frame.
      * @return True when the frame reached @p to's queue, stored or refused there: the caller
      *         then rings @ref ring_doorbell, once for the whole burst (#2146), so a socket

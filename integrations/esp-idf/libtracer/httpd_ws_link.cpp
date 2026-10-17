@@ -953,25 +953,33 @@ struct httpd_ws_link_t::tx_frame_t {
      */
     std::uint32_t sent = 0;
     /**
-     * @brief The delivery lane's key (#2195): the subscription edge, so per session the path.
-     *        Null: a frame from no vertex (a reply, an event, an ANNOUNCE).
-     *
-     * Compared, never dereferenced. An edge that ends while its frame waits can come back at
-     * the same address as a NEW subscription's edge; that subscription's SAMPLE then replaces
-     * the ended one's waiting frame (counted as `tx_conflated`). Two live edges never share an
-     * address, so a live path's frame is never taken by another path's.
+     * @brief What a full lane does with a newer frame (#2195), chosen once from the lane at
+     *        stage time and kept in the two low bits of @ref lane.
      */
-    const void* key = nullptr;
-    /** @brief The lane's depth: 1 is a SAMPLE (latest wins), N a STREAM. */
-    std::uint16_t depth = 1;
-    /** @brief The lane's §4.4 arm for a full STREAM: true refuses the newest frame. */
-    bool reliable = false;
+    enum policy_t : std::uintptr_t {
+        kRefuse = 0,  /**< @brief Refuse the newer frame: a reliable STREAM, the control lane. */
+        kReplace = 1, /**< @brief The newer frame takes the waiting one's place: a SAMPLE. */
+        kShed = 2,    /**< @brief Shed the oldest waiting frame: a best-effort STREAM. */
+    };
+    /**
+     * @brief The delivery lane (#2195): its key (the subscription edge, so per session the
+     *        path; null for a frame from no vertex: a reply, an event, an ANNOUNCE) with its
+     *        @ref policy_t in the two low bits.
+     *
+     * The key names an edge, an object aligned to at least 4 bytes, so its two low bits are
+     * free, and keeping the policy there costs the reference no word of its own. Compared,
+     * never dereferenced. An edge that ends while its frame waits can come back at the same
+     * address as a NEW subscription's edge; if both are SAMPLEs, the new one's frame then
+     * replaces the ended one's waiting frame (counted as `tx_conflated`). Two live edges never
+     * share an address, so a live path's frame is never taken by another path's.
+     */
+    std::uintptr_t lane = kRefuse;
     /** @brief True while a frame is held. */
     [[nodiscard]] bool held() const noexcept { return blk != nullptr; }
     /** @brief True if @p o is a newer frame that may replace this one: a SAMPLE of the same
      *         path for the same session. Nothing else is ever replaced (#2195). */
     [[nodiscard]] bool conflates(const tx_frame_t& o) const noexcept {
-        return key != nullptr && key == o.key && gen == o.gen && depth == 1;
+        return lane == o.lane && gen == o.gen && (lane & 3) == kReplace;
     }
 };
 
@@ -1156,9 +1164,10 @@ struct httpd_ws_link_t::session_t {
      * (`tx_conflated`). Frames of other paths, STREAM frames and frames from no vertex are
      * never replaced: a frame from one vertex is not a newer value of another, and an event
      * or an ANNOUNCE is owed to the peer once. Each lane is bounded by its depth
-     * (`kEgressControlDepth` for frames from no vertex): a full best-effort STREAM sheds its
-     * oldest frame (counted as `tx_conflated`), and a full reliable or control lane, a full
-     * queue or a refused node draw is the link's counted refusal. So a slow peer holds at
+     * (`kEgressControlDepth` for frames from no vertex): a best-effort STREAM at its depth or
+     * at the queue's cap sheds its own oldest frame (counted as `tx_conflated`), and a full
+     * reliable or control lane, a full queue or a refused node draw is the link's counted
+     * refusal. So a slow peer holds at
      * most its own few frames and never a work item or the httpd task that another peer
      * needs. The httpd task moves the oldest waiting frame onto the wire, under @ref tx_m,
      * when the wire frame is empty.
@@ -3472,53 +3481,64 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
     // peer gets, and a replacement takes no node. Any other frame — another path, a STREAM, a
     // frame from no vertex — waits behind, never in place of one: a frame from one vertex is
     // not a newer value of another, and an event or an ANNOUNCE is owed to the peer once. A
-    // full best-effort STREAM lane sheds its oldest frame (counted) and reuses its node; a
-    // full reliable or control lane, a full queue (kTxWaitDepth frames in all) or a refused
-    // node draw refuses the NEW frame — the link's counted drop. A slow peer holds no more
+    // best-effort STREAM lane at its depth, or at the peer's cap (kTxWaitDepth frames in all),
+    // sheds its own oldest frame (counted) and reuses its node; a full reliable or control
+    // lane, a full queue with nothing of this lane waiting, or a refused node draw refuses the
+    // NEW frame — the link's counted drop. A slow peer holds no more
     // than its own few frames and no part of the httpd task that another peer needs. Neither
     // a replacement nor a refusal is a stall strike: a healthy peer subscribed to many
     // vertices fills its queue in one burst while its TCP window is shut for an RTT, and
     // striking it would loop it through reconnects (#2174 rules the same).
     session_t* const s = to.slot;
-    const tx_frame_t fresh{
-        blk, to.gen, 0, lane.key, std::max<std::uint16_t>(lane.depth, 1), lane.reliable};
-    const std::size_t cap = lane.key == nullptr ? kEgressControlDepth : fresh.depth;
+    // What a full lane does, decided once from the lane: the control lane and a reliable
+    // STREAM refuse the newer frame, a SAMPLE replaces, a best-effort STREAM sheds its oldest.
+    static constexpr tx_frame_t::policy_t kArm[2][2] = {
+        {tx_frame_t::kReplace, tx_frame_t::kReplace},  // depth 1, either arm: a SAMPLE
+        {tx_frame_t::kShed, tx_frame_t::kRefuse}};     // a STREAM or control: shed, refuse
+    const bool control = lane.key == nullptr;
+    const std::size_t cap = control ? kEgressControlDepth : std::max<std::uint16_t>(lane.depth, 1);
+    const tx_frame_t::policy_t policy = kArm[cap > 1][lane.reliable | control];
+    const tx_frame_t fresh{blk, to.gen, 0, reinterpret_cast<std::uintptr_t>(lane.key) | policy};
     tx_frame_t old;
     bool refused = false;
     bool full = false;
     {
         const std::lock_guard lock(s->tx_m);
-        // This session's frames (a departed one's are skipped later), and the oldest of this
-        // lane with the node ahead of it.
+        // This session's frames (a departed one's are skipped later), and the link to this
+        // lane's oldest.
         std::size_t waiting = 0;
         std::size_t count = 0;
-        tx_wait_t* same = nullptr;
-        tx_wait_t* before = nullptr;
-        for (tx_wait_t *w = s->tx_head, *prev = nullptr; w != nullptr; prev = w, w = w->next) {
-            if (w->frame.gen != to.gen) continue;
+        tx_wait_t** at = nullptr;
+        for (tx_wait_t** l = &s->tx_head; *l != nullptr; l = &(*l)->next) {
+            if ((*l)->frame.gen != to.gen) continue;
             ++waiting;
-            if (w->frame.key != lane.key || count++ != 0) continue;
-            same = w;
-            before = prev;
+            if ((*l)->frame.lane != fresh.lane || count++ != 0) continue;
+            at = l;
         }
+        // Append while the lane and the queue have room; else replace or shed the lane's
+        // oldest (a SAMPLE in its place; a best-effort STREAM's node takes the new frame to
+        // the tail, which keeps the STREAM's own arm even when it is the peer's queue that is
+        // full); else refuse.
         tx_wait_t* node = nullptr;
-        const bool sample = same != nullptr && same->frame.conflates(fresh);
-        const bool shed = !sample && count >= cap && lane.key != nullptr && !fresh.reliable;
-        full = !sample && !shed && (count >= cap || waiting >= kTxWaitDepth);
-        if (sample || shed) old = std::exchange(same->frame, fresh);  // latest wins, or shed
-        if (shed) {  // a best-effort STREAM at its depth: its oldest node takes the new frame
-            (before != nullptr ? before->next : s->tx_head) = same->next;
-            if (s->tx_tail == same) s->tx_tail = before;
-            node = same;
-        } else if (!sample && !full) {  // the in-slot spare, so one waiting frame draws nothing
-            void* const raw = s->tx_spare_used
-                                  ? io_src_->try_alloc(sizeof(tx_wait_t), alignof(tx_wait_t))
-                                  : &s->tx_spare;
-            s->tx_spare_used = true;
+        if (count < cap && waiting < kTxWaitDepth) {
+            void* raw = &s->tx_spare;  // the in-slot spare: one waiting frame draws nothing
+            if (s->tx_spare_used)
+                raw = io_src_->try_alloc(sizeof(tx_wait_t), alignof(tx_wait_t));
+            else
+                s->tx_spare_used = true;
             node = raw != nullptr ? new (raw) tx_wait_t : nullptr;
+            refused = node == nullptr;
+        } else if (policy != tx_frame_t::kRefuse && at != nullptr) {
+            tx_wait_t* const w = *at;
+            old = std::exchange(w->frame, fresh);
+            if (policy == tx_frame_t::kShed && w != s->tx_tail) {  // the tail stays in place
+                *at = w->next;
+                node = w;
+            }
+        } else {
+            refused = full = true;
         }
-        refused = !sample && node == nullptr;
-        if (!refused) blk->refs.fetch_add(1, std::memory_order_relaxed);
+        blk->refs.fetch_add(static_cast<std::uint32_t>(!refused), std::memory_order_relaxed);
         if (node != nullptr) {
             node->frame = fresh;
             node->next = nullptr;

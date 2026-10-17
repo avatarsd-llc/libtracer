@@ -23,9 +23,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     byte of which has gone out, and it is counted as `tx_conflated`, per peer and link-wide.
     Frames of other paths, STREAM frames and frames from no vertex wait in order.
   - Each lane is also bounded by its depth, and frames from no vertex by
-    `kEgressControlDepth` (8). A full best-effort STREAM sheds its oldest frame, counted as
-    `tx_conflated`. A full reliable STREAM or control lane refuses the new frame.
-  - A frame offered to a full queue or a full reliable or control lane is refused and counted
+    `kEgressControlDepth` (8). A best-effort STREAM at its depth, or at the per-peer cap,
+    sheds its own oldest frame, counted as `tx_conflated`. A full reliable STREAM or control
+    lane refuses the new frame.
+  - A frame offered to a full reliable or control lane, or to a full queue with nothing of its
+    lane waiting, is refused and counted
     in `stats_t::enqueue_drops`. That refusal is counted, not logged per frame. A refused node
     draw also counts there, and logs. `stats_t`'s layout is unchanged and pinned by
     `static_assert`.
@@ -38,8 +40,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     loses its tail, counted. The refusal is counted link-wide only; a per-session count would
     change the pinned `stats_t` layout and is a follow-up.
   - The first waiting frame uses a node inside the session slot. Each further one draws a
-    24 B node (on 32-bit targets) from `memory.io` while it waits. `peer_tx_bytes()` is 57 B
-    per session on the ESP32-C6, up from 41 B.
+    20 B node (on 32-bit targets) from `memory.io` while it waits. Each frame reference keeps
+    its lane's policy in the key's two low bits, so it grows by the key alone:
+    `peer_tx_bytes()` is 49 B per session on the ESP32-C6, up from 41 B.
   - A slow peer gets its held frames oldest first across paths, and the newest value of each
     SAMPLE path.
 
