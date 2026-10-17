@@ -484,31 +484,67 @@ struct alignas(kCellAlign) control_t {
 };
 
 /**
- * @brief The domain's storage.
+ * @brief @ref registry_t::in_flight outside a @ref kMembarrier build: empty, so the domain pays
+ *        0 B for a gate it does not have.
+ *
+ * Nothing calls these. Every use of `in_flight` sits under `if constexpr (kMembarrier)`, but
+ * in a function that is not a template the discarded branch must still name members that
+ * exist, so this spells the ones those branches name. `static_assert`ed to cost nothing below.
+ */
+struct no_flight_t {
+    /** @brief Never called; see the struct. */
+    static constexpr std::uint32_t fetch_add(std::uint32_t, std::memory_order) noexcept {
+        return 0;
+    }
+    /** @brief Never called; see the struct. */
+    static constexpr std::uint32_t exchange(std::uint32_t, std::memory_order) noexcept { return 0; }
+    /** @brief Never called; see the struct (`qsbr_drain_claim_test` names it). */
+    static constexpr std::uint32_t load(std::memory_order = std::memory_order_seq_cst) noexcept {
+        return 0;
+    }
+    /** @brief Never called; see the struct (`qsbr_drain_claim_test` names it). */
+    static constexpr void store(std::uint32_t, std::memory_order) noexcept {}
+};
+
+/**
+ * @brief A QSBR domain: the whole grace state, as one object (#2119, ADR-0080 Amendment 1 §3).
+ *
+ * The reclaim side (@ref advance, @ref horizon, @ref drain, @ref retire) and the by-index
+ * bracket halves (@ref go_online, @ref go_offline) take the domain they act on, defaulted to
+ * @ref registry(), so every library call site uses the default and does not name it. A test
+ * owns a domain of its own and drives participants by index on one thread, which no shared
+ * global can offer. A thread's bracket (@ref enter, @ref leave) is in the default domain only:
+ * the thread's index and nesting depth are one per thread. Under @ref kMembarrier only the
+ * default's `control_t::asym` is ever set (@ref asym_ready), so a bracket in any other domain
+ * enters fenced, which is safe: that domain's reclaim side still pays the `membarrier`.
  *
  * `constinit` and trivially destructible, exactly as `%edge_pin.hpp`'s registry is and for the
- * same reason: it lands in `.bss` with no guard variable and is never destroyed, so a
+ * same reason: the default lands in `.bss` with no guard variable and is never destroyed, so a
  * thread's exit release can always reach it.
  */
 struct registry_t {
     std::array<cell_t, kQsbrParticipants> cells{}; /**< @brief The announcements. */
     control_t ctl{};                               /**< @brief The read-mostly words. */
     std::array<retired_slot_t, kDeferredReleaseSlots> retired{}; /**< @brief Deferred releases. */
+    /**
+     * @brief Drain passes in flight, for single flight (@ref qsbr_single_flight): 0 when none
+     *        is, else 1 plus the passes that skipped. Off the read-mostly line, and only drainers
+     *        write it. A word only under @ref kMembarrier; every other build has no gate and pays
+     *        0 B for it (@ref no_flight_t).
+     */
+    [[no_unique_address]] std::conditional_t<kMembarrier, std::atomic<std::uint32_t>, no_flight_t>
+        in_flight{};
 };
+static_assert(kMembarrier || sizeof(registry_t) ==
+                                 sizeof(std::array<cell_t, kQsbrParticipants>) + sizeof(control_t) +
+                                     sizeof(std::array<retired_slot_t, kDeferredReleaseSlots>),
+              "outside a membarrier build the drain gate costs 0 B");
 
-/** @brief The one domain. */
-[[nodiscard]] inline registry_t& registry() {
+/** @brief The default domain, `constinit`: the one every library call site uses. */
+[[nodiscard]] inline registry_t& registry() noexcept {
     static constinit registry_t reg{};
     return reg;
 }
-
-/**
- * @brief Drain passes in flight, for single flight (@ref qsbr_single_flight): 0 when none is,
- *        else 1 plus the passes that skipped. Off the registry's read-mostly line, and only
- *        drainers write it. Only a build with @ref kMembarrier refers to it, so only that build
- *        emits it.
- */
-inline constinit std::atomic<std::uint32_t> in_flight{0};
 
 /** @brief A record field meaning "no cell": every index was taken, or the thread is exiting. */
 inline constexpr std::uint32_t kNoCell = ~std::uint32_t{0};
@@ -592,13 +628,15 @@ struct cell_release_t {
     return kNoCell;
 }
 
-/** @brief Announce that this thread is entering a dispatch — the read-side half. */
-inline void go_online(thread_record_t& t) noexcept {
-    registry_t& r = registry();
-    std::uint32_t c = t.cell;
-    if (c == 0) [[unlikely]]
-        c = claim(t);
-    if (c == kNoCell) {
+/**
+ * @brief Announce cell @p cell of domain @p r online — the read-side half.
+ *
+ * @p cell is in the record's encoding (@ref thread_record_t): a claimed index plus one, or
+ * @ref kNoCell for a thread that could not claim one. @ref enter passes this thread's own; a
+ * test that owns @p r passes any, a participant one thread opens and closes at will.
+ */
+inline void go_online(registry_t& r, std::uint32_t cell) noexcept {
+    if (cell == kNoCell) {
         r.ctl.overflow_online.fetch_add(1, std::memory_order_relaxed);
         full_fence();
         return;
@@ -613,26 +651,28 @@ inline void go_online(thread_record_t& t) noexcept {
     const std::uint32_t word = (e & kEpochMask) | kOnlineBit;
     if constexpr (kMembarrier) {
         if (r.ctl.asym.load(std::memory_order_relaxed) != 0) {
-            r.cells[c - 1].state.store(word, std::memory_order_release);
+            r.cells[cell - 1].state.store(word, std::memory_order_release);
             std::atomic_signal_fence(std::memory_order_seq_cst);  // keeps S_R before L_R
             return;
         }
     }
     // The fence after the store orders it before this bracket's reads (@ref qsbr_ordering).
-    r.cells[c - 1].state.store(word, kStoreOrder);
+    r.cells[cell - 1].state.store(word, kStoreOrder);
     full_fence();
 }
 
-/** @brief Announce that this thread now holds no snapshot — the quiescent state itself. */
-inline void go_offline(thread_record_t& t) noexcept {
-    registry_t& r = registry();
-    if (t.cell == kNoCell) {
+/**
+ * @brief Announce that cell @p cell of domain @p r now holds no snapshot — the quiescent state
+ *        itself. @p cell is as for @ref go_online.
+ */
+inline void go_offline(registry_t& r, std::uint32_t cell) noexcept {
+    if (cell == kNoCell) {
         r.ctl.overflow_online.fetch_sub(1, std::memory_order_seq_cst);
         return;
     }
     // On one hart the barrier keeps this bracket's reads above the store (@ref qsbr_single_hart).
     if constexpr (kCompilerFence) std::atomic_signal_fence(std::memory_order_seq_cst);
-    r.cells[t.cell - 1].state.store(0, kStoreOrder);
+    r.cells[cell - 1].state.store(0, kStoreOrder);
 }
 
 /**
@@ -641,7 +681,12 @@ inline void go_offline(thread_record_t& t) noexcept {
  */
 inline void enter() noexcept {
     thread_record_t& t = rec();
-    if (t.depth++ == 0) go_online(t);
+    if (t.depth++ == 0) {
+        std::uint32_t c = t.cell;
+        if (c == 0) [[unlikely]]
+            c = claim(t);
+        go_online(registry(), c);
+    }
 }
 
 /**
@@ -651,7 +696,7 @@ inline void enter() noexcept {
 [[nodiscard]] inline bool leave() noexcept {
     thread_record_t& t = rec();
     if (--t.depth != 0) return false;
-    go_offline(t);
+    go_offline(registry(), t.cell);
     return true;
 }
 
@@ -667,8 +712,7 @@ inline void enter() noexcept {
  * waits for that bracket too (@ref qsbr_wrap). The check is one relaxed load per
  * participant, on the control plane.
  */
-[[nodiscard]] inline std::uint32_t advance() noexcept {
-    registry_t& r = registry();
+[[nodiscard]] inline std::uint32_t advance(registry_t& r = registry()) noexcept {
     const std::uint32_t now = r.ctl.epoch.load(std::memory_order_relaxed);
     for (std::size_t i = 0; i < kQsbrParticipants; ++i) {
         const std::uint32_t s = r.cells[i].state.load(std::memory_order_relaxed);
@@ -740,8 +784,7 @@ struct horizon_t {
  * answer is then the empty arc.
  */
 template <std::memory_order MO>
-[[nodiscard]] inline horizon_t scan(std::uint32_t c) noexcept {
-    registry_t& r = registry();
+[[nodiscard]] inline horizon_t scan(std::uint32_t c, registry_t& r = registry()) noexcept {
     if (r.ctl.overflow_online.load(MO) != 0) return {};
     std::int32_t behind = 0;  // the counter's own lag is 0
     std::int32_t ahead = 0;
@@ -774,19 +817,19 @@ template <std::memory_order MO>
  * the whole cost.
  */
 template <class Wants>
-[[nodiscard]] inline horizon_t horizon([[maybe_unused]] Wants&& wants) noexcept {
-    registry_t& r = registry();
+[[nodiscard]] inline horizon_t horizon([[maybe_unused]] Wants&& wants,
+                                       registry_t& r = registry()) noexcept {
     const std::uint32_t c = r.ctl.epoch.load(kLoadOrder);  // L_c, before F_W
     full_fence();
 #if defined(LIBTRACER_QSBR_MEMBARRIER)
     if constexpr (kMembarrier) {
-        if (!wants(scan<std::memory_order_relaxed>(c))) return {};
+        if (!wants(scan<std::memory_order_relaxed>(c, r))) return {};
         if (asym_ready() && syscall(__NR_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0)
             return {};
         std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 #endif
-    return scan<kLoadOrder>(c);
+    return scan<kLoadOrder>(c, r);
 }
 
 /**
@@ -804,11 +847,10 @@ template <class Wants>
  * hook is arbitrary user code that may publish, and a nested publish re-enters here.
  *
  * With @ref kMembarrier the pass runs single flight (@ref qsbr_single_flight): it holds
- * @ref in_flight from before its horizon until after its last hook, and runs ONE more pass,
- * unflagged, when its release shows that a drainer skipped meanwhile.
+ * @ref registry_t::in_flight from before its horizon until after its last hook, and runs ONE more
+ * pass, unflagged, when its release shows that a drainer skipped meanwhile.
  */
-[[gnu::noinline]] inline void drain_ripe() noexcept {
-    registry_t& r = registry();
+[[gnu::noinline]] inline void drain_ripe(registry_t& r = registry()) noexcept {
     const auto ripe = [&r](const horizon_t& h0) {
         for (const retired_slot_t& s : r.retired)
             if (s.state.load(std::memory_order_acquire) == slot_state_t::READY &&
@@ -819,12 +861,13 @@ template <class Wants>
     if constexpr (kMembarrier) {
         // The fence first, for the reason @ref horizon gives: this scan decides whether to run.
         std::atomic_thread_fence(std::memory_order_seq_cst);
-        if (!ripe(scan<std::memory_order_relaxed>(r.ctl.epoch.load(std::memory_order_relaxed))) ||
-            in_flight.fetch_add(1, std::memory_order_acq_rel) != 0)
+        if (!ripe(
+                scan<std::memory_order_relaxed>(r.ctl.epoch.load(std::memory_order_relaxed), r)) ||
+            r.in_flight.fetch_add(1, std::memory_order_acq_rel) != 0)
             return;
     }
     for (bool held = kMembarrier;; held = false) {
-        const horizon_t h = horizon(ripe);
+        const horizon_t h = horizon(ripe, r);
         for (retired_slot_t& s : r.retired) {
             slot_state_t expected = slot_state_t::READY;
             if (!h.past(s.epoch.load(std::memory_order_relaxed)) ||
@@ -845,7 +888,7 @@ template <class Wants>
             fn(ctx);
         }
         if constexpr (kMembarrier)
-            if (held && in_flight.exchange(0, std::memory_order_acq_rel) != 1) continue;
+            if (held && r.in_flight.exchange(0, std::memory_order_acq_rel) != 1) continue;
         return;
     }
 }
@@ -859,9 +902,9 @@ template <class Wants>
  * `fan_out`, which is a property `objdump` is asked to confirm rather than a hope. (Measured:
  * letting it inline added 162 instructions to `fan_out`.)
  */
-inline void drain() noexcept {
-    if (registry().ctl.live.load(std::memory_order_relaxed) == 0) return;
-    drain_ripe();
+inline void drain(registry_t& r = registry()) noexcept {
+    if (r.ctl.live.load(std::memory_order_relaxed) == 0) return;
+    drain_ripe(r);
 }
 
 /**
@@ -876,12 +919,11 @@ inline void drain() noexcept {
  *         is the same deliberate leak the per-thread park makes, for the same reason: running
  *         the hook here would free a context a live fan-out still names.
  */
-inline bool retire(void* ctx, void (*release)(void*)) noexcept {
-    registry_t& r = registry();
+inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry()) noexcept {
     // seq_cst, and load-bearing: this RMW is the full barrier standing between the caller's
     // `clear_edge` and the scan below, which is the writer half of the Dekker pairing.
-    const std::uint32_t e = advance();
-    if (horizon([e](const horizon_t& h) { return h.past(e); }).past(e)) {
+    const std::uint32_t e = advance(r);
+    if (horizon([e](const horizon_t& h) { return h.past(e); }, r).past(e)) {
         release(ctx);
         return true;
     }
@@ -901,7 +943,7 @@ inline bool retire(void* ctx, void (*release)(void*)) noexcept {
         // that never comes. After this, a surviving entry means a participant genuinely has
         // not quiesced yet. Under single flight this retry may skip; the pass in flight then
         // runs once more for it (@ref qsbr_single_flight).
-        drain();
+        drain(r);
         return true;
     }
     return false;
