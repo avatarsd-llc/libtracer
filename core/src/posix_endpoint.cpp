@@ -592,7 +592,9 @@ std::size_t slot_server_t::close_frozen_peers(std::uint64_t now, std::uint64_t d
     std::size_t closed = 0;
     const std::lock_guard lock(peers_m_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
-        const int fd = s->fd.load(std::memory_order_relaxed);
+        // Acquire pairs with accept_peer's release of the fd: a slot whose fd is seen
+        // published also shows its fresh progress flags, never a reused slot's stale ones.
+        const int fd = s->fd.load(std::memory_order_acquire);
         if (fd < 0 || s->name[0] == '\0') continue;
         const bool tx = s->tx_moved.exchange(false, std::memory_order_relaxed);
         const bool rx = s->rx_moved.exchange(false, std::memory_order_relaxed);
@@ -714,7 +716,8 @@ void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
     // A sender reads the fd only inside the session's egress role, and the role cannot be
     // claimed until the egress opens — a release a claim's acquire pairs with — so no sender
     // can see the slot half-published, and none waits on the accept to finish.
-    slot->fd.store(fd, std::memory_order_relaxed);
+    // Release: the liveness check's acquire of the fd then sees the flags stored above (#2198).
+    slot->fd.store(fd, std::memory_order_release);
     // The seam that makes the order testable: the fd is published, the slot not yet open. A
     // broadcast that lands here must skip the slot rather than write to fd -1 (`tcp_test`,
     // the accept-publish race).
