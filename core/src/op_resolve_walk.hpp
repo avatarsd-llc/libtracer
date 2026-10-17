@@ -61,6 +61,37 @@ using wire::type_t;
 
 namespace {
 
+/** @brief What @ref held_block_of reads in place of a missing link on the slab build: no owner,
+ *         no bytes. Constant-initialized, and a variable template, so it exists only where the
+ *         slab arm instantiates it. */
+template <class = void>
+constinit const view_t kNoLink{};
+/** @brief What @ref held_block_of reads in place of a missing owner's bytes: none. */
+constexpr std::span<std::byte> kNoBytes{};
+
+/**
+ * @brief The block a stored value already sits in, for @ref tr::mem::share_fits: the one block
+ *        of @p link's owning segment when @p link (null for none) is owned and covers @p need
+ *        bytes, else `SIZE_MAX` (borrowed, or more than one link).
+ *
+ * On the slab build, where the class test is the store decision, it is branch-free so that
+ * decision stays the one branch it was (#2143): a missing link or owner is replaced by a
+ * sentinel through a select. The arena and heap-root builds only ask "one owned block?"
+ * (`share_fits` reads no size there), so they answer 0 for yes with the plain tests.
+ */
+template <bool Slab = mem::kSlabPool>
+[[nodiscard]] std::size_t held_block_of(const view_t* link, std::size_t need) noexcept {
+    if constexpr (Slab) {
+        const view_t& l = *(link != nullptr ? link : &kNoLink<>);
+        const view::segment_t* const owner = l.owner.get();
+        const std::size_t bytes = (owner != nullptr ? &owner->bytes : &kNoBytes)->size();
+        const bool one = (owner != nullptr) & (l.length >= need);
+        return one ? mem::segment_block_bytes(bytes, alignof(std::max_align_t)) : SIZE_MAX;
+    } else {
+        return link != nullptr && link->owner && link->length >= need ? 0 : SIZE_MAX;
+    }
+}
+
 /**
  * @brief The node-reader concept (ADR-0053 §7): the terminus resolves through ONE templated walk
  *        over a decoded-TLV node, so the span arena and the lazy rope view share the resolver
@@ -172,6 +203,22 @@ struct arena_node {
      *        without a flatten).
      */
     [[nodiscard]] std::size_t wire_size() const noexcept { return node().wire.size(); }
+
+    /**
+     * @brief The block this TLV already sits in, for @ref tr::mem::share_fits: the owning
+     *        frame segment's one block, or `SIZE_MAX` when the frame is borrowed.
+     *
+     * Off the slab build no size is read, and a borrowed frame is the one case `pin_wire`
+     * already refuses (falling back to the copy), so the answer there is a constant.
+     */
+    [[nodiscard]] std::size_t held_block(const view::view_t* frame_view) const noexcept {
+        if constexpr (mem::kSlabPool) {
+            return held_block_of(frame_view, 0);
+        } else {
+            (void)frame_view;
+            return 0;
+        }
+    }
 
     /**
      * @brief Pin this TLV as a subrope of the owning delivery instead of copying it (ADR-0042 §3):
@@ -509,28 +556,35 @@ template <class N>
 }
 
 /**
- * @brief The RFC-0028 §5.3 copy-or-share decision for a stored WRITE value (D3): SHARE the
- *        payload as a subrope of the owning delivery (refcount, zero copy) iff it is at least
- *        @p threshold bytes, trailer-less, AND the reader can share (`pin_wire`) — the span
- *        tier shares a subview of the contiguous owning `frame_view`, the rope tier a subrope of
- *        its own scatter-gather segments. Otherwise the copy arm, @ref copy_tlv: one block.
+ * @brief The copy-or-share decision for a stored WRITE value (RFC-0022 Amendment 3): SHARE the
+ *        payload as a subrope of the owning delivery (refcount, zero copy) when the vertex's
+ *        @p hint and the build's block source allow it, the TLV is trailer-less, AND the reader
+ *        can share (`pin_wire`) — the span tier shares a subview of the contiguous owning
+ *        `frame_view`, the rope tier a subrope of its own scatter-gather segments. Otherwise
+ *        the copy arm, @ref copy_tlv: one block.
  *
- * @param threshold The target vertex's `share_threshold_bytes` (`config_t::kShareThresholdBytes`
- *                  unless declared). `0` shares whatever can be shared; `SIZE_MAX` never shares.
+ * @param hint The target vertex's @ref share_hint_t (`DEFAULT` unless declared). `COPY` never
+ *             shares; `SHARE` shares whatever can be shared; `DEFAULT` asks @ref
+ *             tr::mem::share_fits whether a copy would draw a block no smaller than the one
+ *             the value already sits in, which the arena and heap-root builds answer `true` at
+ *             compile time.
  *
- * The measured variable is the absolute payload size (RFC-0028 R6), so that is the whole
- * predicate. What sharing HOLDS — the whole receive segment, for the value's lifetime — is the
- * retention hazard the threshold exists to price, and it is the consumer's number: a pool-backed
- * deployment sets its threshold with its pool geometry in mind (RFC-0022 Amendment 2).
+ * What sharing HOLDS — the whole receive block, for the value's lifetime — is the retention
+ * hazard `COPY` exists for, and it is the owner's call (RFC-0022 Amendment 2).
  *
  * The test lives HERE, one locus for both readers; each reader only produces its shared rope or
  * its copy. Returns a rope so a multi-link shared payload keeps its segments.
  */
 template <class N>
 [[nodiscard]] stored_tlv_t share_or_copy_tlv(const N& node, const view::view_t* frame_view,
-                                             std::size_t threshold, mem::block_source_t& source,
+                                             share_hint_t hint, mem::block_source_t& source,
                                              mem::mem_backend_t& flat) {
-    if (node.wire_size() >= threshold && trailer_less(node)) {
+    // One branch, as the threshold compare it replaces was: every operand is computed and
+    // combined with `&` / `|`, so the hint and the trait add selects, not branches.
+    const bool fits =
+        mem::share_fits(node.held_block(frame_view), value_t::inline_bytes_for(node.wire_size()));
+    if (trailer_less(node) & (hint != share_hint_t::COPY) &
+        ((hint == share_hint_t::SHARE) | fits)) {
         if (std::optional<view::rope_t> shared = node.pin_wire(frame_view)) {
             instrument::tick_pin();
             return {std::move(*shared), value_ref_t{}};
@@ -894,14 +948,14 @@ template <class N, class ReplyError>
                                    ok, egress);  // OK, empty payload: the ack (#1658)
         }
 
-        // The stored written value, by the vertex's copy-or-share threshold (RFC-0028
-        // §5.3): below it, ONE inline block holding a trailer-sliced copy (§4 — an
-        // arriving CRC/TS trailer is NOT stored; stored TLVs are trailer-less at rest,
-        // ADR-0035); at or above it, an ADR-0042 §3 shared subrope of the frame
-        // (refcount, zero copy; multi-link on the rope tier). An empty rope is an
-        // allocation failure.
-        const stored_tlv_t value = share_or_copy_tlv(
-            payload_node, frame_view, graph.share_threshold_bytes(v), graph.value_source(), flat);
+        // The stored written value, by the vertex's copy-or-share hint and the build's
+        // block source (RFC-0022 Amendment 3): copied, ONE inline block holding a
+        // trailer-sliced copy (RFC-0028 §4 — an arriving CRC/TS trailer is NOT stored;
+        // stored TLVs are trailer-less at rest, ADR-0035); shared, an ADR-0042 §3 subrope
+        // of the frame (refcount, zero copy; multi-link on the rope tier). An empty rope is
+        // an allocation failure.
+        const stored_tlv_t value = share_or_copy_tlv(payload_node, frame_view, graph.share_hint(v),
+                                                     graph.value_source(), flat);
         if (value.rope.total_length() == 0) return reply_error(status_t::BACKPRESSURE);
 
         // The arrival link's catalog identity (#1650) rides the token seam the walk already
@@ -1001,7 +1055,8 @@ template <class N>
     std::optional<stored_tlv_t> held;
     return graph.find_or_create(key, subject, [&]() -> const view::rope_t& {
         if (!held)
-            held = share_or_copy_tlv(*req.payload, frame_view, 0, graph.value_source(), flat);
+            held = share_or_copy_tlv(*req.payload, frame_view, share_hint_t::SHARE,
+                                     graph.value_source(), flat);
         return held->rope;
     });
 }

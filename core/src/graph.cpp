@@ -1731,9 +1731,7 @@ std::optional<vertex_handle_t> graph_t::find(std::span<const std::byte> key) con
     return vertex_handle_t{p};
 }
 
-std::size_t graph_t::share_threshold_bytes(vertex_handle_t v) const noexcept {
-    return v.get()->share_threshold_bytes();
-}
+share_hint_t graph_t::share_hint(vertex_handle_t v) const noexcept { return v.get()->share_hint(); }
 
 retention_t graph_t::retention(vertex_handle_t v) const noexcept { return v.get()->retention(); }
 
@@ -1773,9 +1771,7 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
     // block, so `N` is what draws a STREAM's (#2001), and a `NONE` vertex keeps neither slot
     // nor ring — nor, with no other member declared, any extension block at all.
     const retention_t retention = policy.retention.value_or(default_retention(role));
-    // Compared as stored, so a threshold that saturates the same way moves nothing.
-    const bool threshold_moves = saturate_threshold(vx->share_threshold_bytes()) !=
-                                 saturate_threshold(policy.share_threshold_bytes);
+    const bool hint_moves = vx->share_hint() != policy.share_hint;
     // Owner-facing declaration (RFC-0010 §A.2) — a local host API, so no ACL gate. An owning
     // table is always (re)declared, so its values reset; a borrowed one already installed is
     // the same declaration and keeps its stored values; none declared over a table installed
@@ -1789,7 +1785,7 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
     // Stage: a member that moves draws its blocks now. A ring or a field group already there
     // is kept, so staging one for a member that moves back to its default draws nothing.
     vertex_ext_t* e = nullptr;
-    if (ring_moves || threshold_moves || fields_move || retention == retention_t::N) {
+    if (ring_moves || hint_moves || fields_move || retention == retention_t::N) {
         e = vx->stage_policy(ring_moves, fields_move, *tables_);
         if (e == nullptr) return false;
     }
@@ -1801,8 +1797,7 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
     // Nothing below can be refused: every block is drawn and the mode has landed.
     if (ring_moves) (void)vx->set_ring_source(policy.ring_source, policy.ring_reliable, *tables_);
     if (role != role_t::HANDLER) (void)vx->set_retention(retention, policy.depth, *tables_);
-    if (threshold_moves)
-        (void)vx->set_share_threshold_bytes(policy.share_threshold_bytes, *tables_);
+    if (hint_moves) (void)vx->set_share_hint(policy.share_hint, *tables_);
     if (fields_move) vx->install_app_fields(*e, std::move(built));
     return true;
 }

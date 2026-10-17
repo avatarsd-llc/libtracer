@@ -63,6 +63,27 @@ enum class retention_t : std::uint8_t {
 };
 
 /**
+ * @brief What an owner declares about storing a written value by reference or by copy
+ *        (RFC-0022 Amendment 3): a declaration, not a number.
+ *
+ * Whether a stored value SHARES its inbound receive block (refcount, zero copy) or is COPIED
+ * into a block of its own is the build's block source's answer, given by
+ * @ref tr::mem::share_fits. The static arena and the heap root always share, and the slab pool
+ * shares on a class fit, when a copy would draw a block no smaller than the one already held.
+ * A vertex states only what its value is for. Owner-side and host-only, like
+ * @ref retention_t, and no peer reads or writes it.
+ *
+ * Bytes the receive path does not own (a borrowed span) and a value whose TLV carries a CRC or
+ * TS trailer are copied whatever the hint.
+ */
+enum class share_hint_t : std::uint8_t {
+    DEFAULT = 0, /**< @brief Follow the block source's trait. */
+    SHARE = 1,   /**< @brief Share whenever the value sits in a shareable block. */
+    COPY = 2,    /**< @brief Always copy: the owner's lever for a long-lived value that would
+                  *          otherwise hold a receive block for its whole lifetime. */
+};
+
+/**
  * @brief Owner-declared REMOTE writability of one application property field (RFC-0010
  *        §A.2): what a caller-attributed field write/read may do. The OWNER — a local,
  *        caller-less host API call — always reads and writes its own declared fields;

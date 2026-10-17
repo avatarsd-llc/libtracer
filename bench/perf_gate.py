@@ -206,9 +206,10 @@ DEFAULT_TIER = "advisory"
 #
 # The 16 KiB rows are there because before #1806 no gated family had a payload above 8 KiB,
 # and the standing rule is that every perf report tracks values above 1 KiB. One size per
-# family, and 16 KiB rather than 4 KiB: 4 KiB is the ingress share threshold
-# (`kShareThresholdBytes`), where a received value switches from copied to shared by design,
-# so a gated row there would sit on a designed step; 16 KiB is clearly past it on every path.
+# family, and 16 KiB rather than 4 KiB: 4 KiB was the ingress share threshold (the deleted
+# `kShareThresholdBytes`, now a trait of the block source, RFC-0022 Amendment 3), where a
+# received value switched from copied to shared by design, so a gated row there would have sat
+# on a designed step; 16 KiB is clearly past it on every path.
 # Every ladder size, the 16 KiB one included, has a line on a size-axis chart of the
 # Performance page (`render_history.FAMILIES`: payload, borrow-payload, eptype-stream-payload,
 # lkv, chain-forward, demux-value); only the 16 KiB row is gated. Like the other `main`

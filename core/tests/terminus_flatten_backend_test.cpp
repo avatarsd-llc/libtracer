@@ -684,7 +684,7 @@ void test_terminus_refusal_sweep() {
 // #793 moved the rope tier's single-link ownership copy, and #801 the span tier's, off
 // `view::over_bytes`'s global heap onto the router's injected `flat` seam, so that a node that
 // bounded its memory bounded the peer-provoked copy too. RFC-0028 slice 5 (§5.1) folds that
-// copy INTO the value: below the vertex's share threshold the bytes land inline in the one
+// copy INTO the value: copied (here, on a `COPY` vertex) the bytes land inline in the one
 // `value_t` block the publish already cost, drawn from the GRAPH's injected `block_source_t` —
 // the source every published value is drawn from (D9: one seam). The claims below are #793's and
 // #801's, re-pointed at that source: the copy draws from it (site-specific, by exact size), its
@@ -756,13 +756,19 @@ class arming_source_t final : public tr::mem::block_source_t {
     std::vector<std::size_t> sizes_;
 };
 
-/** @brief @ref node_t over an injected graph source — the seam the copy now draws from. */
+/**
+ * @brief @ref node_t over an injected graph source — the seam the copy now draws from. The
+ *        vertex declares `COPY` (RFC-0022 Amendment 3), so the copy arm is the one these cases
+ *        reach whatever the build's block source would share.
+ */
 struct src_node_t {
     arming_source_t& src;
     graph_t g{src};
     vertex_handle_t temp = g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     rec_link_t in{/*ropes=*/true};
-    explicit src_node_t(arming_source_t& s) : src(s) {}
+    explicit src_node_t(arming_source_t& s) : src(s) {
+        (void)g.set_policy(temp, {.share_hint = tr::graph::share_hint_t::COPY});
+    }
 };
 
 /** @brief The #793 fixture: a WRITE frame split so its payload TLV lies in ONE link. */
@@ -819,7 +825,7 @@ void deliver(tier_t t, src_node_t& n, fwd_router_t& router) {
 const char* tier_name(tier_t t) { return t == tier_t::ROPE ? "rope" : "span"; }
 
 /**
- * @brief Below the share threshold, a terminus WRITE's ownership copy is ONE block drawn from
+ * @brief On a `COPY` vertex, a terminus WRITE's ownership copy is ONE block drawn from
  *        the graph's injected source, and its bytes live there.
  *
  * Three instruments, none vacuous: the exact-size draw (`kOwnBlockBytes` — nothing else on the

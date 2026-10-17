@@ -519,29 +519,27 @@ struct rx_block_t {
 
 /**
  * @brief Allocate a transport's receive block for a @p len-byte frame, with the INGRESS LOAN
- *        reserve when the frame is large enough to be shared (RFC-0028 §6.9, #1626).
+ *        reserve where it costs nothing (RFC-0028 §6.9, #1626, #2143).
  *
- * A frame the graph stores by SHARING (at or above a vertex's copy-or-share threshold) used to
- * cost the terminus one allocation for the record that links it (`value_t`, 40 B on the host).
- * A block drawn here instead carries @ref tr::mem::kRxLoanBytes of room in front of the frame,
- * marked by `segment_t::rx_loan`, and the terminus builds that record in the room: the stored value
- * IS the receive block, and a shared ingress allocates nothing past the transport's own receive.
+ * A frame the graph stores by SHARING used to cost the terminus one allocation for the record
+ * that links it (`value_t`, 40 B on the host). A block drawn here instead carries
+ * @ref tr::mem::kRxLoanBytes of room in front of the frame, marked by `segment_t::rx_loan`, and
+ * the terminus builds that record in the room: the stored value IS the receive block, and a
+ * shared ingress allocates nothing past the transport's own receive.
  *
- * The reserve is taken only where it can pay:
- * - @p len at or above @p loan_min — the transport passes its build's
- *   `tr::graph::kShareThresholdBytes`, below which the default vertex COPIES and the record is
- *   the inline block the copy lands in anyway (a build that copies always, `SIZE_MAX`, never
- *   reserves);
+ * The reserve is taken only where it is free:
+ * - @ref tr::mem::rx_loan_free — the frame plus the reserve lands in the same size class as
+ *   the frame alone, so the reserve draws no byte a plain block would not (never on the heap
+ *   root, whose blocks are exact);
  * - a HOST-space backend whose alignment can hold the record, with room for `len + reserve`
  *   under its `max_segment_size`.
- * Anywhere else it draws a plain `len`-byte block at offset 0 — today's shape, and still a
- * correct frame for every reader. Either way it makes ONE request: a backend that refuses the
- * reserved block is backpressure, not a cue to ask again smaller.
+ * Anywhere else it draws a plain `len`-byte block at offset 0, still a correct frame for every
+ * reader. Either way it makes ONE request: a backend that refuses the reserved block is
+ * backpressure, not a cue to ask again smaller.
  *
  * @retval rx_block_t{} (empty `seg`) The backend refused the block — backpressure.
  */
-[[nodiscard]] rx_block_t alloc_rx(mem::mem_backend_t& backend, std::size_t len,
-                                  std::size_t loan_min) noexcept;
+[[nodiscard]] rx_block_t alloc_rx(mem::mem_backend_t& backend, std::size_t len) noexcept;
 
 /**
  * @brief Allocate a fresh, owned heap segment of @p size bytes, wrapped in an

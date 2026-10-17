@@ -7,8 +7,9 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * Pinned here:
- * 1. `view::alloc_rx` takes the reserve only at or above its threshold, in one request, and
- *    marks the block.
+ * 1. `view::alloc_rx` takes the reserve only where it is free (the frame plus the reserve
+ *    lands in the frame's own size class, never on the heap root), in one request, and marks
+ *    the block.
  * 2. `value_t::make(rope&&)` over such a block places the header in the reserve without ever
  *    asking the graph's block source, and does so only ONCE per block. A second value over
  *    the same block draws its header from the source, as it would for any other block.
@@ -70,10 +71,16 @@ class counting_source_t final : public tr::mem::block_source_t {
     return std::byte(static_cast<std::uint8_t>(i * 7u));
 }
 
+/** @brief The first frame length from @p near up whose loan reserve is @p free (or is not). */
+[[nodiscard]] std::size_t len_where(std::size_t near, bool free) {
+    const std::size_t align = tr::mem::heap_backend().alignment();
+    while (tr::mem::rx_loan_free(near, align) != free) ++near;
+    return near;
+}
+
 /** @brief A loaned receive block holding a patterned @p len-byte frame. */
 [[nodiscard]] tr::view::rx_block_t loaned_block(std::size_t len) {
-    tr::view::rx_block_t blk =
-        tr::view::alloc_rx(tr::mem::heap_backend(), len, tr::graph::kShareThresholdBytes);
+    tr::view::rx_block_t blk = tr::view::alloc_rx(tr::mem::heap_backend(), len);
     if (blk.seg) {
         const std::span<std::byte> f = blk.frame(len);
         for (std::size_t i = 0; i < len; ++i) f[i] = pattern_at(i);
@@ -90,27 +97,35 @@ class counting_source_t final : public tr::mem::block_source_t {
     return true;
 }
 
-/** @brief Vector 1: the reserve is taken only at and above the threshold, and marked. */
+/** @brief Vector 1: the reserve is taken only where it is free, and marked. */
 void test_alloc_rx_shape() {
-    std::printf("alloc_rx reserves only where the loan can pay:\n");
-    constexpr std::size_t kBig = 8192;
-    const tr::view::rx_block_t small = tr::view::alloc_rx(tr::mem::heap_backend(), 64, kBig);
-    check(small.seg && small.off == 0 && small.seg->rx_loan == 0,
-          "below the threshold: a plain block, the frame at offset 0");
-    const tr::view::rx_block_t big = tr::view::alloc_rx(tr::mem::heap_backend(), kBig, kBig);
-    check(big.seg && big.off == tr::mem::kRxLoanBytes && big.seg->rx_loan == 1,
-          "at the threshold: the reserve in front, the block marked");
-    check(big.seg && big.seg->bytes.size() >= kBig + tr::mem::kRxLoanBytes,
+    std::printf("alloc_rx reserves only where the loan is free:\n");
+    if constexpr (tr::mem::kHeapRoot) {
+        const tr::view::rx_block_t b = tr::view::alloc_rx(tr::mem::heap_backend(), 5000);
+        check(b.seg && b.off == 0 && b.seg->rx_loan == 0,
+              "the heap root draws exact blocks: never a reserve");
+        return;
+    }
+    const std::size_t costly = len_where(6000, false);
+    const tr::view::rx_block_t plain = tr::view::alloc_rx(tr::mem::heap_backend(), costly);
+    check(plain.seg && plain.off == 0 && plain.seg->rx_loan == 0,
+          "a reserve that would take the next class: a plain block, the frame at offset 0");
+    const std::size_t free = len_where(6000, true);
+    const tr::view::rx_block_t loaned = tr::view::alloc_rx(tr::mem::heap_backend(), free);
+    check(loaned.seg && loaned.off == tr::mem::kRxLoanBytes && loaned.seg->rx_loan == 1,
+          "a reserve inside the frame's class: the reserve in front, the block marked");
+    check(loaned.seg && loaned.seg->bytes.size() >= free + tr::mem::kRxLoanBytes,
           "the block holds the reserve plus the whole frame");
-    const tr::view::rx_block_t never = tr::view::alloc_rx(tr::mem::heap_backend(), kBig, SIZE_MAX);
-    check(never.seg && never.off == 0 && never.seg->rx_loan == 0,
-          "a SIZE_MAX threshold (a copy-always build) never reserves");
+    const tr::view::rx_block_t small = tr::view::alloc_rx(tr::mem::heap_backend(), 64);
+    check(small.seg &&
+              (small.off == 0) == !tr::mem::rx_loan_free(64, tr::mem::heap_backend().alignment()),
+          "a small frame follows the same class test");
 }
 
 /** @brief Vector 2: the value goes IN the reserve, once per block. */
 void test_make_in_reserve() {
     std::printf("value_t::make places a loaned value in the block's reserve, once:\n");
-    constexpr std::size_t kLen = 6000;
+    const std::size_t kLen = len_where(6000, true);
     counting_source_t src;
     tr::view::rx_block_t blk = loaned_block(kLen);
     const tr::view::segment_t* const seg = blk.seg.get();
@@ -148,7 +163,7 @@ void test_make_in_reserve() {
 /** @brief Vector 3: a loaned value shares by refcount, and every teardown order is clean. */
 void test_share_and_teardown() {
     std::printf("a loaned value shares by refcount and tears down in any order:\n");
-    constexpr std::size_t kLen = 5000;
+    const std::size_t kLen = len_where(5000, true);
     counting_source_t src;
     for (int order = 0; order < 3; ++order) {
         tr::view::rx_block_t blk = loaned_block(kLen);
@@ -187,7 +202,8 @@ void test_share_and_teardown() {
 /** @brief Vector 4: a graph write of a loaned frame stores a loaned value, 0 source draws. */
 void test_graph_write_stores_loaned() {
     std::printf("a graph write of a loaned frame stores a loaned value:\n");
-    constexpr std::size_t kPayload = 5000;
+    // The first payload whose VALUE TLV's receive block carries the reserve for free.
+    const std::size_t kPayload = len_where(5004, true) - 4;
     counting_source_t src;
     graph_t g(src);
     const auto p = path_t::parse("/rx/blob");
@@ -203,8 +219,7 @@ void test_graph_write_stores_loaned() {
         tlv.assign(hs.begin(), hs.end());
         for (std::size_t i = 0; i < kPayload; ++i) tlv.push_back(pattern_at(i));
     }
-    tr::view::rx_block_t blk =
-        tr::view::alloc_rx(tr::mem::heap_backend(), tlv.size(), tr::graph::kShareThresholdBytes);
+    tr::view::rx_block_t blk = tr::view::alloc_rx(tr::mem::heap_backend(), tlv.size());
     std::memcpy(blk.frame(tlv.size()).data(), tlv.data(), tlv.size());
     rope_t r;
     r.append(blk.take(tlv.size()));
@@ -223,8 +238,12 @@ void test_graph_write_stores_loaned() {
 
 int main() {
     test_alloc_rx_shape();
-    test_make_in_reserve();
-    test_share_and_teardown();
-    test_graph_write_stores_loaned();
+    // The heap root never loans (its blocks are exact), so the loaned-value vectors have no
+    // block to run over there.
+    if constexpr (!tr::mem::kHeapRoot) {
+        test_make_in_reserve();
+        test_share_and_teardown();
+        test_graph_write_stores_loaned();
+    }
     return tr::testing::summary("rx_loan");
 }

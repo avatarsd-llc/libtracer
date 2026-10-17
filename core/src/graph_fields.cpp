@@ -326,7 +326,8 @@ constexpr std::size_t kScratchBytes = 256;
 // honest answer an unsupported field already gives. The two survivors did not move to
 // another name; they stopped being remotely writable at all and became owner-side
 // declarations (the ring depth, which RFC-0028 D4 later folded into `graph_t::set_retention`,
-// and the pin ratio that D3 replaced with `graph_t::set_share_threshold_bytes`).
+// and the pin ratio that D3 replaced with a share threshold, since replaced in turn by the
+// `vertex_policy_t::share_hint` declaration of RFC-0022 Amendment 3).
 
 /** @brief Emit the RFC-0010 §A.4 app-container members into @p out: each declared,
  *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then its TLV bytes

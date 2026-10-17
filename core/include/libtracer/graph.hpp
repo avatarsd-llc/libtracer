@@ -780,7 +780,7 @@ struct vertex_policy_t {
      *
      * Switching to `NONE` drops what is already held. Costs zero bytes: `NONE` is a bit in the
      * vertex's flag byte, so a vertex declaring only `NONE` (no fields, no ring source, the
-     * default threshold) draws no extension block — a STREAM included, at registration
+     * default share hint) draws no extension block — a STREAM included, at registration
      * (#2001). `N` draws the block, which holds the depth.
      */
     std::optional<retention_t> retention{};
@@ -789,17 +789,18 @@ struct vertex_policy_t {
     std::uint32_t depth = 1;
 
     /**
-     * @brief The copy-or-share threshold in bytes (RFC-0028 §5.3, D3): a written value of at
-     *        least this many bytes is SHARED, one below it is COPIED.
+     * @brief The copy-or-share hint (RFC-0022 Amendment 3): whether a written value is stored
+     *        by reference to its inbound receive block or as a copy.
      *
-     * At the terminus, a view-delivered, trailer-less WRITE of at least this size is stored
-     * as a refcounted link to the inbound receive segment — no allocation for the bytes, no
-     * copy; a smaller one is copied into the value's own block. `0` shares always; `SIZE_MAX`
-     * copies always. What sharing costs on a POOLED RX backend: the shared value BORROWS a
-     * pool slot until it is displaced, so size against `live shared values x segment_bytes`
-     * (see `config_t::kShareThresholdBytes` for the target-class defaults).
+     * Shared, a view-delivered, trailer-less WRITE is stored as a refcounted link to the
+     * inbound receive segment — no allocation for the bytes, no copy; copied, it lands in the
+     * value's own block. `DEFAULT` follows the build's block source (@ref
+     * tr::mem::share_fits): the static arena and the heap root share, the slab pool shares on
+     * a class fit. `SHARE` shares whenever the block can be shared; `COPY` always copies. What
+     * sharing costs on a POOLED RX backend: the shared value BORROWS its receive block until
+     * it is displaced, so a long-lived value on a small pool is the case for `COPY`.
      */
-    std::size_t share_threshold_bytes = kShareThresholdBytes;
+    share_hint_t share_hint = share_hint_t::DEFAULT;
 
     /**
      * @brief The receiving STREAM vertex's own ring source (RFC-0025 §4.6.1 clause 3); null ⇒
@@ -2801,15 +2802,14 @@ class graph_t {
     [[nodiscard]] std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;
 
     /**
-     * @brief @p v's copy-or-share threshold in bytes (RFC-0028 §5.3): what it declared with
-     *        @ref vertex_policy_t::share_threshold_bytes, else @ref
-     * tr::graph::config_t::kShareThresholdBytes.
+     * @brief @p v's copy-or-share hint (RFC-0022 Amendment 3): what it declared with
+     *        @ref vertex_policy_t::share_hint, else `DEFAULT`.
      *
      * The read accessor the opaque handle does not expose directly: the WRITE resolver
      * (`%op_resolve_walk.hpp`) queries it here instead of dereferencing the vertex. One
      * inline load, and nothing is inherited (RFC-0022 §3.F).
      */
-    [[nodiscard]] std::size_t share_threshold_bytes(vertex_handle_t v) const noexcept;
+    [[nodiscard]] share_hint_t share_hint(vertex_handle_t v) const noexcept;
 
     /**
      * @brief Resolve the target of a fieldless DATA write at @p key, creating a missing level

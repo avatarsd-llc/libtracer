@@ -10,7 +10,7 @@
   "band_abs": 0,
   "band_pct": 0,
   "_band": "0: a copy count is exact. Every pinned row read min = max over 3 repetitions, and its median matched the peer-cost study's TCP figures byte for byte. The WS rows read lower than the study's (3150 against 3266 B at 1 KiB) because this run is paced, so the stream buffer never holds a second frame's tail when it compacts.",
-  "_goal": "From #2136: ingress receives straight into an exact-length segment (0 copies), a server egress is one shared frame (0), a WS client send gathers and masks in one pass (1x), the 48 B TCP client handoff head stays. The stored value is assumed still copied below the 4 KiB share knee: the copy-or-share trait may remove that copy too, and a row that beats its goal is simply re-pinned. UDP ingress already receives into a max_frame segment (#2136 ingress), so a UDP-in relay row holds only the egress side's goal.",
+  "_goal": "From #2136: ingress receives straight into an exact-length segment (0 copies), a server egress is one shared frame (0), a WS client send gathers and masks in one pass (1x), the 48 B TCP client handoff head stays. The copy-or-share trait (#2143) removed the stored-value copy wherever the receive segment fits the value's size class. UDP ingress already receives into a max_frame segment (#2136 ingress), and on the slab pool a value whose size class is smaller than that segment's is copied out of it (RFC-0022 Am.3), so a UDP-in relay row at 4 and 16 KiB carries that copy under a waiver until #2142 (right-sized UDP receive segment) lands and restores the share.",
   "rows": [
     {
       "id": "tcp-relay-srv @64",
@@ -19,9 +19,9 @@
       "arm": "tcp-relay-srv",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 165,
+      "value": 97,
       "goal": 64,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
     {
       "id": "tcp-relay-srv @1024",
@@ -30,9 +30,9 @@
       "arm": "tcp-relay-srv",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 2085,
+      "value": 1057,
       "goal": 1024,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
     {
       "id": "tcp-relay-srv @4096",
@@ -63,9 +63,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 165,
+      "value": 97,
       "goal": 112,
-      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
+      "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
     {
       "id": "tcp-relay-cli @1024",
@@ -74,9 +74,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 2085,
+      "value": 1057,
       "goal": 1072,
-      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
+      "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
     {
       "id": "tcp-relay-cli @4096",
@@ -107,9 +107,9 @@
       "arm": "ws-relay-srv",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 165,
+      "value": 97,
       "goal": 64,
-      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
+      "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
     {
       "id": "ws-relay-srv @1024",
@@ -118,9 +118,9 @@
       "arm": "ws-relay-srv",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 2085,
+      "value": 1057,
       "goal": 1024,
-      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
+      "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
     {
       "id": "ws-relay-srv @4096",
@@ -151,9 +151,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 355,
+      "value": 287,
       "goal": 128,
-      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
+      "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
     {
       "id": "ws-relay-cli @1024",
@@ -162,9 +162,9 @@
       "arm": "ws-relay-cli",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 4195,
+      "value": 3167,
       "goal": 2048,
-      "moved_by": "#2140 (WS server frame ingress: stack read-ahead between frames, larger bodies into an exact-size segment)"
+      "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
     {
       "id": "ws-relay-cli @4096",
@@ -217,9 +217,10 @@
       "arm": "udp-relay-tcp-srv",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 0,
+      "value": 4100,
       "goal": 0,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-tcp-srv @16384",
@@ -228,9 +229,10 @@
       "arm": "udp-relay-tcp-srv",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 0,
+      "value": 16388,
       "goal": 0,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-tcp-cli @64",
@@ -261,9 +263,10 @@
       "arm": "udp-relay-tcp-cli",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 0,
+      "value": 4100,
       "goal": 48,
-      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-tcp-cli @16384",
@@ -272,9 +275,10 @@
       "arm": "udp-relay-tcp-cli",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 0,
+      "value": 16388,
       "goal": 48,
-      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-ws-srv @64",
@@ -305,9 +309,10 @@
       "arm": "udp-relay-ws-srv",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 0,
+      "value": 4100,
       "goal": 0,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-ws-srv @16384",
@@ -316,9 +321,10 @@
       "arm": "udp-relay-ws-srv",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 0,
+      "value": 16388,
       "goal": 0,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-ws-cli @64",
@@ -349,9 +355,10 @@
       "arm": "udp-relay-ws-cli",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 8254,
+      "value": 12354,
       "goal": 4096,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-ws-cli @16384",
@@ -360,9 +367,10 @@
       "arm": "udp-relay-ws-cli",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 32830,
+      "value": 49218,
       "goal": 16384,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-udp @64",
@@ -393,9 +401,10 @@
       "arm": "udp-relay-udp",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 0,
+      "value": 4100,
       "goal": 0,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "udp-relay-udp @16384",
@@ -404,49 +413,50 @@
       "arm": "udp-relay-udp",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 0,
+      "value": 16388,
       "goal": 0,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
+      "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
     },
     {
       "id": "httpd-ws rx @64",
       "target": "MID",
       "source": "static",
       "payload": 64,
-      "value": 128,
+      "value": 64,
       "goal": 64,
-      "moved_by": "#2137 (seeded from the peer-cost study)",
-      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store copies it again, since kShareThresholdBytes is SIZE_MAX on ESP (1). Unfragmented frame."
+      "moved_by": "#2143 (arena trait: the stored value shares its receive segment)",
+      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store shares that segment, since the static arena always shares (RFC-0022 Amendment 3) (0). Unfragmented frame, trailer-less payload."
     },
     {
       "id": "httpd-ws rx @1024",
       "target": "MID",
       "source": "static",
       "payload": 1024,
-      "value": 2048,
+      "value": 1024,
       "goal": 1024,
-      "moved_by": "#2137 (seeded from the peer-cost study)",
-      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store copies it again, since kShareThresholdBytes is SIZE_MAX on ESP (1). Unfragmented frame."
+      "moved_by": "#2143 (arena trait: the stored value shares its receive segment)",
+      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store shares that segment, since the static arena always shares (RFC-0022 Amendment 3) (0). Unfragmented frame, trailer-less payload."
     },
     {
       "id": "httpd-ws rx @4096",
       "target": "MID",
       "source": "static",
       "payload": 4096,
-      "value": 8192,
+      "value": 4096,
       "goal": 4096,
-      "moved_by": "#2137 (seeded from the peer-cost study)",
-      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store copies it again, since kShareThresholdBytes is SIZE_MAX on ESP (1). Unfragmented frame."
+      "moved_by": "#2143 (arena trait: the stored value shares its receive segment)",
+      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store shares that segment, since the static arena always shares (RFC-0022 Amendment 3) (0). Unfragmented frame, trailer-less payload."
     },
     {
       "id": "httpd-ws rx @16384",
       "target": "MID",
       "source": "static",
       "payload": 16384,
-      "value": 32768,
+      "value": 16384,
       "goal": 16384,
-      "moved_by": "#2137 (seeded from the peer-cost study)",
-      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store copies it again, since kShareThresholdBytes is SIZE_MAX on ESP (1). Unfragmented frame."
+      "moved_by": "#2143 (arena trait: the stored value shares its receive segment)",
+      "basis": "httpd_ws_link.cpp on_data_frame: httpd_ws_recv_frame copies the lwIP pbuf into a segment (1); the LKV store shares that segment, since the static arena always shares (RFC-0022 Amendment 3) (0). Unfragmented frame, trailer-less payload."
     },
     {
       "id": "esp_ws_client send @64",

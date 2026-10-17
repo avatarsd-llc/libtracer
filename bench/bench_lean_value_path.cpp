@@ -54,13 +54,15 @@
  *   egress-queued-copy  the same queue with the pre-slice-9 fill: the whole frame copied into
  *                  the slot. The row slice 9 retires, kept for scale.
  *   ingress-copy   a FWD{WRITE} frame resolved through the terminus (view tier) whose value
- *                  TLV is BELOW the vertex's copy-or-share threshold (the build default,
- *                  `config_t::kShareThresholdBytes`): the ownership copy, landing inline in
- *                  the value's own block (RFC-0028 §5.1 / §5.3). The frame asks for a reply
- *                  (non-empty src), so the window also holds the reply's assembly.
- *   ingress-pin    the SAME arm — same vertex, same default threshold — at a size AT OR ABOVE
- *                  it: the value links the receive segment (ADR-0042 §3), a refcount share.
- *                  One arm, two rows: the size alone picks the row (RFC-0028 §6.5's gate).
+ *                  the build's block source COPIES for a default-hint vertex (RFC-0022
+ *                  Amendment 3: on the slab pool, a receive block of a larger class than the
+ *                  copy would draw): the ownership copy, landing inline in the value's own
+ *                  block (RFC-0028 §5.1). The frame asks for a reply (non-empty src), so the
+ *                  window also holds the reply's assembly.
+ *   ingress-pin    the SAME arm — same vertex, same default hint — where the trait SHARES:
+ *                  the value links the receive segment (ADR-0042 §3), a refcount share. One
+ *                  arm, two rows: the store a probe frame took picks the row (RFC-0028 §6.5's
+ *                  gate).
  *                  Each frame arrives in its own receive block, minted outside the window the
  *                  way the transport mints it (`view::alloc_rx`, with the ingress-loan reserve
  *                  since slice 9), so the value header is placed IN the block. The resolve is
@@ -353,8 +355,7 @@ void run_egress_queued(std::size_t size, bool retained) {
 
 /** @brief One receive block holding @p n frame bytes, minted as the transport mints it. */
 view_t mint_rx(std::span<const std::byte> frame) {
-    tr::view::rx_block_t blk =
-        tr::view::alloc_rx(tr::mem::heap_backend(), frame.size(), tr::graph::kShareThresholdBytes);
+    tr::view::rx_block_t blk = tr::view::alloc_rx(tr::mem::heap_backend(), frame.size());
     std::memcpy(blk.frame(frame.size()).data(), frame.data(), frame.size());
     return blk.take(frame.size());
 }
@@ -384,11 +385,17 @@ void run_ingress(std::size_t size, bool acked) {
         g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     tr::graph::op_resolver_t r(g);
     const std::vector<std::byte> bytes = make_write_frame(size, acked);
-    // ONE arm (RFC-0028 §6.5): the vertex keeps the build's default threshold, and the value
-    // TLV's size alone decides whether this row is the copy or the share. The TLV is the
-    // payload plus its 4-byte header, so 4096 B of payload is already at the host default.
-    const std::size_t tlv = size + 4;
-    const bool share = tlv >= g.share_threshold_bytes(v);
+    // ONE arm (RFC-0028 §6.5): the vertex keeps the default hint, and the build's block
+    // source decides whether this row is the copy or the share (RFC-0022 Amendment 3). A probe
+    // frame, resolved before the window, says which store this size takes.
+    {
+        rope_t one;
+        one.append(mint_rx(bytes));
+        const auto fv = tr::wire::tlv_view_t::over(std::move(one));
+        if (fv) (void)r.resolve(*fv);
+    }
+    const auto probe = g.read(v);
+    const bool share = probe.has_value() && !(*probe)->is_inline();
     // Every frame gets its OWN receive block, minted OUTSIDE the window (a transport mints it
     // on receive, and a loaned reserve is claimed once per block); the window holds the
     // terminus decode, the write, and — when the frame asks for one — the reply assembly.

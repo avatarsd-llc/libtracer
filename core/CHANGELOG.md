@@ -16,6 +16,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **Copy-or-share is a compile-time trait of the block source plus a per-vertex hint;
+  `config_t::kShareThresholdBytes` and `vertex_policy_t::share_threshold_bytes` are gone
+  ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143), RFC-0022 Amendment 3).**
+  Whether a trailer-less written value keeps its inbound receive block (shared, zero copy) or
+  is copied into the value's own block is now the build's answer, decided at compile time
+  (`tr::mem::share_fits`): the static arena and the heap root always share, and the host slab
+  pool shares when a copy would draw a block no smaller than the one the value already sits in:
+  a class no smaller inside the size-class table, and no fewer bytes above its last row (64 KiB
+  + 48 B), where the pool draws exact blocks. A vertex may declare `vertex_policy_t::share_hint` (`share_hint_t::DEFAULT`, `SHARE`
+  or `COPY`), read back with `graph_t::share_hint(v)`. A borrowed span and a trailered TLV are
+  copied whatever the hint, and a value spanning more than one receive link (a reassembled CAN
+  group) is copied unless the vertex declares `SHARE`, so a default value is always one link. On the host this shares a 1 KiB value received in an exact-size
+  block, which the 4,096 B threshold used to copy; on ESP-IDF the arena now shares by default
+  where the component used to copy always. Also deleted: `graph_t::share_threshold_bytes(v)`,
+  `tr::graph::kShareThresholdBytes` and `saturate_threshold`.
+  **Migration:** drop `kShareThresholdBytes` from a `config_override.hpp`. Replace
+  `{.share_threshold_bytes = SIZE_MAX}` with `{.share_hint = share_hint_t::COPY}`, `0` with
+  `share_hint_t::SHARE`, and any other byte count with the default (or `COPY` for a long-held
+  value on a small receive pool).
+- **`view::alloc_rx(backend, len)` drops `loan_min`; the ingress-loan reserve is taken only
+  where it is free ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143)).** The
+  RFC-0028 §6.9 reserve now lands on a receive block only when the frame plus `kRxLoanBytes`
+  stays in the frame's own size class (`tr::mem::rx_loan_free`), and never on the heap root,
+  whose blocks are exact. `length_prefix_framer_t::on_prefix` takes `bool loan` in place of
+  `std::size_t loan_min`. **Migration:** delete the third argument of `alloc_rx`; pass `true`
+  for a threshold to `on_prefix`, or nothing for `SIZE_MAX`.
+
 - **Every reclaim refusal is answered and counted; `graph_t::deferred_release_drops()` is
   gone ([#2117](https://github.com/avatarsd-llc/libtracer/issues/2117)).** An `unsubscribe`
   whose deferred release hook finds no parking slot now answers `BACKPRESSURE` instead of `{}`:
@@ -87,6 +114,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `schema:subscribers` and answer `SCHEMA_NOT_FOUND`.
 
 ### Added
+
+- **`size_class_ladder_t::ceiling(bytes)` and `default_config_t::size_classes_t`
+  ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143)).** The class a request of
+  `bytes` lands in, computed from the ladder's parameters by arithmetic, with no table (the
+  smallest row no smaller than `bytes`, or `bytes` itself above the last row), and the ladder
+  type the default `kSizeClasses` is built from. `tr::mem::class_ceiling` uses it on the host
+  slab build with the default table.
 
 - **`config_t::kCrc32cSlices` picks the portable CRC-32C fold's tables
   ([#2116](https://github.com/avatarsd-llc/libtracer/issues/2116)).** 8, the default on every

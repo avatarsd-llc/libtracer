@@ -264,8 +264,8 @@ struct esp_ws_client_config_t {
      *
      * `rx` opts in to OWNING RX delivery: each complete inbound message is copied once out of
      * the read scratch into a receive block drawn from this source — with the RFC-0028 §6.9
-     * ingress-loan reserve when the message is at least `kShareThresholdBytes`, so a terminus
-     * that stores it builds its record in the block — and is delivered as a rope the sink may
+     * ingress-loan reserve where the reserve is free in the source's size class, so a terminus
+     * that shares it builds its record in the block — and is delivered as a rope the sink may
      * keep. An exhausted source is backpressure: the message is dropped and counted on
      * @ref esp_ws_client_link_t::dropped_rx, never satisfied from the heap. `nullptr` (THIS
      * kind's default) keeps borrowed delivery straight out of the scratch, with no per-message
@@ -687,8 +687,8 @@ class esp_ws_client_link_t final : public transport_t {
      *        @ref rx_backend_ and deliver it owning; count and drop if the source refuses.
      *
      * Recv thread only, and reached only when `memory.rx` was named (#1661). The block is
-     * drawn through `view::alloc_rx`, so a message of at least `kShareThresholdBytes` carries
-     * the RFC-0028 §6.9 ingress-loan reserve.
+     * drawn through `view::alloc_rx`, so a message carries the RFC-0028 §6.9 ingress-loan
+     * reserve where it is free.
      *
      * @param len The complete message's length in the scratch.
      */

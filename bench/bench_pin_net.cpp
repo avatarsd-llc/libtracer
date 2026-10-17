@@ -37,16 +37,16 @@
  *
  * @section pin_net_control What the control arm is
  *
- * **Arm B, COPY-ALWAYS — this same binary run at threshold `SIZE_MAX`**: the one-copy store
+ * **Arm B, COPY-ALWAYS — this same binary run with the `COPY` hint**: the one-copy store
  * branch (since RFC-0028 slice 5, into the value's own inline block), reached on the same
  * binary, the same pool and the same transport as every sharing arm.
  *
- * The threshold reaches the store site through `vertex_policy_t::share_threshold_bytes`, the
- * owner-declared per-vertex copy-or-share threshold (RFC-0028 §5.3), so arms rotate inside one
- * process.
+ * The hint reaches the store site through `vertex_policy_t::share_hint`, the owner-declared
+ * per-vertex copy-or-share hint (RFC-0022 Amendment 3), so arms rotate inside one process. It is
+ * passed and reported as its value: 0 `DEFAULT`, 1 `SHARE`, 2 `COPY`.
  *
  * Usage:
- *   bench_pin_net sub <port> <threshold> <payload_bytes> <slot_bytes> <slots> <ms> [vertices]
+ *   bench_pin_net sub <port> <hint> <payload_bytes> <slot_bytes> <slots> <ms> [vertices]
  *                     [label]
  *   bench_pin_net pub <port> <payload_bytes> <count> [vertices]
  */
@@ -197,7 +197,7 @@ class recording_pool_t final : public tr::mem::mem_backend_t {
 /** @brief The delivery-COUNTING receiver process. */
 int run_sub(int argc, char** argv) {
     const std::uint16_t port = static_cast<std::uint16_t>(std::atoi(argv[2]));
-    const std::size_t threshold = static_cast<std::size_t>(std::strtoull(argv[3], nullptr, 10));
+    const auto hint = static_cast<tr::graph::share_hint_t>(std::atoi(argv[3]));
     const std::size_t payload = static_cast<std::size_t>(std::atoi(argv[4]));
     const std::size_t slot = static_cast<std::size_t>(std::atoi(argv[5]));
     const std::size_t slots = static_cast<std::size_t>(std::atoi(argv[6]));
@@ -227,8 +227,7 @@ int run_sub(int argc, char** argv) {
     for (std::size_t i = 0; i < vertices; ++i) {
         const tr::graph::vertex_handle_t v =
             node.register_vertex(path_t("/sensor/blob" + std::to_string(i)), role_t::STORED_VALUE);
-        (void)node.set_policy(
-            v, {.share_threshold_bytes = threshold});  // the arm's threshold, owner-declared
+        (void)node.set_policy(v, {.share_hint = hint});  // the arm's hint, owner-declared
     }
     router.add_child("a", t);
 
@@ -271,9 +270,9 @@ int run_sub(int argc, char** argv) {
     const std::uint64_t n = delivered.load();
 
     std::printf(
-        "RESULT_PINNET\t%s\t%zu\t%zu\t%zu\t%zu\t%llu\t%.0f\t%llu\t%llu\t%zu\t%llu\t%zu\t%zu\n",
-        label, threshold, payload, slot, slots, static_cast<unsigned long long>(n),
-        secs > 0 ? static_cast<double>(n) / secs : 0.0,
+        "RESULT_PINNET\t%s\t%u\t%zu\t%zu\t%zu\t%llu\t%.0f\t%llu\t%llu\t%zu\t%llu\t%zu\t%zu\n",
+        label, static_cast<unsigned>(hint), payload, slot, slots,
+        static_cast<unsigned long long>(n), secs > 0 ? static_cast<double>(n) / secs : 0.0,
         static_cast<unsigned long long>(pins.load()),
         static_cast<unsigned long long>(copies.load()), free_floor,
         static_cast<unsigned long long>(t.dropped_rx()), vertices, pool.capacity());
@@ -322,7 +321,7 @@ int main(int argc, char** argv) {
     if (argc >= 8 && std::string_view(argv[1]) == "sub") return run_sub(argc, argv);
     if (argc >= 5 && std::string_view(argv[1]) == "pub") return run_pub(argc, argv);
     std::fprintf(stderr,
-                 "usage: bench_pin_net sub <port> <threshold> <payload> <slot> <slots> <ms> "
+                 "usage: bench_pin_net sub <port> <hint> <payload> <slot> <slots> <ms> "
                  "[vertices] [label]\n"
                  "       bench_pin_net pub <port> <payload> <count> [vertices]\n");
     return 2;

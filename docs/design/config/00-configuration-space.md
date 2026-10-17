@@ -230,7 +230,6 @@ is a knob the fragment does not state at all (#1244).
 | `kHazardReaderSlots` (`config.hpp:default_config_t::kHazardReaderSlots`) | count | 64 | inherited — unused on a chip, which binds the single-writer slot and never builds the domain |
 | `kEdgePinSlots` (`config.hpp:default_config_t::kEdgePinSlots`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_EDGE_PIN_SLOTS 8)`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`config.hpp:default_config_t::kMaxVertexBytes64` / `config.hpp:default_config_t::kMaxVertexBytes32`) | RAM ratchet | 88 / 64 | the preset — deliberately not overridable |
-| `kShareThresholdBytes` (`config.hpp:default_config_t::kShareThresholdBytes`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0}`) |
 | `kSizeClasses` (`config.hpp:default_config_t::kSizeClasses`) | size-class table | 81 rows: 16–128 B by 16, then eight per doubling to 64 KiB, then 64 KiB plus a 48 B segment header — the host slab pool's classes (#1777, #1990), and the static arena's where there is no slab pool (#1783) | inherited — the static arena's classes |
 | `kSlabPool` (`config.hpp:default_config_t::kSlabPool`) | allocator choice | `true` — the host default root is a slab pool with value, table and net sub-pools (#1777); `false` makes it a static arena of `kArenaBytes`, with no heap (#1783) | `false`, the static arena (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr bool kSlabPool = false`) |
 | `kArenaBytes` (`config.hpp:default_config_t::kArenaBytes`) | size | 32,768 — the static arena behind the MCU default root, read only where `kSlabPool` is `false` (#1783); its free-list heads cover only the size classes no larger than it, and 0 compiles no arena at all and makes the platform heap the default root (`tr::mem::kHeapRoot`, #2090) | menuconfig `CONFIG_LIBTRACER_ARENA_BYTES` (0 via `CONFIG_LIBTRACER_DEFAULT_ROOT_HEAP`), 32,768 on a chip and 262,144 on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_ARENA_BYTES ${CONFIG_LIBTRACER_ARENA_BYTES})`) |
@@ -257,10 +256,10 @@ target and `guard_t`) and `LIBTRACER_PIN_INSTRUMENT` (folded into `kInstrumentCo
 list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **twenty-one knobs, all named, all
+the reference, not this table. What matters here is the shape: **twenty knobs, all named, all
 finite.** Four are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`,
-`kSlabClassCap`), one is a padding width, one is a per-target RAM ceiling, five are sizes
-(`kShareThresholdBytes`, the slab pool's size-class table `kSizeClasses`, its base slab
+`kSlabClassCap`), one is a padding width, one is a per-target RAM ceiling, four are sizes
+(the slab pool's size-class table `kSizeClasses`, its base slab
 `kSlabBytes`, the MCU static arena `kArenaBytes`, and the thread stack size
 `kSelfHealWorkerStackBytes`), two are an ingress budget
 (`kRxDrainFrames` and `kRxDrainBytes`, the frames and bytes a receive context reads before it
@@ -283,19 +282,19 @@ supplies (#1664). `kFaultInjection` is its twin for the test-only fault-injectio
 (`probe_fail_hook` and three transport seams): closed out, the default allocation path carries
 no hook branch and no hook variable reaches the archive (#1719).
 
-Several of the twenty-one carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`,
-`kShareThresholdBytes`, `kSizeClasses`, `kSlabPool`, `kSlabBytes` and `kSlabClassCap` are preset members: an application moves them by declaring its own
-traits type, not by passing `-D`. `kShareThresholdBytes` is the copy-or-share threshold of
-[RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md)
-§5.3 — a trailer-less written value of at least that many bytes is stored as a subview of the
-inbound frame (shared, zero copy); a smaller one is copied into the value's own block. Both
-branches are correct, so the threshold selects which correct branch is cheaper rather than
-imposing a limit: sharing holds the whole owning RX **segment** for the value's lifetime, which
-is the consumer's retention budget to price. It replaced the RFC-0022 §3.D amplification ratio
-`K` (D3: the variable measured was the absolute size). The host default is 4,096 B; the ESP-IDF
-component binds `SIZE_MAX` (copy always), the posture it shipped before the knob. It is also the
-one knob with a per-vertex value (`vertex_policy_t::share_threshold_bytes`), for an owner that knows
-one vertex's traffic differs from the target's default.
+Several of the twenty carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`,
+`kSizeClasses`, `kSlabPool`, `kSlabBytes` and `kSlabClassCap` are preset members: an application moves them by declaring its own
+traits type, not by passing `-D`.
+
+Copy-or-share is no longer a knob
+([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
+Amendment 3, #2143). The byte threshold `kShareThresholdBytes` was deleted: whether a trailer-less
+written value is stored as a subview of its inbound receive block (shared, zero copy) or copied
+into the value's own block is a trait of the block source the build composes, read from
+`kSlabPool`, `kArenaBytes` and `kSizeClasses` (`tr::mem::share_fits`). The static arena and the
+heap root always share; the slab pool shares when a copy would draw a block no smaller than the one
+the value already sits in (above the last class row, where blocks are exact, no fewer bytes). An owner whose value is long-lived declares
+`vertex_policy_t::share_hint = COPY` (or `SHARE`), the one per-vertex say in it.
 
 The ESP-IDF component exposes exactly five options — `LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}` and
 `LIBTRACER_VERTEX_LOCK_STRIPES` — so an integrator reaching for the full ACL policy, the hazard
