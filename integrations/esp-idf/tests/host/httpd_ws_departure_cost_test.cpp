@@ -209,8 +209,10 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     task.run_on_task([] { fake_httpd::instance().close_all(); });
     link.reset();
     // #2202: with no WebSocket client left on the adopted server, nothing can reach the
-    // handler gate, so the teardown returns it with everything else it drew.
-    check(state.live.load() == 0, "no client left: the teardown returned the gate too");
+    // handler gate. The teardown hands it to its detach item without waiting, and the item
+    // returns it on the server task with everything else the link drew.
+    check(wait_for([&] { return state.live.load() == 0; }, kPatience),
+          "no client left: the gate is returned once the server task runs the item");
 }
 
 /**
@@ -228,6 +230,7 @@ void test_a_client_left_open_keeps_the_gate() {
     check(link->ok(), "the adopting link registered its URI");
     fake_httpd::instance().open_session(710);  // upgraded; never sends a frame
     link.reset();
+    task.run_on_task([] {});  // every item the teardown queued has run
     check(state.live.load() == 1, "the gate, and only the gate, is kept");
     task.run_on_task([] { fake_httpd::instance().close_all(); });
 }
