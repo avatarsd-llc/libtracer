@@ -39,6 +39,22 @@ namespace {
 namespace g = tr::graph;
 using tr::testing::check;
 
+/** @brief A fragment that sets only the pin slots, as the ESP-IDF component's does (#2111). */
+struct pins_only_config_t : g::default_config_t {
+    static constexpr std::size_t kEdgePinSlots = 8;
+};
+/** @brief A fragment that sets both knobs. */
+struct both_config_t : g::default_config_t {
+    static constexpr std::size_t kEdgePinSlots = 8;
+    static constexpr std::size_t kQsbrParticipants = 5;
+};
+static_assert(g::qsbr_participants_v<g::default_config_t> == g::default_config_t::kEdgePinSlots,
+              "core's default config: participants follow its own pin slots");
+static_assert(g::qsbr_participants_v<pins_only_config_t> == 8,
+              "a fragment that sets only kEdgePinSlots gets that many participants, not 32");
+static_assert(g::qsbr_participants_v<both_config_t> == 5,
+              "a fragment that declares kQsbrParticipants gets exactly what it declares");
+
 /** @brief The spelling a fragment uses for this build's LKV slot. */
 constexpr std::string_view lkv_slot_name() {
     if constexpr (std::is_same_v<g::lkv_slot_t, g::hazard_slot_t>) {

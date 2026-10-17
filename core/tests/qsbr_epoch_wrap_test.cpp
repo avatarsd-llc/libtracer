@@ -27,6 +27,8 @@ using tr::testing::check;
 
 /** @brief The test's own domain: no library call site and no other thread touches it. */
 constinit q::registry_t g_domain{};
+/** @brief The test domain's retired slots, beside it (#2111). */
+constinit q::retired_table_t g_table{};
 
 void set_epoch(std::uint32_t e, q::registry_t& d = g_domain) {
     d.ctl.epoch.store(e, std::memory_order_seq_cst);
@@ -182,22 +184,22 @@ void protocol_on_one_thread() {
     set_epoch(7);
     g_released = 0;
     int one = 1;
-    check(q::retire(&one, count_release, g_domain) && g_released == 1,
+    check(q::retire(&one, count_release, g_domain, g_table) && g_released == 1,
           "with nobody inside, a retire releases inline");
     open_at(0);
     int ten = 10;
-    check(q::retire(&ten, count_release, g_domain) && g_released == 1,
+    check(q::retire(&ten, count_release, g_domain, g_table) && g_released == 1,
           "a bracket open at the retire parks the pair");
     check(g_domain.ctl.live.load() == 1, "in the shared table");
     open_at(1);  // opened after the retire: it must not hold the pair
-    q::drain(g_domain);
+    q::drain(g_domain, g_table);
     check(g_released == 1, "the drain while participant 0 is inside frees nothing");
     close_at(0);
-    q::drain(g_domain);
+    q::drain(g_domain, g_table);
     check(g_released == 11 && g_domain.ctl.live.load() == 0,
           "once participant 0 closes, the drain frees it, though participant 1 is still inside");
     close_at(1);
-    q::drain(g_domain);
+    q::drain(g_domain, g_table);
     check(g_released == 11, "and the hook ran once");
     check(q::registry().ctl.live.load() == 0, "the default domain saw none of it");
 }
