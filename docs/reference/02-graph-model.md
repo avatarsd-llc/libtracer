@@ -656,7 +656,7 @@ compile-time trait, `tr::mem::share_fits`; #2143 resolved the heap root):
 | ---- | ---- | ---- |
 | **static arena** (`kSlabPool = false`, the ESP-IDF component) | share always | frame ingress draws each receive block at the frame's exact length from the link's own source (ADR-0087 §1), so a shared value holds no more than a copy would, and a copy would be a second block from the same fixed arena |
 | **heap root** (`kArenaBytes = 0`) | share always | the heap draws every block at its exact size, so a copy never draws a smaller block than the one already held |
-| **slab pool** (the host default) | share on a class fit | it shares when a copy would draw a size class no smaller than the receive block already held, and copies otherwise — a small value inside a large receive block is copied out so the block goes back |
+| **slab pool** (the host default) | share on a class fit | it shares when a copy would draw a block no smaller than the one the value already sits in (a class no smaller inside the table; above the last row, where blocks are exact, no fewer bytes), and copies otherwise — a small value inside a large receive block is copied out so the block goes back |
 
 A vertex declares `COPY` to override the default where the value is long-held, and `SHARE`
 where it knows the borrow is worth it. Bytes the receive path does not own (a borrowed span) and
