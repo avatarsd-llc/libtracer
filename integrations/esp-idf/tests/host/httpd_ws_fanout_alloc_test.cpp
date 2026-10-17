@@ -402,6 +402,39 @@ void test_a_wide_fanout_allocates_nothing_per_peer() {
     reset(link);
 }
 
+// ---------------------------------------------------------------------------
+// 4 — a broadcast rings ONE doorbell, however many peers (#2146).
+// ---------------------------------------------------------------------------
+/**
+ * @brief A burst rings the httpd task once, not once per peer.
+ *
+ * The fake's control queue is set PREEMPTING: each post runs at once, as a higher-priority
+ * httpd task does on silicon, where every post is a hand-off to that task and back. Rung
+ * per frame, the flush each post ran cleared the link's "flush posted" flag before the next
+ * peer's frame was stored, so a broadcast to 8 peers posted 8 flushes (about 24 task
+ * switches on silicon). Rung once after every frame is stored, it posts one, and that one
+ * flush writes all 8.
+ */
+void test_a_broadcast_rings_one_doorbell() {
+    std::printf("a broadcast to eight peers, against a preempting httpd task:\n");
+    auto link = make_link();
+    check(link->ok(), "the adopting link registered its URI");
+    const std::size_t peers = 8;
+    for (std::size_t i = 0; i < peers; ++i) claim(1000 + static_cast<int>(i));
+    drain();
+
+    fake_httpd::instance().set_preempting(true);
+    const std::size_t posted_before = fake_httpd::instance().work_posted();
+    const std::size_t sent_before = fake_httpd::instance().frames_sent();
+    broadcast(*link);
+    fake_httpd::instance().set_preempting(false);
+    check_eq(fake_httpd::instance().work_posted() - posted_before, 1,
+             "the broadcast posted ONE flush to the httpd task");
+    check_eq(fake_httpd::instance().frames_sent() - sent_before, peers,
+             "and that one flush wrote every peer's frame");
+    reset(link);
+}
+
 }  // namespace
 
 int main() {
@@ -409,6 +442,7 @@ int main() {
     test_a_broadcast_allocates_nothing();
     test_the_fanout_reaches_every_open_peer_exactly_once();
     test_a_wide_fanout_allocates_nothing_per_peer();
+    test_a_broadcast_rings_one_doorbell();
     std::printf("%s\n", g_failures == 0 ? "OK" : "FAILED");
     return g_failures == 0 ? 0 : 1;
 }

@@ -39,6 +39,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`httpd_ws_link_t` rings the httpd task once per burst, not once per peer
+  ([#2146](https://github.com/avatarsd-llc/libtracer/issues/2146)).** A broadcast stores the
+  shared frame in every peer's waiting slot first and then wakes a parked drain and posts the
+  flush once, so one flush writes them all. Before, each peer's store rang on its own, and an
+  httpd task of higher priority than the producer ran a flush for every peer: a broadcast to
+  8 peers cost 8 posted flushes, about 24 task switches, where it now costs 1 flush and about
+  3 [est, a static count from code; silicon measurement pending]. A refused flush still takes
+  back, and counts, every frame it would have written.
 - **A unicore chip build binds `kSingleCore`, so its frame bracket pays no fence
   ([#2126](https://github.com/avatarsd-llc/libtracer/issues/2126)).** The generated config
   fragment derives it from `CONFIG_FREERTOS_UNICORE` on a chip target; the `linux` target and
