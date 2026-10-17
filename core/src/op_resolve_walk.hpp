@@ -61,6 +61,27 @@ using wire::type_t;
 
 namespace {
 
+/** @brief What @ref held_block_of reads in place of a missing link: no owner, no bytes. */
+const view_t kNoLink{};
+/** @brief What @ref held_block_of reads in place of a missing owner: no bytes. */
+const view::segment_t kNoOwner{nullptr, {}};
+
+/**
+ * @brief The block a stored value already sits in, for @ref tr::mem::share_fits: the one block
+ *        of @p link's owning segment when @p link (null for none) is owned and covers @p need
+ *        bytes, else `SIZE_MAX` (borrowed, or more than one link).
+ *
+ * Branch-free, so the copy-or-share decision stays the one branch it was (#2143): a missing link
+ * or owner is replaced by a sentinel through a select, never tested by a jump.
+ */
+[[nodiscard]] std::size_t held_block_of(const view_t* link, std::size_t need) noexcept {
+    const view_t& l = *(link != nullptr ? link : &kNoLink);
+    const view::segment_t* const owner = l.owner.get();
+    const std::size_t bytes = (owner != nullptr ? owner : &kNoOwner)->bytes.size();
+    const bool one = (owner != nullptr) & (l.length >= need);
+    return one ? mem::segment_block_bytes(bytes, alignof(std::max_align_t)) : SIZE_MAX;
+}
+
 /**
  * @brief The node-reader concept (ADR-0053 §7): the terminus resolves through ONE templated walk
  *        over a decoded-TLV node, so the span arena and the lazy rope view share the resolver
@@ -178,8 +199,7 @@ struct arena_node {
      *        frame segment's one block, or `SIZE_MAX` when the frame is borrowed.
      */
     [[nodiscard]] std::size_t held_block(const view::view_t* frame_view) const noexcept {
-        if (frame_view == nullptr || !frame_view->owner) return SIZE_MAX;
-        return mem::segment_block_bytes(frame_view->owner->bytes.size(), alignof(std::max_align_t));
+        return held_block_of(frame_view, 0);
     }
 
     /**
@@ -541,10 +561,12 @@ template <class N>
 [[nodiscard]] stored_tlv_t share_or_copy_tlv(const N& node, const view::view_t* frame_view,
                                              share_hint_t hint, mem::block_source_t& source,
                                              mem::mem_backend_t& flat) {
-    if (hint != share_hint_t::COPY && trailer_less(node) &&
-        (hint == share_hint_t::SHARE ||
-         mem::share_fits(node.held_block(frame_view),
-                         value_t::inline_bytes_for(node.wire_size())))) {
+    // One branch, as the threshold compare it replaces was: every operand is computed and
+    // combined with `&` / `|`, so the hint and the trait add selects, not branches.
+    const bool fits =
+        mem::share_fits(node.held_block(frame_view), value_t::inline_bytes_for(node.wire_size()));
+    if (trailer_less(node) & (hint != share_hint_t::COPY) &
+        ((hint == share_hint_t::SHARE) | fits)) {
         if (std::optional<view::rope_t> shared = node.pin_wire(frame_view)) {
             instrument::tick_pin();
             return {std::move(*shared), value_ref_t{}};

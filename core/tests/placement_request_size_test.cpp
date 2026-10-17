@@ -47,6 +47,7 @@
 #include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
+#include "libtracer/placement.hpp"
 #include "libtracer/segment.hpp"
 #include "test_support.hpp"
 
@@ -145,6 +146,46 @@ void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept 
 void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept {
     uncounted_free(p, 0);
 }
+
+namespace {
+
+// #2143: the O(1) class lookup behind the copy-or-share trait, pinned at every row edge at
+// compile time. Exactly at a row it answers the row, one byte past it answers the next row,
+// and above the last row it answers the request's own exact size.
+constexpr bool class_ceiling_pins_every_edge() {
+    const auto& t = tr::graph::config_t::kSizeClasses;
+    const std::size_t n = std::size(t);
+    if (tr::mem::class_ceiling(0) != t[0] || tr::mem::class_ceiling(1) != t[0]) return false;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (tr::mem::class_ceiling(t[i]) != t[i]) return false;
+        if (tr::mem::class_ceiling(t[i] + 1) != (i + 1 < n ? t[i + 1] : t[i] + 1)) return false;
+    }
+    const std::size_t last = t[n - 1];
+    return tr::mem::class_ceiling(last + 48) == last + 48 &&
+           tr::mem::class_ceiling(4 * last) == 4 * last;
+}
+static_assert(class_ceiling_pins_every_edge());
+
+// The slab trait at the same edges: a value whose block is in the class its copy would draw
+// shares; one a class above it copies, held at the row edge or one byte past it; above the last
+// row it shares only when the copy is no smaller in bytes; a multi-link value never shares.
+constexpr bool share_fits_pins_the_edges() {
+    if (!tr::mem::kSlabPool) return true;
+    const auto& t = tr::graph::config_t::kSizeClasses;
+    const std::size_t n = std::size(t);
+    for (std::size_t i = 0; i + 1 < n; ++i) {
+        if (!tr::mem::share_fits(t[i], t[i])) return false;      // held at the copy's row
+        if (!tr::mem::share_fits(t[i], t[i] - 1)) return false;  // copy one byte under it
+        if (tr::mem::share_fits(t[i] + 1, t[i])) return false;   // held one byte past it
+        if (tr::mem::share_fits(t[i + 1], t[i])) return false;   // held at the next row
+    }
+    const std::size_t last = t[n - 1];
+    return tr::mem::share_fits(last + 4096, last + 4096) &&
+           !tr::mem::share_fits(last + 4096, last + 48) && !tr::mem::share_fits(SIZE_MAX, 64);
+}
+static_assert(share_fits_pins_the_edges());
+
+}  // namespace
 
 namespace {
 

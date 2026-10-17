@@ -22,8 +22,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Whether a trailer-less written value keeps its inbound receive block (shared, zero copy) or
   is copied into the value's own block is now the build's answer, decided at compile time
   (`tr::mem::share_fits`): the static arena and the heap root always share, and the host slab
-  pool shares when a copy would draw a size class no smaller than the receive block already
-  held. A vertex may declare `vertex_policy_t::share_hint` (`share_hint_t::DEFAULT`, `SHARE`
+  pool shares when a copy would draw a block no smaller than the one the value already sits in:
+  a class no smaller inside the size-class table, and no fewer bytes above its last row (64 KiB
+  + 48 B), where the pool draws exact blocks. A vertex may declare `vertex_policy_t::share_hint` (`share_hint_t::DEFAULT`, `SHARE`
   or `COPY`), read back with `graph_t::share_hint(v)`. A borrowed span and a trailered TLV are
   copied whatever the hint, and a value spanning more than one receive link (a reassembled CAN
   group) is copied unless the vertex declares `SHARE`, so a default value is always one link. On the host this shares a 1 KiB value received in an exact-size
