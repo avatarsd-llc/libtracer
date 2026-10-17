@@ -602,6 +602,16 @@ class stream_endpoint_t : protected posix_endpoint_t {
     static void condemn_fd(int fd) noexcept;
 
     /**
+     * @brief The one-peer @ref transport_t::close_frozen_peers (#2198): a dialer's, or a
+     *        one-peer listener's. Only the TX direction is owed here: a frame held on the wire
+     *        that moved no byte since the last check. A frozen peer is shut down inside its
+     *        writer role, so the recv thread runs the ordinary teardown, and counted in
+     *        @ref frozen_closed_.
+     * @return 1 if the peer was closed, else 0.
+     */
+    std::size_t close_frozen_one(std::uint64_t now, std::uint64_t deadline);
+
+    /**
      * @brief Put one record on the wire toward the ONE peer through its egress (ADR-0087 §2).
      *
      * The single-peer senders' one door. A publisher that finds the peer idle takes the
@@ -617,6 +627,13 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *               when the record has to wait.
      * @param lane   The ring it waits in: its vertex's, or the control lane (a default).
      */
+    /** @brief Record @p s 's bytes in @p moved, a peer's TX progress flag (#2198); returns
+     *         @p s. */
+    static egress_step_t note_moved(std::atomic<bool>& moved, egress_step_t s) noexcept {
+        if (s.moved != 0) moved.store(true, std::memory_order_relaxed);
+        return s;
+    }
+
     template <class Direct>
     void egress_send(function_ref_t<egress_frame_t*()> frame, Direct&& direct,
                      const graph::delivery_lane_t& lane = {}) {
@@ -628,12 +645,12 @@ class stream_endpoint_t : protected posix_endpoint_t {
                 fd = conn_fd_.load(std::memory_order_acquire);
                 // No live peer (still dialing, or torn down) => a counted drop.
                 if (fd < 0) return egress_step_t{0, false, true};
-                return std::forward<Direct>(direct)(fd, bound);
+                return note_moved(tx_moved_, std::forward<Direct>(direct)(fd, bound));
             },
             [&](const egress_frame_t& f, std::size_t off) {
                 fd = conn_fd_.load(std::memory_order_acquire);
                 if (fd < 0) return egress_step_t{0, false, true};
-                return write_frame(fd, f, off, bound, false);
+                return note_moved(tx_moved_, write_frame(fd, f, off, bound, false));
             },
             [&] { condemn_fd(fd); });
         note_egress(r);
@@ -691,6 +708,10 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *         the number every per-record send bound on this endpoint derives from
      *         (`derive_send_bound_ms`). Set once at construction, read-only after. */
     std::uint32_t liveness_window_ms_ = 0;
+    /** @brief A byte of ours went out to the ONE peer since the last liveness check (#2198), in
+     *         the hole after @ref liveness_window_ms_.
+     *         Set by the writer, taken by @ref close_frozen_one; a new session sets it. */
+    std::atomic<bool> tx_moved_{true};
     /** @brief Write turns that found the peer's socket full and moved nothing (#838, #2144)
      *         — the "how often did a stalled peer refuse us" counter, each one a strike.
      *         Relaxed: a diagnostic tally, not a synchronizer. Word-wide, not 64-bit
@@ -700,6 +721,12 @@ class stream_endpoint_t : protected posix_endpoint_t {
     /** @brief Outbound frames this link never put on the wire, every cause: a refused build,
      *         a closed peer, a full ring, a failed write. The link's `dropped_tx`. */
     std::atomic<std::size_t> dropped_tx_{0};
+    /** @brief Peers the application's liveness check closed as frozen (#2198) — every one
+     *         counted. Relaxed: a diagnostic tally. */
+    std::atomic<std::size_t> frozen_closed_{0};
+    /** @brief The application's `now` at the last liveness check that found the ONE peer
+     *         moving or owing nothing (#2198). Written only by @ref close_frozen_one. */
+    std::uint64_t live_since_ = 0;
     /** @brief This link's egress store: shared frames, rings, a frame's gather overflow
      *         (@ref write_frame), and a derived class's own link buffers (#1780). */
     mem::block_source_t* io_src_;
@@ -893,6 +920,24 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      */
     [[nodiscard]] bool close_peer(std::string_view peer);
 
+    /**
+     * @brief The application's liveness check over every open peer (#2198,
+     *        @ref transport_t::close_frozen_peers).
+     *
+     * A peer owes TX while a frame waits on its wire, and RX while it has begun a frame or
+     * a handshake and not finished it (@ref mid_frame). One that owed a direction and moved
+     * no byte in it since its record fell below @p deadline is shut down exactly as
+     * @ref close_peer does it, under @ref peers_m_, and counted in @ref frozen_closed. An
+     * idle peer — owing nothing — is never closed.
+     */
+    std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) override;
+
+    /** @brief Peers the application's liveness check closed as frozen, summed over every
+     *         peer this server has carried (#2198). */
+    [[nodiscard]] std::size_t frozen_closed() const noexcept {
+        return frozen_closed_.load(std::memory_order_relaxed);
+    }
+
    protected:
     /** @brief Bytes a session's `p<slot>` name holds, terminator included: `p` and the
      *         widest slot index. */
@@ -916,6 +961,15 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
 
         std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
         std::atomic<bool> open{false}; /**< @brief True while the session may carry frames. */
+        /** @brief A byte of ours went out since the last liveness check (#2198). Set by the
+         *         writer, taken by @ref close_frozen_peers; an accept sets it. */
+        std::atomic<bool> tx_moved{false};
+        /** @brief The peer's socket was readable since the last liveness check (#2198). Set
+         *         by the poll thread, taken by @ref close_frozen_peers; an accept sets it. */
+        std::atomic<bool> rx_moved{false};
+        /** @brief The peer has begun a frame or a handshake and not finished it (#2198):
+         *         @ref mid_frame as of the poll thread's last pass over it. */
+        std::atomic<bool> rx_owed{false};
         /** @brief The peer's routable NAME, `p<slot>` — a pure function of the slot index
          *         (ADR-0073 §2, #426): stamped at accept, moved out by teardown (the
          *         eviction seam), so a reused slot gets the SAME name back. A legal path
@@ -947,6 +1001,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         slot is recycled, so a stalled peer's frames and strikes are never inherited
          *         by its successor in the slot. */
         egress_peer_t egress;
+        /** @brief The application's `now` at the last liveness check that found this peer
+         *         moving, or owing nothing (#2198). Written only by @ref close_frozen_peers,
+         *         under @ref peers_m_. */
+        std::uint64_t live_since = 0;
 
        protected:
         /** @brief Destroyed only as the derived slot it is: the slot table's
@@ -1112,6 +1170,16 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * @param s The slot being freed; its fd is already closed.
      */
     virtual void on_slot_reset(session_base_t& s) = 0;
+
+    /**
+     * @brief @p s 's peer has begun a frame or a handshake it has not finished — the RX half
+     *        of what a liveness check finds owed (#2198). Poll thread, after
+     *        @ref on_readable. Default: never.
+     */
+    [[nodiscard]] virtual bool mid_frame(const session_base_t& s) const {
+        (void)s;
+        return false;
+    }
 
     /**
      * @brief TEST SEAM dispatch: run on the accept path with the fd published and the slot

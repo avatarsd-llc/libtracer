@@ -57,12 +57,14 @@ static_assert(kBusLinks,
               "bind `static constexpr bool kBusLinks = true;` in libtracer/config_override.hpp, "
               "or do not compile this TU.");
 
-// stats_t's layout is what a dashboard or a pinned integrator reads (#2195). Fifteen
-// 32-bit tallies, in this order; a field added, moved or widened fails here first.
-static_assert(sizeof(httpd_ws_link_t::stats_t) == 15 * sizeof(std::uint32_t));
+// stats_t's layout is what a dashboard or a pinned integrator reads (#2195). Sixteen
+// 32-bit tallies, in this order, a new one only ever appended (#2198's peers_frozen); a
+// field added, moved or widened fails here first.
+static_assert(sizeof(httpd_ws_link_t::stats_t) == 16 * sizeof(std::uint32_t));
 static_assert(offsetof(httpd_ws_link_t::stats_t, enqueue_drops) == 0);
 static_assert(offsetof(httpd_ws_link_t::stats_t, tx_conflated) == 4);
 static_assert(offsetof(httpd_ws_link_t::stats_t, rx_drain_waits) == 56);
+static_assert(offsetof(httpd_ws_link_t::stats_t, peers_frozen) == 60);
 
 namespace {
 
@@ -1211,6 +1213,15 @@ struct httpd_ws_link_t::session_t {
     std::uint32_t tx_stalls = 0;
     /** @brief The last write of this session's wire frame took zero bytes (tx_m). */
     bool tx_refused = false;
+    /** @brief A byte of this session's frames went out since the last liveness check
+     *         (#2198, tx_m). Set by the flush, taken by `close_frozen_peers`. */
+    bool tx_moved = true;
+    /** @brief The liveness check found this session frozen; the next flush condemns it
+     *         (#2198, tx_m). */
+    bool tx_frozen = false;
+    /** @brief The application's `now` at the last liveness check that found this session
+     *         moving or owing nothing (#2198, tx_m). */
+    std::uint64_t live_since = 0;
     /**
      * @brief This session has not authenticated yet — it exists, and it is served NOTHING
      *        (peers_m_).
@@ -3308,6 +3319,8 @@ httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer
         slot->tx_tail = nullptr;
         slot->tx_stalls = 0;  // the stall count is the departed session's, like its frames
         slot->tx_refused = false;
+        slot->tx_moved = true;  // and so is its liveness record (#2198)
+        slot->tx_frozen = false;
     }
     // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that hung up
     // leaves its subscriber edges behind, so the routing plane's eviction hook
@@ -3788,6 +3801,7 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     s.tx_send_failed = tx_send_failed_.load(std::memory_order_relaxed);
     s.peers_refused = peers_refused_.load(std::memory_order_relaxed);
     s.sessions_condemned = sessions_condemned_.load(std::memory_order_relaxed);
+    s.peers_frozen = peers_frozen_.load(std::memory_order_relaxed);
     s.rx_dropped_oversize = rx_dropped_oversize_.load(std::memory_order_relaxed);
     s.rx_dropped_alloc = rx_dropped_alloc_.load(std::memory_order_relaxed);
     s.rx_dropped_pool = rx_dropped_pool_.load(std::memory_order_relaxed);
@@ -4246,6 +4260,7 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
         tx_frame_t* const f = &s->tx;
         tx_frame_t superseded;
         bool stalled = false;
+        bool frozen = false;
         {
             // The oldest waiting frame moves onto the wire when the wire is free. A wire frame
             // not one byte of which has gone out yet is no more owed to the peer than a
@@ -4265,6 +4280,7 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
             }
             if (!f->held()) return progress;
             stalled = s->tx_stalls >= kTxStallStrikes;
+            frozen = std::exchange(s->tx_frozen, false);
         }
         if (superseded.held()) note_tx_conflated(session_ref_t{s, superseded.gen});
         release_frame(superseded);
@@ -4278,6 +4294,12 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
             note_tx_skip(to);
             progress = true;
             continue;
+        }
+        if (frozen) {
+            // The application's liveness check found this peer owing bytes and taking none
+            // past its deadline (#2198): condemned here, on the task that owns the fd.
+            close_frozen(to);
+            return true;
         }
         if (stalled) {
             // kTxStallStrikes large frames were refused while this peer pinned the class and
@@ -4298,6 +4320,7 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
             // none arms the next refused large draw to count (note_large_pinned). A full queue
             // never counts: it is the peer's pace, and a burst fills it on a healthy socket.
             const std::lock_guard lock(s->tx_m);
+            s->tx_moved = s->tx_moved || moved;
             if (moved || out != tx_outcome_t::HELD) {
                 s->tx_stalls = 0;
                 s->tx_refused = false;
@@ -4344,6 +4367,51 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
     }
     if (more && h != nullptr) (void)post_flush(h);
     return progress;
+}
+
+std::size_t httpd_ws_link_t::close_frozen_peers(std::uint64_t now, std::uint64_t deadline) {
+    // The verdict here, under each session's tx_m (never with peers_m_ under it); the close
+    // on the httpd task, through one posted flush. No clock is read: `now` is the caller's.
+    session_t* batch[kFanoutChunk];
+    std::size_t next = 0;
+    std::size_t frozen = 0;
+    for (bool more = true; more;) {
+        std::size_t n = 0;
+        {
+            const std::lock_guard lock(peers_m_);
+            while (next < slots_.size() && n < kFanoutChunk) batch[n++] = slots_[next++];
+            more = next < slots_.size();
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            session_t* const s = batch[i];
+            const std::lock_guard lock(s->tx_m);
+            const bool moved = std::exchange(s->tx_moved, false);
+            const bool owed = s->tx.held() || s->tx_head != nullptr;
+            if (!judge_frozen(!moved && owed, s->live_since, now, deadline)) continue;
+            s->tx_frozen = true;
+            s->live_since = now;
+            ++frozen;
+        }
+    }
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    if (frozen != 0 && h != nullptr) (void)post_flush(h);
+    return frozen;
+}
+
+void httpd_ws_link_t::close_frozen(const session_ref_t& to) {
+    int fd = -1;
+    {
+        // The identity test live_fd makes, and the dead mark note_tx_result sets under the
+        // same lock, so the fan-out stops feeding a peer already condemned.
+        const std::lock_guard lock(peers_m_);
+        session_t* const slot = to.slot;
+        if (slot == nullptr || slot->gen != to.gen || !slot->open || slot->dead) return;
+        slot->dead = true;
+        fd = slot->fd;
+    }
+    peers_frozen_.fetch_add(1, std::memory_order_relaxed);
+    ESP_LOGW(kTag, "peer owed bytes past the application's deadline fd=%d - closing session", fd);
+    condemn(fd);
 }
 
 void httpd_ws_link_t::flush_held() {

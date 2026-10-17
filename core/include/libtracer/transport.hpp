@@ -470,6 +470,24 @@ struct transport_drop_stats_t {
 };
 
 /**
+ * @brief One verdict of the application's liveness check (#2198,
+ *        @ref transport_t::close_frozen_peers), the rule every kind applies per peer.
+ *
+ * @param stuck    The peer owed a direction progress, and that direction moved no byte since
+ *                 the previous check.
+ * @param since    The peer's record: the application's `now` at the last check that found it
+ *                 moving or owing nothing. A peer that is not stuck is stamped @p now here.
+ * @param now      The application's clock reading, as passed to the seam.
+ * @param deadline The oldest record that still counts as alive.
+ * @return True iff the peer is to be closed. The caller re-stamps @p since once it has.
+ */
+[[nodiscard]] constexpr bool judge_frozen(bool stuck, std::uint64_t& since, std::uint64_t now,
+                                          std::uint64_t deadline) noexcept {
+    if (!stuck) since = now;
+    return stuck && since < deadline;
+}
+
+/**
  * @brief A point-to-point (or bus-facet-exposing) transport link: the byte seam
  *        between the routing plane and one wire (ws/tcp/udp/quic/CAN).
  *
@@ -781,6 +799,36 @@ class transport_t {
      * overrides it.
      */
     virtual void shut_down() {}
+
+    /**
+     * @brief The application's liveness check (#2198): close every peer of this link that
+     *        has owed bytes, and moved none of them, since @p deadline.
+     *
+     * A peer OWES bytes in a direction where something waits on it: a frame of ours it has not
+     * taken (TX), or a frame or handshake of its own it has begun and not finished (RX, where
+     * the link tracks one). A peer that owes nothing is idle, and an idle peer is never closed
+     * here. The link records, per peer, the @p now of the last call that found it moving or
+     * owing nothing; a call that finds it owing in a direction with no byte moved since the
+     * previous call, and recorded before @p deadline, closes it as a remote hangup would and
+     * counts the close (each kind names its counter).
+     *
+     * libtracer reads no clock and runs no timer for this: @p now and @p deadline are the
+     * application's, in whatever monotonic unit it picks, and how often it calls is its
+     * cadence. A link whose application never calls this behaves exactly as before. Calls
+     * must not overlap each other on one link; they may race the link's own threads.
+     *
+     * The DEFAULT closes nothing, which is right for a link with no per-peer connection to
+     * hold (an in-process link, a datagram link); a link that holds one overrides it.
+     *
+     * @param now      The application's clock, now.
+     * @param deadline The oldest progress the application accepts (at most @p now).
+     * @return How many peers this call closed.
+     */
+    virtual std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) {
+        (void)now;
+        (void)deadline;
+        return 0;
+    }
 
     /**
      * @brief The owning-delivery capability (ADR-0042 §1): true iff this transport

@@ -120,6 +120,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   64-bit host), is lowered by a narrow build in its override fragment. An advertise whose id names
   another node or another protocol version than the control frame that carried it binds nothing
   and is counted on `dropped_rx()`.
+- **An application-driven liveness check closes frozen peers
+  ([#2198](https://github.com/avatarsd-llc/libtracer/issues/2198)).** New virtual
+  `transport_t::close_frozen_peers(now, deadline)`: the application passes `now` from its own
+  clock and the oldest progress it accepts, and the link closes every peer that owed bytes and
+  moved none since then, the way a remote hangup closes it. A peer owes TX while a frame waits
+  on its wire, and RX (servers) while it has begun a frame or its opening handshake and not
+  finished it; an idle peer is never closed. libtracer reads no clock and runs no timer, and a
+  link whose application never calls it behaves as before. Implemented by
+  `tcp_transport_t`, `ws_client_transport_t`, `tcp_server_transport_t`,
+  `ws_server_transport_t` and `self_heal_link_t` (which forwards to its current socket); the
+  default returns 0, which is what the in-process, UDP and CAN links keep. Each close is
+  counted by the new `frozen_closed()` accessor on the four stream links. Also new:
+  `tr::net::judge_frozen` (the per-peer rule), `egress_t::condemn_held` and
+  `frame_ingress_t::mid_frame()`.
+
 - **`config_t::kCrc32cSlices` picks the portable CRC-32C fold's tables
   ([#2116](https://github.com/avatarsd-llc/libtracer/issues/2116)).** 8, the default on every
   target, is slice-by-8 (8 KiB of `.rodata`); 1 is the byte-at-a-time loop over the 1 KiB base

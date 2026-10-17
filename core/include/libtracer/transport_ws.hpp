@@ -437,6 +437,10 @@ class ws_server_transport_t final : public stream_server_base_t {
     /** @brief Teardown: release the slot's buffers and reset its reassembler. */
     void on_slot_reset(session_base_t& s) override;
 
+    /** @brief The opening handshake is not done, or a frame or a fragmented message is
+     *         part-read (#2198). */
+    [[nodiscard]] bool mid_frame(const session_base_t& s) const override;
+
     /** @brief Read the opening handshake; answer 101 and feed what was pipelined behind it
      *         to frame ingress once it is whole. False ⇒ teardown. */
     bool read_handshake(session_t& s, int fd);
@@ -597,6 +601,18 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     /** @brief The peer liveness window this link bounds its sends by, ms, as constructed
      *         (`0` ⇒ `kDefaultLivenessWindowMs`) (#838). */
     [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
+
+    /** @brief The application's liveness check (#2198, @ref transport_t::close_frozen_peers):
+     *         a frame held on the wire that moved no byte since @p deadline shuts the
+     *         connection down, counted in @ref frozen_closed. A dialer owes TX only. */
+    std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) override {
+        return close_frozen_one(now, deadline);
+    }
+
+    /** @brief Connections the application's liveness check closed as frozen (#2198). */
+    [[nodiscard]] std::size_t frozen_closed() const noexcept {
+        return frozen_closed_.load(std::memory_order_relaxed);
+    }
 
     /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
