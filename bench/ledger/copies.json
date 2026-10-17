@@ -63,7 +63,7 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 145,
+      "value": 97,
       "goal": 112,
       "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
@@ -74,7 +74,7 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 1105,
+      "value": 1057,
       "goal": 1072,
       "moved_by": "#2143 (copy-or-share trait: the stored value shares its exact-class receive segment)"
     },
@@ -85,9 +85,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 4177,
+      "value": 4129,
       "goal": 48,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
     },
     {
       "id": "tcp-relay-cli @16384",
@@ -96,9 +96,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 16465,
+      "value": 16417,
       "goal": 48,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
     },
     {
       "id": "ws-relay-srv @64",
@@ -241,9 +241,9 @@
       "arm": "udp-relay-tcp-cli",
       "metric": "copy_bytes@64",
       "payload": 64,
-      "value": 116,
+      "value": 68,
       "goal": 112,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
     },
     {
       "id": "udp-relay-tcp-cli @1024",
@@ -252,9 +252,9 @@
       "arm": "udp-relay-tcp-cli",
       "metric": "copy_bytes@1024",
       "payload": 1024,
-      "value": 1076,
+      "value": 1028,
       "goal": 1072,
-      "moved_by": "#2171 (first pin)"
+      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
     },
     {
       "id": "udp-relay-tcp-cli @4096",
@@ -263,7 +263,7 @@
       "arm": "udp-relay-tcp-cli",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 4148,
+      "value": 4100,
       "goal": 48,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
       "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
@@ -275,7 +275,7 @@
       "arm": "udp-relay-tcp-cli",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 16436,
+      "value": 16388,
       "goal": 48,
       "moved_by": "#2143 (copy-or-share trait: a value is copied out of the 32 KiB UDP receive segment)",
       "waiver": "RFC-0022 Am.3 (slab pool shares only on a size-class fit), ruled on #2201: a 4 or 16 KiB value held in the bench's 32 KiB max_frame UDP receive block is copied into its own class block, so the stored value no longer pins the whole receive block. Expected to go when #2142 (right-sized UDP receive segment) lands: the datagram then sits in a block of its own class and the share returns, and this row re-pins to its goal."
