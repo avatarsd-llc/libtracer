@@ -170,10 +170,7 @@ class view_node {
      */
     [[nodiscard]] std::size_t held_block(const view::view_t*) const noexcept {
         const std::span<const view::view_t> links = v_->wire().links();
-        if (links.empty() || links.front().length < wire_size() || !links.front().owner)
-            return SIZE_MAX;
-        return mem::segment_block_bytes(links.front().owner->bytes.size(),
-                                        alignof(std::max_align_t));
+        return held_block_of(links.empty() ? nullptr : links.data(), wire_size());
     }
 
     /**
