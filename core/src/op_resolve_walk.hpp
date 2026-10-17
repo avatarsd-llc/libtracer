@@ -61,25 +61,35 @@ using wire::type_t;
 
 namespace {
 
-/** @brief What @ref held_block_of reads in place of a missing link: no owner, no bytes. */
-const view_t kNoLink{};
-/** @brief What @ref held_block_of reads in place of a missing owner: no bytes. */
-const view::segment_t kNoOwner{nullptr, {}};
+/** @brief What @ref held_block_of reads in place of a missing link on the slab build: no owner,
+ *         no bytes. Constant-initialized, and a variable template, so it exists only where the
+ *         slab arm instantiates it. */
+template <class = void>
+constinit const view_t kNoLink{};
+/** @brief What @ref held_block_of reads in place of a missing owner's bytes: none. */
+constexpr std::span<std::byte> kNoBytes{};
 
 /**
  * @brief The block a stored value already sits in, for @ref tr::mem::share_fits: the one block
  *        of @p link's owning segment when @p link (null for none) is owned and covers @p need
  *        bytes, else `SIZE_MAX` (borrowed, or more than one link).
  *
- * Branch-free, so the copy-or-share decision stays the one branch it was (#2143): a missing link
- * or owner is replaced by a sentinel through a select, never tested by a jump.
+ * On the slab build, where the class test is the store decision, it is branch-free so that
+ * decision stays the one branch it was (#2143): a missing link or owner is replaced by a
+ * sentinel through a select. The arena and heap-root builds only ask "one owned block?"
+ * (`share_fits` reads no size there), so they answer 0 for yes with the plain tests.
  */
+template <bool Slab = mem::kSlabPool>
 [[nodiscard]] std::size_t held_block_of(const view_t* link, std::size_t need) noexcept {
-    const view_t& l = *(link != nullptr ? link : &kNoLink);
-    const view::segment_t* const owner = l.owner.get();
-    const std::size_t bytes = (owner != nullptr ? owner : &kNoOwner)->bytes.size();
-    const bool one = (owner != nullptr) & (l.length >= need);
-    return one ? mem::segment_block_bytes(bytes, alignof(std::max_align_t)) : SIZE_MAX;
+    if constexpr (Slab) {
+        const view_t& l = *(link != nullptr ? link : &kNoLink<>);
+        const view::segment_t* const owner = l.owner.get();
+        const std::size_t bytes = (owner != nullptr ? &owner->bytes : &kNoBytes)->size();
+        const bool one = (owner != nullptr) & (l.length >= need);
+        return one ? mem::segment_block_bytes(bytes, alignof(std::max_align_t)) : SIZE_MAX;
+    } else {
+        return link != nullptr && link->owner && link->length >= need ? 0 : SIZE_MAX;
+    }
 }
 
 /**
@@ -197,9 +207,17 @@ struct arena_node {
     /**
      * @brief The block this TLV already sits in, for @ref tr::mem::share_fits: the owning
      *        frame segment's one block, or `SIZE_MAX` when the frame is borrowed.
+     *
+     * Off the slab build no size is read, and a borrowed frame is the one case `pin_wire`
+     * already refuses (falling back to the copy), so the answer there is a constant.
      */
     [[nodiscard]] std::size_t held_block(const view::view_t* frame_view) const noexcept {
-        return held_block_of(frame_view, 0);
+        if constexpr (mem::kSlabPool) {
+            return held_block_of(frame_view, 0);
+        } else {
+            (void)frame_view;
+            return 0;
+        }
     }
 
     /**

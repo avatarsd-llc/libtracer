@@ -162,43 +162,78 @@ inline constexpr std::size_t kRxLoanValueOffset = sizeof(void*);
 
 namespace detail {
 
-/** @brief The step of the class lookup: every row of a classed root's table is a multiple of it
- *         (`slab_classes_valid`, and the arena pool's own rule), so rounding a request up to it
- *         never skips a row. */
-inline constexpr std::size_t kClassGrain = alignof(std::max_align_t);
+/** @brief The row step of every classed root's table: `slab_classes_valid` and the arena pool
+ *         both require rows that are multiples of 16, so rounding a request up to it never skips
+ *         a row. Fixed, not `alignof(std::max_align_t)`, which is 8 on Cortex-M and Xtensa. */
+inline constexpr std::size_t kClassGrain = 16;
 
-/** @brief The table the lookup is built from, and its rows. */
-inline constexpr const auto& kClassRows = graph::config_t::kSizeClasses;
-inline constexpr std::size_t kClassRowCount = std::size(kClassRows);
+/**
+ * @brief The O(1) lookup for a slab build that binds its OWN class table (the default ladder is
+ *        answered by arithmetic and never builds it): a slot per 16 B up to the last row, then
+ *        one slot every larger request is clamped to. Instantiated only on that build.
+ */
+template <const auto& Rows>
+struct class_lookup_t {
+    static constexpr std::size_t kRows = std::size(Rows);
+    static constexpr std::size_t kSlots = Rows[kRows - 1] / kClassGrain + 2;
+    static_assert(kRows < 255, "the class lookup stores a row index in one byte");
+    static_assert(kSlots <= 8 * 1024 + 2,
+                  "the class lookup is one byte per 16 B up to the last row: keep the last row "
+                  "at or below 128 KiB");
 
-/** @brief Lookup slots: one per @ref kClassGrain step up to the last row, then the one slot every
- *         larger request is clamped to. */
-inline constexpr std::size_t kClassSlots = kClassRows[kClassRowCount - 1] / kClassGrain + 2;
+    /** @brief Slot @c q → the index of the smallest row of at least `q * 16` bytes; the last
+     *         slot → `kRows`, "past the table". */
+    static constexpr std::array<std::uint8_t, kSlots> kSlot = [] {
+        std::array<std::uint8_t, kSlots> t{};
+        std::size_t r = 0;
+        for (std::size_t q = 0; q + 1 < kSlots; ++q) {
+            while (r < kRows && Rows[r] < q * kClassGrain) ++r;
+            t[q] = static_cast<std::uint8_t>(r);
+        }
+        t[kSlots - 1] = static_cast<std::uint8_t>(kRows);
+        return t;
+    }();
 
-static_assert(kClassRowCount < 255, "the class lookup stores a row index in one byte");
-static_assert(kClassSlots <= 8 * 1024 + 2,
-              "the class lookup is one byte per 16 B up to the last row: keep the last row at "
-              "or below 128 KiB");
+    /** @brief The rows, then a 0 the "past the table" index reads. */
+    static constexpr std::array<std::size_t, kRows + 1> kRowOr0 = [] {
+        std::array<std::size_t, kRows + 1> t{};
+        for (std::size_t i = 0; i < kRows; ++i) t[i] = Rows[i];
+        return t;
+    }();
 
-/** @brief Slot @c q → the index of the smallest row of at least `q * kClassGrain` bytes; the last
- *         slot → @ref kClassRowCount, "past the table". Built at compile time. */
-inline constexpr std::array<std::uint8_t, kClassSlots> kClassSlot = [] {
-    std::array<std::uint8_t, kClassSlots> t{};
-    std::size_t r = 0;
-    for (std::size_t q = 0; q + 1 < kClassSlots; ++q) {
-        while (r < kClassRowCount && kClassRows[r] < q * kClassGrain) ++r;
-        t[q] = static_cast<std::uint8_t>(r);
+    /** @brief Clamp (a `min`), round up to 16 B, two loads, and a `max` with @p bytes for the
+     *         exact size above the last row. */
+    [[nodiscard]] static constexpr std::size_t ceiling(std::size_t bytes) noexcept {
+        const std::size_t clamped = std::min(bytes, (kSlots - 1) * kClassGrain);
+        return std::max(kRowOr0[kSlot[(clamped + kClassGrain - 1) / kClassGrain]], bytes);
     }
-    t[kClassSlots - 1] = static_cast<std::uint8_t>(kClassRowCount);
-    return t;
-}();
+};
 
-/** @brief The rows, then a 0 the "past the table" index reads (see @ref class_ceiling). */
-inline constexpr std::array<std::size_t, kClassRowCount + 1> kClassRowOr0 = [] {
-    std::array<std::size_t, kClassRowCount + 1> t{};
-    for (std::size_t i = 0; i < kClassRowCount; ++i) t[i] = kClassRows[i];
-    return t;
-}();
+/** @brief Whether @p Cfg binds the default ladder's table (an override may bind its own). */
+template <class Cfg>
+inline constexpr bool kDefaultLadder =
+    std::size(Cfg::kSizeClasses) == std::size(graph::default_config_t::kSizeClasses) &&
+    std::equal(std::begin(Cfg::kSizeClasses), std::end(Cfg::kSizeClasses),
+               std::begin(graph::default_config_t::kSizeClasses));
+
+/** @brief @ref class_ceiling for the configuration @p Cfg: a template, so only the arm the
+ *         build takes is instantiated, and no table is emitted where none is read. */
+template <class Cfg>
+[[nodiscard]] constexpr std::size_t class_ceiling_in(std::size_t bytes) noexcept {
+    if constexpr (kSlabPool && kDefaultLadder<Cfg>) {
+        return graph::default_config_t::size_classes_t::ceiling(bytes);
+    } else if constexpr (kSlabPool) {
+        return class_lookup_t<Cfg::kSizeClasses>::ceiling(bytes);
+    } else {
+        // The static arena and the heap root: the search the arena pool already runs
+        // (`class_of`) over the rows it already links, so no code or table is added for it. It
+        // runs on a receive (`rx_loan_free`), never on the store decision, where `share_fits`
+        // reads no class on these builds.
+        const auto& t = Cfg::kSizeClasses;
+        const auto* const it = std::lower_bound(std::begin(t), std::end(t), bytes);
+        return it == std::end(t) ? bytes : *it;
+    }
+}
 
 }  // namespace detail
 
@@ -207,15 +242,13 @@ inline constexpr std::array<std::size_t, kClassRowCount + 1> kClassRowOr0 = [] {
  *        `config_t::kSizeClasses`) draws for a @p bytes request: the smallest row that holds
  *        it, or @p bytes itself above the last row, where the block is drawn at its exact size.
  *
- * O(1) and branch-free: the request is clamped to the last lookup slot (a `min`), rounded up to
- * the 16 B grain, and two table loads, built at compile time, give the row. Above the table the
- * second load reads 0, and the `max` with @p bytes answers the exact size. No search.
+ * On the slab build, O(1) and branch-free: the default ladder's own arithmetic
+ * (`size_class_ladder_t::ceiling`, no table), or, for a table the build binds itself, a
+ * compile-time 16 B lookup of it (two loads). On the arena and heap-root builds, a search of
+ * the rows the arena pool already links: it runs only on a receive there.
  */
 [[nodiscard]] constexpr std::size_t class_ceiling(std::size_t bytes) noexcept {
-    using namespace detail;
-    const std::size_t clamped = std::min(bytes, (kClassSlots - 1) * kClassGrain);
-    const std::size_t slot = (clamped + kClassGrain - 1) / kClassGrain;
-    return std::max(kClassRowOr0[kClassSlot[slot]], bytes);
+    return detail::class_ceiling_in<graph::config_t>(bytes);
 }
 
 /**
@@ -232,11 +265,16 @@ inline constexpr std::array<std::size_t, kClassRowCount + 1> kClassRowOr0 = [] {
  *
  * On every source, `SIZE_MAX` for @p held_block means the value does not sit in one block (it
  * spans several links, or its bytes are borrowed): it copies, so a default value is always one
- * link. Branch-free: the slab build adds @ref class_ceiling's two table loads and a compare,
- * the other builds one compare. The operators are `&` and `|` so no operand is a branch.
+ * link. Branch-free: the slab build adds @ref class_ceiling's arithmetic and a compare, and
+ * the arena and heap builds keep the one `SIZE_MAX` compare.
  */
 [[nodiscard]] constexpr bool share_fits(std::size_t held_block, std::size_t copy_block) noexcept {
-    return (held_block != SIZE_MAX) & (!kSlabPool | (held_block <= class_ceiling(copy_block)));
+    if constexpr (kSlabPool) {
+        return (held_block != SIZE_MAX) & (held_block <= class_ceiling(copy_block));
+    } else {
+        (void)copy_block;
+        return held_block != SIZE_MAX;
+    }
 }
 
 /**
@@ -252,9 +290,11 @@ inline constexpr std::array<std::size_t, kClassRowCount + 1> kClassRowOr0 = [] {
         (void)align;
         return false;
     } else {
-        // Above the table each ceiling is its own exact size, so the two never match there.
-        return class_ceiling(segment_block_bytes(len, align)) ==
-               class_ceiling(segment_block_bytes(len + kRxLoanBytes, align));
+        // The reserved block fits the frame's own class: one ceiling, since the larger block's
+        // class matches exactly when it is no larger than the smaller block's. Above the table
+        // a ceiling is its own exact size, so the larger block never fits there.
+        return segment_block_bytes(len + kRxLoanBytes, align) <=
+               class_ceiling(segment_block_bytes(len, align));
     }
 }
 

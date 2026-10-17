@@ -27,8 +27,10 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 // Removed build switches (#1722). Each one duplicated a trait of the one configuration type
@@ -85,6 +87,38 @@ struct size_class_ladder_t {
         if (Header != 0) t[i] = Top + Header;
         return t;
     }();
+
+    /**
+     * @brief The smallest row of @ref kTable that holds @p bytes, or @p bytes itself above the
+     *        last row: the table's own answer by arithmetic, with no table read and no search
+     *        (#2143).
+     *
+     * The ladder is geometric, so within a doubling `(lo, 2 lo]` the rows are the multiples of
+     * `lo / PerDoubling`, and the answer is @p bytes rounded up to that step. Every term is
+     * computed and the answer chosen by mask selects: no branch.
+     */
+    [[nodiscard]] static constexpr std::size_t ceiling(std::size_t bytes) noexcept {
+        constexpr std::size_t kBase = Step * PerDoubling;
+        static_assert(std::has_single_bit(Step) && std::has_single_bit(PerDoubling) &&
+                          Top % kBase == 0 && std::has_single_bit(Top / kBase),
+                      "the arithmetic ceiling needs a power-of-two step, rows per doubling and "
+                      "doublings");
+        const std::size_t small = ((bytes > Step ? bytes : Step) + Step - 1) & ~(Step - 1);
+        // `x | 1` is never 0, so the bit width needs no zero test.
+        const std::size_t x = (bytes > kBase ? bytes : kBase + 1) - 1;
+        const std::size_t lo = std::size_t{1} << (std::numeric_limits<std::size_t>::digits - 1 -
+                                                  static_cast<unsigned>(std::countl_zero(x | 1)));
+        const std::size_t step = lo / PerDoubling;
+        const std::size_t geometric = (bytes + step - 1) & ~(step - 1);
+        const std::size_t past =
+            Header != 0 && bytes <= Top + Header ? std::size_t{Top + Header} : bytes;
+        // Mask selects, not ternaries, so a compiler that would branch on the costlier arm
+        // cannot.
+        const auto pick = [](bool c, std::size_t a, std::size_t b) {
+            return b ^ ((a ^ b) & (std::size_t{0} - static_cast<std::size_t>(c)));
+        };
+        return pick(bytes <= kBase, small, pick(bytes <= Top, geometric, past));
+    }
 };
 
 /**
@@ -368,7 +402,10 @@ struct default_config_t {
      *
      * Override fragment: `static constexpr std::size_t kSizeClasses[] = {64, 256, 1024, 4096};`.
      */
-    static constexpr auto kSizeClasses = size_class_ladder_t<16, 8, 65536, 48>::kTable;
+    /** @brief The ladder that generates the default @ref kSizeClasses: a classed root whose
+     *         table is this one finds a class by its arithmetic `ceiling` (#2143). */
+    using size_classes_t = size_class_ladder_t<16, 8, 65536, 48>;
+    static constexpr auto kSizeClasses = size_classes_t::kTable;
 
     /**
      * @brief Whether this build's default root is the host slab pool (ADR-0083 Decision 4,
