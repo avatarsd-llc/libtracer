@@ -121,7 +121,8 @@ class can_reassembly_t {
                                  tr::view::view_t slice) noexcept {
         group_meta_t* const g = touch_group(key);
         if (g == nullptr) return false;
-        const auto placed = slices_.try_emplace(slice_id_t{key, index}, std::move(slice));
+        const slice_id_t id{key, index};
+        const auto placed = slices_.try_emplace(id, std::move(slice));
         if (placed.value == nullptr) return false;
         // A re-sent index replaces the slice it repeats and is counted once (#2049): the group
         // keeps its slice count and highest index here, so no question about the group walks
