@@ -611,6 +611,13 @@ class stream_endpoint_t : protected posix_endpoint_t {
      */
     std::size_t close_frozen_one(std::uint64_t now, std::uint64_t deadline);
 
+    /** @brief Record @p s 's bytes in @p moved, a peer's TX progress flag (#2198); returns
+     *         @p s. */
+    static egress_step_t note_moved(std::atomic<bool>& moved, egress_step_t s) noexcept {
+        if (s.moved != 0) moved.store(true, std::memory_order_relaxed);
+        return s;
+    }
+
     /**
      * @brief Put one record on the wire toward the ONE peer through its egress (ADR-0087 §2).
      *
@@ -627,13 +634,6 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *               when the record has to wait.
      * @param lane   The ring it waits in: its vertex's, or the control lane (a default).
      */
-    /** @brief Record @p s 's bytes in @p moved, a peer's TX progress flag (#2198); returns
-     *         @p s. */
-    static egress_step_t note_moved(std::atomic<bool>& moved, egress_step_t s) noexcept {
-        if (s.moved != 0) moved.store(true, std::memory_order_relaxed);
-        return s;
-    }
-
     template <class Direct>
     void egress_send(function_ref_t<egress_frame_t*()> frame, Direct&& direct,
                      const graph::delivery_lane_t& lane = {}) {
