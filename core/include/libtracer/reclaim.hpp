@@ -220,7 +220,8 @@ struct reclaim_local_t {
  * shared table of @ref tr::graph::default_config_t::kDeferredReleaseSlots retired pairs, all
  * `.bss`. The cells and the epoch are also the transport plane's grace in every build
  * (`fwd_router_t`'s frame bracket), so a net-plane build carries them under any policy; the
- * dispatch bracket's QSBR arm is still emitted only under this one.
+ * retired table is its own object, named only by this policy's paths, so only this policy
+ * links it (#2111), and the dispatch bracket's QSBR arm is still emitted only under this one.
  *
  * @section reclaim_qsbr_897 What it discharges for #897
  *
