@@ -85,11 +85,11 @@ namespace detail {
  *        `101 Switching Protocols` response is on the wire AND its slot is published open.
  *
  * The handshake's two visible transitions — "the peer may believe the connection is up" and
- * "a sender may use this slot" — are ONE step only because the `open` store sits inside the
- * same `write_m_` critical section as the response write. That is not observable from the
- * outside by racing: the window is a few instructions wide. This hook is where a test HOLDS
- * that instant open, sends into it, and checks the frame arrives; with the store moved back
- * out of the lock the identical test reads an empty socket.
+ * "a sender may use this slot" — are ONE step for any observer of the response because the
+ * session's egress opens right after the response write and before this hook (#2144). That
+ * is not observable from the outside by racing: the window is a few instructions wide. This
+ * hook is where a test HOLDS that instant open, sends into it, and checks the frame arrives;
+ * with the open moved after the hook the identical test reads an empty socket.
  *
  * Same shape and same rules as `tr::detail::probe_fail_hook`: install it before the peer that
  * should trip it connects, and clear it before the test returns; consulted only when the build
@@ -146,11 +146,11 @@ struct ws_server_config_t {
      *         the listener and every peer. */
     std::size_t recv_stack = 0;
     /**
-     * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). One
-     *        fan-out round is bounded by it and a DIRECTED send by window ÷ @ref max_peers
-     *        (#1295), so a tab that stops reading cannot freeze the sending thread; a session
-     *        that stalls `kMaxConsecutiveStalls` records in a row, or once mid-record, is
-     *        closed. It also SIZES the peer cap.
+     * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). It
+     *        SIZES the peer cap and bounds the `101` reply. A server's egress writes never
+     *        wait (#2144), so a tab that stops reading cannot freeze the sending thread; a
+     *        session offered `kEgressStallStrikes` rings of frames in a row past a full STREAM
+     *        lane, its socket moving nothing, is closed. A SAMPLE lane never strikes.
      */
     std::uint32_t liveness_window_ms = 0;
     /**
@@ -189,8 +189,8 @@ struct ws_client_config_t {
      */
     bool defer_recv = false;
     /** @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838): it
-     *         bounds every send, and `kMaxConsecutiveStalls` stalled records in a row close
-     *         the connection. */
+     *         bounds each egress write turn, and offers past a full lane whose turns moved
+     *         nothing, `kMaxConsecutiveStalls` rings of them in a row, close the connection. */
     std::uint32_t liveness_window_ms = 0;
     /**
      * @brief The DIAL half of the pre-auth handshake budget (#934), resolved through
@@ -318,13 +318,22 @@ class ws_server_transport_t final : public stream_server_base_t {
      * Overrides the base flatten-then-encode default (`%transport.hpp`): server frames
      * are UNMASKED (RFC 6455 §5.1), so the frame header rides as the first iovec
      * entry and the payload spans follow it straight to the wire via one gathered
-     * scatter-gather write per peer — no allocation, no copy. Each peer writes from
-     * a fresh copy of the iovec array (the write consumes it). No-op until a client
-     * is connected. Thread-safe (peers_m_ → write_m_, the header lock order).
+     * scatter-gather write per peer — no allocation, no copy. Every idle peer writes
+     * from the same read-only gather; one that has to wait gets one shared frame
+     * (ADR-0087 §2). No-op until a client is connected. Thread-safe; a stalled peer
+     * never delays the others (#2144).
      *
      * @param iov The spans to emit, in order, as a single frame.
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
+
+    /**
+     * @brief Retained broadcast (RFC-0028 §6.9): @p head then @p value as one BINARY message
+     *        to every open peer; a peer that has to wait holds one shared frame that keeps
+     *        @p value by reference, in @p lane's ring (ADR-0087 §2).
+     */
+    void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+              const graph::delivery_lane_t& lane) override;
 
     /** @brief True — WS reassembles fragmented messages into ropes (ADR-0053 §5):
      *         each message crosses the seam as a `rope_t`, one owning link per WS
@@ -399,6 +408,11 @@ class ws_server_transport_t final : public stream_server_base_t {
          */
         void send(std::span<const std::span<const std::byte>> iov) override;
 
+        /** @brief Directed retained send: @p head then @p value as one BINARY message to this
+         *         facade's peer only, waiting in @p lane's ring if it waits. */
+        void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+                  const graph::delivery_lane_t& lane) override;
+
         /** @brief The owning server's snapshot (#932): a directed facade counts into the
          *         link's own counters, so it reports them rather than a fabricated zero. */
         [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
@@ -410,6 +424,16 @@ class ws_server_transport_t final : public stream_server_base_t {
         ws_server_transport_t* owner_ = nullptr; /**< @brief The owning server. */
         session_t* slot_ = nullptr;              /**< @brief The peer slot this sends to. */
     };
+
+    /** @brief The one send body: frame @p parts as one BINARY message, then to every open
+     *         peer (@p to null) or to @p to alone, in @p lane, keeping @p value if it waits. */
+    void send_record(session_base_t* to, std::span<const std::span<const std::byte>> parts,
+                     const graph::value_t* value, const graph::delivery_lane_t& lane);
+
+    /** @brief A retained send's message laid out on the stack for `send_record`; a value
+     *         too wide for that takes the base's copy path. */
+    void send_retained(session_base_t* to, std::span<const std::span<const std::byte>> head,
+                       const graph::value_t& value, const graph::delivery_lane_t& lane);
 
     /** @brief One fresh slot with its handshake buffer, frame-ingress state, reassembler and
      *         facade. */
@@ -451,7 +475,6 @@ class ws_server_transport_t final : public stream_server_base_t {
     // accessors widen on read; a 32-bit target wraps after 2^32.
     std::atomic<std::size_t> dropped_rx_{0};
     std::atomic<std::size_t> malformed_rx_{0};
-    std::atomic<std::size_t> dropped_tx_{0};
 };
 
 /** @brief The pre-v0.18.0 spelling of @ref ws_server_transport_t; removed in v0.19.0 (#1723). */
@@ -509,6 +532,14 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     void send(std::span<const std::byte> frame) override;
 
     /**
+     * @brief Retained send: @p head then @p value as one MASKED BINARY message, waiting in
+     *        @p lane's ring if it waits (ADR-0087 §2). A client frame is masked, so it is a
+     *        copy either way: the record is flattened into the link's egress store first.
+     */
+    void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+              const graph::delivery_lane_t& lane) override;
+
+    /**
      * @brief Spawn the recv thread a `defer_recv` construction held back (#1025).
      *
      * The second phase of the two-phase bring-up: the socket is connected and handshaken,
@@ -564,9 +595,9 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
         return dropped_tx_.load(std::memory_order_relaxed);
     }
 
-    /** @brief The subset of @ref dropped_tx a STALLED server caused (#838): records
-     *         abandoned because their send bound expired. `kMaxConsecutiveStalls` in a
-     *         row — or one that half-reached the wire — closes the connection. */
+    /** @brief Strikes a STALLED server cost (#838, #2144): offers past a full STREAM lane
+     *         whose turn moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of
+     * them in a row close the connection. */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
         return stalled_tx_.load(std::memory_order_relaxed);
     }
@@ -607,8 +638,12 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      *         (`pipelined_`, which it takes over). */
     void serve(int fd);
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
+    /** @brief The one send body: @p frame as one masked message through the egress, in
+     *         @p lane. */
+    void send_masked(std::span<const std::byte> frame, const graph::delivery_lane_t& lane);
 
-    // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
+    // conn_fd_, dropped_tx_ and the egress (and their teardown discipline) live in
+    // stream_endpoint_t.
     // 64-bit on purpose (#1697): the splitmix64 state behind the per-frame masking key. This
     // portable client is never compiled for a chip target (the ESP-IDF build uses its native
     // WS link), so its rv32 libatomic call is never linked there.
@@ -623,10 +658,9 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     // accessors widen on read; a 32-bit target wraps after 2^32.
     std::atomic<std::size_t> dropped_rx_{0};
     std::atomic<std::size_t> malformed_rx_{0};
-    std::atomic<std::size_t> dropped_tx_{0};
     /**
      * @brief The REUSED masked-frame buffer `send` encodes into, touched only by the thread
-     *        holding the enqueue-then-write writer role (`handoff_send`).
+     *        holding the link's egress writer role (`egress_send`, ADR-0087 §2).
      *
      * A client frame must be masked (RFC 6455 §5.1), so its wire bytes are not the caller's
      * bytes and cannot be gathered by reference — this is the one WS egress path that still

@@ -645,7 +645,8 @@ void test_producers_race_close_and_reclaim() {
             const std::span<const std::byte> head[] = {std::span<const std::byte>(kBody)};
             for (int i = 0; i < 400; ++i) {
                 if ((i + t) % 3 == 0) {
-                    raw->send(std::span<const std::span<const std::byte>>(head), *val);
+                    raw->send(std::span<const std::span<const std::byte>>(head), *val,
+                              tr::graph::delivery_lane_t{});
                 } else if ((i + t) % 3 == 1) {
                     raw->send(std::span<const std::byte>(kBody));
                 } else if (tr::net::transport_t* const to = raw->peer_link("p2")) {
@@ -701,7 +702,7 @@ void vertex_value(httpd_ws_link_t& link, std::size_t tag) {
     const auto b = tagged(tag);
     const tr::graph::value_ref_t v =
         tr::graph::value_ref_t::adopt(tr::graph::value_t::make_copy(b, tr::mem::heap_source()));
-    link.send(std::span<const std::span<const std::byte>>(), *v);
+    link.send(std::span<const std::span<const std::byte>>(), *v, tr::graph::delivery_lane_t{});
 }
 
 /** @brief The one-byte payloads of the retained frames on @p fd's wire, in wire order. */

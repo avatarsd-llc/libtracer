@@ -575,7 +575,7 @@ const std::byte kHead1[] = {std::byte{0x14}, std::byte{0x00}};
 void send_retained(httpd_ws_link_t& link, const tr::graph::value_t& v) {
     const std::span<const std::byte> head[3] = {
         std::span<const std::byte>(kHead0), std::span<const std::byte>(kHead1), {}};
-    link.send(std::span<const std::span<const std::byte>>(head), v);
+    link.send(std::span<const std::span<const std::byte>>(head), v, tr::graph::delivery_lane_t{});
     drain();
 }
 

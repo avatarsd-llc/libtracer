@@ -108,15 +108,17 @@ void run_arm(const char* name) {
 
 /**
  * @brief Pinned draw of one connected, idle WS peer on a 64-bit target (#2140): its session
- *        (with frame ingress's 14-byte next-header slot), its slot entries and its poll
- *        entry. The session is 16 B over the stream-buffer design it replaced.
+ *        (with frame ingress's 14-byte next-header slot and the shared egress slot, #2144),
+ *        its slot entries and its poll entry. Frame ingress put the session 16 B over the
+ *        stream-buffer design it replaced; the egress slot, net of the per-session write
+ *        state it retired, adds 16 B more.
  *
  * The session's `peer_endpoint_t` is a `transport_t`, whose receiver slot holds a
- * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 704 B plus that
- * mutex, exact on each target: 744 B on x86_64, 752 B on aarch64. Every other byte is
+ * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 720 B plus that
+ * mutex, exact on each target: 760 B on x86_64, 768 B on aarch64. Every other byte is
  * pointers, sizes and block counts, the same on any 64-bit target.
  */
-constexpr std::size_t kWsPeerBytes64 = 704 + sizeof(std::mutex);
+constexpr std::size_t kWsPeerBytes64 = 720 + sizeof(std::mutex);
 
 /** @brief A receive backend over the platform heap that adds to @p src's live balance. */
 class counting_rx_t final : public tr::mem::mem_backend_t {

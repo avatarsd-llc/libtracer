@@ -612,9 +612,14 @@ class transport_t {
      * @param head  The frame's leading bytes, in order. Borrowed for the call only.
      * @param value The payload that completes the frame. Borrowed for the call; a link that
      *              writes later keeps it through `value_ref_t::keep`.
+     * @param lane  The vertex the value comes from and the shape of the per-peer ring it waits
+     *              in (ADR-0087 §2, #2144): a link that queues per peer keeps one ring per
+     *              lane, so one vertex's backlog never displaces another's. A link that
+     *              writes in-call ignores it, as the default below does.
      */
-    virtual void send(std::span<const std::span<const std::byte>> head,
-                      const graph::value_t& value) {
+    virtual void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+                      const graph::delivery_lane_t& lane) {
+        (void)lane;  // written in-call: nothing waits, so there is no ring to choose
         // The #1620 (c) table: a delivery's head is a handful of spans and a value is one or
         // two links, so the stack array holds the common frame and the overflow block (from
         // this link's egress store) is the exception, not a per-send allocation.

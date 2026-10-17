@@ -105,6 +105,28 @@
 namespace tr::graph {
 
 /**
+ * @brief The lane a remote delivery rides toward its peer, and the shape of that lane's ring
+ *        (ADR-0087 §2, #2144).
+ *
+ * A link that queues frames per peer keeps one ring per lane: one per (peer, vertex). The
+ * graph fills this from the subscription edge, whose admission recorded the local vertex's
+ * declaration; the link only applies it. Opaque to the link: @ref key is compared, never
+ * dereferenced.
+ */
+struct delivery_lane_t {
+    /** @brief The subscription edge the delivery comes from — one per (local vertex,
+     *         subscriber), so per peer it names the vertex. Null: a frame from no vertex (a
+     *         reply, a control frame), which rides the link's control lane. */
+    const void* key = nullptr;
+    /** @brief The local vertex's retention depth at subscribe time: `1` is a SAMPLE (latest
+     *         wins), `N` a STREAM of depth N. `0` reads as 1. */
+    std::uint16_t depth = 1;
+    /** @brief The vertex's §4.4 arm for a full STREAM ring: `false` sheds the oldest waiting
+     *         frame, `true` refuses the newest. */
+    bool reliable = false;
+};
+
+/**
  * @brief The reclaimer of an inline value's embedded segment (RFC-0028 §5.1, slice 5).
  *
  * One process-wide instance, @ref inline_value_backend. It allocates nothing: its only job is

@@ -260,8 +260,7 @@ std::pair<::iovec*, std::size_t> build_server_iov(
  * it fills), the current frame's header, the fragment reassembler and the directed facade
  * object. All but the facade are recv-thread-only, like every protocol buffer a slot
  * carries. WS reads the shared rule with ONE addition of its own: the slot is
- * published NOT-open and its `open` store is the `101`'s, taken under the same
- * `write_m_` the response write holds (`read_handshake` below).
+ * published NOT-open and opens only once its `101` is on the wire (`read_handshake` below).
  */
 struct ws_server_transport_t::session_t : slot_server_t::session_base_t {
     /** @brief Draw the handshake buffer from @p src — the server's session store (#1780). */
@@ -333,14 +332,10 @@ struct ws_server_transport_t::framing_t {
                 // payload is <= 125 bytes and the reply cannot fail to be built (#848).
                 std::array<std::byte, ws::kMaxServerControlFrame> pong{};
                 const std::size_t plen = ws::encode_server_control(pong, ws::opcode_t::PONG, bytes);
-                const std::lock_guard lock(link.write_m_);
-                // Bounded (#838): this is the poll thread, so a PONG into a stalled peer
-                // used to hold write_m_ — and stop every peer's ingress — indefinitely.
-                // Divided by the admission cap for the same reason the handshake reply is:
-                // one pass can owe a PONG to every slot (#1295).
-                link.write_all(s.fd.load(std::memory_order_relaxed),
-                               std::span<const std::byte>(pong.data(), plen),
-                               link.directed_send_bound_ms());
+                // Through the session's egress like any other frame (#2144): never a wait on
+                // the poll thread, and never interleaved with a frame in flight.
+                const ::iovec pv{pong.data(), plen};
+                link.send_to(s, std::span<const ::iovec>(&pv, 1));
                 return true;
             }
             case ws::opcode_t::CLOSE:
@@ -433,8 +428,8 @@ bool ws_server_transport_t::on_accept(session_base_t& base, int fd) {
     s.ingress.reset();
     s.assembler.reset();
     // A WS slot is published NOT-open: its 101 has not been written yet, so nothing may
-    // send on it. `on_readable` flips `open` inside the same write_m_ hold as the
-    // response write — the handshake variance, localised here and there alone.
+    // send on it. `on_readable` opens it once the response is out — the handshake
+    // variance, localised here and there alone.
     return false;
 }
 
@@ -460,30 +455,58 @@ void ws_server_transport_t::send(std::span<const std::byte> frame) {
 }
 
 void ws_server_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    // Encode the ONE server frame header for the whole gathered payload, then fan
-    // [header, span0, span1, ...] to every open peer as a single gathered write —
-    // no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock
-    // order per the header contract: peers_m_ (slot list stable) → write_m_ (the
-    // stream write-serialization invariant, now covering every peer fd).
+    send_record(nullptr, iov, nullptr, {});
+}
+
+void ws_server_transport_t::send(std::span<const std::span<const std::byte>> head,
+                                 const graph::value_t& value, const graph::delivery_lane_t& lane) {
+    send_retained(nullptr, head, value, lane);
+}
+
+void ws_server_transport_t::send_retained(session_base_t* to,
+                                          std::span<const std::span<const std::byte>> head,
+                                          const graph::value_t& value,
+                                          const graph::delivery_lane_t& lane) {
+    std::array<std::span<const std::byte>, kMaxServerIov> parts;
+    const std::size_t n = retained_parts(parts, head, value);
+    if (n > parts.size()) {  // too wide for the stack table: the base's copy path
+        if (to == nullptr)
+            transport_t::send(head, value, lane);
+        else
+            to->peer_endpoint->transport_t::send(head, value, lane);
+        return;
+    }
+    send_record(to, std::span<const std::span<const std::byte>>(parts.data(), n), &value, lane);
+}
+
+void ws_server_transport_t::send_record(session_base_t* to,
+                                        std::span<const std::span<const std::byte>> parts,
+                                        const graph::value_t* value,
+                                        const graph::delivery_lane_t& lane) {
+    // Encode the ONE server frame header for the whole gathered payload, then hand
+    // [header, span0, span1, ...] to every open peer (@p to null) or to the one session as a
+    // single gathered write — no flatten, no re-copy (server frames are UNMASKED, RFC 6455
+    // §5.1), each peer through its own egress (ADR-0087 §2).
     std::size_t total = 0;
-    for (const std::span<const std::byte>& s : iov) total += s.size();
+    for (const std::span<const std::byte>& s : parts) total += s.size();
     std::array<std::byte, ws::kMaxServerFrameHeader> header{};
     const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
 
     std::array<::iovec, kMaxServerIov + 1> gather_inline;
     iov_table_t<::iovec> gather_table(gather_inline, egress_source());
-    const auto [vec, n] = build_server_iov(gather_table, header, hlen, iov);
+    const auto [vec, n] = build_server_iov(gather_table, header, hlen, parts);
     if (vec == nullptr) {  // gather store exhausted => drop the frame, and count it (#932)
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
-    // The shared fan-out writes this ONE gather to every peer under the header lock
-    // order, peers_m_ → write_m_: write_all_iov does not consume it (#932), so no
-    // per-peer copy is taken. It is also where the round's #838 send bound is derived and
-    // applied; every peer the bound shed is counted here.
-    dropped_tx_.fetch_add(broadcast_iov(std::span<const ::iovec>(vec, n)),
-                          std::memory_order_relaxed);
+    // Every idle peer writes this ONE gather (read-only, #932), and a peer that has to wait
+    // gets one shared frame of it in that vertex's ring; sheds and stalls are counted.
+    const std::span<const ::iovec> rec(vec, n);
+    if (to == nullptr)
+        broadcast(rec, value, lane);
+    else
+        send_to(*to, rec, value, lane);  // a departed session's egress is closed: shed
 }
 
 void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -494,35 +517,13 @@ void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> fra
 }
 
 void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
-    if (owner_ == nullptr || slot_ == nullptr) return;
-    // The single-fd twin of the broadcast override: one gathered [header, spans...]
-    // write, server frame UNMASKED (RFC 6455 §5.1), no flatten copy.
-    std::size_t total = 0;
-    for (const std::span<const std::byte>& s : iov) total += s.size();
-    std::array<std::byte, ws::kMaxServerFrameHeader> header{};
-    const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
+    if (owner_ != nullptr && slot_ != nullptr) owner_->send_record(slot_, iov, nullptr, {});
+}
 
-    std::array<::iovec, kMaxServerIov + 1> inline_vec;
-    iov_table_t<::iovec> table(inline_vec, owner_->egress_source());
-    const auto [vec, n] = build_server_iov(table, header, hlen, iov);
-    if (vec == nullptr) {  // gather store exhausted => drop the frame, and count it (#932)
-        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-
-    const std::lock_guard lock(owner_->write_m_);
-    if (!slot_->open.load(std::memory_order_relaxed)) {  // departed ⇒ a counted drop
-        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    // One peer in this round, but not one peer on this node: the bound divides by the
-    // admission cap so that N concurrent directed sends to N stalled peers sum to one
-    // window rather than N of them (#1295). A stall still strikes this session alone.
-    const int fd = slot_->fd.load(std::memory_order_relaxed);
-    const write_result_t r =
-        write_all_iov(fd, std::span<const ::iovec>(vec, n), owner_->directed_send_bound_ms());
-    if (owner_->note_write_result(r, fd, slot_->tx_stall_streak))
-        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> head,
+                                                  const graph::value_t& value,
+                                                  const graph::delivery_lane_t& lane) {
+    if (owner_ != nullptr && slot_ != nullptr) owner_->send_retained(slot_, head, value, lane);
 }
 
 void ws_server_transport_t::on_readable(session_base_t& base, int fd) {
@@ -578,26 +579,11 @@ bool ws_server_transport_t::read_handshake(session_t& s, int fd) {
     text_buf_t<kHead.size() + ws::kAcceptKeyChars + kTail.size()> resp;
     resp << kHead << ws::accept_key(key) << kTail;
     const std::span<const std::byte> bytes = resp.bytes();
-    {
-        const std::lock_guard lock(write_m_);
-        // Bounded like every other write on this socket (#838): the handshake reply
-        // runs on the POLL thread, so an unbounded one would stall every peer this
-        // server has, not just the one being admitted. The DIRECTED bound, not the
-        // whole window — one poll pass can owe a reply to every slot, so the sum is
-        // what has to fit the window (#1295).
-        write_all(fd, bytes, directed_send_bound_ms());
-        // Publish the slot as OPEN while still holding the write lock, so the
-        // "101 is on the wire" and "senders may use this slot" transitions are one
-        // step. Storing it after the lock is released opens a window in which the peer
-        // has already read `101 Switching Protocols` — and so believes the connection
-        // is up — while every send still skips the slot as not-open and the frame goes
-        // nowhere. A sender can only reach the fd through this same lock, so taking the
-        // store inside it means anyone who could observe the response also observes the
-        // slot as open. (`open` must NOT move ahead of the response write instead: a
-        // concurrent send would then be free to put a BINARY frame on the wire in front
-        // of the handshake reply.)  Relaxed: the lock is what orders this store.
-        s.open.store(true, std::memory_order_relaxed);
-    }
+    // The reply is the session's FIRST frame: its egress opens with the 101 held on the
+    // wire, so no frame can go ahead of it, and `open` is stored before the reply is
+    // written, so every send that follows a peer which has read it finds the slot open.
+    // The write never waits: a reply the socket cuts short finishes on writability.
+    open_session(s, bytes);
     // The seam that makes the line above testable: here the response is out AND the slot
     // is published, so a send that lands in this instant must reach the peer. Move the
     // store below this point and the same probe reads an empty socket — that is the
@@ -625,8 +611,8 @@ bool ws_server_transport_t::read_handshake(session_t& s, int fd) {
 
 ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_t port,
                                              const ws_client_config_t& config)
-    // The queue's slots hold this link's own masked copies, so they are egress store too
-    // (#1661): drawn from `memory.io` like `tx_buf_`, not from the process heap.
+    // The egress's shared frames hold this link's own masked copies, so they are egress store
+    // too (#1661): drawn from `memory.io` like `tx_buf_`, not from the process heap.
     : stream_endpoint_t(config.memory.io != nullptr ? *config.memory.io : mem::net_source()),
       backend_(config.memory.rx),
       // `block_array_t` binds its source ONCE, here (#873): a post-construction
@@ -672,7 +658,7 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
 
     // The bounded send (#838), armed before the first byte goes out: without it the
     // handshake request AND every later frame block forever on a peer that stops reading,
-    // with write_m_ held.
+    // inside the writer's turn.
     set_snd_timeout(fd);
 
     // Bytes the server pipelined behind its 101 — carried out of the handshake and into
@@ -733,31 +719,53 @@ std::uint32_t ws_client_transport_t::next_mask_key() {
     return static_cast<std::uint32_t>(z);
 }
 
-void ws_client_transport_t::send(std::span<const std::byte> frame) {
-    // One MASKED record per frame, through the enqueue-then-write queue (RFC 0028 §4.7,
-    // #1619). A client frame MUST be masked (RFC 6455 §5.1), so unlike every server-side send
-    // this one cannot gather the caller's bytes by reference and genuinely needs a buffer —
-    // the NOTHROW encode over a REUSED buffer (#848): steady state allocates nothing, and
-    // exhaustion drops the frame instead of aborting under -fno-exceptions.
+void ws_client_transport_t::send(std::span<const std::byte> frame) { send_masked(frame, {}); }
+
+void ws_client_transport_t::send(std::span<const std::span<const std::byte>> head,
+                                 const graph::value_t& value, const graph::delivery_lane_t& lane) {
+    std::size_t total = value.total_length();
+    for (const std::span<const std::byte>& h : head) total += h.size();
+    mem::block_array_t<std::byte> flat(*io_src_);
+    if (!flat.reserve(total)) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // the store refused: shed, counted
+        return;
+    }
+    for (const std::span<const std::byte>& h : head) (void)flat.append(h.data(), h.size());
+    for (const view::view_t& l : value.links())
+        (void)flat.append(l.bytes().data(), l.bytes().size());  // reserved: cannot grow
+    send_masked(std::span<const std::byte>(flat.data(), flat.size()), lane);
+}
+
+void ws_client_transport_t::send_masked(std::span<const std::byte> frame,
+                                        const graph::delivery_lane_t& lane) {
+    // One MASKED record per frame, through the link's egress (ADR-0087 §2). A client frame
+    // MUST be masked (RFC 6455 §5.1), so unlike every server-side send this one cannot gather
+    // the caller's bytes by reference and genuinely needs a buffer — the NOTHROW encode over
+    // a REUSED buffer (#848): steady state allocates nothing, and exhaustion drops the frame
+    // instead of aborting under -fno-exceptions.
     //
-    // The writer encodes into tx_buf_, which only the thread holding the writer role touches
-    // (the handshake writes its own bytes); a publisher that arrives while a write is in
-    // flight encodes straight into its queue slot and returns rather than waiting on write_m_
-    // for the rest of that write. Each record is still bounded by the liveness window (#838).
+    // The writer encodes into tx_buf_, which only the thread holding the writer role touches;
+    // a publisher that arrives while a write is in flight encodes ONE shared frame with the
+    // same key — the same bytes — and returns rather than waiting for the rest of that write.
+    // Each writer turn is still bounded by the liveness window (#838).
     const std::uint32_t key = next_mask_key();
-    const std::uint64_t shed = handoff_send(
-        [&](int fd) {
+    egress_once_t once([&] {
+        return egress_frame_t::make(
+            *io_src_, ws::detail::client_frame_bytes(frame.size()), [&](std::span<std::byte> out) {
+                return ws::detail::put_client_frame(out, ws::opcode_t::BINARY, frame, key, true);
+            });
+    });
+    egress_send(
+        once,
+        [&](int fd, std::uint32_t bound) {
             const std::size_t n =
                 ws::try_encode_client_frame(tx_buf_, ws::opcode_t::BINARY, frame, key);
-            if (n == 0) return true;  // frame buffer exhausted => drop, and COUNT it (#932)
-            const write_result_t r = write_all(fd, std::span<const std::byte>(tx_buf_.data(), n),
-                                               derive_send_bound_ms(liveness_window_ms_, 1));
-            return note_write_result(r, fd, tx_stall_streak_);
+            // Frame buffer exhausted => a counted drop (#932), nothing written.
+            if (n == 0) return egress_step_t{0, false, true};
+            const ::iovec v{tx_buf_.data(), n};
+            return write_gather(fd, std::span<const ::iovec>(&v, 1), bound, false);
         },
-        [&](mem::block_array_t<std::byte>& slot) {
-            return ws::try_encode_client_frame(slot, ws::opcode_t::BINARY, frame, key);
-        });
-    if (shed != 0) dropped_tx_.fetch_add(shed, std::memory_order_relaxed);
+        lane);
 }
 
 bool ws_client_transport_t::handshake(int fd, std::string_view host, std::uint16_t port,
@@ -789,12 +797,10 @@ bool ws_client_transport_t::handshake(int fd, std::string_view host, std::uint16
            "Sec-WebSocket-Key: "
         << key << "\r\nSec-WebSocket-Version: 13\r\n\r\n";
     if (!req.ok) return false;
-    {
-        const std::lock_guard lock(write_m_);
-        // Bounded (#838) — this runs in the CONSTRUCTOR, so an unbounded write here hangs
-        // the application thread that is wiring the link.
-        write_all(fd, req.bytes(), derive_send_bound_ms(liveness_window_ms_, 1));
-    }
+    // Bounded (#838) — this runs in the CONSTRUCTOR, so an unbounded write here hangs the
+    // application thread that is wiring the link. No sender can race it: the fd is not
+    // published to conn_fd_ until the handshake has succeeded.
+    write_all(fd, req.bytes(), derive_send_bound_ms(liveness_window_ms_, 1));
 
     // Read the response header block (CRLFCRLF), bounded so a stuck peer cannot
     // hang construction forever.
@@ -910,10 +916,14 @@ void ws_client_transport_t::serve(int fd) {
                     std::array<std::byte, ws::kMaxClientControlFrame> pong{};
                     const std::size_t plen = ws::encode_client_control(
                         pong, ws::opcode_t::PONG, frame.payload, next_mask_key());
-                    const std::lock_guard lock(write_m_);
-                    // Bounded (#838): the recv thread must not be parked in a write.
-                    write_all(fd, std::span<const std::byte>(pong.data(), plen),
-                              derive_send_bound_ms(liveness_window_ms_, 1));
+                    // Through the egress like any frame (#2144): never interleaved with a
+                    // publisher's record, and bounded per turn (#838).
+                    const ::iovec pv{pong.data(), plen};
+                    const std::span<const ::iovec> rec(&pv, 1);
+                    egress_once_t once([&] { return frame_of(rec); });
+                    egress_send(once, [&](int wfd, std::uint32_t bound) {
+                        return write_gather(wfd, rec, bound, false);
+                    });
                     break;
                 }
                 case ws::opcode_t::CLOSE:
@@ -925,7 +935,9 @@ void ws_client_transport_t::serve(int fd) {
 
         buf.erase_front(off);  // once, after the frames (views into it) are used
 
-        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
+        // One bounded 100 ms wait: readable, and writable too while a frame the socket cut
+        // short is held — that resumes it here (#2144).
+        const int pr = poll_io(fd);
         if (pr < 0) break;
         if (pr == 0) continue;  // timeout → re-check stop_
 
@@ -940,7 +952,7 @@ void ws_client_transport_t::serve(int fd) {
     }
 
 teardown:
-    teardown_peer(fd);  // reset-under-write_m_ then close (stream_endpoint_t)
+    teardown_peer(fd);  // close the egress, then reset and close (stream_endpoint_t)
     // Liveness (#1059): every death of the one connection lands here — peer CLOSE, remote
     // hangup, receive error, RFC 6455 breach, and the local stop — so this is the ONE
     // place link_up() flips false. Cleared BEFORE the departure seam fires, so a notifier

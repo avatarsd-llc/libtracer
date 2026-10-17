@@ -2175,6 +2175,17 @@ if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_W
     add_test(NAME transport_conformance COMMAND transport_conformance_test)
 endif()
 
+if(LIBTRACER_NET_PLANE)
+    # #2144 — the shared-frame egress module (ADR-0087 §2): SAMPLE latest-wins, STREAM order
+    # and its two pressure arms, part writes, strikes, close, a stalled peer delaying no other
+    # (over the #2139 fake link), and the writer-role handoff under contention (the TSan leg).
+    add_executable(egress_test egress_test.cpp)
+    target_link_libraries(egress_test PRIVATE libtracer)
+    libtracer_test_warnings(egress_test)
+    add_test(NAME egress COMMAND egress_test)
+    set_tests_properties(egress PROPERTIES TIMEOUT 120)
+endif()
+
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
     # #2139 — the shared link case suite (partial frame, several frames per read, oversize
     # length, fragmented message, stalled peer, peer leaving mid-send), written against the

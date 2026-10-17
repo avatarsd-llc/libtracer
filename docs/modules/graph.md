@@ -812,6 +812,11 @@ a reply already being assembled.
 :members:
 ```
 
+```{doxygenstruct} tr::graph::delivery_lane_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenstruct} tr::graph::sub_event_t
 :project: libtracer
 :members:

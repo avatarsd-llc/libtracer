@@ -57,6 +57,7 @@ Native-window hold ([ADR-0081](0081-pre-sink-ingress-native-window-hold-or-named
 
 - **Depth 1 is a SAMPLE.** The copy policy overwrites the one slot in place, so the latest frame wins. It is the degenerate ring, not a separate slot type.
 - **Depth N is a STREAM.** A full ring follows the receiving vertex's own declared pressure arm ([RFC-0025](../spec/rfcs/0025-stream-class-values.md) §4.4).
+- **One ring per (peer, vertex)** (maintainer ruling on #2144): each peer keeps a ring for every local vertex it is subscribed to, sized at subscribe time from that vertex's retention depth, so one vertex's flood never sheds another's frames. The rings leave round-robin across vertices and FIFO inside each, and `transport_t::send` carries the vertex identity to the link.
 - **A BATCH is a value the application composes**, so it takes one ring entry, like any other write. IMMEDIATE behaves as STREAM here.
 
 **The egress path never reads the `delivery_class` bits.** This agrees with RFC-0025 §4.1 as the 2026-08-24 selector erratum left it. The class is honoured by the role of the vertex on each side of the edge and by the receiving vertex's pressure arm, never by a bit read in the fan-out loop. Removing the `delivery_class` wire bits themselves would be a separate RFC-0025 amendment, outside this ADR.

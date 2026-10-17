@@ -24,6 +24,36 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `graph_t::deferred_release_drops()` and the QSBR domain's own drop tally it summed are deleted;
   the count is per graph now, `graph_t::reclaim_refusals().release_refused`.
 
+- **Stream links write through one shared-frame egress, one ring per (peer, vertex)
+  ([#2144](https://github.com/avatarsd-llc/libtracer/issues/2144)).** TCP and WebSocket links,
+  dialers and servers, now send through `egress_t` (ADR-0087 §2). A remote delivery waits, when
+  it has to, in its own vertex's ring toward that peer: depth 1 (a SAMPLE) keeps the latest,
+  depth N (a STREAM) keeps order and a full ring takes the vertex's §4.4 arm. The lanes leave
+  round-robin. API changes:
+  - `transport_t::send(head, value)` gains a third parameter, `const graph::delivery_lane_t&`:
+    the lane the value rides. An override adds it; a link that writes in-call ignores it.
+    `graph::remote_delivery_t` carries the edge's lane in its new `lane` field, and
+    `subscriber_remote_t` records the vertex's depth and arm at admission (`lane_depth`,
+    `lane_reliable`, in its tail padding: still 120 B).
+  - `write_result_t::partial` is replaced by `write_result_t::moved` (bytes written), and
+    `slot_server_t::broadcast_iov` by `broadcast` and `send_to`.
+
+  Behaviour changes:
+  - A write the socket cuts short is kept and finished when the socket is writable again,
+    on the link's own wait; it no longer abandons the record and condemns the peer.
+  - Server writes never block, the WebSocket `101` included: it is the session's first egress
+    frame. A strike is an offer that found its STREAM lane full and whose turn moved no byte; a peer
+    is condemned after `kEgressStallStrikes` (`kMaxConsecutiveStalls` on a dialer) whole
+    rings of strikes in a row, counted in the depth of the lane being offered. A burst that
+    only fills rings strikes nothing, and a poll timeout is not an offer. A SAMPLE lane
+    (depth 1) never strikes: its overwrite is bounded at one slot, so a fast publisher cannot
+    condemn a briefly stalled peer, and a peer stuck behind SAMPLE lanes alone is left to
+    the link's own down detection.
+  - A full delivery ring now sheds its oldest frame by default, where the one link queue
+    refused the newest. A vertex that wants the old arm declares it reliable
+    (`vertex_policy_t::ring_reliable`). Frames from no vertex (replies, control) ride a
+    best-effort control lane of `kEgressControlDepth` (8).
+
 - **A UDP link with no `max_frame` accepts one MTU, not 64 KiB
   ([#2132](https://github.com/avatarsd-llc/libtracer/issues/2132)).** The unset receive cap of
   `udp_transport_t` is the new `udp_transport_t::kDefaultMaxFrame` (1,472 B, the payload of one
@@ -96,6 +126,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   than before it (it held its largest frame before), and an oversize length still closes the
   link before anything is drawn. `ws::decode_header`, `ws::header_t` and
   `ws::kMaxClientFrameHeader` expose the header rules the decoder applies.
+
+- **`libtracer/egress.hpp`: the one egress module for stream links
+  ([#2144](https://github.com/avatarsd-llc/libtracer/issues/2144)).** `egress_frame_t` (a
+  refcounted frame: copied head bytes plus a kept value), `egress_peer_t` (24 B per peer on a
+  64-bit host), `egress_t` (`send`, `flush`, `close`, `open`), `egress_step_t`,
+  `egress_result_t`, and `graph::delivery_lane_t` (a lane's key, depth and arm). A peer holds
+  a ring only for a vertex with frames waiting; the ring comes from the link's own source and
+  goes back when it drains. A sender that finds the peer idle writes its own record directly,
+  and one that finds a write in flight leaves a reference and returns. No timer, no clock read.
 
 - **`subscription_selector_t`: a vertex that switches among named options of subscription refs
   ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** A header-only adapter

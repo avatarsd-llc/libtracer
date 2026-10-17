@@ -405,7 +405,8 @@ they are the reason a new binding is small.
   compiled only when that transport is enabled, so a build that drops a transport
   leaves neither a compiled factory nor a dangling call to it. No preprocessor
   macro selects a transport: selection is which translation units get compiled.
-- **`tx_handoff_t`** is enqueue-then-write for a link that must put one record on the wire at a time. The link's lock guards a small bounded queue and a writer-in-flight flag, never the write itself. The first sender becomes the writer and writes its own record; a sender that finds a write in flight copies its record into a queue slot and returns; a sender that finds every slot taken drops the record and the link counts it. The writer drains the queue in admission order. It still waits on I/O, bounded per record by the link's write budget, and a stream link gives the peer up after three stalled writes in a row; there is no transmit task, so the queue does not make the write asynchronous.
+- **`egress_t`** is the one egress module every POSIX stream link adapts (ADR-0087 §2, #2144). A send builds at most one shared, refcounted frame (`egress_frame_t`: the copied head plus a kept value by reference), and a fan-out hands the same frame to every peer. Each (peer, vertex) pair has its own ring of frame references, shaped at subscribe time from the local vertex's retention depth and carried on each send as a `graph::delivery_lane_t`: depth 1 is a SAMPLE, so a newer frame overwrites the waiting one; depth N is a STREAM, and a full ring applies that vertex's pressure arm (best-effort sheds the oldest, reliable refuses the newest). A frame from no vertex rides the peer's control lane (`kEgressControlDepth`, best-effort). Lanes leave round-robin, FIFO inside each; a ring is drawn from the link's source when its vertex's first frame has to wait and goes back when its last one leaves, so an idle peer holds no ring. A sender that finds the peer idle takes the writer role by try-lock and writes its own record from its own memory; one that finds a write in flight leaves its reference and returns, so a stalled peer never delays another peer's send. A write the socket cuts short keeps its frame and offset and resumes when the socket reports writability or on the next send. A strike is an offer past a full STREAM lane whose turn moved no byte; any byte moved clears the count, and the link's cap condemns the peer. A SAMPLE lane never strikes: its overwrite is its contract. Strikes count events, never time: the module reads no clock.
+- **`tx_handoff_t`** is enqueue-then-write for a link that must put one record on the wire at a time; since #2144 only the ESP-IDF WebSocket client uses it. The link's lock guards a small bounded queue and a writer-in-flight flag, never the write itself. The first sender becomes the writer and writes its own record; a sender that finds a write in flight copies its record into a queue slot and returns; a sender that finds every slot taken drops the record and the link counts it. The writer drains the queue in admission order. It still waits on I/O, bounded per record by the link's write budget, and a stream link gives the peer up after three stalled writes in a row; there is no transmit task, so the queue does not make the write asynchronous.
 
 ## API reference
 
@@ -442,6 +443,41 @@ they are the reason a new binding is small.
 ```
 
 ```{doxygenclass} tr::net::self_heal_link_t
+:project: libtracer
+:members:
+```
+
+### The egress
+
+```{doxygenvariable} tr::net::kEgressControlDepth
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kEgressStallStrikes
+:project: libtracer
+```
+
+```{doxygenclass} tr::net::egress_frame_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::egress_step_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::egress_result_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::egress_peer_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::egress_t
 :project: libtracer
 :members:
 ```

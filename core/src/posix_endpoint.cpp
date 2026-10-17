@@ -58,10 +58,15 @@ enum class write_fault_t : std::uint8_t {
 struct send_deadline_t {
     std::chrono::steady_clock::time_point at{}; /**< @brief When the record is abandoned. */
     bool bounded = false;                       /**< @brief False ⇒ no deadline at all. */
+    int flags = 0; /**< @brief `MSG_DONTWAIT` for a nonblocking write, which ends `STALLED`
+                               the first time the socket is full (#2144), else 0. */
 
-    explicit send_deadline_t(std::uint32_t bound_ms)
-        : at(std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms)),
-          bounded(bound_ms != 0) {}
+    /** @brief Reads the clock only for a bounded write: an unbounded (@p bound_ms 0) or
+     *         nonblocking one costs none (#2144). */
+    send_deadline_t(std::uint32_t bound_ms, bool nonblock)
+        : bounded(bound_ms != 0 && !nonblock), flags(static_cast<int>(nonblock) * MSG_DONTWAIT) {
+        if (bounded) at = std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms);
+    }
 
     /** @brief True once the record may no longer be worked on. */
     [[nodiscard]] bool expired() const { return bounded && std::chrono::steady_clock::now() >= at; }
@@ -75,7 +80,7 @@ std::atomic<std::size_t> g_malformed_calls{0};
 std::atomic<int> g_last_malformed_errno{0};
 
 /**
- * @brief The ONE write-fault policy both full-write helpers share (#903 / #948 / #838).
+ * @brief The ONE write-fault policy of the one full-write loop (#903 / #948 / #838).
  *
  * Four outcomes, not two — conflating the last with the middle is #948, where one
  * unimplemented flag on one platform's `sendmsg` made every data frame vanish while the
@@ -169,58 +174,20 @@ int injected_write_errno() {
     }
 }
 
-/** @brief One `send(2)` attempt through the #948 injection seam. */
-ssize_t send_bytes(int fd, const void* buf, std::size_t len) {
-    if (const int fake = injected_write_errno(); fake != 0) {
-        errno = fake;
-        return -1;
-    }
-    return ::send(fd, buf, len, MSG_NOSIGNAL);
-}
-
 /** @brief One `sendmsg(2)` attempt through the #948 injection seam. */
-ssize_t send_gather(int fd, const msghdr* msg) {
+ssize_t send_gather(int fd, const msghdr* msg, int flags) {
     if (const int fake = injected_write_errno(); fake != 0) {
         errno = fake;
         return -1;
     }
-    return ::sendmsg(fd, msg, MSG_NOSIGNAL);
+    // One entry with no address and no ancillary data goes out as send(2): the kernel's
+    // sendmsg path first copies the msghdr and imports the iovec from user memory, a cost a
+    // small record pays in full.
+    if (msg->msg_iovlen == 1 && msg->msg_name == nullptr && msg->msg_controllen == 0)
+        return ::send(fd, msg->msg_iov[0].iov_base, msg->msg_iov[0].iov_len, MSG_NOSIGNAL | flags);
+    return ::sendmsg(fd, msg, MSG_NOSIGNAL | flags);
 }
 
-/**
- * @brief The plain full-write loop, carrying the record's deadline and its
- *        already-on-the-wire fact (#838).
- *
- * @param fd       The destination socket.
- * @param bytes    The remaining bytes of the record.
- * @param dl       The record's deadline (see @ref send_deadline_t).
- * @param progress Whether EARLIER bytes of this record already reached the socket — what
- *                 makes an abandoned write a framing desync rather than a clean miss.
- */
-write_result_t write_all_bounded(int fd, std::span<const std::byte> bytes,
-                                 const send_deadline_t& dl, bool progress) {
-    std::size_t off = 0;
-    bool retry_spent = false;
-    while (off < bytes.size()) {
-        // The deadline is checked BEFORE the attempt, so a record whose budget is already
-        // spent costs no further syscall — and the caller's write-mutex hold ends here.
-        if (dl.expired()) return {write_outcome_t::STALLED, progress};
-        const ssize_t n = send_bytes(fd, bytes.data() + off, bytes.size() - off);
-        if (n <= 0) {
-            const write_fault_t fault = classify_write_fault(n);
-            if (fault == write_fault_t::RESUME) continue;
-            if (fault == write_fault_t::STALLED) continue;  // re-attempt until the deadline
-            if (fault == write_fault_t::PEER_GONE)
-                return {write_outcome_t::FAILED, progress};  // dead socket → drop the rest
-            if (!retry_malformed_call(retry_spent)) return {write_outcome_t::FAILED, progress};
-            continue;  // our call, not the peer: the bytes are still deliverable
-        }
-        off += static_cast<std::size_t>(n);
-        progress = true;
-        retry_spent = false;
-    }
-    return {write_outcome_t::COMPLETE, false};  // whole record on the wire ⇒ nothing partial
-}
 }  // namespace
 
 bool parse_ipv4(std::string_view host, ::in_addr& out) noexcept {
@@ -297,120 +264,167 @@ stream_endpoint_t::~stream_endpoint_t() {
     // posix_endpoint_t teardown invariant), so nothing races this exchange.
     const int leftover = conn_fd_.exchange(-1, std::memory_order_relaxed);
     if (leftover >= 0) ::close(leftover);
+    egress_.close(peer_);  // every waiting frame and lane back to the link's store
 }
 
 write_result_t stream_endpoint_t::write_all(int fd, std::span<const std::byte> bytes,
                                             std::uint32_t bound_ms) {
-    if (fd < 0) return {write_outcome_t::FAILED, false};
-    return write_all_bounded(fd, bytes, send_deadline_t(bound_ms), /*progress=*/false);
+    const ::iovec v{const_cast<std::byte*>(bytes.data()), bytes.size()};
+    // An empty record is a complete one, with no syscall.
+    return write_all_iov(fd, std::span<const ::iovec>(&v, bytes.empty() ? 0 : 1), bound_ms, false);
 }
 
 write_result_t stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec,
-                                                std::uint32_t bound_ms) {
-    if (fd < 0) return {write_outcome_t::FAILED, false};
-    const send_deadline_t dl(bound_ms);
-    bool progress = false;  // has ANY byte of this record reached the socket
+                                                std::uint32_t bound_ms, bool nonblock) {
+    if (fd < 0) return {write_outcome_t::FAILED, 0};
+    const send_deadline_t dl(bound_ms, nonblock);
+    std::size_t moved = 0;  // bytes of this record on the socket
     bool retry_spent = false;
-    std::size_t i = 0;  // the first entry not yet fully written
+    std::size_t i = 0;     // the first entry not yet fully written
+    std::size_t skip = 0;  // bytes of entry i already written
     while (i < vec.size()) {
-        // Bounded per record, not per syscall (#838): the deadline covers this loop, the
-        // nested write_all below, and therefore the caller's whole write_m_ hold.
-        if (dl.expired()) return {write_outcome_t::STALLED, progress};
+        // Bounded per record, not per syscall (#838): the deadline covers this loop and
+        // therefore the caller's whole writer turn.
+        if (dl.expired()) return {write_outcome_t::STALLED, moved};
         msghdr msg{};
-        // sendmsg does not modify the iovec array; the cast is the C API's
-        // missing const, not a licence to consume the caller's gather (#932).
+        // sendmsg does not modify the iovec array; the cast is the C API's missing const,
+        // not a licence to consume the caller's gather (#932). A write that stopped INSIDE
+        // entry i finishes that entry alone from a local view of its rest, then re-gathers
+        // from the next boundary: the gather stays read-only, so a fan-out needs no per-peer
+        // copy.
+        ::iovec rest{static_cast<std::byte*>(vec[i].iov_base) + skip, vec[i].iov_len - skip};
         msg.msg_iov = const_cast<::iovec*>(vec.data() + i);
         msg.msg_iovlen = vec.size() - i;
-        const ssize_t n = send_gather(fd, &msg);
+        if (skip != 0) {
+            msg.msg_iov = &rest;
+            msg.msg_iovlen = 1;
+        }
+        const ssize_t n = send_gather(fd, &msg, dl.flags);
         if (n <= 0) {
             const write_fault_t fault = classify_write_fault(n);
             if (fault == write_fault_t::RESUME) continue;
-            if (fault == write_fault_t::STALLED) continue;  // re-attempt until the deadline
+            if (fault == write_fault_t::STALLED) {
+                if (dl.flags != 0) return {write_outcome_t::STALLED, moved};  // full: never wait
+                continue;  // re-attempt until the deadline
+            }
             if (fault == write_fault_t::PEER_GONE)
-                return {write_outcome_t::FAILED, progress};  // dead socket → drop the rest
-            if (!retry_malformed_call(retry_spent)) return {write_outcome_t::FAILED, progress};
+                return {write_outcome_t::FAILED, moved};  // dead socket → drop the rest
+            if (!retry_malformed_call(retry_spent)) return {write_outcome_t::FAILED, moved};
             continue;  // our call, not the peer: the bytes are still deliverable
         }
         retry_spent = false;
-        progress = true;
-        std::size_t done = static_cast<std::size_t>(n);
-        // Advance past every fully-written entry — the stream may stop at any
-        // byte boundary.
-        while (i < vec.size() && done >= vec[i].iov_len) {
-            done -= vec[i].iov_len;
-            ++i;
-        }
-        if (i < vec.size() && done > 0) {
-            // The write stopped INSIDE entry i. Finish that entry with the plain
-            // writer instead of trimming the caller's array in place, then
-            // re-gather from the next entry boundary: the gather stays read-only,
-            // so a fan-out needs no per-peer copy. This is the rare slow path — a
-            // complete gathered write never lands here.
-            const write_result_t tail = write_all_bounded(
-                fd,
-                std::span<const std::byte>(static_cast<const std::byte*>(vec[i].iov_base) + done,
-                                           vec[i].iov_len - done),
-                dl, /*progress=*/true);
-            if (tail.outcome != write_outcome_t::COMPLETE) return tail;
+        moved += static_cast<std::size_t>(n);
+        // Advance past every fully-written entry — the stream may stop at any byte boundary.
+        skip += static_cast<std::size_t>(n);
+        while (i < vec.size() && skip >= vec[i].iov_len) {
+            skip -= vec[i].iov_len;
             ++i;
         }
     }
-    return {write_outcome_t::COMPLETE, false};
+    return {write_outcome_t::COMPLETE, moved};
 }
 
-write_result_t stream_endpoint_t::write_record(int fd, const tx_handoff_t::record_t& rec,
-                                               std::uint32_t bound_ms) {
-    if (rec.value == nullptr) return write_all(fd, rec.bytes, bound_ms);
-    // A retained record (RFC-0028 §6.9): the head the fill copied, then the value's links,
-    // straight from the published block. One gathered record under the caller's write_m_
-    // hold, so its bytes cannot interleave with another record's.
+namespace {
+/** @brief A write result as one egress turn: a stalled write holds the frame, a failed one
+ *         abandons it. */
+egress_step_t step_of(const write_result_t& r) noexcept {
+    return {r.moved, r.outcome == write_outcome_t::STALLED, r.outcome == write_outcome_t::FAILED};
+}
+}  // namespace
+
+egress_step_t stream_endpoint_t::write_gather(int fd, std::span<const ::iovec> vec,
+                                              std::uint32_t bound_ms, bool nonblock) {
+    return step_of(write_all_iov(fd, vec, bound_ms, nonblock));
+}
+
+egress_step_t stream_endpoint_t::write_frame(int fd, const egress_frame_t& f, std::size_t off,
+                                             std::uint32_t bound_ms, bool nonblock) {
+    // One gathered write from byte off: the head the frame copied, then a kept value's
+    // links straight from the published block (RFC-0028 §6.9).
+    std::array<std::span<const std::byte>, kMaxInlineIov> inline_spans;
     std::array<::iovec, kMaxInlineIov> inline_vec;
+    iov_table_t<std::span<const std::byte>> spans(inline_spans, *io_src_);
     iov_table_t<::iovec> table(inline_vec, *io_src_);
-    ::iovec* const vec = table.acquire(1 + rec.value->link_count());
-    // Refused before a byte moved: a shed record, never a desync.
-    if (vec == nullptr) return {write_outcome_t::FAILED, false};
-    std::size_t n = 0;
-    if (!rec.bytes.empty()) vec[n++] = ::iovec{rec.bytes.data(), rec.bytes.size()};
-    for (const view::view_t& l : rec.value->links()) {
-        const std::span<const std::byte> b = l.bytes();
-        if (!b.empty()) vec[n++] = ::iovec{const_cast<std::byte*>(b.data()), b.size()};
-    }
-    return write_all_iov(fd, std::span<const ::iovec>(vec, n), bound_ms);
+    std::span<const std::byte>* const sp = spans.acquire(f.span_count());
+    ::iovec* const vec = table.acquire(f.span_count());
+    // Refused before a byte moved: a shed frame, never a desync (off == 0), or a condemned
+    // peer when the frame was already part-written.
+    if (sp == nullptr || vec == nullptr) return {0, false, true};
+    const std::size_t n = f.spans_from(off, sp);
+    for (std::size_t k = 0; k < n; ++k)
+        vec[k] = ::iovec{const_cast<std::byte*>(sp[k].data()), sp[k].size()};
+    return write_gather(fd, std::span<const ::iovec>(vec, n), bound_ms, nonblock);
 }
 
-bool stream_endpoint_t::note_write_result(const write_result_t& r, int fd, std::uint8_t& streak) {
-    if (r.outcome != write_outcome_t::STALLED) {
-        // Any record that COMPLETES clears the streak — the trichotomy's middle arm: a peer
-        // that misses one frame and takes the next was riding out a burst, not broken.
-        // A FAILED write is #66 lifecycle (the socket is already dead), so it neither
-        // counts a stall nor accrues one.
-        if (r.outcome == write_outcome_t::COMPLETE) streak = 0;
-        return false;
-    }
-    stalled_tx_.fetch_add(1, std::memory_order_relaxed);
-    if (streak < kMaxConsecutiveStalls) ++streak;
-    // A half-written record has desynced this stream's framing permanently, so it condemns
-    // the session at once, bypassing the streak (#837's short-write rule). Otherwise the
-    // streak decides.
-    if (r.partial || streak >= kMaxConsecutiveStalls) {
-        // shutdown, never close: the fd stays owned by whoever opened it, every later write
-        // on it fails immediately instead of waiting out another bound, and the readable-
-        // at-EOF this raises is what the recv/poll thread turns into the ORDINARY remote-
-        // departure teardown — one teardown path, with its departure notification, rather
-        // than a second one invented here (the slot_server_t::close_peer discipline).
-        if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
-        streak = 0;  // the verdict is spent; the session is on its way out
-    }
-    return true;  // the frame was shed — the caller counts it in its own dropped_tx_
+std::size_t stream_endpoint_t::retained_parts(std::span<std::span<const std::byte>> parts,
+                                              std::span<const std::span<const std::byte>> head,
+                                              const graph::value_t& value) noexcept {
+    if (head.size() + value.link_count() > parts.size()) return parts.size() + 1;
+    std::size_t i = 0;
+    for (const std::span<const std::byte>& h : head) parts[i++] = h;
+    for (const view::view_t& l : value.links()) parts[i++] = l.bytes();
+    return i;
+}
+
+egress_frame_t* stream_endpoint_t::frame_of(std::span<const ::iovec> rec,
+                                            const graph::value_t* value) const {
+    // The value's links end the gather, one entry per non-empty link: the frame copies what
+    // comes before them and keeps the value itself.
+    std::size_t tail = 0;
+    if (value != nullptr)
+        for (const view::view_t& l : value->links()) tail += l.bytes().empty() ? 0 : 1;
+    const std::span<const ::iovec> vec = rec.first(rec.size() - tail);
+    std::size_t head = 0;
+    for (const ::iovec& v : vec) head += v.iov_len;
+    return egress_frame_t::make(
+        *io_src_, head,
+        [&](std::span<std::byte> out) {
+            std::size_t at = 0;
+            for (const ::iovec& v : vec) {
+                if (v.iov_len != 0) std::memcpy(out.data() + at, v.iov_base, v.iov_len);
+                at += v.iov_len;
+            }
+            return at;
+        },
+        value);
+}
+
+void stream_endpoint_t::note_egress(const egress_result_t& r) noexcept {
+    if (r.shed != 0) dropped_tx_.fetch_add(r.shed, std::memory_order_relaxed);
+    if (r.stalled != 0) stalled_tx_.fetch_add(r.stalled, std::memory_order_relaxed);
+}
+
+void stream_endpoint_t::condemn_fd(int fd) noexcept {
+    // One teardown path, with its departure notification (the close_peer discipline): the
+    // fd stays owned by whoever opened it.
+    if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+}
+
+int stream_endpoint_t::poll_io(int fd) {
+    pollfd pfd{
+        .fd = fd,
+        .events = static_cast<short>(POLLIN | (POLLOUT * static_cast<int>(peer_.wants_write()))),
+        .revents = 0};
+    const int pr = ::poll(&pfd, 1, 100);
+    if (pr <= 0) return pr;
+    // The recv thread owns the fd, so the turn names it directly; it never waits.
+    if ((pfd.revents & POLLOUT) != 0)
+        note_egress(egress_.flush(
+            peer_,
+            [&](const egress_frame_t& f, std::size_t off) {
+                return write_frame(fd, f, off, 0, true);
+            },
+            [fd] { condemn_fd(fd); }));
+    return (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0 ? 1 : 0;
 }
 
 void stream_endpoint_t::teardown_peer(int fd) {
-    // Reset under write_m_ BEFORE ::close so a concurrent send() never writes
-    // to (or reads) a closed/reused fd.
-    {
-        const std::lock_guard lock(write_m_);
-        conn_fd_.store(-1, std::memory_order_relaxed);
-    }
+    // shutdown first so a write in flight returns; the egress close then waits out the
+    // writer role and releases every frame, so no sender reads conn_fd_ after this: only
+    // then is the fd reset and closed (never a write to a closed or reused fd).
+    ::shutdown(fd, SHUT_RDWR);
+    egress_.close(peer_);
+    conn_fd_.store(-1, std::memory_order_relaxed);
     ::close(fd);
 }
 
@@ -433,6 +447,7 @@ void stream_endpoint_t::run_accept_loop(int listen_fd, function_ref_t<bool(int)>
             continue;
         }
         conn_fd_.store(fd, std::memory_order_relaxed);
+        egress_.open(peer_);  // release: a sender that claims the role then sees the fd
 
         serve_peer(fd);
 
@@ -453,6 +468,7 @@ slot_server_t::~slot_server_t() {
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
         const int fd = s->fd.exchange(-1, std::memory_order_relaxed);
         if (fd >= 0) ::close(fd);
+        egress_.close(s->egress);  // its waiting frames and lanes back to the link's store
     }
 }
 
@@ -543,45 +559,57 @@ transport_t* slot_server_t::peer_link(std::string_view peer) {
 }
 
 bool slot_server_t::close_peer(std::string_view peer) {
-    // Shutdown-only under the sender lock order (peers_m_ → write_m_); the poll thread's
-    // next pass observes the close and runs the IDENTICAL remote-FIN teardown — no
-    // duplicate logic, and no off-thread touch of the poll-thread-only buffers
-    // teardown_slot's on_slot_reset hook clears.
+    // Shutdown-only under peers_m_; the poll thread's next pass observes the close and runs
+    // the IDENTICAL remote-FIN teardown — no duplicate logic, and no off-thread touch of the
+    // poll-thread-only buffers teardown_slot's on_slot_reset hook clears. The fd cannot be
+    // closed under us: teardown un-names the slot under this same lock before it closes it.
     const std::lock_guard plock(peers_m_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
         if (!s->open.load(std::memory_order_relaxed) || s->name_view() != peer) continue;
-        const std::lock_guard wlock(write_m_);
-        const int fd = s->fd.load(std::memory_order_relaxed);
-        if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+        condemn_fd(s->fd.load(std::memory_order_relaxed));
         return true;
     }
     return false;
 }
 
-std::size_t slot_server_t::broadcast_iov(std::span<const ::iovec> rec) {
-    // No per-peer copy and no scratch store: write_all_iov reads the gather
-    // without consuming it (#932), so every peer writes from the same record.
-    const std::lock_guard plock(peers_m_);
-    const std::lock_guard wlock(write_m_);
-    // Count the round FIRST: the per-peer bound is the liveness window divided by the peers
-    // this round writes to, so the WHOLE fan-out — every peer stalled — still releases both
-    // locks inside one window (#838). The divisor is the round's own size, a fact in hand,
-    // not a guessed cap.
-    std::size_t open_peers = 0;
-    for (const mem::poly_ptr_t<session_base_t>& s : slots_)
-        if (s->open.load(std::memory_order_relaxed)) ++open_peers;
-    const std::uint32_t bound = derive_send_bound_ms(liveness_window_ms_, open_peers);
+void slot_server_t::send_one(session_base_t& s, function_ref_t<egress_frame_t*()> frame,
+                             std::span<const ::iovec> rec, const graph::delivery_lane_t& lane) {
+    // The fd is read INSIDE the writer role: accept opens the egress only after publishing
+    // it, and teardown closes the egress (waiting the role out) before resetting it.
+    const auto fd = [&s] { return s.fd.load(std::memory_order_relaxed); };
+    const egress_result_t r = egress_.send(
+        s.egress, lane, frame, [&] { return write_gather(fd(), rec, 0, true); },
+        [&](const egress_frame_t& f, std::size_t off) {
+            return write_frame(fd(), f, off, 0, true);
+        },
+        [&] { condemn_fd(fd()); });
+    note_egress(r);
+}
 
-    std::size_t shed = 0;
-    for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
-        if (!s->open.load(std::memory_order_relaxed)) continue;
-        const int fd = s->fd.load(std::memory_order_relaxed);
-        const write_result_t r = write_all_iov(fd, rec, bound);
-        // A stalled peer strikes only ITSELF: the peers behind it in this round still get
-        // the record, and only its own session is condemned once it is provably broken.
-        if (note_write_result(r, fd, s->tx_stall_streak)) ++shed;
-    }
-    return shed;
+void slot_server_t::broadcast(std::span<const ::iovec> rec, const graph::value_t* value,
+                              const graph::delivery_lane_t& lane) {
+    // ONE shared frame for the whole fan-out, built only if some peer has to wait for it
+    // (ADR-0087 §2). peers_m_ keeps the slot table still; every write under it is
+    // nonblocking, so the hold is a few syscalls and never a stalled peer's wait.
+    egress_once_t once([&] { return frame_of(rec, value); });
+    const std::lock_guard plock(peers_m_);
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_)
+        if (s->open.load(std::memory_order_acquire)) send_one(*s, once, rec, lane);
+}
+
+void slot_server_t::send_to(session_base_t& s, std::span<const ::iovec> rec,
+                            const graph::value_t* value, const graph::delivery_lane_t& lane) {
+    egress_once_t once([&] { return frame_of(rec, value); });
+    send_one(s, once, rec, lane);  // a departed session's egress is closed: a counted shed
+}
+
+void slot_server_t::flush_peer(session_base_t& s) {
+    const auto fd = [&s] { return s.fd.load(std::memory_order_relaxed); };
+    const auto write = [&](const egress_frame_t& f, std::size_t off) {
+        return write_frame(fd(), f, off, 0, true);
+    };
+    const auto condemn = [&] { condemn_fd(fd()); };
+    note_egress(egress_.flush(s.egress, write, condemn));
 }
 
 void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
@@ -635,42 +663,40 @@ void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
         if (++slot->gen_seq == 0) slot->gen_seq = 1;
         slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen_seq};
     }
-    // The bounded send, armed here rather than in either derived on_accept: an accepted
-    // peer's socket is a shared-machinery fact, and #838 is a defect of the SHARED write
-    // path — both stream servers write through broadcast_iov and their directed facades, so
-    // both peer planes get the bound from one site (and a new stream server inherits it).
+    // The bounded send (#838), armed here rather than in either derived on_accept. Every
+    // egress write on a server is nonblocking (#2144), the WS 101 included; the bound stays
+    // armed for any blocking write a derived server makes.
     set_snd_timeout(fd);
     // Socket options and the slot's protocol buffers, then its handshake stance: a raw
     // stream peer is open the moment it is accepted, a WS peer only past its 101.
     const bool opens_now = on_accept(*slot, fd);
-    // Publish the two sender-visible fields under write_m_ — the SAME lock teardown_slot
-    // resets them under — so the pair moves as one step for anyone who could act on it: a
-    // broadcast holding that lock runs either entirely before this slot goes live or
-    // entirely after. Inside the hold the fd goes FIRST, which is what makes "open ⇒ fd
-    // valid" an invariant; the reverse (open first, unlocked) let a broadcast read
-    // `open == true` next to `fd == -1` and write the frame to a closed descriptor — a
-    // dropped frame today and a trap for any future per-fd state (#891). Accept is cold —
-    // once per connection, off the delivery path — so the hold costs nothing a sender can
-    // measure. The stores are relaxed: the lock, not the memory order, is what orders them
-    // — every reader of the fd that is not the poll thread itself (both send overloads,
-    // close_peer) holds this same lock.
-    {
-        const std::lock_guard lock(write_m_);
-        slot->fd.store(fd, std::memory_order_relaxed);
-        // The seam that makes the line below testable: here the fd is published and the
-        // slot is one store from open, with write_m_ still held. A broadcast that lands in
-        // this instant must block, and must then find the slot whole. Publish these two
-        // stores unlocked in the other order and the same probe writes to fd -1 — that is
-        // the regression the derived hook exists to redden (`tcp_test`, the accept-publish
-        // race).
-        on_slot_publishing();
-        slot->open.store(opens_now, std::memory_order_relaxed);
-    }
+    // Publish the fd FIRST, then open the session: "open ⇒ fd valid" is the invariant (#891).
+    // A sender reads the fd only inside the session's egress role, and the role cannot be
+    // claimed until the egress opens — a release a claim's acquire pairs with — so no sender
+    // can see the slot half-published, and none waits on the accept to finish.
+    slot->fd.store(fd, std::memory_order_relaxed);
+    // The seam that makes the order testable: the fd is published, the slot not yet open. A
+    // broadcast that lands here must skip the slot rather than write to fd -1 (`tcp_test`,
+    // the accept-publish race).
+    on_slot_publishing();
+    if (opens_now) open_session(*slot);
     // Arrival seam (#1223), fired LAST and with no transport lock held — the mirror image of
     // teardown_slot's departure seam, in every respect including the `open` condition: only a
     // session that reached `open` can flow frames, so only one gets an identity. A WS slot is
     // NOT open here (it opens at its 101), and announces itself from that site instead.
     if (opens_now) publish_peer_up(*slot);
+}
+
+void slot_server_t::open_session(session_base_t& s, std::span<const std::byte> first) {
+    // The first frame is on the wire before any sender can claim the role, so every send
+    // goes after it; and `open` is stored before a byte of it is written, so a peer that has
+    // read it finds the session open. A first frame with no block closes the session.
+    const ::iovec v{const_cast<std::byte*>(first.data()), first.size()};
+    egress_frame_t* const f = first.empty() ? nullptr : frame_of(std::span<const ::iovec>(&v, 1));
+    if (f == nullptr && !first.empty()) condemn_fd(s.fd.load(std::memory_order_relaxed));
+    egress_.open(s.egress, f);
+    s.open.store(true, std::memory_order_release);
+    flush_peer(s);  // writes the first frame now; with none held it takes the role and leaves
 }
 
 void slot_server_t::publish_peer_up(const session_base_t& s) {
@@ -719,22 +745,16 @@ void slot_server_t::teardown_slot(session_base_t& s) {
         departed_handle = s.handle;
         s.handle = peer_handle_t{};
     }
-    int fd;
-    bool was_open;
-    {
-        // The stream teardown-under-write-lock invariant, per slot: reset the fd and the
-        // open flag under write_m_ BEFORE ::close, so an in-flight send either finished
-        // against the still-open fd or observes the reset. The mirror image of the
-        // accept-side publish, same lock, same relaxed stores — `open` clears first here,
-        // so the pair never reads live-with-no-fd from this side either.
-        const std::lock_guard lock(write_m_);
-        was_open = s.open.load(std::memory_order_relaxed);
-        s.open.store(false, std::memory_order_relaxed);
-        fd = s.fd.exchange(-1, std::memory_order_relaxed);
-        // Under the same lock the senders mutate it: a stalled peer's strikes die with its
-        // session and are never inherited by whoever next claims this slot (#838).
-        s.tx_stall_streak = 0;
-    }
+    // The stream teardown-under-role invariant, per slot: clear `open`, shut the fd down so
+    // a write in flight returns, close the egress (which waits its writer out and releases
+    // every waiting frame), and only THEN reset and close the fd — so no sender ever writes
+    // to a closed or reused descriptor. A stalled peer's frames and strikes die with its
+    // session and are never inherited by whoever next claims this slot (#838).
+    const bool was_open = s.open.exchange(false, std::memory_order_acq_rel);
+    const int fd = s.fd.load(std::memory_order_relaxed);
+    if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+    egress_.close(s.egress);
+    s.fd.store(-1, std::memory_order_relaxed);
     if (fd >= 0) ::close(fd);
     on_slot_reset(s);
     // Departure seam (RFC-0009 §D.5): fired LAST, with no transport lock held — the
@@ -798,7 +818,10 @@ void slot_server_t::run() {
             for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
                 const int fd = s->fd.load(std::memory_order_relaxed);
                 if (fd < 0) continue;
-                if (!pfds.push_back(pollfd{fd, POLLIN, 0})) break;
+                // A peer with a held frame also waits for writability (#2144).
+                const auto ev = static_cast<short>(
+                    POLLIN | (POLLOUT * static_cast<int>(s->egress.wants_write())));
+                if (!pfds.push_back(pollfd{fd, ev, 0})) break;
                 if (!pslots.push_back(s.get())) {
                     pfds.pop_back();
                     break;
@@ -808,12 +831,15 @@ void slot_server_t::run() {
         pollfd* const set = pfds.empty() ? &listen_only : pfds.data();
         const std::size_t set_n = pfds.empty() ? 1 : pfds.size();
         const int pr = ::poll(set, static_cast<nfds_t>(set_n), 100);
-        if (pr <= 0) continue;  // timeout or transient error → re-check stop_
+        if (pr < 0) continue;  // transient error → re-check stop_
         if (stop_.load(std::memory_order_relaxed)) break;
         // Peers first (their events are bound to this pass's fd list), then the accept
-        // (which may add a slot).
-        for (std::size_t i = 1; i < set_n; ++i)
+        // (which may add a slot). Writability resumes a held frame; a pass that ran out its
+        // quantum is no event, so it strikes nobody (#2144).
+        for (std::size_t i = 1; i < set_n; ++i) {
+            if ((set[i].revents & POLLOUT) != 0) flush_peer(*pslots[i - 1]);
             if ((set[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0) service_peer(*pslots[i - 1]);
+        }
         if ((set[0].revents & POLLIN) != 0) accept_peer(pfds, pslots);
     }
 }

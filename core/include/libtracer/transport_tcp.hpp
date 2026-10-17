@@ -49,17 +49,15 @@ namespace detail {
 /**
  * @brief TEST SEAM: run by the shared accept path (`slot_server_t::accept_peer`, through
  *        this server's `on_slot_publishing` override) at the exact instant a new
- *        peer's fd has been published and its slot is ONE store away from open — inside the
- *        `write_m_` hold that makes the two stores atomic to senders.
+ *        peer's fd has been published and its slot is not yet open.
  *
- * A slot's two sender-visible fields are published under `write_m_`, fd first, so
- * "open ⇒ fd valid" holds for every sender: a broadcast holding that lock runs either
- * entirely before the slot goes live or entirely after it. Publish them unlocked with `open`
- * first and a broadcast can read `open == true` alongside `fd == -1` and write the frame to a
- * closed descriptor. That is not observable from the outside by racing: the window is two
- * instructions wide. This hook is where a test HOLDS the mid-publish instant open, broadcasts
- * into it, and checks the frame arrives at the peer being accepted; with the stores unlocked
- * and reordered the identical test reads an empty socket.
+ * The fd goes first, then the session's egress opens, then `open`, so "open ⇒ fd valid"
+ * holds for every sender: a sender reads the fd only inside the egress role, which cannot be
+ * claimed before the egress opens (#891, #2144). Open the session first and a broadcast can
+ * write the frame to fd -1. That is not observable from the outside by racing: the window is
+ * two instructions wide. This hook is where a test HOLDS the mid-publish instant open,
+ * broadcasts into it, and checks the broadcast neither blocks nor writes to a closed
+ * descriptor, and that the peer then takes the next frame.
  *
  * Same shape and same rules as `ws_peer_published_hook`: install it before the peer that
  * should trip it connects, and clear it before the test returns; consulted only when the build
@@ -119,9 +117,10 @@ struct tcp_config_t {
     /**
      * @brief The app-provided PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs`
      *        (#838): how long the peer may fail to take bytes before it is treated as broken.
-     *        It bounds every `send` (and the write-mutex hold it takes); `kMaxConsecutiveStalls`
-     *        records in a row that hit it — or one that half-reached the wire — close the
-     *        connection.
+     *        It bounds each egress write turn; offers past a full lane whose turns moved
+     *        nothing, `kMaxConsecutiveStalls` rings of them in a row, close the connection. A
+     *        record the socket took only part of keeps
+     *        its place and finishes on the next turn (#2144).
      */
     std::uint32_t liveness_window_ms = 0;
 };
@@ -151,11 +150,10 @@ struct tcp_server_config_t {
      *         peer, so this is the whole server's recv-stack knob. */
     std::size_t recv_stack = 0;
     /**
-     * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). One
-     *        fan-out round is bounded by it (each peer gets window ÷ peers-in-the-round) and a
-     *        DIRECTED send by window ÷ @ref max_peers (#1295); a session that stalls
-     *        `kMaxConsecutiveStalls` records in a row, or once mid-record, is closed. It also
-     *        SIZES the peer cap.
+     * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). It
+     *        SIZES the peer cap. A server's egress writes never wait (#2144): a session that
+     *        is offered `kEgressStallStrikes` rings of frames in a row past a full STREAM lane,
+     *        its socket moving nothing, is closed. A SAMPLE lane never strikes.
      */
     std::uint32_t liveness_window_ms = 0;
 };
@@ -255,9 +253,10 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
      *
      * @param head  The record's leading spans (borrowed for the call).
      * @param value The payload (kept by reference only if the record is queued).
+     * @param lane  The vertex's ring the record waits in, if it waits (ADR-0087 §2).
      */
-    void send(std::span<const std::span<const std::byte>> head,
-              const graph::value_t& value) override;
+    void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+              const graph::delivery_lane_t& lane) override;
 
     /**
      * @brief Spawn the recv thread a `defer_recv` DIAL construction held back (#1045).
@@ -318,10 +317,10 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
         return dropped_tx_.load(std::memory_order_relaxed);
     }
 
-    /** @brief The subset of @ref dropped_tx a STALLED peer caused (#838): records abandoned
-     *         because their send bound expired. `kMaxConsecutiveStalls` in a row — or one
-     *         that half-reached the wire — closes the connection, so a non-zero count with
-     *         @ref link_up still true is a peer that is falling behind but recovering. */
+    /** @brief Strikes a STALLED peer cost (#838, #2144): offers past a full STREAM lane whose
+     *         turn moved nothing, each one a frame shed. `kMaxConsecutiveStalls` rings of them in a
+     *         row close the connection, so a non-zero count with @ref link_up still true is a peer
+     * that is falling behind but recovering. */
     [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
         return stalled_tx_.load(std::memory_order_relaxed);
     }
@@ -345,6 +344,10 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     std::ptrdiff_t read_exact(int fd, std::byte* dst, std::size_t len,
                               std::span<std::byte> ahead = {});
     bool drain(int fd, std::size_t len);  // discard len bytes (backpressure)
+    /** @brief The one send body: prefix @p parts into one record and put it through the
+     *         egress, in @p lane, keeping @p value (whose links end @p parts) if it waits. */
+    void send_record(std::span<const std::span<const std::byte>> parts, const graph::value_t* value,
+                     const graph::delivery_lane_t& lane);
 
     bool listen_ = false;
     int listen_fd_ = -1;  // LISTEN mode only
@@ -362,13 +365,13 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
     // accessors widen on read; a 32-bit target wraps after 2^32.
     std::atomic<std::size_t> dropped_rx_{0};
     std::atomic<std::size_t> malformed_rx_{0};
-    std::atomic<std::size_t> dropped_tx_{0};
     std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for @ref start_receiving. */
     /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
      *         called at most once per endpoint. DIAL only; a LISTEN link spends its one
      *         `start` on the accept loop and never enters the latched path at all. */
     std::atomic<bool> recv_started_{false};
-    // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
+    // conn_fd_, dropped_tx_ and the egress (and their teardown discipline) live in
+    // stream_endpoint_t.
 };
 
 /**
@@ -418,8 +421,8 @@ class tcp_server_transport_t final : public stream_server_base_t {
      *        (the flat point-to-point surface).
      *
      * The prefix is encoded once; each peer gets one serialized gathered
-     * write.  No-op until a peer is connected.  Thread-safe (peers_m_ →
-     * write_m_, the header lock order).  A directed single-peer send is
+     * write through its egress.  No-op until a peer is connected.  Thread-safe;
+     * a stalled peer never delays the others (#2144).  A directed single-peer send is
      * `peer_link(name)->send(frame)`.
      *
      * @param frame A complete TLV's bytes.
@@ -431,12 +434,20 @@ class tcp_server_transport_t final : public stream_server_base_t {
      *        the first iovec entry and the rope's spans follow — ONE gathered
      *        record per open peer, no flatten copy.
      *
-     * Each peer writes from a fresh copy of the iovec array (the write
-     * consumes it).  Thread-safe (peers_m_ → write_m_).
+     * Every idle peer writes from the same read-only gather; a peer that has to wait
+     * gets one shared frame (ADR-0087 §2).  Thread-safe.
      *
      * @param iov The spans to emit, in order, as a single record.
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
+
+    /**
+     * @brief Retained broadcast (RFC-0028 §6.9): @p head then @p value as one record to
+     *        every open peer; a peer that has to wait holds one shared frame that keeps
+     *        @p value by reference, in @p lane's ring (ADR-0087 §2).
+     */
+    void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+              const graph::delivery_lane_t& lane) override;
 
     /** @brief True — every frame reassembles into ONE refcounted segment from
      *         the injected backend, handed up owning (ADR-0042); a span-only
@@ -483,6 +494,11 @@ class tcp_server_transport_t final : public stream_server_base_t {
          *         record to this facade's peer only.  No-op once departed. */
         void send(std::span<const std::span<const std::byte>> iov) override;
 
+        /** @brief Directed retained send: @p head then @p value as one record to this
+         *         facade's peer only, waiting in @p lane's ring if it waits. */
+        void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+                  const graph::delivery_lane_t& lane) override;
+
         /** @brief The owning server's snapshot (#932): a directed facade counts into the
          *         link's own counters, so it reports them rather than a fabricated zero. */
         [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
@@ -494,6 +510,16 @@ class tcp_server_transport_t final : public stream_server_base_t {
         tcp_server_transport_t* owner_ = nullptr; /**< @brief The owning server. */
         session_t* slot_ = nullptr;               /**< @brief The peer slot this sends to. */
     };
+
+    /** @brief The one send body: prefix @p parts into one record, then to every open peer
+     *         (@p to null) or to @p to alone, in @p lane, keeping @p value if it waits. */
+    void send_record(session_base_t* to, std::span<const std::span<const std::byte>> parts,
+                     const graph::value_t* value, const graph::delivery_lane_t& lane);
+
+    /** @brief A retained send's record laid out on the stack for `send_record`; a value
+     *         too wide for that takes the base's copy path. */
+    void send_retained(session_base_t* to, std::span<const std::span<const std::byte>> head,
+                       const graph::value_t& value, const graph::delivery_lane_t& lane);
 
     /** @brief One fresh slot with its length-prefix framer and directed facade. */
     mem::poly_ptr_t<session_base_t> make_session() override;
@@ -510,8 +536,8 @@ class tcp_server_transport_t final : public stream_server_base_t {
     /** @brief Teardown: reset the slot's framer as it is recycled. */
     void on_slot_reset(session_base_t& s) override;
 
-    /** @brief Fire `detail::tcp_peer_publishing_hook` inside the accept-side `write_m_`
-     *         hold — the mid-publish instant a test holds open (#891). Empty unless the
+    /** @brief Fire `detail::tcp_peer_publishing_hook` with the fd published and the slot not
+     *         yet open — the mid-publish instant a test holds open (#891). Empty unless the
      *         build binds `kFaultInjection` (#1719). */
     void on_slot_publishing() override;
 
@@ -526,7 +552,6 @@ class tcp_server_transport_t final : public stream_server_base_t {
     // accessors widen on read; a 32-bit target wraps after 2^32.
     std::atomic<std::size_t> dropped_rx_{0};
     std::atomic<std::size_t> malformed_rx_{0};
-    std::atomic<std::size_t> dropped_tx_{0};
 };
 
 /** @brief The pre-v0.18.0 spelling of @ref tcp_server_transport_t; removed in v0.19.0 (#1723). */

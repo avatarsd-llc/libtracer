@@ -387,14 +387,12 @@ bool raw_handshake(int cfd) {
  * @brief Block until @p server counts at least @p want OPEN peers.
  *
  * `raw_handshake` returning means the CLIENT read the 101 — which is one instruction earlier
- * than the server publishing the slot, since `on_readable` writes the response and stores
- * `open = true` as two steps of one `write_m_` critical section. A sender can only reach the
- * fd through that same lock, so a `send` here cannot in fact be lost (`ws_transport_test`
- * proves it by parking the server in that instant). This barrier stays anyway because it
- * asserts the predicate DIRECTLY rather than by lock-ordering argument: `enumerate_peers`
- * visits exactly the open, named slots, which is the same predicate `send` broadcasts over.
- * (The peer's routable `p<slot>` name is stamped at accept regardless of the server's
- * `peer_named` setting, so this works on a default server too.)
+ * than the server publishing the slot, since `on_readable` writes the response and only then
+ * opens the session (its egress, then `open = true`). A broadcast in that instant skips the
+ * slot, so a `send` here could be lost (#2144). This barrier asserts the predicate DIRECTLY:
+ * `enumerate_peers` visits exactly the open, named slots, which is the same predicate `send`
+ * broadcasts over. (The peer's routable `p<slot>` name is stamped at accept regardless of the
+ * server's `peer_named` setting, so this works on a default server too.)
  */
 [[nodiscard]] bool wait_for_peers(const tr::net::ws_server_transport_t& server, std::size_t want,
                                   std::chrono::milliseconds budget) {
@@ -404,6 +402,33 @@ bool raw_handshake(int cfd) {
         server.enumerate_peers([&n](std::string_view) { ++n; });
         if (n >= want) return true;
         std::this_thread::sleep_for(2ms);
+    }
+    return false;
+}
+
+/**
+ * @brief Wait until a ws server's egress toward the one raw client @p cfd is idle.
+ *
+ * The `101` is the session's first egress frame (#2144), and the poll thread can still hold
+ * the peer's writer role for an instant after the client has read it. A send in that instant
+ * queues, which needs a frame: so a test that counts a send's allocations first settles the
+ * peer. A one-byte send that finds it idle allocates nothing, and the sender lets the role go
+ * itself. Each probe is read off the socket before the next is sent, so a probe that queued has
+ * been written and the poll thread has had its turn to let the role go: probes sent back to back
+ * would all queue behind the one the poll thread is still writing. Nothing is refused here, so
+ * every probe arrives, three bytes each (a 2-byte header and its one byte), and is dropped.
+ */
+template <class Send>
+[[nodiscard]] bool settle(int cfd, Send&& send) {
+    const std::array<std::byte, 1> one{std::byte{0x5A}};
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const bool idle = count_allocs([&] { send(std::span<const std::byte>(one)); }) == 0;
+        if (read_until(
+                cfd, [](const std::vector<std::byte>& b) { return b.size() >= 3; }, 2s)
+                .size() != 3)
+            return false;
+        if (idle) return true;
+        std::this_thread::sleep_for(1ms);
     }
     return false;
 }
@@ -439,6 +464,8 @@ void test_ws_server_send_span_is_allocation_free() {
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
     check(wait_for_peers(server, 1, 2s), "the server registered the peer as open");
+    check(settle(cfd, [&](std::span<const std::byte> b) { server.send(b); }),
+          "the peer's egress is idle");
 
     std::array<std::byte, 8> payload{};
     for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<std::byte>(i + 1);
@@ -473,6 +500,8 @@ void test_ws_server_send_iov_overflow_drops() {
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
     check(wait_for_peers(server, 1, 2s), "the server registered the peer as open");
+    check(settle(cfd, [&](std::span<const std::byte> b) { server.send(b); }),
+          "the peer's egress is idle");
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0xAB});
     const auto iov = wide_gather(storage, kWideSpans);
@@ -539,6 +568,8 @@ void test_ws_peer_endpoint_send_iov_overflow_drops() {
         ::close(cfd);
         return;
     }
+    check(settle(cfd, [&](std::span<const std::byte> b) { peer->send(b); }),
+          "the peer's egress is idle");
 
     // A2/A3 — the DIRECTED single-span send, first: it rides the same gathered path as the
     // broadcast override, so the frame header is stack-built and the caller's payload goes
@@ -1006,6 +1037,8 @@ void test_ws_server_iov_uses_injected_egress_source() {
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
     check(wait_for_peers(server, 1, 2s), "the server registered the peer as open");
+    check(settle(cfd, [&](std::span<const std::byte> b) { server.send(b); }),
+          "the peer's egress is idle");
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x75});
     const auto iov = wide_gather(storage, kWideSpans);

@@ -102,7 +102,9 @@ struct prefixed_iov_t {
 
 tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_port,
                                  const tcp_config_t& config)
-    : backend_(config.memory.rx), recv_stack_(config.recv_stack) {
+    : stream_endpoint_t(config.memory.io_or_default()),
+      backend_(config.memory.rx),
+      recv_stack_(config.recv_stack) {
     const std::size_t max_frame = config.max_frame;
     const bool defer_recv = config.defer_recv;
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
@@ -123,7 +125,7 @@ tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_
     // shutdown (the posix_endpoint_t SO_RCVTIMEO idiom, applied per connection).
     set_rcv_timeout(fd);
     // Its egress twin (#838): without it a send into a peer that has stopped reading blocks
-    // forever WITH write_m_ held, freezing every other sender on this link too.
+    // forever in the writer's turn, and every record behind it waits in the ring.
     set_snd_timeout(fd);
     set_nodelay(fd);
     conn_fd_.store(fd, std::memory_order_relaxed);
@@ -157,7 +159,7 @@ void tcp_transport_t::start_receiving() {
     start(
         [this, fd] {
             serve(fd);
-            teardown_peer(fd);  // reset-under-write_m_ then close (stream_endpoint_t)
+            teardown_peer(fd);  // close the egress, then reset and close (stream_endpoint_t)
             // Departure seam (RFC-0009 §D extended): the one connection died under us —
             // not a local stop — so report the link down (no locks held here).
             if (!stop_.load(std::memory_order_relaxed)) notify_down();
@@ -166,7 +168,7 @@ void tcp_transport_t::start_receiving() {
 }
 
 tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& config)
-    : listen_(true), backend_(config.memory.rx) {
+    : stream_endpoint_t(config.memory.io_or_default()), listen_(true), backend_(config.memory.rx) {
     const std::size_t max_frame = config.max_frame;
     const std::size_t recv_stack = config.recv_stack;
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
@@ -218,83 +220,42 @@ void tcp_transport_t::send(std::span<const std::byte> frame) {
 }
 
 void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    const prefixed_iov_t rec(iov, kMaxFrame, egress_source());
+    send_record(iov, nullptr, {});
+}
+
+void tcp_transport_t::send(std::span<const std::span<const std::byte>> head,
+                           const graph::value_t& value, const graph::delivery_lane_t& lane) {
+    // The record's spans on the stack: a delivery's head is two or three spans and a value one
+    // or two links, so an unusually wide one takes the base's general lowering (the copy path)
+    // rather than growing a table here.
+    std::array<std::span<const std::byte>, kMaxInlineIov> parts;
+    const std::size_t n = retained_parts(parts, head, value);
+    if (n > parts.size()) {
+        transport_t::send(head, value, lane);
+        return;
+    }
+    send_record(std::span<const std::span<const std::byte>>(parts.data(), n), &value, lane);
+}
+
+void tcp_transport_t::send_record(std::span<const std::span<const std::byte>> parts,
+                                  const graph::value_t* value, const graph::delivery_lane_t& lane) {
+    const prefixed_iov_t rec(parts, kMaxFrame, egress_source());
     // Oversize for the cap, or a refused gather store: shed it, but COUNT it (#932) —
     // an egress drop used to be a bare return no observer could see.
     if (!rec.ok) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // Enqueue-then-write (RFC 0028 §4.7, #1619). The writer holds write_m_ across each
-    // record, so records never interleave on the stream and the recv thread cannot close the
-    // fd underneath one; but a publisher that arrives while a write is in flight copies its
-    // record into the queue and returns instead of waiting on write_m_ for the rest of that
-    // write. Each record's write is still bounded by the derived send bound (#838: one peer
-    // here, so the whole liveness window), and a peer that keeps missing it is closed.
-    const std::uint64_t shed = handoff_send(
-        [&](int fd) {
-            const write_result_t r =
-                write_all_iov(fd, rec.span(), derive_send_bound_ms(liveness_window_ms_, 1));
-            return note_write_result(r, fd, tx_stall_streak_);
-        },
-        [&](mem::block_array_t<std::byte>& slot) -> std::size_t {
-            // The queued copy of the record: the gathered spans, prefix included.
-            std::size_t total = 0;
-            for (const ::iovec& v : rec.span()) total += v.iov_len;
-            if (!slot.reserve(total)) return 0;
-            std::size_t off = 0;
-            for (const ::iovec& v : rec.span()) {
-                std::memcpy(slot.data() + off, v.iov_base, v.iov_len);
-                off += v.iov_len;
-            }
-            return total;
-        });
-    if (shed != 0) dropped_tx_.fetch_add(shed, std::memory_order_relaxed);
-}
-
-void tcp_transport_t::send(std::span<const std::span<const std::byte>> head,
-                           const graph::value_t& value) {
-    // The record's spans on the stack: a delivery's head is two or three spans and a value one
-    // or two links, so an unusually wide one takes the base's general lowering (the copy path)
-    // rather than growing a table here.
-    std::array<std::span<const std::byte>, kMaxInlineIov> parts;
-    const std::size_t n = head.size() + value.link_count();
-    if (n > parts.size()) {
-        transport_t::send(head, value);
-        return;
-    }
-    std::size_t i = 0;
-    for (const std::span<const std::byte>& h : head) parts[i++] = h;
-    for (const view::view_t& l : value.links()) parts[i++] = l.bytes();
-    const prefixed_iov_t rec(std::span<const std::span<const std::byte>>(parts.data(), n),
-                             kMaxFrame, egress_source());
-    if (!rec.ok) {
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    // In-call, the whole record gathers straight from the caller's spans, as `send(iov)` does.
-    // Queued, the slot takes the prefix and the head — header-sized — and the queue keeps one
-    // reference to the value, whose links the writer gathers when it drains the record.
-    const std::uint64_t shed = handoff_send(
-        [&](int fd) {
-            const write_result_t r =
-                write_all_iov(fd, rec.span(), derive_send_bound_ms(liveness_window_ms_, 1));
-            return note_write_result(r, fd, tx_stall_streak_);
-        },
-        [&](mem::block_array_t<std::byte>& slot) -> std::size_t {
-            std::size_t total = rec.prefix.size();
-            for (const std::span<const std::byte>& h : head) total += h.size();
-            if (!slot.reserve(total)) return 0;
-            std::memcpy(slot.data(), rec.prefix.data(), rec.prefix.size());
-            std::size_t off = rec.prefix.size();
-            for (const std::span<const std::byte>& h : head) {
-                if (!h.empty()) std::memcpy(slot.data() + off, h.data(), h.size());
-                off += h.size();
-            }
-            return total;
-        },
-        &value);
-    if (shed != 0) dropped_tx_.fetch_add(shed, std::memory_order_relaxed);
+    // One egress (ADR-0087 §2): a publisher that finds the peer idle writes its record
+    // straight from the caller's gather; one that finds a write in flight leaves ONE shared
+    // frame in its vertex's ring and returns, never waiting on another publisher's write
+    // (#1619). The frame copies the prefix and the head — header-sized — and keeps one
+    // reference to the value. The writer's turn is bounded by the liveness window (#838).
+    egress_once_t once([&] { return frame_of(rec.span(), value); });
+    egress_send(
+        once,
+        [&](int fd, std::uint32_t bound) { return write_gather(fd, rec.span(), bound, false); },
+        lane);
 }
 
 std::ptrdiff_t tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len,
@@ -304,6 +265,13 @@ std::ptrdiff_t tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t l
     std::size_t off = 0;
     while (off < len) {
         if (stop_.load(std::memory_order_relaxed)) return -1;
+        // A frame the socket cut short waits for writability, so this thread waits for both
+        // and resumes it (#2144); otherwise the read itself is the wait.
+        if (peer_.wants_write()) {
+            const int pr = poll_io(fd);
+            if (pr < 0) return -1;
+            if (pr == 0) continue;
+        }
         std::array<iovec, 2> iov{iovec{dst + off, len - off}, iovec{ahead.data(), ahead.size()}};
         msghdr msg{};
         msg.msg_iov = iov.data();
@@ -477,17 +445,46 @@ void tcp_server_transport_t::send(std::span<const std::byte> frame) {
 }
 
 void tcp_server_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    // Build the record ONCE, then hand the gather to the shared fan-out, which writes
-    // it to every peer under the header lock order (peers_m_ → write_m_) — the gather
-    // is read-only, so no per-peer copy is taken (#932).
-    const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame, egress_source());
+    send_record(nullptr, iov, nullptr, {});
+}
+
+void tcp_server_transport_t::send(std::span<const std::span<const std::byte>> head,
+                                  const graph::value_t& value, const graph::delivery_lane_t& lane) {
+    send_retained(nullptr, head, value, lane);
+}
+
+void tcp_server_transport_t::send_retained(session_base_t* to,
+                                           std::span<const std::span<const std::byte>> head,
+                                           const graph::value_t& value,
+                                           const graph::delivery_lane_t& lane) {
+    std::array<std::span<const std::byte>, kMaxInlineIov> parts;
+    const std::size_t n = retained_parts(parts, head, value);
+    if (n > parts.size()) {  // too wide for the stack table: the base's copy path
+        if (to == nullptr)
+            transport_t::send(head, value, lane);
+        else
+            to->peer_endpoint->transport_t::send(head, value, lane);
+        return;
+    }
+    send_record(to, std::span<const std::span<const std::byte>>(parts.data(), n), &value, lane);
+}
+
+void tcp_server_transport_t::send_record(session_base_t* to,
+                                         std::span<const std::span<const std::byte>> parts,
+                                         const graph::value_t* value,
+                                         const graph::delivery_lane_t& lane) {
+    // Build the record ONCE, then hand the gather to the fan-out or to the one session: every
+    // idle peer writes from it (read-only, #932), and a peer that has to wait gets one shared
+    // frame in that vertex's ring.
+    const prefixed_iov_t rec(parts, tcp_transport_t::kMaxFrame, egress_source());
     if (!rec.ok) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, and counted (#932)
         return;
     }
-    // Each peer the bound shed is one frame that never reached it — counted here, where the
-    // link's own tx counter lives (#838).
-    dropped_tx_.fetch_add(broadcast_iov(rec.span()), std::memory_order_relaxed);
+    if (to == nullptr)
+        broadcast(rec.span(), value, lane);
+    else
+        send_to(*to, rec.span(), value, lane);  // a departed session's egress is closed: shed
 }
 
 void tcp_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -497,27 +494,13 @@ void tcp_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> fr
 
 void tcp_server_transport_t::peer_endpoint_t::send(
     std::span<const std::span<const std::byte>> iov) {
-    if (owner_ == nullptr || slot_ == nullptr) return;
-    // The single-fd twin of the broadcast override: one gathered record, one peer.
-    const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame, owner_->egress_source());
-    if (!rec.ok) {
-        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, counted (#932)
-        return;
-    }
-    const std::lock_guard lock(owner_->write_m_);
-    if (!slot_->open.load(std::memory_order_relaxed)) {  // departed ⇒ a counted drop
-        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    // One peer in this round, but NOT one peer on this node: every open peer can be the
-    // target of a concurrent directed send, and they serialize behind this same write_m_.
-    // So the bound divides by the admission cap, which makes the sum over all of them one
-    // window instead of one window EACH (#1295). The strike, if it stalls, still lands on
-    // THIS session, the one that earned it.
-    const int fd = slot_->fd.load(std::memory_order_relaxed);
-    const write_result_t r = write_all_iov(fd, rec.span(), owner_->directed_send_bound_ms());
-    if (owner_->note_write_result(r, fd, slot_->tx_stall_streak))
-        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+    if (owner_ != nullptr && slot_ != nullptr) owner_->send_record(slot_, iov, nullptr, {});
+}
+
+void tcp_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> head,
+                                                   const graph::value_t& value,
+                                                   const graph::delivery_lane_t& lane) {
+    if (owner_ != nullptr && slot_ != nullptr) owner_->send_retained(slot_, head, value, lane);
 }
 
 void tcp_server_transport_t::on_readable(session_base_t& base, int fd) {

@@ -28,7 +28,7 @@
  * A queued record is either a COPY of the whole frame, or — since RFC-0028 slice 9 (§6.9) — a
  * copy of the frame's short head plus a RETAINED value: the slot holds one reference to the
  * published block and the writer puts its bytes on the wire straight from it. The retained
- * form is what a link's `transport_t::send(head, value)` override queues, so a payload is
+ * form is what a link's `transport_t::send(head, value, lane)` override queues, so a payload is
  * never gathered into a slot and the slot storage is sized by headers, not by values.
  */
 #pragma once
