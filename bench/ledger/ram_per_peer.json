@@ -47,7 +47,8 @@
       "arm": "tcp-server",
       "metric": "link_base",
       "goal": null,
-      "moved_by": "#2167 (idle server link base 2,608 -> 664 B)",
+      "moved_by": "#2198 (app-driven frozen-peer check: link base 584 -> 600 B)",
+      "waiver": "#2198 maintainer ruling 2026-10-16 (frozen peers are closed by an app-driven check, implemented per transport vertex): +16 B per server link object, not per peer. It is two 8 B members of stream_endpoint_t, which every stream link inherits: frozen_closed_ (std::atomic<std::size_t>, the count of peers the check closed, read by frozen_closed()) and live_since_ (std::uint64_t, the app-supplied `now` at which the check last saw this endpoint make progress; only the dialer's one-peer record reads it, a server judges each session by its own 8 B live_since). tx_moved_ sits in an existing padding hole and costs 0 B.",
       "note": "Per link, not per peer: what an idle server link holds before any peer. #2136 sets no number; it holds."
     },
     {
@@ -57,7 +58,8 @@
       "arm": "ws-server",
       "metric": "link_base",
       "goal": null,
-      "moved_by": "#2167 (idle server link base 2,608 -> 664 B)",
+      "moved_by": "#2198 (app-driven frozen-peer check: link base 584 -> 600 B)",
+      "waiver": "#2198 maintainer ruling 2026-10-16 (frozen peers are closed by an app-driven check, implemented per transport vertex): +16 B per server link object, not per peer. It is two 8 B members of stream_endpoint_t, which every stream link inherits: frozen_closed_ (std::atomic<std::size_t>, the count of peers the check closed, read by frozen_closed()) and live_since_ (std::uint64_t, the app-supplied `now` at which the check last saw this endpoint make progress; only the dialer's one-peer record reads it, a server judges each session by its own 8 B live_since). tx_moved_ sits in an existing padding hole and costs 0 B.",
       "note": "Per link, not per peer: what an idle server link holds before any peer. #2136 sets no number; it holds."
     },
     {
