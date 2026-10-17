@@ -17,7 +17,7 @@
       "metric": "per_conn",
       "goal": 170,
       "moved_by": "#2144 (shared-frame egress: the 24 B egress slot replaces the 1 B stall streak, +16 B per peer)",
-      "waiver": "#2144 maintainer ruling (one ring per (peer, vertex), review blocker 4): the 24 B egress slot is the at-rest cost of the shared-frame egress; rings are drawn only while frames wait. The ws-server row holds at its base.",
+      "waiver": "#2144 maintainer ruling (one ring per (peer, vertex), review blocker 4): the 24 B egress slot is the at-rest cost of the shared-frame egress; rings are drawn only while frames wait. Since #2176 removed the WS session's stream buffer, the same slot shows on the ws-server row too (+32 B, one block class).",
       "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record."
     },
     {
@@ -27,7 +27,8 @@
       "arm": "ws-server",
       "metric": "per_conn",
       "goal": 282,
-      "moved_by": "#2167 (idle server link base re-pinned, per-peer rows +10 B)",
+      "moved_by": "#2144 on #2176 (the 24 B egress slot, no longer absorbed by padding once the WS session lost its stream buffer: 402 -> 434 B per peer)",
+      "waiver": "#2144 maintainer ruling (one ring per (peer, vertex), review blocker 4): the 24 B egress slot is the at-rest cost of the shared-frame egress, here rounded up one block class.",
       "note": "Goal: today's value less the per-peer transport_t stand-in (120 B on x86), deleted by the #2136 peer record."
     },
     {
