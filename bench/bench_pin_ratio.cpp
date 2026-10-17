@@ -69,6 +69,7 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "libtracer/frame.hpp"
 #include "libtracer/pin_instrument.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -121,9 +122,13 @@ std::vector<std::byte> b_u8_value(std::uint8_t v) {
 std::vector<std::byte> b_value(std::size_t n, bool crc = false) {
     std::vector<std::byte> p(n);
     for (std::size_t i = 0; i < n; ++i) p[i] = static_cast<std::byte>(i & 0xFF);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{.cr = crc}, p);
-    return out;
+    // `encode` appends the CRC-32C trailer the bit claims; `emit_tlv` clears trailer bits by
+    // construction (#1109), so a frame built with it never carried one.
+    tr::wire::tlv_t t;
+    t.type = type_t::VALUE;
+    t.opt = opt_t{.cr = crc};
+    t.payload = p;
+    return tr::wire::encode(t);
 }
 
 /** @brief Assemble a FWD{WRITE} frame targeting `/sensor/blob` (RFC-0004 §B child order). */
