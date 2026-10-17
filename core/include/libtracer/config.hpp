@@ -368,6 +368,11 @@ struct default_config_t {
      */
     static constexpr std::size_t kMaxVertexBytes32 = 64;
 
+    /** @brief The ladder that generates the default @ref default_config_t::kSizeClasses. A
+     *         classed root whose table is this one finds a class by its arithmetic `ceiling`
+     *         (#2143). */
+    using size_classes_t = size_class_ladder_t<16, 8, 65536, 48>;
+
     /**
      * @brief The size-class table of the host slab pool (ADR-0083 Decisions 4 and 5, #1775,
      *        #1777): the block sizes a class serves, ascending.
@@ -402,9 +407,6 @@ struct default_config_t {
      *
      * Override fragment: `static constexpr std::size_t kSizeClasses[] = {64, 256, 1024, 4096};`.
      */
-    /** @brief The ladder that generates the default @ref kSizeClasses: a classed root whose
-     *         table is this one finds a class by its arithmetic `ceiling` (#2143). */
-    using size_classes_t = size_class_ladder_t<16, 8, 65536, 48>;
     static constexpr auto kSizeClasses = size_classes_t::kTable;
 
     /**
@@ -419,12 +421,12 @@ struct default_config_t {
      *
      * `false` (the MCU default, ADR-0083 Decision 4, #1783): the default root is a STATIC
      * ARENA of @ref kArenaBytes (`%mem_arena.hpp`, `tr::mem::arena_root_t`), carved into the
-     * classes of @ref kSizeClasses, and the same five defaults draw from its value, table and
-     * net sub-pools. No byte of the default root comes from a heap; the arena never trims, and
-     * an exhausted arena refuses (BACKPRESSURE at run time, a sizing abort at init). A target
-     * with a few hundred KiB of RAM gains nothing from 64 KiB slabs, so the ESP-IDF component
-     * binds `false`. Until v0.19.0 this setting meant the platform heap; an application that
-     * still wants that injects `tr::mem::heap_source()` into its `graph_t`.
+     * classes of @ref default_config_t::kSizeClasses, and the same five defaults draw from its
+     * value, table and net sub-pools. No byte of the default root comes from a heap; the arena
+     * never trims, and an exhausted arena refuses (BACKPRESSURE at run time, a sizing abort at
+     * init). A target with a few hundred KiB of RAM gains nothing from 64 KiB slabs, so the ESP-IDF
+     * component binds `false`. Until v0.19.0 this setting meant the platform heap; an application
+     * that still wants that injects `tr::mem::heap_source()` into its `graph_t`.
      *
      * Override fragment: `static constexpr bool kSlabPool = false;`.
      */
@@ -455,11 +457,12 @@ struct default_config_t {
      * platform heap. The trade-off: every default the application has not redirected draws
      * from the heap, unbounded, and the no-heap link check (ADR-0083 Decision 1) does not hold
      * for that image; it is a deliberate exception for an application that injects its own
-     * sources everywhere. A nonzero value is at least the smallest row of @ref kSizeClasses.
+     * sources everywhere. A nonzero value is at least the smallest row of
+     * @ref default_config_t::kSizeClasses.
      *
      * The free-list heads are sized from the region: one per sub-pool per row of
-     * @ref kSizeClasses no larger than this (`%tr::mem::kArenaClasses`), since a larger class
-     * could never be carved.
+     * @ref default_config_t::kSizeClasses no larger than this (`%tr::mem::kArenaClasses`), since a
+     * larger class could never be carved.
      *
      * Not read where @ref kSlabPool is `true`: no arena is compiled there.
      *

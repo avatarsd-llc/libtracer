@@ -67,11 +67,11 @@ enum class retention_t : std::uint8_t {
  *        (RFC-0022 Amendment 3): a declaration, not a number.
  *
  * Whether a stored value SHARES its inbound receive block (refcount, zero copy) or is COPIED
- * into a block of its own is the build's block source's answer, @ref
- * tr::mem::share_fits: the static arena and the heap root always share, and the slab pool
+ * into a block of its own is the build's block source's answer, given by
+ * @ref tr::mem::share_fits. The static arena and the heap root always share, and the slab pool
  * shares on a class fit, when a copy would draw a block no smaller than the one already held.
- * A vertex states only what its value is for. Owner-side and host-only, like @ref
- * retention_t: no peer reads or writes it.
+ * A vertex states only what its value is for. Owner-side and host-only, like
+ * @ref retention_t, and no peer reads or writes it.
  *
  * Bytes the receive path does not own (a borrowed span) and a value whose TLV carries a CRC or
  * TS trailer are copied whatever the hint.
