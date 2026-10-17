@@ -549,6 +549,15 @@ httpd_ws_client_info_t server_t::fd_info(int fd) {
     return it->second.websocket ? HTTPD_WS_CLIENT_WEBSOCKET : HTTPD_WS_CLIENT_HTTP;
 }
 
+esp_err_t server_t::client_list(std::size_t* fds, int* client_fds) {
+    const std::lock_guard lock(m_);
+    if (fds == nullptr || client_fds == nullptr || *fds < sessions_.size())
+        return ESP_ERR_INVALID_ARG;
+    *fds = 0;
+    for (const auto& [fd, sess] : sessions_) client_fds[(*fds)++] = fd;
+    return ESP_OK;
+}
+
 void server_t::set_frame_hook(std::function<void()> hook) {
     const std::lock_guard lock(m_);
     frame_hook_ = std::move(hook);
@@ -784,6 +793,11 @@ extern "C" int __wrap_shutdown(int fd, int how) {
 httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t handle, int fd) {
     (void)handle;
     return fake_httpd::instance().fd_info(fd);
+}
+
+esp_err_t httpd_get_client_list(httpd_handle_t handle, std::size_t* fds, int* client_fds) {
+    (void)handle;
+    return fake_httpd::instance().client_list(fds, client_fds);
 }
 
 // --- esp_freertos_hooks.h ---------------------------------------------------------------

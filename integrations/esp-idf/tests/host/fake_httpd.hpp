@@ -274,6 +274,7 @@ class server_t {
     esp_err_t queue_work(httpd_work_fn_t work, void* arg);
     esp_err_t trigger_close(int fd);
     [[nodiscard]] httpd_ws_client_info_t fd_info(int fd);
+    esp_err_t client_list(std::size_t* fds, int* client_fds);
     void note_sent();
     /**
      * @brief Refuse further enqueues unconditionally — `cs_send_to_ctrl_sock` returning

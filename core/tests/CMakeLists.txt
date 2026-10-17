@@ -439,7 +439,10 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     # Several cases here PROVE a deliberate leak (a teardown that cannot retire the
     # server's callbacks must leak the session shells and the handler gate rather than
     # free them under a live callback — the #815 precedent), so LeakSanitizer would flag
-    # the very behaviour under test. ASan's use-after-free detection, which is the point
+    # the very behaviour under test. An adopted link still keeps its gate whenever the
+    # server lists a WebSocket client at teardown, or the check cannot run on the server's
+    # task (#2202); with no client left it returns it, which httpd_ws_departure_cost pins
+    # by counting the state source rather than by LeakSanitizer. ASan's use-after-free detection, which is the point
     # of running this suite under sanitizers, stays on.
     set_tests_properties(httpd_ws_teardown PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
@@ -513,8 +516,10 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
             "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
         libtracer_test_warnings(httpd_ws_departure_cost_test)
         add_test(NAME httpd_ws_departure_cost COMMAND httpd_ws_departure_cost_test)
-        # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and this
-        # suite constructs an adopting link — same exemption as the suites around it.
+        # An adopted link keeps its handler gate BY DESIGN while the server lists a WebSocket
+        # client (the #815 precedent, #2202), and one case here proves exactly that. The
+        # other proves it is returned once no client is left, by counting the state source,
+        # so the pin holds on every leg and not only under LeakSanitizer.
         set_tests_properties(httpd_ws_departure_cost
             PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 

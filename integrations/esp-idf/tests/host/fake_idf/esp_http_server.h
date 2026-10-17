@@ -119,13 +119,11 @@ typedef struct httpd_config {
 
 #define ESP_HTTPD_DEF_CTRL_PORT 32768 /**< @brief IDF's default control port. */
 /** @brief IDF's config initialiser. */
-#define HTTPD_DEFAULT_CONFIG()             \
-    {.server_port = 80,                    \
-     .ctrl_port = ESP_HTTPD_DEF_CTRL_PORT, \
-     .stack_size = 4096,                   \
-     .max_open_sockets = 7,                \
-     .lru_purge_enable = false,            \
-     .send_wait_timeout = 5}
+#define HTTPD_DEFAULT_CONFIG()                                                       \
+    {                                                                                \
+        .server_port = 80, .ctrl_port = ESP_HTTPD_DEF_CTRL_PORT, .stack_size = 4096, \
+        .max_open_sockets = 7, .lru_purge_enable = false, .send_wait_timeout = 5     \
+    }
 
 /** @brief WebSocket frame types. */
 typedef enum {
@@ -171,3 +169,6 @@ int httpd_socket_send(httpd_handle_t handle, int sockfd, const char* buf, std::s
 esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int sockfd,
                                        httpd_send_func_t send_fn);
 httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t handle, int fd);
+/** @brief Every open client socket, as httpd_main.c lists them: ESP_ERR_INVALID_ARG when
+ *         @p fds (in: capacity, out: count) cannot hold them all. */
+esp_err_t httpd_get_client_list(httpd_handle_t handle, std::size_t* fds, int* client_fds);
