@@ -188,6 +188,18 @@ constexpr std::size_t kMaxFrameBytes = 32768;
 constexpr bool kRxDrainPaced = kRxDrainFrames != 0 || kRxDrainBytes != 0;
 
 /**
+ * @brief Room for every client socket an adopted server can list (`httpd_get_client_list`),
+ *        which is at most lwIP's socket count. A list that does not fit is refused, and the
+ *        teardown then keeps the handler gate (#2202). The host build has no lwIP and binds
+ *        IDF's default.
+ */
+#if defined(CONFIG_LWIP_MAX_SOCKETS)
+constexpr std::size_t kMaxClientFds = CONFIG_LWIP_MAX_SOCKETS;
+#else
+constexpr std::size_t kMaxClientFds = 10;
+#endif
+
+/**
  * @brief lwIP's per-connection segment queue and send buffer, the two limits a drain's
  *        in-call replies run into (ADR-0085 §7).
  *
@@ -826,10 +838,15 @@ struct asm_buf_t {
  *   - while a handler frame IS inside the link, `depth` is non-zero, and the destructor
  *     blocks until it leaves — the barrier that the URI unregister never was.
  *
- * Its lifetime is deliberately longer than the link's in adopted mode: since the set of
- * sessions still holding the pointer is unknowable, the gate is LEAKED there (one small
- * block, teardown-only — the same leak-rather-than-free discipline #815 established for
- * the TX path). Owning mode frees it: `httpd_stop` deletes every session first.
+ * Its lifetime can be longer than the link's in adopted mode. Owning mode frees it:
+ * `httpd_stop` deletes every session first. Adopted mode frees it only when the server,
+ * asked on its own task after the unregister and the session detach, lists no WebSocket
+ * client at all (#2202): then no session holds the pointer and no item queued before the
+ * check is still to run. It is still LEAKED (one small block, teardown-only, the
+ * leak-rather-than-free discipline #815 established for the TX path) when any WebSocket
+ * client is open — a session still closing, a peer that upgraded and never sent a frame,
+ * a client of another route on a shared server — when the destructor runs on the
+ * server's own task, or when the check never ran within the drain bound.
  *
  * A FIFTH entry point resolves the link through this gate and is NOT one of the latched
  * four: @ref httpd_ws_link_t::ws_pre_handshake, the `ws_pre_handshake_cb` both constructors
@@ -1411,6 +1428,10 @@ struct httpd_ws_link_t::detach_req_t {
     std::size_t n = 0;                  /**< @brief Entries in @ref fds / @ref ctxs. */
     std::atomic<bool> done{false};      /**< @brief Set once every fd has been detached. */
     std::atomic<bool> released{false};  /**< @brief Ownership handshake (see the brief). */
+    /** @brief The server listed no WebSocket client, on the server's task, after the
+     *         unregister and behind every item queued before this one: nothing can reach
+     *         the gate any more (#2202). Published by @ref done. */
+    bool unreached = false;
 };
 
 /**
@@ -1870,6 +1891,9 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // single member of this link — which is also what makes the session snapshot below COMPLETE,
     // since no handler can still be about to claim a slot behind it.
     close_gate();
+    // Owning mode, and a constructor that registered nothing, leave nothing that can reach
+    // the gate; an adopted server is asked (detach_sessions).
+    bool gate_unreached = owns_httpd_ || handle_.load(std::memory_order_relaxed) == nullptr;
     if (handle_.load(std::memory_order_relaxed) != nullptr) {
         if (owns_httpd_) {
             httpd_stop(handle_.load(std::memory_order_relaxed));
@@ -1878,7 +1902,7 @@ httpd_ws_link_t::~httpd_ws_link_t() {
             // latching the route, so the population of stale sessions cannot grow.
             httpd_unregister_uri_handler(handle_.load(std::memory_order_relaxed), uri_.c_str(),
                                          HTTP_GET);
-            detach_sessions();
+            gate_unreached = detach_sessions();
         }
     }
     // No TX drain to wait for (#2095). The one TX work item, the flush, carries the GATE and
@@ -1886,14 +1910,15 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // `gate->link`, which close_gate above has nulled, and it registers on the gate's depth
     // while it runs, which close_gate has joined. An item still in an adopted server's queue
     // finds the link gone and does nothing, so neither a wait nor a leak is owed here.
-    // The gate outlives the link exactly when the server does. Owning mode: httpd_stop
-    // has deleted every session, so nothing holds the pointer any more and it is freed.
-    // Adopted mode: the set of sessions that latched it is unknowable (a peer that
-    // upgraded and never sent a frame is invisible here) and no API deletes them on
-    // demand, so it is LEAKED — one small block, teardown-only, and the price of a
-    // handler that stays safe to dispatch forever. Nothing was registered when the
-    // constructor failed, so that case frees it too.
-    if (owns_httpd_ || handle_.load(std::memory_order_relaxed) == nullptr) {
+    // The gate outlives the link exactly when something may still reach it. Owning mode:
+    // httpd_stop has deleted every session, so it is freed. Adopted mode: it is freed when
+    // the server, asked on its own task after the unregister, lists no WebSocket client
+    // (#2202). Otherwise some session may have latched it (a peer that upgraded and never
+    // sent a frame is invisible here, and no API deletes sessions on demand), so it is
+    // LEAKED: one small block, teardown-only, and the price of a handler that stays safe
+    // to dispatch forever. Kept too when the detach ran inline on the server's task, or
+    // never ran. Nothing was registered when the constructor failed, so that case frees it.
+    if (gate_unreached) {
         mem::drop_in(*state_src_, gate_.load(std::memory_order_relaxed));
     } else {
         ESP_LOGD(kTag, "handler gate leaked at teardown: the adopted server still routes to it");
@@ -1938,11 +1963,24 @@ void httpd_ws_link_t::detach_work(void* req_arg) {
         // the gate shut, neither the close nor any frame that beats it can reach a link.
         (void)httpd_sess_trigger_close(req->handle, fd);
     }
+    // Whether anything can still reach the gate (#2202). The route is unregistered, so no
+    // handshake can latch it again, and this runs behind every item queued before it, the
+    // flush that carries the gate among them. What is left is a session that latched it
+    // earlier, and each of those is a WebSocket client in this list. A session still
+    // closing, a peer that upgraded and never sent a frame, and a client of another route
+    // on a shared server all look the same here, so any WebSocket client keeps the gate.
+    std::array<int, kMaxClientFds> fds{};
+    std::size_t n = fds.size();
+    // A list the server refuses counts as a client: the gate stays.
+    std::size_t ws = httpd_get_client_list(req->handle, &n, fds.data()) != ESP_OK;
+    for (std::size_t i = 0; i < n; ++i)
+        ws += httpd_ws_get_fd_info(req->handle, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET;
+    req->unreached = ws == 0;
     req->done.store(true, std::memory_order_release);
     if (req->released.exchange(true, std::memory_order_acq_rel)) mem::drop_in(*req->src, req);
 }
 
-void httpd_ws_link_t::detach_sessions() {
+bool httpd_ws_link_t::detach_sessions() {
     // The one session that CANNOT be detached: the request a URI handler frame this
     // destructor is nested inside is servicing (#814). For it, httpd_sess_set_ctx takes
     // its request-scoped branch — it edits the in-flight httpd_req_t, leaves the socket
@@ -1965,13 +2003,14 @@ void httpd_ws_link_t::detach_sessions() {
         if (serving_fd >= 0) abandon_session(serving_fd);
     }
 
+    // Queued even with no slot armed: the same item asks whether the gate is still
+    // reachable (detach_work), and an empty snapshot draws nothing.
     std::size_t open_n = 0;
     {
         const std::lock_guard lock(peers_m_);
         for (const auto& s : slots_)
             if (s->open) ++open_n;
     }
-    if (open_n == 0) return;  // no slot armed => no ctx of ours left to retire
 
     // Failable throughout, from `memory.state`: a teardown that cannot draw must still be
     // memory-safe, so a refusal here takes the neutralise-and-leak path rather than skipping
@@ -1981,7 +2020,7 @@ void httpd_ws_link_t::detach_sessions() {
         !raw->ctxs.assign(*state_src_, open_n)) {
         mem::drop_in(*state_src_, raw);
         abandon_sessions();
-        return;
+        return false;
     }
     raw->src = state_src_;
     {
@@ -2005,25 +2044,26 @@ void httpd_ws_link_t::detach_sessions() {
         // We ARE the server task (the dtor was reached from a work item or a handler on
         // it). Queued work could only run after we return, so waiting for it would
         // deadlock by construction — the #814 lesson. Being that task is exactly the
-        // permission detach_work needs, so run it right here instead.
+        // permission detach_work needs, so run it right here instead. Items queued before
+        // this frame have NOT run yet, and one may carry the gate, so it stays.
         detach_work(raw);
+        raw->unreached = false;
         detached = true;
     } else if (httpd_queue_work(handle_.load(std::memory_order_relaxed),
                                 &httpd_ws_link_t::detach_work, raw) != ESP_OK) {
         ESP_LOGE(kTag, "session detach could not be queued (ctrl queue full)");
-        mem::drop_in(*state_src_, raw);  // never queued => nobody else can own it
-        raw = nullptr;
+        raw->released.store(true, std::memory_order_relaxed);  // never queued: ours to drop
     } else {
         for (int turn = 0; turn < kDrainTurns && !detached; ++turn) {
             detached = raw->done.load(std::memory_order_acquire);
             if (!detached) std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
         }
     }
-    if (raw != nullptr && !detached)
-        ESP_LOGE(kTag, "session detach did not run on the httpd task within the drain bound");
-    if (raw != nullptr && raw->released.exchange(true, std::memory_order_acq_rel))
-        mem::drop_in(*state_src_, raw);
+    if (!detached) ESP_LOGE(kTag, "session detach did not run on the httpd task");
+    const bool unreached = detached && raw->unreached;
+    if (raw->released.exchange(true, std::memory_order_acq_rel)) mem::drop_in(*state_src_, raw);
     if (!detached) abandon_sessions();
+    return unreached;
 }
 
 void httpd_ws_link_t::abandon_sessions() {

@@ -299,6 +299,9 @@ void test_send_bound_derivation() {
  */
 void test_jammed_queue_still_closes_the_doomed_fd() {
     std::printf("a peer found broken with its backlog already queued, control queue full:\n");
+    // The links of the previous case each queued their gate check at teardown (#2202), and
+    // no task drains this suite's queue: run them, so this case counts the queue from empty.
+    drain();
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     claim(700);

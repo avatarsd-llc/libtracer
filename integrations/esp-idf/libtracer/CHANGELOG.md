@@ -13,6 +13,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - **`httpd_ws_link_t` conflates a peer's TX frames per path, never across paths
+- **An adopted `httpd_ws_link_t` returns its handler gate at teardown when no WebSocket client
+  is left ([#2202](https://github.com/avatarsd-llc/libtracer/issues/2202)).** The destructor's
+  session-detach work item now also asks the server, on its own task after the URI unregister,
+  whether any WebSocket client is open. With none, nothing can reach the gate and it goes back
+  to `memory.state`. With any (a session still closing, a peer that never sent a frame, a
+  client of another route), or when the check cannot run on the server's task, the gate is
+  kept as before. The adopted teardown now always queues that item, so it waits for the
+  server task (within the existing drain bound) even with no peer connected.
+- **`httpd_ws_link_t` no longer lets one frame replace another
   ([#2195](https://github.com/avatarsd-llc/libtracer/issues/2195)).** Since #2095 a newer frame
   replaced whatever frame was waiting for the peer, and even a wire frame not one byte of which
   had gone out. A session subscribed to two vertices lost one of them, and one-shot frames

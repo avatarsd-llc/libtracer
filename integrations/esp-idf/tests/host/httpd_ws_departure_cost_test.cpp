@@ -40,6 +40,7 @@
 
 #include "fake_httpd.hpp"
 #include "fwd_frame_builder.hpp"
+#include "gated_source.hpp"
 #include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
@@ -152,8 +153,10 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     server_task_t task;
     graph_t g;
     fwd_router_t router(g);
-    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
-                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    gated_source_t state;  // counts what the link draws from `memory.state`, its gate among it
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .memory = {.state = &state}});
     check(link->ok(), "the adopting link registered its URI");
     // add_child installs the bus peer-down notifier, so a session's departure reaches
     // fwd_router_t::link_down under the peer's ROUTABLE name (#994) — `p<slot>`.
@@ -205,6 +208,28 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
 
     task.run_on_task([] { fake_httpd::instance().close_all(); });
     link.reset();
+    // #2202: with no WebSocket client left on the adopted server, nothing can reach the
+    // handler gate, so the teardown returns it with everything else it drew.
+    check(state.live.load() == 0, "no client left: the teardown returned the gate too");
+}
+
+/**
+ * @brief #2202, the other half: a WebSocket client still open at teardown (one that upgraded
+ *        and never sent a frame, or a client of another route on a shared server) may have
+ *        latched the gate, so the adopted teardown keeps it — exactly one block.
+ */
+void test_a_client_left_open_keeps_the_gate() {
+    std::printf("#2202 — an adopted teardown with a WebSocket client still open:\n");
+    server_task_t task;
+    gated_source_t state;
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .memory = {.state = &state}});
+    check(link->ok(), "the adopting link registered its URI");
+    fake_httpd::instance().open_session(710);  // upgraded; never sends a frame
+    link.reset();
+    check(state.live.load() == 1, "the gate, and only the gate, is kept");
+    task.run_on_task([] { fake_httpd::instance().close_all(); });
 }
 
 }  // namespace
@@ -212,6 +237,7 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
 int main() {
     std::printf("== httpd_ws_departure_cost_test ==\n");
     test_departure_cost_is_bounded_by_the_departing_peer();
+    test_a_client_left_open_keeps_the_gate();
     std::printf("%s\n", g_failures == 0 ? "httpd_ws_departure_cost: ALL PASS (0 failures)"
                                         : "httpd_ws_departure_cost: FAILURES");
     return g_failures == 0 ? 0 : 1;
