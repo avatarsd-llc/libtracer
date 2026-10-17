@@ -551,9 +551,9 @@ static_assert(kMembarrier || sizeof(registry_t) ==
  * @brief A domain's deferred releases: the reclaim-only part of its state (#2111).
  *
  * Only @ref retire and @ref drain_ripe name it, and only `reclaim_qsbr_t` reaches those, so a
- * build that binds another policy leaves the default table for `--gc-sections` to drop. That
- * is why it is not a member of @ref registry_t: the router's frame bracket reaches the registry
- * in every build, and a member could not be dropped. The occupancy count the drain's early-out
+ * build that binds another policy leaves the default table for `--gc-sections` to drop. It is
+ * not a member of @ref registry_t because the router's frame bracket reaches the registry in
+ * every build, and a member could not be dropped. The occupancy count the drain's early-out
  * reads stays in @ref control_t::live. A test that owns a domain owns a table beside it and
  * passes both.
  */
