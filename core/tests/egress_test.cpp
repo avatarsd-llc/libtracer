@@ -23,9 +23,10 @@
  *     depth condemns the peer, inside the writer role; an offer the lane still had room for is
  *     none, a turn that moves a byte clears them, and no offer means no strike. A SAMPLE lane
  *     never strikes: a fast publisher to a briefly stalled peer condemns nothing, and the peer
- *     gets the latest value when it drains.
+ *     gets the latest value when it drains, and SAMPLE offers interleaved with STREAM ones on
+ *     the same stalled peer strike nothing. The control lane strikes like a STREAM lane.
  *  6. Close waits the writer out and releases every frame and lane; a refused lane sheds the
- *     frame, counted, and leaves the peer open.
+ *     frame, counted, and leaves the peer open. A close that races senders strands nothing.
  *  7. A peer whose writer is stuck inside a write does not delay a send to another peer of the
  *     same link, and a second sender to the stuck peer returns at once.
  *  8. Many senders, each its own vertex, and a flusher on one peer: every frame arrives whole,
@@ -61,6 +62,7 @@ using tr::net::egress_result_t;
 using tr::net::egress_step_t;
 using tr::net::egress_t;
 using tr::testing::check;
+using tr::testing::check_quiet;
 using bytes_t = std::vector<std::byte>;
 
 /** @brief A heap-backed source that counts live blocks and can be told to refuse. */
@@ -373,6 +375,70 @@ void test_sample_never_strikes() {
     check(src.live.load() == 0, "nothing leaked");
 }
 
+/**
+ * @brief SAMPLE and STREAM offers interleaved against one stalled peer (#2174 review): the
+ *        SAMPLE lane's overwrites strike nothing and clear nothing, while the STREAM lane's
+ *        offers past its full ring strike and condemn at the cap times its depth.
+ */
+void test_sample_and_stream_interleaved() {
+    std::printf("SAMPLE and STREAM interleaved on one stalled peer: only STREAM strikes:\n");
+    counting_source_t src;
+    egress_t eg(src, /*strike_cap=*/3);
+    egress_peer_t p;
+    eg.open(p);
+    const delivery_lane_t telemetry = lane_of(&vertex_a, 1);
+    const delivery_lane_t log = lane_of(&vertex_b, 2);
+    fake_sock_t sock;
+    sock.room = 0;
+    (void)send(eg, p, sock, src, 1, telemetry);  // held on the wire
+    std::uint32_t sample_stalled = 0;
+    std::uint32_t stream_stalled = 0;
+    int condemned_at = 0;
+    for (int i = 1; i <= 20 && condemned_at == 0; ++i) {
+        const egress_result_t s =
+            send(eg, p, sock, src, static_cast<std::uint8_t>(10 + i), telemetry);
+        sample_stalled += s.stalled;
+        check_quiet(!s.condemn, "a SAMPLE offer never condemns");
+        const egress_result_t r = send(eg, p, sock, src, static_cast<std::uint8_t>(100 + i), log);
+        stream_stalled += r.stalled;
+        if (r.condemn) condemned_at = i;
+    }
+    check(sample_stalled == 0, "no SAMPLE offer struck");
+    check(stream_stalled == 6 && condemned_at == 8 && sock.condemned == 1,
+          "STREAM: two absorbed, then six strikes (cap 3 x depth 2) condemn on the eighth");
+    eg.close(p);
+    check(src.live.load() == 0, "nothing leaked");
+}
+
+/**
+ * @brief The control lane (no vertex, depth `kEgressControlDepth`, best-effort) is a STREAM
+ *        lane for the strike count (#2174 review): offers past its full ring strike, and the
+ *        cap times its depth condemns.
+ */
+void test_control_lane_strikes() {
+    std::printf("the control lane strikes and condemns at cap x its depth:\n");
+    counting_source_t src;
+    egress_t eg(src, /*strike_cap=*/3);
+    egress_peer_t p;
+    eg.open(p);
+    const delivery_lane_t control{};
+    fake_sock_t sock;
+    sock.room = 0;
+    std::uint32_t stalled = 0;
+    int condemned_at = 0;
+    for (int i = 1; i <= 64 && condemned_at == 0; ++i) {
+        const egress_result_t r = send(eg, p, sock, src, static_cast<std::uint8_t>(i), control);
+        stalled += r.stalled;
+        if (r.condemn) condemned_at = i;
+    }
+    constexpr int kDepth = tr::net::kEgressControlDepth;
+    check(stalled == 3U * kDepth && condemned_at == 1 + kDepth + 3 * kDepth,
+          "one held and a full ring absorbed, then cap x depth strikes condemn");
+    check(sock.condemned == 1, "condemned once, inside the role");
+    eg.close(p);
+    check(src.live.load() == 0, "nothing leaked");
+}
+
 void test_close_and_refusal() {
     std::printf("close sheds later sends; a refused lane sheds its frame, counted:\n");
     counting_source_t src;
@@ -504,6 +570,45 @@ void test_stalled_peer_does_not_delay_others() {
  *        senders, each its own vertex's lane, and a flusher on one peer whose socket takes a
  *        few bytes per turn.
  */
+/**
+ * @brief A close that races senders strands nothing (#2145): the "nothing waits" read is
+ *        lock-free, so close takes the queue mutex once before it drains, and a frame pushed
+ *        while the close ran is either drained by it or refused as closed.
+ */
+void test_close_races_senders() {
+    std::printf("a close racing senders whose socket holds every write strands nothing:\n");
+    counting_source_t src;
+    bool leaked = false;
+    for (int round = 0; round < 200 && !leaked; ++round) {
+        egress_t eg(src, /*strike_cap=*/255);
+        egress_peer_t p;
+        eg.open(p);
+        const auto none = [](const egress_frame_t&, std::size_t) {
+            return egress_step_t{0, true, false};
+        };
+        std::atomic<bool> go{false};
+        std::vector<std::thread> ts;
+        for (int t = 0; t < 3; ++t)
+            ts.emplace_back([&, t] {
+                const delivery_lane_t lane = lane_of(t == 0 ? &vertex_a : &vertex_b, 4);
+                const bytes_t own(8, std::byte{0x33});
+                const std::span<const std::byte> one[1] = {own};
+                while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+                for (int i = 0; i < 50; ++i) {
+                    tr::net::egress_once_t once([&] { return egress_frame_t::make(src, one); });
+                    (void)eg.send(
+                        p, lane, once, [] { return egress_step_t{0, true, false}; }, none, [] {});
+                }
+            });
+        go.store(true, std::memory_order_release);
+        std::this_thread::yield();
+        eg.close(p);
+        for (std::thread& t : ts) t.join();
+        leaked = src.live.load() != 0;  // a push the close missed would still be held here
+    }
+    check(!leaked, "every frame and lane went back to the store, every round");
+}
+
 void test_concurrent_handoff() {
     std::printf("many senders and a flusher on one peer (TSan):\n");
     counting_source_t src;
@@ -604,8 +709,11 @@ int main() {
     test_part_write_resumes();
     test_strikes_count_offers();
     test_sample_never_strikes();
+    test_sample_and_stream_interleaved();
+    test_control_lane_strikes();
     test_close_and_refusal();
     test_stalled_peer_does_not_delay_others();
+    test_close_races_senders();
     test_concurrent_handoff();
     return tr::testing::summary("egress_test");
 }
