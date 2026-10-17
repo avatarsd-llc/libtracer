@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -3498,6 +3499,8 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
     const bool control = lane.key == nullptr;
     const std::size_t cap = control ? kEgressControlDepth : std::max<std::uint16_t>(lane.depth, 1);
     const tx_frame_t::policy_t policy = kArm[cap > 1][lane.reliable | control];
+    assert((reinterpret_cast<std::uintptr_t>(lane.key) & 3) == 0 &&
+           "delivery_lane_t::key is 4-aligned");
     const tx_frame_t fresh{blk, to.gen, 0, reinterpret_cast<std::uintptr_t>(lane.key) | policy};
     tx_frame_t old;
     bool refused = false;

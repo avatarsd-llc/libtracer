@@ -116,7 +116,8 @@ namespace tr::graph {
 struct delivery_lane_t {
     /** @brief The subscription edge the delivery comes from — one per (local vertex,
      *         subscriber), so per peer it names the vertex. Null: a frame from no vertex (a
-     *         reply, a control frame), which rides the link's control lane. */
+     *         reply, a control frame), which rides the link's control lane. Always aligned to
+     *         at least 4 bytes, so a link may keep a tag in its two low bits. */
     const void* key = nullptr;
     /** @brief The local vertex's retention depth at subscribe time: `1` is a SAMPLE (latest
      *         wins), `N` a STREAM of depth N. `0` reads as 1. */

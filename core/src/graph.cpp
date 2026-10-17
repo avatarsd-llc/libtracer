@@ -2111,6 +2111,9 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     // the handle is non-null here; assert it rather than re-testing on the hot path.
     const subscriber_remote_t* r = e.remote.get();
     assert(r != nullptr && "dispatch_edge gates the remote leg on a populated cold half");
+    // The lane key's contract (delivery_lane_t::key): an address aligned to at least 4 bytes,
+    // whose two low bits a link may use for its own tag.
+    static_assert(alignof(subscriber_remote_t) >= 4, "delivery_lane_t::key must be 4-aligned");
     sink.fn(
         sink.ctx,
         remote_delivery_t{.link = r->link,
