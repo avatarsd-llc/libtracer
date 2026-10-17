@@ -1928,10 +1928,11 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * (@ref abandon_session). Owning mode needs none of this: `httpd_stop` closes every
      * session synchronously, before any member dies.
      *
-     * @return True when the same work item, run on the server's task, found no WebSocket
-     *         client left: nothing can reach the handler gate, and it may be freed (#2202).
+     * The same item carries the handler gate and frees it on the server's task when the
+     * server lists no WebSocket client (#2202). With no slot armed it is only queued: the
+     * destructor does not wait for it.
      */
-    bool detach_sessions();
+    void detach_sessions();
 
     /**
      * @brief Adopted-mode teardown fallback: neutralise, never free, EVERY session slot.
