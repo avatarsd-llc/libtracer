@@ -452,7 +452,9 @@ struct retired_slot_t {
  * Both members are LOADED on the dispatch path (the epoch when going online, the live count
  * when going offline) and STORED only on the control plane, so they want to sit together on
  * one line that stays Shared in every core's cache — and want to be nowhere near the retired
- * table, which a retiring thread writes.
+ * slots (@ref retired_table_t), which a retiring thread writes. The live count stays here, not
+ * beside the slots it counts, because the exit's early-out then reads the line the entry
+ * already loaded; a retirement writes this line anyway, through @ref advance.
  */
 struct alignas(kCellAlign) control_t {
     /**
@@ -507,7 +509,8 @@ struct no_flight_t {
 };
 
 /**
- * @brief A QSBR domain: the whole grace state, as one object (#2119, ADR-0080 Amendment 1 §3).
+ * @brief A QSBR domain: the grace state every bracket reaches, as one object (#2119, ADR-0080
+ *        Amendment 1 §3). Its retired slots are a second object, @ref retired_table_t (#2111).
  *
  * The reclaim side (@ref advance, @ref horizon, @ref drain, @ref retire) and the by-index
  * bracket halves (@ref go_online, @ref go_offline) take the domain they act on, defaulted to
@@ -525,7 +528,6 @@ struct no_flight_t {
 struct registry_t {
     std::array<cell_t, kQsbrParticipants> cells{}; /**< @brief The announcements. */
     control_t ctl{};                               /**< @brief The read-mostly words. */
-    std::array<retired_slot_t, kDeferredReleaseSlots> retired{}; /**< @brief Deferred releases. */
     /**
      * @brief Drain passes in flight, for single flight (@ref qsbr_single_flight): 0 when none
      *        is, else 1 plus the passes that skipped. Off the read-mostly line, and only drainers
@@ -536,14 +538,33 @@ struct registry_t {
         in_flight{};
 };
 static_assert(kMembarrier || sizeof(registry_t) ==
-                                 sizeof(std::array<cell_t, kQsbrParticipants>) + sizeof(control_t) +
-                                     sizeof(std::array<retired_slot_t, kDeferredReleaseSlots>),
+                                 sizeof(std::array<cell_t, kQsbrParticipants>) + sizeof(control_t),
               "outside a membarrier build the drain gate costs 0 B");
 
 /** @brief The default domain, `constinit`: the one every library call site uses. */
 [[nodiscard]] inline registry_t& registry() noexcept {
     static constinit registry_t reg{};
     return reg;
+}
+
+/**
+ * @brief A domain's deferred releases: the reclaim-only part of its state (#2111).
+ *
+ * Only @ref retire and @ref drain_ripe name it, and only `reclaim_qsbr_t` reaches those, so a
+ * build that binds another policy leaves the default table for `--gc-sections` to drop. That
+ * is why it is not a member of @ref registry_t: the router's frame bracket reaches the registry
+ * in every build, and a member could not be dropped. The occupancy count the drain's early-out
+ * reads stays in @ref control_t::live. A test that owns a domain owns a table beside it and
+ * passes both.
+ */
+struct retired_table_t {
+    std::array<retired_slot_t, kDeferredReleaseSlots> slots{}; /**< @brief Deferred releases. */
+};
+
+/** @brief The default domain's retired table, `constinit` for the reason @ref registry is. */
+[[nodiscard]] inline retired_table_t& retired_table() noexcept {
+    static constinit retired_table_t table{};
+    return table;
 }
 
 /** @brief A record field meaning "no cell": every index was taken, or the thread is exiting. */
@@ -852,9 +873,10 @@ template <class Wants>
  * @ref registry_t::in_flight from before its horizon until after its last hook, and runs ONE more
  * pass, unflagged, when its release shows that a drainer skipped meanwhile.
  */
-[[gnu::noinline]] inline void drain_ripe(registry_t& r = registry()) noexcept {
-    const auto ripe = [&r](const horizon_t& h0) {
-        for (const retired_slot_t& s : r.retired)
+[[gnu::noinline]] inline void drain_ripe(registry_t& r = registry(),
+                                         retired_table_t& t = retired_table()) noexcept {
+    const auto ripe = [&t](const horizon_t& h0) {
+        for (const retired_slot_t& s : t.slots)
             if (s.state.load(std::memory_order_acquire) == slot_state_t::READY &&
                 h0.past(s.epoch.load(std::memory_order_relaxed)))
                 return true;
@@ -870,7 +892,7 @@ template <class Wants>
     }
     for (bool held = kMembarrier;; held = false) {
         const horizon_t h = horizon(ripe, r);
-        for (retired_slot_t& s : r.retired) {
+        for (retired_slot_t& s : t.slots) {
             slot_state_t expected = slot_state_t::READY;
             if (!h.past(s.epoch.load(std::memory_order_relaxed)) ||
                 !s.state.compare_exchange_strong(expected, slot_state_t::CLAIMING,
@@ -904,9 +926,9 @@ template <class Wants>
  * `fan_out`, which is a property `objdump` is asked to confirm rather than a hope. (Measured:
  * letting it inline added 162 instructions to `fan_out`.)
  */
-inline void drain(registry_t& r = registry()) noexcept {
+inline void drain(registry_t& r = registry(), retired_table_t& t = retired_table()) noexcept {
     if (r.ctl.live.load(std::memory_order_relaxed) == 0) return;
-    drain_ripe(r);
+    drain_ripe(r, t);
 }
 
 /**
@@ -921,7 +943,8 @@ inline void drain(registry_t& r = registry()) noexcept {
  *         is the same deliberate leak the per-thread park makes, for the same reason: running
  *         the hook here would free a context a live fan-out still names.
  */
-inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry()) noexcept {
+inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry(),
+                   retired_table_t& t = retired_table()) noexcept {
     // seq_cst, and load-bearing: this RMW is the full barrier standing between the caller's
     // `clear_edge` and the scan below, which is the writer half of the Dekker pairing.
     const std::uint32_t e = advance(r);
@@ -929,7 +952,7 @@ inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry()
         release(ctx);
         return true;
     }
-    for (retired_slot_t& s : r.retired) {
+    for (retired_slot_t& s : t.slots) {
         slot_state_t expected = slot_state_t::EMPTY;
         if (!s.state.compare_exchange_strong(expected, slot_state_t::FILLING,
                                              std::memory_order_acq_rel, std::memory_order_relaxed))
@@ -945,7 +968,7 @@ inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry()
         // that never comes. After this, a surviving entry means a participant genuinely has
         // not quiesced yet. Under single flight this retry may skip; the pass in flight then
         // runs once more for it (@ref qsbr_single_flight).
-        drain(r);
+        drain(r, t);
         return true;
     }
     return false;

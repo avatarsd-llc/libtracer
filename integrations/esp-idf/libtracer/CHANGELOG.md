@@ -30,6 +30,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   never sent a frame, a client of another route), or when the check cannot run on the
   server's task, the gate is kept as before. With no peer connected the teardown only queues that item and returns at
   once, as before; it never waits for it.
+- **The QSBR registry is 80 B of `.bss` instead of 528 B
+  ([#2111](https://github.com/avatarsd-llc/libtracer/issues/2111)).** The component's 8 edge-pin
+  slots now size the QSBR participant table too, where it used to inherit core's 32, and the
+  retired table is linked only under `reclaim_qsbr_t`. On an ESP32-C6 `full_node` image,
+  `.dram0.bss` shrinks by 448 B. `critical_pool.cpp` static-asserts that the participant count
+  follows `kEdgePinSlots`.
+
 - **`httpd_ws_link_t` no longer lets one frame replace another
   ([#2195](https://github.com/avatarsd-llc/libtracer/issues/2195)).** Since #2095 a newer frame
   replaced whatever frame was waiting for the peer, and even a wire frame not one byte of which
