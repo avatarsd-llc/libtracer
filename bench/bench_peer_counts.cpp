@@ -32,7 +32,12 @@
  *   - `copy_bytes@N` / `copy_calls@N`: bytes and calls through `memcpy` / `memmove`
  *     (and their fortified `_chk` forms), interposed in this executable. libtracer is a
  *     static archive, so every variable-size copy it makes binds here. Constant-size
- *     copies the compiler inlines are invisible, which hides only headers.
+ *     copies the compiler inlines are invisible, which hides only headers. The WebSocket
+ *     client's masking pass (`ws::detail::mask_copy`, #2145) copies the payload with word
+ *     loads and stores, not memcpy, so this executable compiles its own transport_ws.cpp
+ *     with LIBTRACER_COUNT_MASK_COPY naming `bench_note_mask_copy`, and each copying mask
+ *     pass is counted as one copy of its size. A masking pass in place (the receive
+ *     unmask) copies nothing and is not counted.
  *   - `syscalls@N`: calls B's link threads make to every libc syscall wrapper the peer
  *     path can reach: socket I/O (recv*, send*, read*, write*, recvmmsg, sendmmsg),
  *     waiting (poll, ppoll, select, pselect, epoll_wait, epoll_pwait, epoll_pwait2,
@@ -166,6 +171,7 @@ extern "C" void* memcpy(void* __restrict d, const void* __restrict s, std::size_
     note_copy(n);
     return copy_forward(d, s, n);
 }
+extern "C" void bench_note_mask_copy(std::size_t n) noexcept { note_copy(n); }
 extern "C" void* memmove(void* d, const void* s, std::size_t n) {
     note_copy(n);
     return move_bytes(d, s, n);

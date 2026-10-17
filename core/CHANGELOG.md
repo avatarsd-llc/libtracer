@@ -14,6 +14,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`ws_client_transport_t::send(std::span<const std::span<const std::byte>>)`
+  ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** The WebSocket dialer
+  overrides the gathered send: the spans go out as one masked BINARY message, gathered and
+  masked in one pass, instead of the base class flattening them into a temporary first.
+
+### Changed
+
+- **A WebSocket client frame is gathered and masked in one pass
+  ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** The retained send and the
+  gathered send write each payload byte once, straight from the caller's head spans and the
+  value's links into the frame, masking as they copy (`ws::detail::mask_copy`); the flatten
+  copy into the link's egress store is gone. `ws::try_encode_client_frame` and
+  `ws::detail::put_client_frame` take the payload as a span of spans; the single-span forms
+  remain. A retained record with more links than the inline gather holds falls back to the
+  base class's flatten.
+- **A send to an idle peer takes no mutex
+  ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** `egress_t::send` claims
+  the writer role first and reads "nothing waits" from an atomic, so a dialer or server send
+  that finds its peer idle takes no mutex at all, and one that has to queue takes the queue
+  mutex once (it took three before). `egress_peer_t` keeps its size (24 B).
+
 ### Breaking
 
 - **Every reclaim refusal is answered and counted; `graph_t::deferred_release_drops()` is
