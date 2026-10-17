@@ -162,6 +162,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::net::judge_frozen` (the per-peer rule), `egress_t::condemn_held` and
   `frame_ingress_t::mid_frame()`.
 
+- **`size_class_ladder_t::ceiling(bytes)` and `default_config_t::size_classes_t`
+  ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143)).** The class a request of
+  `bytes` lands in, computed from the ladder's parameters by arithmetic, with no table (the
+  smallest row no smaller than `bytes`, or `bytes` itself above the last row), and the ladder
+  type the default `kSizeClasses` is built from. `tr::mem::class_ceiling` uses it on the host
+  slab build with the default table.
+
 - **`config_t::kCrc32cSlices` picks the portable CRC-32C fold's tables
   ([#2116](https://github.com/avatarsd-llc/libtracer/issues/2116)).** 8, the default on every
   target, is slice-by-8 (8 KiB of `.rodata`); 1 is the byte-at-a-time loop over the 1 KiB base

@@ -324,6 +324,21 @@ void probe_source(std::size_t size) {
 
 /** @brief Sweep the backends' requests either side of every size-class boundary. */
 int main() {
+    // #2143: the three ways a build finds a class agree on every request up to 4 KiB past the
+    // default ladder's last row: the ladder's arithmetic, the 16 B lookup a slab build with its
+    // own table reads, and a plain search of the table.
+    {
+        using ladder = tr::graph::default_config_t::size_classes_t;
+        using lookup = tr::mem::detail::class_lookup_t<tr::graph::default_config_t::kSizeClasses>;
+        const auto& t = tr::graph::default_config_t::kSizeClasses;
+        std::size_t bad = 0;
+        for (std::size_t b = 0; b <= t[std::size(t) - 1] + 4096; ++b) {
+            const auto* const it = std::lower_bound(std::begin(t), std::end(t), b);
+            const std::size_t want = it == std::end(t) ? b : *it;
+            if (ladder::ceiling(b) != want || lookup::ceiling(b) != want) ++bad;
+        }
+        check(bad == 0, "class ceiling: arithmetic, lookup and search agree on every request");
+    }
     std::printf("placement: the bytes each backend asks for (#1768, #1775, #1777):\n");
 
     check(tr::mem::heap_backend_t::kBlockAlign == kAlign &&
