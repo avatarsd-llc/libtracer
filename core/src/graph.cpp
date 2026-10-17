@@ -3481,6 +3481,11 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
                                   delivery_policy_t policy) {
     vertex_t* v = find_ptr(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
+    // A field has no notification surface (reference/02 §#585): refuse a `:field` source as
+    // the wire AWAIT does, rather than binding the whole vertex (#2113). A delivery lands on a
+    // vertex, never in a field, so a `:field` target is refused alike instead of being dropped.
+    if (!src.field().empty() || !target.field().empty())
+        return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // ADR-0049: the sugar ENCODES the same SUBSCRIBER{PATH} TLV a wire subscribe carries
     // and enters the field-write door — subscribe-time is control-plane-cold, so the
     // encode/parse round-trip is irrelevant, and the edge reads back from :subscribers[]
@@ -3524,6 +3529,7 @@ result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t f
                                             delivery_policy_t policy) {
     vertex_t* v = find_ptr(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
+    if (!src.field().empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);  // #2113
     // A callback cannot ride a TLV, so this sugar has no parse to share — it still
     // enters the same single admission step as every other door (ADR-0049), under the
     // empty (local) caller context. The policy lands on the slot directly, which is where
@@ -4440,6 +4446,9 @@ result_t<void> graph_t::write(const path_t& path, view::rope_t value) {
 result_t<value_ref_t> graph_t::await(const path_t& path, std::chrono::nanoseconds timeout) {
     vertex_t* v = find_ptr(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
+    // Nothing can ever wake a wait on a field (RFC-0010 §C), so answer it as the wire AWAIT
+    // does instead of waiting on the whole vertex until the timeout (#2113).
+    if (!path.field().empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     return await(vertex_handle_t{v}, timeout);
 }
 

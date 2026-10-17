@@ -44,7 +44,11 @@ namespace {
             fs.index = static_cast<std::uint16_t>(value);
         }
     }
-    if (fs.name.empty()) return std::unexpected(status_t::INVALID_PATH);
+    // A field name is a NAME like an address segment, held to the same shared predicate
+    // (reference/03 §reserved characters). That is what makes a second ':' malformed (#2113):
+    // the tail was split at the first one, so `/x:schema:subscribers[]` used to name a field
+    // called `schema:subscribers` and answer SCHEMA_NOT_FOUND.
+    if (!valid_segment(fs.name)) return std::unexpected(status_t::INVALID_PATH);
     return fs;
 }
 
