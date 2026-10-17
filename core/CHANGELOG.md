@@ -75,6 +75,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `std::size_t loan_min`. **Migration:** delete the third argument of `alloc_rx`; pass `true`
   for a threshold to `on_prefix`, or nothing for `SIZE_MAX`.
 
+- **reclaim_local is withdrawn; `reclaim_qsbr_t` is the default on every target
+  ([#2127](https://github.com/avatarsd-llc/libtracer/issues/2127), ADR-0080 Amendment 1).**
+  `default_config_t::reclaim_policy_t` is now `reclaim_qsbr_t` on WIDE, MID and NARROW, and the
+  tag set is closed at two: `reclaim_qsbr_t` and `reclaim_strict_t`. A `config_override.hpp` that still binds `reclaim_local_t` is refused at
+  compile time with a message that points here. The policy traits `kReentrantUnsubscribe` and
+  `kGraceSpansThreads` are removed; `kDefersToDispatchExit` is the one trait left, true for
+  `reclaim_qsbr_t` and false for `reclaim_strict_t`. Under the default, a release hook passed
+  to `unsubscribe(sub, release)` runs once, after every snapshot naming the pair is gone, on
+  whichever dispatching thread completes the grace period, which may not be the caller.
+  Per-thread TLS falls from 272 B to 16 B on the host and from 192 B to 56 B per FreeRTOS task
+  (ESP32-C6 `full_node`).
+  The CI `build-test-reclaim-qsbr` and `tsan-reclaim-qsbr` legs, and the `reclaim-qsbr` and
+  `reclaim-qsbr-hazard-slot` presets, duplicated the default and are deleted; the membarrier
+  TSan leg is now `tsan (fence=membarrier)`.
+
+  **Migration:**
+  - Delete the `using reclaim_policy_t = reclaim_local_t;` line to take the default, or the
+    `using reclaim_policy_t = reclaim_qsbr_t;` line, which is now redundant.
+  - Make every release hook short, thread-safe, non-blocking and `noexcept`. Posting the
+    context to an app-owned queue is the ideal shape.
+  - A context that must be released on its own thread binds `reclaim_strict_t`. Then no
+    dispatch may be live, on any thread, when it unsubscribes; strict does not detect a
+    violation.
+  - Replace `kReentrantUnsubscribe` and `kGraceSpansThreads` with `kDefersToDispatchExit`.
+
 - **Every reclaim refusal is answered and counted; `graph_t::deferred_release_drops()` is
   gone ([#2117](https://github.com/avatarsd-llc/libtracer/issues/2117)).** An `unsubscribe`
   whose deferred release hook finds no parking slot now answers `BACKPRESSURE` instead of `{}`:

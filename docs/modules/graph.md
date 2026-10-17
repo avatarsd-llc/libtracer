@@ -228,14 +228,16 @@ the one leg of that snapshot the library owns no copy of. So "when may I free `c
 [reference/17](../reference/17-reclamation-policy.md)), not by a rule you have to keep in
 your head — and never by asking you to track in-flight state.
 
-Under the default `reclaim_local`, pass a release hook and be told:
+Under the default `reclaim_qsbr`, pass a release hook and be told:
 
     void on_dead(void* ctx) { delete static_cast<my_sink_t*>(ctx); }
     (void)g.unsubscribe(sub, &on_dead);
 
-The hook runs exactly once, on your thread, outside every graph lock: **inline, before
-`unsubscribe` returns** when you called it from outside a delivery (the ordinary case), or
-**before the enclosing `write()` returns** when you called it from inside one. The
+The hook runs exactly once, outside every graph lock: **inline, before `unsubscribe`
+returns** when no dispatch is live on any thread (the ordinary case), or, when one is, on
+whichever dispatching thread completes the grace period, after every snapshot naming the
+pair is gone. On a single-threaded node that is before the enclosing `write()` returns. The
+hook must therefore be short, thread-safe, non-blocking and `noexcept`. The
 one-argument overload retires the edge identically and simply carries no signal — which is
 sufficient whenever you unsubscribe from outside a callback, since that call is already
 quiescent on return (`core/include/libtracer/graph.hpp:@param ctx Caller-owned` states the bound on `ctx`).
@@ -633,9 +635,9 @@ the creator door by calling `attach(child_key)`.
 | Rule | The failure mode |
 | --- | --- |
 | `subscribe(src, F& callback)` binds by address | passing a temporary lambda does not compile — which is the intent; a caller that "fixes" it by storing the lambda in a shorter-lived scope than the graph reintroduces the dangle the signature was shaped to prevent |
-| `ctx` is freed at the policy's grace point, not "whenever" | freeing `ctx` on `unsubscribe`'s return is correct under both shipped policies **when the call came from outside a delivery** — and is a use-after-free when it came from inside one, where a live fan-out is still walking a snapshot that names the pair. Pass a `subscriber_release_fn_t` and let the library say which case you are in; it is the only party that can ([reference/17](../reference/17-reclamation-policy.md)) |
-| Two of the three policies speak for ONE thread's dispatch domain | `reclaim_strict` and `reclaim_local` bound the wait by *this* thread unwinding, so a node that dispatches from several threads at once and unsubscribes from another gets no guarantee from either — `reclaim_local` will free a context a sibling thread is still delivering to. Bind **`reclaim_qsbr_t`** for that node (`using reclaim_policy_t = reclaim_qsbr_t;`): its grace point spans every dispatching thread. The trade is that its release hook may then run on a thread other than the `unsubscribe()` caller, so the hook must be thread-safe with respect to its own context |
-| A re-entrant unsubscribe needs a parking slot | `reclaim_local` parks at most `kDeferredReleaseSlots` (default 16) pairs per thread per dispatch stack. Past that a pair is dropped and its hook never runs — a leak, chosen over a use-after-free. That `unsubscribe` answers `BACKPRESSURE` (the edge is gone all the same), and `reclaim_refusals().release_refused` is how an undersized bound shows up before it matters |
+| `ctx` is freed at the policy's grace point, not "whenever" | freeing `ctx` on `unsubscribe`'s return is correct **when no dispatch was live on any thread** — and too early when one was, because a live fan-out may still be walking a snapshot that names the pair. Pass a `subscriber_release_fn_t` and let the library say which case you are in; it is the only party that can ([reference/17](../reference/17-reclamation-policy.md)) |
+| The release hook may run on another thread | the default `reclaim_qsbr` grace point spans every dispatching thread, so the hook runs on whichever participant completes it — not necessarily the `unsubscribe()` caller. A hook that touches thread-affine state, blocks or throws is a bug. A context that must be released on its own thread needs `reclaim_strict_t`, and then no dispatch may be live, on any thread, when it unsubscribes: strict does not detect a violation |
+| A deferred unsubscribe needs a table slot | `reclaim_qsbr` holds at most `kDeferredReleaseSlots` (default 16) retired pairs, in one table shared by every thread. Past that a pair is dropped and its hook never runs — a leak, chosen over a use-after-free. That `unsubscribe` answers `BACKPRESSURE` (the edge is gone all the same), and `reclaim_refusals().release_refused` is how an undersized bound shows up before it matters |
 | `read` returns a reference | keeping a `value_ref_t` in long-lived state pins that allocation; under an injected pool, a handful of parked references is a pool that never drains |
 | `only()` is the single-link accessor | calling it on a multi-link rope is not the general path; `materialize()` is. A value that arrived as a subview of a frame, or that was written as a rope, has more than one link |
 | A retired handle stays dereferenceable | `retire` empties the vertex in place and never frees it, so a stale handle silently addresses a re-virginized slot. A holder that caches a resolution records `retire_generation` beside it and re-reads before use — and must not cache an authorization decision that way, since a generation match says the vertex is the same one, never that the caller may still act on it |

@@ -12,11 +12,11 @@ signals the caller
 
 - **The direction is inverted on purpose.** The embedder never polls in-flight state and
   never waits: it registers a `subscriber_release_fn_t`, and libtracer calls it exactly once,
-  on the caller's own thread, outside every graph lock. A contract of the form "the callback
+  outside every graph lock. A contract of the form "the callback
   may still fire until you call X" is what ADR-0080 rejects.
-- **Called from outside a delivery, the hook runs inline.** Both shipped policies —
-  `reclaim_local_t` (the default) and `reclaim_strict_t` — release before `unsubscribe()`
-  returns in this case, so the caller may free its context on that return. The other case,
+- **With no delivery live, the hook runs inline.** Both policies — `reclaim_qsbr_t` (the
+  default) and `reclaim_strict_t` — release before `unsubscribe()` returns in this case, so
+  the caller may free its context on that return. The other case,
   unsubscribing from *inside* a delivery, is
   [its own example](sub-unsubscribe-from-dispatch.md).
 - **A no-op retire owes no signal.** A default-constructed or already-cleared handle answers

@@ -15,7 +15,7 @@
  * else:
  *
  *  - `LT_EXPECT_LKV_SLOT`       — `single_writer_slot_t` or `hazard_slot_t`;
- *  - `LT_EXPECT_RECLAIM_POLICY` — `reclaim_local_t`, `reclaim_strict_t` or `reclaim_qsbr_t`;
+ *  - `LT_EXPECT_RECLAIM_POLICY` — `reclaim_qsbr_t` or `reclaim_strict_t`;
  *  - `LT_EXPECT_ACL_POLICY`     — `allow_only_policy_t` or `full_acl_policy_t`.
  *
  * A variable left unset is not checked, so a local build runs the test and only prints its
@@ -71,8 +71,6 @@ constexpr std::string_view reclaim_policy_name() {
         return "reclaim_qsbr_t";
     } else if constexpr (std::is_same_v<g::reclaim_policy_t, g::reclaim_strict_t>) {
         return "reclaim_strict_t";
-    } else if constexpr (std::is_same_v<g::reclaim_policy_t, g::reclaim_local_t>) {
-        return "reclaim_local_t";
     }
     return "unknown";
 }
