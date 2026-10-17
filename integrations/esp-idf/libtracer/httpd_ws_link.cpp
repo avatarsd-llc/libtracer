@@ -18,8 +18,10 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -37,6 +39,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "libtracer/egress.hpp"
 
 namespace tr::net {
 
@@ -54,8 +57,7 @@ static_assert(kBusLinks,
               "bind `static constexpr bool kBusLinks = true;` in libtracer/config_override.hpp, "
               "or do not compile this TU.");
 
-// stats_t's layout is what a dashboard or a pinned integrator reads (#2195): the #2195
-// hotfix stops replacing frames, so tx_conflated reads 0, but it keeps its place. Fifteen
+// stats_t's layout is what a dashboard or a pinned integrator reads (#2195). Fifteen
 // 32-bit tallies, in this order; a field added, moved or widened fails here first.
 static_assert(sizeof(httpd_ws_link_t::stats_t) == 15 * sizeof(std::uint32_t));
 static_assert(offsetof(httpd_ws_link_t::stats_t, enqueue_drops) == 0);
@@ -927,10 +929,10 @@ std::size_t httpd_ws_link_t::large_stride() const noexcept {
 /**
  * @brief One peer's reference to an outbound frame, held until its socket takes it (#2095).
  *
- * Each session owns two of these (@ref session_t::tx): the frame on the wire and the newest
- * one waiting behind it. The bytes live in the shared @ref tx_block_t; what is per peer is the
- * reference, the session it was staged for and how far the socket has taken it — a few words,
- * whatever the frame size.
+ * Each session holds one for the frame on the wire (@ref session_t::tx) and one per frame
+ * waiting behind it, with the lane it came on (#2195). The bytes live in the shared @ref
+ * tx_block_t; what is per peer is the reference, the session it was staged for and how far the
+ * socket has taken it — a few words, whatever the frame size.
  */
 struct httpd_ws_link_t::tx_frame_t {
     tx_block_t* blk = nullptr; /**< @brief The shared bytes; null = the frame is empty. */
@@ -951,8 +953,35 @@ struct httpd_ws_link_t::tx_frame_t {
      * else may be written to that socket in between (@ref httpd_ws_link_t::finish_wire).
      */
     std::uint32_t sent = 0;
+    /**
+     * @brief What a full lane does with a newer frame (#2195), chosen once from the lane at
+     *        stage time and kept in the two low bits of @ref lane.
+     */
+    enum policy_t : std::uintptr_t {
+        kRefuse = 0,  /**< @brief Refuse the newer frame: a reliable STREAM, the control lane. */
+        kReplace = 1, /**< @brief The newer frame takes the waiting one's place: a SAMPLE. */
+        kShed = 2,    /**< @brief Shed the oldest waiting frame: a best-effort STREAM. */
+    };
+    /**
+     * @brief The delivery lane (#2195): its key (the subscription edge, so per session the
+     *        path; null for a frame from no vertex: a reply, an event, an ANNOUNCE) with its
+     *        @ref policy_t in the two low bits.
+     *
+     * The key names an edge, an object aligned to at least 4 bytes, so its two low bits are
+     * free, and keeping the policy there costs the reference no word of its own. Compared,
+     * never dereferenced. An edge that ends while its frame waits can come back at the same
+     * address as a NEW subscription's edge; if both are SAMPLEs, the new one's frame then
+     * replaces the ended one's waiting frame (counted as `tx_conflated`). Two live edges never
+     * share an address, so a live path's frame is never taken by another path's.
+     */
+    std::uintptr_t lane = kRefuse;
     /** @brief True while a frame is held. */
     [[nodiscard]] bool held() const noexcept { return blk != nullptr; }
+    /** @brief True if @p o is a newer frame that may replace this one: a SAMPLE of the same
+     *         path for the same session. Nothing else is ever replaced (#2195). */
+    [[nodiscard]] bool conflates(const tx_frame_t& o) const noexcept {
+        return lane == o.lane && gen == o.gen && (lane & 3) == kReplace;
+    }
 };
 
 /**
@@ -1131,12 +1160,18 @@ struct httpd_ws_link_t::session_t {
      * @brief This peer's frame on the wire (httpd task only, #2095).
      *
      * Behind it wait up to @ref httpd_ws_link_t::kTxWaitDepth newer frames, in order
-     * (@ref tx_head), and none ever replaces another (#2195): a frame from one vertex is not
-     * a newer value of another, and an event or an ANNOUNCE is owed to the peer once. A frame
-     * offered to a full queue is the link's counted refusal. So a slow peer holds at most its
-     * own few frames and never a work item or the httpd task that another peer needs. The
-     * httpd task moves the oldest waiting frame onto the wire, under @ref tx_m, when the wire
-     * frame is empty.
+     * (@ref tx_head), AT MOST ONE per SAMPLE path (#2195): a newer frame of the same path
+     * REPLACES the waiting one in place, and the peer's stats count the replaced frame
+     * (`tx_conflated`). Frames of other paths, STREAM frames and frames from no vertex are
+     * never replaced: a frame from one vertex is not a newer value of another, and an event
+     * or an ANNOUNCE is owed to the peer once. Each lane is bounded by its depth
+     * (`kEgressControlDepth` for frames from no vertex): a best-effort STREAM at its depth or
+     * at the queue's cap sheds its own oldest frame (counted as `tx_conflated`), and a full
+     * reliable or control lane, a full queue or a refused node draw is the link's counted
+     * refusal. So a slow peer holds at
+     * most its own few frames and never a work item or the httpd task that another peer
+     * needs. The httpd task moves the oldest waiting frame onto the wire, under @ref tx_m,
+     * when the wire frame is empty.
      */
     tx_frame_t tx;
     tx_wait_t* tx_head = nullptr; /**< @brief The oldest waiting frame (tx_m). */
@@ -3414,11 +3449,12 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
     std::size_t total = 0;
     for (const auto& part : iov) total += part.size();
     tx_block_t* const blk = make_block({}, iov, nullptr);
-    if (stage(to, blk, total)) ring_doorbell(blk, total);
+    if (stage(to, blk, total, graph::delivery_lane_t{})) ring_doorbell(blk, total);
     drop_block(blk);
 }
 
-bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_t total) {
+bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_t total,
+                            const graph::delivery_lane_t& lane) {
     // ONE load of the handle, into a local (#963): the plain read this replaces raced the
     // destructor's write outright, and re-reading it across the store let one send act on
     // two different values of the same member.
@@ -3441,35 +3477,73 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
         return false;
     }
     // Into THIS peer's queue, and nowhere else (#2095): a reference to the shared block,
-    // never a copy. Behind the frames already waiting, never in place of one (#2195): a frame
-    // from one vertex is not a newer value of another, and an event or an ANNOUNCE is owed to
-    // the peer once. A full queue, or a refused node draw, refuses the NEW frame — the link's
-    // counted drop — and a slow peer holds no more than its own few frames and no part of the
-    // httpd task that another peer needs. A refusal is never a stall strike: a healthy peer
-    // subscribed to many vertices fills its queue in one burst while its TCP window is shut
-    // for an RTT, and striking it would loop it through reconnects (#2174 rules the same).
+    // never a copy, waiting by its lane (#2195). A SAMPLE of a path already waiting REPLACES
+    // that path's frame in place and is counted: the newest value of a path is the one a slow
+    // peer gets, and a replacement takes no node. Any other frame — another path, a STREAM, a
+    // frame from no vertex — waits behind, never in place of one: a frame from one vertex is
+    // not a newer value of another, and an event or an ANNOUNCE is owed to the peer once. A
+    // best-effort STREAM lane at its depth, or at the peer's cap (kTxWaitDepth frames in all),
+    // sheds its own oldest frame (counted) and reuses its node; a full reliable or control
+    // lane, a full queue with nothing of this lane waiting, or a refused node draw refuses the
+    // NEW frame — the link's counted drop. A slow peer holds no more
+    // than its own few frames and no part of the httpd task that another peer needs. Neither
+    // a replacement nor a refusal is a stall strike: a healthy peer subscribed to many
+    // vertices fills its queue in one burst while its TCP window is shut for an RTT, and
+    // striking it would loop it through reconnects (#2174 rules the same).
     session_t* const s = to.slot;
+    // What a full lane does, decided once from the lane: the control lane and a reliable
+    // STREAM refuse the newer frame, a SAMPLE replaces, a best-effort STREAM sheds its oldest.
+    static constexpr tx_frame_t::policy_t kArm[2][2] = {
+        {tx_frame_t::kReplace, tx_frame_t::kReplace},  // depth 1, either arm: a SAMPLE
+        {tx_frame_t::kShed, tx_frame_t::kRefuse}};     // a STREAM or control: shed, refuse
+    const bool control = lane.key == nullptr;
+    const std::size_t cap = control ? kEgressControlDepth : std::max<std::uint16_t>(lane.depth, 1);
+    const tx_frame_t::policy_t policy = kArm[cap > 1][lane.reliable | control];
+    assert((reinterpret_cast<std::uintptr_t>(lane.key) & 3) == 0 &&
+           "delivery_lane_t::key is 4-aligned");
+    const tx_frame_t fresh{blk, to.gen, 0, reinterpret_cast<std::uintptr_t>(lane.key) | policy};
+    tx_frame_t old;
     bool refused = false;
     bool full = false;
     {
         const std::lock_guard lock(s->tx_m);
-        std::size_t waiting = 0;  // this session's; a departed one's frames are skipped later
-        for (const tx_wait_t* w = s->tx_head; w != nullptr; w = w->next)
-            waiting += w->frame.gen == to.gen ? 1 : 0;
-        tx_wait_t* node = nullptr;
-        full = waiting >= kTxWaitDepth;
-        if (!full && !s->tx_spare_used) {  // one waiting frame: no draw
-            s->tx_spare_used = true;
-            node = &s->tx_spare;
-        } else if (!full) {
-            void* const raw = io_src_->try_alloc(sizeof(tx_wait_t), alignof(tx_wait_t));
-            node = raw != nullptr ? new (raw) tx_wait_t : nullptr;
+        // This session's frames (a departed one's are skipped later), and the link to this
+        // lane's oldest.
+        std::size_t waiting = 0;
+        std::size_t count = 0;
+        tx_wait_t** at = nullptr;
+        for (tx_wait_t** l = &s->tx_head; *l != nullptr; l = &(*l)->next) {
+            if ((*l)->frame.gen != to.gen) continue;
+            ++waiting;
+            if ((*l)->frame.lane != fresh.lane || count++ != 0) continue;
+            at = l;
         }
-        if (node == nullptr) {
-            refused = true;  // counted below, and never a stall strike
+        // Append while the lane and the queue have room; else replace or shed the lane's
+        // oldest (a SAMPLE in its place; a best-effort STREAM's node takes the new frame to
+        // the tail, which keeps the STREAM's own arm even when it is the peer's queue that is
+        // full); else refuse.
+        tx_wait_t* node = nullptr;
+        if (count < cap && waiting < kTxWaitDepth) {
+            void* raw = &s->tx_spare;  // the in-slot spare: one waiting frame draws nothing
+            if (s->tx_spare_used)
+                raw = io_src_->try_alloc(sizeof(tx_wait_t), alignof(tx_wait_t));
+            else
+                s->tx_spare_used = true;
+            node = raw != nullptr ? new (raw) tx_wait_t : nullptr;
+            refused = node == nullptr;
+        } else if (policy != tx_frame_t::kRefuse && at != nullptr) {
+            tx_wait_t* const w = *at;
+            old = std::exchange(w->frame, fresh);
+            if (policy == tx_frame_t::kShed && w != s->tx_tail) {  // the tail stays in place
+                *at = w->next;
+                node = w;
+            }
         } else {
-            blk->refs.fetch_add(1, std::memory_order_relaxed);
-            node->frame = tx_frame_t{blk, to.gen, 0};
+            refused = full = true;
+        }
+        blk->refs.fetch_add(static_cast<std::uint32_t>(!refused), std::memory_order_relaxed);
+        if (node != nullptr) {
+            node->frame = fresh;
             node->next = nullptr;
             (s->tx_tail != nullptr ? s->tx_tail->next : s->tx_head) = node;
             s->tx_tail = node;
@@ -3477,16 +3551,25 @@ bool httpd_ws_link_t::stage(const session_ref_t& to, tx_block_t* blk, std::size_
     }
     // A refused frame still rings the doorbell, at most one flush per link (post_flush): a
     // socket that reopened is offered its held frames on this link's own traffic, and the
-    // zero-byte write it may meet only arms tx_refused, which no refusal reads. A full queue
-    // is this peer's own pace, as a replacement was before it, so it is counted and not
-    // logged per frame (a stalled peer at 100 updates/s would otherwise log 100 lines a
-    // second); a refused node draw is the link's memory, and logs like every other refused
-    // enqueue.
+    // zero-byte write it may meet only arms tx_refused, which no refusal reads. A full lane or
+    // queue is this peer's own pace, as a replacement is, so it is counted and not logged per
+    // frame (a stalled peer at 100 updates/s would otherwise log 100 lines a second); a
+    // refused node draw is the link's memory, and logs like every other refused enqueue.
     if (full)
         enqueue_drops_.fetch_add(1, std::memory_order_relaxed);
     else if (refused)
         note_enqueue_drop(fd, total);
+    if (old.held()) note_tx_conflated(to);
+    release_frame(old);
     return true;
+}
+
+void httpd_ws_link_t::note_tx_conflated(const session_ref_t& to) {
+    tx_conflated_.fetch_add(1, std::memory_order_relaxed);
+    const std::lock_guard lock(peers_m_);
+    // The identity test live_fd makes: a replaced frame is charged to the session it was
+    // gathered for or to nobody, never to whoever holds the slot now (#954).
+    if (to.slot->gen == to.gen) ++to.slot->st.tx_conflated;
 }
 
 void httpd_ws_link_t::ring_doorbell(tx_block_t* blk, std::size_t total) {
@@ -4132,22 +4215,30 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
     // socket would otherwise keep this task on it for as long as the socket keeps up.
     for (int turn = 0; turn < 2; ++turn) {
         tx_frame_t* const f = &s->tx;
+        tx_frame_t superseded;
         bool stalled = false;
         {
-            // The oldest waiting frame moves onto the wire when the wire is free, and only
-            // then: a wire frame is never replaced, started or not (#2195). Under tx_m, the
-            // one moment a producer and this task touch the same frames.
+            // The oldest waiting frame moves onto the wire when the wire is free. A wire frame
+            // not one byte of which has gone out yet is no more owed to the peer than a
+            // waiting one, so a newer SAMPLE of its path takes its place and it is counted the
+            // same way: a stalled peer that recovers gets the NEWEST value of a path, not the
+            // one it stalled on. Never a frame of another path, and never a started one
+            // (#2195). Under tx_m, the one moment a producer and this task touch the same
+            // frames.
             const std::lock_guard lock(s->tx_m);
-            if (!f->held() && s->tx_head != nullptr) {
-                tx_wait_t* const w = s->tx_head;
-                s->tx_head = w->next;
-                if (s->tx_tail == w) s->tx_tail = nullptr;
-                *f = std::exchange(w->frame, tx_frame_t{});
+            for (tx_wait_t *w = s->tx_head, *prev = nullptr; w != nullptr; prev = w, w = w->next) {
+                if (f->held() && (f->sent != 0 || !f->conflates(w->frame))) continue;
+                (prev != nullptr ? prev->next : s->tx_head) = w->next;
+                if (s->tx_tail == w) s->tx_tail = prev;
+                superseded = std::exchange(*f, std::exchange(w->frame, tx_frame_t{}));
                 free_waiting(*s, w);
+                break;
             }
             if (!f->held()) return progress;
             stalled = s->tx_stalls >= kTxStallStrikes;
         }
+        if (superseded.held()) note_tx_conflated(session_ref_t{s, superseded.gen});
+        release_frame(superseded);
         // The frame names the session it was staged for (#954), and the server's own verdict
         // is the second opinion. A skip is not a send result: it feeds the cumulative tally,
         // never the streak (note_tx_skip).
@@ -4322,17 +4413,18 @@ httpd_ws_link_t::tx_block_t* httpd_ws_link_t::make_retained(
 
 void httpd_ws_link_t::queue_send_retained(const session_ref_t& to,
                                           std::span<const std::span<const std::byte>> head,
-                                          const graph::value_t& value) {
+                                          const graph::value_t& value,
+                                          const graph::delivery_lane_t& lane) {
     tx_block_t* const blk = make_retained(head, value);
-    if (stage(to, blk, value.total_length())) ring_doorbell(blk, value.total_length());
+    if (stage(to, blk, value.total_length(), lane)) ring_doorbell(blk, value.total_length());
     drop_block(blk);
 }
 
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
                            const graph::value_t& value, const graph::delivery_lane_t& lane) {
-    (void)lane;  // the ESP-IDF link keeps tx_handoff_t's one queue for now (#2144)
-    // The broadcast's fan-out with the retained block in place of the gathered one.
-    fan_out([&] { return make_retained(head, value); }, value.total_length());
+    // The broadcast's fan-out with the retained block in place of the gathered one, waiting
+    // in each peer's queue by its lane: per path, never across paths (#2195).
+    fan_out([&] { return make_retained(head, value); }, value.total_length(), lane);
 }
 
 void httpd_ws_link_t::send(std::span<const std::byte> frame) {
@@ -4347,10 +4439,11 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     // copy live simultaneously), the heap spike behind the on-device OOM abort.
     std::size_t total = 0;
     for (const auto& part : iov) total += part.size();
-    fan_out([&] { return make_block({}, iov, nullptr); }, total);
+    fan_out([&] { return make_block({}, iov, nullptr); }, total, graph::delivery_lane_t{});
 }
 
-void httpd_ws_link_t::fan_out(function_ref_t<tx_block_t*()> build, std::size_t total) {
+void httpd_ws_link_t::fan_out(function_ref_t<tx_block_t*()> build, std::size_t total,
+                              const graph::delivery_lane_t& lane) {
     // Broadcast: snapshot the destinations under the lock, then enqueue unlocked — the
     // per-session drop accounting inside stage takes peers_m_ itself — and ring the
     // doorbell ONCE, after every destination's frame is stored (#2146).
@@ -4400,7 +4493,7 @@ void httpd_ws_link_t::fan_out(function_ref_t<tx_block_t*()> build, std::size_t t
             blk = build();
             built = true;
         }
-        for (std::size_t i = 0; i < n; ++i) staged = stage(targets[i], blk, total) || staged;
+        for (std::size_t i = 0; i < n; ++i) staged = stage(targets[i], blk, total, lane) || staged;
     }
     if (staged) ring_doorbell(blk, total);
     drop_block(blk);
@@ -4465,7 +4558,6 @@ void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::span<const st
 void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::span<const std::byte>> head,
                                               const graph::value_t& value,
                                               const graph::delivery_lane_t& lane) {
-    (void)lane;  // the ESP-IDF link keeps tx_handoff_t's one queue for now (#2144)
     // The directed twin of the retained broadcast, with the identity test of the iovec
     // override above (#1013 / #954) — see there.
     httpd_ws_link_t* const owner = owner_;
@@ -4494,7 +4586,7 @@ void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::span<const st
         owner->send_in_call(to, std::span<const std::span<const std::byte>>(iov.data(), n));
         return;
     }
-    owner->queue_send_retained(to, head, value);
+    owner->queue_send_retained(to, head, value, lane);
 }
 
 // ---------------------------------------------------------------------------

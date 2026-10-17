@@ -197,6 +197,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`delivery_lane_t::key` is documented as aligned to at least 4 bytes
+  ([#2195](https://github.com/avatarsd-llc/libtracer/issues/2195)).** A link may keep a tag in
+  its two low bits; the ESP-IDF WebSocket server link keeps its per-lane policy there. The
+  graph static-asserts the alignment of the subscriber edge it hands as the key.
 - **A graph keeps one park for every retired kind
   ([#2118](https://github.com/avatarsd-llc/libtracer/issues/2118)).** Value seams `retire`
   detaches and the releases `park_release` / `park_reserved` are handed (a removed link, a
