@@ -1326,6 +1326,12 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(qsbr_drain_claim_test PRIVATE libtracer Threads::Threads)
     libtracer_test_warnings(qsbr_drain_claim_test)
     add_test(NAME qsbr_drain_claim COMMAND qsbr_drain_claim_test)
+    # #2123: a bracket and an edge pin opened from a thread_local destructor that runs after
+    # the thread gave its cells back. No free gets through; a TSan and ASan target.
+    add_executable(qsbr_exit_order_test qsbr_exit_order_test.cpp)
+    target_link_libraries(qsbr_exit_order_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(qsbr_exit_order_test)
+    add_test(NAME qsbr_exit_order COMMAND qsbr_exit_order_test)
 endif()
 
 # #82 — in-band :children[] SPEC vertex creation (ADR-0017). Reads the shared `spec/`
