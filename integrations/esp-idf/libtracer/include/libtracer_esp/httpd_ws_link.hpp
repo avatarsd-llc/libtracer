@@ -909,6 +909,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
          * table was full; logged once at construction as "ingress unpaced").
          */
         std::uint32_t rx_drain_waits = 0;
+        /** @brief Sessions the application's liveness check condemned as frozen (#2198,
+         *         @ref close_frozen_peers): they owed TX and moved no byte past the
+         *         application's deadline. A subset of @ref sessions_condemned. */
+        std::uint32_t peers_frozen = 0;
     };
 
     /**
@@ -1046,6 +1050,22 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * link reads no clock. A no-op when nothing is held.
      */
     void flush_held();
+
+    /**
+     * @brief The application's liveness check (#2198, @ref transport_t::close_frozen_peers):
+     *        a session owes TX while a frame waits for its socket, and one that owed it and
+     *        moved no byte since its record fell below @p deadline is condemned.
+     *
+     * The verdict is reached here, on the caller's task, under each session's own `tx_m`;
+     * the close itself runs on the httpd task, the one that owns the descriptors, through
+     * the flush this call posts — the same one @ref flush_held posts. RX does not apply:
+     * the server reads each frame whole itself. Counted in @ref stats_t::peers_frozen (and
+     * so in @ref stats_t::sessions_condemned); a session that departs before the flush
+     * reaches it is not counted.
+     *
+     * @return How many sessions this call found frozen.
+     */
+    std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) override;
 
     /**
      * @brief Admission predicate: given the parsed opening GET, return true to admit the
@@ -1484,6 +1504,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * @return Whether any frame of this session moved.
      */
     bool flush_peer(session_t* s);
+    /** @brief Condemn the session @p to names as frozen (#2198), counted; httpd task only. */
+    void close_frozen(const session_ref_t& to);
     /** @brief Write @p f to @p fd from `f.sent` on, inside one frame bracket: without waiting
      *         (@p nonblock, a flush) or within the send bound (finishing it ahead of a reply). */
     tx_outcome_t write_frame(httpd_handle_t h, int fd, session_t& s, tx_frame_t& f, bool nonblock);
@@ -2182,6 +2204,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     std::atomic<std::uint32_t> tx_conflated_{0};
     /** @brief See @ref stats_t::tx_stall_strikes. */
     std::atomic<std::uint32_t> tx_stall_strikes_{0};
+    /** @brief See @ref stats_t::peers_frozen. */
+    std::atomic<std::uint32_t> peers_frozen_{0};
     /** @brief A frame was left held on a full socket by the last flush (httpd task writes,
      *         any task reads): what @ref flush_held and the handler entry test first. */
     std::atomic<bool> tx_held_{false};

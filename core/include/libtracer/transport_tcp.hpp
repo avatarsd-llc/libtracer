@@ -329,6 +329,18 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
      *         (`0` ⇒ `kDefaultLivenessWindowMs`) (#838). */
     [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
 
+    /** @brief The application's liveness check (#2198, @ref transport_t::close_frozen_peers):
+     *         a frame held on the wire that moved no byte since @p deadline shuts the
+     *         connection down, counted in @ref frozen_closed. A dialer owes TX only. */
+    std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) override {
+        return close_frozen_one(now, deadline);
+    }
+
+    /** @brief Connections the application's liveness check closed as frozen (#2198). */
+    [[nodiscard]] std::size_t frozen_closed() const noexcept {
+        return frozen_closed_.load(std::memory_order_relaxed);
+    }
+
     /** @brief The interface-level snapshot (#932) — the concrete accessors above, as the
      *         one shape a generic `transport_t*` holder reads. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
@@ -535,6 +547,9 @@ class tcp_server_transport_t final : public stream_server_base_t {
 
     /** @brief Teardown: reset the slot's framer as it is recycled. */
     void on_slot_reset(session_base_t& s) override;
+
+    /** @brief A record's prefix or body is part-read (#2198). */
+    [[nodiscard]] bool mid_frame(const session_base_t& s) const override;
 
     /** @brief Fire `detail::tcp_peer_publishing_hook` with the fd published and the slot not
      *         yet open — the mid-publish instant a test holds open (#891). Empty unless the

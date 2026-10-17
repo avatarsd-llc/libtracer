@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`httpd_ws_link_t::close_frozen_peers(now, deadline)`, the application's liveness check
+  ([#2198](https://github.com/avatarsd-llc/libtracer/issues/2198)).** A session owes TX while a
+  frame waits for its socket; one that owed it and moved no byte since the application's
+  deadline is condemned on the httpd task, through the flush the call posts. The link reads no
+  clock. Each close is counted in the new `stats_t::peers_frozen`, appended after
+  `rx_drain_waits` (the struct grows from 15 to 16 tallies), and in `sessions_condemned`.
+
 ### Fixed
 
 - **`httpd_ws_link_t` no longer lets one frame replace another

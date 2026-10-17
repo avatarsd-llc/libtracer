@@ -483,6 +483,26 @@ class egress_t {
     }
 
     /**
+     * @brief The application's liveness check closing @p p (#2198): run @p condemn if a frame
+     *        still waits on its wire, inside the writer role, so the socket it shuts down is
+     *        still the peer's own (a teardown waits the role out before it closes the fd).
+     *
+     * The claim does not wait. A role somebody holds is a write in progress, so the peer is
+     * not frozen and nothing runs. Nothing is written here: a lane frame found with the wire
+     * free waits on the wire for the peer's own writability, as a full socket's would.
+     * @return True iff @p condemn ran.
+     */
+    bool condemn_held(egress_peer_t& p, function_ref_t<void()> condemn) {
+        if (!claim(p)) return false;
+        egress_result_t r;
+        r.condemn = p.wire_ != nullptr;
+        drain_owned(
+            p, [](const egress_frame_t&, std::size_t) { return egress_step_t{0, true, false}; },
+            condemn, r, r.condemn);
+        return r.condemn;
+    }
+
+    /**
      * @brief Close @p p: refuse every later send, wait out a write in flight, release every
      *        frame and every lane. Teardown's half of the role handoff.
      *

@@ -284,6 +284,12 @@ class length_prefix_framer_t {
         return res;
     }
 
+    /** @brief A frame's prefix or body is part-read, or a dropped frame is part-skipped: the
+     *         stream owes the rest of it (#2198). */
+    [[nodiscard]] bool mid_frame() const noexcept {
+        return prefix_have_ != 0 || rx_len_ != 0 || drain_left_ != 0;
+    }
+
     /** @brief Discard partial reassembly state (a new peer's stream reuses the framer). */
     void reset() noexcept {
         prefix_have_ = 0;
