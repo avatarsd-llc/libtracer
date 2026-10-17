@@ -366,7 +366,11 @@ The receive thread decodes each frame's CAN ID, discards any frame outside its o
 version band and any frame bearing its own node id (the self-echo guard). A
 **control-slot** frame feeds the per-node advertise byte stream (`decode_advertise`
 pops each complete manifest), which **learns the `id ↔ path` binding** and sets the
-group's expected slice count. A **data-slot** frame is reassembled by
+group's expected slice count. A manifest binds only its carrier's own slots: one whose id
+names another node or another version than the control frame that carried it binds
+nothing and is counted on `dropped_rx`. The binding table is bounded per link by the build's
+`config_t::kCanLearnedBindings`; a new binding past it is refused and counted on
+`dropped_binding_cap`, and nothing is evicted to make room (#2203). A **data-slot** frame is reassembled by
 `can_reassembly_t`, keyed by `(node, base-endpoint) + (endpoint − base) index` — all
 derived from the CAN ID, so no per-frame origin/ts ever rides the bus. On completion
 the slices are flattened and **trimmed back to the advertised total length**, which

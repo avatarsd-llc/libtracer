@@ -1221,6 +1221,163 @@ void test_stale_lap_binding_is_refused_not_welded() {
           "the counter did not move on the healthy path");
 }
 
+/** @brief A one-slice, non-delivered advertise binding `{0, node, endpoint}`: a binding that
+ *         creates no reassembly group, which is all the table-bound tests need. */
+can::advertise_t one_slot_advertise(std::uint16_t node, std::uint16_t endpoint) {
+    can::advertise_t adv;
+    adv.can_id = can::encode_can_id({0, node, endpoint});
+    adv.group_total_len = 8;
+    adv.slice_count = 1;
+    adv.target = 7;  // addressed elsewhere: learned and consumed, never reassembled
+    adv.path = "p";
+    return adv;
+}
+
+/**
+ * @brief #2203 — an advertise binds only its carrier's own slots, in our version band.
+ *
+ * A node advertises its own data slots on its own control ID, so an advertise naming another
+ * node, or another protocol version, than the frame that carried it binds nothing and is
+ * counted on dropped_rx. Non-vacuity: the same advertise from its own node binds.
+ */
+void test_advertise_must_match_its_carrier() {
+    std::printf("transport_can refuses an advertise that does not match its carrier (#2203):\n");
+    fake_can_bus_t bus;
+    fake_link_t injector(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    tr::net::can_transport_t tx_b(std::move(link_b), rx_test_config());
+
+    can::advertise_t other_node = one_slot_advertise(/*node=*/3, 5);
+    inject_advertise(injector, /*node=*/1, other_node);  // node 1 claims node 3's slot
+    can::advertise_t other_version = one_slot_advertise(/*node=*/1, 6);
+    other_version.can_id = can::encode_can_id({1, 1, 6});
+    inject_advertise(injector, /*node=*/1, other_version);
+    check(wait_until([&] { return tx_b.dropped_rx() == 2; }, 2s),
+          "both mismatched advertises were refused and counted on dropped_rx");
+    check(!tx_b.learned_binding(other_node.can_id).has_value(),
+          "an advertise naming another node than its carrier binds nothing");
+    check(!tx_b.learned_binding(other_version.can_id).has_value(),
+          "an advertise naming another protocol version binds nothing");
+
+    inject_advertise(injector, /*node=*/3, other_node);
+    check(wait_until([&] { return tx_b.learned_binding(other_node.can_id).has_value(); }, 2s),
+          "the same advertise from its own node binds");
+    check(tx_b.dropped_rx() == 2, "and moves no counter");
+}
+
+/**
+ * @brief #2203 — the learned-binding table stops at the build's per-link cap, never evicting.
+ *
+ * Enough nodes each fill their whole data-endpoint window to reach
+ * `config_t::kCanLearnedBindings`; one more new binding is refused and counted on
+ * dropped_binding_cap, and every binding already learned survives. A re-issue of a slot the
+ * table already holds is a rewrite, so the cap never refuses it.
+ */
+void test_binding_table_is_capped_per_link() {
+    std::printf("transport_can learned-binding table is capped per link (#2203):\n");
+    fake_can_bus_t bus;
+    fake_link_t injector(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    tr::net::transport_can_config_t cfg = rx_test_config();
+    cfg.rx_ttl = 60s;
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg);
+
+    constexpr std::size_t kCap = tr::graph::config_t::kCanLearnedBindings;
+    constexpr std::uint16_t kFirst = tr::net::kCanFirstDataEndpoint;
+    // Nodes 1, 3, 4, ... (node 2 is the receiver), each filling its window until kCap.
+    std::size_t sent = 0;
+    std::uint16_t node = 1;
+    std::uint16_t ep = kFirst;
+    std::uint32_t last_id = 0;
+    for (; sent < kCap; ++sent) {
+        const can::advertise_t adv = one_slot_advertise(node, ep);
+        inject_advertise(injector, node, adv);
+        last_id = adv.can_id;
+        if (ep == can::kEndpointMax) {
+            node = static_cast<std::uint16_t>(node == 1 ? 3 : node + 1);
+            ep = kFirst;
+        } else {
+            ++ep;
+        }
+    }
+    check(wait_until([&] { return tx_b.learned_binding(last_id).has_value(); }, 30s),
+          "the table filled to the cap");
+    check(tx_b.dropped_binding_cap() == 0 && tx_b.dropped_rx() == 0,
+          "nothing was refused on the way to the cap");
+
+    const can::advertise_t over = one_slot_advertise(node, ep);
+    inject_advertise(injector, node, over);
+    check(wait_until([&] { return tx_b.dropped_binding_cap() == 1; }, 2s),
+          "the binding past the cap was refused and counted on dropped_binding_cap");
+    check(!tx_b.learned_binding(over.can_id).has_value(), "it bound nothing");
+    check(tx_b.learned_binding(one_slot_advertise(1, kFirst).can_id).has_value(),
+          "the oldest binding was NOT evicted to make room");
+
+    // A re-issue of a slot already held rewrites it in place, cap or no cap.
+    can::advertise_t again = one_slot_advertise(1, kFirst);
+    again.path = "q2";
+    inject_advertise(injector, 1, again);
+    std::array<char, 8> path{};
+    check(wait_until(
+              [&] {
+                  const auto b = tx_b.learned_binding(again.can_id, path);
+                  return b && b->path == "q2";
+              },
+              2s),
+          "a re-issue at the cap rewrote its own slot");
+    check(tx_b.dropped_binding_cap() == 1, "and the cap did not refuse it");
+}
+
+/**
+ * @brief #2200 / #2203 — a same-id re-issue rewrites its slot in place and discards the old
+ *        group, so the fresh group delivers as itself.
+ *
+ * Node 1 advertises a 2-slice group and only its first slice arrives. A fresh advertise under
+ * the very same id (the wrapped allocator re-issuing that base) keeps the slot, takes the new
+ * manifest and path, and reclaims the half-built group; the fresh group's two slices then
+ * deliver at the NEW total length.
+ */
+void test_same_id_reissue_rewrites_in_place() {
+    std::printf("transport_can same-id re-issue rewrites the binding in place:\n");
+    fake_can_bus_t bus;
+    fake_link_t injector(bus);
+    sink_t sink;
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    tr::net::transport_can_config_t cfg = rx_test_config();
+    cfg.rx_ttl = 60s;
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg);
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    tx_b.set_receiver(rx);
+
+    constexpr std::uint16_t kBase = 9;
+    can::advertise_t first;
+    first.can_id = can::encode_can_id({0, 1, kBase});
+    first.group = true;
+    first.group_total_len = 16;
+    first.slice_count = 2;
+    first.path = "old/path";
+    inject_advertise(injector, 1, first);
+    inject_data(injector, 1, kBase);  // the second slice is lost
+    check(wait_until([&] { return tx_b.learned_binding(first.can_id).has_value(); }, 2s),
+          "the first binding was learned with its group half-built");
+
+    can::advertise_t fresh = first;
+    fresh.group_total_len = 12;  // a different manifest under the same id
+    fresh.path = "new/path";
+    inject_advertise(injector, 1, fresh);
+    inject_data(injector, 1, kBase);
+    inject_data(injector, 1, kBase + 1);
+    check(sink.wait_for_count(1, 2s), "the fresh group delivered");
+    check(sink.last().size() == fresh.group_total_len,
+          "it delivered at the FRESH manifest's length, not the old one's");
+    check(tx_b.dropped_groups() == 1, "the half-built group was reclaimed once, counted");
+    std::array<char, 16> path{};
+    const auto b = tx_b.learned_binding(first.can_id, path);
+    check(b && b->path == "new/path" && b->group_total_len == fresh.group_total_len,
+          "the slot now holds the fresh manifest and path");
+    check(sink.count() == 1 && tx_b.dropped_rx() == 0, "nothing else delivered or dropped");
+}
+
 }  // namespace
 
 /**
@@ -1307,5 +1464,8 @@ int main() {
     test_rx_zero_length_slice_drops_the_group_and_counts();
     test_endpoint_wraparound_does_not_alias_stale_state();
     test_stale_lap_binding_is_refused_not_welded();
+    test_advertise_must_match_its_carrier();
+    test_binding_table_is_capped_per_link();
+    test_same_id_reissue_rewrites_in_place();
     return tr::testing::summary("transport_can");
 }

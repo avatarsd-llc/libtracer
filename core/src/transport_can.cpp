@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
@@ -505,7 +506,7 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
             const std::span<const std::byte> rest(buf.data() + off, buf.size() - off);
             const auto decoded = can::decode_advertise(rest);
             if (decoded) {
-                learn_advertise(decoded->first);
+                learn_advertise(decoded->first, frame.id);
                 off += decoded->second;
                 continue;
             }
@@ -530,7 +531,7 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
     process_data(frame);
 }
 
-void transport_can::learn_advertise(const can::advertise_t& adv) {
+void transport_can::learn_advertise(const can::advertise_t& adv, std::uint32_t carrier_id) {
     // The on-advertise stale-group sweep (#912). Every group is created by an
     // advertise, so this is the cadence that sees every group. `erase` is reached
     // only after `is_complete`, so a group a lost advertise or a lost data slice
@@ -540,21 +541,25 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     // The hello/presence form (slice_count == 0) binds nothing — its liveness
     // effect already landed in touch_peer on the frame that carried it.
     if (adv.slice_count == 0) return;
-    // Decoded BEFORE the insert, where it used to sit after it. Two reasons: the
-    // endpoint run the invalidation below is computed from lives in these fields,
-    // and an id no CAN frame could carry (>29 bits) binds nothing anyway —
-    // process_data decodes the same id and skips whatever fails, so such an entry
-    // could only ever accumulate in a map that is not otherwise erased per id.
+    // A node advertises only its own data slots, in its own version band, on its own control
+    // ID (#2203): the advertised id's `version | node` bits must be the carrying frame's. One
+    // compare refuses another node's or another version's slots and an id no CAN frame could
+    // carry (>29 bits) alike, each counted. The carrier is a decoded 29-bit id of our version,
+    // so after it `base` is always engaged.
+    if ((adv.can_id >> can::kEndpointBits) != (carrier_id >> can::kEndpointBits)) {
+        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    // Decoded BEFORE the insert: the endpoint run the invalidation below is computed from it.
     const auto base = can::decode_can_id(adv.can_id);
-    if (!base) return;
     // A directed group addressed to another node (ADR-0044) is learned so its
     // data slices are recognized and CONSUMED, but never reassembled/delivered.
     const bool deliver = adv.target == can::kCanBroadcastNode || adv.target == cfg_.node;
     // THE LAP TEST (#1011). `alloc_base` hands out strictly ascending bases and wraps
     // to kCanFirstDataEndpoint when a reservation runs off the end of the window, so a
     // base that does NOT exceed the last one this node placed is proof its allocator
-    // came round. Keyed on the ADVERTISED id's node rather than the carrying frame's,
-    // so it matches exactly what process_data resolves against.
+    // came round. Keyed on the advertised id's node, which the check above made the
+    // carrying frame's too, so it matches exactly what process_data resolves against.
     //
     // `<=` rather than `<` on purpose: within one lap the next base is the previous
     // one plus a slice count of at least 1, so equality is unreachable from a
@@ -565,16 +570,23 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     // The endpoint space wraps by design, so this base has been used before (#909).
     // Retire whatever still claims these slots BEFORE the fresh binding lands. A binding under
     // this very id is left in its slot, its group discarded, and is rewritten below.
-    invalidate_overlapping(*base, adv.slice_count);
+    const bool kept = invalidate_overlapping(*base, adv.slice_count);
     // The binding owns its path: `adv.path` views the control stream, which moves on. A
     // refusal of the node's entry, the binding or its path binds nothing, and is counted.
+    // A NEW binding past the link's cap is refused the same way, never evicting (#2203); the
+    // slot kept for this very id above is a rewrite, so the cap never refuses a re-issue.
     node_rx_t* const node = node_rx(base->node);
+    const bool at_cap = learned_.size() - kept >= graph::config_t::kCanLearnedBindings;
     binding_t* const bound =
-        learned_.try_emplace(adv.can_id, binding_t{adv, mem::string_t(rx_source(cfg_)), deliver})
-            .value;
+        at_cap
+            ? nullptr
+            : learned_
+                  .try_emplace(adv.can_id, binding_t{adv, mem::string_t(rx_source(cfg_)), deliver})
+                  .value;
     if (node == nullptr || bound == nullptr || !bound->path.assign(adv.path)) {
         (void)learned_.erase(adv.can_id);
-        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        dropped_binding_cap_.fetch_add(at_cap, std::memory_order_relaxed);
+        dropped_rx_.fetch_add(!at_cap, std::memory_order_relaxed);
         return;
     }
     // Rewritten whether the entry is new or the reused slot above (a no-op for a new one).
@@ -599,11 +611,11 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     std::size_t keep = 0;
     for (std::size_t i = 0; i < pending_.size(); ++i) {
         const pending_slice_t& p = pending_[i];
-        const auto ff = can::decode_can_id(p.frame.id);
-        // In the advertised run: one unsigned compare covers both ends (below the base wraps
-        // past the count).
-        if (ff && ff->node == base->node &&
-            static_cast<std::uint32_t>(ff->endpoint - base->endpoint) < adv.slice_count) {
+        // In the advertised run: the same `version | node` bits as the advertise, and one
+        // unsigned compare on the endpoint covers both ends (below the base wraps past the
+        // count). A parked frame's id was decoded on arrival, so it is a 29-bit id.
+        if ((p.frame.id >> can::kEndpointBits) == (adv.can_id >> can::kEndpointBits) &&
+            p.frame.id - adv.can_id < adv.slice_count) {
             // A refused lift sheds that slice, counted.
             dropped_rx_.fetch_add(static_cast<std::size_t>(!ready.push_back(p)),
                                   std::memory_order_relaxed);
@@ -652,9 +664,10 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
  *
  * @param base        The fields of the fresh binding's base id (its endpoint is slot 0).
  * @param slice_count The fresh binding's slice count; never 0 (hello returns earlier).
+ * @return Whether a binding under the fresh run's own id was kept for rewriting in place.
  * @note Requires `rx_m_` held.
  */
-void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
+bool transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
                                            std::uint16_t slice_count) {
     // Half-open runs in the endpoint field's own units. Widened to u32 only so the
     // upper edge of a non-conforming peer's over-long slice_count cannot wrap the u16
@@ -669,6 +682,7 @@ void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
     const std::uint32_t lo_id = can::encode_can_id(base);
     std::size_t i = learned_.lower_bound(lo_id);
     i -= static_cast<std::size_t>(i != 0);
+    bool kept = false;
     while (i < learned_.size() && learned_.at(i).key < lo_id - lo + hi) {
         const auto stale = can::decode_can_id(learned_.at(i).key);
         // A different node's slots are a different address space entirely — the node
@@ -692,11 +706,13 @@ void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
         // in place. That is the steady state (a lapped allocator re-issues the same base), and
         // an erase plus a re-insert shifted every binding above it twice per advertise (#2049).
         if (learned_.at(i).key == lo_id) {
+            kept = true;
             ++i;
             continue;
         }
         learned_.erase_at(i);  // index `i` now holds the next binding
     }
+    return kept;
 }
 
 /**

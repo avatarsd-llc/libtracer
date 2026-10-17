@@ -540,6 +540,21 @@ class can_transport_t final : public transport_t, public bus_link_t {
     }
 
     /**
+     * @brief Advertises that bound nothing because the link's learned-binding table was at
+     *        `%graph::config_t::kCanLearnedBindings` (#2203).
+     *
+     * The table is bounded per link and never evicts: an advertise that would add a binding
+     * past the cap is refused here, its data slices then park and age out like any slice
+     * whose advertise was lost. A re-issue that retires overlapping bindings first, or
+     * rewrites its own slot, never reaches the cap. Counts ADVERTISES, one per refusal. A
+     * distinctly named cause, never folded into @ref dropped_rx, and a moving count means the
+     * build's cap is smaller than the bus this link hears.
+     */
+    [[nodiscard]] std::uint64_t dropped_binding_cap() const noexcept {
+        return dropped_binding_cap_.load(std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Outbound frames the caller believed sent that never reached the bus
      *        (the twai `tx_dropped()` convention, spelled to match `dropped_rx`).
      *
@@ -667,7 +682,9 @@ class can_transport_t final : public transport_t, public bus_link_t {
 
     // --- ingress (runs on the link's receive thread) ---
     void on_rx(const can_frame_data_t& frame);
-    void learn_advertise(const can::advertise_t& adv);  // requires rx_m_ held
+    // `carrier_id` is the CAN ID of the control frame the advertise rode in on.
+    void learn_advertise(const can::advertise_t& adv,
+                         std::uint32_t carrier_id);  // requires rx_m_ held
     struct node_rx_t;
     node_rx_t* node_rx(std::uint16_t node) noexcept;  // requires rx_m_ held; null = refused
     // Retire every same-node binding whose endpoint run overlaps the one a fresh
@@ -675,8 +692,9 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // The 12-bit endpoint space wraps, so a base RECURS; without this a stale run
     // shadows the live binding in the process_data lookup and a recurring key merges
     // stale slices into the fresh group. Holds the invariant "one binding per slot,
-    // and a group lives exactly as long as the binding that feeds it".
-    void invalidate_overlapping(const can::can_id_fields_t& base,
+    // and a group lives exactly as long as the binding that feeds it". Returns whether a
+    // binding under the fresh run's own id was kept, to be rewritten in place.
+    bool invalidate_overlapping(const can::can_id_fields_t& base,
                                 std::uint16_t slice_count);  // requires rx_m_ held
     // Mark every binding of `node` as belonging to a prior lap — the producer's
     // endpoint allocator has come round (#1011). Runs only on a detected lap; it is the
@@ -791,6 +809,7 @@ class can_transport_t final : public transport_t, public bus_link_t {
     std::atomic<std::size_t> dropped_tx_{0};
     std::atomic<std::size_t> dropped_presink_{0};
     std::atomic<std::size_t> dropped_stale_binding_{0};
+    std::atomic<std::size_t> dropped_binding_cap_{0};
 
     // the last-heard peer table (ADR-0044) — node id -> entry, insert-only. Each entry
     // is its own block (drawn from the RX store, freed with the transport) because
