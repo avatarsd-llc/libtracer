@@ -162,6 +162,9 @@ class frame_ingress_t {
         return done;
     }
 
+    /** @brief A header or a body is part-read: the stream owes the rest of it (#2198). */
+    [[nodiscard]] bool mid_frame() const noexcept { return hdr_have_ != 0 || in_body_; }
+
     /** @brief Forget the stream: drop a half-read header and release a half-filled body. */
     void reset() noexcept {
         blk_ = {};

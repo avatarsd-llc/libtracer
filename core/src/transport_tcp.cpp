@@ -439,6 +439,10 @@ void tcp_server_transport_t::on_slot_reset(session_base_t& s) {
     static_cast<session_t&>(s).framer.reset();
 }
 
+bool tcp_server_transport_t::mid_frame(const session_base_t& s) const {
+    return static_cast<const session_t&>(s).framer.mid_frame();
+}
+
 void tcp_server_transport_t::send(std::span<const std::byte> frame) {
     const std::span<const std::byte> one[1] = {frame};
     send(std::span<const std::span<const std::byte>>(one));

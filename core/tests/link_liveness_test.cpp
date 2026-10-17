@@ -253,6 +253,9 @@ void test_op_autowakes_and_dials() {
     check(await_state(node, "/net/fake-client/a", link_state_t::UP),
           "the vertex publishes UP (0x03) on the successful dial");
     check(link->link_up(), "link_up() is true once UP");
+    check(link->close_frozen_peers(100, 50) == 0 && link->close_frozen_peers(200, 150) == 0 &&
+              link->link_up(),
+          "the engine forwards the liveness check (#2198) and an idle socket is kept");
     check(script.built.size() == 1 && script.built[0]->sent.load() == 1,
           "the woken op was SERVED on the new socket (not dropped)");
     check(dropped_tx(net, "net/fake-client/a") == 0, "nothing was dropped on the wake path");
