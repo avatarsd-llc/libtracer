@@ -219,7 +219,43 @@ void collided_passes_strand_nothing() {
 
 }  // namespace
 
+/**
+ * @brief A burst of retirements larger than the table drains before it refuses (`qsbr.hpp`,
+ *        `retire`): the table is full of pairs whose only reader has since gone quiescent,
+ *        and one more retirement frees them and takes a slot instead of being refused.
+ *
+ * The test owns its domain and opens participants by cell. Participant 1 holds the first
+ * `kDeferredReleaseSlots` pairs, which fill the table. It then goes quiescent with no drain
+ * after it, and participant 2 comes online, so the next pair must be deferred too. Without a
+ * drain before refusing, that pair finds every slot taken and its hook never runs.
+ */
+void a_burst_drains_before_refusing() {
+    std::printf("a burst over the table frees the ripe pairs before it refuses one\n");
+    static q::registry_t r{};
+    static q::retired_table_t t{};
+    const auto held = std::make_unique<object_t[]>(tr::graph::kDeferredReleaseSlots);
+    q::go_online(r, 1);
+    bool parked = true;
+    for (std::size_t i = 0; i < tr::graph::kDeferredReleaseSlots; ++i)
+        parked = q::retire(&held[i], release, r, t) && !held[i].released.load() && parked;
+    check(parked, "the pairs the open participant holds fill the table, none run");
+    q::go_offline(r, 1);  // the participant is quiescent, and nothing drains after it
+    q::go_online(r, 2);   // a second participant keeps the next pair from running inline
+    object_t extra;
+    check(q::retire(&extra, release, r, t),
+          "a pair retired into a full table of ripe pairs is accepted, not refused");
+    bool all = true;
+    for (std::size_t i = 0; i < tr::graph::kDeferredReleaseSlots; ++i)
+        all = all && held[i].released.load();
+    check(all, "the drain before refusing ran every pair the quiescent participant held");
+    check(!extra.released.load(), "the new pair waits for the participant still online");
+    q::go_offline(r, 2);
+    q::drain(r, t);
+    check(extra.released.load(), "and it runs once that participant is quiescent");
+}
+
 int main() {
+    a_burst_drains_before_refusing();
     hook_runs_after_every_reader();
     a_skipped_pass_leaves_its_request();
     a_skip_inside_a_pass_is_served();

@@ -937,9 +937,13 @@ inline void drain(registry_t& r = registry(), retired_table_t& t = retired_table
  * true under this policy exactly as it is under the other two. Otherwise the pair is deferred
  * into the shared table and freed by whichever participant next completes the grace period.
  *
- * @return False when the pair was REFUSED a slot; the caller counts it and says so. Refusing
- *         is the same deliberate leak the per-thread park makes, for the same reason: running
- *         the hook here would free a context a live fan-out still names.
+ * A full table is drained once and scanned again before the pair is refused, so a burst of
+ * retirements larger than the table frees whatever entries are already past the horizon and
+ * takes their slots instead of being refused while ripe entries hold them.
+ *
+ * @return False when the pair was REFUSED a slot even after that drain; the caller counts it
+ *         and says so. Refusing is a deliberate leak: running the hook here would end the
+ *         context's lifetime while a live fan-out may still name it.
  */
 inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry(),
                    retired_table_t& t = retired_table()) noexcept {
@@ -950,25 +954,30 @@ inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry()
         release(ctx);
         return true;
     }
-    for (retired_slot_t& s : t.slots) {
-        slot_state_t expected = slot_state_t::EMPTY;
-        if (!s.state.compare_exchange_strong(expected, slot_state_t::FILLING,
-                                             std::memory_order_acq_rel, std::memory_order_relaxed))
-            continue;
-        s.ctx = ctx;
-        s.release = release;
-        s.epoch.store(e, std::memory_order_relaxed);
-        r.ctl.live.fetch_add(1, std::memory_order_relaxed);
-        s.state.store(slot_state_t::READY, std::memory_order_release);
-        // One retry, on THIS thread, now that the pair is visible to every drainer: the
-        // participants that were online a moment ago may have quiesced during the push, and a
-        // node whose only other thread has since gone idle would otherwise wait for a dispatch
-        // that never comes. After this, a surviving entry means a participant genuinely has
-        // not quiesced yet. Under single flight this retry may skip; the pass in flight then
-        // runs once more for it (@ref qsbr_single_flight).
-        drain(r, t);
-        return true;
-    }
+    // Two scans, each followed by a drain: the second sees the slots the first drain freed. Under
+    // single flight the drain may skip while another pass runs; that pass frees the same
+    // slots, and the second scan finds them if it has finished.
+    for (int scan = 0; scan < 2; drain(r, t), ++scan)
+        for (retired_slot_t& s : t.slots) {
+            slot_state_t expected = slot_state_t::EMPTY;
+            if (!s.state.compare_exchange_strong(expected, slot_state_t::FILLING,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_relaxed))
+                continue;
+            s.ctx = ctx;
+            s.release = release;
+            s.epoch.store(e, std::memory_order_relaxed);
+            r.ctl.live.fetch_add(1, std::memory_order_relaxed);
+            s.state.store(slot_state_t::READY, std::memory_order_release);
+            // One retry, on THIS thread, now that the pair is visible to every drainer: the
+            // participants that were online a moment ago may have quiesced during the push, and a
+            // node whose only other thread has since gone idle would otherwise wait for a dispatch
+            // that never comes. After this, a surviving entry means a participant genuinely has
+            // not quiesced yet. Under single flight this retry may skip; the pass in flight then
+            // runs once more for it (@ref qsbr_single_flight).
+            drain(r, t);
+            return true;
+        }
     return false;
 }
 

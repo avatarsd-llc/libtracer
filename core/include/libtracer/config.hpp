@@ -634,8 +634,10 @@ struct default_config_t {
      * Overflow is a REFUSAL, not a failure: a pair that finds every slot taken is DROPPED and
      * its hook is never run — a leak, deliberately, because the alternative is running a
      * release hook while a fan-out that is still walking the snapshot names that context.
-     * The domain retries the scan once after publishing the pair, so a drop means a participant
-     * genuinely never reached a quiescent state. The `unsubscribe` answers `BACKPRESSURE` and
+     * A full table is drained and scanned again before a pair is refused, so a drop means the
+     * table is full of pairs some participant still holds: either one participant has not
+     * reached a quiescent state, or a burst of retirements outran the table while participants
+     * were still inside their fan-outs. The `unsubscribe` answers `BACKPRESSURE` and
      * `graph_t::reclaim_refusals()` counts every one (`release_refused`), so an undersized bound
      * is observable rather than silent. Override fragment:
      * `static constexpr std::size_t kDeferredReleaseSlots = 64;`
