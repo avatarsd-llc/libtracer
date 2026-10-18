@@ -9,13 +9,15 @@
  *
  * A callback that retires its own subscription cannot be told "the pair is dead" on the
  * spot: the fan-out that called it is still walking a snapshot naming that `{fn, ctx}`
- * pair. Under the default `reclaim_local_t` the retired pair is PARKED and the release
- * hook runs when this thread's dispatch stack unwinds to depth 0 — i.e. before the
- * `write()` that started the delivery returns. The retirement itself is immediate: the
- * next fan-out skips the slot.
+ * pair. Under the default `reclaim_qsbr_t` the retired pair is DEFERRED in the QSBR domain's
+ * table, and the release hook runs at the grace point: here, with this thread the only one
+ * dispatching, that is when its dispatch stack unwinds to depth 0 — before the `write()`
+ * that started the delivery returns. With other threads dispatching, the hook would run on
+ * whichever of them completes the grace period. The retirement itself is immediate: the next
+ * fan-out skips the slot.
  *
- * `reclaim_strict_t` forbids this shape outright — it debug-asserts on a re-entrant
- * unsubscribe — so THIS EXAMPLE APPLIES TO `reclaim_local_t` ONLY. Both policies live in
+ * `reclaim_strict_t` forbids this shape outright (and cannot detect it), so THIS EXAMPLE
+ * APPLIES TO THE DEFAULT POLICY ONLY. Both policies live in
  * `libtracer/reclaim.hpp`, and the binding is a build-time type, so the example follows it
  * with `if constexpr` and SKIPS its body where the policy forbids the shape (the same way
  * `core/tests/reclaim_test.cpp` drops its re-entrant cases). A policy the example does not
@@ -74,7 +76,7 @@ void check(bool& ok, bool cond, const char* what) {
 /**
  * @brief The example proper — retire a subscription from inside its own delivery.
  *
- * Written unguarded, because under `reclaim_local_t` every line of it is valid; the ONE
+ * Written unguarded, because under the default policy every line of it is valid; the ONE
  * policy branch lives in `main`, so what a reader studies here is the pattern itself.
  *
  * @return True when every expectation held.
@@ -109,13 +111,13 @@ int main() {
                 policy.data());
 
     bool ok = true;
-    if constexpr (tr::graph::reclaim_policy_t::kReentrantUnsubscribe) {
+    if constexpr (tr::graph::reclaim_policy_t::kDefersToDispatchExit) {
         ok = run_reentrant_unsubscribe();
     } else {
-        // `reclaim_strict_t` FORBIDS the shape this whole example is about, and debug-asserts
-        // on it — running the body would be asserting that an abort happens. The example is
-        // therefore skipped, not failed, and certainly not made to break the build: it simply
-        // does not apply to this binding. Read it against the default policy.
+        // `reclaim_strict_t` FORBIDS the shape this whole example is about: running the body
+        // would release a context the running fan-out still names. The example is therefore
+        // skipped, not failed, and certainly not made to break the build: it simply does not
+        // apply to this binding. Read it against the default policy.
         std::printf("skipped: this build forbids unsubscribing from inside a delivery\n");
     }
     std::printf("RESULT %s\n", ok ? "ok" : "FAILED");

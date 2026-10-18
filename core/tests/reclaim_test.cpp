@@ -38,15 +38,14 @@
  *       runs — a deliberate leak in preference to a use-after-free — and the drop counter
  *       says so;
  *   (g) the CROSS-THREAD unsubscribe — the one case no per-thread grace point can cover, and
- *       the whole reason `reclaim_qsbr` exists. Thread A is provably parked INSIDE a delivery
- *       when thread B unsubscribes it. B must not block, must not free the ctx (which is what
- *       `reclaim_local` would wrongly do here, since B's own dispatch depth is 0 and it cannot
- *       see A's snapshot), and the hook must run once A passes its quiescent state.
+ *       why `reclaim_qsbr` is the default (ADR-0080 Amendment 1). Thread A is provably parked
+ *       INSIDE a delivery when thread B unsubscribes it. B must not block, must not free the
+ *       ctx (B's own dispatch depth is 0, and it cannot see A's snapshot), and the hook must
+ *       run once A passes its quiescent state.
  *
- * Every assertion here is policy-INDEPENDENT in shape; (b), (e) and (f) are guarded on
- * `reclaim_policy_t::kReentrantUnsubscribe`, since `reclaim_strict` forbids the operation
- * they exercise and debug-asserts on it, and (g) on `reclaim_policy_t::kGraceSpansThreads`,
- * since it asserts the property the other two policies explicitly do NOT promise.
+ * Every assertion here is policy-INDEPENDENT in shape; (b), (e), (f) and (g) are guarded on
+ * `reclaim_policy_t::kDefersToDispatchExit`, since `reclaim_strict` forbids the operations
+ * they exercise and cannot detect them.
  */
 
 #include "libtracer/reclaim.hpp"
@@ -169,8 +168,8 @@ void unsubscribing_sink(void* ctx, const tr::graph::value_t&) {
     auto* u = static_cast<unsubscriber_t*>(ctx);
     if (u->done.load(std::memory_order_acquire)) return;  // only the first delivery unsubscribes
     const bool ok = u->g->unsubscribe(u->victim, &probe_release).has_value();
-    // Sampled INSIDE the dispatch: this is the observation that separates `reclaim_local`
-    // from a policy that frees on return.
+    // Sampled INSIDE the dispatch: this is the observation that separates a deferring policy
+    // from one that frees on return.
     u->released_at_return.store(u->victim_ctx->released.load(std::memory_order_acquire),
                                 std::memory_order_release);
     u->ok.store(ok, std::memory_order_release);
@@ -400,9 +399,9 @@ void test_only_a_retiring_unsubscribe_signals() {
 //
 // DETERMINISTIC, not raced, exactly as (b) is. Thread A enters a delivery and PARKS there on a
 // latch, so for the whole middle of this test A is provably holding a snapshot that names the
-// subscriber pair while its dispatch depth is 1 and thread B's is 0. That is precisely the
-// state `reclaim_local` reads as "quiescent, free it now" — so assertion 2 below is the one
-// that fails under the default policy, which is why it is guarded rather than universal.
+// subscriber pair while its dispatch depth is 1 and thread B's is 0. The pair's lifetime must
+// span A's snapshot even though B, the caller, holds none — assertion 2 below pins that
+// (#894, #2127).
 
 /** @brief What the blocking subscriber needs to announce itself and then wait. */
 struct latched_sink_t {
@@ -458,8 +457,8 @@ void test_cross_thread_unsubscribe_waits_for_the_other_thread() {
     //    waits on is exactly what ADR-0080 §Decision 4 rejects, and A cannot proceed until we
     //    set `go`, so a blocking implementation would deadlock here rather than fail.
     check(rc.has_value(), "thread B's unsubscribe returns SUCCESS without blocking");
-    // 2. THE assertion. `reclaim_local` would have released here — B's own dispatch depth is 0,
-    //    and a per-thread grace point cannot see thread A's live snapshot.
+    // 2. THE assertion. B's own dispatch depth is 0, but the grace period spans every thread,
+    //    so the release waits for thread A's live snapshot to end.
     check(probe.released.load() == 0,
           "and it did NOT release the ctx, because thread A still names it in a live snapshot");
 
@@ -484,22 +483,16 @@ int main() {
                 static_cast<int>(reclaim_policy_t::kName.size()), reclaim_policy_t::kName.data());
     test_unsubscribe_outside_dispatch_is_quiescent_on_return();
     test_only_a_retiring_unsubscribe_signals();
-    if constexpr (reclaim_policy_t::kReentrantUnsubscribe) {
+    if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
         test_reentrant_unsubscribe_releases_at_dispatch_exit();
         test_release_waits_for_the_outermost_dispatch();
         test_park_overflow_drops_rather_than_frees();
-    } else {
-        // `reclaim_strict` forbids the operation the three cases above exercise and
-        // debug-asserts on it, so running them would be asserting that an abort happens.
-        std::printf("(b,e,f) skipped: this build forbids re-entrant unsubscribe\n");
-    }
-    if constexpr (reclaim_policy_t::kGraceSpansThreads) {
         test_cross_thread_unsubscribe_waits_for_the_other_thread();
     } else {
-        // Not a gap in coverage — the inverse. Both per-thread policies state their guarantee
-        // over ONE thread's dispatch domain, so asserting (g) against them would be asserting a
-        // promise they deliberately do not make.
-        std::printf("(g) skipped: this build's grace point does not span threads\n");
+        // `reclaim_strict` forbids unsubscribing while a dispatch is live, here or on another
+        // thread, and cannot detect it: running these would release a context a fan-out still
+        // names.
+        std::printf("(b,e,f,g) skipped: this build forbids unsubscribe during a dispatch\n");
     }
     return tr::testing::summary("reclaim");
 }

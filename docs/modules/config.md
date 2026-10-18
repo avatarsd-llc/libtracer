@@ -265,11 +265,6 @@ plane read their own spellings, so that neither L0 nor `tr::net` has to name an 
 :members:
 ```
 
-```{doxygenstruct} tr::graph::reclaim_local_t
-:project: libtracer
-:members:
-```
-
 ```{doxygenstruct} tr::graph::reclaim_qsbr_t
 :project: libtracer
 :members:

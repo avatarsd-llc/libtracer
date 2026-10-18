@@ -77,161 +77,58 @@ std::string_view session_of(const remote_ptr_t& remote) noexcept {
 }
 
 // ---------------------------------------------------------------------------------------------
-// ADR-0080 — the reclamation seam's machinery, for all three policies.
+// ADR-0080 — the reclamation seam's machinery, for both policies.
 //
-// The whole mechanism is ONE per-thread object plus, under `reclaim_qsbr` alone, an announcement
-// into the shared domain in `%qsbr.hpp`. Both grace points are decided by the SAME per-thread
-// depth counter, which is why one bracket serves all three policies:
+// Under `reclaim_qsbr` (the default, ADR-0080 Amendment 1) the grace point is a property OF
+// EVERY THREAD. The dispatch bracket is the QSBR thread record's count: the transition from 0 is
+// this thread's announcement and the transition to 0 its quiescent state. The retired pairs
+// cannot live on this thread, because the thread that retires is typically NOT the one that
+// completes the grace period; they sit in the domain's shared table (`%qsbr.hpp`
+// §qsbr_why_global). Under `reclaim_strict` nothing is tracked and every release is inline.
 //
-//   * `reclaim_local` — the grace point is a property OF THIS THREAD ("my dispatch stack
-//     unwound"), so the state that tracks it is thread-local and never shared. No atomic and no
-//     cache line is involved on the dispatch path, and a parked pair provably cannot outlive
-//     anything: the thread that parks IS the thread dispatching, and it drains before returning
-//     to depth 0.
-//   * `reclaim_qsbr` — the grace point is a property OF EVERY THREAD. The depth counter is still
-//     what decides WHEN (the transition to 0 is this thread's quiescent state, and the
-//     transition from 0 is its announcement), but the retired pairs cannot live here: the thread
-//     that retires is typically NOT the thread that will complete the grace period. See
-//     `%qsbr.hpp` §qsbr_why_global for why a per-thread retired list would never drain in the
-//     very case this policy exists for.
-//
-// `graph_t` gains NO data member under any policy, so no existing field's offset moves.
-//
-// NOTHING HERE IS A TEMPLATE, and that is a measured decision rather than an oversight. The
-// obvious way to keep the QSBR domain out of a build that does not bind it is to parameterise
-// this trio on the policy, on the theory that an `if constexpr` discarded statement outside a
-// template still odr-uses what it names. GCC does not behave that way: a discarded branch
-// naming `detail_qsbr::registry()` emits ZERO bytes of it at -O0, -O1 -g and -O3 alike (the
-// `.bss` is confirmed absent from the default build by `nm`). Templatising anyway is not free —
-// it changes every mangled name in this block, which is what stopped the default build's
-// `graph.cpp.o` from comparing byte-identical to the one before this policy existed. So the
-// trio keeps its shipped shape, and the ONE thing that genuinely must vary with the policy —
-// how much parking storage the thread-local carries — varies as an array bound.
+// `graph_t` gains NO data member under either policy, so no field's offset moves.
 // ---------------------------------------------------------------------------------------------
-
-/**
- * @brief How many pairs one thread parks locally — @ref kDeferredReleaseSlots, or none under a
- *        policy whose retired pairs live in the SHARED table instead.
- *
- * A QSBR build never parks on this thread, so the full array would be dead TLS on every
- * dispatching thread (256 B a piece on a 64-bit host); it collapses to one unused entry, a
- * zero-length array being an extension rather than standard C++. Collapsing the BOUND rather
- * than the struct is what lets the default build's thread-local keep byte-for-byte the layout
- * it had — the array is the only thing that may differ, and only where it is never touched.
- */
-inline constexpr std::size_t kLocalParkSlots =
-    reclaim_policy_t::kGraceSpansThreads ? 1 : kDeferredReleaseSlots;
-
-/**
- * @brief One thread's dispatch-stack depth and the pairs retired from inside it (ADR-0080).
- *
- * Deliberately a plain aggregate of scalars: it is `thread_local`, so a non-trivial destructor
- * would register a per-thread `__cxa_thread_atexit` handler and a non-constant initializer would
- * put a guard variable check on the dispatch path. Neither is acceptable for a counter whose
- * whole budget is an increment. `retired_callback_t` is trivially copyable for the same reason,
- * so `parked` is storage rather than a container.
- */
-struct dispatch_state_t {
-    /** @brief Nesting depth of `fan_out` / latch dispatch on this thread; 0 ⇒ quiescent. Stays
-     *         0 under `reclaim_qsbr`, whose count is the QSBR thread record's. */
-    unsigned depth;
-    /** @brief How many of @ref parked are occupied. Stays 0 under `reclaim_qsbr`. */
-    unsigned parked_n;
-    /** @brief Pairs retired at depth > 0, awaiting this thread's return to depth 0. */
-    retired_callback_t parked[kLocalParkSlots];
-};
-
-/**
- * @brief This thread's @ref dispatch_state_t.
- *
- * `constinit`-shaped (all-zero, trivially destructible), so the access is a bare TLS address
- * computation with no guard variable and no lazy-init branch.
- */
-[[nodiscard]] inline dispatch_state_t& dispatch_state() noexcept {
-    static thread_local dispatch_state_t state{};
-    return state;
-}
-
-/**
- * @brief Run every pair this thread parked, then empty the park — the grace point itself.
- *
- * `noinline` and out of line on purpose: its caller is the dispatch path, whose cost must be the
- * depth decrement and one predictable-not-taken branch. Nothing here runs under a graph lock —
- * the caller is a `fan_out` that has already released its edge pin.
- *
- * The park is emptied BEFORE the first hook runs. A hook is arbitrary user code that may publish,
- * and a nested publish re-enters this function; taking the entries first means it finds an empty
- * park rather than re-running a hook that is already executing.
- *
- * `maybe_unused` because a `reclaim_qsbr` build parks nothing locally and never reaches it.
- */
-[[maybe_unused]] [[gnu::noinline]] void run_parked_releases(dispatch_state_t& s) {
-    retired_callback_t taken[kLocalParkSlots];
-    const unsigned n = s.parked_n;
-    for (unsigned i = 0; i < n; ++i) taken[i] = s.parked[i];
-    s.parked_n = 0;
-    for (unsigned i = 0; i < n; ++i) taken[i].release(taken[i].ctx);
-}
 
 /**
  * @brief Bracket one dispatch on this thread — ADR-0080's grace-point instrument.
  *
  * Constructed once per `fan_out` (and once per ADR-0049 durability latch), never per edge, so
- * the cost is independent of fan-out width as the ADR requires. Under a non-deferring policy
- * every member below compiles away and the object is empty.
+ * the cost is independent of fan-out width as the ADR requires. Under `reclaim_strict` the
+ * object is empty.
  */
 class dispatch_scope_t {
    public:
     dispatch_scope_t() noexcept {
-        if constexpr (reclaim_policy_t::kGraceSpansThreads) {
-            // Only the OUTERMOST section announces (`enter` keeps the count, shared with the
-            // router's frame bracket). An inner one is already covered by the announcement the
-            // outer one made, and re-announcing at a NEWER epoch would let a scan conclude past
-            // a retirement the outer snapshot still names. The dispatch bracket IS the frame
-            // bracket here: one count, in the QSBR thread record.
-            detail_qsbr::enter();
-        } else if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
-            ++dispatch_state().depth;
-        }
+        // Only the OUTERMOST section announces (`enter` keeps the count, shared with the
+        // router's frame bracket). An inner one is already covered by the announcement the
+        // outer one made, and re-announcing at a NEWER epoch would let a scan conclude past a
+        // retirement the outer snapshot still names.
+        if constexpr (reclaim_policy_t::kDefersToDispatchExit) detail_qsbr::enter();
     }
     dispatch_scope_t(const dispatch_scope_t&) = delete;
     dispatch_scope_t& operator=(const dispatch_scope_t&) = delete;
 
-    /** @brief Leaving the OUTERMOST dispatch is the grace point; anything inner is a decrement. */
+    /** @brief Leaving the OUTERMOST section is this thread's quiescent state. */
     ~dispatch_scope_t() {
-        if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
-            if constexpr (reclaim_policy_t::kGraceSpansThreads) {
-                // Go quiescent FIRST, so this thread's own announcement is already withdrawn
-                // when the drain scans — otherwise every drain would see itself as a reason to
-                // defer, and a node with one dispatching thread would reclaim nothing, ever.
-                // A dispatch inside a router frame is not the outermost section: the frame's
-                // own exit is the quiescent point.
-                if (!detail_qsbr::leave()) return;
-                pass_quiescent_state<reclaim_policy_t>();
-            } else {
-                // Both fields live in the same thread-local object, so the common case — unwind
-                // to depth 0 with an empty park — is two loads off one base and a branch nobody
-                // takes.
-                dispatch_state_t& s = dispatch_state();
-                if (--s.depth == 0 && s.parked_n != 0) run_parked_releases(s);
-            }
-        }
+        // Go quiescent FIRST, so this thread's own announcement is already withdrawn when the
+        // drain scans — otherwise every drain would see itself as a reason to defer, and a node
+        // with one dispatching thread would reclaim nothing, ever. A dispatch inside a router
+        // frame is not the outermost section: the frame's own exit is the quiescent point.
+        if constexpr (reclaim_policy_t::kDefersToDispatchExit)
+            if (detail_qsbr::leave()) pass_quiescent_state<reclaim_policy_t>();
     }
 };
 
 /**
- * @brief The frame bracket a fan-out opens for its remote edges: once, at the first remote
- *        edge, so a fan-out over F links pays one outermost bracket instead of F.
+ * @brief The frame bracket a fan-out opens for its remote edges, under `reclaim_strict` only:
+ *        once, at the first remote edge, so a fan-out over F links pays one outermost bracket
+ *        instead of F.
  *
  * Under `reclaim_qsbr` the dispatch bracket already announces, so there is nothing to open.
- * Under the other two policies it is the router's frame bracket (`%detail_qsbr::frame_scope_t`),
- * and each remote delivery's own bracket then nests inside it. A fan-out with no remote edge
- * never opens it, so an in-process write pays nothing (ADR-0038 §3a). The bracket only grows:
- * it opens before the first remote edge's reads and closes after the last, which can only
- * defer a free. It also stays open across any in-process callback that runs between the first
- * and the last remote edge; under `reclaim_local` `thread_quiescent` is a no-op, so a router
- * retirement such a callback makes waits for the router's next drain, not for the end of that
- * remote delivery.
+ * Under `reclaim_strict` it is the router's frame bracket (`%detail_qsbr::frame_scope_t`), and
+ * each remote delivery's own bracket then nests inside it. A fan-out with no remote edge never
+ * opens it, so an in-process write pays nothing (ADR-0038 §3a). The bracket only grows: it opens
+ * before the first remote edge's reads and closes after the last, which can only defer a free.
  *
  * The open and the close are out of line: a fan-out pays one flag test per edge inline, and
  * the bracket's body is emitted once instead of in each of `fan_out`'s two loops.
@@ -243,12 +140,12 @@ class remote_frame_t {
     remote_frame_t& operator=(const remote_frame_t&) = delete;
     /** @brief Open the bracket before @p e's delivery if @p e is remote and it is not open yet. */
     void cover(const edge_view_t& e) noexcept {
-        if constexpr (!reclaim_policy_t::kGraceSpansThreads)
+        if constexpr (!reclaim_policy_t::kDefersToDispatchExit)
             if (!open_ && e.has_remote_leg()) open(open_);
     }
     /** @brief Close it, if it was opened; the outermost close is a quiescent state. */
     ~remote_frame_t() {
-        if constexpr (!reclaim_policy_t::kGraceSpansThreads)
+        if constexpr (!reclaim_policy_t::kDefersToDispatchExit)
             if (open_) close();
     }
 
@@ -272,42 +169,21 @@ class remote_frame_t {
 };
 
 /**
- * @brief Whether this thread is currently inside a delivery — the question `unsubscribe` asks.
- *
- * Under a non-deferring policy the depth is never maintained, so this is a compile-time
- * `false` and `unsubscribe`'s release is unconditionally inline. Under `reclaim_qsbr` the count
- * is the QSBR thread record's, and nothing asks this: the domain scans instead.
- */
-[[nodiscard]] inline bool inside_dispatch() noexcept {
-    if constexpr (reclaim_policy_t::kDefersToDispatchExit && !reclaim_policy_t::kGraceSpansThreads)
-        return dispatch_state().depth != 0;
-    return false;
-}
-
-/**
  * @brief Retire one `{ctx, release}` pair at the bound policy's grace point — the whole of
  *        `unsubscribe`'s policy body, in one place.
  *
- * Every branch releases INLINE in the case where nothing can still be holding the pair, which is
- * why "quiescent on return" is true of an ordinary unsubscribe under all three policies.
+ * Under `reclaim_qsbr` the domain decides inline-vs-defer by SCANNING every participant, which
+ * is what sees a sibling thread's live snapshot; with none mid-dispatch it releases inline.
+ * Under `reclaim_strict` the release is always inline.
  *
- * @return False when the pair was REFUSED a parking slot (this thread's, or the QSBR domain's
- *         shared table). The OOM rule, stated once: the hook is then **never** run. That is a
- *         deliberate leak and the only safe answer — running it here would release a context a
- *         fan-out up the stack, or on another thread, still holds in its snapshot, the very
- *         use-after-free this seam exists to close. The caller counts it and says so.
+ * @return False when the pair was REFUSED a slot in the domain's shared table. The OOM rule,
+ *         stated once: the hook is then **never** run. That is a deliberate leak and the only
+ *         safe answer — running it here would end a context's lifetime while a fan-out, here or on
+ *         another thread, still holds it in its snapshot. The caller counts it and says so.
  */
 [[nodiscard]] inline bool retire_pair(const retired_callback_t& pair) {
-    if constexpr (reclaim_policy_t::kGraceSpansThreads) {
-        // The domain decides inline-vs-defer by SCANNING, not by asking about this thread: a
-        // sibling thread's live snapshot is exactly what the depth counter cannot see.
+    if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
         return detail_qsbr::retire(pair.ctx, pair.release);
-    } else if (inside_dispatch()) {
-        // Parked until this thread unwinds to depth 0.
-        dispatch_state_t& s = dispatch_state();
-        if (s.parked_n >= kLocalParkSlots) return false;
-        s.parked[s.parked_n++] = pair;
-        return true;
     } else {
         pair.release(pair.ctx);
         return true;
@@ -3579,18 +3455,6 @@ result_t<void> graph_t::unsubscribe(const subscription_t& sub) { return unsubscr
 
 result_t<void> graph_t::unsubscribe(const subscription_t& sub, subscriber_release_fn_t release) {
     if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
-
-    // ADR-0080's forbidden op, policed where it is committed rather than described in prose.
-    // Under `reclaim_strict` the grace point IS this return, which is only sound if no dispatch
-    // is walking a snapshot that names the edge — i.e. if this thread is not inside one. A
-    // release build cannot see the violation; that is the trade `reclaim_strict` is FOR, and
-    // the reason `reclaim_local` is the default.
-    if constexpr (!reclaim_policy_t::kReentrantUnsubscribe)
-        assert(!inside_dispatch() &&
-               "reclaim_strict forbids unsubscribing from inside a delivery: the running "
-               "fan-out still names this edge's {fn, ctx} pair in its snapshot, and this "
-               "policy's grace point is THIS return. Bind reclaim_local_t (the default) if "
-               "this node re-entrantly unsubscribes.");
 
     // The in-process counterpart of the wire ":subscribers[N] clear" (graph_fields.cpp):
     // deactivate the slot, then unwind the RFC-0005 listener bookkeeping — the SAME order and

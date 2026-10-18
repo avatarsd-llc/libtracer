@@ -118,8 +118,8 @@ using remote_delivery_fn_t = void (*)(void* ctx, const remote_delivery_t& sub,
  * @brief Announce that THIS thread holds no `%edge_view_t` snapshot and drain whatever that
  *        made reclaimable — the quiescent point of a cross-thread grace period (ADR-0080).
  *
- * Compiles to nothing at all unless this build binds a policy whose grace point spans threads,
- * which today means @ref tr::graph::reclaim_qsbr_t. It does two things there, and both are
+ * Compiles to nothing at all under @ref tr::graph::reclaim_strict_t. Under the default,
+ * @ref tr::graph::reclaim_qsbr_t, it does two things, and both are
  * cheap-and-early-out rather than conditional on the caller knowing anything:
  *
  * 1. drains the shared retired table of every `{ctx, release}` pair whose grace period has now
@@ -137,7 +137,7 @@ using remote_delivery_fn_t = void (*)(void* ctx, const remote_delivery_t& sub,
  */
 template <class P>
 inline void pass_quiescent_state() noexcept {
-    if constexpr (P::kGraceSpansThreads) {
+    if constexpr (P::kDefersToDispatchExit) {
         detail_qsbr::drain();
         if constexpr (std::is_same_v<lkv_slot_t, hazard_slot_t>)
             detail_hp::retire_and_flush(nullptr);
@@ -176,20 +176,18 @@ inline void pass_quiescent_state() noexcept {
  * the caller to reason about in-flight state.
  *
  * **This build's guarantee is the one stated on the bound policy** —
- * @ref tr::graph::reclaim_local_t (the default), @ref tr::graph::reclaim_strict_t or
- * @ref tr::graph::reclaim_qsbr_t. Under all three the library owns the tracking and SIGNALS
- * release through the @ref tr::graph::subscriber_release_fn_t hook of
+ * @ref tr::graph::reclaim_qsbr_t (the default on every target) or
+ * @ref tr::graph::reclaim_strict_t (the opt-out). Under both the library owns the tracking and
+ * SIGNALS release through the @ref tr::graph::subscriber_release_fn_t hook of
  * @ref graph_t::unsubscribe(const subscription_t&, subscriber_release_fn_t): the hook runs
  * exactly once, outside every graph lock, at that policy's grace point. **There is nothing to
  * poll and nothing to wait on** — that shape is precisely what ADR-0080 §Decision 4 rejects.
  *
- * The two per-thread policies state their guarantee over ONE thread's dispatch domain, which
- * is the single-threaded WIDE / MCU target they are for, and run the hook on the caller's own
- * thread. An embedder that dispatches from several threads at once and unsubscribes from
- * another needs a grace period spanning every thread: bind
- * @ref tr::graph::reclaim_qsbr_t. Its one API difference — the hook may then run on a thread
- * other than the `unsubscribe()` caller, because a cross-thread grace period cannot promise
- * otherwise without blocking — is stated on the policy itself.
+ * Under the default the grace period spans every dispatching thread, so the hook may run on a
+ * thread other than the `unsubscribe()` caller — a cross-thread grace period cannot promise
+ * otherwise without blocking — and must be short, thread-safe and non-blocking; that is stated
+ * on the policy itself. @ref tr::graph::reclaim_strict_t runs it inline on the caller's thread,
+ * and is sound only where no dispatch is live when the caller unsubscribes.
  */
 class subscription_t {
    public:
@@ -2416,9 +2414,9 @@ class graph_t {
      * @param ctx Caller-owned context, passed back to @p fn on every delivery. Its lifetime
      *            is bounded by this build's reclamation policy (ADR-0080), not by prose: keep
      *            it alive until @ref unsubscribe releases it — under the default
-     *            @ref tr::graph::reclaim_local_t that is before `unsubscribe()` returns when
-     *            called from outside a delivery, and before the enclosing `write()` returns
-     *            when called from inside one. Pass a
+     *            @ref tr::graph::reclaim_qsbr_t that is before `unsubscribe()` returns when
+     *            no thread is mid-dispatch, and otherwise once every dispatching thread has
+     *            passed a quiescent state. Pass a
      *            @ref tr::graph::subscriber_release_fn_t to
      *            @ref unsubscribe(const subscription_t&, subscriber_release_fn_t) to be TOLD
      *            which; there is no in-flight state to poll. See @ref subscription_t.
@@ -2461,15 +2459,12 @@ class graph_t {
      * default-constructed or already-cleared handle returns `NOT_FOUND`.
      *
      * **On the `ctx`.** Retirement takes effect at once — the next snapshot skips the slot —
-     * but a fan-out ALREADY walking a snapshot still names the retired `{fn, ctx}` pair. Under
-     * the default @ref tr::graph::reclaim_local_t there is exactly one case where that can be
-     * true of THIS call: unsubscribing from inside a delivery. So when this overload is called
-     * from outside any delivery — the ordinary case — it returns already quiescent and the
-     * caller may free its `ctx` on the return. Called from INSIDE a delivery it cannot tell the
-     * caller when the pair died, because it was given no way to: use the two-argument overload
-     * below, which is the form that carries a signal. Under
-     * @ref tr::graph::reclaim_strict_t re-entrant unsubscribe is forbidden outright, so this
-     * overload is always quiescent on return.
+     * but a fan-out ALREADY walking a snapshot — inside this call's own delivery or on another
+     * thread — still names the retired `{fn, ctx}` pair. This overload cannot tell the caller
+     * when that pair died, because it was given no way to: free a `ctx` only through the
+     * two-argument overload below, which is the form that carries a signal. Under
+     * @ref tr::graph::reclaim_strict_t the release is inline, and the caller has promised that
+     * no dispatch is live, so this overload is quiescent on return.
      * @note Applies to the callback-form subscriptions; a path→path (`subscribe(src, target)`)
      *       edge is a wire `:subscribers[]` field-write, removed via that wire clear.
      */
@@ -2481,16 +2476,16 @@ class graph_t {
      *
      * Identical to the one-argument overload in what it retires; it adds the one thing that
      * overload structurally cannot provide, a **signal**. @p release is invoked exactly once
-     * with the subscription's `callback_ctx`, on THIS thread, outside every graph lock, at the
-     * grace point the bound @ref tr::graph::default_config_t::reclaim_policy_t names:
+     * with the subscription's `callback_ctx`, outside every graph lock, at the grace point the
+     * bound @ref tr::graph::default_config_t::reclaim_policy_t names:
      *
-     * | bound policy | called from OUTSIDE a delivery | called from INSIDE one |
+     * | bound policy | no dispatch live anywhere | some dispatch live (here or elsewhere) |
      * | --- | --- | --- |
-     * | @ref tr::graph::reclaim_strict_t | inline, before this call returns | forbidden |
-     * | @ref tr::graph::reclaim_local_t | inline, before this call returns | before the enclosing
-     *   `write()` / `propagate()` returns |
-     * | @ref tr::graph::reclaim_qsbr_t | inline when NO participant is mid-dispatch | once every
-     *   participant has passed a quiescent state — possibly on another thread |
+     * | @ref tr::graph::reclaim_qsbr_t (default) | inline, on this thread, before this call
+     *   returns | once every participant has passed a quiescent state — possibly on another
+     *   thread |
+     * | @ref tr::graph::reclaim_strict_t | inline, before this call returns | forbidden, and not
+     *   detected |
      *
      * So the caller frees its context from @p release and never asks a question about
      * in-flight state — the library owns that tracking. A hook is run ONLY for a call that
@@ -2500,14 +2495,15 @@ class graph_t {
      * @param sub     The handle @ref subscribe returned.
      * @param release The release hook; `nullptr` degrades this to the one-argument overload.
      *                It must not itself unsubscribe the same handle, and it runs on whichever
-     *                thread reached the grace point.
+     *                thread reached the grace point, so it must be short, thread-safe,
+     *                non-blocking and `noexcept`.
      * @return `{}` on success; `NOT_FOUND` when @p sub names no active edge — and then
      *         @p release is *not* called.
      * @retval BACKPRESSURE The edge IS removed, but its deferred hook found no parking slot,
      *         so @p release will never run and the caller must not free the context: a live
      *         fan-out may still name it, for the life of the process. A deferred hook needs
-     *         one of the @ref tr::graph::default_config_t::kDeferredReleaseSlots slots —
-     *         this thread's, or under `reclaim_qsbr_t` the shared table's — and running it
+     *         one of the @ref tr::graph::default_config_t::kDeferredReleaseSlots slots of the
+     *         QSBR domain's shared table, and running it
      *         with every slot taken would free a context a live fan-out still names: a
      *         deliberate leak in preference to a use-after-free. Counted in
      *         @ref reclaim_refusals_t::release_refused. Do not retry: the edge is gone,

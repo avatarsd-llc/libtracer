@@ -2897,6 +2897,17 @@ target_link_libraries(config_binding_test PRIVATE libtracer)
 libtracer_test_warnings(config_binding_test)
 add_test(NAME config_binding COMMAND config_binding_test)
 
+# #2127 — `reclaim_local_t` is withdrawn: a fragment that still binds it must be refused, and
+# refused with the migration note rather than with whatever error a missing definition causes.
+# The fragment's `-I` comes first, so it shadows any preset a leg passes in CMAKE_CXX_FLAGS.
+add_test(NAME reclaim_local_refused
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/fixtures/reclaim-local-refused
+                 -I${PROJECT_SOURCE_DIR}/include
+                 ${CMAKE_CURRENT_SOURCE_DIR}/reclaim_local_refused.cpp)
+set_tests_properties(reclaim_local_refused PROPERTIES
+                     PASS_REGULAR_EXPRESSION "reclaim_local_t is withdrawn \\(#2127")
+
 # #1713 — a STREAM write is ONE stripe-lock section and zero heap allocations in the common
 # case. `--wrap=pthread_mutex_lock` is the lock counter (the httpd suites' `--wrap=send`
 # precedent); the test counts only the watched stripe's acquisitions.

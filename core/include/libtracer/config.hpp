@@ -138,7 +138,7 @@ struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit
 class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
 class single_writer_slot_t;  // lkv_slot.hpp — one value_t* swapped inside guard_t; no spin
 struct reclaim_strict_t;     // reclaim.hpp — grace point: `unsubscribe()` returns
-struct reclaim_local_t;      // reclaim.hpp — grace point: this thread's dispatch stack unwinds
+struct reclaim_local_t;      // WITHDRAWN (#2127): declared, never defined, so naming it is refused
 struct reclaim_qsbr_t;  // reclaim.hpp — grace point: EVERY thread has passed a quiescent state
 
 /**
@@ -593,59 +593,54 @@ struct default_config_t {
      * @brief The target's selected RECLAMATION policy (ADR-0080) — WHEN the library may free
      *        the memory behind a retired subscription's `{fn, ctx}` pair.
      *
-     * Default: `reclaim_local_t`, whose grace point is "this thread's dispatch stack unwinds
-     * to depth 0". It is the default because it makes the MCU and the host build behave
-     * IDENTICALLY: `reclaim_strict_t` forbids unsubscribing from inside a delivery, which
-     * would make the same application code legal on a host and illegal on the constrained
-     * target — a portability bug that surfaces only where it is hardest to debug.
+     * Default, on every target: `reclaim_qsbr_t`, whose grace point is "every dispatching
+     * thread has passed a quiescent state" (ADR-0080 Amendment 1 §1, #2127). A retired pair is
+     * released inline when no participant is mid-dispatch (the ordinary case) and otherwise by
+     * whichever participant completes the grace period, so the release hook may run on a thread
+     * other than the `unsubscribe()` caller and must be short, thread-safe and non-blocking —
+     * see `%reclaim.hpp`. It prices one relaxed load, one release store and one fence per
+     * OUTERMOST bracket (not per edge; the fence is a compiler barrier under `kSingleCore`).
      *
-     * What the default costs, and what rebinding buys, is one non-atomic increment,
-     * decrement and branch per `fan_out` on a per-thread counter — once per publish,
-     * regardless of subscriber count, and nothing at all on a publish nobody subscribed to
-     * (the counter sits after `fan_out`'s no-subscriber gate). Override fragment:
-     * `using reclaim_policy_t = reclaim_strict_t;` — worth taking only where the deployment
-     * can show that re-entrant unsubscribe does not occur, because `reclaim_strict_t` cannot
-     * see it outside a debug build.
-     *
-     * `reclaim_qsbr` — ADR-0080's third policy, whose grace point spans EVERY thread — is the
-     * one to bind when this node dispatches from several threads at once and unsubscribes from
-     * another, the case neither policy above covers. Override fragment:
-     * `using reclaim_policy_t = reclaim_qsbr_t;`. It prices one relaxed load and one `seq_cst`
-     * store per OUTERMOST fan-out (not per edge), and it is the only policy whose release hook
-     * may run on a thread other than the `unsubscribe()` caller — see `%reclaim.hpp`.
+     * The one opt-out: `using reclaim_policy_t = reclaim_strict_t;`, which tracks nothing and
+     * releases inline before `unsubscribe()` returns. Take it only where the deployment can
+     * show that no dispatch is live when it unsubscribes — on any thread — because
+     * `reclaim_strict_t` cannot detect it. `reclaim_local_t` is withdrawn: a fragment that
+     * still names it is refused with the migration note.
      */
-    using reclaim_policy_t = reclaim_local_t;
+    using reclaim_policy_t = reclaim_qsbr_t;
 
     /**
-     * @brief How many retired `{ctx, release}` pairs ONE THREAD may hold parked at once, when
-     *        @ref reclaim_policy_t defers (ADR-0080).
+     * @brief How many retired `{ctx, release}` pairs the QSBR domain may hold at once, waiting
+     *        for a grace period (ADR-0080).
      *
-     * Read this as "subscriptions unsubscribed from INSIDE a single delivery stack". The
-     * ordinary unsubscribe — from outside any callback — parks nothing at all, so on most
-     * nodes this storage is touched zero times; it exists for the re-entrant case
-     * `reclaim_local_t` supports and `reclaim_strict_t` forbids.
+     * The pairs are held across a cross-thread GRACE PERIOD in ONE shared table, so the quantity
+     * this bounds is "retirements in flight process-wide while some participant has yet to
+     * quiesce". The ordinary unsubscribe, with no participant mid-dispatch, holds nothing: its
+     * hook runs inline. Raise it (64 is a sane starting point) on any node that unsubscribes in
+     * bulk while other threads dispatch. Nothing at all under `reclaim_strict_t`, which never
+     * defers.
      *
-     * Sizing: one @ref retired_callback_t per slot, in per-thread storage that is plain bytes
-     * with no destructor and no allocation — 256 B on a 64-bit host at the default, 128 B on a
-     * 32-bit MCU, and only on a thread that actually dispatches. Nothing at all under
-     * `reclaim_strict_t`, which never defers.
+     * Sizing: each slot is a handoff word, the `{ctx, release}` pair and its epoch, in `.bss`,
+     * with no destructor and no allocation: 32 B on a 64-bit host and 16 B on a 32-bit MCU, so
+     * the default 16 slots cost 512 B and 256 B. Now that `reclaim_qsbr_t` is the default on
+     * every target (#2127), size the table for the largest burst of unsubscribes that can
+     * overlap another thread's dispatch, not for the steady state: one slot per subscription
+     * a node may retire while some participant is still inside a fan-out. A single-threaded
+     * node, or one that unsubscribes only while no other thread dispatches, retires inline and
+     * never holds a slot. A node that tears down a whole subtree under live traffic wants the
+     * subtree's subscription count here. Watch `graph_t::reclaim_refusals().release_refused`
+     * in a soak: any non-zero reading means the bound is too small for that deployment.
      *
      * Overflow is a REFUSAL, not a failure: a pair that finds every slot taken is DROPPED and
      * its hook is never run — a leak, deliberately, because the alternative is running a
-     * release hook while the fan-out that is still walking the snapshot names that context.
-     * The `unsubscribe` answers `BACKPRESSURE` and `graph_t::reclaim_refusals()` counts every
-     * one (`release_refused`), so an undersized bound is observable rather than silent. Override
-     * fragment: `static constexpr std::size_t kDeferredReleaseSlots = 64;`
-     *
-     * **Under `reclaim_qsbr_t` read it differently.** There the pairs are held across a
-     * cross-thread GRACE PERIOD rather than a dispatch stack, in ONE shared table rather than
-     * per-thread storage, so the quantity it bounds is "retirements in flight process-wide
-     * while some participant has yet to quiesce" — a larger and less predictable number. Raise
-     * it (64 is a sane starting point) on any node that unsubscribes in bulk while other
-     * threads dispatch. The overflow rule is identical, and so is its observability: a QSBR
-     * build retries the scan once after publishing the pair, so a drop means a participant
-     * thread genuinely never reached a quiescent state — an embedder defect
-     * @ref tr::graph::graph_t::reclaim_refusals now names.
+     * release hook while a fan-out that is still walking the snapshot names that context.
+     * A full table is drained and scanned again before a pair is refused, so a drop means the
+     * table is full of pairs some participant still holds: either one participant has not
+     * reached a quiescent state, or a burst of retirements outran the table while participants
+     * were still inside their fan-outs. The `unsubscribe` answers `BACKPRESSURE` and
+     * `graph_t::reclaim_refusals()` counts every one (`release_refused`), so an undersized bound
+     * is observable rather than silent. Override fragment:
+     * `static constexpr std::size_t kDeferredReleaseSlots = 64;`
      */
     static constexpr std::size_t kDeferredReleaseSlots = 16;
 
@@ -680,10 +675,10 @@ struct default_config_t {
      * Its `.bss` is `N * max(kCacheLineBytes, alignof(std::uint32_t))` bytes, the floor being
      * the 31-bit epoch's state word: at N = 32 that is 2,048 B on a host. The transport plane
      * uses the same cells in every build (`fwd_router_t` brackets each inbound frame and
-     * origination with them), so a build with the router carries this `.bss` under any policy;
-     * a thread that finds every index taken still fails safe, deferring the free of a removed
-     * link. The retired table is a separate object that only `reclaim_qsbr_t` names, so the
-     * linker drops it from a build that binds another policy.
+     * origination with them), so a build with the router carries this `.bss` under either
+     * policy; a thread that finds every index taken still fails safe, deferring the free of a
+     * removed link. The retired table is a separate object that only `reclaim_qsbr_t` names, so
+     * the linker drops it from a `reclaim_strict_t` build.
      * Override fragment:
      * `static constexpr std::size_t kQsbrParticipants = 64;`
      */
@@ -1323,6 +1318,11 @@ using reader_guard_t = guard_t;
 using lkv_slot_t = config_t::lkv_slot_t;
 /** @brief @ref default_config_t::reclaim_policy_t for this build. */
 using reclaim_policy_t = config_t::reclaim_policy_t;
+static_assert(!std::is_same_v<reclaim_policy_t, reclaim_local_t>,
+              "reclaim_local_t is withdrawn (#2127, ADR-0080 Amendment 1). Delete the "
+              "`reclaim_policy_t` line to take the default, "
+              "reclaim_qsbr_t, or bind reclaim_strict_t; see core/CHANGELOG.md, \"reclaim_local "
+              "is withdrawn\", for the migration note.");
 
 }  // namespace tr::graph
 

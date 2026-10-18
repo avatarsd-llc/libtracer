@@ -1,25 +1,23 @@
 /**
  * @file
  * @brief The QSBR domain (#1376): the cross-thread grace period behind
- *        @ref tr::graph::reclaim_qsbr_t, ADR-0080's third reclamation policy.
+ *        @ref tr::graph::reclaim_qsbr_t, ADR-0080's default reclamation policy (Amendment 1).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * Quiescent-state-based reclamation in the URCU sense, applied to two things: the `{fn, ctx}`
  * leg of a retired subscription under `reclaim_qsbr`, and, in every build, what the transport
- * plane parks on the graph (a removed link, a retired seam). The read-side announcement it
- * needs is ALREADY COMPUTED by the seam PR #1377 shipped: `graph.cpp`'s dispatch bracket keeps
- * a per-thread depth whose transition to 0 is the proof that this thread holds no
- * `edge_view_t` snapshot. That is `reclaim_local`'s entire grace-point argument, and this
- * domain reuses it verbatim, adding one announcement at the OUTERMOST bracket and nothing at
- * all per edge.
+ * plane parks on the graph (a removed link, a retired seam). The read-side announcement is the
+ * dispatch bracket's per-thread depth: its transition to 0 is the proof that this thread holds
+ * no `edge_view_t` snapshot. The domain adds one announcement at the OUTERMOST bracket and
+ * nothing at all per edge.
  *
  * The shape is modelled on `%edge_pin.hpp`, not on `%lkv_slot.hpp`: a bounded `constinit`
  * registry in `.bss`, a claimable per-thread cell, and no exit sweep to register.
  *
  * **Two users, one domain.** `%graph.cpp`'s dispatch bracket reaches it only through an
- * `if constexpr` branch a non-QSBR build discards, so under the other two policies `fan_out`
+ * `if constexpr` branch a `reclaim_strict` build discards, so under that policy `fan_out`
  * emits nothing from here. The transport plane uses it in EVERY build: `fwd_router_t` brackets
  * each inbound frame and each origination with `%enter` / `%leave`, and the graph frees a
  * parked link or value seam only once every bracket open when it was parked has closed
@@ -45,10 +43,10 @@
  * the hook.
  *
  * That has a consequence the API must state rather than hide: under this policy the release
- * hook may run **on a thread other than the caller of `unsubscribe()`**. Both shipped
- * policies promise the caller's own thread; a grace period that spans threads structurally
- * cannot, because the only alternatives are to block the caller (ADR-0080 §Decision 4 rejects
- * waiting outright) or to leak. See @ref tr::graph::reclaim_qsbr_t.
+ * hook may run **on a thread other than the caller of `unsubscribe()`**. A grace period that
+ * spans threads structurally cannot promise the caller's own thread, because the only alternatives
+ * are to block the caller (ADR-0080 §Decision 4 rejects waiting outright) or to leak. See @ref
+ * tr::graph::reclaim_qsbr_t.
  *
  * @section qsbr_protocol The protocol
  *
@@ -939,9 +937,13 @@ inline void drain(registry_t& r = registry(), retired_table_t& t = retired_table
  * true under this policy exactly as it is under the other two. Otherwise the pair is deferred
  * into the shared table and freed by whichever participant next completes the grace period.
  *
- * @return False when the pair was REFUSED a slot; the caller counts it and says so. Refusing
- *         is the same deliberate leak the per-thread park makes, for the same reason: running
- *         the hook here would free a context a live fan-out still names.
+ * A full table is drained once and scanned again before the pair is refused, so a burst of
+ * retirements larger than the table frees whatever entries are already past the horizon and
+ * takes their slots instead of being refused while ripe entries hold them.
+ *
+ * @return False when the pair was REFUSED a slot even after that drain; the caller counts it
+ *         and says so. Refusing is a deliberate leak: running the hook here would end the
+ *         context's lifetime while a live fan-out may still name it.
  */
 inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry(),
                    retired_table_t& t = retired_table()) noexcept {
@@ -952,25 +954,30 @@ inline bool retire(void* ctx, void (*release)(void*), registry_t& r = registry()
         release(ctx);
         return true;
     }
-    for (retired_slot_t& s : t.slots) {
-        slot_state_t expected = slot_state_t::EMPTY;
-        if (!s.state.compare_exchange_strong(expected, slot_state_t::FILLING,
-                                             std::memory_order_acq_rel, std::memory_order_relaxed))
-            continue;
-        s.ctx = ctx;
-        s.release = release;
-        s.epoch.store(e, std::memory_order_relaxed);
-        r.ctl.live.fetch_add(1, std::memory_order_relaxed);
-        s.state.store(slot_state_t::READY, std::memory_order_release);
-        // One retry, on THIS thread, now that the pair is visible to every drainer: the
-        // participants that were online a moment ago may have quiesced during the push, and a
-        // node whose only other thread has since gone idle would otherwise wait for a dispatch
-        // that never comes. After this, a surviving entry means a participant genuinely has
-        // not quiesced yet. Under single flight this retry may skip; the pass in flight then
-        // runs once more for it (@ref qsbr_single_flight).
-        drain(r, t);
-        return true;
-    }
+    // Two scans, each followed by a drain: the second sees the slots the first drain freed. Under
+    // single flight the drain may skip while another pass runs; that pass frees the same
+    // slots, and the second scan finds them if it has finished.
+    for (int scan = 0; scan < 2; drain(r, t), ++scan)
+        for (retired_slot_t& s : t.slots) {
+            slot_state_t expected = slot_state_t::EMPTY;
+            if (!s.state.compare_exchange_strong(expected, slot_state_t::FILLING,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_relaxed))
+                continue;
+            s.ctx = ctx;
+            s.release = release;
+            s.epoch.store(e, std::memory_order_relaxed);
+            r.ctl.live.fetch_add(1, std::memory_order_relaxed);
+            s.state.store(slot_state_t::READY, std::memory_order_release);
+            // One retry, on THIS thread, now that the pair is visible to every drainer: the
+            // participants that were online a moment ago may have quiesced during the push, and a
+            // node whose only other thread has since gone idle would otherwise wait for a dispatch
+            // that never comes. After this, a surviving entry means a participant genuinely has
+            // not quiesced yet. Under single flight this retry may skip; the pass in flight then
+            // runs once more for it (@ref qsbr_single_flight).
+            drain(r, t);
+            return true;
+        }
     return false;
 }
 

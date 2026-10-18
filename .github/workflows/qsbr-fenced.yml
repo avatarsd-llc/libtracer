@@ -5,7 +5,7 @@
 # (`kQsbrAsymmetricFence`, core/tests/presets/reclaim-qsbr-membarrier), reclaim_qsbr_t
 # registers for `membarrier(2)` and, when the kernel refuses, keeps the fenced bracket entry
 # for good (qsbr.hpp §qsbr_asym). A hosted Linux runner always accepts the registration, so
-# core-ci's `tsan qsbr (fence=membarrier)` leg only ever runs the plain entry, and the
+# core-ci's `tsan (fence=membarrier)` leg only ever runs the plain entry, and the
 # fallback ran only on targets without membarrier. This job builds the same membarrier
 # configuration under ThreadSanitizer and runs its whole ctest under
 # tools/refuse_membarrier.c, a seccomp filter that fails every membarrier call with EPERM,
