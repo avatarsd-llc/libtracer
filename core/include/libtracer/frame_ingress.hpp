@@ -53,6 +53,22 @@
 
 namespace tr::net {
 
+/**
+ * @brief The stack scratch a read between frames offers after the header slot, for every
+ *        stream link (#2140, #2141): a lone message carrying a 1 KiB value lands whole in one
+ *        read.
+ *
+ * A scratch on the receiving thread's stack, not a buffer: every byte it receives is moved
+ * into its frame's exact segment (or the header slot) before the read returns, so it holds
+ * nothing between reads and no peer or link keeps RAM for it. Sized from the counted ledger:
+ * the 1 KiB row is a 1,065 B WebSocket frame on the wire (8 B header, 33 B FWD envelope to
+ * `/sensor/temp`); 128 B over 1 KiB covers that header and an envelope whose paths run to
+ * about 80 B. Paced small frames, the common telemetry case, then cost one read each, paid
+ * for with a copy of at most about 1 KiB; a larger body is still received straight into its
+ * segment.
+ */
+inline constexpr std::size_t kIngressReadAheadBytes = 1024 + 128;
+
 /** @brief What a link's framing made of the header bytes @ref frame_ingress_t has read. */
 struct ingress_header_t {
     /** @brief The verdict. */
@@ -74,9 +90,12 @@ struct ingress_header_t {
  *
  * @tparam MaxHeader The framing's largest header, in bytes.
  * @tparam ReadAhead The stack scratch a read between frames offers after the header slot, in
- *                   bytes (it also takes a refused body's bytes, which are shed).
+ *                   bytes (it also takes a refused body's bytes, which are shed). 0 reads
+ *                   no further than each header between frames, so a body is never copied:
+ *                   a lone frame then costs two reads (header, then body and the next
+ *                   header together).
  */
-template <std::size_t MaxHeader, std::size_t ReadAhead>
+template <std::size_t MaxHeader, std::size_t ReadAhead = kIngressReadAheadBytes>
 class frame_ingress_t {
    public:
     /**
@@ -90,28 +109,36 @@ class frame_ingress_t {
      * @param fd      The stream's socket.
      * @param rx      The receiving link's own source, which every body is drawn from.
      * @param framing The link's framing (see the file comment).
+     * @param flags   The `recvmsg` flags: `MSG_DONTWAIT` (the default) for a poll-driven
+     *                link, 0 for a link whose thread blocks in the read under a receive
+     *                timeout. A timeout returns true with the partial frame kept.
      * @return False when the stream must close: the peer closed it, a read failed, or the
      *         framing said so.
      */
     template <class Framing>
-    [[nodiscard]] bool read(int fd, mem::mem_backend_t& rx, Framing& framing) {
+    [[nodiscard]] bool read(int fd, mem::mem_backend_t& rx, Framing& framing,
+                            int flags = MSG_DONTWAIT) {
         for (bool more = true; more;) {
             // A body in progress takes its remaining bytes (or, refused by the source, this
             // scratch as throwaway space) and the header slot whatever follows. Between
             // frames the header slot comes first and the scratch takes up to `ReadAhead`
             // bytes more, which this call moves into their frames before it returns.
-            std::array<std::byte, ReadAhead> scratch;
+            std::array<std::byte, kScratchBytes> scratch;
             const bool between = !in_body_;
             const std::size_t room = body_len_ - body_have_;
             const ::iovec hdr{hdr_.data() + hdr_have_, MaxHeader - hdr_have_};
-            const ::iovec ahead{scratch.data(), scratch.size()};
+            const ::iovec ahead{scratch.data(), ReadAhead};
+            // A refused body is read past through the scratch, and the header slot is offered
+            // only once that read can reach the body's end: before it, what follows the
+            // scratch is still the body.
             const ::iovec into = blk_.seg ? ::iovec{blk_.frame(body_len_).data() + body_have_, room}
                                           : ::iovec{scratch.data(), std::min(room, scratch.size())};
-            std::array<::iovec, 2> iov = between ? std::array{hdr, ahead} : std::array{into, hdr};
+            const ::iovec next{hdr.iov_base, std::size_t{into.iov_len == room} * hdr.iov_len};
+            std::array<::iovec, 2> iov = between ? std::array{hdr, ahead} : std::array{into, next};
             ::msghdr msg{};
             msg.msg_iov = iov.data();
             msg.msg_iovlen = iov.size();
-            const ::ssize_t n = ::recvmsg(fd, &msg, MSG_DONTWAIT);
+            const ::ssize_t n = ::recvmsg(fd, &msg, flags);
             if (n <= 0) return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
 
             const auto got = static_cast<std::size_t>(n);
@@ -212,6 +239,11 @@ class frame_ingress_t {
     }
 
     static_assert(MaxHeader < 256, "the header count is one byte");
+
+    /** @brief The stack scratch: the read-ahead, and at least 256 B of throwaway space for a
+     *         refused body, so a link that reads no further than each header (`ReadAhead`
+     *         0) still sheds one in a bounded number of reads. */
+    static constexpr std::size_t kScratchBytes = ReadAhead > 256 ? ReadAhead : 256;
 
     std::array<std::byte, MaxHeader> hdr_; /**< @brief Header bytes read and not yet judged. */
     std::uint8_t hdr_have_ = 0;            /**< @brief How many of `hdr_` are filled. */

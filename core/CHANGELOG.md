@@ -133,14 +133,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   refused its park. Before, a refused `park_release` there kept the shut-down link for the
   graph's lifetime and counted it nowhere. A connection or a module declaration whose park
   entry cannot be reserved is refused `BACKPRESSURE`, with nothing created.
-- **The WebSocket server receives each frame into a segment of its exact length, header first
-- **The WebSocket server receives each frame into a segment of its exact length
-- **The WebSocket server receives each frame into a segment of its exact length, header first
-
 - **The WebSocket server receives each frame into a segment of its exact length
   ([#2140](https://github.com/avatarsd-llc/libtracer/issues/2140)).** A new header-only
   `frame_ingress_t` (`libtracer/frame_ingress.hpp`) reads between frames into a 14-byte header
-  slot and a stack scratch of `ws_server_transport_t::kReadAheadBytes` (1,152 B): every frame
+  slot and a stack scratch of `kIngressReadAheadBytes` (1,152 B): every frame
   whole in it is copied into a segment drawn at its exact length from the link's `memory.rx`,
   and the rest moves into the slot or a freshly drawn segment before the read returns, so a
   lone small frame costs one read and the scratch holds nothing between reads. A body in
@@ -158,6 +154,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   a ring only for a vertex with frames waiting; the ring comes from the link's own source and
   goes back when it drains. A sender that finds the peer idle writes its own record directly,
   and one that finds a write in flight leaves a reference and returns. No timer, no clock read.
+
+- **The TCP server, the TCP client and the WebSocket client receive on `frame_ingress_t` too
+  ([#2141](https://github.com/avatarsd-llc/libtracer/issues/2141)).** A body larger than one
+  read lands straight in its segment, so a 4 KiB or 16 KiB TCP frame costs 4 syscalls instead
+  of 5 or 11 and copies at most the 1,152 B read-ahead, not the whole frame; a TCP server peer
+  holds 290 B instead of 306 B. The TCP client (dial and one-peer LISTEN) reads with no
+  read-ahead, header then body. The WebSocket client drops its growable stream buffer and so
+  the self-healing link over it holds nothing between frames. A frame the receive source
+  refuses is now skipped whole: before, a refused body larger than the read scratch on the
+  WebSocket server could be read into the next header slot.
+  `ws_server_transport_t::kReadAheadBytes` is replaced by the namespace-level
+  `kIngressReadAheadBytes`, the default read-ahead of `frame_ingress_t`.
 
 - **`subscription_selector_t`: a vertex that switches among named options of subscription refs
   ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** A header-only adapter

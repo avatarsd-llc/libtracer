@@ -41,9 +41,9 @@
       "arm": "tcp-relay-srv",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 4129,
+      "value": 1152,
       "goal": 0,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2141 (TCP server and self-healing links on frame ingress: a body at or above the share threshold is drawn at its size and shared, not copied out of a read buffer)"
     },
     {
       "id": "tcp-relay-srv @16384",
@@ -52,9 +52,9 @@
       "arm": "tcp-relay-srv",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 16417,
+      "value": 1152,
       "goal": 0,
-      "moved_by": "#2137 (seeded from the peer-cost study)"
+      "moved_by": "#2141 (TCP server and self-healing links on frame ingress: a body at or above the share threshold is drawn at its size and shared, not copied out of a read buffer)"
     },
     {
       "id": "tcp-relay-cli @64",
@@ -85,9 +85,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@4096",
       "payload": 4096,
-      "value": 4129,
+      "value": 1152,
       "goal": 48,
-      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
+      "moved_by": "#2141 (TCP server and self-healing links on frame ingress: a body at or above the share threshold is drawn at its size and shared, not copied out of a read buffer)"
     },
     {
       "id": "tcp-relay-cli @16384",
@@ -96,9 +96,9 @@
       "arm": "tcp-relay-cli",
       "metric": "copy_bytes@16384",
       "payload": 16384,
-      "value": 16417,
+      "value": 1152,
       "goal": 48,
-      "moved_by": "#2144 (shared-frame egress: a send that need not wait writes the caller's head in place, one 48 B copy fewer)"
+      "moved_by": "#2141 (TCP server and self-healing links on frame ingress: a body at or above the share threshold is drawn at its size and shared, not copied out of a read buffer)"
     },
     {
       "id": "ws-relay-srv @64",

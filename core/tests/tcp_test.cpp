@@ -1393,7 +1393,7 @@ struct raw_listener_t {
  * `set_receiver` can only ever run afterwards. A peer that pushes the instant it accepts has
  * that frame in flight before the constructor returns, and whether it beats the caller's next
  * statement is decided by nothing but scheduling: the recv thread reaching its first
- * `read_exact` versus the calling thread performing one store. Lose that race and
+ * read versus the calling thread performing one store. Lose that race and
  * `receiver_slot_t`'s empty slot drops the frame — no `dropped_rx()`, no `malformed_rx()`, a
  * healthy-looking connection. Measured at `ce5e902b` with a 300 ms sink-install delay: peer
  * pushed 1, sink received 0, both counters 0.
