@@ -111,6 +111,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **A CAN link's learned-binding table is bounded by `config_t::kCanLearnedBindings`, and an
+  advertise binds only its carrier's own slots
+  ([#2203](https://github.com/avatarsd-llc/libtracer/issues/2203)).** A new binding past the
+  cap binds nothing and is counted on the new `can_transport_t::dropped_binding_cap()`; no
+  binding is evicted, and a re-issue that retires or rewrites its own slot is never refused.
+  The default, 32,760 bindings (eight senders' whole endpoint windows, about 2.7 MB at most on a
+  64-bit host), is lowered by a narrow build in its override fragment. An advertise whose id names
+  another node or another protocol version than the control frame that carried it binds nothing
+  and is counted on `dropped_rx()`.
 - **`config_t::kCrc32cSlices` picks the portable CRC-32C fold's tables
   ([#2116](https://github.com/avatarsd-llc/libtracer/issues/2116)).** 8, the default on every
   target, is slice-by-8 (8 KiB of `.rodata`); 1 is the byte-at-a-time loop over the 1 KiB base

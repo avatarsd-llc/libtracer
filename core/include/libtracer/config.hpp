@@ -1082,6 +1082,25 @@ struct default_config_t {
      * Override fragment: `static constexpr bool kAllowInsecureTls = true;`
      */
     static constexpr bool kAllowInsecureTls = false;
+
+    /**
+     * @brief The most learned `id ↔ path` bindings one CAN link holds at once (#2203).
+     *
+     * A receiver keeps a learned binding until a later advertise from the same node overlaps
+     * its endpoint run (#909), so one sending node can hold up to its whole data-endpoint
+     * window (`%net::kCanMaxGroupSlices`, 4095 slots) and every node it hears adds its own.
+     * This bounds the sum per link. An advertise that would grow the table past it binds
+     * nothing and is counted on `%net::can_transport_t::dropped_binding_cap()`; no binding is
+     * ever evicted to make room. A re-issue that retires overlapping bindings first, or
+     * rewrites its own slot in place, is never refused by it.
+     *
+     * Sizing: one binding is about 82 B on a 64-bit host, so the default of eight senders'
+     * whole windows holds at most about 2.7 MB. A narrow target that hears fewer nodes, or
+     * whose senders never lap their window, sets it to what it can afford; a counted
+     * refusal is the sign it is too small. Override fragment:
+     * `static constexpr std::size_t kCanLearnedBindings = 512;`
+     */
+    static constexpr std::size_t kCanLearnedBindings = 8 * 4095;
 };
 
 }  // namespace tr::graph
