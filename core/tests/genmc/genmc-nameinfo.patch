@@ -1,0 +1,18 @@
+GenMC v0.19.0 aborts (VERIFY(i != 0)) when it names an access at an offset before a
+global's first named field, which the harness's domain hits on the RETIRE scenario under
+LLVM 19. Naming is only for the trace, so the patch names such an access <unnamed> instead.
+Applied by .github/workflows/genmc.yml before the build; drop it when a GenMC release fixes it.
+
+diff --git a/genmc/genmc/Support/NameInfo.cpp b/genmc/genmc/Support/NameInfo.cpp
+index 83382e8..c9ccb6a 100644
+--- a/genmc/genmc/Support/NameInfo.cpp
++++ b/genmc/genmc/Support/NameInfo.cpp
+@@ -37,7 +37,7 @@ auto NameInfo::getNameAtOffset(unsigned int offset) const -> std::string
+ 
+ 	for (auto i = 0U; i < info.size(); i++) {
+ 		if (info[i].first > offset) {
+-			VERIFY(i != 0);
++			if (i == 0) return "<unnamed>";
+ 			return info[i - 1].second;
+ 		}
+ 	}

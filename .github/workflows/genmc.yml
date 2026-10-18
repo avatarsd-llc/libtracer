@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Model-checks the shipped QSBR header with GenMC (#2120): tools/genmc_qsbr.sh runs
+# core/tests/genmc/qsbr_mc.cpp, which drives qsbr.hpp's own code (not a transcription) in a
+# domain it owns, under every execution RC11 and IMM allow for the FENCED flavour and every
+# SC interleaving for the COMPILER flavour. It catches what TSan cannot (GCC TSan ignores
+# fences) and x86 cannot show (TSO): a relaxed announce is a use-after-free on a weak
+# machine, and this job fails on it (ADR-0080 §3).
+#
+# Its own workflow, not a core-ci job, and NOT a required check. core-ci's trigger is derived
+# from what core-ci compiles (tools/gen_ci_paths.py), and its aggregator is required, so a
+# path-filtered job inside it would leave the required check unreported on most PRs (#1614).
+# This filter is exactly the checker's inputs: the reclaim headers and the config they read.
+#
+# GenMC is built from a pinned tag against the distribution's LLVM 19, with one fix to how it
+# names a location in a trace (core/tests/genmc/genmc-nameinfo.patch), and cached by tag, LLVM
+# major and patch, so a warm run is the apt install plus the checks. The checker shells out to
+# clang-19 at run time, which is why the apt step runs on a cache hit too.
+#
+# RUNNER: hosted `ubuntu-24.04` on every route. It builds nothing of libtracer's, so there is
+# nothing to gain from the ci-local pool, and no fork guard or workspace-ownership step.
+name: genmc
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/include/libtracer/qsbr.hpp"
+      - "core/include/libtracer/edge_pin.hpp"
+      - "core/include/libtracer/reclaim.hpp"
+      - "core/include/libtracer/config.hpp"
+      - "core/tests/genmc/**"
+      - "tools/genmc_qsbr.sh"
+      - ".github/workflows/genmc.yml"
+  pull_request:
+    # Duplicated rather than a YAML anchor: GitHub Actions does not expand aliases.
+    paths:
+      - "core/include/libtracer/qsbr.hpp"
+      - "core/include/libtracer/edge_pin.hpp"
+      - "core/include/libtracer/reclaim.hpp"
+      - "core/include/libtracer/config.hpp"
+      - "core/tests/genmc/**"
+      - "tools/genmc_qsbr.sh"
+      - ".github/workflows/genmc.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: genmc-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GENMC_TAG: v0.19.0
+  LLVM_MAJOR: "19"
+
+jobs:
+  qsbr:
+    runs-on: ubuntu-24.04
+    # Warm: ~1 min of apt, ~1 min of checks. Cold: plus the GenMC build (~10 min on 4 vCPUs).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install LLVM ${{ env.LLVM_MAJOR }} and GenMC's build dependencies
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            "llvm-${LLVM_MAJOR}-dev" "clang-${LLVM_MAJOR}" "libclang-${LLVM_MAJOR}-dev" \
+            "libclang-cpp${LLVM_MAJOR}-dev" libffi-dev zlib1g-dev libzstd-dev libedit-dev \
+            g++-14 cmake ninja-build
+      - name: Restore GenMC
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/genmc
+          key: genmc-${{ env.GENMC_TAG }}-llvm${{ env.LLVM_MAJOR }}-ubuntu-24.04-${{ hashFiles('core/tests/genmc/genmc-nameinfo.patch') }}
+      # Built in place and run from the build tree: the binary records its runtime-include
+      # directory as an absolute path, and the cache restores it at the same one.
+      - name: Build GenMC ${{ env.GENMC_TAG }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        timeout-minutes: 25
+        run: |
+          git clone --quiet --depth 1 --branch "$GENMC_TAG" \
+            https://github.com/MPI-SWS/genmc.git ~/genmc
+          git -C ~/genmc apply "$GITHUB_WORKSPACE/core/tests/genmc/genmc-nameinfo.patch"
+          cmake -S ~/genmc -B ~/genmc/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_PREFIX_PATH="/usr/lib/llvm-${LLVM_MAJOR}/lib/cmake"
+          cmake --build ~/genmc/build --target genmc
+      - name: Model-check qsbr.hpp
+        run: GENMC="$HOME/genmc/build/bin/genmc" tools/genmc_qsbr.sh
