@@ -556,7 +556,8 @@ wire surface moves.** The spelling was never emitted or honoured; the vector's b
 
 ## Amendment 3 (2026-10-18): §D — a HANDLER may decline to deliver a write it did not make ([#2208](https://github.com/avatarsd-llc/libtracer/issues/2208))
 
-**Status: proposed — awaiting maintainer sign-off.** The rulings below were given on #2208;
+**Status: proposed — awaiting maintainer sign-off.** The rulings below are recorded in
+[the design-rulings comment on #2208](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6251237127);
 this text encodes them for sign-off.
 
 **Instrument: amendment, not erratum** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)
