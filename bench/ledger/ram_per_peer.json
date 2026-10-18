@@ -69,7 +69,7 @@
       "arm": "udp-span",
       "metric": "link_base",
       "goal": 232,
-      "moved_by": "#2167 (UDP link_base re-pinned after #2163)",
+      "moved_by": "#2142 (UDP borrowed-span link receives into stack scratch: 1,768 -> 216 B, goal met)",
       "note": "Goal: no receive segment at rest; 232 B is what the pool arm reads."
     },
     {
