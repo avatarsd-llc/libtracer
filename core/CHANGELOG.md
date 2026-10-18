@@ -86,6 +86,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   whichever dispatching thread completes the grace period, which may not be the caller.
   Per-thread TLS falls from 272 B to 16 B on the host and from 192 B to 56 B per FreeRTOS task
   (ESP32-C6 `full_node`).
+  `kDeferredReleaseSlots` changes meaning: it bounded the pairs ONE THREAD parked in its own
+  storage (256 B per dispatching thread on a 64-bit host at the default 16), and it now bounds
+  ONE process-wide table every thread shares (512 B in `.bss` on a 64-bit host, 256 B on a
+  32-bit MCU). A full table is drained and scanned again before a pair is refused. A build that
+  raised it for deep re-entrant unsubscribes on one thread should size it for the largest burst
+  of unsubscribes, on all threads together, that can overlap another thread's dispatch.
   The CI `build-test-reclaim-qsbr` and `tsan-reclaim-qsbr` legs, and the `reclaim-qsbr` and
   `reclaim-qsbr-hazard-slot` presets, duplicated the default and are deleted; the membarrier
   TSan leg is now `tsan (fence=membarrier)`.
