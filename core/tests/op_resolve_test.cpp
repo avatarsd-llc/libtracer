@@ -16,6 +16,7 @@
  * Input FWDs are built via the codec (round-trip-safe), replies decoded back.
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -493,6 +494,135 @@ void test_await_at_a_handler_replies_with_the_composed_value() {
     check(d.tlv.children.size() == 5 && d.tlv.children[4].type == type_t::VALUE &&
               value_u8(d.tlv.children[4]) == 0x5B,
           "and the payload is the on_read-composed VALUE u8=91");
+}
+
+/**
+ * @brief RFC-0008 Amendment 3 (#2208): a HANDLER registered `deliver_written = false` delivers
+ *        only its local owner's writes — own subscribers and ancestors alike — while a peer's
+ *        write still runs `on_write` and is still acknowledged.
+ */
+void test_handler_deliver_written_false() {
+    std::printf("RFC-0008 Am.3 — a handler that does not deliver a peer's write:\n");
+    graph_t g;
+    auto writes = std::make_shared<int>(0);
+    tr::graph::handlers_t h;
+    auto h_on_write = [writes](const tr::graph::value_t&,
+                               const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+        ++*writes;
+        return {};
+    };
+    h.on_write = tr::graph::thunk(h_on_write);
+    h.deliver_written = false;
+    const tr::graph::handlers_t control_h{.on_write = tr::graph::thunk(h_on_write)};
+    const tr::graph::vertex_handle_t rv = g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
+    const tr::graph::vertex_handle_t hv = g.register_vertex(path_t("/r/h"), role_t::HANDLER, h);
+    const tr::graph::vertex_handle_t cv =
+        g.register_vertex(path_t("/r/c"), role_t::HANDLER, control_h);
+
+    auto at_h = std::make_shared<int>(0);
+    auto at_c = std::make_shared<int>(0);
+    auto at_r = std::make_shared<int>(0);
+    auto on_h = [at_h](const tr::graph::value_t&) { ++*at_h; };
+    auto on_c = [at_c](const tr::graph::value_t&) { ++*at_c; };
+    auto on_r = [at_r](const tr::graph::value_t&) { ++*at_r; };
+    check(g.subscribe(path_t("/r/h"), on_h).has_value(), "subscribe to the suppressing handler");
+    check(g.subscribe(path_t("/r/c"), on_c).has_value(), "subscribe to the default handler");
+    check(g.subscribe(path_t("/r"), on_r).has_value(), "subscribe to the common ancestor");
+
+    // The owner's write is the handler's publish path: delivered, own and ancestor.
+    check(g.write(hv, make_value(b_value({0x01}))).has_value(), "the owner's write succeeds");
+    check(*writes == 1 && *at_h == 1 && *at_r == 1,
+          "the OWNER's write runs on_write and delivers to own and ancestor subscribers");
+
+    // A peer's write: accepted, on_write runs, nothing delivered anywhere.
+    check(g.write(hv, make_value(b_value({0x02})), "peer-a").has_value(),
+          "a PEER's write is still acknowledged as a success");
+    check(*writes == 2, "... and on_write still ran");
+    check(*at_h == 1, "... but the handler's own subscriber saw nothing");
+    check(*at_r == 1, "... and neither did the ancestor's: bubbling is suppressed too");
+
+    // Control: the same peer write at a default handler delivers as it always did.
+    check(
+        g.write(cv, make_value(b_value({0x03})), "peer-a").has_value() && *at_c == 1 && *at_r == 2,
+        "control — a default handler delivers a peer's write, own and ancestor");
+
+    // A branch write by a peer that lands a slice at the suppressing handler: on_write runs,
+    // the slice is not delivered at the handler's subscription point.
+    std::vector<std::byte> leaf;
+    tr::wire::emit_name(leaf, "h");
+    append(leaf, b_value({0x04}));
+    std::vector<std::byte> root;
+    tr::wire::emit_name(root, "r");
+    tr::wire::emit_tlv(root, type_t::POINT, opt_t{.pl = true}, leaf);
+    std::vector<std::byte> branch;
+    tr::wire::emit_tlv(branch, type_t::POINT, opt_t{.pl = true}, root);
+    check(g.write(rv, make_value(branch)).has_value() && *at_h == 2,
+          "control — the OWNER's branch write delivers the handler's slice");
+    const int before = *writes;
+    check(g.write(rv, make_value(branch), "peer-a").has_value(),
+          "a PEER's branch write over the handler is acknowledged");
+    check(*writes == before + 1 && *at_h == 2,
+          "... runs the handler's on_write and delivers its slice to nobody there");
+
+    // Visibility: `:schema` reports the flag read-only, and only where it is set.
+    const auto has = [](std::span<const std::byte> hay, std::string_view needle) {
+        return std::search(
+                   hay.begin(), hay.end(), reinterpret_cast<const std::byte*>(needle.data()),
+                   reinterpret_cast<const std::byte*>(needle.data()) + needle.size()) != hay.end();
+    };
+    std::vector<std::byte> facet;
+    tr::wire::emit_name(facet, "deliver_written");
+    append(facet, b_value({0x00}));
+    const auto hs = g.read(path_t("/r/h:schema"));
+    const auto cs = g.read(path_t("/r/c:schema"));
+    const tr::view::view_t hflat = hs ? (*hs)->flatten() : tr::view::view_t{};
+    const tr::view::view_t cflat = cs ? (*cs)->flatten() : tr::view::view_t{};
+    check(hs && has(hflat.bytes(),
+                    std::string_view(reinterpret_cast<const char*>(facet.data()), facet.size())),
+          ":schema of the suppressing handler carries NAME \"deliver_written\" VALUE u8 0");
+    check(cs && !has(cflat.bytes(), "deliver_written"),
+          "... and a default handler's :schema does not — absent means delivers");
+    check(!g.write(path_t("/r/h:schema"), make_value(b_value({0x01}))).has_value(),
+          "... and it is read-only: :schema has no write door");
+}
+
+/**
+ * @brief RFC-0008 Amendment 3 clause 4: a FWD{WRITE} arriving at a suppressing handler as its
+ *        terminus is a peer write — acknowledged, applied, and delivered to nobody.
+ */
+void test_handler_deliver_written_fwd_terminus() {
+    std::printf("RFC-0008 Am.3 — FWD{WRITE} at a suppressing handler terminus:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    auto writes = std::make_shared<int>(0);
+    tr::graph::handlers_t h;
+    auto h_on_write = [writes](const tr::graph::value_t&,
+                               const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+        ++*writes;
+        return {};
+    };
+    h.on_write = tr::graph::thunk(h_on_write);
+    h.deliver_written = false;
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/dev/out"), role_t::HANDLER, h);
+    auto at_out = std::make_shared<int>(0);
+    auto at_dev = std::make_shared<int>(0);
+    auto on_out = [at_out](const tr::graph::value_t&) { ++*at_out; };
+    auto on_dev = [at_dev](const tr::graph::value_t&) { ++*at_dev; };
+    check(g.subscribe(path_t("/dev/out"), on_out).has_value(), "subscribe at the terminus");
+    check(g.subscribe(path_t("/dev"), on_dev).has_value(), "subscribe at its ancestor");
+
+    const auto fwd =
+        b_fwd(fwd_op_t::WRITE, b_path({"dev", "out"}), b_path({"reply-ep"}), {}, b_value({0x2A}));
+    const auto reply = resolve_bytes(resolver, fwd, "peer-a");
+    check(reply.has_value(), "resolve WRITE produced a reply");
+    const auto dr = reply ? decode_reply(*reply) : decoded_reply_t{};
+    check(dr.tlv.children.size() == 4 &&
+              value_u8(dr.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+          "the writer gets its acknowledgement exactly as before (kind=RESULT)");
+    check(*writes == 1, "on_write ran at the terminus");
+    check(*at_out == 0 && *at_dev == 0,
+          "and nothing was delivered: not to the terminus's subscriber, not to its ancestor's");
 }
 
 void test_subscribers_field() {
@@ -1618,6 +1748,8 @@ int main() {
     test_await_field_selector_is_enotty();
     test_local_subscribe_await_field_path_matches_remote();
     test_await_at_a_handler_replies_with_the_composed_value();
+    test_handler_deliver_written_false();
+    test_handler_deliver_written_fwd_terminus();
     test_subscribers_field();
     test_write_trailer_sliced();
     test_share_hint_store();

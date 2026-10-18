@@ -2015,7 +2015,14 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     if (e.has_remote_leg() && remote_sink_.installed()) dispatch_edge_remote(e, value);
 }
 
-void graph_t::fan_out_slice(vertex_t* v, const view::view_t& slice) {
+void graph_t::fan_out_slice(vertex_t* v, const view::view_t& slice, std::string_view caller) {
+    // The branch path's half of RFC-0008 Amendment 3 (#2208): a peer's slice landing at a
+    // suppressing HANDLER ran its `on_write` and is not delivered at its subscription point.
+    // The tree delivered at the branch root and above is the ROOT's write, and carving this
+    // slice out of it would mean re-encoding the tree — the same limit admission states.
+    if (!write_ctx_t{.subject = caller, .link = nullptr, .session = {}}.is_local_owner() &&
+        v->role() == role_t::HANDLER && !v->handlers().deliver_written)
+        return;
     const value_storage_t<1> sv{slice};
     fan_out(v, sv.get());
 }
@@ -2179,7 +2186,13 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, role_t role, view::rope_
     const auto run = [&](const value_t& val) -> result_t<void> {
         const result_t<value_ref_t> stored = handler_write(v, val, caller, link);
         if (!stored) return std::unexpected(stored.error());
-        deliver_vertex(v, val);
+        // RFC-0008 Amendment 3 (#2208): a handler registered `deliver_written = false` delivers
+        // only what its LOCAL OWNER writes — its publish path for the value it applied. A peer's
+        // write (a FWD{WRITE} terminus, a session) ran `on_write` and is acknowledged as ever,
+        // and is delivered to nobody: not here, and not by bubbling.
+        if (write_ctx_t{.subject = caller, .link = nullptr, .session = {}}.is_local_owner() ||
+            v->handlers().deliver_written)
+            deliver_vertex(v, val);
         // Eager delivery flushes any pending mark a prior assign left — but only while
         // what this write published is still current (#1185); on the handler leg that is
         // the null "consumed" sentinel, matching the handler's permanently null LKV.
@@ -2701,7 +2714,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     for (const branch_node_t& node : plan) {
         if (node.refused || node.notify.empty()) continue;
         vertex_t* vx = node.vx != nullptr ? node.vx : find_ptr(node.key);
-        if (vx != nullptr) fan_out_slice(vx, node.notify);
+        if (vx != nullptr) fan_out_slice(vx, node.notify, caller);
     }
     if (v->listeners_above() > 0)
         deliver_unstored(v, value, &graph_t::bubble_up, v->listeners_above());

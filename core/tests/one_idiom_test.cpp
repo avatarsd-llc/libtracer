@@ -8,8 +8,9 @@
  *
  * The gates, each asserted here:
  *
- *   - `sizeof(handlers_t) <= 112` and `sizeof(value_handlers_t) <= 48` on a 64-bit host: seven and
- *     three `{fn, ctx}` hooks, where they were `std::function`s of 32 B each (216 B / 96 B);
+ *   - `sizeof(handlers_t) <= 120` and `sizeof(value_handlers_t) <= 56` on a 64-bit host: seven and
+ *     three `{fn, ctx}` hooks, where they were `std::function`s of 32 B each (216 B / 96 B), plus
+ *     the `deliver_written` flag each (RFC-0008 Amendment 3, #2208);
  *   - `graph_t::history` fills caller storage and allocates NOTHING;
  *   - a HANDLER target's `on_write` is handed the very block the source published — its
  *     address, not a clone — and K handler targets cost the publish no allocation beyond the
@@ -126,10 +127,11 @@ void test_sizes() {
     static_assert(std::is_trivially_destructible_v<tr::graph::value_handlers_t>,
                   "freeing a parked seam block runs no user code");
     if constexpr (sizeof(void*) == 8) {
-        static_assert(sizeof(handlers_t) <= 112,
-                      "RFC-0028 §5.7: handlers_t 216 -> 96 B; +16 B on_app_field_read (#1878)");
-        static_assert(sizeof(tr::graph::value_handlers_t) <= 48,
-                      "RFC-0028 §5.7: value_handlers_t 96 -> 48 B");
+        static_assert(sizeof(handlers_t) <= 120,
+                      "RFC-0028 §5.7: handlers_t 216 -> 96 B; +16 B on_app_field_read (#1878); "
+                      "+8 B deliver_written (#2208)");
+        static_assert(sizeof(tr::graph::value_handlers_t) <= 56,
+                      "RFC-0028 §5.7: value_handlers_t 96 -> 48 B; +8 B deliver_written (#2208)");
     }
     std::printf("  sizeof(handlers_t) = %zu, sizeof(value_handlers_t) = %zu\n", sizeof(handlers_t),
                 sizeof(tr::graph::value_handlers_t));

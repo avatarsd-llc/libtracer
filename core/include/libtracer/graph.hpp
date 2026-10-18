@@ -3174,8 +3174,10 @@ class graph_t {
                                               bool notify);
     void fan_out(vertex_t* v, const value_t& value);
     // The same fan-out over a SLICE no vertex stored (a branch write's per-site cut): the view
-    // is wrapped in stack storage for the duration of the dispatch.
-    void fan_out_slice(vertex_t* v, const view::view_t& slice);
+    // is wrapped in stack storage for the duration of the dispatch. @p caller is the branch
+    // writer's subject: a HANDLER site registered `deliver_written = false` delivers a slice
+    // only its local owner wrote (RFC-0008 Amendment 3, #2208).
+    void fan_out_slice(vertex_t* v, const view::view_t& slice, std::string_view caller);
     // The ONE dispatch of a subscription edge's three legs (in-process callback, local
     // target re-dispatch, remote sink) — shared by fan_out and the admission durability
     // latch (ADR-0049), always called OUTSIDE the vertex lock. The target/remote legs
@@ -4080,6 +4082,13 @@ class graph_t {
     /** @brief @p v's declared `:schema` catalog bytes — empty unless it declared one.
      *         Lock-free; the caller has already tested the flag. */
     [[nodiscard]] std::span<const std::byte> declared_catalog(const vertex_t* v) const noexcept;
+
+    /** @brief Stage the children of @p v's `:schema` protocol-part `SETTINGS` into @p out: the
+     *         declared catalog (RFC-0014 Amendment 3), then — on a HANDLER registered
+     *         `deliver_written = false` — `NAME "deliver_written" VALUE <u8 0>` (RFC-0008
+     *         Amendment 3, #2208). Empty for every other vertex.
+     *  @retval false The table source refused the staging; @p out is partial. */
+    [[nodiscard]] bool schema_protocol_part(const vertex_t* v, mem::bytes_t& out) const noexcept;
 
     /** @brief The right @p v demands for a written TLV of @p type — `WRITE` unless @p v
      *         declared a row for it. Lock-free; the caller has already tested the flag. */

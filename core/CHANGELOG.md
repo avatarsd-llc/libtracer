@@ -25,6 +25,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `wire::packed_block_child_bytes` / `wire::packed_batch_wire_bytes`. `wire::batch_view_t`
   gains `width`, `block` and `sample(i)`; a framed batch leaves them empty. None of it
   allocates.
+
+- **`handlers_t::deliver_written` / `value_handlers_t::deliver_written`
+  ([#2208](https://github.com/avatarsd-llc/libtracer/issues/2208), RFC-0008 Amendment 3).** A
+  `HANDLER` registered with `deliver_written = false` does not deliver a write its local owner
+  did not make (a peer write, or a `FWD{WRITE}` arriving at it as terminus) to its own or its
+  ancestors' subscribers; `on_write` still runs and the writer is still acknowledged. Owner
+  writes deliver as before. The vertex's `:schema` protocol part reports the flag read-only as
+  `NAME "deliver_written" VALUE <u8 0>`. Default `true`: no behaviour change.
+  `sizeof(value_handlers_t)` and `sizeof(handlers_t)` grow by 8 B on the host.
+
 - **`ws_client_transport_t::send(std::span<const std::span<const std::byte>>)`
   ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** The WebSocket dialer
   overrides the gathered send: the spans go out as one masked BINARY message, gathered and
