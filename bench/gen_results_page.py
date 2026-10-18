@@ -303,6 +303,12 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "unbatched and with BATCH, with the reply leg priced separately. A report, not a gate.",
         "ns p50 per frame · wire bytes per hop"),
     instrument_t(
+        "bench_can_reassembly.cpp", "framed", (),
+        "Two CAN transport ends on an in-process bus, classic and FD, 4 B to 64 KiB: the "
+        "thread CPU of one send plus its reassembly and delivery, and the receiver's RX-store "
+        "bytes. A report, not a gate.",
+        "CPU ns per send · RX-store bytes"),
+    instrument_t(
         "bench_path_label.cpp", "framed", (),
         "Carries one `FWD{op=READ}` through a chain of real forwarder hops twice, differing "
         "only in whether each hop's mount run is spelled as its segments or as the RFC-0027 "

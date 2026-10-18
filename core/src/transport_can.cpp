@@ -563,8 +563,8 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     // the fresh one is cleared of the mark right after, so it always starts current.
     //
     // The endpoint space wraps by design, so this base has been used before (#909).
-    // Retire whatever still claims these slots BEFORE the fresh binding lands — which
-    // includes any binding under this very id, so the emplace below always inserts.
+    // Retire whatever still claims these slots BEFORE the fresh binding lands. A binding under
+    // this very id is left in its slot, its group discarded, and is rewritten below.
     invalidate_overlapping(*base, adv.slice_count);
     // The binding owns its path: `adv.path` views the control stream, which moves on. A
     // refusal of the node's entry, the binding or its path binds nothing, and is counted.
@@ -577,6 +577,9 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
         dropped_rx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    // Rewritten whether the entry is new or the reused slot above (a no-op for a new one).
+    bound->adv = adv;
+    bound->deliver = deliver;
     if (base->endpoint <= node->last_base) mark_prior_lap(base->node);
     node->last_base = base->endpoint;
     bound->adv.path = bound->path.view();
@@ -658,7 +661,15 @@ void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
     // it is compared in; the values themselves are the wire's.
     const std::uint32_t lo = base.endpoint;
     const std::uint32_t hi = lo + slice_count;
-    for (std::size_t i = 0; i < learned_.size();) {
+    // Only this node's runs from just below `lo` up to `hi` can overlap, and they are one
+    // contiguous range of the map: the id is `version | node | endpoint`, so a node's bindings
+    // sort by base endpoint. Its runs never overlap one another (this function keeps it so),
+    // so at most ONE run starting below `lo` reaches into it, the nearest one. The walk is
+    // bounded by the fresh run's length, not by the table (#2049).
+    const std::uint32_t lo_id = can::encode_can_id(base);
+    std::size_t i = learned_.lower_bound(lo_id);
+    i -= static_cast<std::size_t>(i != 0);
+    while (i < learned_.size() && learned_.at(i).key < lo_id - lo + hi) {
         const auto stale = can::decode_can_id(learned_.at(i).key);
         // A different node's slots are a different address space entirely — the node
         // sub-field is part of the id, so only THIS node's runs can be aliased.
@@ -677,6 +688,13 @@ void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
         // group (a directed group addressed elsewhere, or one whose slices are all
         // still in flight), so nothing is counted that was not actually reclaimed.
         reasm_.discard(key_of(stale->node, stale->endpoint));
+        // A binding under the fresh run's own id keeps its slot: learn_advertise rewrites it
+        // in place. That is the steady state (a lapped allocator re-issues the same base), and
+        // an erase plus a re-insert shifted every binding above it twice per advertise (#2049).
+        if (learned_.at(i).key == lo_id) {
+            ++i;
+            continue;
+        }
         learned_.erase_at(i);  // index `i` now holds the next binding
     }
 }
@@ -721,18 +739,19 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     const auto fields = can::decode_can_id(frame.id);
     if (!fields) return;
 
-    // Find the binding whose [base, base+slice_count) endpoint range owns this id.
+    // Find the binding whose [base, base+slice_count) endpoint range owns this id. A node's
+    // runs never overlap (invalidate_overlapping) and sort by base, so the only candidate is
+    // the nearest binding at or below this id: one binary search, where the scan it replaces
+    // walked every binding of every node on every data frame (#2049).
+    const std::size_t at = learned_.lower_bound(can::encode_can_id(*fields) + 1);
     const binding_t* binding = nullptr;
     std::uint16_t base_ep = 0;
-    for (const auto& entry : learned_) {
-        const auto base = can::decode_can_id(entry.key);
-        if (!base || base->node != fields->node) continue;
-        if (fields->endpoint >= base->endpoint &&
-            fields->endpoint < base->endpoint + entry.value.adv.slice_count) {
-            binding = &entry.value;
-            base_ep = base->endpoint;
-            break;
-        }
+    if (const auto base = at == 0 ? std::nullopt : can::decode_can_id(learned_.at(at - 1).key);
+        base && base->node == fields->node &&
+        static_cast<std::uint32_t>(fields->endpoint - base->endpoint) <
+            learned_.at(at - 1).value.adv.slice_count) {
+        binding = &learned_.at(at - 1).value;
+        base_ep = base->endpoint;
     }
     if (!binding) {
         park_pending(frame);  // hold until its advertise lands — bounded and aged
