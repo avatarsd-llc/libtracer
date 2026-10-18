@@ -17,8 +17,8 @@
  *   `horizon` says the epoch is past (`graph_t::collect`'s shape).
  * - `SCENARIO_REUSE`: as above with one bracket, then the reader's thread exits and a second
  *   thread claims the same cell and brackets in it (`cell_release_t` then `claim`).
- * - `SCENARIO_RETIRE`: the reclaimer retires the object through the shared table with a hook
- *   that frees it, and the reader drains at its quiescent point (`reclaim_qsbr`'s shape).
+ * - `SCENARIO_RETIRE`: the reclaimer retires the object through the domain's own table with a
+ *   hook that frees it, and the reader drains at its quiescent point (`reclaim_qsbr`'s shape).
  *
  * The FENCED preset is checked under RC11 and IMM. The COMPILER preset is checked under SC:
  * its argument is one hart's (`qsbr.hpp` §qsbr_single_hart), and one in-order hart with
@@ -54,6 +54,8 @@ struct obj_t {
 
 /** @brief The domain under test: the header's own type, owned by this file. */
 constinit q::registry_t g_domain{};
+/** @brief The domain's retired slots, owned beside it. */
+constinit q::retired_table_t g_table{};
 
 std::atomic<obj_t*> g_link{nullptr}; /**< @brief The published object. */
 obj_t* g_obj = nullptr;              /**< @brief The object, for the final free. */
@@ -78,7 +80,7 @@ void bracket(std::size_t idx) {
 void* reader(void*) {
     for (int b = 0; b < BRACKETS; ++b) bracket(0);
 #if defined(SCENARIO_RETIRE)
-    q::drain(g_domain);  // the quiescent point
+    q::drain(g_domain, g_table);  // the quiescent point
 #endif
 #if defined(SCENARIO_REUSE)
     // `cell_release_t::~cell_release_t`: go quiescent, then give the cell back.
@@ -103,7 +105,7 @@ void* successor(void*) {
 void* reclaimer(void*) {
     g_link.store(nullptr, std::memory_order_relaxed);  // the unpublish
 #if defined(SCENARIO_RETIRE)
-    (void)q::retire(g_obj, free_hook, g_domain);
+    (void)q::retire(g_obj, free_hook, g_domain, g_table);
 #else
     const std::uint32_t e = q::advance(g_domain);
     const auto past = [e](const q::horizon_t& h) { return h.past(e); };
