@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/config.hpp"
 #include "libtracer/iov_table.hpp"
 
 namespace tr::net {
@@ -33,33 +34,11 @@ namespace {
 [[nodiscard]] std::uint64_t pack_peer(std::uint32_t ip_net, std::uint16_t port_host) noexcept {
     return (static_cast<std::uint64_t>(ip_net) << 16) | port_host;
 }
-
-/**
- * @brief The receive loop's lazily drawn scratch buffer, returned to its store when the loop
- *        ends; while the store refuses, a one-byte drain stands in for it.
- */
-struct rx_scratch_t {
-    mem::block_source_t& src; /**< @brief Where the buffer is drawn from. */
-    std::size_t cap;          /**< @brief The buffer's size. */
-    std::byte* p = nullptr;   /**< @brief The buffer, once drawn. */
-    std::byte drain[1]{};     /**< @brief The stand-in while the store refuses. */
-    /** @brief The buffer, drawn on first use — or, while the source refuses, the one
-     *         byte a refused datagram is drained through (the caller compares against
-     *         `drain`). */
-    std::span<std::byte> get() noexcept {
-        if (p == nullptr) p = static_cast<std::byte*>(src.try_alloc(cap, alignof(std::byte)));
-        return p != nullptr ? std::span<std::byte>(p, cap) : std::span<std::byte>(drain);
-    }
-    /** @brief Return the buffer, if one was drawn. */
-    ~rx_scratch_t() {
-        if (p != nullptr) src.release(p, cap, alignof(std::byte));
-    }
-};
 }  // namespace
 
 udp_transport_t::udp_transport_t(std::uint16_t bind_port, std::string_view peer_host,
                                  std::uint16_t peer_port, const udp_config_t& config)
-    : backend_(config.memory.rx), state_src_(&config.memory.state_or_default()) {
+    : backend_(config.memory.rx) {
     const std::size_t max_frame = config.max_frame;
     const std::size_t recv_stack = config.recv_stack;
     // `:settings max_frame` (0 = unset) sets the accepted-datagram cap; unset is one Ethernet
@@ -73,6 +52,11 @@ udp_transport_t::udp_transport_t(std::uint16_t bind_port, std::string_view peer_
     // An unresolved peer at construction = listener mode: learn it from inbound
     // datagrams' source addresses (see the header note).
     learn_peer_ = peer_ip == 0 || peer_port == 0;
+
+    // The receive loop keeps its stack scratch on the thread this spawns (#2142): a stack
+    // too small to hold it is refused here, before any socket, never clamped.
+    recv_stack_refused_ = recv_stack != 0 && recv_stack < kMinRecvStack;
+    if (recv_stack_refused_) return;
 
     fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd_ < 0) return;
@@ -212,113 +196,88 @@ void udp_transport_t::run() {
     // can reach 65,536 bytes, so the refusal is unreachable there.
     const std::size_t frame_cap = max_frame_;
     const std::size_t alloc_cap = std::min(rx_cap, frame_cap + 1);
-    // The borrowed-span path holds no segment, so nothing bounds its scratch but this: one
-    // byte past the smaller of the configured cap and the backend's segment, so an injected
-    // bounded backend bounds the scratch too (a 1,536 B pool slot draws a 1,537 B scratch, not
-    // 64 KiB from `memory.state`, which an MCU's static arena cannot serve) and a datagram
-    // too long for either is refused whole, never truncated (#1783). With the unbounded
-    // default backend this is `frame_cap + 1`, as before.
+    // The accepted length, on either path: the cap, and the backend's bound too, so an
+    // injected bounded backend refuses a datagram too long for its slot whole (#1783).
     const std::size_t span_cap = std::min(frame_cap, rx_cap);
-    const std::size_t scratch_cap = std::min(kMaxDatagram, span_cap + 1);
-    // The borrowed-span path (and the exhaustion drain) needs that scratch buffer; it is
-    // allocated LAZILY on first use, so a steady-state owning-delivery node (view receiver
-    // installed, backend healthy) never pays for it — and the recv thread never carries a
-    // 64 KiB frame on its stack (FreeRTOS/pthread stacks are a few KiB; a stack array here
-    // would overflow them on-target).
-    //
-    // It is drawn from the link's `memory.state` — receive-side state this link was given
-    // (receiver pays, #1780) — and returned when the loop ends. A refused draw is
-    // backpressure like a refused segment: the datagram is drained through a one-byte buffer
-    // and counted.
-    rx_scratch_t scratch{*state_src_, scratch_cap};
-    std::byte drain[1];          // a datagram with no segment to land in is drained through this
-    view::segment_ptr_t rx_seg;  // pending RX segment, reused across recv timeouts
+    // The datagram adapter of frame ingress (ADR-0087 §1, #2142). A borrowed sink with a cap
+    // inside kUdpStackScratchBytes receives on this thread's stack: nothing held at rest,
+    // one recvfrom per datagram, no copy. Every other link receives into ONE held segment of
+    // `alloc_cap` from its own `memory.rx`, reused across receive timeouts and replaced once
+    // handed up, so an owning sink gets the datagram with no copy. The stack array also
+    // drains a datagram that has no segment to land in.
+    std::array<std::byte, graph::kUdpStackScratchBytes + 1> stack;
+    const bool fits_stack = span_cap <= graph::kUdpStackScratchBytes;
+    view::segment_ptr_t rx_seg;
 
     // The owning-vs-span RECEIVE STRATEGY is decided per iteration off the slot's
     // rx_.has_rope() — BEFORE the blocking recvfrom (the segment must exist to
-    // receive into); the span path re-checks AFTER recvfrom so a rope sink
+    // receive into); a stack receive re-checks AFTER recvfrom so a rope sink
     // installed DURING the blocking call still delivers that datagram owning.
     // Sink snapshot/tier-select itself lives in the slot (receiver_slot.hpp).
     while (!stop_.load(std::memory_order_relaxed)) {
-        if (rx_.has_rope()) {
-            // ADR-0042 §2: one datagram = one frame = one segment — recvfrom straight
-            // into a fresh refcounted segment from the injected backend; no library
-            // buffer, no copy. The pending segment is reused across recv timeouts
-            // (no idle churn). Exhaustion is backpressure: drain the datagram into
-            // the lazy scratch, drop it, tick the counter — never an OOM.
-            if (!rx_seg) rx_seg = view::segment_ptr_t::adopt(backend_->alloc(alloc_cap));
-            sockaddr_in from{};
-            socklen_t flen = sizeof(from);
-            // No segment: the datagram is drained through one byte and dropped below — its
-            // size is never needed, because a refused segment is the verdict either way.
-            std::byte* const dst = rx_seg ? rx_seg->bytes.data() : drain;
-            const std::size_t cap = rx_seg ? rx_seg->bytes.size() : sizeof(drain);
-            const ssize_t n =
-                ::recvfrom(fd_, dst, cap, 0, reinterpret_cast<sockaddr*>(&from), &flen);
-            if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_ (rx_seg kept)
-            if (learn_peer_)
-                peer_.store(pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port)),
-                            std::memory_order_relaxed);
-            if (!rx_seg) {
-                dropped_rx_.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
-            if (static_cast<std::size_t>(n) > frame_cap) {
-                // Over the configured cap: refuse it. The segment is KEPT (it is still a
-                // clean buffer for the next datagram), so a peer spraying over-cap
-                // datagrams costs no allocator traffic at all.
-                malformed_rx_.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
-            // Narrow the whole-segment view to the received length and hand it up
-            // owning — the receiver may pin/subview it beyond this call. Built by
-            // aggregate init, NOT over().subview(): `subview` is const and copies the
-            // handle, so the discarded whole-segment temporary would hold a second
-            // reference for the whole delivery call — a refcount round-trip per
-            // datagram, and a library reference live across the receiver callback (#845).
-            rx_.deliver(view::view_t{std::move(rx_seg), 0, static_cast<std::size_t>(n)});
-            continue;
-        }
-
-        // Span path: recvfrom into the borrowed scratch (no owning segment committed).
+        const bool on_stack = fits_stack && !rx_.has_rope();
+        // Exhaustion is backpressure: the datagram drains through the stack array and is
+        // dropped and counted, never an OOM.
+        if (!on_stack && !rx_seg) rx_seg = view::segment_ptr_t::adopt(backend_->alloc(alloc_cap));
+        const bool drained = !on_stack && !rx_seg;
+        // A held segment takes the datagram; otherwise the stack array does, for a stack
+        // receive (span_cap + 1 fits, by fits_stack) or a drain.
+        const std::span<std::byte> buf =
+            rx_seg ? rx_seg->bytes
+                   : std::span<std::byte>(stack.data(), std::min(span_cap + 1, stack.size()));
+        // recvmsg, not recvfrom, for MSG_TRUNC: a held segment bounded by a tight backend can
+        // be smaller than the cap plus one, and a datagram it truncated must be refused, not
+        // delivered short (#1783). Linux returns the truncated length, lwIP the whole one;
+        // the flag is set either way. Still one syscall per datagram.
         sockaddr_in from{};
-        socklen_t flen = sizeof(from);
-        const std::span<std::byte> scratch_span = scratch.get();
-        std::byte* const buf = scratch_span.data();
-        const ssize_t n =
-            ::recvfrom(fd_, buf, scratch_span.size(), 0, reinterpret_cast<sockaddr*>(&from), &flen);
-        if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_
+        ::iovec into{buf.data(), buf.size()};
+        ::msghdr mh{};
+        mh.msg_name = &from;
+        mh.msg_namelen = sizeof(from);
+        mh.msg_iov = &into;
+        mh.msg_iovlen = 1;
+        const ssize_t n = ::recvmsg(fd_, &mh, 0);
+        if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_ (rx_seg kept)
         // Listener mode: the latest datagram's source IS the peer (single-peer
         // UDP-server shape) — replies/sends target it from now on.
         if (learn_peer_)
             peer_.store(pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port)),
                         std::memory_order_relaxed);
-        if (buf == scratch.drain) {  // the scratch was refused: drained, dropped, counted
+        const auto len = static_cast<std::size_t>(n);
+        if (drained) {
             dropped_rx_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
-        // The configured cap applies to the borrowed path too — the sink shape is the
-        // node's business, the admitted datagram size is the peer's — and so does the
-        // backend's bound, which sized the scratch.
-        if (static_cast<std::size_t>(n) > span_cap) {
+        if (len > span_cap || (mh.msg_flags & MSG_TRUNC) != 0) {
+            // Over the cap, or cut short by a held segment: refuse it whole. It is KEPT (it is
+            // still a clean buffer for the next datagram), so a peer spraying over-cap datagrams
+            // costs no allocator traffic at all.
             malformed_rx_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
-        // A rope sink may have been installed while we were blocked in recvfrom
-        // above with the span decision already made — re-check and, if so, deliver this
-        // datagram owning via a one-time copy into a backend segment (race-window
-        // datagrams only; every subsequent datagram takes the zero-copy path above).
+        if (rx_seg) {
+            // A held segment (an owning sink, a cap above the stack bound, or a sink that
+            // stopped owning since it was drawn) is handed up whole and not redrawn for a
+            // stack receive. Narrow the whole-segment view to the received length and hand it up
+            // owning. Built by aggregate init, NOT over().subview(): `subview` copies the handle,
+            // so a second reference would live across the receiver callback (#845).
+            rx_.deliver(view::view_t{std::move(rx_seg), 0, len});
+            continue;
+        }
+        // A rope sink installed while this thread was blocked in recvfrom takes this one
+        // datagram owning, by a one-time copy into a segment; every later one is received
+        // into a segment above.
         if (rx_.has_rope()) {
             view::segment_ptr_t seg = view::segment_ptr_t::adopt(backend_->alloc(alloc_cap));
-            if (!seg || static_cast<std::size_t>(n) > seg->bytes.size()) {
+            if (!seg) {
                 dropped_rx_.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
-            std::memcpy(seg->bytes.data(), buf, static_cast<std::size_t>(n));
-            rx_.deliver(view::view_t{std::move(seg), 0, static_cast<std::size_t>(n)});
+            std::memcpy(seg->bytes.data(), stack.data(), len);
+            rx_.deliver(view::view_t{std::move(seg), 0, len});
             continue;
         }
-        rx_.deliver_borrowed(std::span<const std::byte>(buf, static_cast<std::size_t>(n)));
+        rx_.deliver_borrowed(std::span<const std::byte>(stack.data(), len));
     }
 }
 

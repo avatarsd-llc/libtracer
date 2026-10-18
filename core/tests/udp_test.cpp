@@ -33,6 +33,7 @@
 #include <cstring>
 #include <future>
 #include <mutex>
+#include <new>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -613,12 +614,13 @@ void test_tx_drop_counted() {
 /**
  * @brief #1783 — a bounded RX backend bounds the borrowed path's scratch too.
  *
- * The span path receives into a scratch drawn from `memory.state`. It used to be sized from
+ * The span path used to receive into a scratch drawn from `memory.state` and sized from
  * `max_frame` alone, so a link left at the default cap drew 64 KiB there even with a
  * 256-byte-slot pool as its backend, and a state store that cannot hold 64 KiB (an MCU's
- * static arena) refused it and dropped every datagram. It is now one byte past the backend's
- * slot: a 1 KiB state store serves it, a datagram that fits lands whole, and one longer than
- * the slot is refused (`malformed_rx`), never truncated.
+ * static arena) refused it and dropped every datagram. The backend's slot bounds what it
+ * accepts: a datagram that fits lands whole, and one longer than the slot is refused
+ * (`malformed_rx`), never truncated. Since #2142 the span path receives on the stack, so the
+ * 1 KiB state store is never drawn from at all.
  */
 void test_span_scratch_bounded_by_backend() {
     std::printf("UDP transport — a bounded backend bounds the span scratch (#1783):\n");
@@ -719,6 +721,87 @@ void test_default_cap_is_one_mtu() {
           "and admits the 16 KiB datagram the default refuses");
 }
 
+/** @brief A receive source that counts its grants, to show what a link draws (#2142). */
+class counting_rx_t final : public tr::mem::mem_backend_t {
+   public:
+    counting_rx_t() noexcept : mem_backend_t("udp_counting_rx") {}
+    /** @brief Grants since construction. */
+    [[nodiscard]] std::size_t draws() const noexcept { return draws_.load(); }
+    /** @brief Draw from the heap and count it. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        draws_.fetch_add(1);
+        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+    }
+    /** @brief Return a block. */
+    void release(void* p, std::size_t /*bytes*/, std::size_t align) noexcept override {
+        ::operator delete(p, std::align_val_t{align}, std::nothrow);
+    }
+
+   private:
+    std::atomic<std::size_t> draws_{0}; /**< @brief Grants counted. */
+};
+
+/**
+ * @brief #2142 — a borrowed-span UDP link receives on its stack: nothing drawn at rest or per
+ *        datagram, an oversize datagram refused whole and counted. In a build with no stack
+ *        scratch (`kUdpStackScratchBytes` 0, the library default) the same link holds one
+ *        segment from its `memory.rx` instead, and still never draws from `memory.state`.
+ */
+void test_span_link_draws_nothing() {
+    std::printf("UDP transport — a borrowed link receives on the stack (#2142):\n");
+    constexpr bool kStack =
+        tr::graph::kUdpStackScratchBytes >= tr::net::udp_transport_t::kDefaultMaxFrame;
+    counting_rx_t rx;
+    counting_rx_t state;
+    std::atomic<int> spans{0};
+    std::atomic<std::size_t> last_len{0};
+    auto span_rx = [&](std::span<const std::byte> f) {
+        last_len.store(f.size());
+        spans.fetch_add(1);
+    };
+    tr::net::udp_transport_t b(0, "", 0, {.memory = {.rx = &rx, .state = &state}});
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
+    check(a.ok() && b.ok(), "both UDP sockets bound");
+    b.set_receiver(span_rx);
+    std::this_thread::sleep_for(150ms);  // past one receive timeout: the loop is at rest
+    check(rx.draws() == (kStack ? 0u : 1u) && state.draws() == 0,
+          "an idle borrowed link has drawn nothing (or one segment, with no stack scratch)");
+
+    constexpr std::size_t kDef = tr::net::udp_transport_t::kDefaultMaxFrame;
+    const std::vector<std::byte> exactly(kDef, std::byte{0x44});
+    a.send(std::span<const std::byte>(exactly));
+    check(wait_until([&] { return spans.load() == 1; }, 3s), "an at-cap datagram is delivered");
+    check(last_len.load() == kDef, "whole");
+    const std::vector<std::byte> over(kDef + 1, std::byte{0x55});
+    a.send(std::span<const std::byte>(over));
+    check(wait_until([&] { return b.malformed_rx() == 1; }, 3s),
+          "one byte over the cap is refused, counted in malformed_rx");
+    check(spans.load() == 1, "and nothing truncated was delivered");
+    check((!kStack || rx.draws() == 0) && state.draws() == 0,
+          "and no datagram drew from either source on the stack path");
+}
+
+/**
+ * @brief #2142 — a `recv_stack` too small for the receive loop's stack scratch is refused at
+ *        construction, never clamped: no socket, `ok()` false, `recv_stack_refused()` true.
+ */
+void test_recv_stack_too_small_refused() {
+    std::printf("UDP transport — a recv_stack below kMinRecvStack is refused (#2142):\n");
+    constexpr std::size_t kMin = tr::net::udp_transport_t::kMinRecvStack;
+    if constexpr (kMin == 0) {
+        tr::net::udp_transport_t any(0, "", 0, {.recv_stack = 16384});
+        check(any.ok() && !any.recv_stack_refused(), "no stack scratch: any recv_stack is taken");
+    } else {
+        tr::net::udp_transport_t small(0, "", 0, {.recv_stack = kMin - 1});
+        check(!small.ok() && small.recv_stack_refused(),
+              "one byte short of kMinRecvStack: refused");
+        tr::net::udp_transport_t fits(0, "", 0, {.recv_stack = kMin});
+        check(fits.ok() && !fits.recv_stack_refused(), "exactly kMinRecvStack: accepted");
+        tr::net::udp_transport_t dflt(0, "", 0, {});
+        check(dflt.ok() && !dflt.recv_stack_refused(), "0 (platform default): accepted");
+    }
+}
+
 int main() {
     test_default_cap_is_one_mtu();
     test_raw_frame();
@@ -728,6 +811,8 @@ int main() {
     test_view_pool_exhaustion();
     test_settings_max_frame();
     test_span_scratch_bounded_by_backend();
+    test_span_link_draws_nothing();
+    test_recv_stack_too_small_refused();
     test_ephemeral_bind_owns_its_port();
     test_shut_down_frees_the_port();
     test_two_nodes_zero_copy_store();

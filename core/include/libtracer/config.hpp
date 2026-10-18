@@ -899,6 +899,26 @@ struct default_config_t {
     static constexpr std::size_t kSelfHealWorkerStackBytes = 0;
 
     /**
+     * @brief The largest `max_frame` a UDP link receives on its thread's STACK when its sink
+     *        borrows (#2142); `0` = never, the default.
+     *
+     * A borrowed-span UDP link (no rope receiver) receives each datagram into a stack array
+     * of this many bytes plus one, so it holds no receive buffer at rest and pays one
+     * `recvfrom` per datagram with no copy. A link whose `max_frame` is above it, and every
+     * owning (rope) link, receives into one held segment of `max_frame + 1` bytes from its
+     * `memory.rx` instead.
+     *
+     * It defaults to `0` so that a packaging nobody has audited fails safe: on an RTOS target
+     * the stack is a real allocation per receive thread, and a scratch the task's stack cannot
+     * hold is an overflow, not a cost. A POSIX host, where the stack is lazily committed
+     * address space, opts in; this tree's host presets (the test and bench fragments) bind
+     * 16384. A nonzero value makes a `udp_config_t::recv_stack` too small to hold the scratch a
+     * construction-time refusal (`udp_transport_t::kMinRecvStack`). Override fragment:
+     * `static constexpr std::size_t kUdpStackScratchBytes = 16384;`
+     */
+    static constexpr std::size_t kUdpStackScratchBytes = 0;
+
+    /**
      * @brief Frames a link's receive context may consume back to back before it waits for
      *        its core to go idle once; `0` = no frame budget (ADR-0085).
      *
@@ -1232,6 +1252,8 @@ inline constexpr bool kCreationHooks = config_t::kCreationHooks;
 inline constexpr bool kSessionAdmission = config_t::kSessionAdmission;
 /** @brief @ref default_config_t::kForceGuardedRmw for this build. */
 inline constexpr bool kForceGuardedRmw = config_t::kForceGuardedRmw;
+/** @brief @ref default_config_t::kUdpStackScratchBytes for this build. */
+inline constexpr std::size_t kUdpStackScratchBytes = config_t::kUdpStackScratchBytes;
 
 namespace detail_guard {
 

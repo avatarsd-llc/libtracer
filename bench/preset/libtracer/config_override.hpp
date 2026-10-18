@@ -24,6 +24,8 @@ namespace tr::graph {
 struct bench_config_t : default_config_t {
     static constexpr bool kBusLinks = true;
     static constexpr bool kSelfHealLinks = true;
+    /** @brief A POSIX host receives a borrowed UDP datagram on the stack (#2142). */
+    static constexpr std::size_t kUdpStackScratchBytes = 16384;
 };
 
 using config_t = bench_config_t;

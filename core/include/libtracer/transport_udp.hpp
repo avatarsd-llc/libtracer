@@ -21,9 +21,24 @@
 #include <span>
 #include <string_view>
 
+#include "libtracer/config.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
+
+/** @brief 1 in a sanitized build (ASan, TSan or MSan), whose stack frames are larger; 0 otherwise.
+ *         Sizes `udp_transport_t::kRecvStackHeadroom` (#2142). */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define LIBTRACER_UDP_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || \
+    __has_feature(memory_sanitizer)
+#define LIBTRACER_UDP_SANITIZED 1
+#endif
+#endif
+#ifndef LIBTRACER_UDP_SANITIZED
+#define LIBTRACER_UDP_SANITIZED 0
+#endif
 
 namespace tr::net {
 
@@ -58,11 +73,15 @@ struct udp_config_t {
      *        accepted (0 → `udp_transport_t::kDefaultMaxFrame`, one Ethernet MTU; values
      *        above `udp_transport_t::kMaxDatagram` are inert). A longer datagram is refused
      *        (`malformed_rx` ticks), provided the backend can furnish `max_frame + 1` bytes
-     *        (#1074). It also sizes the RX segment and scratch, so a link holds about
-     *        `max_frame` bytes at rest, not 64 KiB (#2132).
+     *        (#1074). It also sizes the RX segment, so an owning link holds about
+     *        `max_frame` bytes at rest, not 64 KiB (#2132), and a borrowed-span link whose
+     *        cap fits `%graph::kUdpStackScratchBytes` holds none (#2142).
      */
     std::size_t max_frame = 0;
-    /** @brief Recv-thread stack size in bytes, 0 = platform default. */
+    /** @brief Recv-thread stack size in bytes, 0 = platform default. The receive loop keeps
+     *         `%graph::kUdpStackScratchBytes + 1` bytes on it (#2142), so a nonzero value
+     *         below `udp_transport_t::kMinRecvStack` is refused at construction
+     *         (`udp_transport_t::recv_stack_refused`), never clamped. */
     std::size_t recv_stack = 0;
 };
 
@@ -81,10 +100,11 @@ struct udp_config_t {
  * the cap rather than at @ref kMaxDatagram. Unset, the cap is @ref kDefaultMaxFrame. That refusal
  * is unconditional on the borrowed-span path; on the owning path it holds while the injected
  * backend can furnish `max_frame + 1` bytes — a backend bounded tighter than the cap truncates the
- * datagram before the cap is ever consulted (#1074). The borrowed path's scratch, drawn from
- * `memory.state`, is bounded by the backend as well: one byte past the smaller of the cap and
- * the backend's `max_segment_size()`, and a datagram longer than either is refused whole
- * (#1783). An injected bounded backend thereby keeps every receive buffer at its slot size.
+ * datagram before the cap is ever consulted (#1074). On the borrowed-span path a datagram
+ * longer than the smaller of the cap and the backend's `max_segment_size()` is refused whole
+ * (#1783). That path receives on the receive thread's stack when the cap fits
+ * `%graph::kUdpStackScratchBytes` (#2142), so the link holds nothing at rest; otherwise, and on
+ * the owning path, the link holds ONE segment of `max_frame + 1` bytes from `memory.rx`.
  */
 class udp_transport_t final : public transport_t, private posix_endpoint_t {
    public:
@@ -99,9 +119,27 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
      *         payload of one 1,500-byte Ethernet MTU after the 20-byte IPv4 and 8-byte UDP
      *         headers. A longer datagram needs IP fragmentation, which lwIP's default
      *         configuration does not reassemble, so an MCU peer never receives one anyway.
-     *         The RX segment and scratch are drawn one byte past it. A link that carries
+     *         The RX segment is drawn one byte past it. A link that carries
      *         wider datagrams sets `max_frame`, up to @ref kMaxDatagram. */
     static constexpr std::size_t kDefaultMaxFrame = 1472;
+
+    /** @brief The stack the receive thread keeps beside its stack scratch, bytes (#2142): its
+     *         own frames, the thread's TLS (glibc carves it from the same stack) and the
+     *         borrowed sink's dispatch, which runs on that thread. A margin this check
+     *         requires, not a measured bound of any one sink's depth.
+     *
+     * 8 KiB in an ordinary build. A sanitized build (ASan, TSan or MSan) inflates every frame
+     * and the TLS block, so it keeps 64 KiB: an ASan+UBSan Debug build of the receive loop
+     * was measured to need about 28 KiB in all, where 8 KiB of headroom overflowed. */
+    static constexpr std::size_t kRecvStackHeadroom = LIBTRACER_UDP_SANITIZED ? 65536 : 8192;
+
+    /** @brief The smallest nonzero `udp_config_t::recv_stack` this build accepts (#2142): the
+     *         stack scratch, one byte past it and @ref kRecvStackHeadroom. `0` in a build
+     *         with no stack scratch (`%graph::kUdpStackScratchBytes` 0), where any size is
+     *         accepted. */
+    static constexpr std::size_t kMinRecvStack =
+        graph::kUdpStackScratchBytes == 0 ? 0
+                                          : graph::kUdpStackScratchBytes + 1 + kRecvStackHeadroom;
 
     /**
      * @brief Bind a local UDP socket on @p bind_port and target @p peer_host : @p peer_port.
@@ -134,8 +172,12 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
      *         backend, handed up owning; span-only sinks keep the borrowed path. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
-    /** @brief True iff the socket bound successfully. */
+    /** @brief True iff the socket bound successfully. False too when @ref recv_stack_refused. */
     [[nodiscard]] bool ok() const noexcept { return fd_ >= 0; }
+    /** @brief True iff the constructor refused `udp_config_t::recv_stack` (#2142): nonzero and
+     *         below @ref kMinRecvStack, so the receive loop's stack scratch would not fit.
+     *         No socket is opened and no thread started; @ref ok is false. */
+    [[nodiscard]] bool recv_stack_refused() const noexcept { return recv_stack_refused_; }
     /** @brief The bound local port (resolves an ephemeral @c bind_port of 0). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
     /** @brief Datagrams dropped because the RX backend was exhausted (backpressure,
@@ -184,13 +226,12 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
     // RMW. On rv32 each access is an `__atomic_*_8` call, so send() pays one per datagram
     // there (#1697).
     std::atomic<std::uint64_t> peer_{0};
-    bool learn_peer_ = false;  // constructed peer-less => adopt each datagram's source
+    bool learn_peer_ = false;          // constructed peer-less => adopt each datagram's source
+    bool recv_stack_refused_ = false;  // recv_stack below kMinRecvStack (#2142)
 
     // RX segment source for view delivery (ADR-0042 §2) + backend-exhaustion
     // drop counter (backpressure, never OOM).
     mem::mem_backend_t* backend_;
-    /** @brief The receive scratch's store — the link's `memory.state` (#1780). */
-    mem::block_source_t* state_src_;
     std::size_t max_frame_ = kDefaultMaxFrame;  // accepted-datagram cap (:settings; 0 => default)
     // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
     // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit

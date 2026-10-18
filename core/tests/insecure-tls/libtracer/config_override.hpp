@@ -23,6 +23,8 @@ struct insecure_tls_config_t : default_config_t {
      *         compiles (`transport_can.cpp` / `self_heal_link.cpp` assert them). */
     static constexpr bool kBusLinks = true;
     static constexpr bool kSelfHealLinks = true; /**< @brief See @ref kBusLinks. */
+    /** @brief A POSIX host receives a borrowed UDP datagram on the stack (#2142). */
+    static constexpr std::size_t kUdpStackScratchBytes = 16384;
     /** @brief And the test-only fault-injection hooks the same build arms (#1719). */
     static constexpr bool kFaultInjection = true;
 };

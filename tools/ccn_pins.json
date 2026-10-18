@@ -109,12 +109,6 @@
       ],
       "file": "core/src/transport_vertex.cpp"
     },
-    "tr::net::udp_transport_t::run": {
-      "ccn": [
-        17
-      ],
-      "file": "core/src/transport_udp.cpp"
-    },
     "tr::net::webtransport_transport_factory": {
       "ccn": [
         16

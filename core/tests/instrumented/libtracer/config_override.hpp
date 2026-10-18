@@ -59,6 +59,8 @@ struct instrumented_config_t : default_config_t {
     static constexpr bool kInstrumentCounters = true;
     static constexpr bool kBusLinks = true;
     static constexpr bool kSelfHealLinks = true;
+    /** @brief A POSIX host receives a borrowed UDP datagram on the stack (#2142). */
+    static constexpr std::size_t kUdpStackScratchBytes = 16384;
     static constexpr bool kFaultInjection = true;
     static constexpr bool kCreationHooks = true;
     static constexpr bool kSessionAdmission = true;

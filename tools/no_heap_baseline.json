@@ -662,7 +662,7 @@
         },
         "transport_udp.cpp.obj": {
           "_ZN2tr11inline_fn_tIFvvELj8EE11invoke_implIZNS_3net15udp_transport_tC4EtSt17basic_string_viewIcSt11char_traitsIcEEtRKNS4_12udp_config_tEEUlvE_EEvPKv": {"via _ZN2tr3net15udp_transport_t3runEv": 1},
-          "_ZN2tr3net15udp_transport_t3runEv": {"via _ZN2tr4view13segment_ptr_t5resetEv": 4, "via _ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": 2},
+          "_ZN2tr3net15udp_transport_t3runEv": {"via _ZN2tr4view13segment_ptr_t5resetEv": 3, "via _ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": 2},
           "_ZN2tr3net15udp_transport_tC2EtSt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_12udp_config_tE": {"via _ZN2tr11inline_fn_tIFvvELj8EE11invoke_implIZNS_3net15udp_transport_tC4EtSt17basic_string_viewIcSt11char_traitsIcEEtRKNS4_12udp_config_tEEUlvE_EEvPKv": 2, "via _ZN2tr3net16posix_endpoint_t5startENS_11inline_fn_tIFvvELj8EEEj": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZNK2tr3net15receiver_slot_tIJEE7deliverENS_4view6view_tE": {"operator delete": 1, "via _ZN2tr4view13segment_ptr_t5resetEv": 6},

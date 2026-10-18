@@ -225,6 +225,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `ws_server_transport_t::kReadAheadBytes` is replaced by the namespace-level
   `kIngressReadAheadBytes`, the default read-ahead of `frame_ingress_t`.
 
+- **A borrowed-span UDP link can receive on its thread's stack and hold nothing at rest
+  ([#2142](https://github.com/avatarsd-llc/libtracer/issues/2142)).** A UDP link with no rope
+  receiver used to keep a `max_frame + 1` scratch drawn from its `memory.state`. A build that
+  binds the new `config_t::kUdpStackScratchBytes` receives each datagram into a stack array of
+  that size instead, still one `recvfrom` per datagram and no copy, whenever the link's cap
+  fits it. It defaults to `0`, so a packaging that does not opt in (ESP-IDF, PlatformIO,
+  Arduino, ESPHome) keeps the held segment and never puts the scratch on a task stack; this
+  tree's host test and bench presets bind 16384. Without the stack path, an owning link and a
+  borrowed one whose cap is above the bound hold one `max_frame + 1` segment from `memory.rx`,
+  sized to `max_frame` ([#2132](https://github.com/avatarsd-llc/libtracer/issues/2132)).
+  `udp_transport_t` no longer reads `memory.state`. At the default `max_frame`, a borrowed-span
+  link with the stack path holds 216 B at rest instead of 1,768 B.
+  - A nonzero `udp_config_t::recv_stack` below the new `udp_transport_t::kMinRecvStack` is
+    refused at construction: `ok()` is false and `recv_stack_refused()` is true. It is never
+    clamped. `kMinRecvStack` is the scratch plus `kRecvStackHeadroom` (8 KiB, or 64 KiB in an
+    ASan, TSan or MSan build); in a build with no stack scratch it is `0`.
+  - An oversize datagram is still refused whole and counted in `malformed_rx`.
+
 - **`subscription_selector_t`: a vertex that switches among named options of subscription refs
   ([#2024](https://github.com/avatarsd-llc/libtracer/issues/2024)).** A header-only adapter
   beside the core (`libtracer/subscription_selector.hpp`): a build that does not include it
