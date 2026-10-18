@@ -399,9 +399,9 @@ void test_only_a_retiring_unsubscribe_signals() {
 //
 // DETERMINISTIC, not raced, exactly as (b) is. Thread A enters a delivery and PARKS there on a
 // latch, so for the whole middle of this test A is provably holding a snapshot that names the
-// subscriber pair while its dispatch depth is 1 and thread B's is 0. That is precisely the
-// state a per-thread grace point would read as "quiescent, free it now" — assertion 2 below is
-// the one the withdrawn `reclaim_local` failed (#894, #2127).
+// subscriber pair while its dispatch depth is 1 and thread B's is 0. The pair's lifetime must
+// span A's snapshot even though B, the caller, holds none — assertion 2 below pins that
+// (#894, #2127).
 
 /** @brief What the blocking subscriber needs to announce itself and then wait. */
 struct latched_sink_t {
@@ -457,8 +457,8 @@ void test_cross_thread_unsubscribe_waits_for_the_other_thread() {
     //    waits on is exactly what ADR-0080 §Decision 4 rejects, and A cannot proceed until we
     //    set `go`, so a blocking implementation would deadlock here rather than fail.
     check(rc.has_value(), "thread B's unsubscribe returns SUCCESS without blocking");
-    // 2. THE assertion. A per-thread grace point would have released here — B's own dispatch
-    //    depth is 0, and it cannot see thread A's live snapshot.
+    // 2. THE assertion. B's own dispatch depth is 0, but the grace period spans every thread,
+    //    so the release waits for thread A's live snapshot to end.
     check(probe.released.load() == 0,
           "and it did NOT release the ctx, because thread A still names it in a live snapshot");
 
