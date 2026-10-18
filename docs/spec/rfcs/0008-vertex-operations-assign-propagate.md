@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0008 |
 | **Title** | Vertex operations: `assign` and `propagate`; structural selective propagation; value-agnostic per-vertex `delivery_mode` |
-| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b, and 2026-08-22 — Amendment 2, below; §B corrected 2026-09-30 by erratum, below; §C corrected 2026-10-08 by erratum, below; §D amended 2026-10-18 — Amendment 3, below, **awaiting maintainer sign-off**) |
+| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b, and 2026-08-22 — Amendment 2, below; §B corrected 2026-09-30 by erratum, below; §C corrected 2026-10-08 by erratum, below; §D amended 2026-10-18 — Amendment 3, below, approved by the maintainer on 2026-10-18 ([sign-off](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6253724494))) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-06 |
 | **Comment window** | waived by the maintainer (solo-maintainer project, GOVERNANCE.md window dead ceremony) |
@@ -556,9 +556,9 @@ wire surface moves.** The spelling was never emitted or honoured; the vector's b
 
 ## Amendment 3 (2026-10-18): §D — a HANDLER may decline to deliver a write it did not make ([#2208](https://github.com/avatarsd-llc/libtracer/issues/2208))
 
-**Status: proposed — awaiting maintainer sign-off.** The rulings below are recorded in
-[the design-rulings comment on #2208](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6251237127);
-this text encodes them for sign-off.
+**Status: approved by the maintainer on 2026-10-18** ([sign-off on #2208](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6253724494)). The rulings
+it encodes are recorded in
+[the design-rulings comment on #2208](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6251237127).
 
 **Instrument: amendment, not erratum** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)
 §"Errata, amendments, and the comment window"). A peer observes the change: a subscriber to a

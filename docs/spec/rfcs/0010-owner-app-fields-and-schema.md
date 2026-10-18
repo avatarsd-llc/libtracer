@@ -353,8 +353,8 @@ POINT (PL=1) {
   > `SETTINGS{}` when the vertex declares no app fields.
 
   > **Amended by [RFC-0008](0008-vertex-operations-assign-propagate.md) Amendment 3
-  > (2026-10-18, [#2208](https://github.com/avatarsd-llc/libtracer/issues/2208), awaiting
-  > sign-off).** The protocol part enumerates one conditional entry: a `HANDLER` registered
+  > (2026-10-18, [#2208](https://github.com/avatarsd-llc/libtracer/issues/2208), approved by the
+  > maintainer on 2026-10-18 — [sign-off](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6253724494)).** The protocol part enumerates one conditional entry: a `HANDLER` registered
   > `deliver_written = false` reports `NAME "deliver_written" VALUE <u8 0>`, read-only. Every
   > other vertex's protocol part is unchanged.
 - The **owner part is authoritative for `settings.app.*`** and is served
