@@ -212,18 +212,25 @@ template <std::size_t... N>
  *        rows at 1024 and 4096 topics cost about what the 256-topic row does.
  *
  * Zenoh's `Session::put` on an undeclared `KeyExpr` resolves against every declared
- * subscription, so its cost per put grows with the topic count: at 4096 topics a fixed
- * 500 000-put budget was 33 s per row, and the endpoint slice was ~900 s of the docs
- * sweep's three rounds (#1910 made those rows resolve on every put). Both engines take
- * the same scaled budget, so the rows stay matched. At or below 256 topics the budget is
- * returned unchanged, so no existing row's sample count moves; above it the budget
- * shrinks in proportion to the topic count, with a floor of 2000 operations, which is
- * @ref publishes_for's own floor.
+ * subscription, so its cost per put grows about linearly with the topic count. At 4096
+ * topics a row ran 33 s on the grid budget, which @ref publishes_for caps at 200 000 puts
+ * at fan-out 1, and the endpoint slice was ~900 s of the docs sweep's three rounds
+ * (#1910 made those rows resolve on every put). Both engines take the same scaled budget,
+ * so the rows stay matched.
+ *
+ * At or below 256 topics the budget is returned unchanged, so no existing row's sample
+ * count moves. Above it the budget is first capped at that same 200 000 ceiling, as
+ * @ref ladder_budget does, and then scaled by 256 / topics, with a floor of 2000
+ * operations (@ref publishes_for's own floor). So the operation count falls as fast as
+ * the per-put cost grows. The 500 000-put grid budget becomes 50 000 puts at 1024 topics
+ * and 12 500 at 4096, and the 40 000-sample latency budget becomes 10 000 and 2500.
  */
 [[nodiscard]] inline std::uint64_t endpoint_budget(std::size_t endpoints, std::uint64_t budget) {
     constexpr std::size_t kFullBudgetEndpoints = 256;
+    constexpr std::uint64_t kCap = 200'000;  // publishes_for's ceiling at fan-out 1
     if (endpoints <= kFullBudgetEndpoints) return budget;
-    return std::max<std::uint64_t>(2000, budget * kFullBudgetEndpoints / endpoints);
+    const std::uint64_t scaled = std::min(budget, kCap) * kFullBudgetEndpoints / endpoints;
+    return std::max<std::uint64_t>(2000, scaled);
 }
 
 /**
