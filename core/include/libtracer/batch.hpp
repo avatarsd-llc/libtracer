@@ -417,13 +417,16 @@ inline void store_packed_batch_head(std::span<std::byte> out, batch_carriage_t c
  * @param offsets_ns The non-uniform stream's per-sample offsets — exactly `n` of them — or
  *                   empty for a uniform stream.
  * @return The bytes written: @ref packed_batch_wire_bytes.
- * @retval 0 Refused: @p width is `0`, `block.size()` is not a multiple of @p width, a non-empty
- *           @p offsets_ns does not hold exactly `n` entries, or @p out is too small.
+ * @retval 0 Refused: @p width is `0`, @p block is empty (`n == 0`), `block.size()` is not a
+ *           multiple of @p width, a non-empty @p offsets_ns does not hold exactly `n` entries,
+ *           or @p out is too small. An empty block is refused because, with no offsets to
+ *           send, it would take the uniform shape, which @ref read_packed_batch refuses on the
+ *           `dt_ns == 0` stream; a batch of no samples is never worth a record.
  */
 [[nodiscard]] inline std::size_t encode_packed_batch(
     std::span<std::byte> out, batch_carriage_t carriage, std::int64_t base_ns, std::uint16_t width,
     std::span<const std::byte> block, std::span<const std::int32_t> offsets_ns = {}) noexcept {
-    if (width == 0 || block.size() % width != 0) return 0;
+    if (width == 0 || block.empty() || block.size() % width != 0) return 0;
     if (!offsets_ns.empty() && offsets_ns.size() != block.size() / width) return 0;
     const std::size_t total = packed_batch_wire_bytes(block.size(), offsets_ns.size());
     if (out.size() < total) return 0;

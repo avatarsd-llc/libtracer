@@ -563,6 +563,19 @@ void packed_block_malformed() {
                                         tr::wire::batch_carriage_t::STANDALONE, kBase, kWidth,
                                         argb(8)) == 0,
           "... and a span too small to hold the record");
+    // n == 0: with no offsets to send, the record would be TIME + an empty block — the uniform
+    // shape — which read_packed_batch refuses on the dt_ns == 0 stream it was meant for.
+    std::vector<std::byte> empty_body;
+    tr::wire::emit_batch_time(empty_body, kBase);
+    tr::wire::emit_tlv(empty_body, type_t::VALUE, opt_t{}, std::span<const std::byte>{});
+    std::vector<std::byte> empty_rec;
+    tr::wire::emit_tlv(empty_rec, type_t::BATCH, opt_t{.pl = true}, empty_body);
+    const auto empty_tlv = decode_all(empty_rec);
+    check(empty_tlv && !tr::wire::read_packed_batch(*empty_tlv, 0, kWidth).has_value(),
+          "an empty block on a dt_ns == 0 stream is one its own reader refuses");
+    check(tr::wire::encode_packed_batch(out, tr::wire::batch_carriage_t::STANDALONE, kBase, kWidth,
+                                        std::span<const std::byte>{}) == 0,
+          "... so encode_packed_batch refuses n == 0 rather than write it");
     check(out == std::array<std::byte, 64>{}, "a refusal writes nothing into the caller's span");
 
     // A framed batch is not a packed one: several sample children are not one block.
