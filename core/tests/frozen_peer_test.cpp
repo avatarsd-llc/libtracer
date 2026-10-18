@@ -23,6 +23,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -227,8 +228,23 @@ void test_ws_server() {
     check(sees_close(hs), "it sees the connection go");
     ::close(hs);
     // A real client, open and idle, owes nothing; one that drains every broadcast is kept.
+    // The server writes the 101 partway through the poll pass that reads the handshake,
+    // and records the peer as owing nothing only when that pass returns, so the client can
+    // be open while the server still has it mid-handshake. Two checks back to back, with
+    // their fake clock already past the deadline, would close it there. One tiny frame the
+    // server delivers settles that: its pass starts only after the handshake pass is over.
+    std::atomic<int> delivered{0};
+    auto rx = [&](std::span<const std::byte>) {
+        delivered.fetch_add(1, std::memory_order_release);
+    };
+    server.set_receiver(rx);
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port(), {});
     check(client.ok() && wait_peers(server, 1), "the client is open");
+    const std::array<std::byte, 4> ping{};
+    client.send(std::span<const std::byte>(ping));
+    for (int i = 0; i < 200 && delivered.load(std::memory_order_acquire) == 0; ++i)
+        std::this_thread::sleep_for(10ms);
+    check(delivered.load(std::memory_order_acquire) == 1, "the server has read past the handshake");
     check(server.close_frozen_peers(100, 50) == 0 && server.close_frozen_peers(200, 150) == 0,
           "an idle, open peer owes nothing: kept");
     std::size_t closed = 0;
