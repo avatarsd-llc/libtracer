@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792326979882,
+  "lastUpdate": 1792331153703,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer in-process latency (ns, smaller is better)": [
@@ -1860283,6 +1860283,5965 @@ window.BENCHMARK_DATA = {
           {
             "name": "zenoh-topics RSS delta",
             "value": 45020,
+            "unit": "KB"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d3e8053a5a82b2912bb9b1e015cd37eedfcf1151",
+          "message": "Merge pull request #2211 from avatarsd-llc/ingress/2142-udp-datagram-adapter\n\nudp: a borrowed-span link can receive on the stack and hold nothing at rest (#2142)",
+          "timestamp": "2026-10-18T16:11:16+03:00",
+          "tree_id": "bf7e720b0ce6be3d95c31a4321122db3cc17f5fc",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/d3e8053a5a82b2912bb9b1e015cd37eedfcf1151"
+        },
+        "date": 1792331034909,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan8/1ep p50 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan8/1ep p99 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan8/1ep ns/delivery",
+            "value": 16.645,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan8/1ep p50 latency",
+            "value": 133.693,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan128/1ep p50 latency",
+            "value": 651,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan128/1ep p99 latency",
+            "value": 681,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan128/1ep ns/delivery",
+            "value": 5.023,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan128/1ep p50 latency",
+            "value": 820.281,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1024/1ep p50 latency",
+            "value": 6019,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1024/1ep p99 latency",
+            "value": 7170,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1024/1ep ns/delivery",
+            "value": 5.904,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan1024/1ep p50 latency",
+            "value": 6008.875,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan8192/1ep p50 latency",
+            "value": 64921,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan8192/1ep p99 latency",
+            "value": 78005,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan8192/1ep ns/delivery",
+            "value": 8.039,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan8192/1ep p50 latency",
+            "value": 65061,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 1B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 1B/fan1/1ep p99 latency",
+            "value": 150,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 1B/fan1/1ep ns/delivery",
+            "value": 96.735,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 1B/fan1/1ep p50 latency",
+            "value": 100.617,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 8B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 8B/fan1/1ep p99 latency",
+            "value": 141,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 8B/fan1/1ep ns/delivery",
+            "value": 96.168,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 8B/fan1/1ep p50 latency",
+            "value": 100.598,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep p99 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep ns/delivery",
+            "value": 98.254,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan1/1ep p50 latency",
+            "value": 103.883,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 1024B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 1024B/fan1/1ep p99 latency",
+            "value": 111,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 1024B/fan1/1ep ns/delivery",
+            "value": 77.259,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 1024B/fan1/1ep p50 latency",
+            "value": 74.279,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 8192B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 8192B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 8192B/fan1/1ep ns/delivery",
+            "value": 78.078,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 8192B/fan1/1ep p50 latency",
+            "value": 74.603,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 984B/fan1/1ep p50 latency",
+            "value": 131,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 984B/fan1/1ep p99 latency",
+            "value": 180,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 984B/fan1/1ep ns/delivery",
+            "value": 118.678,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 984B/fan1/1ep p50 latency",
+            "value": 118.848,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 985B/fan1/1ep p50 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 985B/fan1/1ep p99 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 985B/fan1/1ep ns/delivery",
+            "value": 122.538,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 985B/fan1/1ep p50 latency",
+            "value": 123.248,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 4096B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 4096B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 4096B/fan1/1ep ns/delivery",
+            "value": 78.103,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 4096B/fan1/1ep p50 latency",
+            "value": 74.27,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 16384B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 16384B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 16384B/fan1/1ep ns/delivery",
+            "value": 78.266,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 16384B/fan1/1ep p50 latency",
+            "value": 73.928,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 65536B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 65536B/fan1/1ep p99 latency",
+            "value": 150,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 65536B/fan1/1ep ns/delivery",
+            "value": 77.133,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 65536B/fan1/1ep p50 latency",
+            "value": 73.752,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 2B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 2B/fan1/1ep p99 latency",
+            "value": 141,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 2B/fan1/1ep ns/delivery",
+            "value": 96.239,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 2B/fan1/1ep p50 latency",
+            "value": 100.48,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 3B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 3B/fan1/1ep p99 latency",
+            "value": 141,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 3B/fan1/1ep ns/delivery",
+            "value": 95.936,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 3B/fan1/1ep p50 latency",
+            "value": 100.832,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 4B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 4B/fan1/1ep p99 latency",
+            "value": 131,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 4B/fan1/1ep ns/delivery",
+            "value": 95.817,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 4B/fan1/1ep p50 latency",
+            "value": 101.557,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 6B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 6B/fan1/1ep p99 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 6B/fan1/1ep ns/delivery",
+            "value": 96.073,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 6B/fan1/1ep p50 latency",
+            "value": 101.516,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 11B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 11B/fan1/1ep p99 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 11B/fan1/1ep ns/delivery",
+            "value": 95.75,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 11B/fan1/1ep p50 latency",
+            "value": 101.398,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 16B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 16B/fan1/1ep p99 latency",
+            "value": 141,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 16B/fan1/1ep ns/delivery",
+            "value": 96.984,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 16B/fan1/1ep p50 latency",
+            "value": 101.42,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 23B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 23B/fan1/1ep p99 latency",
+            "value": 141,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 23B/fan1/1ep ns/delivery",
+            "value": 96.533,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 23B/fan1/1ep p50 latency",
+            "value": 101.105,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 32B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 32B/fan1/1ep p99 latency",
+            "value": 160,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 32B/fan1/1ep ns/delivery",
+            "value": 96.338,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 32B/fan1/1ep p50 latency",
+            "value": 101.01,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 45B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 45B/fan1/1ep p99 latency",
+            "value": 141,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 45B/fan1/1ep ns/delivery",
+            "value": 97.837,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 45B/fan1/1ep p50 latency",
+            "value": 101.027,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 91B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 91B/fan1/1ep p99 latency",
+            "value": 141,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 91B/fan1/1ep ns/delivery",
+            "value": 97.591,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 91B/fan1/1ep p50 latency",
+            "value": 102.945,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 128B/fan1/1ep p50 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 128B/fan1/1ep p99 latency",
+            "value": 151,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 128B/fan1/1ep ns/delivery",
+            "value": 100,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 128B/fan1/1ep p50 latency",
+            "value": 103.609,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 181B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 181B/fan1/1ep p99 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 181B/fan1/1ep ns/delivery",
+            "value": 100.682,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 181B/fan1/1ep p50 latency",
+            "value": 103.787,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 256B/fan1/1ep p50 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 256B/fan1/1ep p99 latency",
+            "value": 150,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 256B/fan1/1ep ns/delivery",
+            "value": 105.403,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 256B/fan1/1ep p50 latency",
+            "value": 108.949,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 362B/fan1/1ep p50 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 362B/fan1/1ep p99 latency",
+            "value": 151,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 362B/fan1/1ep ns/delivery",
+            "value": 107.651,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 362B/fan1/1ep p50 latency",
+            "value": 132.639,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 512B/fan1/1ep p50 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 512B/fan1/1ep p99 latency",
+            "value": 151,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 512B/fan1/1ep ns/delivery",
+            "value": 104.924,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 512B/fan1/1ep p50 latency",
+            "value": 106.545,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 724B/fan1/1ep p50 latency",
+            "value": 121,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 724B/fan1/1ep p99 latency",
+            "value": 160,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 724B/fan1/1ep ns/delivery",
+            "value": 110.872,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 724B/fan1/1ep p50 latency",
+            "value": 111.199,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 1448B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 1448B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 1448B/fan1/1ep ns/delivery",
+            "value": 77.35,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 1448B/fan1/1ep p50 latency",
+            "value": 74.094,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 2048B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 2048B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 2048B/fan1/1ep ns/delivery",
+            "value": 77.025,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 2048B/fan1/1ep p50 latency",
+            "value": 73.595,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 2896B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 2896B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 2896B/fan1/1ep ns/delivery",
+            "value": 77.935,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 2896B/fan1/1ep p50 latency",
+            "value": 73.713,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 5793B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 5793B/fan1/1ep p99 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 5793B/fan1/1ep ns/delivery",
+            "value": 78.19,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 5793B/fan1/1ep p50 latency",
+            "value": 74.681,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 11585B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 11585B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 11585B/fan1/1ep ns/delivery",
+            "value": 77.071,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 11585B/fan1/1ep p50 latency",
+            "value": 73.801,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 23170B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 23170B/fan1/1ep p99 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 23170B/fan1/1ep ns/delivery",
+            "value": 76.999,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 23170B/fan1/1ep p50 latency",
+            "value": 73.751,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 32768B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 32768B/fan1/1ep p99 latency",
+            "value": 111,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 32768B/fan1/1ep ns/delivery",
+            "value": 78.029,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 32768B/fan1/1ep p50 latency",
+            "value": 73.566,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 46341B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 46341B/fan1/1ep p99 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 46341B/fan1/1ep ns/delivery",
+            "value": 76.227,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 46341B/fan1/1ep p50 latency",
+            "value": 73.84,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 1B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 1B/fan1/1ep p99 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 1B/fan1/1ep ns/delivery",
+            "value": 95.405,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 1B/fan1/1ep p50 latency",
+            "value": 92.52,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 8B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 8B/fan1/1ep p99 latency",
+            "value": 121,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 8B/fan1/1ep ns/delivery",
+            "value": 95.718,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 8B/fan1/1ep p50 latency",
+            "value": 92.91,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
+            "value": 94.907,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 64B/fan1/1ep p50 latency",
+            "value": 93.029,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 1024B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 1024B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 1024B/fan1/1ep ns/delivery",
+            "value": 95.099,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 1024B/fan1/1ep p50 latency",
+            "value": 93.027,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 8192B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 8192B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 8192B/fan1/1ep ns/delivery",
+            "value": 95.097,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 8192B/fan1/1ep p50 latency",
+            "value": 93.008,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 984B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 984B/fan1/1ep p99 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 984B/fan1/1ep ns/delivery",
+            "value": 94.416,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 984B/fan1/1ep p50 latency",
+            "value": 92.988,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 985B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 985B/fan1/1ep p99 latency",
+            "value": 181,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 985B/fan1/1ep ns/delivery",
+            "value": 98.192,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 985B/fan1/1ep p50 latency",
+            "value": 93.791,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 4096B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 4096B/fan1/1ep p99 latency",
+            "value": 131,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 4096B/fan1/1ep ns/delivery",
+            "value": 118.54,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 4096B/fan1/1ep p50 latency",
+            "value": 92.988,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 16384B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 16384B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 16384B/fan1/1ep ns/delivery",
+            "value": 95.327,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 16384B/fan1/1ep p50 latency",
+            "value": 93.047,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 65536B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 65536B/fan1/1ep p99 latency",
+            "value": 121,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 65536B/fan1/1ep ns/delivery",
+            "value": 95.277,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow-batch 65536B/fan1/1ep p50 latency",
+            "value": 93.438,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1ep p50 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1ep p99 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1ep ns/delivery",
+            "value": 130.883,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path-batch 64B/fan1/1ep p50 latency",
+            "value": 126.906,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8ep p50 latency",
+            "value": 150,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8ep p99 latency",
+            "value": 180,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8ep ns/delivery",
+            "value": 135.522,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path-batch 64B/fan1/8ep p50 latency",
+            "value": 140.775,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/128ep p50 latency",
+            "value": 160,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/128ep p99 latency",
+            "value": 211,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/128ep ns/delivery",
+            "value": 151.788,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path-batch 64B/fan1/128ep p50 latency",
+            "value": 150.496,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1024ep p50 latency",
+            "value": 180,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1024ep p99 latency",
+            "value": 240,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1024ep ns/delivery",
+            "value": 170.077,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path-batch 64B/fan1/1024ep p50 latency",
+            "value": 168.449,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8192ep p50 latency",
+            "value": 210,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8192ep p99 latency",
+            "value": 371,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8192ep ns/delivery",
+            "value": 208.28,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-path-batch 64B/fan1/8192ep p50 latency",
+            "value": 203.738,
+            "unit": "ns"
+          },
+          {
+            "name": "mixed 0B/fan6/128ep p50 latency",
+            "value": 131,
+            "unit": "ns"
+          },
+          {
+            "name": "mixed 0B/fan6/128ep p99 latency",
+            "value": 431,
+            "unit": "ns"
+          },
+          {
+            "name": "mixed 0B/fan6/128ep ns/delivery",
+            "value": 27.161,
+            "unit": "ns"
+          },
+          {
+            "name": "path-parse 2B/fan1/1ep p50 latency",
+            "value": 24.367,
+            "unit": "ns"
+          },
+          {
+            "name": "path-parse 2B/fan1/1ep ns/delivery",
+            "value": 24.604,
+            "unit": "ns"
+          },
+          {
+            "name": "path-parse 12B/fan2/1ep p50 latency",
+            "value": 37.634,
+            "unit": "ns"
+          },
+          {
+            "name": "path-parse 12B/fan2/1ep ns/delivery",
+            "value": 37.997,
+            "unit": "ns"
+          },
+          {
+            "name": "path-parse 23B/fan4/1ep p50 latency",
+            "value": 56.04,
+            "unit": "ns"
+          },
+          {
+            "name": "path-parse 23B/fan4/1ep ns/delivery",
+            "value": 57.077,
+            "unit": "ns"
+          },
+          {
+            "name": "path-parse 16B/fan8/1ep p50 latency",
+            "value": 56.861,
+            "unit": "ns"
+          },
+          {
+            "name": "path-parse 16B/fan8/1ep ns/delivery",
+            "value": 57.611,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-lean 64B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-lean 64B/fan1/1ep p99 latency",
+            "value": 141,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-lean 64B/fan1/1ep ns/delivery",
+            "value": 99.175,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-lean-cached 64B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-lean-cached 64B/fan1/1ep p99 latency",
+            "value": 131,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-lean-cached 64B/fan1/1ep ns/delivery",
+            "value": 95.939,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 64B/fan1/1ep p50 latency",
+            "value": 121,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 64B/fan1/1ep p99 latency",
+            "value": 181,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 64B/fan1/1ep ns/delivery",
+            "value": 109.663,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 984B/fan1/1ep p50 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 984B/fan1/1ep p99 latency",
+            "value": 200,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 984B/fan1/1ep ns/delivery",
+            "value": 126.881,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 985B/fan1/1ep p50 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 985B/fan1/1ep p99 latency",
+            "value": 191,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 985B/fan1/1ep ns/delivery",
+            "value": 126.968,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 1024B/fan1/1ep p50 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 1024B/fan1/1ep p99 latency",
+            "value": 200,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 1024B/fan1/1ep ns/delivery",
+            "value": 126.914,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 4096B/fan1/1ep p50 latency",
+            "value": 180,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 4096B/fan1/1ep p99 latency",
+            "value": 241,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 4096B/fan1/1ep ns/delivery",
+            "value": 166.045,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 16384B/fan1/1ep p50 latency",
+            "value": 391,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 16384B/fan1/1ep p99 latency",
+            "value": 481,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 16384B/fan1/1ep ns/delivery",
+            "value": 377.646,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 65536B/fan1/1ep p50 latency",
+            "value": 1582,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 65536B/fan1/1ep p99 latency",
+            "value": 1983,
+            "unit": "ns"
+          },
+          {
+            "name": "eptype-stream 65536B/fan1/1ep ns/delivery",
+            "value": 1583.055,
+            "unit": "ns"
+          },
+          {
+            "name": "fold-b1 512B/fan1/1ep p50 latency",
+            "value": 2.82,
+            "unit": "ns"
+          },
+          {
+            "name": "fold-b1 512B/fan1/1ep ns/delivery",
+            "value": 2.853,
+            "unit": "ns"
+          },
+          {
+            "name": "fold-b2 512B/fan1/1ep p50 latency",
+            "value": 4.215,
+            "unit": "ns"
+          },
+          {
+            "name": "fold-b2 512B/fan1/1ep ns/delivery",
+            "value": 3.804,
+            "unit": "ns"
+          },
+          {
+            "name": "fold-b4 512B/fan1/1ep p50 latency",
+            "value": 5.703,
+            "unit": "ns"
+          },
+          {
+            "name": "fold-b4 512B/fan1/1ep ns/delivery",
+            "value": 5.495,
+            "unit": "ns"
+          },
+          {
+            "name": "fold-b8 512B/fan1/1ep p50 latency",
+            "value": 9.504,
+            "unit": "ns"
+          },
+          {
+            "name": "fold-b8 512B/fan1/1ep ns/delivery",
+            "value": 9.393,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1/1ep p50 latency",
+            "value": 70,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1/1ep p99 latency",
+            "value": 80,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1/1ep ns/delivery",
+            "value": 51.394,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8/1ep p50 latency",
+            "value": 100,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8/1ep p99 latency",
+            "value": 111,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8/1ep ns/delivery",
+            "value": 10.644,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan128/1ep p50 latency",
+            "value": 621,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan128/1ep p99 latency",
+            "value": 641,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan128/1ep ns/delivery",
+            "value": 4.554,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1024/1ep p50 latency",
+            "value": 5929,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1024/1ep p99 latency",
+            "value": 7872,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1024/1ep ns/delivery",
+            "value": 5.817,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8192/1ep p50 latency",
+            "value": 47581,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8192/1ep p99 latency",
+            "value": 62072,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8192/1ep ns/delivery",
+            "value": 5.861,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 64B/fan1/1ep p50 latency",
+            "value": 5.957,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 64B/fan1/1ep ns/delivery",
+            "value": 5.794,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 64B/fan1/1ep p50 latency",
+            "value": 6.228,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 64B/fan1/1ep ns/delivery",
+            "value": 5.466,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 64B/fan1/1ep p50 latency",
+            "value": 14.89,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 64B/fan1/1ep ns/delivery",
+            "value": 15.071,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 64B/fan1/1ep p50 latency",
+            "value": 14.89,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 64B/fan1/1ep ns/delivery",
+            "value": 15.008,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 1024B/fan1/1ep p50 latency",
+            "value": 6.228,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 1024B/fan1/1ep ns/delivery",
+            "value": 6.292,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 1024B/fan1/1ep p50 latency",
+            "value": 6.136,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 1024B/fan1/1ep ns/delivery",
+            "value": 6.257,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 1024B/fan1/1ep p50 latency",
+            "value": 19.266,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 1024B/fan1/1ep ns/delivery",
+            "value": 18.961,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 1024B/fan1/1ep p50 latency",
+            "value": 15.037,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 1024B/fan1/1ep ns/delivery",
+            "value": 18.877,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 984B/fan1/1ep p50 latency",
+            "value": 6.227,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 984B/fan1/1ep ns/delivery",
+            "value": 6.259,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 984B/fan1/1ep p50 latency",
+            "value": 6.229,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 984B/fan1/1ep ns/delivery",
+            "value": 6.262,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 984B/fan1/1ep p50 latency",
+            "value": 19.851,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 984B/fan1/1ep ns/delivery",
+            "value": 20.376,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 984B/fan1/1ep p50 latency",
+            "value": 18.292,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 984B/fan1/1ep ns/delivery",
+            "value": 17.087,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 985B/fan1/1ep p50 latency",
+            "value": 6.227,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 985B/fan1/1ep ns/delivery",
+            "value": 6.388,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 985B/fan1/1ep p50 latency",
+            "value": 6.227,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 985B/fan1/1ep ns/delivery",
+            "value": 6.299,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 985B/fan1/1ep p50 latency",
+            "value": 19.821,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 985B/fan1/1ep ns/delivery",
+            "value": 19.44,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 985B/fan1/1ep p50 latency",
+            "value": 18.285,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 985B/fan1/1ep ns/delivery",
+            "value": 18.378,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 4096B/fan1/1ep p50 latency",
+            "value": 12.455,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 4096B/fan1/1ep ns/delivery",
+            "value": 12.937,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 4096B/fan1/1ep p50 latency",
+            "value": 6.231,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 4096B/fan1/1ep ns/delivery",
+            "value": 5.448,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 4096B/fan1/1ep p50 latency",
+            "value": 43.34,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 4096B/fan1/1ep ns/delivery",
+            "value": 43.397,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 4096B/fan1/1ep p50 latency",
+            "value": 30.15,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 4096B/fan1/1ep ns/delivery",
+            "value": 34.573,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 16384B/fan1/1ep p50 latency",
+            "value": 11.374,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 16384B/fan1/1ep ns/delivery",
+            "value": 12.013,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 16384B/fan1/1ep p50 latency",
+            "value": 6.232,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 16384B/fan1/1ep ns/delivery",
+            "value": 6.307,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 16384B/fan1/1ep p50 latency",
+            "value": 116.396,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 16384B/fan1/1ep ns/delivery",
+            "value": 113.139,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 16384B/fan1/1ep p50 latency",
+            "value": 115.43,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 16384B/fan1/1ep ns/delivery",
+            "value": 111.688,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 65536B/fan1/1ep p50 latency",
+            "value": 12.455,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap 65536B/fan1/1ep ns/delivery",
+            "value": 12.237,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 65536B/fan1/1ep p50 latency",
+            "value": 6.234,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-pool 65536B/fan1/1ep ns/delivery",
+            "value": 6.229,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 65536B/fan1/1ep p50 latency",
+            "value": 1228.844,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap 65536B/fan1/1ep ns/delivery",
+            "value": 1237.97,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 65536B/fan1/1ep p50 latency",
+            "value": 1236.828,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-pool 65536B/fan1/1ep ns/delivery",
+            "value": 1247.188,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 1B/fan1/1ep p50 latency",
+            "value": 100,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 1B/fan1/1ep p99 latency",
+            "value": 121,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 1B/fan1/1ep ns/delivery",
+            "value": 87.679,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 8B/fan1/1ep p50 latency",
+            "value": 100,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 8B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 8B/fan1/1ep ns/delivery",
+            "value": 87.691,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 64B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 64B/fan1/1ep p99 latency",
+            "value": 131,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 64B/fan1/1ep ns/delivery",
+            "value": 92.625,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 1024B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 1024B/fan1/1ep p99 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 1024B/fan1/1ep ns/delivery",
+            "value": 68.315,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 8192B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 8192B/fan1/1ep p99 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 8192B/fan1/1ep ns/delivery",
+            "value": 67.27,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 1B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 1B/fan1/1ep p99 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 1B/fan1/1ep ns/delivery",
+            "value": 85.644,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 8B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 8B/fan1/1ep p99 latency",
+            "value": 121,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 8B/fan1/1ep ns/delivery",
+            "value": 85.438,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 64B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 64B/fan1/1ep p99 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 64B/fan1/1ep ns/delivery",
+            "value": 85.724,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 1024B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 1024B/fan1/1ep p99 latency",
+            "value": 121,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 1024B/fan1/1ep ns/delivery",
+            "value": 85.534,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 8192B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 8192B/fan1/1ep p99 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 8192B/fan1/1ep ns/delivery",
+            "value": 85.271,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 984B/fan1/1ep p50 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 984B/fan1/1ep p99 latency",
+            "value": 171,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 984B/fan1/1ep ns/delivery",
+            "value": 119.936,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 985B/fan1/1ep p50 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 985B/fan1/1ep p99 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 985B/fan1/1ep ns/delivery",
+            "value": 114.354,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 4096B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 4096B/fan1/1ep p99 latency",
+            "value": 111,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 4096B/fan1/1ep ns/delivery",
+            "value": 67.228,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 16384B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 16384B/fan1/1ep p99 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 16384B/fan1/1ep ns/delivery",
+            "value": 66.68,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 65536B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 65536B/fan1/1ep p99 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool 65536B/fan1/1ep ns/delivery",
+            "value": 70.372,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 984B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 984B/fan1/1ep p99 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 984B/fan1/1ep ns/delivery",
+            "value": 85.735,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 985B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 985B/fan1/1ep p99 latency",
+            "value": 121,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 985B/fan1/1ep ns/delivery",
+            "value": 85.82,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 4096B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 4096B/fan1/1ep p99 latency",
+            "value": 181,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 4096B/fan1/1ep ns/delivery",
+            "value": 85.672,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 16384B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 16384B/fan1/1ep p99 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 16384B/fan1/1ep ns/delivery",
+            "value": 85.979,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 65536B/fan1/1ep p50 latency",
+            "value": 101,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 65536B/fan1/1ep p99 latency",
+            "value": 121,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-borrow 65536B/fan1/1ep ns/delivery",
+            "value": 85.901,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1/1ep p50 latency",
+            "value": 131,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1/1ep p99 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1/1ep ns/delivery",
+            "value": 113.187,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8/1ep p50 latency",
+            "value": 321,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8/1ep p99 latency",
+            "value": 411,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8/1ep ns/delivery",
+            "value": 37.962,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan128/1ep p50 latency",
+            "value": 3665,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan128/1ep p99 latency",
+            "value": 3796,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan128/1ep ns/delivery",
+            "value": 28.739,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1024/1ep p50 latency",
+            "value": 28682,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1024/1ep p99 latency",
+            "value": 36384,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1024/1ep ns/delivery",
+            "value": 28.259,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8192/1ep p50 latency",
+            "value": 373141,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8192/1ep p99 latency",
+            "value": 398558,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8192/1ep ns/delivery",
+            "value": 45.881,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1/1ep p50 latency",
+            "value": 130,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1/1ep p99 latency",
+            "value": 181,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1/1ep ns/delivery",
+            "value": 114.713,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8/1ep p50 latency",
+            "value": 281,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8/1ep p99 latency",
+            "value": 341,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8/1ep ns/delivery",
+            "value": 33.863,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan128/1ep p50 latency",
+            "value": 2944,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan128/1ep p99 latency",
+            "value": 3225,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan128/1ep ns/delivery",
+            "value": 22.943,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1024/1ep p50 latency",
+            "value": 22503,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1024/1ep p99 latency",
+            "value": 28953,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1024/1ep ns/delivery",
+            "value": 22.102,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8192/1ep p50 latency",
+            "value": 323438,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8192/1ep p99 latency",
+            "value": 354945,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8192/1ep ns/delivery",
+            "value": 39.897,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan16/1ep p50 latency",
+            "value": 180,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan16/1ep p99 latency",
+            "value": 210,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan16/1ep ns/delivery",
+            "value": 9.722,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan16/1ep p50 latency",
+            "value": 154.602,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan32/1ep p50 latency",
+            "value": 240,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan32/1ep p99 latency",
+            "value": 280,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan32/1ep ns/delivery",
+            "value": 6.828,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan32/1ep p50 latency",
+            "value": 216.844,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan64/1ep p50 latency",
+            "value": 361,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan64/1ep p99 latency",
+            "value": 391,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan64/1ep ns/delivery",
+            "value": 5.411,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan64/1ep p50 latency",
+            "value": 340.117,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan256/1ep p50 latency",
+            "value": 1222,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan256/1ep p99 latency",
+            "value": 1302,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan256/1ep ns/delivery",
+            "value": 4.736,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan256/1ep p50 latency",
+            "value": 1207.562,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan512/1ep p50 latency",
+            "value": 2894,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan512/1ep p99 latency",
+            "value": 2975,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan512/1ep ns/delivery",
+            "value": 5.616,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-batch 64B/fan512/1ep p50 latency",
+            "value": 2870.5,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap-aged 64B/fan1/1ep p50 latency",
+            "value": 5.957,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap-aged 64B/fan1/1ep ns/delivery",
+            "value": 5.863,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap-aged 64B/fan1/1ep p50 latency",
+            "value": 14.89,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap-aged 64B/fan1/1ep ns/delivery",
+            "value": 15.038,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap-aged 1024B/fan1/1ep p50 latency",
+            "value": 6.228,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-alloc-heap-aged 1024B/fan1/1ep ns/delivery",
+            "value": 6.334,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap-aged 1024B/fan1/1ep p50 latency",
+            "value": 19.743,
+            "unit": "ns"
+          },
+          {
+            "name": "lkv-store-heap-aged 1024B/fan1/1ep ns/delivery",
+            "value": 20.604,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 16B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 16B/fan1/1ep ns/delivery",
+            "value": 4.936,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 64B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 64B/fan1/1ep ns/delivery",
+            "value": 4.918,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 80B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 80B/fan1/1ep ns/delivery",
+            "value": 4.916,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 112B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 112B/fan1/1ep ns/delivery",
+            "value": 4.909,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 128B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 128B/fan1/1ep ns/delivery",
+            "value": 4.956,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 176B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 176B/fan1/1ep ns/delivery",
+            "value": 4.925,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 208B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 208B/fan1/1ep ns/delivery",
+            "value": 4.917,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 256B/fan1/1ep p50 latency",
+            "value": 4.875,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 256B/fan1/1ep ns/delivery",
+            "value": 4.918,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 304B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 304B/fan1/1ep ns/delivery",
+            "value": 4.914,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 464B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 464B/fan1/1ep ns/delivery",
+            "value": 4.916,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 512B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 512B/fan1/1ep ns/delivery",
+            "value": 4.911,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 560B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 560B/fan1/1ep ns/delivery",
+            "value": 4.92,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 960B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 960B/fan1/1ep ns/delivery",
+            "value": 4.919,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 968B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 968B/fan1/1ep ns/delivery",
+            "value": 4.93,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 976B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 976B/fan1/1ep ns/delivery",
+            "value": 4.911,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 984B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 984B/fan1/1ep ns/delivery",
+            "value": 4.91,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 985B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 985B/fan1/1ep ns/delivery",
+            "value": 4.916,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 992B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 992B/fan1/1ep ns/delivery",
+            "value": 4.911,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1000B/fan1/1ep p50 latency",
+            "value": 4.875,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1000B/fan1/1ep ns/delivery",
+            "value": 4.915,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1008B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1008B/fan1/1ep ns/delivery",
+            "value": 4.92,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1016B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1016B/fan1/1ep ns/delivery",
+            "value": 4.955,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1024B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1024B/fan1/1ep ns/delivery",
+            "value": 4.912,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1032B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1032B/fan1/1ep ns/delivery",
+            "value": 4.912,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1040B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1040B/fan1/1ep ns/delivery",
+            "value": 4.911,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1048B/fan1/1ep p50 latency",
+            "value": 4.875,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1048B/fan1/1ep ns/delivery",
+            "value": 4.92,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1056B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1056B/fan1/1ep ns/delivery",
+            "value": 4.909,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1064B/fan1/1ep p50 latency",
+            "value": 4.906,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1064B/fan1/1ep ns/delivery",
+            "value": 4.957,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1072B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1072B/fan1/1ep ns/delivery",
+            "value": 4.911,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1080B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1080B/fan1/1ep ns/delivery",
+            "value": 4.924,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1088B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1088B/fan1/1ep ns/delivery",
+            "value": 4.944,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1096B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 1096B/fan1/1ep ns/delivery",
+            "value": 4.908,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 2000B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 2000B/fan1/1ep ns/delivery",
+            "value": 4.917,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 2048B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 2048B/fan1/1ep ns/delivery",
+            "value": 4.984,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 2096B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 2096B/fan1/1ep ns/delivery",
+            "value": 4.925,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 4048B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 4048B/fan1/1ep ns/delivery",
+            "value": 5.081,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 4096B/fan1/1ep p50 latency",
+            "value": 11.643,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 4096B/fan1/1ep ns/delivery",
+            "value": 11.838,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 4144B/fan1/1ep p50 latency",
+            "value": 11.643,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 4144B/fan1/1ep ns/delivery",
+            "value": 11.749,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 8144B/fan1/1ep p50 latency",
+            "value": 12.724,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 8144B/fan1/1ep ns/delivery",
+            "value": 12.633,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 8192B/fan1/1ep p50 latency",
+            "value": 10.56,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 8192B/fan1/1ep ns/delivery",
+            "value": 10.655,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 8240B/fan1/1ep p50 latency",
+            "value": 10.56,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 8240B/fan1/1ep ns/delivery",
+            "value": 10.643,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 16336B/fan1/1ep p50 latency",
+            "value": 11.643,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 16336B/fan1/1ep ns/delivery",
+            "value": 11.8,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 16384B/fan1/1ep p50 latency",
+            "value": 10.56,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 16384B/fan1/1ep ns/delivery",
+            "value": 10.72,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 16432B/fan1/1ep p50 latency",
+            "value": 10.56,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 16432B/fan1/1ep ns/delivery",
+            "value": 10.675,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 32720B/fan1/1ep p50 latency",
+            "value": 10.271,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 32720B/fan1/1ep ns/delivery",
+            "value": 10.355,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 32768B/fan1/1ep p50 latency",
+            "value": 14.347,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 32768B/fan1/1ep ns/delivery",
+            "value": 14.294,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 32816B/fan1/1ep p50 latency",
+            "value": 14.35,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 32816B/fan1/1ep ns/delivery",
+            "value": 14.585,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 65488B/fan1/1ep p50 latency",
+            "value": 10.562,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 65488B/fan1/1ep ns/delivery",
+            "value": 10.753,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 65536B/fan1/1ep p50 latency",
+            "value": 11.643,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 65536B/fan1/1ep ns/delivery",
+            "value": 11.757,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 65584B/fan1/1ep p50 latency",
+            "value": 25.179,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-heap 65584B/fan1/1ep ns/delivery",
+            "value": 25.414,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 16B/fan1/1ep p50 latency",
+            "value": 4.644,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 16B/fan1/1ep ns/delivery",
+            "value": 4.972,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 64B/fan1/1ep p50 latency",
+            "value": 4.636,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 64B/fan1/1ep ns/delivery",
+            "value": 4.697,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 80B/fan1/1ep p50 latency",
+            "value": 4.693,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 80B/fan1/1ep ns/delivery",
+            "value": 5.67,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 112B/fan1/1ep p50 latency",
+            "value": 4.647,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 112B/fan1/1ep ns/delivery",
+            "value": 6.217,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 128B/fan1/1ep p50 latency",
+            "value": 4.635,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 128B/fan1/1ep ns/delivery",
+            "value": 5.503,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 176B/fan1/1ep p50 latency",
+            "value": 6.121,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 176B/fan1/1ep ns/delivery",
+            "value": 6.238,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 208B/fan1/1ep p50 latency",
+            "value": 4.636,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 208B/fan1/1ep ns/delivery",
+            "value": 5.576,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 256B/fan1/1ep p50 latency",
+            "value": 4.631,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 256B/fan1/1ep ns/delivery",
+            "value": 4.665,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 304B/fan1/1ep p50 latency",
+            "value": 4.636,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 304B/fan1/1ep ns/delivery",
+            "value": 4.686,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 464B/fan1/1ep p50 latency",
+            "value": 4.636,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 464B/fan1/1ep ns/delivery",
+            "value": 4.671,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 512B/fan1/1ep p50 latency",
+            "value": 4.639,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 512B/fan1/1ep ns/delivery",
+            "value": 4.688,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 560B/fan1/1ep p50 latency",
+            "value": 4.633,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 560B/fan1/1ep ns/delivery",
+            "value": 4.669,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 960B/fan1/1ep p50 latency",
+            "value": 4.635,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 960B/fan1/1ep ns/delivery",
+            "value": 4.672,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 968B/fan1/1ep p50 latency",
+            "value": 4.633,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 968B/fan1/1ep ns/delivery",
+            "value": 4.685,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 976B/fan1/1ep p50 latency",
+            "value": 4.639,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 976B/fan1/1ep ns/delivery",
+            "value": 4.674,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 984B/fan1/1ep p50 latency",
+            "value": 4.639,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 984B/fan1/1ep ns/delivery",
+            "value": 4.672,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 985B/fan1/1ep p50 latency",
+            "value": 4.637,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 985B/fan1/1ep ns/delivery",
+            "value": 4.676,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 992B/fan1/1ep p50 latency",
+            "value": 4.669,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 992B/fan1/1ep ns/delivery",
+            "value": 4.707,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1000B/fan1/1ep p50 latency",
+            "value": 4.632,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1000B/fan1/1ep ns/delivery",
+            "value": 4.673,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1008B/fan1/1ep p50 latency",
+            "value": 4.666,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1008B/fan1/1ep ns/delivery",
+            "value": 4.7,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1016B/fan1/1ep p50 latency",
+            "value": 4.635,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1016B/fan1/1ep ns/delivery",
+            "value": 4.677,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1024B/fan1/1ep p50 latency",
+            "value": 4.636,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1024B/fan1/1ep ns/delivery",
+            "value": 4.67,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1032B/fan1/1ep p50 latency",
+            "value": 4.637,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1032B/fan1/1ep ns/delivery",
+            "value": 4.675,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1040B/fan1/1ep p50 latency",
+            "value": 4.637,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1040B/fan1/1ep ns/delivery",
+            "value": 4.678,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1048B/fan1/1ep p50 latency",
+            "value": 4.679,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1048B/fan1/1ep ns/delivery",
+            "value": 4.714,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1056B/fan1/1ep p50 latency",
+            "value": 4.682,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1056B/fan1/1ep ns/delivery",
+            "value": 4.711,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1064B/fan1/1ep p50 latency",
+            "value": 4.646,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1064B/fan1/1ep ns/delivery",
+            "value": 4.691,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1072B/fan1/1ep p50 latency",
+            "value": 4.636,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1072B/fan1/1ep ns/delivery",
+            "value": 4.679,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1080B/fan1/1ep p50 latency",
+            "value": 4.635,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1080B/fan1/1ep ns/delivery",
+            "value": 4.687,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1088B/fan1/1ep p50 latency",
+            "value": 4.632,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1088B/fan1/1ep ns/delivery",
+            "value": 4.695,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1096B/fan1/1ep p50 latency",
+            "value": 4.666,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 1096B/fan1/1ep ns/delivery",
+            "value": 4.7,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 2000B/fan1/1ep p50 latency",
+            "value": 4.631,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 2000B/fan1/1ep ns/delivery",
+            "value": 4.668,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 2048B/fan1/1ep p50 latency",
+            "value": 4.631,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 2048B/fan1/1ep ns/delivery",
+            "value": 4.67,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 2096B/fan1/1ep p50 latency",
+            "value": 4.666,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 2096B/fan1/1ep ns/delivery",
+            "value": 4.706,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 4048B/fan1/1ep p50 latency",
+            "value": 4.635,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 4048B/fan1/1ep ns/delivery",
+            "value": 4.686,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 4096B/fan1/1ep p50 latency",
+            "value": 4.64,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 4096B/fan1/1ep ns/delivery",
+            "value": 4.673,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 4144B/fan1/1ep p50 latency",
+            "value": 4.633,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 4144B/fan1/1ep ns/delivery",
+            "value": 4.673,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 8144B/fan1/1ep p50 latency",
+            "value": 4.632,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 8144B/fan1/1ep ns/delivery",
+            "value": 4.671,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 8192B/fan1/1ep p50 latency",
+            "value": 4.634,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 8192B/fan1/1ep ns/delivery",
+            "value": 4.669,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 8240B/fan1/1ep p50 latency",
+            "value": 4.636,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 8240B/fan1/1ep ns/delivery",
+            "value": 4.676,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 16336B/fan1/1ep p50 latency",
+            "value": 4.635,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 16336B/fan1/1ep ns/delivery",
+            "value": 4.668,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 16384B/fan1/1ep p50 latency",
+            "value": 4.631,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 16384B/fan1/1ep ns/delivery",
+            "value": 4.671,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 16432B/fan1/1ep p50 latency",
+            "value": 4.635,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 16432B/fan1/1ep ns/delivery",
+            "value": 4.702,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 32720B/fan1/1ep p50 latency",
+            "value": 4.636,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 32720B/fan1/1ep ns/delivery",
+            "value": 4.671,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 32768B/fan1/1ep p50 latency",
+            "value": 4.636,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 32768B/fan1/1ep ns/delivery",
+            "value": 4.673,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 32816B/fan1/1ep p50 latency",
+            "value": 4.635,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 32816B/fan1/1ep ns/delivery",
+            "value": 4.671,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 65488B/fan1/1ep p50 latency",
+            "value": 4.638,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 65488B/fan1/1ep ns/delivery",
+            "value": 4.695,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 65536B/fan1/1ep p50 latency",
+            "value": 4.633,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 65536B/fan1/1ep ns/delivery",
+            "value": 4.681,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 65584B/fan1/1ep p50 latency",
+            "value": 4.631,
+            "unit": "ns"
+          },
+          {
+            "name": "cliff-alloc-pool 65584B/fan1/1ep ns/delivery",
+            "value": 4.668,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-spill 64B/fan1/1ep p50 latency",
+            "value": 888.031,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-spill 64B/fan1/1ep ns/delivery",
+            "value": 127.817,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-defer 64B/fan1/1ep p50 latency",
+            "value": 575.148,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-defer 64B/fan1/1ep ns/delivery",
+            "value": 145.139,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-class-c1 64B/fan1/1ep p50 latency",
+            "value": 3.521,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-class-c1 64B/fan1/1ep ns/delivery",
+            "value": 3.553,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-class-c8 64B/fan1/1ep p50 latency",
+            "value": 9.476,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-class-c8 64B/fan1/1ep ns/delivery",
+            "value": 9.494,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-class-c32 64B/fan1/1ep p50 latency",
+            "value": 30.592,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-class-c32 64B/fan1/1ep ns/delivery",
+            "value": 30.945,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-direct 64B/fan1/1ep p50 latency",
+            "value": 3.761,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-direct 64B/fan1/1ep ns/delivery",
+            "value": 3.733,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-fallback 64B/fan1/1ep p50 latency",
+            "value": 5.643,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-fallback 64B/fan1/1ep ns/delivery",
+            "value": 5.638,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 64B/fan1/1ep p50 latency",
+            "value": 4.874,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 64B/fan1/1ep ns/delivery",
+            "value": 4.916,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 984B/fan1/1ep p50 latency",
+            "value": 4.873,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 984B/fan1/1ep ns/delivery",
+            "value": 4.917,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 985B/fan1/1ep p50 latency",
+            "value": 4.873,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 985B/fan1/1ep ns/delivery",
+            "value": 4.914,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 1024B/fan1/1ep p50 latency",
+            "value": 4.873,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 1024B/fan1/1ep ns/delivery",
+            "value": 4.938,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 4096B/fan1/1ep p50 latency",
+            "value": 4.873,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 4096B/fan1/1ep ns/delivery",
+            "value": 4.922,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 16384B/fan1/1ep p50 latency",
+            "value": 11.915,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 16384B/fan1/1ep ns/delivery",
+            "value": 12.042,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 65536B/fan1/1ep p50 latency",
+            "value": 10.836,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 65536B/fan1/1ep ns/delivery",
+            "value": 11.012,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 65552B/fan1/1ep p50 latency",
+            "value": 11.643,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 65552B/fan1/1ep ns/delivery",
+            "value": 11.85,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 65600B/fan1/1ep p50 latency",
+            "value": 23.829,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-values 65600B/fan1/1ep ns/delivery",
+            "value": 24.064,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 64B/fan1/1ep p50 latency",
+            "value": 8.946,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 64B/fan1/1ep ns/delivery",
+            "value": 9.035,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 984B/fan1/1ep p50 latency",
+            "value": 8.941,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 984B/fan1/1ep ns/delivery",
+            "value": 9.011,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 985B/fan1/1ep p50 latency",
+            "value": 8.94,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 985B/fan1/1ep ns/delivery",
+            "value": 9.014,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 1024B/fan1/1ep p50 latency",
+            "value": 8.94,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 1024B/fan1/1ep ns/delivery",
+            "value": 9.027,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 4096B/fan1/1ep p50 latency",
+            "value": 8.941,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 4096B/fan1/1ep ns/delivery",
+            "value": 9.037,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 16384B/fan1/1ep p50 latency",
+            "value": 15.704,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 16384B/fan1/1ep ns/delivery",
+            "value": 15.828,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 65536B/fan1/1ep p50 latency",
+            "value": 15.45,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 65536B/fan1/1ep ns/delivery",
+            "value": 15.554,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 65552B/fan1/1ep p50 latency",
+            "value": 15.179,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 65552B/fan1/1ep ns/delivery",
+            "value": 15.306,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 65600B/fan1/1ep p50 latency",
+            "value": 24.372,
+            "unit": "ns"
+          },
+          {
+            "name": "seam-tables 65600B/fan1/1ep ns/delivery",
+            "value": 24.623,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 1B/fan1/1ep p50 latency",
+            "value": 87.16,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 8B/fan1/1ep p50 latency",
+            "value": 87.434,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 64B/fan1/1ep p50 latency",
+            "value": 90.27,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 1024B/fan1/1ep p50 latency",
+            "value": 69.331,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 8192B/fan1/1ep p50 latency",
+            "value": 69.204,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 984B/fan1/1ep p50 latency",
+            "value": 112.236,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 985B/fan1/1ep p50 latency",
+            "value": 111.336,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 4096B/fan1/1ep p50 latency",
+            "value": 69.321,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 16384B/fan1/1ep p50 latency",
+            "value": 69.351,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-pool-batch 65536B/fan1/1ep p50 latency",
+            "value": 69.517,
+            "unit": "ns"
+          },
+          {
+            "name": "dce-canary 8B/fan1/1ep p50 latency",
+            "value": 10.831,
+            "unit": "ns"
+          },
+          {
+            "name": "dce-canary 64B/fan1/1ep p50 latency",
+            "value": 88.119,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-bound 64B/fan1/1ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-bound 64B/fan1/1ep p99 latency",
+            "value": 131,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-bound 64B/fan1/1ep ns/delivery",
+            "value": 98.852,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-addr 64B/fan1/1ep p50 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-addr 64B/fan1/1ep p99 latency",
+            "value": 240,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-addr 64B/fan1/1ep ns/delivery",
+            "value": 126.699,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-bound 64B/fan1/100ep p50 latency",
+            "value": 110,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-bound 64B/fan1/100ep p99 latency",
+            "value": 150,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-bound 64B/fan1/100ep ns/delivery",
+            "value": 101.863,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-addr 64B/fan1/100ep p50 latency",
+            "value": 160,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-addr 64B/fan1/100ep p99 latency",
+            "value": 200,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-addr 64B/fan1/100ep ns/delivery",
+            "value": 144.608,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-bound 64B/fan1/10000ep p50 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-bound 64B/fan1/10000ep p99 latency",
+            "value": 180,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-bound 64B/fan1/10000ep ns/delivery",
+            "value": 113.611,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-addr 64B/fan1/10000ep p50 latency",
+            "value": 201,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-addr 64B/fan1/10000ep p99 latency",
+            "value": 401,
+            "unit": "ns"
+          },
+          {
+            "name": "topics-addr 64B/fan1/10000ep ns/delivery",
+            "value": 217.038,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-mt1 64B/fan1/1ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-mt1 64B/fan1/1ep p99 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-mt1 64B/fan1/1ep ns/delivery",
+            "value": 72.692,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-mt2 64B/fan1/2ep p50 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-mt2 64B/fan1/2ep p99 latency",
+            "value": 150,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-mt2 64B/fan1/2ep ns/delivery",
+            "value": 37.477,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-mt4 64B/fan1/4ep p50 latency",
+            "value": 151,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-mt4 64B/fan1/4ep p99 latency",
+            "value": 180,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-mt4 64B/fan1/4ep ns/delivery",
+            "value": 34.847,
+            "unit": "ns"
+          },
+          {
+            "name": "acl-inherit-d4 64B/fan1/1ep p50 latency",
+            "value": 70,
+            "unit": "ns"
+          },
+          {
+            "name": "acl-inherit-d4 64B/fan1/1ep p99 latency",
+            "value": 90,
+            "unit": "ns"
+          },
+          {
+            "name": "acl-inherit-d4 64B/fan1/1ep ns/delivery",
+            "value": 50.68,
+            "unit": "ns"
+          },
+          {
+            "name": "acl-inherit-d4-mt4 64B/fan1/4ep p50 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "acl-inherit-d4-mt4 64B/fan1/4ep p99 latency",
+            "value": 1923,
+            "unit": "ns"
+          },
+          {
+            "name": "acl-inherit-d4-mt4 64B/fan1/4ep ns/delivery",
+            "value": 81.695,
+            "unit": "ns"
+          },
+          {
+            "name": "poolalloc-mt1 64B/fan1/1ep p50 latency",
+            "value": 30,
+            "unit": "ns"
+          },
+          {
+            "name": "poolalloc-mt1 64B/fan1/1ep p99 latency",
+            "value": 41,
+            "unit": "ns"
+          },
+          {
+            "name": "poolalloc-mt1 64B/fan1/1ep ns/delivery",
+            "value": 63.988,
+            "unit": "ns"
+          },
+          {
+            "name": "heapalloc-mt1 64B/fan1/1ep p50 latency",
+            "value": 30,
+            "unit": "ns"
+          },
+          {
+            "name": "heapalloc-mt1 64B/fan1/1ep p99 latency",
+            "value": 40,
+            "unit": "ns"
+          },
+          {
+            "name": "heapalloc-mt1 64B/fan1/1ep ns/delivery",
+            "value": 61.102,
+            "unit": "ns"
+          },
+          {
+            "name": "poolalloc-mt2 64B/fan1/1ep p50 latency",
+            "value": 30,
+            "unit": "ns"
+          },
+          {
+            "name": "poolalloc-mt2 64B/fan1/1ep p99 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "poolalloc-mt2 64B/fan1/1ep ns/delivery",
+            "value": 64.821,
+            "unit": "ns"
+          },
+          {
+            "name": "heapalloc-mt2 64B/fan1/1ep p50 latency",
+            "value": 30,
+            "unit": "ns"
+          },
+          {
+            "name": "heapalloc-mt2 64B/fan1/1ep p99 latency",
+            "value": 40,
+            "unit": "ns"
+          },
+          {
+            "name": "heapalloc-mt2 64B/fan1/1ep ns/delivery",
+            "value": 48.747,
+            "unit": "ns"
+          },
+          {
+            "name": "poolalloc-mt4 64B/fan1/1ep p50 latency",
+            "value": 40,
+            "unit": "ns"
+          },
+          {
+            "name": "poolalloc-mt4 64B/fan1/1ep p99 latency",
+            "value": 180,
+            "unit": "ns"
+          },
+          {
+            "name": "poolalloc-mt4 64B/fan1/1ep ns/delivery",
+            "value": 45.495,
+            "unit": "ns"
+          },
+          {
+            "name": "heapalloc-mt4 64B/fan1/1ep p50 latency",
+            "value": 30,
+            "unit": "ns"
+          },
+          {
+            "name": "heapalloc-mt4 64B/fan1/1ep p99 latency",
+            "value": 41,
+            "unit": "ns"
+          },
+          {
+            "name": "heapalloc-mt4 64B/fan1/1ep ns/delivery",
+            "value": 23.439,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-w1 64B/fan1/1ep p50 latency",
+            "value": 120,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-w1 64B/fan1/1ep p99 latency",
+            "value": 161,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-w1 64B/fan1/1ep ns/delivery",
+            "value": 115.593,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-w2 64B/fan1/1ep p50 latency",
+            "value": 310,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-w2 64B/fan1/1ep p99 latency",
+            "value": 1663,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-w2 64B/fan1/1ep ns/delivery",
+            "value": 224.108,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-w4 64B/fan1/1ep p50 latency",
+            "value": 450,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-w4 64B/fan1/1ep p99 latency",
+            "value": 11137,
+            "unit": "ns"
+          },
+          {
+            "name": "stream-w4 64B/fan1/1ep ns/delivery",
+            "value": 302.062,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan1/1ep p50 latency",
+            "value": 126.24,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan1/1ep ns/delivery",
+            "value": 128.03,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan2/1ep p50 latency",
+            "value": 129.859,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan2/1ep ns/delivery",
+            "value": 130.837,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan4/1ep p50 latency",
+            "value": 131.621,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan4/1ep ns/delivery",
+            "value": 132.844,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan8/1ep p50 latency",
+            "value": 134.398,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan8/1ep ns/delivery",
+            "value": 135.621,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan16/1ep p50 latency",
+            "value": 143.668,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan16/1ep ns/delivery",
+            "value": 144.84,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan32/1ep p50 latency",
+            "value": 160.98,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan32/1ep ns/delivery",
+            "value": 162.455,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan64/1ep p50 latency",
+            "value": 195.797,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-fixed 61B/fan64/1ep ns/delivery",
+            "value": 197.508,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan1/1ep p50 latency",
+            "value": 126.145,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan1/1ep ns/delivery",
+            "value": 127.357,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan2/2ep p50 latency",
+            "value": 127.963,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan2/2ep ns/delivery",
+            "value": 129.168,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan4/4ep p50 latency",
+            "value": 133.184,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan4/4ep ns/delivery",
+            "value": 134.3,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan8/8ep p50 latency",
+            "value": 138.213,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan8/8ep ns/delivery",
+            "value": 139.357,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan16/16ep p50 latency",
+            "value": 147.875,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan16/16ep ns/delivery",
+            "value": 149.053,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan32/32ep p50 latency",
+            "value": 164.5,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan32/32ep ns/delivery",
+            "value": 166.049,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan64/64ep p50 latency",
+            "value": 195.25,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-scan 61B/fan64/64ep ns/delivery",
+            "value": 200.005,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan1/1ep p50 latency",
+            "value": 200.727,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan1/1ep ns/delivery",
+            "value": 202.392,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan2/1ep p50 latency",
+            "value": 201.863,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan2/1ep ns/delivery",
+            "value": 203.706,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan4/1ep p50 latency",
+            "value": 207.262,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan4/1ep ns/delivery",
+            "value": 209.013,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan8/1ep p50 latency",
+            "value": 210.152,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan8/1ep ns/delivery",
+            "value": 212.167,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan16/1ep p50 latency",
+            "value": 219.152,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan16/1ep ns/delivery",
+            "value": 221.072,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan32/1ep p50 latency",
+            "value": 235.387,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan32/1ep ns/delivery",
+            "value": 237.644,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan64/1ep p50 latency",
+            "value": 270.281,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl 61B/fan64/1ep ns/delivery",
+            "value": 272.708,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan1/1ep p50 latency",
+            "value": 118.342,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan1/1ep ns/delivery",
+            "value": 115.04,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan2/2ep p50 latency",
+            "value": 118.52,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan2/2ep ns/delivery",
+            "value": 115.385,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan4/4ep p50 latency",
+            "value": 118.58,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan4/4ep ns/delivery",
+            "value": 115.485,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan8/8ep p50 latency",
+            "value": 119.174,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan8/8ep ns/delivery",
+            "value": 117.016,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan16/16ep p50 latency",
+            "value": 119.641,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan16/16ep ns/delivery",
+            "value": 116.44,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan32/32ep p50 latency",
+            "value": 127.707,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan32/32ep ns/delivery",
+            "value": 128.774,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan64/64ep p50 latency",
+            "value": 142.277,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair 54B/fan64/64ep ns/delivery",
+            "value": 143.786,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan1/1ep p50 latency",
+            "value": 186.473,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan1/1ep ns/delivery",
+            "value": 182.78,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan2/2ep p50 latency",
+            "value": 187.012,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan2/2ep ns/delivery",
+            "value": 183.366,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan4/4ep p50 latency",
+            "value": 187.375,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan4/4ep ns/delivery",
+            "value": 186.107,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan8/8ep p50 latency",
+            "value": 188.422,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan8/8ep ns/delivery",
+            "value": 188.085,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan16/16ep p50 latency",
+            "value": 192.004,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan16/16ep ns/delivery",
+            "value": 194.354,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan32/32ep p50 latency",
+            "value": 195.25,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan32/32ep ns/delivery",
+            "value": 197.036,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan64/64ep p50 latency",
+            "value": 211.523,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl 54B/fan64/64ep ns/delivery",
+            "value": 213.687,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-resolve 61B/fan1/1ep p50 latency",
+            "value": 38.998,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-resolve-legacy 79B/fan1/1ep p50 latency",
+            "value": 49.526,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-rebuild 61B/fan1/1ep p50 latency",
+            "value": 25.963,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 64B/fan1/1ep p50 latency",
+            "value": 126.084,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 64B/fan1/1ep ns/delivery",
+            "value": 127.197,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 984B/fan1/1ep p50 latency",
+            "value": 128.412,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 984B/fan1/1ep ns/delivery",
+            "value": 129.37,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 985B/fan1/1ep p50 latency",
+            "value": 126.145,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 985B/fan1/1ep ns/delivery",
+            "value": 127.296,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 1024B/fan1/1ep p50 latency",
+            "value": 129.586,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 1024B/fan1/1ep ns/delivery",
+            "value": 130.923,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 4096B/fan1/1ep p50 latency",
+            "value": 125.869,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 4096B/fan1/1ep ns/delivery",
+            "value": 136.04,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 16384B/fan1/1ep p50 latency",
+            "value": 128.334,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 16384B/fan1/1ep ns/delivery",
+            "value": 129.706,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 65536B/fan1/1ep p50 latency",
+            "value": 125.93,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-value 65536B/fan1/1ep ns/delivery",
+            "value": 127.13,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 64B/fan1/1ep p50 latency",
+            "value": 200.766,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 64B/fan1/1ep ns/delivery",
+            "value": 202.574,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 984B/fan1/1ep p50 latency",
+            "value": 200.297,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 984B/fan1/1ep ns/delivery",
+            "value": 202.049,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 985B/fan1/1ep p50 latency",
+            "value": 202.562,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 985B/fan1/1ep ns/delivery",
+            "value": 204.346,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 1024B/fan1/1ep p50 latency",
+            "value": 200.648,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 1024B/fan1/1ep ns/delivery",
+            "value": 202.625,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 4096B/fan1/1ep p50 latency",
+            "value": 200.805,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 4096B/fan1/1ep ns/delivery",
+            "value": 202.512,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 16384B/fan1/1ep p50 latency",
+            "value": 199.082,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 16384B/fan1/1ep ns/delivery",
+            "value": 200.835,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 65536B/fan1/1ep p50 latency",
+            "value": 200.098,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-acl-value 65536B/fan1/1ep ns/delivery",
+            "value": 202.149,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 64B/fan1/1ep p50 latency",
+            "value": 186.551,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 64B/fan1/1ep ns/delivery",
+            "value": 182.295,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 984B/fan1/1ep p50 latency",
+            "value": 180.633,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 984B/fan1/1ep ns/delivery",
+            "value": 180.25,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 985B/fan1/1ep p50 latency",
+            "value": 185.969,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 985B/fan1/1ep ns/delivery",
+            "value": 181.744,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 1024B/fan1/1ep p50 latency",
+            "value": 186.383,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 1024B/fan1/1ep ns/delivery",
+            "value": 182.431,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 4096B/fan1/1ep p50 latency",
+            "value": 186.152,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 4096B/fan1/1ep ns/delivery",
+            "value": 182.578,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 16384B/fan1/1ep p50 latency",
+            "value": 174.117,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 16384B/fan1/1ep ns/delivery",
+            "value": 180.462,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 65536B/fan1/1ep p50 latency",
+            "value": 185.98,
+            "unit": "ns"
+          },
+          {
+            "name": "fwd-demux-pair-acl-value 65536B/fan1/1ep ns/delivery",
+            "value": 182.565,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 4B/fan1/1ep p50 latency",
+            "value": 426.25,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 4B/fan1/1ep ns/delivery",
+            "value": 433.622,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 4B/fan1/1ep p50 latency",
+            "value": 119.414,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 4B/fan1/1ep ns/delivery",
+            "value": 120.188,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 64B/fan1/1ep p50 latency",
+            "value": 422.266,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 64B/fan1/1ep ns/delivery",
+            "value": 427.874,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 64B/fan1/1ep p50 latency",
+            "value": 118.893,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 64B/fan1/1ep ns/delivery",
+            "value": 118.407,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 512B/fan1/1ep p50 latency",
+            "value": 440.109,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 512B/fan1/1ep ns/delivery",
+            "value": 444.543,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 512B/fan1/1ep p50 latency",
+            "value": 119.59,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 512B/fan1/1ep ns/delivery",
+            "value": 120.613,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 984B/fan1/1ep p50 latency",
+            "value": 446.906,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 984B/fan1/1ep ns/delivery",
+            "value": 450.946,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 984B/fan1/1ep p50 latency",
+            "value": 119.375,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 984B/fan1/1ep ns/delivery",
+            "value": 120.147,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 985B/fan1/1ep p50 latency",
+            "value": 445.109,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 985B/fan1/1ep ns/delivery",
+            "value": 449.144,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 985B/fan1/1ep p50 latency",
+            "value": 117.961,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 985B/fan1/1ep ns/delivery",
+            "value": 117.83,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 1024B/fan1/1ep p50 latency",
+            "value": 445.188,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 1024B/fan1/1ep ns/delivery",
+            "value": 450.173,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 1024B/fan1/1ep p50 latency",
+            "value": 119.688,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 1024B/fan1/1ep ns/delivery",
+            "value": 120.348,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 4096B/fan1/1ep p50 latency",
+            "value": 484.773,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 4096B/fan1/1ep ns/delivery",
+            "value": 489.234,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 4096B/fan1/1ep p50 latency",
+            "value": 119.355,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 4096B/fan1/1ep ns/delivery",
+            "value": 120.118,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 16384B/fan1/1ep p50 latency",
+            "value": 748.812,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 16384B/fan1/1ep ns/delivery",
+            "value": 761.415,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 16384B/fan1/1ep p50 latency",
+            "value": 119.748,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 16384B/fan1/1ep ns/delivery",
+            "value": 120.54,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 65536B/fan1/1ep p50 latency",
+            "value": 1769.5,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-terminus 65536B/fan1/1ep ns/delivery",
+            "value": 1786.177,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 65536B/fan1/1ep p50 latency",
+            "value": 117.295,
+            "unit": "ns"
+          },
+          {
+            "name": "chain-forward 65536B/fan1/1ep ns/delivery",
+            "value": 117.268,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1/1ep p50 latency",
+            "value": 175,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1/1ep p99 latency",
+            "value": 196,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1/1ep ns/delivery",
+            "value": 157.938,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8/1ep p50 latency",
+            "value": 551,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8/1ep p99 latency",
+            "value": 621,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8/1ep ns/delivery",
+            "value": 70.753,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan128/1ep p50 latency",
+            "value": 7632,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan128/1ep p99 latency",
+            "value": 8313,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan128/1ep ns/delivery",
+            "value": 60.057,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1024/1ep p50 latency",
+            "value": 57816,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1024/1ep p99 latency",
+            "value": 69873,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1024/1ep ns/delivery",
+            "value": 57.197,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8192/1ep p50 latency",
+            "value": 674115,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8192/1ep p99 latency",
+            "value": 734774,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8192/1ep ns/delivery",
+            "value": 84.551,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 1B/fan1/1ep p50 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 1B/fan1/1ep p99 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 1B/fan1/1ep ns/delivery",
+            "value": 155.507,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 8B/fan1/1ep p50 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 8B/fan1/1ep p99 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 8B/fan1/1ep ns/delivery",
+            "value": 158.852,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 1024B/fan1/1ep p50 latency",
+            "value": 150,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 1024B/fan1/1ep p99 latency",
+            "value": 151,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 1024B/fan1/1ep ns/delivery",
+            "value": 123.026,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 8192B/fan1/1ep p50 latency",
+            "value": 150,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 8192B/fan1/1ep p99 latency",
+            "value": 161,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 8192B/fan1/1ep ns/delivery",
+            "value": 123.601,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 984B/fan1/1ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 984B/fan1/1ep p99 latency",
+            "value": 211,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 984B/fan1/1ep ns/delivery",
+            "value": 170.096,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 985B/fan1/1ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 985B/fan1/1ep p99 latency",
+            "value": 201,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 985B/fan1/1ep ns/delivery",
+            "value": 168.354,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 4096B/fan1/1ep p50 latency",
+            "value": 140,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 4096B/fan1/1ep p99 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 4096B/fan1/1ep ns/delivery",
+            "value": 123.223,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 16384B/fan1/1ep p50 latency",
+            "value": 191,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 16384B/fan1/1ep p99 latency",
+            "value": 230,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 16384B/fan1/1ep ns/delivery",
+            "value": 123.057,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 65536B/fan1/1ep p50 latency",
+            "value": 200,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 65536B/fan1/1ep p99 latency",
+            "value": 230,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 65536B/fan1/1ep ns/delivery",
+            "value": 124.869,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 2B/fan1/1ep p50 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 2B/fan1/1ep p99 latency",
+            "value": 230,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 2B/fan1/1ep ns/delivery",
+            "value": 155.977,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 3B/fan1/1ep p50 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 3B/fan1/1ep p99 latency",
+            "value": 191,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 3B/fan1/1ep ns/delivery",
+            "value": 157.131,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 4B/fan1/1ep p50 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 4B/fan1/1ep p99 latency",
+            "value": 191,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 4B/fan1/1ep ns/delivery",
+            "value": 157.374,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 6B/fan1/1ep p50 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 6B/fan1/1ep p99 latency",
+            "value": 191,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 6B/fan1/1ep ns/delivery",
+            "value": 156.539,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 11B/fan1/1ep p50 latency",
+            "value": 170,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 11B/fan1/1ep p99 latency",
+            "value": 191,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 11B/fan1/1ep ns/delivery",
+            "value": 157.049,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 16B/fan1/1ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 16B/fan1/1ep p99 latency",
+            "value": 220,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 16B/fan1/1ep ns/delivery",
+            "value": 173.126,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 23B/fan1/1ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 23B/fan1/1ep p99 latency",
+            "value": 211,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 23B/fan1/1ep ns/delivery",
+            "value": 176.148,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 32B/fan1/1ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 32B/fan1/1ep p99 latency",
+            "value": 211,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 32B/fan1/1ep ns/delivery",
+            "value": 172.161,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 45B/fan1/1ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 45B/fan1/1ep p99 latency",
+            "value": 211,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 45B/fan1/1ep ns/delivery",
+            "value": 175.644,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 91B/fan1/1ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 91B/fan1/1ep p99 latency",
+            "value": 220,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 91B/fan1/1ep ns/delivery",
+            "value": 172.868,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 128B/fan1/1ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 128B/fan1/1ep p99 latency",
+            "value": 211,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 128B/fan1/1ep ns/delivery",
+            "value": 174.591,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 181B/fan1/1ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 181B/fan1/1ep p99 latency",
+            "value": 220,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 181B/fan1/1ep ns/delivery",
+            "value": 178.587,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 256B/fan1/1ep p50 latency",
+            "value": 200,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 256B/fan1/1ep p99 latency",
+            "value": 221,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 256B/fan1/1ep ns/delivery",
+            "value": 184.012,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 362B/fan1/1ep p50 latency",
+            "value": 200,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 362B/fan1/1ep p99 latency",
+            "value": 231,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 362B/fan1/1ep ns/delivery",
+            "value": 181.264,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 512B/fan1/1ep p50 latency",
+            "value": 200,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 512B/fan1/1ep p99 latency",
+            "value": 221,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 512B/fan1/1ep ns/delivery",
+            "value": 182.158,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 724B/fan1/1ep p50 latency",
+            "value": 200,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 724B/fan1/1ep p99 latency",
+            "value": 240,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 724B/fan1/1ep ns/delivery",
+            "value": 183.669,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 1448B/fan1/1ep p50 latency",
+            "value": 160,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 1448B/fan1/1ep p99 latency",
+            "value": 181,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 1448B/fan1/1ep ns/delivery",
+            "value": 136.178,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 2048B/fan1/1ep p50 latency",
+            "value": 160,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 2048B/fan1/1ep p99 latency",
+            "value": 181,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 2048B/fan1/1ep ns/delivery",
+            "value": 136.373,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 2896B/fan1/1ep p50 latency",
+            "value": 160,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 2896B/fan1/1ep p99 latency",
+            "value": 181,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 2896B/fan1/1ep ns/delivery",
+            "value": 136.984,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 5793B/fan1/1ep p50 latency",
+            "value": 160,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 5793B/fan1/1ep p99 latency",
+            "value": 181,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 5793B/fan1/1ep ns/delivery",
+            "value": 136.593,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 11585B/fan1/1ep p50 latency",
+            "value": 181,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 11585B/fan1/1ep p99 latency",
+            "value": 231,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 11585B/fan1/1ep ns/delivery",
+            "value": 135.956,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 23170B/fan1/1ep p50 latency",
+            "value": 210,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 23170B/fan1/1ep p99 latency",
+            "value": 241,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 23170B/fan1/1ep ns/delivery",
+            "value": 135.927,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 32768B/fan1/1ep p50 latency",
+            "value": 210,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 32768B/fan1/1ep p99 latency",
+            "value": 241,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 32768B/fan1/1ep ns/delivery",
+            "value": 135.836,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 46341B/fan1/1ep p50 latency",
+            "value": 220,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 46341B/fan1/1ep p99 latency",
+            "value": 251,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 46341B/fan1/1ep ns/delivery",
+            "value": 135.893,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1ep p50 latency",
+            "value": 320,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1ep p99 latency",
+            "value": 341,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1ep ns/delivery",
+            "value": 303.268,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8ep p50 latency",
+            "value": 431,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8ep p99 latency",
+            "value": 481,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8ep ns/delivery",
+            "value": 415.004,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/128ep p50 latency",
+            "value": 2474,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/128ep p99 latency",
+            "value": 2924,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/128ep ns/delivery",
+            "value": 2472.695,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1024ep p50 latency",
+            "value": 21923,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1024ep p99 latency",
+            "value": 28432,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1024ep ns/delivery",
+            "value": 21135.84,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8192ep p50 latency",
+            "value": 250480,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8192ep p99 latency",
+            "value": 277360,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8192ep ns/delivery",
+            "value": 273597.811,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan16/1ep p50 latency",
+            "value": 951,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan16/1ep p99 latency",
+            "value": 1162,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan16/1ep ns/delivery",
+            "value": 59.112,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan32/1ep p50 latency",
+            "value": 1713,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan32/1ep p99 latency",
+            "value": 1923,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan32/1ep ns/delivery",
+            "value": 53.991,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan64/1ep p50 latency",
+            "value": 3555,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan64/1ep p99 latency",
+            "value": 4737,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan64/1ep ns/delivery",
+            "value": 56.793,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan256/1ep p50 latency",
+            "value": 14591,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan256/1ep p99 latency",
+            "value": 20992,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan256/1ep ns/delivery",
+            "value": 57.514,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan512/1ep p50 latency",
+            "value": 28552,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan512/1ep p99 latency",
+            "value": 35543,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh inproc 64B/fan512/1ep ns/delivery",
+            "value": 56.323,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-bound 64B/fan1/1ep p50 latency",
+            "value": 180,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-bound 64B/fan1/1ep p99 latency",
+            "value": 201,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-bound 64B/fan1/1ep ns/delivery",
+            "value": 160.897,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-addr 64B/fan1/1ep p50 latency",
+            "value": 291,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-addr 64B/fan1/1ep p99 latency",
+            "value": 311,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-addr 64B/fan1/1ep ns/delivery",
+            "value": 277.231,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-bound 64B/fan1/100ep p50 latency",
+            "value": 190,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-bound 64B/fan1/100ep p99 latency",
+            "value": 220,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-bound 64B/fan1/100ep ns/delivery",
+            "value": 174.907,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-addr 64B/fan1/100ep p50 latency",
+            "value": 2243,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-addr 64B/fan1/100ep p99 latency",
+            "value": 2414,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-addr 64B/fan1/100ep ns/delivery",
+            "value": 2109.384,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-bound 64B/fan1/10000ep p50 latency",
+            "value": 271,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-bound 64B/fan1/10000ep p99 latency",
+            "value": 891,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-bound 64B/fan1/10000ep ns/delivery",
+            "value": 345.668,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-addr 64B/fan1/10000ep p50 latency",
+            "value": 353202,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-addr 64B/fan1/10000ep p99 latency",
+            "value": 395324,
+            "unit": "ns"
+          },
+          {
+            "name": "zenoh topics-addr 64B/fan1/10000ep ns/delivery",
+            "value": 362976.407,
+            "unit": "ns"
+          },
+          {
+            "name": "heap bytes per forward (probe)",
+            "value": 0,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per forward (probe)",
+            "value": 0,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per observed (probe)",
+            "value": 0,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per observed (probe)",
+            "value": 0,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per terminus (probe)",
+            "value": 0,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per terminus (probe)",
+            "value": 0,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per fanout_wide (probe)",
+            "value": 0,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per fanout_wide (probe)",
+            "value": 0,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per vertex (probe)",
+            "value": 112,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per vertex (probe)",
+            "value": 2,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per vertex_value (probe)",
+            "value": 0,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per vertex_value (probe)",
+            "value": 1,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per session_anchor (probe)",
+            "value": 512,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per session_anchor (probe)",
+            "value": 0,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per session_anchor_churn (probe)",
+            "value": 0,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per session_anchor_churn (probe)",
+            "value": 0,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per vertex_app5 (probe)",
+            "value": 536,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per vertex_app5 (probe)",
+            "value": 11,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per vertex_app5_static (probe)",
+            "value": 240,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per vertex_app5_static (probe)",
+            "value": 4,
+            "unit": "allocs"
+          },
+          {
+            "name": "heap bytes per reg_escape (probe)",
+            "value": 0,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap allocs per reg_escape (probe)",
+            "value": 0,
+            "unit": "allocs"
+          },
+          {
+            "name": "live bytes per edge_callback (ramprobe)",
+            "value": 216.312,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap blocks per edge_callback (ramprobe)",
+            "value": 1.023,
+            "unit": "blocks"
+          },
+          {
+            "name": "live bytes per edge_wire (ramprobe)",
+            "value": 472.593,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap blocks per edge_wire (ramprobe)",
+            "value": 6.023,
+            "unit": "blocks"
+          },
+          {
+            "name": "live bytes per link (ramprobe)",
+            "value": 256.031,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap blocks per link (ramprobe)",
+            "value": 0.003,
+            "unit": "blocks"
+          },
+          {
+            "name": "live bytes per vertex_value_1k (ramprobe)",
+            "value": 1120,
+            "unit": "bytes"
+          },
+          {
+            "name": "heap blocks per vertex_value_1k (ramprobe)",
+            "value": 2,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per owned write 64B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per owned write 64B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per owned write 984B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per owned write 984B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per owned write 985B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per owned write 985B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per owned write 1024B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per owned write 1024B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per owned write 4096B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per owned write 4096B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per owned write 16384B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per owned write 16384B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per owned write 65536B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per owned write 65536B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per rope2 write 64B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per rope2 write 64B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per rope2 write 984B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per rope2 write 984B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per rope2 write 985B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per rope2 write 985B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per rope2 write 1024B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per rope2 write 1024B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per rope2 write 4096B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per rope2 write 4096B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per rope2 write 16384B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per rope2 write 16384B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "seam blocks per rope2 write 65536B",
+            "value": 1,
+            "unit": "blocks"
+          },
+          {
+            "name": "heap blocks per rope2 write 65536B",
+            "value": 0,
+            "unit": "blocks"
+          },
+          {
+            "name": "class bytes per write 64B (seamclass)",
+            "value": 160,
+            "unit": "bytes"
+          },
+          {
+            "name": "requested bytes per write 64B (seamclass)",
+            "value": 152,
+            "unit": "bytes"
+          },
+          {
+            "name": "class bytes per write 984B (seamclass)",
+            "value": 1200,
+            "unit": "bytes"
+          },
+          {
+            "name": "requested bytes per write 984B (seamclass)",
+            "value": 1072,
+            "unit": "bytes"
+          },
+          {
+            "name": "class bytes per write 985B (seamclass)",
+            "value": 1200,
+            "unit": "bytes"
+          },
+          {
+            "name": "requested bytes per write 985B (seamclass)",
+            "value": 1073,
+            "unit": "bytes"
+          },
+          {
+            "name": "class bytes per write 1024B (seamclass)",
+            "value": 1200,
+            "unit": "bytes"
+          },
+          {
+            "name": "requested bytes per write 1024B (seamclass)",
+            "value": 1112,
+            "unit": "bytes"
+          },
+          {
+            "name": "class bytes per write 4096B (seamclass)",
+            "value": 4656,
+            "unit": "bytes"
+          },
+          {
+            "name": "requested bytes per write 4096B (seamclass)",
+            "value": 4184,
+            "unit": "bytes"
+          },
+          {
+            "name": "class bytes per write 16384B (seamclass)",
+            "value": 18480,
+            "unit": "bytes"
+          },
+          {
+            "name": "requested bytes per write 16384B (seamclass)",
+            "value": 16472,
+            "unit": "bytes"
+          },
+          {
+            "name": "class bytes per write 65536B (seamclass)",
+            "value": 65632,
+            "unit": "bytes"
+          },
+          {
+            "name": "requested bytes per write 65536B (seamclass)",
+            "value": 65624,
+            "unit": "bytes"
+          },
+          {
+            "name": "stripe sections per STREAM write (w1)",
+            "value": 1,
+            "unit": "sections"
+          },
+          {
+            "name": "stripe sections per STREAM write (spill)",
+            "value": 1,
+            "unit": "sections"
+          },
+          {
+            "name": "stripe sections per STREAM write (defer)",
+            "value": 1,
+            "unit": "sections"
+          },
+          {
+            "name": "stripe sections per STREAM write (w4)",
+            "value": 1,
+            "unit": "sections"
+          },
+          {
+            "name": "stripe sections per STREAM write (w2)",
+            "value": 1,
+            "unit": "sections"
+          },
+          {
+            "name": "inproc-fan RSS delta",
+            "value": 1888,
+            "unit": "KB"
+          },
+          {
+            "name": "inproc-size RSS delta",
+            "value": 3016,
+            "unit": "KB"
+          },
+          {
+            "name": "inproc-borrow RSS delta",
+            "value": 1900,
+            "unit": "KB"
+          },
+          {
+            "name": "inproc-path RSS delta",
+            "value": 11984,
+            "unit": "KB"
+          },
+          {
+            "name": "mixed RSS delta",
+            "value": 1544,
+            "unit": "KB"
+          },
+          {
+            "name": "path-parse RSS delta",
+            "value": 216,
+            "unit": "KB"
+          },
+          {
+            "name": "eptype RSS delta",
+            "value": 2560,
+            "unit": "KB"
+          },
+          {
+            "name": "fold RSS delta",
+            "value": 152,
+            "unit": "KB"
+          },
+          {
+            "name": "deliver RSS delta",
+            "value": 4672,
+            "unit": "KB"
+          },
+          {
+            "name": "lkv RSS delta",
+            "value": 2572,
+            "unit": "KB"
+          },
+          {
+            "name": "inproc-pool RSS delta",
+            "value": 6944,
+            "unit": "KB"
+          },
+          {
+            "name": "target RSS delta",
+            "value": 11320,
+            "unit": "KB"
+          },
+          {
+            "name": "inproc-fan-mid RSS delta",
+            "value": 472,
+            "unit": "KB"
+          },
+          {
+            "name": "lkv-aged RSS delta",
+            "value": 16920,
+            "unit": "KB"
+          },
+          {
+            "name": "cliff-heap RSS delta",
+            "value": 532,
+            "unit": "KB"
+          },
+          {
+            "name": "cliff-pool RSS delta",
+            "value": 152,
+            "unit": "KB"
+          },
+          {
+            "name": "stream RSS delta",
+            "value": 468,
+            "unit": "KB"
+          },
+          {
+            "name": "alloc-seam RSS delta",
+            "value": 2344,
+            "unit": "KB"
+          },
+          {
+            "name": "inproc-pool-batch RSS delta",
+            "value": 5396,
+            "unit": "KB"
+          },
+          {
+            "name": "dce-canary RSS delta",
+            "value": 148,
+            "unit": "KB"
+          },
+          {
+            "name": "topics RSS delta",
+            "value": 14208,
+            "unit": "KB"
+          },
+          {
+            "name": "inproc-mt RSS delta",
+            "value": 13244,
+            "unit": "KB"
+          },
+          {
+            "name": "acl RSS delta",
+            "value": 6904,
+            "unit": "KB"
+          },
+          {
+            "name": "syncpool RSS delta",
+            "value": 12844,
+            "unit": "KB"
+          },
+          {
+            "name": "stream-mt RSS delta",
+            "value": 3752,
+            "unit": "KB"
+          },
+          {
+            "name": "forward-demux RSS delta",
+            "value": 0,
+            "unit": "KB"
+          },
+          {
+            "name": "chain-delivery RSS delta",
+            "value": 0,
+            "unit": "KB"
+          },
+          {
+            "name": "zenoh-inproc-fan RSS delta",
+            "value": 10756,
+            "unit": "KB"
+          },
+          {
+            "name": "zenoh-inproc-size RSS delta",
+            "value": 8372,
+            "unit": "KB"
+          },
+          {
+            "name": "zenoh-inproc-path RSS delta",
+            "value": 35864,
+            "unit": "KB"
+          },
+          {
+            "name": "zenoh-inproc-fan-mid RSS delta",
+            "value": 6440,
+            "unit": "KB"
+          },
+          {
+            "name": "zenoh-topics RSS delta",
+            "value": 44928,
             "unit": "KB"
           }
         ]
