@@ -997,6 +997,42 @@ class GateTimesFamilyByFamily(unittest.TestCase):
                                   self.bins(pathlib.Path(d), "b"), pairs)
         return s, seen
 
+    def test_each_run_is_a_fresh_copy_of_its_arms_binary(self):
+        """#2215: no two runs of a step share a file, none runs the build file itself, every
+        copy holds its binary's bytes, and the copies are gone once the step is done."""
+        runs: list[tuple[pathlib.Path, bytes]] = []
+        with tempfile.TemporaryDirectory() as d:
+            cand, base = self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b")
+            for arm in (cand, base):
+                for key, path in arm.items():
+                    path.write_bytes(f"{path.parent.name}:{key}".encode())
+
+            def fake(argv, timeout, score_pressure=True, cpus=None):
+                exe = pathlib.Path(argv[0])
+                runs.append((exe, exe.read_bytes()))
+                fam = argv[2] if len(argv) > 2 else exe.name
+                row = _row("inproc", 64, 1, 1) if fam == "inproc-fan" else ""
+                return _measurement(argv, row + "\n", True)
+            with unittest.mock.patch.object(pg, "list_families", lambda p: self.FAMILIES), \
+                    unittest.mock.patch.object(pg, "timed_run", fake), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                pg.paired_samples(cand, base, 4)
+            builds = {p: p.read_bytes() for arm in (cand, base) for p in arm.values()}
+            for exe, data in runs:
+                self.assertNotIn(exe, builds, "a run used the build file itself")
+                src = next(p for p in builds if p.name == exe.name and
+                           p.parent == exe.parent.parent.parent)
+                self.assertEqual(data, builds[src], f"{exe} is not a copy of {src}")
+            self.assertEqual(len({exe for exe, _ in runs}), len(runs), "a copy was reused")
+            self.assertEqual(list(pathlib.Path(d).rglob(pg.PAIR_COPY_DIR)), [],
+                             "the copies outlived their step")
+
+    def test_the_baselines_spread_across_its_copies_is_named(self):
+        base = {"store-lat-narrow-net-fwd/32/1/1": [{"p50_ns": 220.0}, {"p50_ns": 265.0}],
+                "inproc/64/1/1": [{"p50_ns": 100.0}, {"p50_ns": 104.0}]}
+        self.assertEqual(pg.placement_spread(base),
+                         [("store-lat-narrow-net-fwd/32/1/1", 220.0, 265.0)])
+
     def test_each_family_runs_its_pairs_back_to_back_abba(self):
         _, seen = self.run_paired(pairs=4)
         fan = [arm for fam, arm in seen if fam == "inproc-fan"]

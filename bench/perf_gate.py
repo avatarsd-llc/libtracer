@@ -65,6 +65,7 @@ import os
 import pathlib
 import random
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -1000,6 +1001,46 @@ def leg_factor(k: str, leg: str, null: dict[str, dict[str, float]]) -> tuple[flo
     return (1 / (1 + t) if lower else 1 + t), False, "null"
 
 
+# Every timed run is a FRESH COPY of its arm's binary (#2215). A process's speed can depend
+# on where its executable's pages sit in memory, and those pages stay where they are for
+# as long as the file does, so one build file is one placement for every pair of a job.
+# Measured on the bench host: eight byte-identical copies of main's bench_store_sweep read
+# store-lat-narrow-net-fwd at 220-235 ns, except one copy at 265 ns in every run of it; and
+# PRs whose binary was byte-identical to their baseline's (#2211) or whose hot path was
+# (#2201) failed that row and inproc-target-handler 8/8 with disjoint ranges. With a copy
+# per run, the pairs sample as many placements as they have runs, so one unlucky file moves
+# one pair instead of all of them. The copies sit beside the binary (so a sibling lookup
+# still resolves) and are removed when the step ends; a step's copies all live until then,
+# so no two runs of one step can share a file's pages.
+PAIR_COPY_DIR = ".pair-copies"
+# The baseline arm is ONE binary run from as many copies as it has pairs, so its spread on
+# a row is a placement A/A at no extra cost; a row past this is named under the samples.
+PLACEMENT_NOTE = 1.10
+
+
+def fresh_copy(src: pathlib.Path, n: int) -> pathlib.Path:
+    """@brief A new file holding @p src's bytes (#2215), the job's @p n-th; @p src
+    itself when it does not exist, so `run_step` still prints its build hint."""
+    if not src.exists():
+        return src
+    d = src.parent / PAIR_COPY_DIR / str(n)  # its own directory: the name is unchanged
+    d.mkdir(parents=True, exist_ok=True)
+    dst = d / src.name
+    shutil.copy2(src, dst)
+    return dst
+
+
+def placement_spread(base: dict[str, list[dict]]) -> list[tuple[str, float, float]]:
+    """@brief The baseline arm's rows whose p50 spreads past @ref PLACEMENT_NOTE across its
+    copies: (key, min, max). Every sample of that arm is the same bytes (#2215)."""
+    out = []
+    for k, vs in sorted(base.items()):
+        p = [v["p50_ns"] for v in vs if v.get("p50_ns")]
+        if len(p) > 1 and min(p) > 0 and max(p) / min(p) > PLACEMENT_NOTE:
+            out.append((k, min(p), max(p)))
+    return out
+
+
 def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
                    pairs: int, plan: list[Step] | None = None) -> dict:
     """@brief Run candidate and baseline interleaved, family by family, ABBA.
@@ -1014,24 +1055,34 @@ def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
     print(f"  {len(plan)} steps ({n_multi} multi-threaded), {max(1, pairs)} ABBA pairs each; "
           f"single-threaded pinned to {','.join(map(str, CPU_SINGLE)) if CPU_SINGLE else 'nothing (unpinned)'}")
     arms = {"cand": (0, cand), "base": (1, base)}
+    n = 0  # numbers every run's copy, so no path repeats across the job
     for step in plan:
         clean_pairs, gated = 0, False
-        for i in range(max(1, pairs)):
-            order = ["base", "cand"] if i % 2 == 0 else ["cand", "base"]
-            got, ok = {}, True
-            for arm in order:
-                idx, bins = arms[arm]
-                if idx in step.args and step.key in bins:
-                    rows, clean = run_step(bins[step.key], step, idx)
-                    got[arm] = step_metrics(step.key, rows)
-                    ok = ok and clean
-                    gated = gated or bool(got[arm])
-            if not ok:
-                continue  # contended through every re-run: drop the pair, both arms
-            clean_pairs += 1
-            for arm, kv in got.items():
-                for k, v in kv.items():
-                    out[arm].setdefault(k, []).append(v)
+        copied: set[pathlib.Path] = set()
+        try:
+            for i in range(max(1, pairs)):
+                order = ["base", "cand"] if i % 2 == 0 else ["cand", "base"]
+                got, ok = {}, True
+                for arm in order:
+                    idx, bins = arms[arm]
+                    if idx in step.args and step.key in bins:
+                        n += 1
+                        exe = fresh_copy(bins[step.key], n)
+                        if exe != bins[step.key]:
+                            copied.add(exe.parent.parent)
+                        rows, clean = run_step(exe, step, idx)
+                        got[arm] = step_metrics(step.key, rows)
+                        ok = ok and clean
+                        gated = gated or bool(got[arm])
+                if not ok:
+                    continue  # contended through every re-run: drop the pair, both arms
+                clean_pairs += 1
+                for arm, kv in got.items():
+                    for k, v in kv.items():
+                        out[arm].setdefault(k, []).append(v)
+        finally:
+            for d in copied:
+                shutil.rmtree(d, ignore_errors=True)
         lost = max(1, pairs) - clean_pairs
         if lost:
             out["dropped"][step.label] = lost
@@ -1040,6 +1091,9 @@ def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
                 out["inconclusive"].append(
                     f"{step.label}: only {clean_pairs}/{max(1, pairs)} pairs ran clean "
                     f"(more than {MAX_DROPPED_PAIRS} contended)")
+    for k, lo, hi in placement_spread(out["base"]):
+        print(f"  placement A/A: {k} p50 {lo:.1f}..{hi:.1f} ns (x{hi / lo:.3f}) across "
+              f"the baseline's copies")
     return out
 
 
