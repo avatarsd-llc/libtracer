@@ -1,0 +1,12 @@
+{
+  "name": "batch-packed-malformed",
+  "category": "stream",
+  "hex": "80401A000C00080000002A36FE9C971701000A00FFFF0000FF00FF00FF00",
+  "total_bytes": 30,
+  "decoded": {
+    "type": "0x80 BATCH",
+    "structured": true,
+    "meaning": "BATCH{ TIME u64=1700000000000000000, VALUE[10] } — a packed batch whose block length (10) is not a multiple of the descriptor's width (4): MALFORMED under RFC-0025 §4.1.4 (Amendment 5), so a consumer delivers NONE of its samples",
+    "note": "the codec still decodes and round-trips these bytes — malformed is a reader's answer about the packed convention, not a framing error (05-protocol-tlvs.md §User range). Delivering the two whole frames and dropping the tail is exactly what the rule forbids"
+  }
+}
