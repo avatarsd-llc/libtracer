@@ -8,7 +8,11 @@
  */
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdint>
+#include <iterator>
 #include <new>
 #include <span>
 
@@ -154,6 +158,144 @@ inline constexpr std::size_t kRxLoanValueOffset = sizeof(void*);
 [[nodiscard]] constexpr bool rx_loan_fits(std::size_t len, std::size_t cap,
                                           std::size_t align) noexcept {
     return cap >= kRxLoanBytes && len <= cap - kRxLoanBytes && align >= alignof(void*);
+}
+
+namespace detail {
+
+/** @brief The row step of every classed root's table: `slab_classes_valid` and the arena pool
+ *         both require rows that are multiples of 16, so rounding a request up to it never skips
+ *         a row. Fixed, not `alignof(std::max_align_t)`, which is 8 on Cortex-M and Xtensa. */
+inline constexpr std::size_t kClassGrain = 16;
+
+/**
+ * @brief The O(1) lookup for a slab build that binds its OWN class table (the default ladder is
+ *        answered by arithmetic and never builds it): a slot per 16 B up to the last row, then
+ *        one slot every larger request is clamped to. Instantiated only on that build.
+ */
+template <const auto& Rows>
+struct class_lookup_t {
+    static constexpr std::size_t kRows = std::size(Rows);
+    static constexpr std::size_t kSlots = Rows[kRows - 1] / kClassGrain + 2;
+    static_assert(kRows < 255, "the class lookup stores a row index in one byte");
+    static_assert(kSlots <= 8 * 1024 + 2,
+                  "the class lookup is one byte per 16 B up to the last row: keep the last row "
+                  "at or below 128 KiB");
+
+    /** @brief Slot @c q → the index of the smallest row of at least `q * 16` bytes; the last
+     *         slot → `kRows`, "past the table". */
+    static constexpr std::array<std::uint8_t, kSlots> kSlot = [] {
+        std::array<std::uint8_t, kSlots> t{};
+        std::size_t r = 0;
+        for (std::size_t q = 0; q + 1 < kSlots; ++q) {
+            while (r < kRows && Rows[r] < q * kClassGrain) ++r;
+            t[q] = static_cast<std::uint8_t>(r);
+        }
+        t[kSlots - 1] = static_cast<std::uint8_t>(kRows);
+        return t;
+    }();
+
+    /** @brief The rows, then a 0 the "past the table" index reads. */
+    static constexpr std::array<std::size_t, kRows + 1> kRowOr0 = [] {
+        std::array<std::size_t, kRows + 1> t{};
+        for (std::size_t i = 0; i < kRows; ++i) t[i] = Rows[i];
+        return t;
+    }();
+
+    /** @brief Clamp (a `min`), round up to 16 B, two loads, and a `max` with @p bytes for the
+     *         exact size above the last row. */
+    [[nodiscard]] static constexpr std::size_t ceiling(std::size_t bytes) noexcept {
+        const std::size_t clamped = std::min(bytes, (kSlots - 1) * kClassGrain);
+        return std::max(kRowOr0[kSlot[(clamped + kClassGrain - 1) / kClassGrain]], bytes);
+    }
+};
+
+/** @brief Whether @p Cfg binds the default ladder's table (an override may bind its own). */
+template <class Cfg>
+inline constexpr bool kDefaultLadder =
+    std::size(Cfg::kSizeClasses) == std::size(graph::default_config_t::kSizeClasses) &&
+    std::equal(std::begin(Cfg::kSizeClasses), std::end(Cfg::kSizeClasses),
+               std::begin(graph::default_config_t::kSizeClasses));
+
+/** @brief @ref class_ceiling for the configuration @p Cfg: a template, so only the arm the
+ *         build takes is instantiated, and no table is emitted where none is read. */
+template <class Cfg>
+[[nodiscard]] constexpr std::size_t class_ceiling_in(std::size_t bytes) noexcept {
+    if constexpr (kSlabPool && kDefaultLadder<Cfg>) {
+        return graph::default_config_t::size_classes_t::ceiling(bytes);
+    } else if constexpr (kSlabPool) {
+        return class_lookup_t<Cfg::kSizeClasses>::ceiling(bytes);
+    } else {
+        // The static arena and the heap root: the search the arena pool already runs
+        // (`class_of`) over the rows it already links, so no code or table is added for it. It
+        // runs on a receive (`rx_loan_free`), never on the store decision, where `share_fits`
+        // reads no class on these builds.
+        const auto& t = Cfg::kSizeClasses;
+        const auto* const it = std::lower_bound(std::begin(t), std::end(t), bytes);
+        return it == std::end(t) ? bytes : *it;
+    }
+}
+
+}  // namespace detail
+
+/**
+ * @brief The block a classed root (the slab pool and the static arena both carve by
+ *        `config_t::kSizeClasses`) draws for a @p bytes request: the smallest row that holds
+ *        it, or @p bytes itself above the last row, where the block is drawn at its exact size.
+ *
+ * On the slab build, O(1) and branch-free: the default ladder's own arithmetic
+ * (`size_class_ladder_t::ceiling`, no table), or, for a table the build binds itself, a
+ * compile-time 16 B lookup of it (two loads). On the arena and heap-root builds, a search of
+ * the rows the arena pool already links: it runs only on a receive there.
+ */
+[[nodiscard]] constexpr std::size_t class_ceiling(std::size_t bytes) noexcept {
+    return detail::class_ceiling_in<graph::config_t>(bytes);
+}
+
+/**
+ * @brief Whether this build's composed block source shares a stored value by default
+ *        (RFC-0022 Amendment 3): the copy-or-share trait, decided at compile time.
+ *
+ * - **Static arena and heap root: always.** The heap draws every block at its exact size, so a
+ *   copy never draws a block smaller than the one the value already sits in (the heap-root
+ *   default, resolved in #2143); the arena's fixed RAM is what both draws share.
+ * - **Slab pool: on a class fit.** It shares when a copy, a @p copy_block -byte block, would
+ *   draw a block no smaller than the @p held_block -byte block the value already sits in (a
+ *   class no smaller inside the table; above the last row, where blocks are exact, no fewer
+ *   bytes), and copies otherwise.
+ *
+ * On every source, `SIZE_MAX` for @p held_block means the value does not sit in one block (it
+ * spans several links, or its bytes are borrowed): it copies, so a default value is always one
+ * link. Branch-free: the slab build adds @ref class_ceiling's arithmetic and a compare, and
+ * the arena and heap builds keep the one `SIZE_MAX` compare.
+ */
+[[nodiscard]] constexpr bool share_fits(std::size_t held_block, std::size_t copy_block) noexcept {
+    if constexpr (kSlabPool) {
+        return (held_block != SIZE_MAX) & (held_block <= class_ceiling(copy_block));
+    } else {
+        (void)copy_block;
+        return held_block != SIZE_MAX;
+    }
+}
+
+/**
+ * @brief Whether a receive block for a @p len-byte frame carries the receive-loan reserve
+ *        (RFC-0028 §6.9): only where it costs nothing, that is, when the frame plus
+ *        @ref kRxLoanBytes lands in the same size class as the frame alone (resolved in #2143).
+ *
+ * Never on the heap root, whose blocks are exact, and never above the last class row.
+ */
+[[nodiscard]] constexpr bool rx_loan_free(std::size_t len, std::size_t align) noexcept {
+    if constexpr (kHeapRoot) {
+        (void)len;
+        (void)align;
+        return false;
+    } else {
+        // The reserved block fits the frame's own class: one ceiling, since the larger block's
+        // class matches exactly when it is no larger than the smaller block's. Above the table
+        // a ceiling is its own exact size, so the larger block never fits there.
+        return segment_block_bytes(len + kRxLoanBytes, align) <=
+               class_ceiling(segment_block_bytes(len, align));
+    }
 }
 
 /** @brief The one-block layout (see the declaration in `%backend.hpp`). */

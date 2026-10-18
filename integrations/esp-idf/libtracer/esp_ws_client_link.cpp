@@ -874,11 +874,11 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
 
 void esp_ws_client_link_t::deliver_owned(std::size_t len) {
     // ONE copy out of the read scratch into a block from the application's source, drawn
-    // through `alloc_rx` so a message large enough to be shared carries the RFC-0028 §6.9
-    // reserve and the terminus that stores it allocates nothing more. The copy is the
+    // through `alloc_rx` so a message carries the RFC-0028 §6.9 reserve where it is free and
+    // the terminus that shares it allocates nothing more. The copy is the
     // price of the IDF read API (see esp_ws_client_config_t::memory) and the same one the
     // host client pays from its decoded frame.
-    view::rx_block_t blk = view::alloc_rx(*rx_backend_, len, graph::kShareThresholdBytes);
+    view::rx_block_t blk = view::alloc_rx(*rx_backend_, len);
     if (!blk.seg) {
         // The source refused: a bounded pool doing its job. Never the heap — that would
         // hand back the footprint the injection bounds. The message is already off the

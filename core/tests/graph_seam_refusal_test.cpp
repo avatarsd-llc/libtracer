@@ -190,7 +190,7 @@ std::vector<std::byte> key_of(std::string_view p) {
 /**
  * @brief A policy-less registration at @p p (a plain `register_vertex_key`, which applies none)
  *        inherits nothing a refused one left on the placeholder: no app field (`gain` is
- *        undeclared), `LAST` retention and the default share threshold. It retires the vertex
+ *        undeclared), `LAST` retention and the default share hint. It retires the vertex
  *        again, so the sweep's retry finds a placeholder.
  */
 bool inherits_nothing(graph_t& g, std::string_view p) {
@@ -201,7 +201,7 @@ bool inherits_nothing(graph_t& g, std::string_view p) {
     const std::string field = std::string(p) + ":settings.app.gain";
     const bool clean = !g.write(*path_t::parse(field), make_value({0x01})) &&
                        g.retention(*h) == retention_t::LAST &&
-                       g.share_threshold_bytes(*h) == tr::graph::config_t::kShareThresholdBytes;
+                       g.share_hint(*h) == tr::graph::share_hint_t::DEFAULT;
     return g.retire(*h).has_value() && clean;
 }
 
@@ -230,7 +230,7 @@ void test_register() {
     report(drive<none_t>([](graph_t&) { return none_t{}; }, op, untouched), "register");
 }
 
-/** @brief Registration whose policy drops retention and moves the threshold: a refusal after
+/** @brief Registration whose policy drops retention and moves the share hint: a refusal after
  *         the policy landed leaves the placeholder with none of it (#1778 review). */
 void test_register_policy_reset() {
     std::printf("register_vertex — a refused registration leaves no policy on the placeholder:\n");
@@ -239,7 +239,7 @@ void test_register_policy_reset() {
     const auto op = [&rows](graph_t& g, none_t&) {
         vertex_policy_t p;
         p.retention = retention_t::NONE;
-        p.share_threshold_bytes = 0;
+        p.share_hint = tr::graph::share_hint_t::SHARE;
         p.ring_reliable = true;
         p.app_fields = {app_field_t{.name = "gain", .access = app_access_t::RW}};
         return verdict(g.register_vertex_key(key_of("/n/v"), role_t::STORED_VALUE, {}, std::move(p),
@@ -420,15 +420,15 @@ struct policy_state_t {
     bool ring_reliable = false;                       /**< @brief The §4.4 arm. */
     retention_t retention = retention_t::NONE;        /**< @brief What the vertex retains. */
     std::uint32_t depth = 0;                          /**< @brief The ring depth. */
-    std::size_t threshold = 0;                        /**< @brief The share threshold. */
+    tr::graph::share_hint_t hint{};                   /**< @brief The share hint. */
     std::size_t fields = 0;                           /**< @brief Installed app-field slots. */
     delivery_mode_t mode = delivery_mode_t::IF_NEWER; /**< @brief The delivery mode. */
 
     /** @brief Read every member off @p v. */
     static policy_state_t of(vertex_handle_t v) {
         const tr::graph::vertex_t* const x = std::bit_cast<tr::graph::vertex_t*>(v);
-        return {x->ring_source(),     x->ring_reliable(),         x->retention(),
-                x->retention_depth(), x->share_threshold_bytes(), x->app_field_slots().size(),
+        return {x->ring_source(),     x->ring_reliable(), x->retention(),
+                x->retention_depth(), x->share_hint(),    x->app_field_slots().size(),
                 x->delivery_mode()};
     }
     /** @brief Member-wise equality. */
@@ -455,7 +455,7 @@ void test_set_policy() {
     };
     const auto leaf_op = [](graph_t& g, policy_ctx_t& c) {
         vertex_policy_t p;
-        p.share_threshold_bytes = 7;
+        p.share_hint = tr::graph::share_hint_t::COPY;
         p.app_fields = {app_field_t{.name = "k", .access = app_access_t::RW}};
         p.delivery_mode = delivery_mode_t::UNCONDITIONAL;
         return verdict(g.set_policy(c.v, std::move(p)));
@@ -475,7 +475,7 @@ void test_set_policy() {
         p.ring_reliable = true;
         p.retention = retention_t::N;
         p.depth = 4;
-        p.share_threshold_bytes = 7;
+        p.share_hint = tr::graph::share_hint_t::COPY;
         p.app_fields = {
             app_field_t{.name = "k", .access = app_access_t::RW, .value = {std::byte{1}}}};
         p.delivery_mode = delivery_mode_t::UNCONDITIONAL;

@@ -27,8 +27,10 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 // Removed build switches (#1722). Each one duplicated a trait of the one configuration type
@@ -85,6 +87,38 @@ struct size_class_ladder_t {
         if (Header != 0) t[i] = Top + Header;
         return t;
     }();
+
+    /**
+     * @brief The smallest row of @ref kTable that holds @p bytes, or @p bytes itself above the
+     *        last row: the table's own answer by arithmetic, with no table read and no search
+     *        (#2143).
+     *
+     * The ladder is geometric, so within a doubling `(lo, 2 lo]` the rows are the multiples of
+     * `lo / PerDoubling`, and the answer is @p bytes rounded up to that step. Every term is
+     * computed and the answer chosen by mask selects: no branch.
+     */
+    [[nodiscard]] static constexpr std::size_t ceiling(std::size_t bytes) noexcept {
+        constexpr std::size_t kBase = Step * PerDoubling;
+        static_assert(std::has_single_bit(Step) && std::has_single_bit(PerDoubling) &&
+                          Top % kBase == 0 && std::has_single_bit(Top / kBase),
+                      "the arithmetic ceiling needs a power-of-two step, rows per doubling and "
+                      "doublings");
+        const std::size_t small = ((bytes > Step ? bytes : Step) + Step - 1) & ~(Step - 1);
+        // `x | 1` is never 0, so the bit width needs no zero test.
+        const std::size_t x = (bytes > kBase ? bytes : kBase + 1) - 1;
+        const std::size_t lo = std::size_t{1} << (std::numeric_limits<std::size_t>::digits - 1 -
+                                                  static_cast<unsigned>(std::countl_zero(x | 1)));
+        const std::size_t step = lo / PerDoubling;
+        const std::size_t geometric = (bytes + step - 1) & ~(step - 1);
+        const std::size_t past =
+            Header != 0 && bytes <= Top + Header ? std::size_t{Top + Header} : bytes;
+        // Mask selects, not ternaries, so a compiler that would branch on the costlier arm
+        // cannot.
+        const auto pick = [](bool c, std::size_t a, std::size_t b) {
+            return b ^ ((a ^ b) & (std::size_t{0} - static_cast<std::size_t>(c)));
+        };
+        return pick(bytes <= kBase, small, pick(bytes <= Top, geometric, past));
+    }
 };
 
 /**
@@ -334,42 +368,10 @@ struct default_config_t {
      */
     static constexpr std::size_t kMaxVertexBytes32 = 64;
 
-    /**
-     * @brief The copy-or-share threshold (RFC-0028 §5.3, D3): a written value of AT LEAST this
-     *        many bytes is SHARED, one below it is COPIED into the value's own block.
-     *
-     * The default every vertex answers until its `vertex_policy_t::share_threshold_bytes` gives it
-     * its own. At ingress, "shared" means the stored value links the inbound receive segment
-     * (refcount, zero copy) and "copied" means the bytes land inline in the one `value_t` block
-     * the publish costs (`value_t::make_inline`: one allocation, one `memcpy`). A payload whose
-     * TLV carries a CRC/TS trailer is always copied — a shared frame's opt byte cannot be
-     * patched — and so is one whose reader cannot share (a borrowed, span-delivered frame).
-     *
-     * `0` shares always; `SIZE_MAX` copies always. The two ends are the old `kPinNever` and
-     * "pin unconditionally", now edge cases of one comparison on the absolute payload size —
-     * the variable that was actually measured (RFC-0028 R6); the retired ratio was the
-     * measurement rig's rotation knob (#774).
-     *
-     * @section share_borrow Sharing BORROWS the receive segment, and this is the knob that prices
-     * it
-     *
-     * A shared value holds its whole inbound RX **segment** for as long as it is the vertex's
-     * last-known value (or sits in a STREAM ring). On a pooled RX backend that is a **pool
-     * slot** — receive capacity the transport cannot use until the value is displaced. The
-     * library makes the deferred release *safe*; only the application knows its pool geometry
-     * and retention pattern, so the budget is the consumer's number (RFC-0022 Amendment 2).
-     * Size against `live shared values x segment_bytes`; `bench/README.md` §"RFC-0022 §6 —
-     * receive-pool occupancy" measured a 29-slot ESP32-C6 pool collapsing once the live shared
-     * set crossed the slot count.
-     *
-     * Target-class defaults (§11 ruling 2):
-     * - **host (WIDE / MID)** — 4,096 B, RFC-0022 Amendment 2's knee: below it the copy is
-     *   cheaper than the borrow, above it the zero-copy share wins.
-     * - **NARROW** — a per-build trait: a fixed, small RX pool states its own value in its
-     *   `config_override.hpp` (the ESP-IDF component binds `SIZE_MAX`, copy always, which is
-     *   exactly the posture it shipped before this knob).
-     */
-    static constexpr std::size_t kShareThresholdBytes = 4096;
+    /** @brief The ladder that generates the default @ref default_config_t::kSizeClasses. A
+     *         classed root whose table is this one finds a class by its arithmetic `ceiling`
+     *         (#2143). */
+    using size_classes_t = size_class_ladder_t<16, 8, 65536, 48>;
 
     /**
      * @brief The size-class table of the host slab pool (ADR-0083 Decisions 4 and 5, #1775,
@@ -405,7 +407,7 @@ struct default_config_t {
      *
      * Override fragment: `static constexpr std::size_t kSizeClasses[] = {64, 256, 1024, 4096};`.
      */
-    static constexpr auto kSizeClasses = size_class_ladder_t<16, 8, 65536, 48>::kTable;
+    static constexpr auto kSizeClasses = size_classes_t::kTable;
 
     /**
      * @brief Whether this build's default root is the host slab pool (ADR-0083 Decision 4,
@@ -419,12 +421,12 @@ struct default_config_t {
      *
      * `false` (the MCU default, ADR-0083 Decision 4, #1783): the default root is a STATIC
      * ARENA of @ref kArenaBytes (`%mem_arena.hpp`, `tr::mem::arena_root_t`), carved into the
-     * classes of @ref kSizeClasses, and the same five defaults draw from its value, table and
-     * net sub-pools. No byte of the default root comes from a heap; the arena never trims, and
-     * an exhausted arena refuses (BACKPRESSURE at run time, a sizing abort at init). A target
-     * with a few hundred KiB of RAM gains nothing from 64 KiB slabs, so the ESP-IDF component
-     * binds `false`. Until v0.19.0 this setting meant the platform heap; an application that
-     * still wants that injects `tr::mem::heap_source()` into its `graph_t`.
+     * classes of @ref default_config_t::kSizeClasses, and the same five defaults draw from its
+     * value, table and net sub-pools. No byte of the default root comes from a heap; the arena
+     * never trims, and an exhausted arena refuses (BACKPRESSURE at run time, a sizing abort at
+     * init). A target with a few hundred KiB of RAM gains nothing from 64 KiB slabs, so the ESP-IDF
+     * component binds `false`. Until v0.19.0 this setting meant the platform heap; an application
+     * that still wants that injects `tr::mem::heap_source()` into its `graph_t`.
      *
      * Override fragment: `static constexpr bool kSlabPool = false;`.
      */
@@ -455,11 +457,12 @@ struct default_config_t {
      * platform heap. The trade-off: every default the application has not redirected draws
      * from the heap, unbounded, and the no-heap link check (ADR-0083 Decision 1) does not hold
      * for that image; it is a deliberate exception for an application that injects its own
-     * sources everywhere. A nonzero value is at least the smallest row of @ref kSizeClasses.
+     * sources everywhere. A nonzero value is at least the smallest row of
+     * @ref default_config_t::kSizeClasses.
      *
      * The free-list heads are sized from the region: one per sub-pool per row of
-     * @ref kSizeClasses no larger than this (`%tr::mem::kArenaClasses`), since a larger class
-     * could never be carved.
+     * @ref default_config_t::kSizeClasses no larger than this (`%tr::mem::kArenaClasses`), since a
+     * larger class could never be carved.
      *
      * Not read where @ref kSlabPool is `true`: no arena is compiled there.
      *
@@ -1209,8 +1212,6 @@ static_assert(kInlineFanout >= 1,
               "an array of that many edge views");
 /** @brief @ref default_config_t::kEdgePinSlots for this build. */
 inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
-/** @brief @ref default_config_t::kShareThresholdBytes for this build. */
-inline constexpr std::size_t kShareThresholdBytes = config_t::kShareThresholdBytes;
 /** @brief @ref default_config_t::kDeferredReleaseSlots for this build. */
 inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
 /** @brief @ref default_config_t::kQsbrParticipants for this build. */

@@ -531,18 +531,20 @@ void test_default_memory_is_borrowed() {
 }
 
 /**
- * @brief #1661 — a named `rx` source: owning ropes from it, the loan reserve at the share
- *        threshold, and a refusal that is a counted drop the next message survives.
+ * @brief #1661 — a named `rx` source: owning ropes from it, the loan reserve where it is free
+ *        in the frame's size class, and a refusal that is a counted drop the next message survives.
  */
 void test_named_rx_source_delivers_owning_ropes() {
     std::printf("#1661 memory.rx makes delivery owning, from the application's source:\n");
     fake_ws::reset();
     app_source_t src;
     tr::mem::source_backend_t backend(src);
-    // Big enough to hold a message at the share threshold, so the loan arm is exercised on
-    // a build whose threshold is finite (the host default); a SIZE_MAX build never reserves.
-    constexpr std::size_t kLoanMsg = tr::graph::kShareThresholdBytes;
-    constexpr bool kCanLoan = kLoanMsg < 65536;
+    // A message whose reserve is free in its size class, so the loan arm is exercised on a
+    // classed build; the heap root draws exact blocks and never reserves.
+    const std::size_t align = backend.alignment();
+    std::size_t kLoanMsg = 4096;
+    while (!tr::mem::kHeapRoot && !tr::mem::rx_loan_free(kLoanMsg, align)) ++kLoanMsg;
+    constexpr bool kCanLoan = !tr::mem::kHeapRoot;
     rope_sink_t ropes;
     {
         tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
@@ -559,7 +561,9 @@ void test_named_rx_source_delivers_owning_ropes() {
         fake_ws::push_frames({small});
         check(wait_until([&] { return ropes.count() >= 1; }, 5s), "a small message delivered");
         check(src.served.load() >= 1, "its block came from the APPLICATION's source");
-        check(ropes.offset(0) == 0, "below the share threshold the block carries no reserve");
+        check(ropes.offset(0) ==
+                  (tr::mem::rx_loan_free(small.payload.size(), align) ? tr::mem::kRxLoanBytes : 0),
+              "a small message carries the reserve only where its class has room for it");
 
         if (kCanLoan) {
             const fake_ws::frame_t big =
@@ -567,7 +571,7 @@ void test_named_rx_source_delivers_owning_ropes() {
             fake_ws::push_frames({big});
             check(wait_until([&] { return ropes.count() >= 2; }, 5s), "a large message delivered");
             check(ropes.offset(1) == tr::mem::kRxLoanBytes,
-                  "at the share threshold the block carries the ingress-loan reserve");
+                  "a free reserve: the block carries the ingress-loan reserve");
             check(ropes.bytes(1) == big.payload, "with its bytes intact");
         }
         const std::size_t before = ropes.count();

@@ -33,10 +33,10 @@
  *                                               with no wire spelling: a `:settings.delivery_mode`
  *                                               write or read answers SCHEMA_NOT_FOUND.
  *
- * §5.8 `store/pin-ratio` is covered at the decision site (`op_resolve_test`, `udp_test`), not
- * here; RFC-0028 D3 replaced the ratio with an absolute copy-or-share threshold. What this file
- * pins about it is the DECLARATION — `share_threshold_bytes`, the owner-side per-vertex value
- * that defaults to `config_t::kShareThresholdBytes`.
+ * §5.8 `store/share-hint` (RFC-0022 Amendment 3, which replaced the pin ratio and then the
+ * byte threshold) is covered at the decision site (`op_resolve_test`, `udp_test`), not here.
+ * What this file pins about it is the DECLARATION — `share_hint`, the owner-side per-vertex
+ * value that defaults to `share_hint_t::DEFAULT`.
  */
 
 #include <array>
@@ -453,26 +453,27 @@ void test_nothing_is_inherited() {
     std::printf("§3.F — no inheritance, and no registration-forced extension block:\n");
     graph_t g;
     const vertex_handle_t parent = g.register_vertex(path_t("/i/root"), role_t::STORED_VALUE);
-    (void)g.set_policy(parent, {.share_threshold_bytes = 256});
+    (void)g.set_policy(parent, {.share_hint = tr::graph::share_hint_t::SHARE});
     check(!g.set_policy(parent, {.retention = tr::graph::retention_t::N, .depth = 4}).has_value(),
           "a STORED_VALUE has no ring to give a depth to (RFC-0028 §5.4) — refused, by value");
-    check(g.share_threshold_bytes(parent) == 256, "the parent holds its own declared threshold");
+    check(g.share_hint(parent) == tr::graph::share_hint_t::SHARE,
+          "the parent holds its own declared hint");
 
     // A child registered UNDER it inherits nothing — the whole hole Amendment 1 closed.
     const vertex_handle_t child = g.register_vertex(path_t("/i/root/a"), role_t::STORED_VALUE);
-    check(g.share_threshold_bytes(child) == tr::graph::kShareThresholdBytes,
+    check(g.share_hint(child) == tr::graph::share_hint_t::DEFAULT,
           "a child inherits NOTHING (§3.F)");
     check(!has_ext(child), "... and pays no extension block for the parent's declaration");
 
     // A child registered LATER, and one under a fresh intermediate placeholder, likewise.
-    (void)g.set_policy(parent, {.share_threshold_bytes = 512});
+    (void)g.set_policy(parent, {.share_hint = tr::graph::share_hint_t::COPY});
     const vertex_handle_t later = g.register_vertex(path_t("/i/root/b"), role_t::STORED_VALUE);
     const vertex_handle_t deep =
         g.register_vertex(path_t("/i/root/mid/deep"), role_t::STORED_VALUE);
-    check(g.share_threshold_bytes(later) == tr::graph::kShareThresholdBytes &&
-              g.share_threshold_bytes(deep) == tr::graph::kShareThresholdBytes,
+    check(g.share_hint(later) == tr::graph::share_hint_t::DEFAULT &&
+              g.share_hint(deep) == tr::graph::share_hint_t::DEFAULT,
           "a later child and a grandchild under a placeholder inherit nothing either");
-    check(g.share_threshold_bytes(parent) == 512,
+    check(g.share_hint(parent) == tr::graph::share_hint_t::COPY,
           "... while the parent's own later declaration still lands on the parent");
 
     // The RAM half of §3.B: registration cannot force the cold block any more, because the
@@ -483,8 +484,8 @@ void test_nothing_is_inherited() {
     check(has_ext(stream),
           "ablation: a STREAM identity still allocates one (has_ext is not stuck)");
     // A declaration is what materialises it — the owner pays only when the owner asks.
-    (void)g.set_policy(plain, {.share_threshold_bytes = 8});
-    check(has_ext(plain) && g.share_threshold_bytes(plain) == 8,
+    (void)g.set_policy(plain, {.share_hint = tr::graph::share_hint_t::COPY});
+    check(has_ext(plain) && g.share_hint(plain) == tr::graph::share_hint_t::COPY,
           "an owner-side declaration materialises the block, and takes effect");
 }
 

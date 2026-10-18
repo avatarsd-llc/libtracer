@@ -157,10 +157,6 @@ refcount slot `sp_atomic_slot_t` was removed because libstdc++ spin-locks it
 :project: libtracer
 ```
 
-```{doxygenvariable} tr::graph::kShareThresholdBytes
-:project: libtracer
-```
-
 ```{doxygenvariable} tr::graph::kInstrumentCounters
 :project: libtracer
 ```

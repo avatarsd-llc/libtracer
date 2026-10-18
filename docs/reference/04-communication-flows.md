@@ -244,8 +244,8 @@ Peer                              Vertex
 The vertex's `:settings` **core namespace is empty** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B): every flat knob name
 answers `SCHEMA_NOT_FOUND`, on read and on write, caller-independently. The two survivors of the
 old knob set are declared through the host API — `vertex_policy_t::retention` for the STREAM ring depth
-(§3.C) and `vertex_policy_t::share_threshold_bytes` for the copy-or-share threshold ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.3,
-which replaced the §3.D pin ratio) — and **neither has any wire surface at all**. A declaration applies to the **next** store; in-flight dispatches are not
+(§3.C) and `vertex_policy_t::share_hint` for the copy-or-share hint (Amendment 3, which replaced
+[RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.3's byte threshold, itself the successor of the §3.D pin ratio) — and **neither has any wire surface at all**. A declaration applies to the **next** store; in-flight dispatches are not
 re-evaluated.
 
 A declaration reaches exactly the vertex it names. **Nothing is inherited** (§3.F): no subtree

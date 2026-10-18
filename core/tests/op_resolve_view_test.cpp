@@ -277,18 +277,18 @@ int main() {
     }
 
     // ADR-0053 ⑤ / ADR-0042 §3 — the rope-tier referenced store: a view-delivered
-    // MULTI-LINK payload at or above the vertex's share threshold is SHARED as a
-    // subrope of the delivery (its segments kept, ZERO copy), yet byte-identical to the
-    // copy a default vertex makes. The arena tier proves the contiguous-frame twin in
-    // op_resolve_test's share_threshold_store; here the payload spans many links.
+    // MULTI-LINK payload on a `SHARE` vertex is SHARED as a subrope of the delivery (its
+    // segments kept, ZERO copy), yet byte-identical to the copy a default vertex makes. The
+    // arena tier proves the contiguous-frame twin in op_resolve_test's share_hint_store;
+    // here the payload spans many links.
     {
-        std::printf("rope-tier shared store (share_threshold_bytes, multi-link payload):\n");
+        std::printf("rope-tier shared store (share_hint SHARE, multi-link payload):\n");
         graph_t g;
         tr::graph::vertex_handle_t v =
             g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
-        // Declare a threshold the 36 B TLV clears, OWNER-side (there is no wire knob),
-        // matching the arena test.
-        (void)g.set_policy(v, {.share_threshold_bytes = 32});
+        // Declare SHARE OWNER-side (there is no wire knob), matching the arena test: a
+        // multi-link payload sits in no one block, so a DEFAULT vertex copies it.
+        (void)g.set_policy(v, {.share_hint = tr::graph::share_hint_t::SHARE});
 
         std::vector<std::byte> big(32);
         for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(i);
@@ -304,7 +304,7 @@ int main() {
         const auto view = tr::wire::tlv_view_t::over(rope_split(wframe, every_byte));
         check(view.has_value(), "fragmented WRITE frame adopts as a lazy view");
         const auto reply = r.resolve(*view);
-        check(reply.has_value(), "rope-tier WRITE over threshold produced a reply");
+        check(reply.has_value(), "rope-tier WRITE on a SHARE vertex produced a reply");
 
         const auto rd = g.read(v);
         check(rd.has_value() && (*rd)->link_count() > 1,
@@ -314,10 +314,11 @@ int main() {
               "pinned store reads back byte-identical to the written VALUE TLV");
     }
 
-    // The same fragmented payload BELOW the threshold (the host default) is gathered into ONE
-    // inline value block — one memcpy per link, no flatten block, no segment of its own.
+    // The same fragmented payload on a DEFAULT vertex is gathered into ONE inline value block
+    // on every block source (a multi-link value sits in no one block, tr::mem::share_fits) —
+    // one memcpy per link, no flatten block, no segment of its own.
     {
-        std::printf("rope-tier copied store (below threshold, multi-link payload):\n");
+        std::printf("rope-tier copied store (share_hint DEFAULT, multi-link payload):\n");
         graph_t g;
         tr::graph::vertex_handle_t v =
             g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
@@ -332,11 +333,11 @@ int main() {
         op_resolver_t r(g);
         const auto view = tr::wire::tlv_view_t::over(rope_split(wframe, every_byte));
         check(view.has_value() && r.resolve(*view).has_value(),
-              "rope-tier WRITE below threshold produced a reply");
+              "rope-tier WRITE on a DEFAULT vertex produced a reply");
         const auto rd = g.read(v);
         check(rd.has_value() && (*rd)->is_inline() &&
                   (*rd)->block_bytes() == tr::graph::value_t::inline_bytes_for(big_tlv.size()),
-              "multi-link payload below threshold => ONE inline block");
+              "multi-link payload on a DEFAULT vertex => ONE inline block");
         check(rd.has_value() && (*rd)->only().bytes().size() == big_tlv.size() &&
                   std::memcmp((*rd)->only().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
               "the gathered copy reads back byte-identical to the written VALUE TLV");

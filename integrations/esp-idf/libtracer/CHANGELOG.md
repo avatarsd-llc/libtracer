@@ -102,6 +102,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the destructor returns the memory.
 ### Breaking
 
+- **The static arena shares a stored value by default; the copy-always binding is gone
+  ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143), RFC-0022 Amendment 3).** The
+  generated `config_override.hpp` no longer binds `kShareThresholdBytes = SIZE_MAX`: core deleted
+  the knob, and copy-or-share is now a trait of the block source the build composes. This
+  component's static arena always shares, because frame ingress draws each receive block at the
+  frame's exact length, so a trailer-less write received on an owning RX source keeps its block
+  instead of copying into a second one from the same arena. The ingress-loan reserve is taken
+  only where it is free in the arena's size class.
+  **Migration:** a vertex whose value is long-lived and should not hold its receive block
+  declares `vertex_policy_t{.share_hint = tr::graph::share_hint_t::COPY}`; an override that set
+  `share_threshold_bytes` replaces it with a hint.
+
 - **`httpd_ws_link_t`: the subject an in-band ACCEPT binds is the session's caller context,
   and the credential hook is told which session it is judging
   ([#1846](https://github.com/avatarsd-llc/libtracer/issues/1846)).**

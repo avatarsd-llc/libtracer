@@ -265,13 +265,10 @@ endif()
 # is found from the component's own sources AND from every dependent (`REQUIRES libtracer`) —
 # one file per build means every TU agrees, which is what the old PUBLIC compile definition
 # existed to guarantee.
-# The copy-or-share threshold (RFC-0028 §5.3) is the NARROW per-build trait §11 ruling 2 leaves
-# to the target: copy always (SIZE_MAX). A shared value holds its whole RX pool slot for as long
-# as it is a vertex's value, and a small fixed pool cannot fund that borrow — RFC-0022
-# Amendment 2 measured a 29-slot C6 pool collapsing once the live shared set crossed the slot
-# count. It is exactly the posture this component shipped before the knob (the retired pin
-# ratio's never-pin sentinel); an app that wants zero-copy on a vertex declares it per vertex
-# with `vertex_policy_t::share_threshold_bytes`.
+# Copy-or-share is no longer stated here (RFC-0022 Amendment 3): it is a trait of the block
+# source the build composes, and this build's static arena always shares. A vertex whose value
+# is long-lived and should not hold its receive block declares `share_hint_t::COPY` in its
+# `vertex_policy_t`.
 # What this component deliberately does NOT state, because core's default is already the right
 # answer here: the ACL profile (`allow_only_policy_t`, the MCU profile — no full-ACL Kconfig
 # yet) and the hazard reader slots (unused on a chip, which binds the single-writer slot below).
@@ -462,7 +459,6 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
     static constexpr std::size_t kRxDrainFrames = ${LIBTRACER_RX_DRAIN_FRAMES};
     static constexpr std::size_t kRxDrainBytes = ${LIBTRACER_RX_DRAIN_BYTES};
-    static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};
     static constexpr bool kSlabPool = false;
     static constexpr std::size_t kArenaBytes = ${LIBTRACER_ARENA_BYTES};
 ${LIBTRACER_SLOT_BINDING}};

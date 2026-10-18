@@ -129,7 +129,7 @@ int main() {
         report("STREAM, depth 8", c, "the STREAM role (the depth is free)", total);
     }
 
-    // An owner-declared threshold on an ordinary leaf: the ONE shape where storage itself
+    // An owner-declared share hint on an ordinary leaf: the ONE shape where storage itself
     // buys the block. Opt-in, per vertex, by the owner.
     {
         graph_t g;
@@ -137,10 +137,10 @@ int main() {
         for (int i = 0; i < kPer; ++i) {
             const std::string p = "/policy/v" + std::to_string(i);
             const vertex_handle_t v = g.register_vertex(path_t(p), role_t::STORED_VALUE);
-            (void)g.set_policy(v, {.share_threshold_bytes = 256});
+            (void)g.set_policy(v, {.share_hint = tr::graph::share_hint_t::COPY});
             classify(v, c);
         }
-        report("owner-declared threshold", c, "the declaration itself", total);
+        report("owner-declared share hint", c, "the declaration itself", total);
     }
 
     // RFC-0022 §3.F: a leaf under a declaring ancestor. Before Amendment 1 this shape
@@ -151,7 +151,7 @@ int main() {
         graph_t g;
         census_t c;
         const vertex_handle_t root = g.register_vertex(path_t("/inh"), role_t::STORED_VALUE);
-        (void)g.set_policy(root, {.share_threshold_bytes = 256});
+        (void)g.set_policy(root, {.share_hint = tr::graph::share_hint_t::COPY});
         for (int i = 0; i < kPer; ++i) {
             const std::string p = "/inh/v" + std::to_string(i);
             classify(g.register_vertex(path_t(p), role_t::STORED_VALUE), c);

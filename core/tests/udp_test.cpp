@@ -544,11 +544,11 @@ void test_two_nodes_zero_copy_store() {
     tr::net::udp_transport_t tb(0, "", 0, {.memory = {.rx = &rec}});
     tr::net::udp_transport_t ta(0, "127.0.0.1", tb.local_port());
 
-    // B's target vertex carries its share threshold as an OWNER-side declaration (never a
-    // remote write): 68 >= 64 => shared.
+    // B's target vertex carries its share hint as an OWNER-side declaration (never a remote
+    // write): SHARE => shared, whatever block the datagram landed in.
     tr::graph::vertex_handle_t v =
         node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
-    (void)node_b.set_policy(v, {.share_threshold_bytes = 64});
+    (void)node_b.set_policy(v, {.share_hint = tr::graph::share_hint_t::SHARE});
     (void)router_a.add_child("b", ta);
     (void)router_b.add_child("a", tb);  // tb delivers views => the owning receiver is installed
 
@@ -557,7 +557,7 @@ void test_two_nodes_zero_copy_store() {
     auto on_blob = [&written](const tr::graph::value_t&) { written.set_value(); };
     (void)node_b.subscribe(path_t("/sensor/blob"), on_blob);
 
-    // A 64-byte payload => a 68-byte trailer-less VALUE TLV, at or above the threshold.
+    // A 64-byte payload => a 68-byte trailer-less VALUE TLV.
     std::vector<std::byte> pb(64);
     for (std::size_t i = 0; i < pb.size(); ++i) pb[i] = static_cast<std::byte>(i);
     std::vector<std::byte> payload;
