@@ -658,6 +658,18 @@ struct default_config_t {
      * `lkv_slot.hpp`'s `kRetireBatch` is derived from @ref kHazardReaderSlots — the two sets are
      * the same threads, since a thread that publishes is a thread that dispatches.
      *
+     * The derivation follows the config the build binds (#2111): a fragment that sets
+     * @ref kEdgePinSlots and leaves this knob alone gets that many participants, not this
+     * struct's 32. A member initializer here cannot see a derived struct's value, so the
+     * namespace-scope `tr::graph::kQsbrParticipants` makes the choice, through
+     * `%qsbr_participants_v`: the bound config's own `kQsbrParticipants` when it declares one,
+     * else its `kEdgePinSlots`.
+     *
+     * The two sets are not quite the same: a transport's receive thread opens the router's
+     * frame bracket, and so takes a cell, without ever taking an edge pin. A node with more
+     * receive threads than publishing ones should declare this knob rather than rely on the
+     * derivation.
+     *
      * **Unlike @ref kEdgePinSlots, correctness is not indifferent to this number** — but it
      * fails SAFE, not silently. A thread that finds every index taken cannot announce itself,
      * and a thread a scan cannot see is one no grace period may conclude past; so it counts
@@ -665,11 +677,13 @@ struct default_config_t {
      * until it clears. The failure mode is therefore deferred frees (visible as
      * @ref tr::graph::graph_t::reclaim_refusals rising), never a use-after-free.
      *
-     * Its `.bss` is `N * max(kCacheLineBytes, alignof(std::uint64_t))` bytes — at N = 32 that
-     * is 2,048 B on a host — plus the shared retired table. The transport plane uses the same
-     * cells in every build (`fwd_router_t` brackets each inbound frame and origination with
-     * them), so a build with the router carries this `.bss` under any policy; a thread that
-     * finds every index taken still fails safe, deferring the free of a removed link.
+     * Its `.bss` is `N * max(kCacheLineBytes, alignof(std::uint32_t))` bytes, the floor being
+     * the 31-bit epoch's state word: at N = 32 that is 2,048 B on a host. The transport plane
+     * uses the same cells in every build (`fwd_router_t` brackets each inbound frame and
+     * origination with them), so a build with the router carries this `.bss` under any policy;
+     * a thread that finds every index taken still fails safe, deferring the free of a removed
+     * link. The retired table is a separate object that only `reclaim_qsbr_t` names, so the
+     * linker drops it from a build that binds another policy.
      * Override fragment:
      * `static constexpr std::size_t kQsbrParticipants = 64;`
      */
@@ -1234,8 +1248,21 @@ static_assert(kInlineFanout >= 1,
 inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
 /** @brief @ref default_config_t::kDeferredReleaseSlots for this build. */
 inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
-/** @brief @ref default_config_t::kQsbrParticipants for this build. */
-inline constexpr std::size_t kQsbrParticipants = config_t::kQsbrParticipants;
+/**
+ * @brief The participant count config @p C asks for: its own `kQsbrParticipants` when it
+ *        declares one, else its `kEdgePinSlots` (#2111).
+ *
+ * `default_config_t::kQsbrParticipants` is initialized from `default_config_t::kEdgePinSlots`,
+ * and a derived fragment that only re-declares `kEdgePinSlots` inherits that initializer's
+ * value, not its derivation. A config that does not declare the knob names the base's very
+ * object, so comparing the two members' addresses tells "inherited" from "declared".
+ */
+template <class C>
+inline constexpr std::size_t qsbr_participants_v =
+    &C::kQsbrParticipants == &default_config_t::kQsbrParticipants ? C::kEdgePinSlots
+                                                                  : C::kQsbrParticipants;
+/** @brief @ref default_config_t::kQsbrParticipants for this build; see `%qsbr_participants_v`. */
+inline constexpr std::size_t kQsbrParticipants = qsbr_participants_v<config_t>;
 /** @brief @ref default_config_t::kQsbrAsymmetricFence for this build. */
 inline constexpr bool kQsbrAsymmetricFence = config_t::kQsbrAsymmetricFence;
 /** @brief @ref default_config_t::kSingleCore for this build. */

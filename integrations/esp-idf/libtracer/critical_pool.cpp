@@ -27,6 +27,11 @@ static_assert(tr::graph::kSingleCore, "CONFIG_FREERTOS_UNICORE must bind kSingle
 static_assert(!tr::graph::kSingleCore, "a multi-core chip build must bind kSingleCore = false");
 #endif
 
+// The QSBR participant count follows this component's kEdgePinSlots (#2111): inheriting core's
+// 32 instead would cost 192 B of .bss on every chip build.
+static_assert(tr::graph::kQsbrParticipants == tr::graph::kEdgePinSlots,
+              "the ESP config's QSBR participant count must follow its kEdgePinSlots");
+
 static_assert(tr::guard<tr::esp::critical_guard_t>,
               "the interrupt-masked guard must model the one critical-section trait");
 static_assert(tr::esp::critical_pool_t::is_isr_safe,

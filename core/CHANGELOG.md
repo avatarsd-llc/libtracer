@@ -311,6 +311,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   ([#2195](https://github.com/avatarsd-llc/libtracer/issues/2195)).** A link may keep a tag in
   its two low bits; the ESP-IDF WebSocket server link keeps its per-lane policy there. The
   graph static-asserts the alignment of the subscriber edge it hands as the key.
+- **The QSBR participant count follows the config a build binds, and the retired table is
+  linked only under `reclaim_qsbr_t` ([#2111](https://github.com/avatarsd-llc/libtracer/issues/2111)).**
+  A fragment that sets `kEdgePinSlots` and does not declare `kQsbrParticipants` now gets
+  `kEdgePinSlots` participants. Before, it inherited `default_config_t`'s 32, because the
+  default's initializer could not see the derived value. The new
+  `tr::graph::qsbr_participants_v<C>` makes the choice; a fragment that wants another count
+  declares `kQsbrParticipants` as before. The ESP-IDF component (8 pin slots) therefore drops to
+  8 participants. A host fragment that lowered `kEdgePinSlots` now gets fewer participants too.
+  If more threads than that dispatch or receive frames at once, the ones without a cell block
+  reclamation: frees are deferred, and once the retired table fills, each further release is
+  refused and counted in `graph_t::reclaim_refusals()` (a counted leak, never a use-after-free).
+  To keep the old count, declare `kQsbrParticipants = 32` in the fragment. The retired slots
+  leave `detail_qsbr::registry_t` for their own `constinit` object, which only `retire` and the
+  drain name. Under `reclaim_local_t` or `reclaim_strict_t` the linker drops it, while the
+  router's frame bracket keeps the cells and the control words, which include the slots'
+  occupancy count. A `reclaim_qsbr_t` build links both, at the same total size as before.
+
 - **A graph keeps one park for every retired kind
   ([#2118](https://github.com/avatarsd-llc/libtracer/issues/2118)).** Value seams `retire`
   detaches and the releases `park_release` / `park_reserved` are handed (a removed link, a
