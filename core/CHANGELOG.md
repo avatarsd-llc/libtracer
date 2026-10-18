@@ -16,6 +16,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **A packed sample block for stream batches, RFC-0025 Amendment 5
+  ([#2219](https://github.com/avatarsd-llc/libtracer/issues/2219)).** `batch.hpp` gains
+  `wire::encode_packed_batch` (a packed batch written into the caller's span; `0` when the
+  shape is refused), `wire::read_packed_batch` (the batch read back as a view, `count = n`,
+  or nothing for a malformed length or offset count), `wire::store_packed_batch_head` (the
+  head alone, for a caller that ropes its own block on behind it) and the size functions
+  `wire::packed_block_child_bytes` / `wire::packed_batch_wire_bytes`. `wire::batch_view_t`
+  gains `width`, `block` and `sample(i)`; a framed batch leaves them empty. None of it
+  allocates.
 - **`ws_client_transport_t::send(std::span<const std::span<const std::byte>>)`
   ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** The WebSocket dialer
   overrides the gathered send: the spans go out as one masked BINARY message, gathered and

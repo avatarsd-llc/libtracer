@@ -438,6 +438,184 @@ void composition_references_rather_than_copies() {
 
 }  // namespace
 
+/** @brief The four ARGB samples of `stream/batch-packed-roundtrip`, back to back. */
+constexpr std::array<std::uint8_t, 16> kArgb{0xFF, 0xFF, 0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00,
+                                             0xFF, 0x00, 0x00, 0xFF, 0x80, 0xFF, 0xFF, 0xFF};
+
+/** @brief The descriptor's `width` for the packed vectors: one 4-byte ARGB pixel per frame. */
+constexpr std::uint16_t kWidth = 4;
+
+/** @brief The first @p n bytes of @ref kArgb as a byte span. */
+std::span<const std::byte> argb(std::size_t n = kArgb.size()) {
+    return std::as_bytes(std::span<const std::uint8_t>(kArgb)).first(n);
+}
+
+/** @brief Encode a packed batch into a fresh, exactly-sized buffer; empty when refused. */
+std::vector<std::byte> packed(
+    std::span<const std::byte> block, std::span<const std::int32_t> offsets = {},
+    tr::wire::batch_carriage_t carriage = tr::wire::batch_carriage_t::STANDALONE) {
+    std::vector<std::byte> out(tr::wire::packed_batch_wire_bytes(block.size(), offsets.size()));
+    const std::size_t n =
+        tr::wire::encode_packed_batch(out, carriage, kBase, kWidth, block, offsets);
+    out.resize(n);
+    return out;
+}
+
+/**
+ * @brief Amendment 5, `stream/batch-packed-roundtrip`: n samples in one opaque block, read back
+ *        as n samples with the derived times — and at n = 1 the framed shape's own bytes.
+ */
+void packed_block_roundtrip() {
+    std::printf("§4.1.4 packed block — n samples in ONE opaque VALUE:\n");
+    const std::vector<std::byte> rec = packed(argb());
+    check(same(rec, vector_bytes("stream/batch-packed-roundtrip")),
+          "stream/batch-packed-roundtrip is byte-exact against encode_packed_batch");
+
+    const auto tlv = decode_all(rec);
+    const auto v = tlv ? tr::wire::read_packed_batch(*tlv, kDt, kWidth) : std::nullopt;
+    check(v.has_value() && v->size() == 4 && v->width == kWidth,
+          "read_packed_batch answers n = len / width = 4");
+    bool frames_ok = v.has_value();
+    for (std::size_t i = 0; v && i < 4; ++i)
+        frames_ok = frames_ok && same(v->sample(i), argb().subspan(i * kWidth, kWidth));
+    check(frames_ok, "... and sample(i) is bytes [i*width, (i+1)*width) of the block, in place");
+    check(v && v->sample(4).empty(), "... and an out-of-range index is empty, not a stray read");
+    check(v && v->sample_time_ns(3) == kBase + 3 * static_cast<std::int64_t>(kDt),
+          "time is unchanged from the framed shape: t(i) = base + i * dt_ns");
+
+    // The overhead table: 4 B ARGB, uniform dt — framed vs packed at n = 1, 16, 256.
+    for (const auto& [n, framed, pk] :
+         {std::array<std::size_t, 3>{1, 24, 24}, std::array<std::size_t, 3>{16, 144, 84},
+          std::array<std::size_t, 3>{256, 2064, 1044}}) {
+        check(tr::wire::batch_wire_bytes(n * (4 + kWidth)) == framed &&
+                  tr::wire::packed_batch_wire_bytes(n * kWidth) == pk,
+              "the Amendment 5 overhead table holds (framed vs packed)");
+    }
+
+    // n = 1 is byte-identical to the framed shape, uniform and non-uniform alike.
+    std::vector<std::byte> one;
+    tr::wire::emit_tlv(one, type_t::VALUE, opt_t{}, argb(kWidth));
+    const std::array<std::span<const std::byte>, 1> frames{std::span<const std::byte>(one)};
+    std::vector<std::byte> framed;
+    tr::wire::emit_batch(framed, kBase, frames);
+    check(same(packed(argb(kWidth)), framed), "n = 1 is the framed batch, byte for byte");
+    constexpr std::array<std::int32_t, 1> kOne{-7};
+    std::vector<std::byte> framed_nu;
+    tr::wire::emit_batch(framed_nu, kBase, frames, kOne);
+    check(same(packed(argb(kWidth), kOne), framed_nu),
+          "... and so is the non-uniform n = 1, offset child included");
+
+    // One layout, two carriages — the header type byte is the whole difference.
+    const std::vector<std::byte> folded = packed(argb(), {}, tr::wire::batch_carriage_t::FOLDED);
+    check(folded.size() == rec.size() && folded[0] == std::byte{0x01} &&
+              std::equal(rec.begin() + 1, rec.end(), folded.begin() + 1),
+          "the FOLDED carriage differs from the standalone one in the type byte alone");
+
+    // A block past the u16 length widens its own header (opt.LL), and still reads back.
+    std::vector<std::byte> big_block(70'000, std::byte{0x5A});
+    const std::vector<std::byte> big = packed(big_block);
+    const auto big_tlv = decode_all(big);
+    const auto bv = big_tlv ? tr::wire::read_packed_batch(*big_tlv, kDt, kWidth) : std::nullopt;
+    check(big.size() == tr::wire::packed_batch_wire_bytes(70'000) && bv &&
+              bv->size() == 70'000 / kWidth,
+          "a 70 000-byte block takes a u32 length on both headers and reads back whole");
+}
+
+/**
+ * @brief Amendment 5, `stream/batch-packed-malformed`: a length that is not a multiple of the
+ *        width, or an offset count other than n, delivers NONE of the batch — and the encoder
+ *        refuses to write either.
+ */
+void packed_block_malformed() {
+    std::printf("§4.1.4 packed block — malformed delivers nothing:\n");
+    const std::vector<std::byte> bytes = vector_bytes("stream/batch-packed-malformed");
+    const auto tlv = decode_all(bytes);
+    check(tlv.has_value(), "the malformed vector still DECODES — the codec does not opine");
+    check(tlv && !tr::wire::read_packed_batch(*tlv, kDt, kWidth).has_value(),
+          "... but len % width != 0 is refused whole: no two-and-a-half samples");
+    if (tlv) {
+        check(same(tr::wire::encode(tr::wire::to_tree(*tlv)), bytes),
+              "... while the same bytes round-trip byte-for-byte");
+    }
+
+    // The offset-count rule: three offsets over a two-sample block.
+    std::vector<std::byte> body;
+    tr::wire::emit_batch_time(body, kBase);
+    tr::wire::emit_batch_offsets(body, std::array<std::int32_t, 3>{0, 500, 1000});
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, argb(8));
+    std::vector<std::byte> rec;
+    tr::wire::emit_tlv(rec, type_t::BATCH, opt_t{.pl = true}, body);
+    const auto nu = decode_all(rec);
+    check(nu && !tr::wire::read_packed_batch(*nu, 0, kWidth).has_value(),
+          "an offset count other than n is malformed too");
+
+    std::array<std::byte, 64> out{};
+    check(tr::wire::encode_packed_batch(out, tr::wire::batch_carriage_t::STANDALONE, kBase, kWidth,
+                                        argb(10)) == 0,
+          "encode_packed_batch refuses a block that is not a multiple of the width");
+    check(tr::wire::encode_packed_batch(out, tr::wire::batch_carriage_t::STANDALONE, kBase, kWidth,
+                                        argb(8), std::array<std::int32_t, 3>{0, 1, 2}) == 0,
+          "... and an offset run that is not n long");
+    check(tr::wire::encode_packed_batch(out, tr::wire::batch_carriage_t::STANDALONE, kBase, 0,
+                                        argb(8)) == 0,
+          "... and a width of 0, which is the framed shape and has no block");
+    check(tr::wire::encode_packed_batch(std::span<std::byte>(out).first(20),
+                                        tr::wire::batch_carriage_t::STANDALONE, kBase, kWidth,
+                                        argb(8)) == 0,
+          "... and a span too small to hold the record");
+    // n == 0: with no offsets to send, the record would be TIME + an empty block — the uniform
+    // shape — which read_packed_batch refuses on the dt_ns == 0 stream it was meant for.
+    std::vector<std::byte> empty_body;
+    tr::wire::emit_batch_time(empty_body, kBase);
+    tr::wire::emit_tlv(empty_body, type_t::VALUE, opt_t{}, std::span<const std::byte>{});
+    std::vector<std::byte> empty_rec;
+    tr::wire::emit_tlv(empty_rec, type_t::BATCH, opt_t{.pl = true}, empty_body);
+    const auto empty_tlv = decode_all(empty_rec);
+    check(empty_tlv && !tr::wire::read_packed_batch(*empty_tlv, 0, kWidth).has_value(),
+          "an empty block on a dt_ns == 0 stream is one its own reader refuses");
+    check(tr::wire::encode_packed_batch(out, tr::wire::batch_carriage_t::STANDALONE, kBase, kWidth,
+                                        std::span<const std::byte>{}) == 0,
+          "... so encode_packed_batch refuses n == 0 rather than write it");
+    check(out == std::array<std::byte, 64>{}, "a refusal writes nothing into the caller's span");
+
+    // A framed batch is not a packed one: several sample children are not one block.
+    std::vector<std::byte> framed;
+    tr::wire::emit_batch(framed, kBase, three_samples().spans);
+    const auto ft = decode_all(framed);
+    check(ft && !tr::wire::read_packed_batch(*ft, kDt, 2).has_value(),
+          "a framed batch of three children does not read as a packed block");
+}
+
+/**
+ * @brief Amendment 5, `stream/batch-packed-unaware`: the packed reader reads the samples, the
+ *        framed reader does not split the block, and the bytes pass through unchanged.
+ */
+void packed_block_unaware() {
+    std::printf("§4.1.4 packed block — opaque to a consumer that does not implement it:\n");
+    constexpr std::array<std::int32_t, 2> kOffsets{0, 250};
+    const std::vector<std::byte> rec = packed(argb(8), kOffsets);
+    const std::vector<std::byte> bytes = vector_bytes("stream/batch-packed-unaware");
+    check(same(rec, bytes), "stream/batch-packed-unaware is byte-exact against the encoder");
+
+    const auto tlv = decode_all(bytes);
+    const auto v = tlv ? tr::wire::read_packed_batch(*tlv, 0, kWidth) : std::nullopt;
+    check(v && v->size() == 2 && v->sample_time_ns(1) == kBase + 250,
+          "the packed reader reads two samples at base + offsets[i]");
+    check(tlv && !tr::wire::read_batch(*tlv, 0).has_value(),
+          "the framed reader refuses the non-uniform record: 2 offsets over 1 child");
+    const std::vector<std::byte> uniform = packed(argb());
+    const auto uniform_tlv = decode_all(uniform);
+    const auto uniform_misread =
+        uniform_tlv ? tr::wire::read_batch(*uniform_tlv, kDt) : std::nullopt;
+    check(uniform_misread && uniform_misread->size() == 1,
+          "... and on a uniform stream would read the whole block as ONE sample — why the "
+          "unaware consumer MUST treat it as opaque");
+    if (tlv) {
+        check(same(tr::wire::encode(tr::wire::to_tree(*tlv)), bytes),
+              "a node that moves the value moves these bytes unchanged");
+    }
+}
+
 /** @brief Runs every BATCH-record check; non-zero exit ⇒ some check failed. */
 int main() {
     fold_is_a_concatenation();
@@ -448,5 +626,8 @@ int main() {
     composition_references_rather_than_copies();
     emit_batch_offsets_appends_the_packed_child();
     delivery_class_bits();
+    packed_block_roundtrip();
+    packed_block_malformed();
+    packed_block_unaware();
     return tr::testing::summary("batch");
 }

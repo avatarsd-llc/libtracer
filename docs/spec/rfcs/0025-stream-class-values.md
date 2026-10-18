@@ -40,7 +40,9 @@ protocol already has**, with **zero new wire grammar**:
   supersedes that timestamp spelling**: the trailer carries wire/TX time only, and a
   batch's sample time is a payload `TIME{u64 base}` child — 0 bytes/sample on a
   uniform stream, a packed `i32` offset array on a non-uniform one. Still zero new
-  grammar.
+  grammar. **Amendment 5 (§4.1.4)** lets a fixed-width stream carry its sample frames
+  as **one packed block** — a single opaque `VALUE` of `n × width` bytes, the width
+  declared in the descriptor — instead of one child TLV per sample.
 - The **stream descriptor is a separate LKV vertex** beside the data vertex —
   declared once, never repeated per batch, browseable by every existing tool.
 - The QoS folded in from #863 becomes a **delivery-class field in bits 6–7 of
@@ -625,6 +627,99 @@ Two consequences worth stating, because they are what make this cheap:
 - **The wire op set.** `READ` / `WRITE` / `AWAIT` / `REPLY`, unchanged. No verb is added and none is
   proposed.
 
+#### 4.1.4 Amendment 5 (2026-10-18, ruled) — a packed sample block for fixed-width samples
+
+**Instrument.** Amendment, not erratum:
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"
+reserves an erratum for text that contradicts shipped, already-agreed behaviour. This adds a
+batch shape a conforming consumer can observe and must read correctly, and a MUST for the
+consumer that cannot, so it is an amendment. It **mints no type code, no `opt` bit and no
+registry entry**: the block is an ordinary unstructured `VALUE` (`0x01`, `opt.PL=0`), the
+switch is a new key in the §4.3 descriptor (a recommended convention, not protocol grammar), and
+the record stays the `0x80` BATCH of §4.1.2 clause 6 in both carriages. The comment window is
+**waived by default** under that document's solo-maintainer clause and is **not invoked**. **No
+wire byte already released moves**: a stream whose descriptor declares no `width` is exactly
+the framed batch of §4.2.1 and §4.1.3, and no published conformance vector's bytes change.
+Approved by the maintainer as drafted on
+[#2219](https://github.com/avatarsd-llc/libtracer/issues/2219), 2026-10-18.
+
+##### The problem
+
+The framed batch carries every sample frame as a child TLV of its own — the ADR-0008 array
+shape. That is the right shape for samples whose encoding varies, and it is pure overhead for a
+fixed-width one: each sample pays a 4-byte `VALUE` header to say a length the descriptor already
+knows. For a 4-byte ARGB pixel, half of every sample's bytes on the wire are header.
+
+##### The judgement
+
+> **When the descriptor declares a sample width, the sample frames are ONE opaque `VALUE` of
+> `n × width` bytes.** Everything before them — the `TIME` base, and on a non-uniform stream the
+> packed `i32` offset run — is unchanged.
+
+```
+BATCH  (opt.PL=1, 0x80 standalone / VALUE folded — §4.1.2 clause 6, unchanged)
+  ├─ TIME  <u64 LE ns>              ; the batch BASE, unchanged (§4.2.1)
+  ├─ [ VALUE <i32[n] LE ns> ]       ; dt_ns == 0 only: EXACTLY n offsets
+  └─ VALUE (opt.PL=0) <n × width>   ; the BLOCK — frame i is bytes [i·width, (i+1)·width)
+```
+
+1. **The switch is a descriptor field.** The §4.3 descriptor gains `NAME "width" VALUE <u16>`:
+   bytes per sample frame. **Absent or `0` means the framed shape**, so every descriptor written
+   before this amendment keeps meaning what it meant.
+2. **The block.** When `width != 0`, the sample frames are **one** unstructured `VALUE`
+   (`opt.PL=0`) of `n × width` bytes, where `n = len / width`, in frame order. It is the last
+   child of the batch and the only one after the base (and the offset run). Frame `i` is bytes
+   `[i × width, (i + 1) × width)` of its payload; a sample carries no header of its own.
+3. **Time is unchanged.** The `TIME{u64 base}` child and the uniform rule
+   `t(i) = base + i × dt_ns` stand as §4.2.1 states them. When `dt_ns == 0`, the packed `i32`
+   offset array **MUST hold exactly `n` entries**, one per frame of the block.
+4. **Malformed means none.** A block whose `len % width != 0`, or an offset count other than
+   `n`, makes the batch **malformed**: the consumer **delivers none of its samples**. It does
+   not deliver the whole frames and drop the tail, and it does not guess at which offsets
+   belong to which frame. As with every other reader refusal of the convention this is the
+   consumer's answer, not the codec's: the record still decodes, forwards and round-trips
+   (§User range in the annex).
+5. **Unaware consumers keep their hands off.** A consumer that does not implement the packed
+   block **MUST treat the value as opaque when `width != 0`**: it may store it, forward it and
+   hand it to its application as bytes, and it must not split it into sample frames. Read as a
+   framed batch, a uniform packed record is a batch of **one** sample — the whole block — which
+   is wrong in a way nothing in the bytes would reveal.
+6. **One stream, one shape.** A producer **SHOULD** publish the descriptor before its first
+   packed batch, so no consumer meets a block before it can know the width: a consumer that
+   predates this amendment and reads a uniform stream without the descriptor would take a
+   packed block for a single sample (clause 5). Packed and framed
+   batches are **not mixed on one data vertex**: the width is a property of the stream, not of a
+   batch, and the record does not carry it.
+7. **`n = 1` is the framed shape.** One sample in a block is one `VALUE` child of `width`
+   bytes — exactly what the framed batch spells for one `VALUE` sample. A producer can switch a
+   single-sample stream to a declared width without changing a byte.
+
+##### What it costs and saves
+
+Wire bytes per batch for 4-byte ARGB samples on a uniform stream (a 4-byte record header, the
+12-byte `TIME` base, then either `n` children of 8 bytes or one block child of `4 + 4n`):
+
+| n | framed | packed |
+| --- | --- | --- |
+| 1 | 24 B | 24 B |
+| 16 | 144 B | 84 B |
+| 256 | 2064 B | 1044 B |
+
+The saving is the child header of every sample but the first: 4 bytes per sample, whatever the
+width. A non-uniform stream adds the same `4 + 4n`-byte offset child to both columns.
+
+##### What this does NOT change
+
+- **The framed batch.** A stream with no declared `width` is §4.2.1 and §4.1.3 exactly, and
+  remains the shape for samples whose encoding varies.
+- **The carriage table** of the 2026-08-23 erratum and **clause 6's `0x80` assignment.** A packed
+  batch is headed `0x80` standalone and `VALUE` folded, like any other.
+- **Claim 5.** The graph still never interprets a batch; `width` is a fact for the consumer, in
+  the descriptor, beside `dt_ns`.
+- **Composition.** A packed batch is still a value the application composes and swaps in
+  (§4.1.3); the reference helpers in `core/include/libtracer/batch.hpp` encode one into a
+  caller's buffer and read one as a view over the received bytes, with no allocation.
+
 ### 4.2 Wire shape — the batch convention (zero new grammar)
 
 A **batch** is a structured (`opt.PL=1`) written value whose children are the
@@ -773,6 +868,8 @@ SETTINGS {
   NAME "channels"  VALUE <u8>     ; sample frames are channel-interleaved
   NAME "dt_ns"     VALUE <u64>    ; nominal sample period; 0 = irregular
                                   ;   (per-frame trailer offsets carry all timing)
+  NAME "width"     VALUE <u16>    ; bytes per sample frame; absent or 0 = framed
+                                  ;   (Amendment 5, §4.1.4: non-zero = one packed block)
   NAME "channel"   SETTINGS {…}   ; optional — T2 out-of-band binding (§4.7)
 }
 ```
@@ -783,6 +880,10 @@ Ruled consequences:
   `dt_ns` and the other timing fields tell a **consumer** how to read bytes a producer
   already composed — they are not a rate the graph honours, a cadence it schedules, or a
   trigger it waits on. Writing a descriptor changes nothing about what the node does.
+- **`width` selects the batch shape** (§4.1.4, Amendment 5). Non-zero means the sample frames
+  travel as one packed block of `n × width` bytes; a consumer that does not implement the block
+  MUST treat the value as opaque. A producer SHOULD publish the descriptor before its first
+  packed batch.
 - The descriptor is **not** the data vertex's stored value, and there is **no
   per-vertex stream flag**. The data vertex is an ordinary vertex: its stored value
   is the last written rope (the latest batch or single value), `read` answers it,
@@ -1190,6 +1291,8 @@ fan-out pressure.
   its Recipe C, **compose → swap → push** (Amendment 4 §4.1.3 clause 4).
 - `core/include/libtracer/batch.hpp` — the reference composition helper (Amendment 4
   §4.1.3 clause 4): one layout, both carriages, sample bytes referenced rather than copied.
+  **Amendment 5 (§4.1.4) adds the packed-block encode and decode beside it**, and the
+  annex's §User range BATCH paragraph gains the packed shape (edited in this PR).
 - `docs/reference/02-graph-model.md` — the delivery-class ladder and the
   attach-forward cold-start boundary.
 - `docs/reference/01-data-format.md` — a short worked example of the batch trailer
@@ -1265,6 +1368,16 @@ New vectors (the `stream/*` family, phase-3 unless noted):
 15. `stream/receiver-ring-flood` (Amendment 2 §4.6.1) — exhausting the **net-plane** store
     under a flood leaves the **graph plane** still able to allocate; the receiver ring
     sheds under §4.4 rather than starving the node.
+16. `stream/batch-packed-roundtrip` (Amendment 5 §4.1.4) — a uniform packed batch of four
+    4-byte ARGB frames, descriptor `width = 4`: one block child of 16 bytes after the `TIME`
+    base, read back as `n = 4` samples at the derived times. The encoder also pins that `n = 1`
+    is byte-identical to the framed shape.
+17. `stream/batch-packed-malformed` (Amendment 5 §4.1.4 clause 4) — a 10-byte block against
+    `width = 4`: the record decodes and round-trips, and the consumer delivers **none** of its
+    samples. The offset-count case (`dt_ns == 0`, offsets ≠ `n`) is gated beside it.
+18. `stream/batch-packed-unaware` (Amendment 5 §4.1.4 clause 5) — a non-uniform packed batch
+    (two offsets, an 8-byte block): a packed reader reads two samples, a framed reader does
+    not split the block, and a node that moves the value moves these bytes unchanged.
 
 **Vector repairs Amendment 3 (§4.1.2 clause 7) schedules but does not perform.**
 `subscriber/policy-reserved-bits` is repaired **in place, same bytes** — its `0xFFC1`

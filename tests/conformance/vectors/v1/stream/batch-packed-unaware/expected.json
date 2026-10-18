@@ -1,0 +1,12 @@
+{
+  "name": "batch-packed-unaware",
+  "category": "stream",
+  "hex": "804024000C00080000002A36FE9C97170100080000000000FA00000001000800FFFF0000FF00FF00",
+  "total_bytes": 40,
+  "decoded": {
+    "type": "0x80 BATCH",
+    "structured": true,
+    "meaning": "BATCH{ TIME u64=1700000000000000000, VALUE i32[2]={0,250}, VALUE[8]={FFFF0000, FF00FF00} } — a NON-UNIFORM packed batch (descriptor width = 4, dt_ns = 0): two offsets for n = 8 / 4 = 2 samples. A consumer that does not implement the packed block MUST treat this value as opaque (RFC-0025 §4.1.4, Amendment 5)",
+    "note": "a width-unaware framed reader would see an offset run of 2 entries against 1 sample child and refuse; on a uniform stream it would instead read the whole block as ONE sample, which is the misreading the opaque rule exists to prevent. A node that stores or forwards the value moves these bytes unchanged either way"
+  }
+}

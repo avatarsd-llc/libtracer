@@ -52,10 +52,18 @@
  * `propagate`/push. Whether the vertex is STORED (its LKV is the latest batch) or STREAM (its
  * ring holds a history of batches, one entry per batch) is the app's choice.
  *
+ * **The packed sample block** (RFC-0025 §4.1.4, Amendment 5). When the descriptor declares a
+ * `width` (bytes per sample frame), the sample frames are not one child each but ONE opaque
+ * `VALUE` (`opt.PL=0`) of `n × width` bytes, so a fixed-width sample pays no per-sample TLV
+ * header. Everything before the block is the framed layout unchanged, and `n = 1` is
+ * byte-identical to the framed shape. @ref tr::wire::encode_packed_batch writes one into a
+ * caller's span and @ref tr::wire::read_packed_batch reads one back; neither allocates.
+ *
  * Lives in `tr::wire` (L2/L3): it produces and reads wire bytes from wire types.
  */
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -349,6 +357,86 @@ inline void emit_batch(std::vector<std::byte>& out, std::int64_t base_ns,
 }
 
 /**
+ * @brief Wire bytes of a packed sample block's child: one `VALUE` (`opt.PL=0`) header plus the
+ *        @p block_len bytes of `n × width` packed samples (RFC-0025 §4.1.4, Amendment 5).
+ *
+ * The header is 4 bytes, or 6 once the block passes the u16 length (`opt.LL`).
+ */
+[[nodiscard]] constexpr std::size_t packed_block_child_bytes(std::size_t block_len) noexcept {
+    return (block_len > 0xFFFFu ? 6u : 4u) + block_len;
+}
+
+/**
+ * @brief Wire bytes one PACKED batch record occupies: the framed head (record header, `TIME`
+ *        base, optional offset child) around ONE block child of @p block_len bytes.
+ *
+ * For a 4-byte sample on a uniform stream this is `24 + 4 × (n − 1)` bytes against the framed
+ * shape's `24 + 8 × (n − 1)`: the block saves the 4-byte child header of every sample but the
+ * first, and at `n = 1` the two shapes are the same bytes.
+ *
+ * @param block_len Bytes of packed sample data: `n × width`.
+ * @param offsets   How many packed offsets ride along; `0` on a uniform stream, `n` otherwise.
+ */
+[[nodiscard]] constexpr std::size_t packed_batch_wire_bytes(std::size_t block_len,
+                                                            std::size_t offsets = 0) noexcept {
+    return batch_wire_bytes(packed_block_child_bytes(block_len), offsets);
+}
+
+/**
+ * @brief Store a PACKED batch's head — the framed head of @ref store_batch_head followed by the
+ *        block child's own `VALUE` header — into an exactly-sized span.
+ *
+ * Everything up to the first sample byte. A caller that holds its block in a segment of its
+ * own can store this head into a small segment and rope the block on behind it, exactly as
+ * @ref compose_batch does for framed samples; one that wants a contiguous record calls
+ * @ref encode_packed_batch.
+ *
+ * @param block_len Bytes of packed sample data that will follow: `n × width`.
+ * @note Precondition: `out.size() >= packed_batch_wire_bytes(block_len, offsets_ns.size()) -
+ *       block_len`. This stores; it does not validate the shape — @ref encode_packed_batch does.
+ */
+inline void store_packed_batch_head(std::span<std::byte> out, batch_carriage_t carriage,
+                                    std::int64_t base_ns, std::size_t block_len,
+                                    std::span<const std::int32_t> offsets_ns = {}) noexcept {
+    const std::size_t child = packed_block_child_bytes(block_len);
+    store_batch_head(out, carriage, base_ns, child, offsets_ns);
+    const std::size_t at = batch_head_bytes(child, offsets_ns.size());
+    store_header(out.subspan(at), type_t::VALUE, opt_t{.ll = block_len > 0xFFFFu}, block_len);
+}
+
+/**
+ * @brief ENCODE a packed batch into the caller's @p out span: `n = block.size() / width`
+ *        samples in one opaque block child (RFC-0025 §4.1.4, Amendment 5).
+ *
+ * No allocation and no buffer of the library's own: the record is written straight into
+ * @p out, the block's bytes copied once. The shape rules are checked before a byte is written,
+ * so a refusal leaves @p out untouched.
+ *
+ * @param width      Bytes per sample frame — the descriptor's `width`. Must be non-zero.
+ * @param block      The `n × width` bytes of packed sample frames, in order.
+ * @param offsets_ns The non-uniform stream's per-sample offsets — exactly `n` of them — or
+ *                   empty for a uniform stream.
+ * @return The bytes written: @ref packed_batch_wire_bytes.
+ * @retval 0 Refused: @p width is `0`, @p block is empty (`n == 0`), `block.size()` is not a
+ *           multiple of @p width, a non-empty @p offsets_ns does not hold exactly `n` entries,
+ *           or @p out is too small. An empty block is refused because, with no offsets to
+ *           send, it would take the uniform shape, which @ref read_packed_batch refuses on the
+ *           `dt_ns == 0` stream; a batch of no samples is never worth a record.
+ */
+[[nodiscard]] inline std::size_t encode_packed_batch(
+    std::span<std::byte> out, batch_carriage_t carriage, std::int64_t base_ns, std::uint16_t width,
+    std::span<const std::byte> block, std::span<const std::int32_t> offsets_ns = {}) noexcept {
+    if (width == 0 || block.empty() || block.size() % width != 0) return 0;
+    if (!offsets_ns.empty() && offsets_ns.size() != block.size() / width) return 0;
+    const std::size_t total = packed_batch_wire_bytes(block.size(), offsets_ns.size());
+    if (out.size() < total) return 0;
+    const std::size_t head = total - block.size();
+    store_packed_batch_head(out.first(head), carriage, base_ns, block.size(), offsets_ns);
+    std::copy(block.begin(), block.end(), out.begin() + static_cast<std::ptrdiff_t>(head));
+    return total;
+}
+
+/**
  * @brief A decoded BATCH record: its base, its sample frames, and the arithmetic that turns
  *        an index into a sample time.
  *
@@ -362,13 +450,26 @@ struct batch_view_t {
     std::uint64_t dt_ns = 0;
     /** @brief The packed `i32` LE offset run; EMPTY on a uniform stream. */
     std::span<const std::byte> offsets{};
-    /** @brief The sample frames, in order — the children after the base (and the offsets). */
+    /** @brief The sample frames, in order — the children after the base (and the offsets).
+     *         On a PACKED batch this is the one block child; read a sample with @ref sample. */
     tlv_children_t samples{};
-    /** @brief How many sample frames @ref samples holds. */
+    /** @brief How many sample frames the batch holds — on a packed batch, `n = len / width`. */
     std::size_t count = 0;
+    /** @brief Bytes per sample frame from the descriptor; `0` = the framed shape (RFC-0025
+     *         §4.1.4, Amendment 5). */
+    std::uint16_t width = 0;
+    /** @brief The packed block's `n × width` bytes; EMPTY on a framed batch. */
+    std::span<const std::byte> block{};
 
     /** @brief How many sample frames this batch folded. */
     [[nodiscard]] constexpr std::size_t size() const noexcept { return count; }
+
+    /** @brief The bytes of packed sample frame @p i — EMPTY on a framed batch or when @p i is
+     *         out of range. */
+    [[nodiscard]] constexpr std::span<const std::byte> sample(std::size_t i) const noexcept {
+        if (width == 0 || i >= count) return {};
+        return block.subspan(i * width, width);
+    }
 
     /** @brief True when per-sample time is DERIVED from the descriptor's rate (0 B/sample). */
     [[nodiscard]] constexpr bool uniform() const noexcept { return dt_ns != 0; }
@@ -464,6 +565,48 @@ struct batch_view_t {
     v.samples = tlv_children_t::from(it);
     for (; it != ch.end(); ++it) ++v.count;
     if (dt_ns == 0 && v.offsets.size() != v.count * kBatchOffsetBytes) return std::nullopt;
+    return v;
+}
+
+/**
+ * @brief Read a PACKED batch against the descriptor's @p dt_ns and @p width (RFC-0025 §4.1.4,
+ *        Amendment 5): the `TIME` base, the offset child when `dt_ns == 0`, then exactly ONE
+ *        opaque block child of `n × width` bytes.
+ *
+ * Returns a view over @p tlv's own bytes — @ref batch_view_t::count is `n`,
+ * @ref batch_view_t::block the samples, @ref batch_view_t::sample one of them — and allocates
+ * nothing.
+ *
+ * @return Nothing when the record is not a packed batch of this width: @ref read_batch's own
+ *         refusals, a @p width of `0`, a missing, structured or extra block child, a block
+ *         length that is not a multiple of @p width, or (on a non-uniform stream) an offset
+ *         count other than `n`. The last two are what Amendment 5 calls MALFORMED, and the
+ *         answer is the same: the consumer delivers **none** of the batch's samples. As with
+ *         @ref read_batch the refusal is the reader's, not the codec's — the record still
+ *         decodes and still round-trips.
+ */
+[[nodiscard]] inline std::optional<batch_view_t> read_packed_batch(const tlv_node_t& tlv,
+                                                                   std::uint64_t dt_ns,
+                                                                   std::uint16_t width) noexcept {
+    // Read as UNIFORM whatever the descriptor says: that validates the base and leaves every
+    // child after it in `samples`, which is the run this reader then shapes itself.
+    std::optional<batch_view_t> v = read_batch(tlv, 1);
+    if (!v || width == 0 || v->count != (dt_ns == 0 ? 2u : 1u)) return std::nullopt;
+    auto it = v->samples.begin();
+    if (dt_ns == 0) {
+        if ((*it).type() != type_t::VALUE || (*it).opt().pl) return std::nullopt;
+        v->offsets = (*it).payload();
+        ++it;
+    }
+    const tlv_node_t block = *it;
+    if (block.type() != type_t::VALUE || block.opt().pl || block.payload().size() % width != 0)
+        return std::nullopt;
+    v->dt_ns = dt_ns;
+    v->width = width;
+    v->block = block.payload();
+    v->samples = tlv_children_t::from(it);
+    v->count = v->block.size() / width;
+    if (dt_ns == 0 && v->offsets.size() != v->count * kBatchOffsetBytes) return std::nullopt;
     return v;
 }
 

@@ -1,0 +1,12 @@
+{
+  "name": "batch-packed-roundtrip",
+  "category": "stream",
+  "hex": "804020000C00080000002A36FE9C971701001000FFFF0000FF00FF00FF0000FF80FFFFFF",
+  "total_bytes": 36,
+  "decoded": {
+    "type": "0x80 BATCH",
+    "structured": true,
+    "meaning": "BATCH{ TIME u64=1700000000000000000, VALUE[16]={FFFF0000, FF00FF00, FF0000FF, 80FFFFFF} } — a PACKED batch (RFC-0025 §4.1.4, Amendment 5): the descriptor declares width = 4 and dt_ns = 1000, so the one opaque VALUE after the TIME base is n = 16 / 4 = 4 ARGB sample frames, t(i) = 1700000000000000000 + i*1000",
+    "note": "one child header for four samples: the framed spelling of the same batch is 48 bytes (a VALUE header per sample), this one is 36. A consumer that splits the block needs the descriptor's width; the record does not carry it"
+  }
+}
