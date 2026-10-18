@@ -653,8 +653,9 @@ void run_grid() {
     for (std::size_t F : kGridFanouts) run_inproc_deliver(kRefSize, F, kGridBudget, kGridLatBudget);
     for (std::size_t S : kGridSizes)
         for (std::size_t E : kGridEndpoints)
-            run_inproc(S, 1, E, alloc_t::HEAP, true, "inproc-path", kGridBudget, kGridLatBudget,
-                       nullptr, rows_t::QUANTIZED);
+            run_inproc(S, 1, E, alloc_t::HEAP, true, "inproc-path",
+                       bench::endpoint_budget(E, kGridBudget),
+                       bench::endpoint_budget(E, kGridLatBudget), nullptr, rows_t::QUANTIZED);
     // The dense payload sweep (#1890), at fan-out 1 only: the payload charts' slice.
     for (std::size_t S : bench::sweep_extra(kGridSizes))
         run_inproc(S, 1, 1, alloc_t::HEAP, false, "inproc", bench::ladder_budget(S, kGridBudget),

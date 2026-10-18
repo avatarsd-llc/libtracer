@@ -208,6 +208,25 @@ template <std::size_t... N>
 }
 
 /**
+ * @brief Scale a grid budget down for an endpoint count above 256, so the `inproc-path`
+ *        rows at 1024 and 4096 topics cost about what the 256-topic row does.
+ *
+ * Zenoh's `Session::put` on an undeclared `KeyExpr` resolves against every declared
+ * subscription, so its cost per put grows with the topic count: at 4096 topics a fixed
+ * 500 000-put budget was 33 s per row, and the endpoint slice was ~900 s of the docs
+ * sweep's three rounds (#1910 made those rows resolve on every put). Both engines take
+ * the same scaled budget, so the rows stay matched. At or below 256 topics the budget is
+ * returned unchanged, so no existing row's sample count moves; above it the budget
+ * shrinks in proportion to the topic count, with a floor of 2000 operations, which is
+ * @ref publishes_for's own floor.
+ */
+[[nodiscard]] inline std::uint64_t endpoint_budget(std::size_t endpoints, std::uint64_t budget) {
+    constexpr std::size_t kFullBudgetEndpoints = 256;
+    if (endpoints <= kFullBudgetEndpoints) return budget;
+    return std::max<std::uint64_t>(2000, budget * kFullBudgetEndpoints / endpoints);
+}
+
+/**
  * @brief Payload from which an in-process write row builds its values, and frees them, outside
  *        the timed region, on both engines (#1905); see @ref kStagedBuffers.
  *
