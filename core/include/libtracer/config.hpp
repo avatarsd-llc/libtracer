@@ -620,8 +620,16 @@ struct default_config_t {
      * bulk while other threads dispatch. Nothing at all under `reclaim_strict_t`, which never
      * defers.
      *
-     * Sizing: one @ref retired_callback_t plus its epoch per slot, in `.bss`, with no destructor
-     * and no allocation.
+     * Sizing: each slot is a handoff word, the `{ctx, release}` pair and its epoch, in `.bss`,
+     * with no destructor and no allocation: 32 B on a 64-bit host and 16 B on a 32-bit MCU, so
+     * the default 16 slots cost 512 B and 256 B. Now that `reclaim_qsbr_t` is the default on
+     * every target (#2127), size the table for the largest burst of unsubscribes that can
+     * overlap another thread's dispatch, not for the steady state: one slot per subscription
+     * a node may retire while some participant is still inside a fan-out. A single-threaded
+     * node, or one that unsubscribes only while no other thread dispatches, retires inline and
+     * never holds a slot. A node that tears down a whole subtree under live traffic wants the
+     * subtree's subscription count here. Watch `graph_t::reclaim_refusals().release_refused`
+     * in a soak: any non-zero reading means the bound is too small for that deployment.
      *
      * Overflow is a REFUSAL, not a failure: a pair that finds every slot taken is DROPPED and
      * its hook is never run — a leak, deliberately, because the alternative is running a
