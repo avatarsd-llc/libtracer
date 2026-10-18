@@ -436,6 +436,13 @@ void ws_server_transport_t::on_slot_reset(session_base_t& base) {
     s.assembler.reset();
 }
 
+bool ws_server_transport_t::mid_frame(const session_base_t& base) const {
+    // A peer owes its opening handshake until the 101 opens the session.
+    const session_t& s = static_cast<const session_t&>(base);
+    return !s.open.load(std::memory_order_relaxed) || s.ingress.mid_frame() ||
+           s.assembler.assembling;
+}
+
 void ws_server_transport_t::send(std::span<const std::byte> frame) {
     // One span, same wire bytes — the gathered path is the ONE implementation (the
     // tcp_transport_t::send idiom). A server frame is UNMASKED (RFC 6455 §5.1), so the

@@ -2104,6 +2104,17 @@ if(LIBTRACER_TRANSPORT_TCP)
     set_tests_properties(send_stall PROPERTIES TIMEOUT 60)
 endif()
 
+if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+    # #2198 — the application's liveness check: on every stream transport vertex a peer
+    # that owes the wire progress and makes none past the app's deadline is closed and
+    # counted, and a draining or idle peer is kept.
+    add_executable(frozen_peer_test frozen_peer_test.cpp)
+    target_link_libraries(frozen_peer_test PRIVATE libtracer)
+    libtracer_test_warnings(frozen_peer_test)
+    add_test(NAME frozen_peer COMMAND frozen_peer_test)
+    set_tests_properties(frozen_peer PROPERTIES TIMEOUT 60)
+endif()
+
 if(LIBTRACER_ANY_SOCKET_TRANSPORT)
     # #903 — the stream_endpoint_t full-write helpers under a REAL signal storm: a
     # socketpair with a small SO_SNDBUF, a deliberately slow reader, and SIGUSR1

@@ -389,6 +389,19 @@ egress_frame_t* stream_endpoint_t::frame_of(std::span<const ::iovec> rec,
         value);
 }
 
+std::size_t stream_endpoint_t::close_frozen_one(std::uint64_t now, std::uint64_t deadline) {
+    const bool moved = tx_moved_.exchange(false, std::memory_order_relaxed);
+    if (!judge_frozen(!moved && peer_.wants_write(), live_since_, now, deadline)) return 0;
+    // Inside the writer role, so the fd it shuts down is still the peer's; a role somebody
+    // holds is a write in progress, and the next check asks again.
+    if (!egress_.condemn_held(peer_,
+                              [this] { condemn_fd(conn_fd_.load(std::memory_order_acquire)); }))
+        return 0;
+    live_since_ = now;
+    frozen_closed_.fetch_add(1, std::memory_order_relaxed);
+    return 1;
+}
+
 void stream_endpoint_t::note_egress(const egress_result_t& r) noexcept {
     if (r.shed != 0) dropped_tx_.fetch_add(r.shed, std::memory_order_relaxed);
     if (r.stalled != 0) stalled_tx_.fetch_add(r.stalled, std::memory_order_relaxed);
@@ -412,7 +425,7 @@ int stream_endpoint_t::poll_io(int fd) {
         note_egress(egress_.flush(
             peer_,
             [&](const egress_frame_t& f, std::size_t off) {
-                return write_frame(fd, f, off, 0, true);
+                return note_moved(tx_moved_, write_frame(fd, f, off, 0, true));
             },
             [fd] { condemn_fd(fd); }));
     return (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0 ? 1 : 0;
@@ -447,6 +460,7 @@ void stream_endpoint_t::run_accept_loop(int listen_fd, function_ref_t<bool(int)>
             continue;
         }
         conn_fd_.store(fd, std::memory_order_relaxed);
+        tx_moved_.store(true, std::memory_order_relaxed);  // a new peer starts alive (#2198)
         egress_.open(peer_);  // release: a sender that claims the role then sees the fd
 
         serve_peer(fd);
@@ -572,15 +586,39 @@ bool slot_server_t::close_peer(std::string_view peer) {
     return false;
 }
 
+std::size_t slot_server_t::close_frozen_peers(std::uint64_t now, std::uint64_t deadline) {
+    // Under peers_m_, the close_peer discipline: teardown un-names a slot under this lock
+    // before it closes the fd, so a named slot's fd is still its own here.
+    std::size_t closed = 0;
+    const std::lock_guard lock(peers_m_);
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
+        // Acquire pairs with accept_peer's release of the fd: a slot whose fd is seen
+        // published also shows its fresh progress flags, never a reused slot's stale ones.
+        const int fd = s->fd.load(std::memory_order_acquire);
+        if (fd < 0 || s->name[0] == '\0') continue;
+        const bool tx = s->tx_moved.exchange(false, std::memory_order_relaxed);
+        const bool rx = s->rx_moved.exchange(false, std::memory_order_relaxed);
+        const bool stuck =
+            (!tx && s->egress.wants_write()) || (!rx && s->rx_owed.load(std::memory_order_relaxed));
+        if (!judge_frozen(stuck, s->live_since, now, deadline)) continue;
+        condemn_fd(fd);  // the poll thread's next pass runs the remote-FIN teardown
+        s->live_since = now;
+        ++closed;
+    }
+    frozen_closed_.fetch_add(closed, std::memory_order_relaxed);
+    return closed;
+}
+
 void slot_server_t::send_one(session_base_t& s, function_ref_t<egress_frame_t*()> frame,
                              std::span<const ::iovec> rec, const graph::delivery_lane_t& lane) {
     // The fd is read INSIDE the writer role: accept opens the egress only after publishing
     // it, and teardown closes the egress (waiting the role out) before resetting it.
     const auto fd = [&s] { return s.fd.load(std::memory_order_relaxed); };
     const egress_result_t r = egress_.send(
-        s.egress, lane, frame, [&] { return write_gather(fd(), rec, 0, true); },
+        s.egress, lane, frame,
+        [&] { return note_moved(s.tx_moved, write_gather(fd(), rec, 0, true)); },
         [&](const egress_frame_t& f, std::size_t off) {
-            return write_frame(fd(), f, off, 0, true);
+            return note_moved(s.tx_moved, write_frame(fd(), f, off, 0, true));
         },
         [&] { condemn_fd(fd()); });
     note_egress(r);
@@ -606,7 +644,7 @@ void slot_server_t::send_to(session_base_t& s, std::span<const ::iovec> rec,
 void slot_server_t::flush_peer(session_base_t& s) {
     const auto fd = [&s] { return s.fd.load(std::memory_order_relaxed); };
     const auto write = [&](const egress_frame_t& f, std::size_t off) {
-        return write_frame(fd(), f, off, 0, true);
+        return note_moved(s.tx_moved, write_frame(fd(), f, off, 0, true));
     };
     const auto condemn = [&] { condemn_fd(fd()); };
     note_egress(egress_.flush(s.egress, write, condemn));
@@ -670,11 +708,16 @@ void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
     // Socket options and the slot's protocol buffers, then its handshake stance: a raw
     // stream peer is open the moment it is accepted, a WS peer only past its 101.
     const bool opens_now = on_accept(*slot, fd);
+    // A new peer starts alive (#2198): the next liveness check stamps its record.
+    slot->tx_moved.store(true, std::memory_order_relaxed);
+    slot->rx_moved.store(true, std::memory_order_relaxed);
+    slot->rx_owed.store(mid_frame(*slot), std::memory_order_relaxed);
     // Publish the fd FIRST, then open the session: "open ⇒ fd valid" is the invariant (#891).
     // A sender reads the fd only inside the session's egress role, and the role cannot be
     // claimed until the egress opens — a release a claim's acquire pairs with — so no sender
     // can see the slot half-published, and none waits on the accept to finish.
-    slot->fd.store(fd, std::memory_order_relaxed);
+    // Release: the liveness check's acquire of the fd then sees the flags stored above (#2198).
+    slot->fd.store(fd, std::memory_order_release);
     // The seam that makes the order testable: the fd is published, the slot not yet open. A
     // broadcast that lands here must skip the slot rather than write to fd -1 (`tcp_test`,
     // the accept-publish race).
@@ -726,7 +769,10 @@ void slot_server_t::service_peer(session_base_t& s) {
     if (fd < 0) return;
     // The read and the framing are the derived server's: a length-prefix framer feed, or
     // the WS handshake and then frame ingress. Either may tear this slot down in the hook.
+    s.rx_moved.store(true, std::memory_order_relaxed);
     on_readable(s, fd);
+    // What the peer still owes after the read, for the liveness check (#2198).
+    s.rx_owed.store(mid_frame(s), std::memory_order_relaxed);
 }
 
 void slot_server_t::teardown_slot(session_base_t& s) {

@@ -1017,6 +1017,41 @@ void test_a_refused_node_draw_is_a_counted_refusal() {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// #2198 — the application's liveness check condemns a frozen peer, and only it.
+// ---------------------------------------------------------------------------
+/**
+ * @brief A peer whose socket takes nothing while a frame waits is condemned once the
+ *        application's deadline passes its record, and counted; a draining peer and an idle
+ *        one are kept, and nothing is closed before the deadline. `now` is the test's.
+ */
+void test_the_liveness_check_closes_a_frozen_peer() {
+    std::printf("the application's liveness check (#2198):\n");
+    auto link = make_link();
+    claim(kStalled);
+    claim(kHealthy);
+    drain();
+    check_eq(link->close_frozen_peers(100, 50), 0, "idle peers owe nothing: both kept");
+    fake_httpd::instance().set_send_script(kStalled, {send_result_t::TIMEOUT});
+    link->send(std::span<const std::byte>(kBody));
+    drain();
+    const std::uint32_t condemned = link->stats().sessions_condemned;
+    // The idle check stamped both records at 100; the stalled peer has owed since.
+    check_eq(link->close_frozen_peers(101, 100), 0, "a record at the deadline is kept");
+    check_eq(link->close_frozen_peers(102, 100), 0, "and kept again: nothing re-stamps it");
+    drain();
+    check(fake_httpd::instance().has_session(kStalled), "so the stalled peer is still up");
+    check_eq(link->close_frozen_peers(110, 105), 1, "past the deadline the frozen peer is found");
+    drain();
+    check(!fake_httpd::instance().has_session(kStalled), "and condemned on the httpd task");
+    check(fake_httpd::instance().has_session(kHealthy), "the draining peer is kept");
+    check_eq(link->stats().peers_frozen, 1, "the close is counted in peers_frozen");
+    check_eq(link->stats().sessions_condemned - condemned, 1, "and in sessions_condemned");
+    check_eq(link->stats().tx_send_failed, 0, "not as a failed send");
+    check_eq(link->close_frozen_peers(200, 150), 0, "a later check finds nobody owing");
+    reset(link);
+}
+
 int main() {
     std::printf("httpd_ws_link per-peer conflating TX slot host suite (#2095):\n");
     test_a_stalled_peer_sets_only_its_own_rate();
@@ -1038,6 +1073,7 @@ int main() {
     test_a_sample_replaces_in_a_full_queue();
     test_a_full_stream_sheds_or_refuses();
     test_a_refused_node_draw_is_a_counted_refusal();
+    test_the_liveness_check_closes_a_frozen_peer();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
