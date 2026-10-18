@@ -556,13 +556,18 @@ void test_handler_deliver_written_false() {
     tr::wire::emit_tlv(root, type_t::POINT, opt_t{.pl = true}, leaf);
     std::vector<std::byte> branch;
     tr::wire::emit_tlv(branch, type_t::POINT, opt_t{.pl = true}, root);
-    check(g.write(rv, make_value(branch)).has_value() && *at_h == 2,
-          "control — the OWNER's branch write delivers the handler's slice");
+    const int root_before = *at_r;
+    check(g.write(rv, make_value(branch)).has_value() && *at_h == 2 && *at_r == root_before + 1,
+          "control — the OWNER's branch write delivers the handler's slice, and the root's tree");
     const int before = *writes;
     check(g.write(rv, make_value(branch), "peer-a").has_value(),
           "a PEER's branch write over the handler is acknowledged");
     check(*writes == before + 1 && *at_h == 2,
           "... runs the handler's on_write and delivers its slice to nobody there");
+    // RFC-0008 Am.3 clause 6: the branch root's own tree is the root's write, so its
+    // subscriber still gets it — the slice is not re-encoded out.
+    check(*at_r == root_before + 2,
+          "... while the branch root's subscriber still receives the root's tree (clause 6)");
 
     // Visibility: `:schema` reports the flag read-only, and only where it is set.
     const auto has = [](std::span<const std::byte> hay, std::string_view needle) {
