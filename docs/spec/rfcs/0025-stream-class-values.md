@@ -685,7 +685,9 @@ BATCH  (opt.PL=1, 0x80 standalone / VALUE folded — §4.1.2 clause 6, unchanged
    framed batch, a uniform packed record is a batch of **one** sample — the whole block — which
    is wrong in a way nothing in the bytes would reveal.
 6. **One stream, one shape.** A producer **SHOULD** publish the descriptor before its first
-   packed batch, so no consumer meets a block before it can know the width. Packed and framed
+   packed batch, so no consumer meets a block before it can know the width: a consumer that
+   predates this amendment and reads a uniform stream without the descriptor would take a
+   packed block for a single sample (clause 5). Packed and framed
    batches are **not mixed on one data vertex**: the width is a property of the stream, not of a
    batch, and the record does not carry it.
 7. **`n = 1` is the framed shape.** One sample in a block is one `VALUE` child of `width`
