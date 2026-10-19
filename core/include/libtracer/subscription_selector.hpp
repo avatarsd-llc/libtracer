@@ -123,16 +123,6 @@ enum class selector_ref_state_t : std::uint8_t {
  * owner lists it and switches: admitting it suspended needs a remote spelling (#2019). "No
  * double delivery" is a promise over the refs listed here, while the selector owns their bit.
  *
- * **A refused switch.** A toggle cannot be refused for want of memory since #1622, so this arm
- * is reached only if a resume answers an error other than `NOT_FOUND`; it is kept as the
- * contract for that case. The switch then reports that error and is
- * partly applied (RFC-0034 §2.1): B stays the active option and @ref settled turns false; every
- * ref outside B is suspended, the refs of B that resumed deliver, and the refused ones stay
- * suspended. Selecting B again (or writing `active` again) retries only the refs still
- * suspended. It is the one refused
- * `active` write that leaves state behind, which the admit seam's doc
- * (`handlers_t::on_app_field_admit`) allows.
- *
  * **A dangling ref** (its subscription is gone) answers `NOT_FOUND` to a toggle. The selector
  * then marks it INERT, skips it on every later switch, and keeps listing it, until the owner
  * removes it (@ref remove) or lists the same address again (@ref add), which re-reads it.
@@ -145,10 +135,10 @@ enum class selector_ref_state_t : std::uint8_t {
  * OS lock, and it cannot invert priorities. Taking it is one atomic exchange where the core
  * has one, else a load and a store inside the build's guard (`tr::graph::guard_t`), as
  * `tr::rmw_counter_t` does. A switch holds it across `%graph_t::set_suspended`, which takes the
- * graph's own locks; a guard section could not be held there. @ref active, @ref settled and a
- * read of the `active` field read atomics and never refuse, so a `BACKPRESSURE` switch can
- * be told apart: if the option it named is now active, it was partly applied; if not, the
- * selector was busy and nothing changed. Either way, the same write again completes it.
+ * graph's own locks; a guard section could not be held there. @ref active and a read of the
+ * `active` field read an atomic and never refuse. A switch is never partly applied: a toggle
+ * cannot be refused (#1622), so a `BACKPRESSURE` switch only ever found the selector busy and
+ * changed nothing, and the same write again completes it.
  *
  * **What an `options` read can cost.** A ref can be listed in every option, so a read renders
  * at most `kRefs × kOptions` ref records, each with a producer key of up to 1 KiB
@@ -288,11 +278,9 @@ class subscription_selector_t {
      * @brief Make @p option the active one and bring every ref in line with it; an empty
      *        @p option selects none and suspends every ref.
      *
-     * Selecting the option already active retries a refused switch and changes nothing else.
+     * Selecting the option already active changes nothing.
      * @retval NOT_FOUND    No option is named @p option; nothing changed.
-     * @retval BACKPRESSURE A resume was refused: @p option is active, @ref settled is false,
-     *                      and selecting it again retries (see the class notes). Or another
-     *                      operation on this selector is running, and nothing changed.
+     * @retval BACKPRESSURE Another operation on this selector is running; nothing changed.
      */
     [[nodiscard]] result_t<void> select(std::string_view option) {
         const hold_t hold(*this);
@@ -300,7 +288,8 @@ class subscription_selector_t {
         const std::size_t o = option.empty() ? kNone : find_option(option);
         if (!option.empty() && o == n_options_) return std::unexpected(status_t::NOT_FOUND);
         active_.store(static_cast<std::uint8_t>(o), std::memory_order_release);
-        return reconcile();
+        reconcile();
+        return {};
     }
 
     /** @brief The active option's name; empty when none is. Never refused. */
@@ -308,9 +297,6 @@ class subscription_selector_t {
         const std::uint8_t a = active_.load(std::memory_order_acquire);
         return a == kNone ? std::string_view{} : names_[a];
     }
-
-    /** @brief False after a refused switch, until a retry resumes every ref it left out. */
-    [[nodiscard]] bool settled() const noexcept { return settled_.load(std::memory_order_acquire); }
 
     /**
      * @brief What @p ref is doing now, re-read from the graph.
@@ -447,26 +433,23 @@ class subscription_selector_t {
      *        lists that is not live, skipping INERT refs. Caller holds the flag.
      *
      * One loop, two passes: pass 0 suspends, pass 1 resumes, so no resume runs before the
-     * last suspend. A refused resume does not stop the pass; the first refusal is returned.
+     * last suspend. A toggle answers only NOT_FOUND (the ref is gone: it turns INERT) or
+     * success (#1622), so the pass always completes.
      */
-    [[nodiscard]] result_t<void> reconcile() {
+    void reconcile() {
         const std::size_t a = active_.load(std::memory_order_relaxed);
         const mask_t want = a == kNone ? mask_t{0} : members_[a];
-        result_t<void> out{};
         for (const bool resume : {false, true}) {
             for (std::size_t r = 0; r < n_refs_; ++r) {
                 const bool w = (want >> r) & 1u;
                 if (((inert_ >> r) & 1u) || bool((live_ >> r) & 1u) == w || w != resume) continue;
-                const result_t<void> t =
-                    g_->set_suspended(g_->subscription_at(producer(r), refs_[r].slot), !resume);
-                const bool gone = !t && t.error() == status_t::NOT_FOUND;
-                inert_ = with(inert_, r, gone);
-                live_ = with(live_, r, t.has_value() && resume);
-                if (!t && !gone && out) out = t;
+                const bool ok =
+                    g_->set_suspended(g_->subscription_at(producer(r), refs_[r].slot), !resume)
+                        .has_value();
+                inert_ = with(inert_, r, !ok);
+                live_ = with(live_, r, ok && resume);
             }
         }
-        settled_.store(out.has_value(), std::memory_order_release);
-        return out;
     }
 
     /** @brief Re-read ref @p r's state from the graph; a gone subscription turns it INERT, and
@@ -512,8 +495,9 @@ class subscription_selector_t {
     }
 
     /** @brief The read seam (`handlers_t::on_app_field_read`): both fields are answered from
-     *         the selector's own state. `active` reads atomics and never takes the busy flag,
-     *         so a writer whose switch was refused can always read which option is active;
+     *         the selector's own state. `active` reads an atomic and never takes the busy
+     *         flag, so a writer whose switch met a busy selector can always read which option
+     *         is active;
      *         `options` takes it. An empty reference is a refused draw or a busy selector
      *         (BACKPRESSURE). */
     static std::optional<value_ref_t> read_field(void* ctx, std::string_view name) {
@@ -579,9 +563,8 @@ class subscription_selector_t {
     std::uint8_t n_refs_ = 0;                        /**< @brief Refs in use. */
     std::uint8_t n_options_ = 0;                     /**< @brief Options in use. */
     std::atomic<std::uint8_t> active_{kNone};        /**< @brief The active option, or `kNone`. */
-    std::atomic<bool> settled_{true}; /**< @brief False after a refused switch, until a retry. */
-    std::atomic<bool> busy_{false};   /**< @brief The one-operation flag (see `hold_t`). */
-    bool attached_ = false;           /**< @brief Whether `vertex_` holds a vertex. */
+    std::atomic<bool> busy_{false}; /**< @brief The one-operation flag (see `hold_t`). */
+    bool attached_ = false;         /**< @brief Whether `vertex_` holds a vertex. */
 };
 
 // The sizes the class notes state, pinned on both data models.

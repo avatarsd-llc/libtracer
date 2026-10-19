@@ -243,7 +243,7 @@ void test_switching() {
     check(sel.add("a", *s1) && sel.add("a", *sb) && sel.add("b", *s2) && sel.add("b", *sb) &&
               sel.add("b", *s1b),
           "option a = {s1, shared}, option b = {s2, shared, s1 by another edge}");
-    check(sel.select("a").has_value() && sel.active() == "a" && sel.settled(), "select a");
+    check(sel.select("a").has_value() && sel.active() == "a", "select a");
     (void)g.write(in, byte_value(1));
     check(t1.seen == 1 && both.seen == 1 && t2.seen == 0 && t1_via_b.seen == 0,
           "a delivers to s1 and the shared ref only");
@@ -321,7 +321,7 @@ void test_fields() {
 }
 
 /** @brief (3) A switch under memory pressure: a toggle draws nothing, so it cannot be refused. */
-void test_refused_switch() {
+void test_switch_under_pressure() {
     std::printf("a switch under memory pressure completes, and never double-delivers:\n");
     gate_source_t gate;
     graph_t g{gate};
@@ -340,7 +340,7 @@ void test_refused_switch() {
     // Since #1622 that is the only staleness a refusal leaves, and a resume flips its own entry
     // without rebuilding, so the switch needs no room at all.
     check(g.unsubscribe(*so).has_value(), "an unsubscribe with no room still takes effect");
-    check(sel.select("b").has_value() && sel.active() == "b" && sel.settled(),
+    check(sel.select("b").has_value() && sel.active() == "b",
           "the switch to b completes with no room");
     gate.disarm();
     (void)g.write(in, byte_value(1));
@@ -379,7 +379,7 @@ void test_suspend_before_resume() {
           "an unsubscribe with no room takes effect");
     gate.disarm();
     gate.watch(g, in);
-    check(sel.select("b").has_value() && sel.settled(), "the switch to b completes");
+    check(sel.select("b").has_value(), "the switch to b completes");
     gate.unwatch();
     check(gate.draws() == 0, "the switch drew nothing from the source, though it had room");
     check(g.own_subs(in) == 1, "b's edge is the only one counted after it");
@@ -403,7 +403,7 @@ void test_dangling_ref() {
     check(sel.select("a").has_value(), "select a");
 
     check(g.unsubscribe(*sb).has_value(), "b's own subscription is removed behind its back");
-    check(sel.select("b").has_value() && sel.settled(), "the switch to b still succeeds");
+    check(sel.select("b").has_value(), "the switch to b still succeeds");
     check(sel.state(*sb).value_or(selector_ref_state_t::LIVE) == selector_ref_state_t::INERT,
           "the gone ref reads INERT");
     (void)g.write(in, byte_value(1));
@@ -442,7 +442,7 @@ void test_teardown() {
     check(g.retire(in).has_value(), "retire the producer");
     check(again.state(*sa).value_or(selector_ref_state_t::LIVE) == selector_ref_state_t::INERT,
           "its ref goes inert");
-    check(again.select("a").has_value() && again.settled(), "and a switch skips it");
+    check(again.select("a").has_value(), "and a switch skips it");
 }
 
 /** @brief The embedder's creation hook: each missing child of /sel becomes a selector. */
@@ -563,7 +563,7 @@ void test_slot_reuse() {
     check(sel.select("a").has_value(), "re-selecting a brings it in line");
     (void)g.write(in, byte_value(2));
     check(a.seen == 2 && b_again.seen == 1, "a delivers and the reused ref is silent");
-    check(sel.select("b").has_value() && sel.settled(), "and a switch to b");
+    check(sel.select("b").has_value(), "and a switch to b");
     (void)g.write(in, byte_value(3));
     check(a.seen == 2 && b_again.seen == 2, "moves delivery to it");
 }
@@ -651,7 +651,7 @@ void test_one_at_a_time(const char* binding) {
     check(done.has_value(), "a retried switch completes within 1,000 tries (no stuck flag)");
     (void)g.write(in, byte_value(1));
     const int a_seen = a.seen;
-    check(sel.settled() && b.seen >= 1 && g.is_suspended(*sa).value_or(false),
+    check(b.seen >= 1 && g.is_suspended(*sa).value_or(false),
           "a retried switch to b completes: a is suspended, b delivers");
     (void)g.write(in, byte_value(2));
     check(a.seen == a_seen, "and a stays silent");
@@ -662,7 +662,7 @@ void test_one_at_a_time(const char* binding) {
 int main() {
     test_switching();
     test_fields();
-    test_refused_switch();
+    test_switch_under_pressure();
     test_suspend_before_resume();
     test_dangling_ref();
     test_teardown();

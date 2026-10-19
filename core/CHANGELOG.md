@@ -348,15 +348,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   through `graph_t::set_suspended`: no unsubscribe or re-subscribe, no frame, no draw, and no
   double delivery among the refs it lists. The selector owns the suspend bit of those refs and
   does not watch it: a peer's (re)subscribe is admitted delivering and delivers until the owner
-  lists it and switches (a remote "admit suspended" is #2019's). A resume that answers
-  `BACKPRESSURE` fails the switch with `BACKPRESSURE` and leaves it partly applied (the new
-  option active, `settled()` false); selecting it again retries. A ref whose subscription is
+  lists it and switches (a remote "admit suspended" is #2019's). A switch is never partly
+  applied: a toggle answers only success or `NOT_FOUND` (#1622). A ref whose subscription is
   gone is listed `inert` and skipped until the owner removes it or adds the same address again,
   which re-reads it. Operations that meet on one instance never wait: the later one answers
   `BACKPRESSURE` and changes nothing. The selector never creates or deletes a subscription,
   persists nothing and copies no option name (names are borrowed; a temporary owning string
   does not compile, and a slot past 65,535 is refused with `INVALID_PATH`). A read of `active`
-  never refuses, so a `BACKPRESSURE` switch tells "busy" from "partly applied". Its tables are
+  never refuses. Its tables are
   fixed arrays sized by the template: `<8, 4>` by default, 176 B on LP64 and 100 B on ILP32; `<64, 16>` is
   1,064 B and 680 B. An `options` read renders at most `kRefs × kOptions` ref records, each with
   a key of up to 1 KiB, staged at about twice that on the graph's table source. An instance is
