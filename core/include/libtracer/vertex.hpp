@@ -386,6 +386,24 @@ struct handlers_t {
     /** @brief Synthesized `:children[]` listing. */
     hook_t<result_t<view::view_t>()> on_children;
     /**
+     * @brief Whether a HANDLER delivers a value a PEER wrote (RFC-0008 Amendment 3, #2208);
+     *        `true`, the default, is the behaviour every handler had before.
+     *
+     * `false` stops a write that is NOT the local owner's (`write_ctx_t::is_local_owner`) from
+     * being delivered: neither to this vertex's own subscribers nor, by bubbling, to its
+     * ancestors'. `on_write` still runs and the writer still gets its acknowledgement exactly
+     * as before; only the echo of the raw input is gone. A write by the local owner delivers as
+     * always, own and ancestors, and is how the handler publishes the value it actually
+     * applied (`assign`/`propagate` refuse at a HANDLER, RFC-0008 Amendment 2).
+     *
+     * A FWD{WRITE} arriving at this vertex as its terminus is a peer write and is suppressed;
+     * transit hops are unaffected. A peer sees the setting read-only in this vertex's
+     * `:schema` protocol part (`NAME "deliver_written" VALUE <u8 0>`), so it can tell
+     * suppression from no write. Read only on a HANDLER-role vertex, and only when `on_write`
+     * is installed — a HANDLER without one refuses every write.
+     */
+    bool deliver_written = true;
+    /**
      * @brief The ADMISSION seam of a RETAINING vertex: runs BEFORE the write becomes state,
      *        and decides whether — and in what form — it does (`admission_t`).
      *
@@ -490,7 +508,7 @@ struct handlers_t {
 /**
  * @brief The internal, lazily-allocated STORAGE of a vertex's VALUE seam (ADR-0058 Step 2)
  *        — the seams `handlers_t` carries minus the app-field ones and the admission filter:
- *        three @ref hook_t pairs, 48 B on the host.
+ *        three @ref hook_t pairs and the `deliver_written` flag, 56 B on the host.
  *
  * Split off from the public @ref handlers_t input so a vertex that installs none of the
  * three never allocates this block: it lives behind a lazily
@@ -514,6 +532,9 @@ struct value_handlers_t {
      *         @ref handlers_t::on_write contract, verbatim. */
     hook_t<result_t<void>(const value_t& value, const write_ctx_t& ctx)> on_write;
     hook_t<result_t<view::view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
+    /** @brief @ref handlers_t::deliver_written, verbatim: `false` delivers only the local owner's
+     *         writes (RFC-0008 Amendment 3, #2208). */
+    bool deliver_written = true;
 };
 
 /**
@@ -3744,7 +3765,7 @@ class vertex_t {
         value_handlers_t* const seam =
             has_seam ? tr::mem::make_in<value_handlers_t>(
                            from, value_handlers_t{handlers.on_read, handlers.on_write,
-                                                  handlers.on_children})
+                                                  handlers.on_children, handlers.deliver_written})
                      : nullptr;
         const bool need_app = handlers.on_app_field_write && (e == nullptr || e->app == nullptr);
         app_field_group_t* const app =

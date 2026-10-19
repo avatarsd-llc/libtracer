@@ -351,6 +351,12 @@ POINT (PL=1) {
   > RFC-0022 dissolved rather than fixed. §A.4's `:settings` container is likewise unchanged in
   > shape and emptied of knobs: it reads `SETTINGS{ [NAME "app" SETTINGS{…}] }`, and an empty
   > `SETTINGS{}` when the vertex declares no app fields.
+
+  > **Amended by [RFC-0008](0008-vertex-operations-assign-propagate.md) Amendment 3
+  > (2026-10-18, [#2208](https://github.com/avatarsd-llc/libtracer/issues/2208), approved by the
+  > maintainer on 2026-10-18 — [sign-off](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6253724494)).** The protocol part enumerates one conditional entry: a `HANDLER` registered
+  > `deliver_written = false` reports `NAME "deliver_written" VALUE <u8 0>`, read-only. Every
+  > other vertex's protocol part is unchanged.
 - The **owner part is authoritative for `settings.app.*`** and is served
   verbatim (no runtime merge *into* it — precedence by position, zero merge
   logic on an MCU: the read is two stored/synthesized byte runs concatenated

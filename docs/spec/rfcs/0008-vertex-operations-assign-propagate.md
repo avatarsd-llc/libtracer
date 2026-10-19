@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0008 |
 | **Title** | Vertex operations: `assign` and `propagate`; structural selective propagation; value-agnostic per-vertex `delivery_mode` |
-| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b, and 2026-08-22 — Amendment 2, below; §B corrected 2026-09-30 by erratum, below; §C corrected 2026-10-08 by erratum, below) |
+| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b, and 2026-08-22 — Amendment 2, below; §B corrected 2026-09-30 by erratum, below; §C corrected 2026-10-08 by erratum, below; §D amended 2026-10-18 — Amendment 3, below, approved by the maintainer on 2026-10-18 ([sign-off](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6253724494))) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-06 |
 | **Comment window** | waived by the maintainer (solo-maintainer project, GOVERNANCE.md window dead ceremony) |
@@ -242,6 +242,12 @@ A producer's selective subtree flush therefore reaches a **remote** subtree subs
 as one `FWD{WRITE}` per selected vertex (driven by the single host `propagate`), exactly
 as a local subscriber receives one callback per selected vertex. No wire batch primitive
 is introduced; `propagate` simply drives the sends it selects.
+
+> **Amended 2026-10-18 (Amendment 3, below — [#2208](https://github.com/avatarsd-llc/libtracer/issues/2208)).**
+> A `HANDLER` vertex registered with `deliver_written = false` does not deliver a write that
+> its local owner did not make — neither to its own subscribers nor, by bubbling, to its
+> ancestors'. `on_write` still runs and the writer is still acknowledged. A `FWD{WRITE}`
+> arriving at such a vertex as its terminus is such a write.
 
 ### E. Stream vertices are a queue, not a coalesce
 
@@ -547,3 +553,95 @@ left as written. Conformance vector `settings/delivery-mode-not-found` pins the 
 **Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
 wire surface moves.** The spelling was never emitted or honoured; the vector's bytes are the
 `tr::schema::not_found` reply the core already builds, identical to `settings/removed-knob`.
+
+## Amendment 3 (2026-10-18): §D — a HANDLER may decline to deliver a write it did not make ([#2208](https://github.com/avatarsd-llc/libtracer/issues/2208))
+
+**Status: approved by the maintainer on 2026-10-18** ([sign-off on #2208](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6253724494)). The rulings
+it encodes are recorded in
+[the design-rulings comment on #2208](https://github.com/avatarsd-llc/libtracer/issues/2208#issuecomment-6251237127).
+
+**Instrument: amendment, not erratum** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)
+§"Errata, amendments, and the comment window"). A peer observes the change: a subscriber to a
+vertex that sets the flag stops receiving the values other peers write to it, and the vertex's
+`:schema` gains a field. The comment window is **waived by default** under that document's
+solo-maintainer clause and is not invoked. No type code, `opt` bit, error identity or frame
+shape is added, and a vertex that does not set the flag behaves byte-for-byte as before.
+
+### The problem
+
+§D composes a write as "`assign`, then deliver": at a `HANDLER`, the written value is handed
+to `on_write` and then delivered to the vertex's own subscribers and, by bubbling, to every
+ancestor's. A handler that turns a write into some *other* value — a device that applies an
+input and publishes what it actually applied, possibly batched — cannot stop the raw input
+going out as well. Its subscribers see both, and must tell them apart by shape; a durable edge
+to a sink delivers two inputs per change; and at a high write rate the echo can be most of the
+vertex's traffic. Refusing the write in `on_write` is wrong (the write was accepted), and
+Amendment 2 already refuses `assign`/`propagate` at a vertex that retains nothing, so neither
+verb can carry the published value in its place.
+
+### The rulings
+
+1. **A registration-time flag.** A `HANDLER` vertex MAY be registered with
+   `deliver_written = false`. It is a field of the vertex's handler group, fixed at
+   registration, with no per-write cost beyond one branch. Absent, it is `true`: today's
+   behaviour.
+2. **What it suppresses.** With the flag set, a write **not** made by the vertex's local owner
+   is **not delivered**: neither to the vertex's own subscribers nor to its ancestors'
+   subscribers (bubbling is suppressed too, so the echo cannot close a loop through an
+   ancestor subscription). `on_write` still runs, and the writer still gets its write
+   acknowledgement exactly as before — a success, or `on_write`'s own refusal.
+3. **What it keeps.** A write by the **local owner** (the empty subject the ACL gate already
+   treats as the owner, `write_ctx_t::is_local_owner` in the reference) delivers as today, to
+   its own and its ancestors' subscribers. That is the handler's publish path for the value it
+   applied: Amendment 2 refuses `propagate` at a `HANDLER`, and the owner's `write` is the eager
+   composition that remains.
+4. **Forwarding and mirroring.** The flag is a property of the **terminus** vertex only. A
+   `FWD{WRITE}` arriving at a vertex that sets it, as the frame's terminus, is a non-owner write
+   and is suppressed. Transit hops are unaffected: a relay forwards the frame as it always did.
+   A remote subscriber or mirror of the vertex therefore sees only values its owner published.
+5. **Visibility.** A peer can tell suppression from "nothing was written": the vertex's
+   `:schema` protocol part ([RFC-0010](0010-owner-app-fields-and-schema.md) §B.2) reports the
+   flag, **read-only**, as `NAME "deliver_written" VALUE <u8 0>` — present only when the flag
+   is set, so every other vertex's `:schema` is unchanged. `:schema` has no write door, and no
+   subscription grammar is added: whether a vertex delivers its peers' writes is the owner's
+   declaration, not a subscriber's request.
+6. **A branch write.** When a branch `POINT` write ([RFC-0005](0005-subtree-subscriptions.md)
+   §B) by a non-owner lands a slice at a vertex that sets the flag, that vertex's `on_write`
+   runs and the slice is not delivered at its subscription point. The tree delivered at the
+   branch root and above it is the **root's** write, and an implementation is not required to
+   re-encode it to carve the slice out — the same limit the branch path states for admission.
+
+### What this does NOT change
+
+- **A vertex without the flag.** Every role, every default handler: unchanged, byte for byte.
+- **The acknowledgement.** The writer's reply — local result or `FWD` reply — is exactly what it
+  was.
+- **The ACL.** The gate runs before the handler as before; the flag only acts on a write the
+  ACL already admitted.
+- **Retention.** A `HANDLER` still keeps nothing. The flag decides what is *delivered*, not what
+  is kept (`retention_t::NONE` is the storage question and stays separate).
+
+### Conformance / behavioural vectors
+
+| # | Vector | Expected |
+| --- | --- | --- |
+| 1 | owner write at a suppressing handler | `on_write` runs; delivered to own and ancestor subscribers |
+| 2 | peer write at a suppressing handler | success; `on_write` runs; delivered to nobody, own or ancestor |
+| 3 | peer write at a default handler | delivered as before (control) |
+| 4 | `FWD{WRITE}` terminus at a suppressing handler | `kind=RESULT` acknowledgement; `on_write` runs; nothing delivered |
+| 5 | peer branch write over a suppressing handler | `on_write` runs; the slice is not delivered at the handler |
+| 6 | `:schema` of a suppressing handler | protocol part holds `NAME "deliver_written" VALUE u8 0`; absent on a default handler; no write door |
+
+Vectors 1–6 live in `core/tests/op_resolve_test.cpp`
+(`test_handler_deliver_written_false`, `test_handler_deliver_written_fwd_terminus`).
+
+### Files this amendment edits
+
+- [docs/reference/05-protocol-tlvs.md](../../reference/05-protocol-tlvs.md) (a normative
+  annex): §`0x04` SUBSCRIBER's opening sentence and §Subtree subscription's delivery MUST gain
+  the exception; §The `:schema` read lists the facet.
+- [RFC-0010](0010-owner-app-fields-and-schema.md) §B.2: a pointer note — the synthesized
+  protocol part now enumerates one conditional entry.
+- Reference implementation: `handlers_t::deliver_written` and `value_handlers_t`,
+  `graph_t::handler_write_deliver`, the branch path's `graph_t::fan_out_slice`, and
+  `graph_t::schema_protocol_part`; recorded in `core/CHANGELOG.md`.

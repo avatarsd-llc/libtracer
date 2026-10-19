@@ -1054,6 +1054,17 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view::view_t& spec_
     return {};
 }
 
+bool graph_t::schema_protocol_part(const vertex_t* v, mem::bytes_t& out) const noexcept {
+    if (v->has_payload_rights()) {
+        const std::span<const std::byte> catalog = declared_catalog(v);
+        if (!out.append(catalog.data(), catalog.size())) return false;
+    }
+    // Absent means "delivers", the default, so every schema a vertex served before this
+    // amendment is served byte-for-byte unchanged.
+    if (v->role() != role_t::HANDLER || v->handlers().deliver_written) return true;
+    return wire::emit_name(out, "deliver_written") && wire::emit_value_le<std::uint8_t>(out, 0);
+}
+
 result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     // POINT { NAME <vertex name>, SETTINGS { } }
     //
@@ -1071,14 +1082,17 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     // content of this `SETTINGS`, served verbatim. The graph owns the frame, the declarer owns
     // what is inside it. Behind the same flag bit as the payload-right rows, so a vertex that
     // declared neither does not walk.
-    const std::span<const std::byte> settings_children =
-        v->has_payload_rights() ? declared_catalog(v) : std::span<const std::byte>{};
-
+    //
+    // A HANDLER registered `deliver_written = false` (RFC-0008 Amendment 3, #2208) adds one
+    // read-only facet after the catalog, so a peer can tell a suppressed write from no write.
+    //
     // Staged on the table source (#1885); a refusal anywhere is BACKPRESSURE.
+    mem::bytes_t settings_children(*tables_);
     mem::bytes_t point_body(*tables_);
-    if (!wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment()) ||
+    if (!schema_protocol_part(v, settings_children) ||
+        !wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment()) ||
         !wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
-                        settings_children))  // SETTINGS
+                        mem::as_span(settings_children)))  // SETTINGS
         return std::unexpected(status_t::BACKPRESSURE);
 
     // The owner part (RFC-0010 §B.2), present iff a descriptor table is installed —

@@ -156,7 +156,7 @@ Free-form UTF-8 human-readable description of a vertex or field. Optional in eve
 
 ## `0x04` — SUBSCRIBER
 
-Subscription record. The presence of a SUBSCRIBER TLV at `<vertex>:subscribers[N]` causes the router to fan out future writes to that vertex to the subscriber's target path.
+Subscription record. The presence of a SUBSCRIBER TLV at `<vertex>:subscribers[N]` causes the router to fan out future writes to that vertex to the subscriber's target path. The one exception is a `HANDLER` vertex registered with `deliver_written = false`, which delivers only the writes its local owner makes ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) Amendment 3; §Subtree subscription below).
 
 ### Payload layout
 
@@ -270,7 +270,7 @@ The per-vertex `delivery_mode` is **enforced producer-side** (during the `propag
 
 ### Subtree subscription — vertical bubbling
 
-Every subscription is a **subtree subscription** ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)): a SUBSCRIBER at `<vertex>:subscribers[N]` observes writes to that vertex **and to any descendant of it** (a leaf subscription is the trivial case), so no wildcard `target_path` is needed — subscribing to the composite vertex *is* the subtree subscription. A write at vertex W MUST deliver, once per subscriber, to the subscribers of W and of each ancestor of W ("vertical bubbling"). The delivered payload is the **written TLV as-is** — the exact frame the producer wrote, at the granularity it chose (a leaf `VALUE`, or a whole branch `POINT` per §`0x07`); there is no re-encoding and no delivery-metadata envelope. Local subscribers receive the usual zero-copy view clone; remote subscribers receive the frame over the existing return-route `FWD{WRITE}` delivery path unchanged. Any provenance a consumer needs beyond the frame itself travels **in the data** ([CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER direction); wire-level concrete-path tagging of remote deliveries is the separate, draft [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md) proposal.
+Every subscription is a **subtree subscription** ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)): a SUBSCRIBER at `<vertex>:subscribers[N]` observes writes to that vertex **and to any descendant of it** (a leaf subscription is the trivial case), so no wildcard `target_path` is needed — subscribing to the composite vertex *is* the subtree subscription. A write at vertex W MUST deliver, once per subscriber, to the subscribers of W and of each ancestor of W ("vertical bubbling"). **Exception — a handler that declines peer writes** ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) Amendment 3): when W is a `HANDLER` registered with `deliver_written = false` and the write was not made by W's local owner, the write is delivered to nobody — not to W's subscribers and not to any ancestor's — while `on_write` still runs and the writer is still acknowledged. A `FWD{WRITE}` arriving at W as its terminus is such a write; transit hops are unaffected. When W is reached by a non-owner branch `POINT` write rooted above it, only the delivery at W's own subscription point is suppressed: the tree delivered at the branch root and its ancestors is the root's write and still carries W's slice, which an implementation is not required to re-encode out (RFC-0008 Amendment 3 clause 6). The flag is reported read-only in W's `:schema` (§The `:schema` read). The delivered payload is the **written TLV as-is** — the exact frame the producer wrote, at the granularity it chose (a leaf `VALUE`, or a whole branch `POINT` per §`0x07`); there is no re-encoding and no delivery-metadata envelope. Local subscribers receive the usual zero-copy view clone; remote subscribers receive the frame over the existing return-route `FWD{WRITE}` delivery path unchanged. Any provenance a consumer needs beyond the frame itself travels **in the data** ([CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER direction); wire-level concrete-path tagging of remote deliveries is the separate, draft [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md) proposal.
 
 The write path MUST stay near-free when nobody listens: an implementation maintains per-vertex listener bookkeeping (updated at subscribe/unsubscribe, at control-plane frequency) so a write performs the ancestor fan-out walk **only when a subscriber exists at or above it** — an idle write takes no vertex lock and costs two atomic loads ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §A cost model).
 
@@ -731,7 +731,10 @@ Subscribers and children appear as direct children of POINT, identified by their
 POINT (PL=1) {
   NAME      <vertex name>
   SETTINGS  <protocol part>          ; synthesized by the runtime — authoritative for
-                                     ; protocol fields; the owner part is never consulted
+                                     ; protocol fields; the owner part is never consulted.
+                                     ; A HANDLER registered deliver_written = false holds
+                                     ; NAME "deliver_written" VALUE <u8 0> here (RFC-0008
+                                     ; Amendment 3); absent everywhere else
   NAME "doc"  VALUE <intent document>  ; iff installed — UTF-8, VERBATIM, never parsed
   NAME "app"  SETTINGS (PL=1) {      ; owner part — present iff a table is installed
     NAME <field-name>  SETTINGS (PL=1) {

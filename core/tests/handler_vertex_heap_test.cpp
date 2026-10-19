@@ -172,7 +172,9 @@ int main() {
         // The #1640 budget on a 64-bit host: the cold block holds only what every ext-bearing
         // vertex can need; ACL and STREAM state hang off it lazily.
         check(ext <= 48, "sizeof(vertex_ext_t) <= 48 B on a 64-bit host (#1640)");
-        check(op_x.bytes <= 96, "a value-less HANDLER costs <= 96 B over a leaf (#1640)");
+        // 96 B under #1640; +8 B for value_handlers_t::deliver_written (#2208, RFC-0008
+        // Amendment 3), the registration-time flag the ruling places in the handler group.
+        check(op_x.bytes <= 104, "a value-less HANDLER costs <= 104 B over a leaf (#1640, #2208)");
     }
 
     return tr::testing::summary("handler_vertex_heap");
