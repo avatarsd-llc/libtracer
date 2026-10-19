@@ -29,7 +29,9 @@
  * Per arm the asserts are the same: every frame that arrived is whole (length and every body
  * byte), each thread's frames arrive in the order it sent them, and every frame is accounted
  * for — received, or counted in `dropped_tx` (a full queue drops and counts by contract; it
- * never waits and never tears). The client arm also asserts the race it exists for really
+ * never waits and never tears). Nothing asks that each thread gets a frame through: a link
+ * shedding under load may lose every frame of one sender, counted, and still be correct (#2213).
+ * The client arm also asserts the race it exists for really
  * happened: some send of one thread began AND returned inside the other thread's send, which
  * on the enqueue-then-write queue means it was queued (or refused) behind a write in flight.
  *
@@ -137,7 +139,7 @@ struct race_sink_t {
                      std::to_integer<std::uint8_t>(f[1]) < 2 && get_u32(f.data() + 8) == f.size();
         const std::uint8_t thread = whole ? std::to_integer<std::uint8_t>(f[1]) : 0;
         const std::uint32_t seq = whole ? get_u32(f.data() + 4) : 0;
-        whole = whole && f.size() == kSizes[seq % kSizes.size()];
+        whole = whole && seq < kFramesPerThread && f.size() == kSizes[seq % kSizes.size()];
         for (std::size_t i = kHeaderBytes; whole && i < f.size(); ++i)
             whole = f[i] == body_byte(thread, seq, i);
         std::size_t n = 0;
@@ -236,16 +238,25 @@ std::size_t publish_round(SendA&& send_a, SendB&& send_b) {
     return nested_calls(spans[0], spans[1]) + nested_calls(spans[1], spans[0]);
 }
 
-/** @brief Assert one round's verdict: whole, ordered, and every frame accounted for. */
+/**
+ * @brief Assert one round's verdict: whole, ordered, and every frame accounted for.
+ *
+ * Per thread, a frame that did not arrive was lost; the threads' losses together are the
+ * round's `dropped_tx`. A drop is counted by the call that caused it, and a newer frame
+ * can push out the other thread's waiting one, so the counter cannot be split by thread.
+ * Arriving in order means each thread's frames arrived at most once each.
+ */
 void check_round(race_sink_t& sink, std::uint64_t dropped, const char* arm) {
     const std::lock_guard lock(sink.m);
     const std::size_t sent = 2u * kFramesPerThread;
+    const std::array<std::size_t, 2> lost{kFramesPerThread - sink.per_thread[0],
+                                          kFramesPerThread - sink.per_thread[1]};
     check(sink.torn == 0, "every frame that arrived is whole — no frame carries another's bytes");
     check(sink.reordered == 0, "each thread's frames arrived in the order it sent them");
-    check(sink.frames + dropped == sent,
-          "every frame is accounted for: received, or dropped and counted");
-    check(sink.per_thread[0] > 0 && sink.per_thread[1] > 0,
-          "both threads' frames reached the peer");
+    check(sink.per_thread[0] + sink.per_thread[1] == sink.frames,
+          "every frame that arrived is one of the two threads'");
+    check(lost[0] + lost[1] == dropped,
+          "each thread's frames are received or lost, and the losses are the counted drops");
     std::printf("  %s: received %zu/%zu (t0=%zu t1=%zu), dropped+counted %llu, torn %zu\n", arm,
                 sink.frames, sent, sink.per_thread[0], sink.per_thread[1],
                 static_cast<unsigned long long>(dropped), sink.torn);
