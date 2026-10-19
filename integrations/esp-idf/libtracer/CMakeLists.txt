@@ -265,10 +265,11 @@ endif()
 # is found from the component's own sources AND from every dependent (`REQUIRES libtracer`) —
 # one file per build means every TU agrees, which is what the old PUBLIC compile definition
 # existed to guarantee.
-# Copy-or-share is no longer stated here (RFC-0022 Amendment 3): it is a trait of the block
-# source the build composes, and this build's static arena always shares. A vertex whose value
-# is long-lived and should not hold its receive block declares `share_hint_t::COPY` in its
-# `vertex_policy_t`.
+# Copy-or-share (RFC-0022 Amendment 3) is a trait of the block source the build composes, and
+# this build's static arena always shares. CONFIG_LIBTRACER_DEFAULT_SHARE_HINT (#2226) binds
+# `kDefaultShareHint`, the hint a vertex that declares none answers; a vertex whose value is
+# long-lived and should not hold its receive block declares `share_hint_t::COPY` in its
+# `vertex_policy_t`, or the build chooses COPY for every such vertex.
 # What this component deliberately does NOT state, because core's default is already the right
 # answer here: the ACL profile (`allow_only_policy_t`, the MCU profile — no full-ACL Kconfig
 # yet) and the hazard reader slots (unused on a chip, which binds the single-writer slot below).
@@ -290,6 +291,15 @@ elseif(CONFIG_LIBTRACER_ARENA_BYTES)
     set(LIBTRACER_ARENA_BYTES ${CONFIG_LIBTRACER_ARENA_BYTES})
 else()
     set(LIBTRACER_ARENA_BYTES 32768)
+endif()
+# The build-wide copy-or-share hint (#2226). The early pass falls back to the Kconfig default,
+# DEFAULT (follow the block source), like the link modules below.
+if(CONFIG_LIBTRACER_DEFAULT_SHARE_HINT_COPY)
+    set(LIBTRACER_DEFAULT_SHARE_HINT COPY)
+elseif(CONFIG_LIBTRACER_DEFAULT_SHARE_HINT_SHARE)
+    set(LIBTRACER_DEFAULT_SHARE_HINT SHARE)
+else()
+    set(LIBTRACER_DEFAULT_SHARE_HINT DEFAULT)
 endif()
 # Edge-pin announcements (#635) — one index per task that may PUBLISH concurrently. Unlike the
 # hazard domain this one is ALWAYS emitted, so it is real static RAM: N * max(padding,
@@ -461,6 +471,7 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kRxDrainBytes = ${LIBTRACER_RX_DRAIN_BYTES};
     static constexpr bool kSlabPool = false;
     static constexpr std::size_t kArenaBytes = ${LIBTRACER_ARENA_BYTES};
+    static constexpr share_hint_t kDefaultShareHint = share_hint_t::${LIBTRACER_DEFAULT_SHARE_HINT};
 ${LIBTRACER_SLOT_BINDING}};
 
 using config_t = esp_config_t;

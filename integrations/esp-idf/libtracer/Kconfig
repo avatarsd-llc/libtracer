@@ -391,6 +391,38 @@ menu "libtracer"
             OFF by default, the lean choice. Off, the graph has no slot for the
             hook and the subscribe and departure paths pay nothing for it.
 
+    choice LIBTRACER_DEFAULT_SHARE_HINT
+        prompt "Copy-or-share default for a vertex that declares no hint"
+        default LIBTRACER_DEFAULT_SHARE_HINT_DEFAULT
+        help
+            What a written value does with its receive block on a vertex whose
+            vertex_policy_t declares no share_hint (libtracer #2226, RFC-0022
+            Amendment 3). A vertex's own SHARE or COPY always wins.
+
+            Follow the block source (the default): the static arena and the
+            heap root share, so a trailer-less value received on an owning RX
+            source keeps its receive block instead of being copied.
+
+            Copy: every vertex copies unless it declares SHARE. Choose it on a
+            small receive pool whose long-lived values (knobs, settings) would
+            otherwise each hold a receive block for their whole life; declare
+            SHARE on the vertices whose large, short-lived values should keep
+            theirs. This is the posture the component had before #2143.
+
+            Share: every vertex shares wherever its value sits in one block.
+
+            Binds tr::graph::config_t::kDefaultShareHint, a compile-time
+            constant: the stock choice compiles to the same code as before the
+            option existed.
+
+        config LIBTRACER_DEFAULT_SHARE_HINT_DEFAULT
+            bool "Follow the block source (the static arena shares)"
+        config LIBTRACER_DEFAULT_SHARE_HINT_COPY
+            bool "Copy unless the vertex declares SHARE"
+        config LIBTRACER_DEFAULT_SHARE_HINT_SHARE
+            bool "Share unless the vertex declares COPY"
+    endchoice
+
     config LIBTRACER_DEFAULT_ROOT_HEAP
         bool "Default root: system heap, no static arena"
         default n

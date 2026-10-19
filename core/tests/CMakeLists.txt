@@ -1820,6 +1820,28 @@ if(LIBTRACER_NET_PLANE)
     target_compile_definitions(op_resolve_test PRIVATE
         LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME op_resolve COMMAND op_resolve_test)
+
+    # #2226: config_t::kDefaultShareHint. The same COPY-build-wide test over three copies of
+    # the core (tests/copy_default), one per default root: slab pool, static arena, heap root.
+    # The default build's half (an undeclared vertex follows the trait) is op_resolve_test's.
+    foreach(_root IN ITEMS 0 1 2)
+        add_library(libtracer_copy_default_${_root} STATIC
+            ${LIBTRACER_SOURCES_REQUIRED} ${LIBTRACER_SOURCES_NET_PLANE})
+        target_include_directories(libtracer_copy_default_${_root} BEFORE PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/copy_default)
+        target_include_directories(libtracer_copy_default_${_root} PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+        target_compile_definitions(libtracer_copy_default_${_root} PUBLIC
+            LT_COPY_DEFAULT_ROOT=${_root})
+        target_link_libraries(libtracer_copy_default_${_root} PUBLIC Threads::Threads)
+        target_compile_features(libtracer_copy_default_${_root} PUBLIC cxx_std_23)
+
+        add_executable(share_hint_default_${_root}_test share_hint_default_test.cpp)
+        target_link_libraries(share_hint_default_${_root}_test PRIVATE
+            libtracer_copy_default_${_root})
+        libtracer_test_warnings(share_hint_default_${_root}_test)
+        add_test(NAME share_hint_default_${_root} COMMAND share_hint_default_${_root}_test)
+    endforeach()
 endif()
 
 if(LIBTRACER_NET_PLANE)
