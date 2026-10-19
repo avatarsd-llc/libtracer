@@ -276,6 +276,13 @@ speed-up ratios**: every point is a measured number you can read off directly. F
 discussed in its own section below, because a naive put-vs-write comparison would be
 misleading.
 
+The topic-count rows above 256 topics take **fewer samples**, the same for both engines
+(`bench::endpoint_budget`). Each row is capped at 200 000 operations and then scaled by
+256 / topics. So 1024 topics gets 50 000 puts and 10 000 latency samples, and 4096 topics
+gets 12 500 puts and **2500 latency samples**. Zenoh's put by key resolves against every
+declared subscription, so a fixed count cost 33 s per row at 4096 topics and most of the
+sweep's wall time. Read the p99 and tail of those rows with that sample count in mind.
+
 ### 5 · Cross-core codec (like-for-like across implementations)
 
 Each native core runs the *same* per-vector decode→encode roundtrip over the shared

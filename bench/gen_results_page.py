@@ -986,6 +986,10 @@ logical CPU, Zenoh's runtime threads included, with equal payload bytes. The bou
 of the same ladder (`topics-bound`) and the decomposition that set this pairing are in the
 methodology below.
 
+Above 256 topics those rows take **fewer samples**, the same for both engines: 50 000 puts
+and 10 000 latency samples at 1024 topics, 12 500 puts and 2500 latency samples at 4096.
+Read the p99 and tail there with that count in mind; the methodology says why.
+
 libtracer is compiled from source at `-O3`; Zenoh is the upstream prebuilt `zenoh-c 1.10.0`
 release binary that `bench/fetch_zenoh.sh` downloads, so its optimization profile is
 upstream's rather than a flag this repo sets. Both are optimized builds. Which rows do equal

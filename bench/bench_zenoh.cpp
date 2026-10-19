@@ -269,7 +269,8 @@ void run_grid(Session& session) {
     // `inproc-path` rows used to put through a declared `Publisher`, the bound spelling.
     for (std::size_t S : kGridSizes)
         for (std::size_t E : kGridEndpoints)
-            run(session, S, 1, E, "inproc-path", kGridBudget, kGridLatBudget, addr_t::ADDR);
+            run(session, S, 1, E, "inproc-path", endpoint_budget(E, kGridBudget),
+                endpoint_budget(E, kGridLatBudget), addr_t::ADDR);
     // The dense payload sweep (#1890), at fan-out 1 only: the payload charts' slice.
     for (std::size_t S : sweep_extra(kGridSizes))
         run(session, S, 1, 1, "inproc", ladder_budget(S, kGridBudget),

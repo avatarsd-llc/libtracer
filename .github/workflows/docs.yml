@@ -172,7 +172,12 @@ jobs:
     # the matrix sat green. Both times cancel+rerun cleared it and the rerun passed in ~17
     # minutes, so the fault is transient and NOT this repo's content. The ceiling exists to
     # convert "wedged forever" into "red in an hour, retry it".
-    timeout-minutes: 60
+    #
+    # 75, not 60 (2026-10-19): a healthy run on a slow hosted runner reached 48 minutes
+    # with every released subtree cached, and a cold cache adds ~17 more, so 60 cancelled
+    # healthy cold runs. The fixes are the cache save that survives a cancellation and
+    # the scaled endpoint budget (see those steps); this margin is only the backstop.
+    timeout-minutes: 75
     steps:
       # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
       # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
@@ -248,7 +253,9 @@ jobs:
           # the docs deploy (the comparison degrades to a note; libtracer numbers stand).
           cmake --build bench/build --target bench_zenoh bench_zenoh_net bench_zenoh_compose --parallel "$BUILD_JOBS" || echo "bench_zenoh unavailable — comparison omitted"
       # Run the libtracer-vs-Zenoh sweep ONCE here; both the docs page and the PR comment
-      # consume this file (LIBTRACER_COMPARE_TSV) so the ~40s sweep isn't paid twice.
+      # consume this file (LIBTRACER_COMPARE_TSV) so the sweep isn't paid twice. It is
+      # the job's longest step: 11-22 minutes for three rounds before the endpoint rows'
+      # budget was scaled (bench_common.hpp's endpoint_budget), several minutes less after.
       - name: Run the libtracer-vs-Zenoh comparison sweep
         run: |
           out="${RUNNER_TEMP}/compare.tsv"
@@ -340,32 +347,53 @@ jobs:
         run: sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html
       # Released-version subtree cache (#1603). Each vX.Y.Z subtree is a pure function
       # of (tag, docs toolchain, assembler script), yet rebuilding all of them was ~13 of
-      # this job's ~35 minutes on every PR. The key is
-      #   release-docs-<toolchain fingerprint>-<hash of the ordered release-tag list>
+      # this job's ~35 minutes on every PR. Entries are keyed
+      #   release-docs-<toolchain fingerprint>-<hash of the ordered release-tag list>-<run>
       # where the fingerprint covers the RESOLVED toolchain (pip freeze, not the ranges
       # in docs/requirements.txt), the python and doxygen versions, and the assembler's
-      # own hash. An exact hit copies every subtree and builds none. A new tag misses
-      # the exact key, restores the newest entry with the same fingerprint by prefix,
-      # and builds only the new tag. A toolchain or assembler change matches no prefix
-      # and rebuilds everything, which is the same work as before this cache existed.
+      # own hash. The restore takes the newest entry with the same fingerprint and tag
+      # list, else the newest with the same fingerprint, and the assembler copies every
+      # tag that entry holds and builds only the rest. A toolchain or assembler change
+      # matches no prefix and rebuilds everything, which is the same work as before this
+      # cache existed.
+      #
+      # The fingerprint leaves out the HTTP client stack (requests, urllib3, idna,
+      # certifi, charset-normalizer): Sphinx uses it only to fetch, and the assembler
+      # fetches nothing, so its version cannot change a subtree's bytes. A certifi
+      # release on 2026-10-18 changed the fingerprint, missed every entry and pushed the
+      # job past its ceiling.
+      #
+      # The save is its own step, right after the assembly and under `always()`, and the
+      # key carries the run, because the assembler leaves a `.built` or `.failed` marker
+      # per finished tag: a run that fails or is cancelled later, or inside the assembly
+      # itself, still keeps every tag it finished, and the next run resumes from there.
+      # A post-job save (actions/cache's default) never ran in a job that hit its
+      # timeout, so one cold run could never seed the cache. The save is skipped when
+      # the marker set did not change, so a warm run adds no entry.
       # The cache lives outside the checkout, since the checkout is the Sphinx source root.
       - name: Fingerprint the released-docs toolchain
         id: release-docs-key
         run: |
-          fp="$( { python3 --version; pip freeze; doxygen --version; sha256sum tools/assemble_release_docs.sh; } | sha256sum | cut -c1-16)"
+          fp="$( { python3 --version; pip freeze | grep -viE '^(certifi|charset[-_]normalizer|idna|requests|urllib3)=='; doxygen --version; sha256sum tools/assemble_release_docs.sh; } | sha256sum | cut -c1-16)"
           tags="$(git tag --list | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sha256sum | cut -c1-16)"
-          echo "prefix=release-docs-${fp}-" >> "$GITHUB_OUTPUT"
-          echo "key=release-docs-${fp}-${tags}" >> "$GITHUB_OUTPUT"
-          echo "release-docs cache key: release-docs-${fp}-${tags}"
+          echo "fp-prefix=release-docs-${fp}-" >> "$GITHUB_OUTPUT"
+          echo "tags-prefix=release-docs-${fp}-${tags}-" >> "$GITHUB_OUTPUT"
+          echo "key=release-docs-${fp}-${tags}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "release-docs cache key: release-docs-${fp}-${tags}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
       - name: Restore the released-version subtree cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         # Same reasoning as the install step's ceiling: a healthy restore takes seconds,
         # so a stalled cache download fails here and names itself.
         timeout-minutes: 10
         with:
           path: ~/.cache/libtracer-release-docs
           key: ${{ steps.release-docs-key.outputs.key }}
-          restore-keys: ${{ steps.release-docs-key.outputs.prefix }}
+          restore-keys: |
+            ${{ steps.release-docs-key.outputs.tags-prefix }}
+            ${{ steps.release-docs-key.outputs.fp-prefix }}
+      - name: Record the restored subtree markers
+        id: release-docs-before
+        run: echo "markers=$(ls -d "$HOME"/.cache/libtracer-release-docs/v*/.built "$HOME"/.cache/libtracer-release-docs/v*/.failed 2>/dev/null | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       # Rebuild each released version's docs from its vX.Y.Z tag into a subtree of
       # the site (deploy-pages replaces the WHOLE site every push, so released
       # subtrees must be re-assembled on every deploy, not once at release time).
@@ -374,6 +402,17 @@ jobs:
       - name: Assemble released-version doc subtrees
         # `~` is expanded by actions/cache but not in an `env:` value, hence $HOME here.
         run: RELEASE_DOCS_CACHE="$HOME/.cache/libtracer-release-docs" bash tools/assemble_release_docs.sh docs/_build/html
+      - name: Did the assembly finish a new tag
+        id: release-docs-after
+        if: always() && steps.release-docs-before.outcome == 'success'
+        run: echo "markers=$(ls -d "$HOME"/.cache/libtracer-release-docs/v*/.built "$HOME"/.cache/libtracer-release-docs/v*/.failed 2>/dev/null | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Save the released-version subtree cache
+        if: always() && steps.release-docs-after.outputs.markers != '' && steps.release-docs-after.outputs.markers != steps.release-docs-before.outputs.markers
+        uses: actions/cache/save@v4
+        timeout-minutes: 10
+        with:
+          path: ~/.cache/libtracer-release-docs
+          key: ${{ steps.release-docs-key.outputs.key }}
       # Emit the version manifest the sidebar switcher reads. It scans the built
       # site for the vX.Y.Z/ subtrees assembled above; "latest" (the main build,
       # at the site root) is always first.
