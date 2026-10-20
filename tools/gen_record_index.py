@@ -36,12 +36,14 @@ REF_RE = re.compile(r"^(ADR|RFC)-(\d{4})$")
 GAPS = {
     ("RFC", 12): "Used by the dtype/direction draft of PR #416, which was closed unmerged.",
     ("RFC", 15): "Used by PR #446, withdrawn under the type-agnosticism gate.",
+    ("RFC", 35): "Held for RFC-0035 (`:subscribers[N]` as one surface), open in PR #2086, which "
+    "stacks on RFC-0036. The entry goes when that record merges.",
 }
 GAP_NOTE = (
-    "Neither gap is reusable: each number carries history in a closed pull request, "
-    "so reissuing it would make two different documents answer to one name. RFC-0014 "
-    "was once listed as a third gap, but it was later issued as a real document. A new "
-    "record takes the next number after the highest one in use."
+    "The RFC-0012 and RFC-0015 gaps are not reusable: each number carries history in a "
+    "closed pull request, so reissuing it would make two different documents answer to "
+    "one name. RFC-0014 was once listed as a third gap, but it was later issued as a real "
+    "document. A new record takes the next number after the highest one in use."
 )
 
 
