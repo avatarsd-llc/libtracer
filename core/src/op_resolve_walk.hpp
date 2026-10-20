@@ -563,7 +563,8 @@ template <class N>
  *        `frame_view`, the rope tier a subrope of its own scatter-gather segments. Otherwise
  *        the copy arm, @ref copy_tlv: one block.
  *
- * @param hint The target vertex's @ref share_hint_t (`DEFAULT` unless declared). `COPY` never
+ * @param hint The target vertex's @ref share_hint_t (the build's `kDefaultShareHint` unless
+ *             declared). `COPY` never
  *             shares; `SHARE` shares whatever can be shared; `DEFAULT` asks @ref
  *             tr::mem::share_fits whether a copy would draw a block no smaller than the one
  *             the value already sits in, which the arena and heap-root builds answer `true` at

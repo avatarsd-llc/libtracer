@@ -16,6 +16,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`config_t::kDefaultShareHint`, the build-wide copy-or-share default
+  ([#2226](https://github.com/avatarsd-llc/libtracer/issues/2226)).** A vertex that declares
+  no `vertex_policy_t::share_hint`, or declares `DEFAULT`, now answers the build's
+  `kDefaultShareHint`, read back by `graph_t::share_hint(v)`. It defaults to
+  `share_hint_t::DEFAULT` (follow the block source), so a build that does not bind it
+  compiles to the same code. Binding `COPY` restores copy-by-default: every vertex copies
+  unless it declares `SHARE`. `share_hint_t` moves from `app_fields.hpp` to `config.hpp`, which
+  every header that named it already includes. The ESP-IDF component exposes it as the
+  `LIBTRACER_DEFAULT_SHARE_HINT` Kconfig choice.
 - **A packed sample block for stream batches, RFC-0025 Amendment 5
   ([#2219](https://github.com/avatarsd-llc/libtracer/issues/2219)).** `batch.hpp` gains
   `wire::encode_packed_batch` (a packed batch written into the caller's span; `0` when the
@@ -76,7 +85,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **Migration:** drop `kShareThresholdBytes` from a `config_override.hpp`. Replace
   `{.share_threshold_bytes = SIZE_MAX}` with `{.share_hint = share_hint_t::COPY}`, `0` with
   `share_hint_t::SHARE`, and any other byte count with the default (or `COPY` for a long-held
-  value on a small receive pool).
+  value on a small receive pool). A build that set `kShareThresholdBytes = SIZE_MAX` (copy by
+  default) and gave the vertices that shared their own thresholds binds
+  `static constexpr share_hint_t kDefaultShareHint = share_hint_t::COPY;` instead
+  ([#2226](https://github.com/avatarsd-llc/libtracer/issues/2226)) and declares
+  `share_hint_t::SHARE` on those vertices.
 - **`view::alloc_rx(backend, len)` drops `loan_min`; the ingress-loan reserve is taken only
   where it is free ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143)).** The
   RFC-0028 §6.9 reserve now lands on a receive block only when the frame plus `kRxLoanBytes`

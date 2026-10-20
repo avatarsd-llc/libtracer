@@ -1652,7 +1652,8 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
     // block, so `N` is what draws a STREAM's (#2001), and a `NONE` vertex keeps neither slot
     // nor ring — nor, with no other member declared, any extension block at all.
     const retention_t retention = policy.retention.value_or(default_retention(role));
-    const bool hint_moves = vx->share_hint() != policy.share_hint;
+    // Compared as the build reads it, so a policy naming the build's default moves nothing.
+    const bool hint_moves = vx->share_hint() != effective_share_hint(policy.share_hint);
     // Owner-facing declaration (RFC-0010 §A.2) — a local host API, so no ACL gate. An owning
     // table is always (re)declared, so its values reset; a borrowed one already installed is
     // the same declaration and keeps its stored values; none declared over a table installed

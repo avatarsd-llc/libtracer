@@ -12,6 +12,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The `LIBTRACER_DEFAULT_SHARE_HINT` Kconfig choice
+  ([#2226](https://github.com/avatarsd-llc/libtracer/issues/2226)).** It binds core's
+  `config_t::kDefaultShareHint` in the generated `config_override.hpp`: the copy-or-share hint
+  a vertex that declares none answers. The default follows the block source, as before; `Copy`
+  restores the copy-by-default posture the component had before #2143, with `SHARE` declared
+  on the vertices that should keep their receive blocks.
 - **`httpd_ws_link_t::close_frozen_peers(now, deadline)`, the application's liveness check
   ([#2198](https://github.com/avatarsd-llc/libtracer/issues/2198)).** A session owes TX while a
   frame waits for its socket; one that owed it and moved no byte since the application's
@@ -119,7 +125,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only where it is free in the arena's size class.
   **Migration:** a vertex whose value is long-lived and should not hold its receive block
   declares `vertex_policy_t{.share_hint = tr::graph::share_hint_t::COPY}`; an override that set
-  `share_threshold_bytes` replaces it with a hint.
+  `share_threshold_bytes` replaces it with a hint. To keep the old copy-always posture
+  build-wide, choose `Copy` under `LIBTRACER_DEFAULT_SHARE_HINT`
+  ([#2226](https://github.com/avatarsd-llc/libtracer/issues/2226)).
 
 - **`httpd_ws_link_t`: the subject an in-band ACCEPT binds is the session's caller context,
   and the credential hook is told which session it is judging

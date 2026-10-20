@@ -58,6 +58,29 @@ struct stderr_fault_sink_t;  // init_fault.hpp — the host default: one line on
 namespace tr::graph {
 
 /**
+ * @brief What an owner declares about storing a written value by reference or by copy
+ *        (RFC-0022 Amendment 3): a declaration, not a number.
+ *
+ * Whether a stored value SHARES its inbound receive block (refcount, zero copy) or is COPIED
+ * into a block of its own is the build's block source's answer, given by
+ * @ref tr::mem::share_fits. The static arena and the heap root always share, and the slab pool
+ * shares on a class fit, when a copy would draw a block no smaller than the one already held.
+ * A vertex states only what its value is for. Owner-side and host-only, like
+ * @ref retention_t, and no peer reads or writes it.
+ *
+ * Bytes the receive path does not own (a borrowed span) and a value whose TLV carries a CRC or
+ * TS trailer are copied whatever the hint. A build states the hint an undeclared vertex answers
+ * with @ref default_config_t::kDefaultShareHint.
+ */
+enum class share_hint_t : std::uint8_t {
+    DEFAULT = 0, /**< @brief Follow the build: @ref default_config_t::kDefaultShareHint, whose
+                  *          own default follows the block source's trait. */
+    SHARE = 1,   /**< @brief Share whenever the value sits in a shareable block. */
+    COPY = 2,    /**< @brief Always copy: the owner's lever for a long-lived value that would
+                  *          otherwise hold a receive block for its whole lifetime. */
+};
+
+/**
  * @brief A size-class ladder: @p PerDoubling classes of @p Step bytes from @p Step, then
  *        @p PerDoubling evenly spaced classes in every doubling up to @p Top, then, when
  *        @p Header is not 0, one more class of `Top + Header` bytes.
@@ -367,6 +390,24 @@ struct default_config_t {
      * target the heap is what is actually scarce.
      */
     static constexpr std::size_t kMaxVertexBytes32 = 64;
+
+    /**
+     * @brief The copy-or-share hint a vertex that declares none answers (RFC-0022 Amendment 3,
+     *        #2226): a build-wide @ref share_hint_t.
+     *
+     * `DEFAULT`, the default, follows the build's block source (`tr::mem::share_fits`): the
+     * static arena and the heap root share a trailer-less written value, the slab pool shares
+     * it on a class fit. `COPY` makes copy the build's posture, so a long-lived value (a knob,
+     * a setting) never holds a pooled receive block for its whole life and only the vertices
+     * that declare `share_hint_t::SHARE` keep theirs; `SHARE` shares wherever the value sits in
+     * one block. A vertex's own declaration wins over it, and one that declares `DEFAULT` gets
+     * this value.
+     *
+     * Compile-time, like every member here: the read is one constant fold, so at `DEFAULT`
+     * the write path compiles to what it was without the knob. Override fragment:
+     * `static constexpr share_hint_t kDefaultShareHint = share_hint_t::COPY;`.
+     */
+    static constexpr share_hint_t kDefaultShareHint = share_hint_t::DEFAULT;
 
     /** @brief The ladder that generates the default @ref default_config_t::kSizeClasses. A
      *         classed root whose table is this one finds a class by its arithmetic `ceiling`
@@ -1241,6 +1282,15 @@ static_assert(kInlineFanout >= 1,
               "an array of that many edge views");
 /** @brief @ref default_config_t::kEdgePinSlots for this build. */
 inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
+/** @brief @ref default_config_t::kDefaultShareHint for this build. */
+inline constexpr share_hint_t kDefaultShareHint = config_t::kDefaultShareHint;
+/**
+ * @brief @p h as this build reads it: `DEFAULT` is @ref kDefaultShareHint, a declared `SHARE`
+ *        or `COPY` is itself. The identity when @ref kDefaultShareHint is `DEFAULT`.
+ */
+[[nodiscard]] constexpr share_hint_t effective_share_hint(share_hint_t h) noexcept {
+    return h == share_hint_t::DEFAULT ? kDefaultShareHint : h;
+}
 /** @brief @ref default_config_t::kDeferredReleaseSlots for this build. */
 inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
 /**

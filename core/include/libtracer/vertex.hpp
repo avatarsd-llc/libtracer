@@ -864,10 +864,10 @@ struct vertex_ext_t {
      * Owner-side like @ref retention_depth, and for the same reason: it is a deployment
      * copy/share trade, not a quality-of-service property, so it has no wire surface.
      * Declared through @ref vertex_policy_t::share_hint; a vertex that never declared one
-     * answers `DEFAULT`, which is also what this member starts at. Read on every
-     * view-delivered write (`%op_resolve_walk.hpp`) with no lock, so it stays ONE inline load
-     * off this block, a relaxed atomic one because a retire or a declaration stores it under
-     * that read. One byte, in the word it shares with @ref retention_depth.
+     * answers the build's @ref default_config_t::kDefaultShareHint, and this member starts at
+     * `DEFAULT`. Read on every view-delivered write (`%op_resolve_walk.hpp`) with no lock, so it
+     * stays ONE inline load off this block, a relaxed atomic one because a retire or a declaration
+     * stores it under that read. One byte, in the word it shares with @ref retention_depth.
      */
     std::atomic<std::uint8_t> share_hint{0};
     /** @brief The RFC-0010 APP-FIELD group (ADR-0058 Step 2) — the descriptor table plus
@@ -1053,18 +1053,19 @@ class vertex_t {
     }
 
     /**
-     * @brief This vertex's copy-or-share hint (RFC-0022 Amendment 3): `DEFAULT` unless it
-     *        declared its own.
+     * @brief This vertex's copy-or-share hint (RFC-0022 Amendment 3): the build's
+     *        @ref default_config_t::kDefaultShareHint unless it declared `SHARE` or `COPY`.
      *
      * ONE inline load and nothing more: it is read on EVERY view-delivered write
      * (`%op_resolve_walk.hpp`), so it may never become an ancestor walk. Nothing is
-     * inherited (RFC-0022 §3.F) — a vertex that was never given a hint follows the build's
-     * trait, whatever its ancestors hold.
+     * inherited (RFC-0022 §3.F) — a vertex that was never given a hint answers the build's
+     * default, whatever its ancestors hold. At the stock `DEFAULT` the mapping folds away.
      */
     [[nodiscard]] share_hint_t share_hint() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e == nullptr) return share_hint_t::DEFAULT;
-        return static_cast<share_hint_t>(e->share_hint.load(std::memory_order_relaxed));
+        if (e == nullptr) return kDefaultShareHint;
+        return effective_share_hint(
+            static_cast<share_hint_t>(e->share_hint.load(std::memory_order_relaxed)));
     }
     /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam);
      *         an all-empty shared constant when no extension block. */

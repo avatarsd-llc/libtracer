@@ -792,11 +792,12 @@ struct vertex_policy_t {
      *
      * Shared, a view-delivered, trailer-less WRITE is stored as a refcounted link to the
      * inbound receive segment — no allocation for the bytes, no copy; copied, it lands in the
-     * value's own block. `DEFAULT` follows the build's block source (@ref
-     * tr::mem::share_fits): the static arena and the heap root share, the slab pool shares on
-     * a class fit. `SHARE` shares whenever the block can be shared; `COPY` always copies. What
-     * sharing costs on a POOLED RX backend: the shared value BORROWS its receive block until
-     * it is displaced, so a long-lived value on a small pool is the case for `COPY`.
+     * value's own block. `DEFAULT` takes the build's @ref default_config_t::kDefaultShareHint,
+     * which by default follows the build's block source (@ref tr::mem::share_fits): the static
+     * arena and the heap root share, the slab pool shares on a class fit. `SHARE` shares whenever
+     * the block can be shared; `COPY` always copies. What sharing costs on a POOLED RX backend: the
+     * shared value BORROWS its receive block until it is displaced, so a long-lived value on a
+     * small pool is the case for `COPY`.
      */
     share_hint_t share_hint = share_hint_t::DEFAULT;
 
@@ -2798,8 +2799,9 @@ class graph_t {
     [[nodiscard]] std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;
 
     /**
-     * @brief @p v's copy-or-share hint (RFC-0022 Amendment 3): what it declared with
-     *        @ref vertex_policy_t::share_hint, else `DEFAULT`.
+     * @brief @p v's copy-or-share hint (RFC-0022 Amendment 3): the `SHARE` or `COPY` it
+     *        declared with @ref vertex_policy_t::share_hint, else the build's
+     *        @ref default_config_t::kDefaultShareHint (`DEFAULT` unless the build binds another).
      *
      * The read accessor the opaque handle does not expose directly: the WRITE resolver
      * (`%op_resolve_walk.hpp`) queries it here instead of dereferencing the vertex. One
