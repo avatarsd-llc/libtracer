@@ -860,9 +860,10 @@ struct graph_t::field_surface_t {
         // cannot disagree about who wrote, and it sees the arrival link the value plane's
         // `on_admit` sees.
         view::view_t admitted = value;
-        const admission_node_t* adm = g.admission_for(v);
-        if (adm != nullptr && adm->on_app_field_admit) {
-            result_t<view::view_t> decided = adm->on_app_field_admit(key, value, ctx);
+        if (const app_field_admit_hook_t on_admit =
+                g.admission_hook(v, &graph_t::admission_node_t::side_t::on_app_field_admit);
+            on_admit) {
+            result_t<view::view_t> decided = on_admit(key, value, ctx);
             if (!decided) return std::unexpected(decided.error());
             admitted = std::move(*decided);
         }
@@ -1055,10 +1056,9 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view::view_t& spec_
 }
 
 bool graph_t::schema_protocol_part(const vertex_t* v, mem::bytes_t& out) const noexcept {
-    if (v->has_payload_rights()) {
-        const std::span<const std::byte> catalog = declared_catalog(v);
-        if (!out.append(catalog.data(), catalog.size())) return false;
-    }
+    // The catalog leads, so it is copied straight into the empty `out` (it replaces what is
+    // there); a vertex that declared none leaves `out` empty.
+    if (!declared_catalog(v, out)) return false;
     // Absent means "delivers", the default, so every schema a vertex served before this
     // amendment is served byte-for-byte unchanged.
     if (v->role() != role_t::HANDLER || v->handlers().deliver_written) return true;
@@ -1281,8 +1281,7 @@ result_t<view::view_t> graph_t::read_settings_app(vertex_t* v) const {
 }
 
 app_field_read_hook_t graph_t::app_field_reader(const vertex_t* v) const noexcept {
-    const admission_node_t* adm = admission_for(v);
-    return adm != nullptr ? adm->on_app_field_read : app_field_read_hook_t{};
+    return admission_hook(v, &admission_node_t::side_t::on_app_field_read);
 }
 
 result_t<view::view_t> graph_t::read_acl(vertex_t* v) const {
