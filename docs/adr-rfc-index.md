@@ -136,6 +136,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [RFC-0032](spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) | Delete `COMPACT` and the per-link handle tables: every stream rides the chain, and no hop holds state for it | accepted |  | [ADR-0035](adr/0035-implementing-rfc-0004-remote-operation-addressing.md) (part), [ADR-0038](adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) (part), [ADR-0062](adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md), [RFC-0002](spec/rfcs/0002-protocol-error-model.md) (part), [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part), [RFC-0010](spec/rfcs/0010-owner-app-fields-and-schema.md) (part), [RFC-0029](spec/rfcs/0029-one-path-primitive.md) (part) |
 | [RFC-0033](spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) | A minimal Noise link binding: NNpsk0 over a datagram carrier | accepted |  | [ADR-0086](adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) (part), [RFC-0014](spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) (part) |
 | [RFC-0034](spec/rfcs/0034-subscription-selector-fields.md) | The subscription selector's two fields: `active` and `options` | accepted |  |  |
+| [RFC-0035](spec/rfcs/0035-subscribers-slot-surface-suspend-and-manage.md) | `:subscribers[N]` as one surface: list, create, suspend, resume and clear any subscription | accepted |  |  |
 | [RFC-0036](spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md) | Two rights, and `:` fields are paths under their vertex | accepted |  | [ADR-0020](adr/0020-acl-nfsv4-style-aces-with-inheritance.md) (part) |
 
 ## Numbering gaps
@@ -144,6 +145,5 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | ---- | ---- |
 | RFC-0012 | Used by the dtype/direction draft of PR #416, which was closed unmerged. |
 | RFC-0015 | Used by PR #446, withdrawn under the type-agnosticism gate. |
-| RFC-0035 | Held for RFC-0035 (`:subscribers[N]` as one surface), open in PR #2086, which stacks on RFC-0036. The entry goes when that record merges. |
 
 The RFC-0012 and RFC-0015 gaps are not reusable: each number carries history in a closed pull request, so reissuing it would make two different documents answer to one name. RFC-0014 was once listed as a third gap, but it was later issued as a real document. A new record takes the next number after the highest one in use.
