@@ -19,10 +19,10 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#2088](https://github.com/avatarsd-llc/libtracer/issues/2088). It blocks [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019) (wire spelling for a suspended subscriber slot), whose RFC-0035 has an open question that this RFC answers (§8). |
 | **Target spec version** | v1 itself. `docs/spec/v1.md` still reads "(DRAFT)". |
 | **Amends** | reference/05 §`0x0A` (the rights registry and the enforcement paragraph); [ADR-0020](../../adr/0020-acl-nfsv4-style-aces-with-inheritance.md) (its `access_mask`, its "`admin` is `WRITE_ACL`" decision, and the owner-semantics item its #1033 erratum left open); [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §5 and Amendment 2 (the `CREATE` row and the payload-right table); [RFC-0005](0005-subtree-subscriptions.md) §D as amended (write-creates under `CREATE`); [RFC-0009](0009-vertex-removal-and-subscriber-eviction.md) §D.1 (the `[N]` write gate); [ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md) (the `SUBSCRIBE` fan-out gate). |
-| **Relates to** | RFC-0034, the subscription selector's fields ([PR #2068](https://github.com/avatarsd-llc/libtracer/pull/2068)); RFC-0035, `:subscribers[N]` as one surface ([PR #2086](https://github.com/avatarsd-llc/libtracer/pull/2086)). |
+| **Relates to** | [RFC-0034](0034-subscription-selector-fields.md), the subscription selector's fields; RFC-0035, `:subscribers[N]` as one surface ([PR #2086](https://github.com/avatarsd-llc/libtracer/pull/2086)). |
 
-> **Numbering note.** RFC-0034 and RFC-0035 are in open pull requests and are not yet on
-> `main`, so this record leaves a two-number gap on `main` until they merge. The gap is not a
+> **Numbering note.** RFC-0035 is in an open pull request and is not yet on `main`, so this
+> record leaves a one-number gap on `main` until it merges. The gap is not a
 > skipped number. Numbering gaps and why they are not reused are recorded in the
 > [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
@@ -409,7 +409,7 @@ this RFC, and it lands after it (#2088 blocks #2019):
 
 ## 9. How RFC-0034 fits
 
-The RFC-0034 selector ([PR #2068](https://github.com/avatarsd-llc/libtracer/pull/2068)) **writes
+The [RFC-0034](0034-subscription-selector-fields.md) selector **writes
 as the owner**. A switch suspends and resumes refs on their producers through the host API under
 the empty local caller, so it can toggle any entry it lists, whoever holds it. A remote controller
 needs WRITE on the selector's own vertex, where `settings.app.active` is an RFC-0010 field, and no
@@ -417,8 +417,8 @@ right at all on the producers.
 
 That makes the selector the reference instance of §3.3's owner-app vertex. **The ACL on the
 selector's vertex is the delegation**: granting a peer WRITE there lets it switch exactly the refs
-the owner listed, and nothing else. RFC-0034 §2.3's last-writer-wins rule and its "the selector
-owns nothing on the wire" stand unchanged.
+the owner listed, and nothing else. RFC-0034 §2.3, under which the selector owns the suspend bit of
+every subscription it lists and a peer's subscribe is admitted delivering, stands unchanged.
 
 ## 10. What this overrides, explicitly
 
