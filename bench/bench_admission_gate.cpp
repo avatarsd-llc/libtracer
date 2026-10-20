@@ -1,8 +1,8 @@
 /**
  * @file
  * @brief The declaration-gated write rows (#2032): a write through an `on_admit` filter and a
- *        write through a payload-right table, at the 64 B .. 16 KiB payload ladder, with and
- *        without re-registration churn at a sibling address.
+ *        write to a vertex declaring a `:schema` catalog, at the 64 B .. 16 KiB payload ladder,
+ *        with and without re-registration churn at a sibling address.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -16,8 +16,10 @@
  * Rows, one per (kind, payload bytes, churn):
  *
  * - `admit`  — `/a` is a `STORED_VALUE` with an accept-as-written `on_admit`;
- * - `rights` — `/a` is a `STORED_VALUE` declaring one payload-right row for `SPEC`, written a
- *   `SPEC`-led payload, so the gate reads its declaration on every write.
+ * - `catalog` — `/a` is a `STORED_VALUE` declaring a `:schema` catalog (RFC-0014 Amendment 3),
+ *   written a `SPEC`-led payload. Since RFC-0036 deleted the payload-right table that rode the
+ *   same declaration, the write gate reads nothing of it: this row is the control that the
+ *   declaration costs the write path nothing.
  *
  * Each row reports the best-of-rounds batch mean (`ns/op`, and `Mops/s` from it), the p50 and
  * p99 of single timed writes, and the table-source bytes the churn left behind (`churn_B`).
@@ -40,12 +42,10 @@
 
 namespace {
 
-using tr::graph::acl_right_t;
 using tr::graph::admission_t;
 using tr::graph::graph_t;
 using tr::graph::handlers_t;
 using tr::graph::path_t;
-using tr::graph::payload_right_t;
 using tr::graph::role_t;
 using tr::graph::vertex_handle_t;
 using tr::graph::write_ctx_t;
@@ -83,7 +83,7 @@ tr::view::rope_t rope_over(std::span<const std::byte> bytes) {
     return tr::view::rope_t{tr::view::view_t::over(std::move(seg))};
 }
 
-/** @brief A payload of @p bytes: a `SPEC` TLV for the rights kind, raw bytes otherwise. */
+/** @brief A payload of @p bytes: a `SPEC` TLV for the catalog kind, raw bytes otherwise. */
 tr::view::rope_t payload(std::size_t bytes, bool spec) {
     const std::vector<std::byte> body(bytes, std::byte{0x5a});
     if (!spec) return rope_over(body);
@@ -101,34 +101,30 @@ struct row_t {
 };
 
 /** @brief Build the topology for one row and time writes to `/a`. */
-row_t run_row(bool rights, std::size_t bytes, int churn) {
+row_t run_row(bool catalog, std::size_t bytes, int churn) {
     counting_source_t src;
     row_t out;
     {
         graph_t g(src);
-        const payload_right_t rows[] = {
-            payload_right_t{tr::wire::type_t::SPEC, acl_right_t::WRITE}};
+        std::vector<std::byte> decl;
+        if (catalog) tr::wire::emit_name(decl, "catalog");
         handlers_t ha;
-        if (!rights) ha.on_admit = {&accept, nullptr};
+        if (!catalog) ha.on_admit = {&accept, nullptr};
         const path_t a_path("/a");
-        const auto a = g.register_vertex_key(
-            a_path.key(), role_t::STORED_VALUE, ha, {},
-            rights ? std::span<const payload_right_t>(rows) : std::span<const payload_right_t>{});
+        const auto a = g.register_vertex_key(a_path.key(), role_t::STORED_VALUE, ha, {}, decl);
         if (!a) return out;
         // The sibling churn: the same declaration kind, registered and retired `churn` times.
         const path_t b_path("/b");
         const std::size_t before = src.stats().in_use;
         for (int i = 0; i < churn; ++i) {
             handlers_t hb;
-            if (!rights) hb.on_admit = {&accept, nullptr};
-            const auto b = g.register_vertex_key(b_path.key(), role_t::STORED_VALUE, hb, {},
-                                                 rights ? std::span<const payload_right_t>(rows)
-                                                        : std::span<const payload_right_t>{});
+            if (!catalog) hb.on_admit = {&accept, nullptr};
+            const auto b = g.register_vertex_key(b_path.key(), role_t::STORED_VALUE, hb, {}, decl);
             if (b) (void)g.retire(*b);
         }
         out.churn_bytes = src.stats().in_use - before;
 
-        const tr::view::rope_t value = payload(bytes, rights);
+        const tr::view::rope_t value = payload(bytes, catalog);
         auto op = [&] { bench::do_not_optimize(g.write(*a, value)); };
         const std::size_t batch = bench::calibrate_batch_for_window(op);
         double best = 1e30;
@@ -159,12 +155,12 @@ int main() {
     constexpr int kChurn[] = {0, 256};
     std::printf("%-8s %7s %6s %10s %8s %8s %8s %9s\n", "kind", "bytes", "churn", "ns/op", "Mops/s",
                 "p50_ns", "p99_ns", "churn_B");
-    for (const bool rights : {false, true})
+    for (const bool catalog : {false, true})
         for (const std::size_t bytes : kBytes)
             for (const int churn : kChurn) {
-                const row_t r = run_row(rights, bytes, churn);
+                const row_t r = run_row(catalog, bytes, churn);
                 std::printf("%-8s %7zu %6d %10.1f %8.2f %8llu %8llu %9zu\n",
-                            rights ? "rights" : "admit", bytes, churn, r.ns_per_op,
+                            catalog ? "catalog" : "admit", bytes, churn, r.ns_per_op,
                             1e3 / r.ns_per_op, static_cast<unsigned long long>(r.p50),
                             static_cast<unsigned long long>(r.p99), r.churn_bytes);
             }

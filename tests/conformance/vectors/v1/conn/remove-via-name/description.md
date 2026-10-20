@@ -26,9 +26,8 @@ removes, and everything else is refused (`conn/bad-payload-type`).
 
 Three consequences the byte string makes concrete:
 
-- The operation is an ordinary `WRITE` (`0x02` in the access mask), **not** `DELETE` (`0x10`).
-  RFC-0009 §A.2 records `DELETE` as reserved-and-unused for protocol v1 and §Discussion 1
-  explicitly rejected a `DELETE`-gated remote retire; RFC-0014 §5 follows it.
+- The operation is an ordinary `WRITE` (`0x02` in the access mask) of the endpoint, the same
+  right a create demands (RFC-0036 §3).
 - The path carries the module, the payload carries the name. Nothing here says *which*
   transport — the endpoint's own path does.
 - These same six bytes written to a vertex that is **not** a creator endpoint are an ordinary

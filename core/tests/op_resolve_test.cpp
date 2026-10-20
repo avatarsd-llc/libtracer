@@ -1227,7 +1227,8 @@ void test_denied_creator_draws_nothing() {
     const auto dev = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     creation_seen_t seen{.g = &g};
     check(g.set_creation_hook(dev, {&create_stored, &seen}).has_value(), "hook on /dev");
-    // Enforcement on for a NAMED caller; /dev grants WRITE (inherited) but not CREATE.
+    // Enforcement on for a NAMED caller; /dev grants READ (inherited) but not WRITE, the right
+    // a creation needs (RFC-0036).
     auto hooks = g.hooks();
     hooks.subject_resolver = {
         [](void*, std::string_view) -> std::expected<tr::graph::subject_token_t, tr::wire::err_t> {
@@ -1240,9 +1241,9 @@ void test_denied_creator_draws_nothing() {
     const std::vector<tr::graph::ace_t> aces{
         {.flags = tr::graph::kAceInherit,
          .subject = everyone,
-         .access_mask = static_cast<std::uint32_t>(tr::graph::acl_right_t::WRITE)}};
+         .access_mask = static_cast<std::uint32_t>(tr::graph::acl_right_t::READ)}};
     check(g.write(path_t("/dev:acl"), make_value(tr::graph::encode_acl(aces))).has_value(),
-          "/dev grants WRITE, not CREATE");
+          "/dev grants READ, not WRITE");
 
     const std::size_t before = src.draws;
     const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"dev", "ota"}), b_path({"reply-ep"}), {},
@@ -1260,7 +1261,7 @@ void test_denied_creator_draws_nothing() {
 
     // §7.1: only a fieldless data write may create. A READ and a `:field` write to a missing
     // child of the same hooked parent are a plain miss, NOT_FOUND, from the same denied subject:
-    // neither the hook nor the CREATE gate is consulted (a consulted gate would deny).
+    // neither the hook nor the creation WRITE gate is consulted (a consulted gate would deny).
     std::vector<std::byte> field_append;
     {
         std::vector<std::byte> body = b_name("subscribers");
@@ -1472,29 +1473,44 @@ void test_subscription_observer() {
     }
     check(seen.size() == before_noop, "re-clearing an empty slot fires nothing");
 
-    // --- the external REPLACE (§D.1) is two events, in causal order ---------------------
-    const std::size_t before_replace = seen.size();
-    {
-        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
-                               b_field_subs_at(0), b_subscriber({"ui", "other"}));
-        (void)resolve_bytes(resolver, fwd, "link-c");
-    }
-    check(seen.size() == before_replace + 2, "a replace of a LIVE slot fires two events");
-    check(seen.size() >= 2 &&
-              render(seen[seen.size() - 2]) == "REMOVED /sensor/temp -> /ui/panel via link-c [0]" &&
-              render(seen.back()) == "ADDED /sensor/temp -> /ui/other via link-c [0]",
-          "... REMOVED (displaced) then ADDED (incoming), same slot");
-
-    // Filling the slot cleared above is an ADD and nothing else.
+    // Filling the slot cleared above, by an append, is an ADD and nothing else.
     const std::size_t before_refill = seen.size();
     {
         const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
-                               b_field_subs_at(2), b_subscriber({"ui", "panel"}));
+                               b_field_subs_append(), b_subscriber({"ui", "panel"}));
         (void)resolve_bytes(resolver, fwd, "link-c");
     }
     check(seen.size() == before_refill + 1 &&
               render(seen.back()) == "ADDED /sensor/temp -> /ui/panel via link-c [2]",
-          "a replace that FILLS an empty slot is one ADDED, no REMOVED");
+          "an append that FILLS an empty slot is one ADDED, no REMOVED");
+
+    // --- the external REPLACE (§D.1) is two events, in causal order ---------------------
+    // link-c replaces the slot it holds (RFC-0036 §3.4).
+    const std::size_t before_replace = seen.size();
+    {
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_at(2), b_subscriber({"ui", "other"}));
+        (void)resolve_bytes(resolver, fwd, "link-c");
+    }
+    check(seen.size() == before_replace + 2, "a replace of a LIVE slot fires two events");
+    check(seen.size() >= 2 &&
+              render(seen[seen.size() - 2]) == "REMOVED /sensor/temp -> /ui/panel via link-c [2]" &&
+              render(seen.back()) == "ADDED /sensor/temp -> /ui/other via link-c [2]",
+          "... REMOVED (displaced) then ADDED (incoming), same slot");
+
+    // A replace of a slot the caller does not hold (slot 0 is the owner's) is refused and
+    // reports nothing.
+    const std::size_t before_foreign = seen.size();
+    {
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_at(0), b_subscriber({"ui", "other"}));
+        auto reply = resolve_bytes(resolver, fwd, "link-c");
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR) &&
+                  status_error_code(d.tlv.children[4]) == 0x0050 /*tr::access::denied*/,
+              "a replace of the owner's slot 0 is refused (PERMISSION_DENIED)");
+    }
+    check(seen.size() == before_foreign, "... and fires nothing");
 
     // --- a REFUSED external subscribe reports nothing -----------------------------------
     const std::size_t before_refused = seen.size();

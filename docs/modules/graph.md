@@ -127,11 +127,9 @@ class graph_t {
 
     // registration and removal — the policy is applied WHOLE, at registration
     vertex_handle_t register_vertex(const path_t&, role_t, handlers_t = {},
-                                    vertex_policy_t policy = {},
-                                    std::span<const payload_right_t> rights = {});
+                                    vertex_policy_t policy = {});
     result_t<vertex_handle_t> try_register_vertex(const path_t&, role_t, handlers_t = {},
-                                                  vertex_policy_t policy = {},
-                                                  std::span<const payload_right_t> rights = {});
+                                                  vertex_policy_t policy = {});
     result_t<void> retire(vertex_handle_t);                       // logical absence, subtree-wide
     std::uint32_t  retire_generation(vertex_handle_t) const noexcept;
     void           collect();                    // free seams parked before the last call — CALLER-timed

@@ -107,7 +107,7 @@ tr::graph::ace_t allow(std::string_view subject, std::uint32_t mask) {
 /** @brief `admin` holds every right, `p0` holds WRITE, everyone else nothing. */
 bytes_t mount_acl() {
     const tr::graph::ace_t aces[2] = {
-        allow("admin", 0xFFFFFFFFu),
+        allow("admin", tr::graph::kAceRights),
         allow("p0", static_cast<std::uint32_t>(acl_right_t::WRITE)),
     };
     return tr::graph::encode_acl(std::span<const tr::graph::ace_t>(aces, 2));

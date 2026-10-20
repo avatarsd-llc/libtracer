@@ -5,21 +5,22 @@
 
 /**
  * @file
- * @brief ONE CONCEPT — `access_mask` is a bitfield, and every gate tests exactly ONE bit.
+ * @brief ONE CONCEPT — `access_mask` holds two rights, and a `:` field is a path under its
+ *        vertex (RFC-0036).
  *
- * There is no "access level" and no ordering among the rights: `acl_right_t` values are single
- * bits, a stored ACE may carry any OR of them, and each door in the graph asks for its own bit
- * and no other (docs/reference/05 §0x0A, ADR-0020). A subject granted `READ` cannot write; a
- * subject granted `READ` cannot even read the `:acl`, because reading the policy is
- * `READ_ACL` — its own right.
+ * `acl_right_t` has two single bits, READ and WRITE, and every gate in the graph asks for one
+ * of them (docs/reference/05 §0x0A). A `:` field has no ACL of its own: reading any field of a
+ * vertex needs READ on it, and writing one needs WRITE. Subscribing is a read, because a
+ * subscription delivers what a read would; creating a child is a write to the parent.
  *
- * The bit worth naming is `WRITE_ACL`: it is PRECISELY the admin right, the one that lets a
- * subject rewrite the policy and so delegate to others. Not a role, not a flag beside the mask —
- * one bit in the same bitfield, which is what makes "the owner grants an orchestrator admin over
- * a subtree, and the orchestrator leaves" an ordinary ACE write (reference/13).
+ * Two things are not rights at all. Writing `:acl` is the OWNER's, the empty local caller's,
+ * and no ACE can grant it, so a subject holding both bits still cannot rewrite the policy. A
+ * deployment that wants remote administration registers an owner-app vertex whose handler
+ * applies ACEs by the application's own policy (reference/13). And a `:subscribers[N]` slot is
+ * its holder's: a subject with READ may clear its own, never another's.
  *
- * Six subjects, six single-bit grants, one vertex — so every allow below is the bit under test
- * and every deny is a subject that holds a DIFFERENT bit rather than nothing at all.
+ * A mask bit outside READ|WRITE is refused at install with `TYPE_MISMATCH`, so a retired right
+ * is never stored and left inert.
  *
  * Runs under ctest as `example_acl_right_bits`; returns non-zero on any failed check.
  */
@@ -118,14 +119,12 @@ int main() {
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, some_value());  // trusted local seed, so a refused read is the only failure
 
-    // One ACE per right, one subject per ACE. No subject holds two bits.
+    // One ACE per right, one subject per ACE, and one subject holding both.
     const ace_t aces[] = {
         {.subject = as_bytes("reader"), .access_mask = bit(acl_right_t::READ)},
         {.subject = as_bytes("writer"), .access_mask = bit(acl_right_t::WRITE)},
-        {.subject = as_bytes("watcher"), .access_mask = bit(acl_right_t::SUBSCRIBE)},
-        {.subject = as_bytes("builder"), .access_mask = bit(acl_right_t::CREATE)},
-        {.subject = as_bytes("auditor"), .access_mask = bit(acl_right_t::READ_ACL)},
-        {.subject = as_bytes("admin"), .access_mask = bit(acl_right_t::WRITE_ACL)},
+        {.subject = as_bytes("both"),
+         .access_mask = bit(acl_right_t::READ) | bit(acl_right_t::WRITE)},
     };
     (void)g.write(path_t("/x:acl"), *tr::view::over_bytes(tr::graph::encode_acl(aces)));
 
@@ -133,47 +132,38 @@ int main() {
     const auto subscribers = path_t::parse("/x:subscribers[]");
     const auto children = path_t::parse("/x:children[]");
 
-    // READ (0x01) — the data plane's read door.
+    // READ (0x01) — the read door, every `:` field read, and subscribe.
     check(ok, g.read(v, "reader").has_value(), "READ: the reader reads");
     check(ok, denied(g.read(v, "writer")), "READ: the writer may not — WRITE is a different bit");
+    check(ok, g.read(v, acl_field->field(), "reader").has_value(),
+          "READ: the reader reads the :acl, a field like any other");
+    check(ok, g.write(v, subscribers->field(), subscriber_to("sink"), "reader").has_value(),
+          "READ: the reader subscribes — a subscription delivers what a read would");
+    check(ok, denied(g.write(v, subscribers->field(), subscriber_to("sink"), "writer")),
+          "READ: a WRITE grant does not buy a subscription");
 
-    // WRITE (0x02) — the data plane's write door, and the fan-in gate for deliveries.
+    // WRITE (0x02) — the write door, every `:` field write, creation, and fan-in deliveries.
     check(ok, g.write(v, some_value(), "writer").has_value(), "WRITE: the writer writes");
     check(ok, denied(g.write(v, some_value(), "reader")), "WRITE: the reader may not");
+    check(ok, g.write(v, children->field(), child_named("kid"), "writer").has_value(),
+          "WRITE: the writer creates /x/kid — creating is a write to the parent");
+    check(ok, denied(g.write(v, children->field(), child_named("other"), "reader")),
+          "WRITE: the reader may not create a child");
 
-    // SUBSCRIBE (0x04) — the PRODUCER's fan-out gate: who may append to my :subscribers[].
-    check(ok, g.write(v, subscribers->field(), subscriber_to("sink"), "watcher").has_value(),
-          "SUBSCRIBE: the watcher appends a :subscribers[] edge");
-    check(ok, denied(g.write(v, subscribers->field(), subscriber_to("sink"), "writer")),
-          "SUBSCRIBE: a WRITE grant does not buy a subscription");
+    // `:acl` writes are the owner's: no ACE grants them, both bits included.
+    const ace_t next[] = {{.subject = as_bytes("both"), .access_mask = bit(acl_right_t::READ)}};
+    const tr::view::view_t next_acl = *tr::view::over_bytes(tr::graph::encode_acl(next));
+    check(ok, denied(g.write(v, acl_field->field(), next_acl, "both")),
+          ":acl: a remote subject holding READ|WRITE cannot rewrite the policy");
+    check(ok, g.write(*acl_field, next_acl).has_value(), ":acl: the owner can");
 
-    // CREATE (0x08) — in-band vertex creation is a write, and it has its own bit (ADR-0017).
-    check(ok, g.write(v, children->field(), child_named("kid"), "builder").has_value(),
-          "CREATE: the builder creates /x/kid");
-    check(ok, denied(g.write(v, children->field(), child_named("other"), "writer")),
-          "CREATE: the writer may not create a child");
+    // A retired right is refused at install, and nothing is stored.
+    const ace_t retired[] = {{.subject = as_bytes("watcher"), .access_mask = 0x04}};
+    const auto refused = g.write(*acl_field, *tr::view::over_bytes(tr::graph::encode_acl(retired)));
+    check(ok, !refused.has_value() && refused.error() == status_t::TYPE_MISMATCH,
+          "a mask bit outside READ|WRITE is refused with TYPE_MISMATCH");
 
-    // READ_ACL (0x20) — reading the policy is not reading the value.
-    check(ok, g.read(v, acl_field->field(), "auditor").has_value(),
-          "READ_ACL: the auditor reads the :acl");
-    check(ok, denied(g.read(v, acl_field->field(), "reader")),
-          "READ_ACL: READ alone does not disclose the policy");
-
-    // WRITE_ACL (0x40) — precisely the admin right: rewrite the policy, delegate to others.
-    const ace_t delegated[] = {
-        {.subject = as_bytes("admin"), .access_mask = bit(acl_right_t::WRITE_ACL)}};
-    check(ok,
-          g.write(v, acl_field->field(), *tr::view::over_bytes(tr::graph::encode_acl(delegated)),
-                  "admin")
-              .has_value(),
-          "WRITE_ACL: the admin rewrites the policy — this bit IS 'admin'");
-    check(ok,
-          denied(g.write(v, acl_field->field(),
-                         *tr::view::over_bytes(tr::graph::encode_acl(delegated)), "writer")),
-          "WRITE_ACL: nobody else can, however much of the data plane they hold");
-
-    std::printf("six rights, six single-bit grants: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
-                bit(acl_right_t::READ), bit(acl_right_t::WRITE), bit(acl_right_t::SUBSCRIBE),
-                bit(acl_right_t::CREATE), bit(acl_right_t::READ_ACL), bit(acl_right_t::WRITE_ACL));
+    std::printf("two rights, two single-bit grants: 0x%02x 0x%02x\n", bit(acl_right_t::READ),
+                bit(acl_right_t::WRITE));
     return ok ? 0 : 1;
 }

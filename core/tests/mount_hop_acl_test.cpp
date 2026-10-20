@@ -27,14 +27,14 @@
  * vertex in the graph. Enforcing, it has nothing to grant a right, so a NAME-spelled hop
  * through it is refused; the same graph without a subject resolver forwards it (the control).
  *
- * The upgrade layout (#2003) pins the ACL layout the 0.18.1 upgrade note recommends, end to
- * end: an inheritable READ and SUBSCRIBE grant on `/net`, READ, WRITE and SUBSCRIBE on each
- * connection vertex once it exists, and no CREATE on `<module>/conn`. A listener session `p0`
+ * The upgrade layout (#2003) pins the ACL layout the 0.18.1 upgrade note recommends, as RFC-0036
+ * §7 updated it, end to end: an inheritable READ grant on `/net`, READ and WRITE on each
+ * connection vertex once it exists, and no WRITE on `<module>/conn`. A listener session `p0`
  * subscribes, through the node's dial `net/up/b`, to a producer on a second node, and the
  * deliveries come back into its session. The `/net` grant alone (the 0.18.0-era layout) is the
  * control: the subscribe is refused at the dial. The same session's dial attempt through
  * `net/up/conn` is refused, and the identical attempt is admitted once the endpoint grants
- * CREATE. The case also pins that a graph has no root `:acl`: a write to `/:acl` answers
+ * WRITE. The case also pins that a graph has no root `:acl`: a write to `/:acl` answers
  * `NOT_FOUND`.
  */
 
@@ -152,10 +152,10 @@ tr::graph::ace_t allow(std::string_view subject, std::uint32_t mask) {
     };
 }
 
-/** @brief `admin` holds every right, `p0` holds WRITE, everyone else nothing. */
+/** @brief `admin` holds both rights, `p0` holds WRITE, everyone else nothing. */
 bytes_t mount_acl() {
     const tr::graph::ace_t aces[2] = {
-        allow("admin", 0xFFFFFFFFu),
+        allow("admin", tr::graph::kAceRights),
         allow("p0", static_cast<std::uint32_t>(acl_right_t::WRITE)),
     };
     return tr::graph::encode_acl(std::span<const tr::graph::ace_t>(aces, 2));
@@ -356,12 +356,11 @@ void upgrade_layout() {
     check(n.g.write(path_t("/net/up/conn"), tr::net::conn_spec_t("b").view()).has_value(),
           "the application creates the dial net/up/b");
 
-    // The layout's first entry: an inheritable READ and SUBSCRIBE grant on `/net`.
-    const auto rs = static_cast<std::uint32_t>(acl_right_t::READ) |
-                    static_cast<std::uint32_t>(acl_right_t::SUBSCRIBE);
+    // The layout's first entry: an inheritable READ grant on `/net`.
+    const auto rs = static_cast<std::uint32_t>(acl_right_t::READ);
     check(n.g.write(path_t("/net:acl"), make_value(everyone_acl(rs, tr::graph::kAceInherit)))
               .has_value(),
-          "/net carries an inheritable READ and SUBSCRIBE grant");
+          "/net carries an inheritable READ grant");
 
     const bytes_t sub_dst = tr::testing::b_path({"net", "up", "b", "sensor", "temp"});
     const bytes_t reply_ep = tr::testing::b_path({"reply-ep"});
@@ -383,17 +382,17 @@ void upgrade_layout() {
     check(subscribe(), "/net grant alone: the subscribe is answered");
     check(!delivered(), "/net grant alone: the subscribe through the dial is refused");
 
-    // The layout's second entry: READ, WRITE and SUBSCRIBE on each connection vertex.
+    // The layout's second entry: READ and WRITE on each connection vertex.
     const auto rws = rs | static_cast<std::uint32_t>(acl_right_t::WRITE);
     check(n.g.write(path_t("/net/up/b:acl"), make_value(everyone_acl(rws, 0))).has_value() &&
               n.g.write(path_t("/net/tcp-server/srv:acl"), make_value(everyone_acl(rws, 0)))
                   .has_value(),
-          "the dial and the listener carry READ, WRITE and SUBSCRIBE");
+          "the dial and the listener carry READ and WRITE");
     check(subscribe(), "the subscribe is answered");
     check(delivered(), "the subscribe passes the dial and the delivery enters p0's session");
     check(delivered(), "... and every later delivery does too");
 
-    // The layout's third entry: no CREATE on `<module>/conn`, so a session cannot dial.
+    // The layout's third entry: no WRITE on `<module>/conn`, so a session cannot dial.
     const bytes_t conn_dst = tr::testing::b_path({"net", "up", "conn"});
     const bytes_t spec = tr::net::conn_spec_t("b2").bytes();
     const auto dial_from_p0 = [&] {
@@ -401,11 +400,11 @@ void upgrade_layout() {
         return wait_until([&] { return n.g.find(path_t("/net/up/b2").key()).has_value(); },
                           kDropBudget);
     };
-    check(!dial_from_p0(), "no CREATE on net/up/conn: p0's dial attempt is refused");
+    check(!dial_from_p0(), "no WRITE on net/up/conn: p0's dial attempt is refused");
     check(n.g.write(path_t("/net/up/conn:acl"),
-                    make_value(everyone_acl(static_cast<std::uint32_t>(acl_right_t::CREATE), 0)))
+                    make_value(everyone_acl(static_cast<std::uint32_t>(acl_right_t::WRITE), 0)))
               .has_value(),
-          "(control) the endpoint is granted CREATE");
+          "(control) the endpoint is granted WRITE");
     check(dial_from_p0(), "(control) the identical dial attempt is admitted");
 
     // There is no graph-root `:acl`: the write answers NOT_FOUND and installs nothing.

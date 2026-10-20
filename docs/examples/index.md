@@ -60,7 +60,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [The `std::pmr` adapter](mem-source-resource.md) | L0 substrate | ADR-0079 `source_resource_t` — placement and bounding, never failability |
 | [Open by default, and the first ACE is the lock](acl-open-by-default.md) | L4 auth / ACL | enforcement is opt-in twice; presence closes, not a DENY; the trusted local context |
 | [The caller context is not the subject](acl-subject-resolver.md) | L4 auth / ACL | ADR-0018 `subject_resolver_fn_t`; the ERROR arm is a deny; the `{fn, ctx}` shape |
-| [`access_mask` is a bitfield](acl-right-bits.md) | L4 auth / ACL | six gates, six single-bit grants; `WRITE_ACL` is precisely admin |
+| [`access_mask` is a bitfield](acl-right-bits.md) | L4 auth / ACL | two single-bit rights, READ and WRITE; `:acl` is the owner's |
 | [`EVERYONE@` is reserved both ways](acl-everyone-reserved.md) | L4 auth / ACL | the wildcard ACE, and why a resolved subject may never spell it (#908) |
 | [Effective ACL = own + inherited](acl-inherit.md) | L4 auth / ACL | `kAceInherit`; a closed parent over an open child |
 | [`expires_ns` is checked against your clock](acl-expiry.md) | L4 auth / ACL | ADR-0050: one merge, many verdicts; an expired ACE still closes |

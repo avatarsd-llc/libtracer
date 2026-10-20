@@ -1038,10 +1038,10 @@ template <class N, class ReplyError>
  *        the graph's creation walk, shown the written TLV.
  *
  * A read, a `:field` write or any payload-less op that misses answers `NOT_FOUND` here without
- * reaching a hook or the `CREATE` gate (§7.1). For a data write the TLV is shared from the frame
- * (zero copy) where the frame has an owner, and copied from the graph's value source where it is
- * borrowed, once per write however many hooked levels ask. The graph asks only after the
- * parent's `CREATE` gate admitted the writer, so a denied writer provokes no copy. An empty
+ * reaching a hook or the creation `WRITE` gate (§7.1). For a data write the TLV is shared from the
+ * frame (zero copy) where the frame has an owner, and copied from the graph's value source where it
+ * is borrowed, once per write however many hooked levels ask. The graph asks only after the
+ * parent's `WRITE` gate admitted the writer, so a denied writer provokes no copy. An empty
  * rope is a refused copy (`BACKPRESSURE`).
  */
 template <class N>

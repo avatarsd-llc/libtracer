@@ -530,7 +530,7 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     // index is built on the right one); `value_backend_` stays `heap_backend()`, which draws
     // from the value sub-pool on that build.
     if (!is_default_source(&src)) value_backend_ = &src_backend_;
-    payload_rights_.src = tables_;
+    schema_catalogs_.src = tables_;
     admissions_.src = tables_;
     // Both structural roots, in one table-source block. The anchors' private root (#1223)
     // takes NO vertex slot: it is never an anchor itself and no element can name it, and
@@ -575,11 +575,9 @@ void graph_t::register_child_type(std::string_view type, child_factory_t factory
 }
 
 vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
-                                         vertex_policy_t policy,
-                                         std::span<const payload_right_t> rights) {
+                                         vertex_policy_t policy) {
     const std::size_t ceiling_refusals = vertex_ceiling_refusals_.load(std::memory_order_relaxed);
-    result_t<vertex_handle_t> h =
-        try_register_vertex(path, role, handlers, std::move(policy), rights);
+    result_t<vertex_handle_t> h = try_register_vertex(path, role, handlers, std::move(policy));
     // PATH_IN_USE on a compile-site literal is a source bug, not a runtime outcome — fail loud
     // (ADR-0056, mirroring path_t(std::string_view)) rather than hand back a result the caller
     // would only `*`-deref unchecked. A genuine runtime path uses try_register_vertex.
@@ -601,25 +599,23 @@ vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handle
 }
 
 result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_t role,
-                                                       handlers_t handlers, vertex_policy_t policy,
-                                                       std::span<const payload_right_t> rights) {
-    return register_vertex_key_span(path.key(), role, handlers, rights, {}, std::move(policy));
+                                                       handlers_t handlers,
+                                                       vertex_policy_t policy) {
+    return register_vertex_key_span(path.key(), role, handlers, {}, std::move(policy));
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key(std::span<const std::byte> key, role_t role,
                                                        handlers_t handlers, vertex_policy_t policy,
-                                                       std::span<const payload_right_t> rights,
                                                        std::span<const std::byte> schema_catalog) {
     // The key is BORROWED for the call (#1781): the descent below never retains the argument —
     // every record it keeps is copied into the vertex's own `path_key_t` — so a caller holding
     // a `std::vector`, a core array or a frame's bytes passes them as they are (#1139).
-    return register_vertex_key_span(key, role, handlers, rights, schema_catalog, std::move(policy));
+    return register_vertex_key_span(key, role, handlers, schema_catalog, std::move(policy));
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     std::span<const std::byte> key, role_t role, const handlers_t& handlers,
-    std::span<const payload_right_t> rights, std::span<const std::byte> schema_catalog,
-    vertex_policy_t policy) {
+    std::span<const std::byte> schema_catalog, vertex_policy_t policy) {
     // Refused BEFORE the descent, so an illegal policy registers nothing — not even the
     // placeholder levels a descent would create.
     if (!policy_legal(role, policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
@@ -683,11 +679,10 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
         i = e;
     }
     if (node->registered()) return std::unexpected(status_t::PATH_IN_USE);
-    // The RFC-0014 Amendment 2 declaration is copied in here, before `fill` adopts the
-    // handlers: the rows are the graph's (one node per declaring address, #2032), the vertex
-    // keeps only the flag bit that says they exist. We are under the unique map lock,
-    // which is exactly the hold `declare_payload_rights` requires. The RFC-0014 Amendment 3
-    // `:schema` catalog rides the same record, for the same reason and under the same hold.
+    // The RFC-0014 Amendment 3 `:schema` catalog is copied in here, before `fill` adopts the
+    // handlers: the catalog is the graph's (one node per declaring address, #2032), the vertex
+    // keeps only the flag bit that says it exists. We are under the unique map lock,
+    // which is exactly the hold `declare_schema_catalog` requires.
     // Same treatment, same hold, and for the same reason (see `graph_t::admissions_`): the two
     // ADMISSION filters are taken here, before `fill` adopts the rest, so the seam block
     // `adopt_identity` may allocate is byte-for-byte the one it allocated before this feature.
@@ -704,8 +699,8 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     const bool mode_moves = node->delivery_mode() != policy.delivery_mode;
     if (!apply_policy(node, role, std::move(policy),
                       mode_moves ? key : std::span<const std::byte>{}) ||
-        !declare_payload_rights(node, rights, schema_catalog) ||
-        !declare_admission(node, handlers) || !node->fill(role, handlers, *tables_)) {
+        !declare_schema_catalog(node, schema_catalog) || !declare_admission(node, handlers) ||
+        !node->fill(role, handlers, *tables_)) {
         node->clear_declarations();
         if (mode_moves) {
             const std::lock_guard slock(sweep_mutex_);
@@ -717,50 +712,45 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     return vertex_handle_t{node};
 }
 
-bool graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
-                                     std::span<const std::byte> catalog) {
+bool graph_t::declare_schema_catalog(vertex_t* v, std::span<const std::byte> catalog) {
     // The overwhelming majority: no node, no flag, no cost.
-    if (rows.empty() && catalog.empty()) return true;
+    if (catalog.empty()) return true;
     // ONE node per address, republished in place through its latch (#2032): a reader sees
     // this declaration or the previous one, whole, and a refusal leaves the previous standing.
-    payload_right_node_t* const node = payload_rights_.find_or_make(v);
-    if (node == nullptr || !node->publish(*tables_, rows, catalog)) return false;
-    v->mark_payload_rights();
+    schema_catalog_node_t* const node = schema_catalogs_.find_or_make(v);
+    if (node == nullptr || !node->publish(*tables_, catalog)) return false;
+    v->mark_schema_catalog();
     return true;
 }
 
 namespace {
 
-/** @brief Words a payload-right block header takes: the row count and the catalog length. */
-constexpr std::size_t kPayloadHeadWords = 2;
-/** @brief Words one payload-right row takes: its type and its right. */
-constexpr std::size_t kPayloadRowWords = 2;
+/** @brief Words a catalog block header takes: the catalog length. */
+constexpr std::size_t kCatalogHeadWords = 1;
 /** @brief Bytes of catalog one word carries. */
 constexpr std::size_t kCatalogBytesPerWord = sizeof(std::uint32_t);
 
-/** @brief The words a declaration of @p rows rows and @p catalog_bytes catalog bytes needs. */
-constexpr std::size_t payload_words(std::size_t rows, std::size_t catalog_bytes) noexcept {
-    return kPayloadHeadWords + kPayloadRowWords * rows +
-           (catalog_bytes + kCatalogBytesPerWord - 1) / kCatalogBytesPerWord;
+/** @brief The words a declaration of @p catalog_bytes catalog bytes needs. */
+constexpr std::size_t catalog_words(std::size_t catalog_bytes) noexcept {
+    return kCatalogHeadWords + (catalog_bytes + kCatalogBytesPerWord - 1) / kCatalogBytesPerWord;
 }
 
 }  // namespace
 
-bool graph_t::payload_right_node_t::publish(mem::block_source_t& src,
-                                            std::span<const payload_right_t> rows,
-                                            std::span<const std::byte> catalog) {
-    const std::size_t need = payload_words(rows.size(), catalog.size());
-    return decl.publish([&](payload_side_t& side) {
-        payload_block_t* block = side.block.load(std::memory_order_relaxed);
+bool graph_t::schema_catalog_node_t::publish(mem::block_source_t& src,
+                                             std::span<const std::byte> catalog) {
+    const std::size_t need = catalog_words(catalog.size());
+    return decl.publish([&](catalog_side_t& side) {
+        catalog_block_t* block = side.block.load(std::memory_order_relaxed);
         if (block == nullptr || block->words < need) {
             // Grow: at least double, so the superseded chain stays under the live block.
             const std::size_t words = std::max(need, block != nullptr ? 2 * block->words : need);
-            void* const raw = src.try_alloc(sizeof(payload_block_t) + words * sizeof(std::uint32_t),
-                                            alignof(payload_block_t));
+            void* const raw = src.try_alloc(sizeof(catalog_block_t) + words * sizeof(std::uint32_t),
+                                            alignof(catalog_block_t));
             if (raw == nullptr) return false;
-            auto* const grown = new (raw) payload_block_t{words, nullptr, block};
+            auto* const grown = new (raw) catalog_block_t{words, nullptr, block};
             auto* const first = reinterpret_cast<std::atomic<std::uint32_t>*>(
-                static_cast<std::byte*>(raw) + sizeof(payload_block_t));
+                static_cast<std::byte*>(raw) + sizeof(catalog_block_t));
             for (std::size_t i = 0; i < words; ++i) new (first + i) std::atomic<std::uint32_t>(0);
             grown->word = std::launder(first);
             // Release: a reader that loads this pointer, on either side, meets the
@@ -769,13 +759,8 @@ bool graph_t::payload_right_node_t::publish(mem::block_source_t& src,
             block = grown;
         }
         std::atomic<std::uint32_t>* const w = block->word;
-        w[0].store(static_cast<std::uint32_t>(rows.size()), std::memory_order_relaxed);
-        w[1].store(static_cast<std::uint32_t>(catalog.size()), std::memory_order_relaxed);
-        std::size_t at = kPayloadHeadWords;
-        for (const payload_right_t& row : rows) {
-            w[at++].store(std::to_underlying(row.type), std::memory_order_relaxed);
-            w[at++].store(std::to_underlying(row.right), std::memory_order_relaxed);
-        }
+        w[0].store(static_cast<std::uint32_t>(catalog.size()), std::memory_order_relaxed);
+        std::size_t at = kCatalogHeadWords;
         for (std::size_t i = 0; i < catalog.size(); i += kCatalogBytesPerWord) {
             std::uint32_t packed = 0;
             std::memcpy(&packed, catalog.data() + i,
@@ -786,55 +771,35 @@ bool graph_t::payload_right_node_t::publish(mem::block_source_t& src,
     });
 }
 
-acl_right_t graph_t::payload_right_node_t::right_for(wire::type_t type) const noexcept {
+bool graph_t::schema_catalog_node_t::copy_catalog(mem::bytes_t& out) const noexcept {
+    // A retry overwrites what a torn copy left in `out`, so only the validated copy remains.
     // Every index is bounded by the block's own capacity: a copy torn by a concurrent rewrite
     // is discarded by the latch only after it was made, so it must not reach past the block.
-    return decl.read([type](const payload_side_t& side) {
-        const payload_block_t* const block = side.block.load(std::memory_order_acquire);
-        if (block == nullptr) return acl_right_t::WRITE;
-        const std::atomic<std::uint32_t>* const w = block->word;
-        const std::size_t rows =
-            std::min<std::size_t>(w[0].load(std::memory_order_relaxed),
-                                  (block->words - kPayloadHeadWords) / kPayloadRowWords);
-        for (std::size_t i = 0; i < rows; ++i) {
-            const std::size_t at = kPayloadHeadWords + kPayloadRowWords * i;
-            if (w[at].load(std::memory_order_relaxed) == std::to_underlying(type))
-                return static_cast<acl_right_t>(w[at + 1].load(std::memory_order_relaxed));
-        }
-        return acl_right_t::WRITE;
-    });
-}
-
-bool graph_t::payload_right_node_t::copy_catalog(mem::bytes_t& out) const noexcept {
-    // A retry overwrites what a torn copy left in `out`, so only the validated copy remains.
-    return decl.read([&out](const payload_side_t& side) {
+    return decl.read([&out](const catalog_side_t& side) {
         out.clear();
-        const payload_block_t* const block = side.block.load(std::memory_order_acquire);
+        const catalog_block_t* const block = side.block.load(std::memory_order_acquire);
         if (block == nullptr) return true;
         const std::atomic<std::uint32_t>* const w = block->word;
-        const std::size_t rows =
+        const std::size_t len =
             std::min<std::size_t>(w[0].load(std::memory_order_relaxed),
-                                  (block->words - kPayloadHeadWords) / kPayloadRowWords);
-        const std::size_t first = kPayloadHeadWords + kPayloadRowWords * rows;
-        const std::size_t len = std::min<std::size_t>(
-            w[1].load(std::memory_order_relaxed), (block->words - first) * kCatalogBytesPerWord);
+                                  (block->words - kCatalogHeadWords) * kCatalogBytesPerWord);
         if (!out.resize_for_overwrite(len)) return false;
         for (std::size_t i = 0; i < len; i += kCatalogBytesPerWord) {
             const std::uint32_t packed =
-                w[first + i / kCatalogBytesPerWord].load(std::memory_order_relaxed);
+                w[kCatalogHeadWords + i / kCatalogBytesPerWord].load(std::memory_order_relaxed);
             std::memcpy(out.data() + i, &packed, std::min(kCatalogBytesPerWord, len - i));
         }
         return true;
     });
 }
 
-void graph_t::payload_right_node_t::release_storage(mem::block_source_t& src) noexcept {
-    for (payload_side_t& side : decl.sides()) {
-        for (payload_block_t* b = side.block.load(std::memory_order_relaxed); b != nullptr;) {
-            payload_block_t* const older = b->superseded;
-            const std::size_t bytes = sizeof(payload_block_t) + b->words * sizeof(std::uint32_t);
-            b->~payload_block_t();  // the atomic words are trivially destructible
-            src.release(b, bytes, alignof(payload_block_t));
+void graph_t::schema_catalog_node_t::release_storage(mem::block_source_t& src) noexcept {
+    for (catalog_side_t& side : decl.sides()) {
+        for (catalog_block_t* b = side.block.load(std::memory_order_relaxed); b != nullptr;) {
+            catalog_block_t* const older = b->superseded;
+            const std::size_t bytes = sizeof(catalog_block_t) + b->words * sizeof(std::uint32_t);
+            b->~catalog_block_t();  // the atomic words are trivially destructible
+            src.release(b, bytes, alignof(catalog_block_t));
             b = older;
         }
     }
@@ -893,19 +858,13 @@ creation_hook_t graph_t::creation_hook_for(const vertex_t* v) const noexcept {
 
 bool graph_t::declared_catalog(const vertex_t* v, mem::bytes_t& out) const noexcept {
     // Behind the flag bit, so a vertex that declared nothing does not walk; a node is immortal.
-    const payload_right_node_t* const n =
-        v->has_payload_rights() ? payload_rights_.find(v) : nullptr;
+    const schema_catalog_node_t* const n =
+        v->has_schema_catalog() ? schema_catalogs_.find(v) : nullptr;
     if (n == nullptr) {
         out.clear();
         return true;
     }
     return n->copy_catalog(out);
-}
-
-acl_right_t graph_t::declared_write_right(const vertex_t* v, wire::type_t type) const {
-    // The vertex's own current table, first match wins; an undeclared type takes `WRITE`.
-    const payload_right_node_t* const n = payload_rights_.find(v);
-    return n != nullptr ? n->right_for(type) : acl_right_t::WRITE;
 }
 
 void graph_t::retire_subtree(vertex_t* v, gone_edges_t& gone) {
@@ -1510,13 +1469,14 @@ result_t<vertex_t*> graph_t::find_or_create_ptr(std::span<const std::byte> key,
             parent = child;
             return true;
         }
-        // The CREATE gate runs before the payload is asked for, so a writer the parent's ACL
+        // The WRITE gate (RFC-0036 §3.2: creating is a write to the parent) runs before the
+        // payload is asked for, so a writer the parent's ACL
         // denies provokes no draw (a span-delivered remote payload is copied to be shown).
         const creation_hook_t hook = creation_hook_for(parent);
         const view::rope_t* value = nullptr;
         if (!hook)  // no hook here: the miss is the answer
             failed = status_t::NOT_FOUND;
-        else if (!acl_allows(parent, caller, acl_right_t::CREATE))
+        else if (!acl_allows(parent, caller, acl_right_t::WRITE))
             failed = status_t::PERMISSION_DENIED;
         else if ((value = &payload())->total_length() == 0)  // the payload could not be held
             failed = status_t::BACKPRESSURE;
@@ -1628,7 +1588,7 @@ void graph_t::note_subscriber_removed(vertex_t* v) {
 }
 
 bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_view caller,
-                                    void** retired_ctx) {
+                                    void** retired_ctx, const subscriber_remote_t* expect) {
     // ONE out-of-line clear for both doors, so `vertex_t::clear_edge` is compiled once rather
     // than inlined here and again out of line in graph_fields.cpp (#1711, rv32 flash).
     //
@@ -1641,7 +1601,7 @@ bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_v
                                          : view::view_t{};
     remote_ptr_t retired_remote;
     bool was_suspended = false;
-    if (!v->clear_edge(slot, retired_ctx, &retired_remote, &was_suspended)) return false;
+    if (!v->clear_edge(slot, retired_ctx, &retired_remote, &was_suspended, expect)) return false;
     if (!was_suspended) note_subscriber_removed(v);  // RFC-0005 counts delivering edges only
     // The link hold (#1816) and the session charge (#1841) this clear gives back.
     release_edges(delivery_link(retired_remote), session_of(retired_remote), v);
@@ -1810,8 +1770,8 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     if (lookup.fn == nullptr) return true;  // cleared by the republish it waited out
     // The trusted channel is the EMPTY caller context — a local API call — settled HERE,
     // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
-    // whose natural reading ("I cannot name this caller") meant "grant everything", WRITE_ACL
-    // and CREATE included. A remote op carries the inbound link's NAME, so it cannot spell
+    // whose natural reading ("I cannot name this caller") meant "grant everything", every
+    // gate included. A remote op carries the inbound link's NAME, so it cannot spell
     // this arm: it carries its caller through `ensure_remote(src)->caller`. #974 was a second,
     // since-deleted net-plane write path (the COMPACT terminus, #1951) that once carried none:
     // unattributed, it landed here and was waved through every ACE. Any net-plane write path
@@ -1897,6 +1857,36 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // of a top-level creation, and it is never registered and never retired.
     std::atomic_thread_fence(std::memory_order_acquire);
     return allowed && (v->registered() || v->parent() == nullptr);
+}
+
+bool graph_t::may_write_slot(vertex_t* v, std::size_t slot, std::string_view caller,
+                             remote_ptr_t& edge) const {
+    // The edge the slot verb is checked against, the owner's included. The share keeps the
+    // record, and so the identity the verb compares, alive. Nothing is disclosed before READ.
+    edge = v->edge_holder(slot);
+    if (caller.empty()) return true;  // Rule 2: the owner passes as the owner
+    // READ first, so a caller without it learns nothing about slot N (§3.4, Order).
+    if (!acl_allows(v, caller, acl_right_t::READ)) return false;
+    // Rule 1: a slot past the end, a cleared slot and an edge with an empty stored context
+    // have no holder, so each is the owner's alone, and the lookup never runs on it (#905).
+    if (edge == nullptr || edge->caller.empty()) return false;
+    const std::string_view held = edge->caller.view();
+    const auto settled = subject_lookup_.get_settled(kHookSettleReads);
+    if (!settled) return false;
+    const auto lookup = *settled;
+    // Rule 4: with no resolver, the stored contexts are compared byte for byte (§12 Q1).
+    if (lookup.fn == nullptr) return held == caller;
+    // Rule 3: both resolve, to the same unreserved token. A failure on either side is "not the
+    // holder", so an edge whose creator no longer resolves is the owner's.
+    std::array<std::byte, kSubjectFrameBytes> a_bytes;
+    std::array<std::byte, kSubjectFrameBytes> b_bytes;
+    mem::bump_source_t a_frame(a_bytes, *tables_);
+    mem::bump_source_t b_frame(b_bytes, *tables_);
+    mem::bytes_t a(a_frame);
+    mem::bytes_t b(b_frame);
+    return lookup.fn(lookup.ctx, held, a) && lookup.fn(lookup.ctx, caller, b) &&
+           !is_reserved_subject(mem::as_span(a)) &&
+           std::ranges::equal(mem::as_span(a), mem::as_span(b));
 }
 
 void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
@@ -2214,7 +2204,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, role_t role, view::rope_
     // is the only value any subscriber can observe and a refused one is observable nowhere.
     //
     // The flag test is the whole cost to a vertex that installed no filter: one relaxed load of
-    // the same word the write gate's `has_payload_rights()` reads, and no list walk. The filter
+    // the vertex's already-hot flags word, and no list walk. The filter
     // itself lives on the GRAPH (`graph_t::admissions_`) rather than on the vertex, so it costs
     // the seam-bearing and app-field-bearing vertices nothing either — the reason that member
     // states, measured. The null re-test is not redundant with the bit: retirement clears the
@@ -2484,18 +2474,6 @@ namespace {
            (std::to_integer<std::uint8_t>(head[1]) & 0x40) != 0;
 }
 
-/**
- * @brief The written value's LEADING TLV type, or nullopt when it has none.
- *
- * A value with no links, or whose head is DEVICE memory (never dereferenced), has no type
- * byte the gate may read — so it is not a declared payload and takes the default right.
- */
-[[nodiscard]] std::optional<type_t> leading_type(const view::rope_t& value) {
-    if (value.link_count() < 1 || !value.links()[0].is_host()) return std::nullopt;
-    const std::span<const std::byte> head = value.links()[0].bytes();
-    if (head.empty()) return std::nullopt;
-    return static_cast<type_t>(std::to_integer<std::uint8_t>(head[0]));
-}
 }  // namespace
 
 result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_view caller,
@@ -2509,22 +2487,9 @@ result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_
     // ::denied): `denied` means refusals, not refusals-nobody-heard-about, and a counter
     // whose value depended on WHICH door a refusal came through could not be summed.
     //
-    // WHICH right is demanded is the vertex's own declaration (RFC-0014 Amendment 2): a
-    // handler vertex may map a written TLV type to a right other than `WRITE` — the creator
-    // endpoint demands `CREATE` for a `SPEC` — and everything else demands `WRITE`, as it
-    // always has. The gate itself does not move, and neither does the counter: one
-    // declaration decides the right, one site makes the demand and counts the refusal.
-    //
-    // The cost of the feature to a vertex that declares nothing is the `has_payload_rights()`
-    // bit test below and NOTHING else — no byte on the vertex, no dereference, and no branch
-    // taken. The rows live on the graph (@ref graph_t::payload_rights_) precisely so that
-    // stays true.
-    acl_right_t right = acl_right_t::WRITE;
-    if (v->has_payload_rights()) {
-        if (const std::optional<type_t> t = leading_type(value))
-            right = declared_write_right(v, *t);
-    }
-    if (!acl_allows(v, caller, right)) {
+    // Every value write demands WRITE (RFC-0036 §3.2, §12 Q4): the payload-type → right table
+    // of RFC-0014 Amendment 2 is gone, so the gate reads nothing of the value.
+    if (!acl_allows(v, caller, acl_right_t::WRITE)) {
         count_drop(drop_reason_t::DENIED, 1);
         return std::unexpected(status_t::PERMISSION_DENIED);
     }
@@ -3241,13 +3206,16 @@ result_t<void> graph_t::mark_flushed(vertex_handle_t vh) {
 result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
                                                    std::string_view caller,
                                                    std::optional<std::size_t> slot,
-                                                   link_id_t link_token) {
-    // The single admission step (ADR-0049): every door lands here, so the SUBSCRIBE gate
+                                                   link_id_t link_token,
+                                                   const subscriber_remote_t* expect) {
+    // The single admission step (ADR-0049): every door lands here, so the READ gate
     // and the transient-local durability latch apply UNIFORMLY — which invariants fire no
     // longer depends on which door an edge entered through.
-    // Producer fan-out gate (#81, ADR-0026): appending a subscriber edge requires the
-    // SUBSCRIBE right on this (the producer's) :acl, under the door's caller context.
-    if (!acl_allows(v, caller, acl_right_t::SUBSCRIBE))
+    // Producer fan-out gate (#81, ADR-0026, RFC-0036 §3.4): appending a subscriber edge
+    // requires READ on this (the producer's) :acl, under the door's caller context — a
+    // subscription delivers what a read would. A replace (`slot`) was gated by its own door,
+    // the `:subscribers[N]` arm, before the slot was looked up; the same test is not run twice.
+    if (!slot && !acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
 
     // Mint the local target's binding ONCE, here (#830) — after every door has finished
@@ -3327,11 +3295,12 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // find one to give. The failure returns below hand it back themselves (#1816).
     hold_link(delivery_link(admitted), true);
     if (slot) {
-        // RFC-0009 §D.1 replace: the SAME door, so the SUBSCRIBE gate above and the latch
-        // below apply identically to a replace and to an append (ADR-0049). An index no
+        // RFC-0009 §D.1 replace: the SAME door, so the latch below applies identically to a
+        // replace and to an append (ADR-0049); the READ gate ran at the `[N]` arm. An index no
         // slot answers to is a malformed address, not a silent no-op — and refusing it is
         // what stops a wire-supplied `:subscribers[65535]` from growing the slot vector.
-        const vertex_t::edge_replace_t r = v->replace_edge(*slot, std::move(s), &latch, &displaced);
+        const vertex_t::edge_replace_t r =
+            v->replace_edge(*slot, std::move(s), expect, &latch, &displaced);
         // Only filling a CLEARED slot is genuinely a new listener; swapping a live one leaves
         // the count be, and a refused index adds nothing — both give the speculative bump
         // back. The unwind costs a second subtree walk on a control-plane-COLD path, which is
@@ -3341,8 +3310,9 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // A REFUSED replace changed nothing (#1622): the displaced edge still delivers, so the
         // speculative bump and hold go back exactly as for an index no slot answers to. The two
         // refusals lead the enumeration, so one test takes both and the table names the status.
-        if (r <= vertex_t::edge_replace_t::REFUSED) {
-            constexpr status_t kRefusal[] = {status_t::INVALID_PATH, status_t::BACKPRESSURE};
+        if (r <= vertex_t::edge_replace_t::EDGE_CHANGED) {
+            constexpr status_t kRefusal[] = {status_t::INVALID_PATH, status_t::BACKPRESSURE,
+                                             status_t::PERMISSION_DENIED};
             note_subscriber_removed(v);
             release_edges(delivery_link(admitted), session_of(admitted), v);
             return std::unexpected(kRefusal[std::to_underlying(r)]);
@@ -3535,7 +3505,7 @@ result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t f
 result_t<void> graph_t::set_suspended(const subscription_t& sub, bool suspended) {
     vertex_t* const v = sub.vertex_;
     if (v == nullptr) return std::unexpected(status_t::NOT_FOUND);
-    // No SUBSCRIBE gate and no re-admission: the edge's admission decision stands (#1533).
+    // No subscribe gate and no re-admission: the edge's admission decision stands (#1533).
     // The RFC-0005 counts are of DELIVERING edges, so the toggle moves them, under ONE shared
     // map hold with the flip, as evict_link_edges does: a concurrent retire (unique lock) reads
     // own_subs() before zeroing it and must see the pair whole. A resume counts FIRST, the
@@ -3730,7 +3700,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // arrival session, because that silence is exactly what made #491 look like it worked.
     mem::bytes_t mount_route_tlv(*tables_);  // outlives `route_view` below
     // The link this edge DELIVERS over — the arrival link until a mount-routed target moves
-    // it. `caller` is left alone: it is the ACL subject context the SUBSCRIBE gate and
+    // it. `caller` is left alone: it is the ACL subject context the subscribe (READ) gate and
     // every delivery run under (#81, ADR-0026, RFC-0021 §E — the gate is the WRITER's, even
     // when the data goes somewhere else), so the two must not be the same variable. Since
     // #375 Part 2 they are not even the same STRING: at a FLAT listener every peer shares
@@ -3778,7 +3748,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // The fan-in gate context this edge's deliveries run under (#81) — the WRITER's subject
     // since #375 Part 2, and the link's own name for every caller that supplied none, which
     // is byte for byte what this door stored before the two claims were separated (ADR-0082).
-    // It is also the context the SUBSCRIBE gate runs under (#81/ADR-0026), not the delivery
+    // It is also the context the subscribe (READ) gate runs under (#81/ADR-0026), not the delivery
     // link's.
     const std::string_view gate_ctx = caller.empty() ? std::string_view(link) : caller;
     // A wire subscriber always carries the cold half; it and both names draw from the table
@@ -4414,7 +4384,7 @@ result_t<value_ref_t> graph_t::read(const path_t& path) const {
 result_t<void> graph_t::write(const path_t& path, view::rope_t value) {
     // A miss is NOT_FOUND unless the parent's creation hook creates the target (RFC-0030 §7).
     // A `:field` write never creates (§7.1: there is no vertex whose control surface it could
-    // address), so it never reaches the hook or the CREATE gate. The hit stays one lookup.
+    // address), so it never reaches the hook or the creation WRITE gate. The hit stays one lookup.
     vertex_t* v = find_ptr(path.key());
     if (v == nullptr) {
         if (!path.field().empty()) return std::unexpected(status_t::NOT_FOUND);

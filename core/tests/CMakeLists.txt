@@ -1149,6 +1149,8 @@ if(LIBTRACER_NET_PLANE)
     add_executable(acl_test acl_test.cpp)
     target_link_libraries(acl_test PRIVATE libtracer)
     libtracer_test_warnings(acl_test)
+    # RFC-0036 §6: binds acl/ace-retired-bit and acl/ace-duplicate-key at the `:acl` door.
+    target_compile_definitions(acl_test PRIVATE LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME acl COMMAND acl_test)
 
     # #1665 — acl_allows reads the ACE-expiry clock only once an ACL will be evaluated.
@@ -2063,13 +2065,12 @@ if(LIBTRACER_NET_PLANE)
 endif()
 
 if(LIBTRACER_NET_PLANE)
-    # #492 S2c — RFC-0014 Amendment 2 (§5.1): the payload-type => required-ACL-right table a
-    # handler vertex declares, and §5 discharged on the creator endpoint (SPEC=>CREATE,
-    # NAME=>WRITE). Also pins Amendment 3's empty-SETTINGS catalog envelope.
-    add_executable(payload_right_table_test payload_right_table_test.cpp)
-    target_link_libraries(payload_right_table_test PRIVATE libtracer)
-    libtracer_test_warnings(payload_right_table_test)
-    add_test(NAME payload_right_table COMMAND payload_right_table_test)
+    # The creator endpoint: SPEC and NAME both gate on WRITE (RFC-0036 §12 Q4, which deleted
+    # the RFC-0014 Amendment 2 payload-right table), and its Amendment 3 `conn:schema` catalog.
+    add_executable(creator_endpoint_test creator_endpoint_test.cpp)
+    target_link_libraries(creator_endpoint_test PRIVATE libtracer)
+    libtracer_test_warnings(creator_endpoint_test)
+    add_test(NAME creator_endpoint COMMAND creator_endpoint_test)
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)

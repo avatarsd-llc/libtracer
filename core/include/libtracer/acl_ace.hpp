@@ -33,21 +33,20 @@
 namespace tr::graph {
 
 /**
- * @brief One right bit of an ACE `access_mask` (docs/reference/05 §0x0A, ADR-0020).
+ * @brief One right bit of an ACE `access_mask` (docs/reference/05 §0x0A, RFC-0036 §3.1).
  *
- * Single-bit values so a gate tests exactly one right; a stored mask may carry any
- * OR of them. `WRITE_ACL` is precisely the `admin` right (modify the ACL / delegate).
+ * Two rights, and nothing else: a `:` field is a path under its vertex and is gated by the
+ * vertex's own READ and WRITE (RFC-0036 §3.2). Single-bit values so a gate tests exactly one
+ * right. A mask bit outside @ref kAceRights is refused when the ACL is installed. Writing
+ * `:acl` is not a right: only the owner, the empty local caller, may do it (RFC-0036 §3.3).
  */
 enum class acl_right_t : std::uint32_t {
-    READ = 0x01,        /**< @brief Read the vertex value / control fields. */
-    WRITE = 0x02,       /**< @brief Write the vertex value / control fields (fan-in gate). */
-    SUBSCRIBE = 0x04,   /**< @brief Append a `:subscribers[]` edge (fan-out gate). */
-    CREATE = 0x08,      /**< @brief Create a child via `:children[]` (ADR-0017). */
-    DELETE = 0x10,      /**< @brief Remove a child (reserved; no core surface yet). */
-    READ_ACL = 0x20,    /**< @brief Read the `:acl` field. */
-    WRITE_ACL = 0x40,   /**< @brief Modify the `:acl` field — the `admin` right. */
-    WRITE_OWNER = 0x80, /**< @brief Transfer ownership (reserved; no core surface yet). */
+    READ = 0x01,  /**< @brief Read the vertex value and its `:` fields, and subscribe to it. */
+    WRITE = 0x02, /**< @brief Write the vertex value and its `:` fields, and create under it. */
 };
+
+/** @brief Every right bit an ACE may carry (RFC-0036 §3.1); any other bit is refused at install. */
+inline constexpr std::uint32_t kAceRights = 0x03;
 
 /** @brief The one ACE flag the core subset honors: propagate to the subtree (ADR-0020). */
 inline constexpr std::uint8_t kAceInherit = 0x1;

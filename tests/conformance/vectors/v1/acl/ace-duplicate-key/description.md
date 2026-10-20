@@ -9,14 +9,14 @@ ACL (PL=1) {
     NAME "type"        VALUE 0x00           ; ALLOW
     NAME "subject"     VALUE "peer-a"
     NAME "access_mask" VALUE u16=0x0001     ; READ
-    NAME "access_mask" VALUE u16=0xFFFF     ; repeated — every right at once
+    NAME "access_mask" VALUE u16=0x0003     ; repeated — READ|WRITE
   }
 }
 ```
 
 **Behavioural expectation:** every ACE reader **rejects** the record
 (`TYPE_MISMATCH` / `TypeMismatch`). An ACL is a security document: applying the
-plain family's last-wins rule here would read the ACE as the 0xFFFF grant — a
+plain family's last-wins rule here would read the ACE as the READ|WRITE grant — a
 duplicate key WIDENING access — and first-wins would let a prepended duplicate
 narrow a deny the same way. So repeats are refused in every tier, alongside the
 family's other refusals (unknown key, non-`NAME` in a key slot, odd child
@@ -27,6 +27,11 @@ The codec round-trips these bytes untouched (`input.bin`, not `reject.bin`) —
 the refusal is the READER's, bound per core (see HARNESS.md): C++
 `core/tests/acl_test.cpp`, Rust `bindings/rust/tests/conformance_vectors.rs`.
 
+RFC-0036 repaired the second mask in place, from `0xFFFF` to `0x0003`. Every
+bit outside `0x03` is now refused on its own (`acl/ace-retired-bit`), so the old
+wide mask would have been refused for two reasons and the vector would no
+longer isolate the duplicate key.
+
 ```
-0a4050000a404c0002000400747970650100010000020007007375626a65637401000600706565722d6102000b006163636573735f6d61736b01000200010002000b006163636573735f6d61736b01000200ffff
+0a4050000a404c0002000400747970650100010000020007007375626a65637401000600706565722d6102000b006163636573735f6d61736b01000200010002000b006163636573735f6d61736b010002000300
 ```

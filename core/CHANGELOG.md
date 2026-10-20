@@ -14,6 +14,54 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **Two ACL rights, and `:` fields are gated by their vertex (RFC-0036,
+  [#2091](https://github.com/avatarsd-llc/libtracer/issues/2091)).** `acl_right_t` keeps
+  `READ` (`0x01`) and `WRITE` (`0x02`); `SUBSCRIBE`, `CREATE`, `DELETE`, `READ_ACL`,
+  `WRITE_ACL` and `WRITE_OWNER` are removed, and new `kAceRights` names the two-bit set.
+  Installing an ACE whose mask sets any other bit is refused with `TYPE_MISMATCH`. A `:` field
+  now answers its vertex's effective ACL: READ for reads, WRITE for writes. Subscribing needs
+  READ on the producer; creating through `:children[]`, the creation hook and the creator
+  endpoint needs WRITE, for both the create and the remove payload. `v:acl` is written by the
+  owner (the empty caller) only, with or without a subject resolver. `v:subscribers[N]` is
+  its holder's: a non-owner needs READ and must hold slot N, judged by the resolver's token when
+  one is installed and by the stored caller bytes when none is; a slot nobody holds, cleared or
+  past the end, is the owner's. The replace or clear lands only on the edge the check saw: a
+  slot cleared and reused in between answers `PERMISSION_DENIED` to a replace and is left as
+  it is by a clear. `vertex_t::edge_holder` now returns that edge's `remote_ptr_t`, and
+  `replace_edge` takes it as `expect` and `clear_edge` as an optional one (a new
+  `edge_replace_t::EDGE_CHANGED` outcome).
+- **`payload_right_t` and every `rights` parameter are removed.** `register_vertex`,
+  `try_register_vertex`, `register_vertex_key` and `register_vertex_key_span` lose the
+  argument (RFC-0014 Amendment 2's payload-right table is retired); the Amendment 3 `:schema`
+  catalog argument stays.
+
+#### Upgrading
+
+Rewrite each ACE the application installs:
+
+| Old right | New |
+| ---- | ---- |
+| SUBSCRIBE | READ. Subscribing needs READ on the producer |
+| CREATE | WRITE on the parent, or on the creator endpoint |
+| READ_ACL | READ |
+| WRITE_ACL | drop it. Administer through an owner-app vertex |
+| DELETE, WRITE_OWNER | drop them. Neither gated anything |
+
+Then check three things:
+
+1. **Who clears subscriptions.** A remote tool that cleared or retargeted other parties'
+   subscriptions with WRITE is now refused. Move that function into an owner-app vertex.
+2. **The 0.18.1 connection-vertex layout** becomes: an inheritable READ on `/net`; READ and
+   WRITE on each connection vertex, written once the connection exists; and no WRITE on
+   `/net/<module>/conn`, which is what stops a remote peer from opening connections. Under the
+   ALLOW-only profile WRITE stays off `/net` and `/net/<module>`. `mount_hop_acl_test` pins the
+   layout.
+3. **Remote formation.** An orchestrator that was granted WRITE_ACL now needs WRITE where it
+   creates and binds, READ where it subscribes, and an owner-app vertex for any ACL it has to
+   set.
+
 ## [0.20.0] — 2026-10-20
 
 ### Added

@@ -406,7 +406,7 @@ namespace {
  *
  * The three doors are `graph_t::subscribe_wire` and the `:subscribers[]` append and
  * `:subscribers[N]` replace of the field surface (graph_fields.cpp). What is deliberately NOT
- * in here is everything the doors disagree about: the `[N]` arm's `acl_allows(WRITE)` gate and
+ * in here is everything the doors disagree about: the `[N]` arm's owner-or-holder gate and
  * its empty-STATUS eviction sentinel (both of which run before this), the field-write
  * door's `require a PATH child` rule, and `subscribe_wire`'s inverse — it CLEARS `target_key`,
  * because a PATH child there names the consumer at ITS origin and delivery rides the return route.
@@ -530,12 +530,16 @@ struct graph_t::field_surface_t {
         // and admission tail below, and `slot` is the only thing that tells them apart.
         const field_sel_t sel = field_selector(field);
         std::optional<std::size_t> slot;
+        remote_ptr_t edge;  // the edge the `[N]` gate checked; the slot verb lands only on it
         if (sel == field_sel_t::SLOT) {
-            // `[N]` is gated on WRITE before its payload is looked at. The append is gated by
-            // the SUBSCRIBE gate inside `admit_subscriber` alone, as it always was.
-            if (!g.acl_allows(v, ctx.subject, acl_right_t::WRITE))
-                return std::unexpected(status_t::PERMISSION_DENIED);
+            // `[N]` is the owner's, or its holder's with READ (RFC-0036 §3.4), and is gated
+            // before its payload is looked at (`graph_t::may_write_slot`). The rule holds with
+            // no resolver installed too (§12 Q2): the holder test then compares the stored
+            // contexts byte for byte. The append is gated by the READ gate inside
+            // `admit_subscriber` alone, as it always was.
             slot = field.steps[0].index;
+            if (!g.may_write_slot(v, *slot, ctx.subject, edge))
+                return std::unexpected(status_t::PERMISSION_DENIED);
             // §D.1 is payload-DISCRIMINATING. Before it, every indexed write cleared the slot
             // payload-blind, so a peer writing a SUBSCRIBER to slot N — plainly meaning to
             // replace that edge — silently destroyed it and was told RESULT. The eviction
@@ -547,7 +551,7 @@ struct graph_t::field_surface_t {
                 // Clear-and-report through the ONE slot-clear door `unsubscribe` also runs: the
                 // observer's view is taken before the clear, the RFC-0005 counters unwind, and
                 // only a slot that WAS active is reported as a removal.
-                (void)g.clear_subscriber_slot(v, *slot, ctx.subject);
+                (void)g.clear_subscriber_slot(v, *slot, ctx.subject, nullptr, edge.get());
                 return {};
             }
         } else if (sel != field_sel_t::APPEND) {
@@ -575,7 +579,7 @@ struct graph_t::field_surface_t {
         }
         subscriber_t s;
         // The shared door parse (ADR-0049, #869): decode, type check, parse and retain — the
-        // same steps `subscribe_wire` runs. On `[N]` it sits AFTER the WRITE gate and AFTER the
+        // same steps `subscribe_wire` runs. On `[N]` it sits AFTER the holder gate and AFTER the
         // sentinel discrimination above, which are that arm's alone. A record with no PATH
         // child names no local target, and this door has nowhere else to deliver.
         if (const auto parsed = parse_wire_subscriber(value, s, g.table_source()); !parsed)
@@ -604,38 +608,42 @@ struct graph_t::field_surface_t {
             if (r == nullptr || !r->caller.assign(ctx.subject) || !r->link.assign(ctx.session))
                 return std::unexpected(status_t::BACKPRESSURE);
         }
-        // The single admission step (ADR-0049): SUBSCRIBE gate → append (or replace at
+        // The single admission step (ADR-0049): READ gate → append (or replace at
         // `slot` — §D.1's "admitted through the same admission door") → latch. A field-write
         // subscribe returns no host handle — discard it.
-        if (const auto r = g.admit_subscriber(v, std::move(s), ctx.subject, slot); !r)
+        if (const auto r = g.admit_subscriber(v, std::move(s), ctx.subject, slot, {}, edge.get());
+            !r)
             return std::unexpected(r.error());
         return {};
     }
 
     /**
-     * @brief `:acl` read — the stored ACEs re-encoded, gated on READ_ACL.
+     * @brief `:acl` read — the stored ACEs re-encoded, gated on READ like every field
+     *        (RFC-0036 §3.3).
      *
      * Served whole — no member or slot addressing, so `:acl[N]` names nothing (an ACE is not
      * separately addressable). Resolving the shape keeps `:acl[7]` from being served the
      * entire ACE collection under an OK status. `whole_field` is the shared shape rule (#869),
      * the same predicate @ref write_acl uses — note only the SHAPE is shared: this door gates
-     * on READ_ACL and that one on WRITE_ACL, and an UNACCEPTED shape resolves below the gate
+     * on READ and that one admits the owner alone, and an UNACCEPTED shape resolves below the gate
      * here (under the plain READ right) and above it there (the divergence pinned by
      * `field_shape_matrix`).
      */
     static result_t<value_ref_t> read_acl(const graph_t& g, vertex_t* v, const field_path_t& field,
                                           std::string_view caller) {
-        const bool whole = whole_field(field);
-        if (!g.acl_allows(v, caller, whole ? acl_right_t::READ_ACL : acl_right_t::READ))
+        if (!g.acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
-        if (!whole) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        if (!whole_field(field)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         return single_link(g, g.read_acl(v));
     }
 
     /**
-     * @brief `:acl` write — gate on WRITE_ACL, parse the typed ACEs, store that list alone.
+     * @brief `:acl` write — the owner only, parse the typed ACEs, store that list alone.
      *
-     * Store the :acl (#81, ADR-0018/0020): gate on WRITE_ACL — the `admin` right — then
+     * Store the :acl (#81, ADR-0018/0020): admit the owner, the empty local caller, and no one
+     * else (RFC-0036 §3.3) — no ACE can grant it, so none is evaluated, and the rule holds with
+     * no resolver installed too (§12 Q2), so a remote peer cannot plant ACEs that would take
+     * effect once one is. Remote administration is an owner-app vertex's policy. Then
      * validate + parse the typed ACEs (ADR-0050 parse_acl) and store THAT LIST ALONE, no
      * verbatim byte copy beside it (#907): read_acl re-encodes, so read-back cannot describe a
      * policy other than the one acl_allows walks. The outer SHAPE is checked too, not just the
@@ -655,8 +663,7 @@ struct graph_t::field_surface_t {
     static result_t<void> write_acl(graph_t& g, vertex_t* v, const field_path_t& field,
                                     const view::view_t& value, const write_ctx_t& ctx) {
         if (!whole_field(field)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (!g.acl_allows(v, ctx.subject, acl_right_t::WRITE_ACL))
-            return std::unexpected(status_t::PERMISSION_DENIED);
+        if (!ctx.is_local_owner()) return std::unexpected(status_t::PERMISSION_DENIED);
         const auto acl = wire::tlv_node_t::over(value);
         if (!acl || acl->type() != type_t::ACL || !acl->opt().pl)
             return std::unexpected(status_t::TYPE_MISMATCH);
@@ -704,7 +711,8 @@ struct graph_t::field_surface_t {
      * @brief `:children[]` write — in-band vertex creation from a SPEC (#82, ADR-0017).
      *
      * A `:children[]` APPEND of a SPEC instantiates a child of a device-catalog type, gated by
-     * the parent's CREATE right (#81, ADR-0020). A `[N]` clear (child removal) is deferred
+     * the parent's WRITE right (#81, ADR-0020, RFC-0036 §3.2). A `[N]` clear (child removal) is
+     * deferred
      * (#66). Read-back (members, not SPECs) is the field-read surface.
      *
      * `:children` is addressed WHOLE, like `:subscribers` (#581). `append` was the sole
@@ -713,7 +721,7 @@ struct graph_t::field_surface_t {
      * tail provably inert (two different tails produced the same reply and the same graph). On
      * `/net` that spelling built a LIVE connection vertex and wired it into the router. The
      * READ of the byte-identical selector already answered SCHEMA_NOT_FOUND, so the two halves
-     * disagreed; this makes them agree. Before the CREATE gate, like `:acl`.
+     * disagreed; this makes them agree. Before the WRITE gate, like `:acl`.
      *
      * Same `field_selector` classification the read door uses for `:children` (#869) — the
      * shapes are one rule, the answers are per side: `[]` CREATES here and ENUMERATES there,
@@ -723,7 +731,7 @@ struct graph_t::field_surface_t {
                                          const view::view_t& value, const write_ctx_t& ctx) {
         if (field_selector(field) != field_sel_t::APPEND)
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (!g.acl_allows(v, ctx.subject, acl_right_t::CREATE))
+        if (!g.acl_allows(v, ctx.subject, acl_right_t::WRITE))
             return std::unexpected(status_t::PERMISSION_DENIED);
         return g.create_child(v, value);
     }
@@ -1080,8 +1088,8 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     // The one exception is a CONTROL vertex that declared a catalog at registration
     // (RFC-0014 Amendment 3 — a transport module's creator endpoint): its catalog IS the
     // content of this `SETTINGS`, served verbatim. The graph owns the frame, the declarer owns
-    // what is inside it. Behind the same flag bit as the payload-right rows, so a vertex that
-    // declared neither does not walk.
+    // what is inside it. Behind the `SCHEMA_CATALOG` flag bit, so a vertex that declared none
+    // does not walk.
     //
     // A HANDLER registered `deliver_written = false` (RFC-0008 Amendment 3, #2208) adds one
     // read-only facet after the catalog, so a peer can tell a suppressed write from no write.

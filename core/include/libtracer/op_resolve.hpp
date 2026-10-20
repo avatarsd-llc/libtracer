@@ -525,8 +525,8 @@ class op_resolver_t {
      *
      * Called at most ONCE per resolve, before any graph call, and never for a local resolve:
      * the derived token is then the caller context for every gate the walk runs — the READ
-     * gate, the WRITE gate, the SUBSCRIBE gate and the `graph::write_ctx_t` a HANDLER sees —
-     * so a handler and the `:acl` that admitted its write cannot disagree.
+     * and WRITE gates, the `:subscribers[N]` holder test and the `graph::write_ctx_t` a HANDLER
+     * sees — so a handler and the `:acl` that admitted its write cannot disagree.
      *
      * **An EMPTY answer is the conformant default, not an error**: the subject falls back to
      * `inbound_ref_t::link`, i.e. exactly the caller context the resolver used before the

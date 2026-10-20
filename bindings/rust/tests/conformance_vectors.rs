@@ -1095,11 +1095,11 @@ fn ace_builder_matches_manual() {
     assert_eq!(encode(&structured::acl(&aces)), bin);
 }
 
-/** @brief RFC-0026 (#993): the mask is u32 end to end — a rights bit above the old
- * 16-bit ceiling survives build → decode → read untruncated (the reader used to
- * narrow to u16, silently dropping the high half of a wider grant). */
+/** @brief RFC-0026 (#993) and RFC-0036 §3.1: the mask is read at its full u32 width,
+ * so a bit above the old 16-bit ceiling is seen and refused. Narrowing to u16 would drop
+ * it and read the ACE as a plain READ grant. */
 #[test]
-fn ace_mask_u32_round_trip() {
+fn ace_mask_high_bit_is_refused_not_narrowed() {
     let aces = [Ace {
         ace_type: 0,
         flags: 0,
@@ -1108,8 +1108,7 @@ fn ace_mask_u32_round_trip() {
         expires_ns: None,
     }];
     let t = decode(&encode(&structured::acl(&aces))).unwrap();
-    let got = structured::acl_aces(&t).unwrap();
-    assert_eq!(got[0].access_mask, 0x0001_0001);
+    assert_eq!(structured::acl_aces(&t), Err(BuildError::TypeMismatch));
 }
 
 /* ------------------------------------------------------------- Unit 6 — SPEC --- */
@@ -1901,6 +1900,43 @@ fn ace_duplicate_key_is_rejected() {
         Err(BuildError::TypeMismatch),
         "a duplicate access_mask, narrow then wide: last-wins would WIDEN the grant"
     );
+}
+
+/** @brief `acl/ace-retired-bit` — RFC-0036 §3.1: a mask bit outside READ|WRITE (here
+ * `0x04`, the old SUBSCRIBE) is refused, never masked off; READ|WRITE itself reads. */
+#[test]
+fn ace_retired_bit_is_rejected() {
+    let bin = assert_vector_consistent("acl/ace-retired-bit");
+    let t = decode(&bin).unwrap();
+    assert_eq!(
+        structured::acl_aces(&t),
+        Err(BuildError::TypeMismatch),
+        "a retired rights bit is refused at the reader"
+    );
+    for mask in [0x04u32, 0x08, 0x10, 0x20, 0x40, 0x80, 0x8000_0000] {
+        let aces = [Ace {
+            ace_type: 0,
+            flags: 0,
+            subject: b"peer-a".to_vec(),
+            access_mask: mask,
+            expires_ns: None,
+        }];
+        let t = decode(&encode(&structured::acl(&aces))).unwrap();
+        assert_eq!(
+            structured::acl_aces(&t),
+            Err(BuildError::TypeMismatch),
+            "mask {mask:#x}"
+        );
+    }
+    let ok = [Ace {
+        ace_type: 0,
+        flags: 0,
+        subject: b"peer-a".to_vec(),
+        access_mask: 0x03,
+        expires_ns: None,
+    }];
+    let t = decode(&encode(&structured::acl(&ok))).unwrap();
+    assert_eq!(structured::acl_aces(&t).unwrap()[0].access_mask, 0x03);
 }
 
 /** @brief The rest of the ACE reject family: unknown key, desync, odd child count. */

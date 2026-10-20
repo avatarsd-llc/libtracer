@@ -236,14 +236,14 @@ using subject_token_t = std::vector<std::byte>;
  *
  * @warning The ERROR arm is a **deny**, not a fallback (#905). A resolver that cannot name
  *          the caller returns `std::unexpected(wire::err_t::ACCESS_DENIED)` and the
- *          operation fails `status_t::PERMISSION_DENIED` at every gate — READ, WRITE,
- *          SUBSCRIBE, CREATE, WRITE_ACL, READ_ACL, and remote-edge fan-in delivery. It is
+ *          operation fails `status_t::PERMISSION_DENIED` at every gate — READ, WRITE, the
+ *          `:subscribers[N]` holder test, and remote-edge fan-in delivery. It is
  *          never invoked with an empty caller: the empty (local API) context is the
  *          trusted-by-convention channel and `graph_t::acl_allows` short-circuits it
  *          BEFORE the resolver, so a remote identity — which always carries a non-empty
  *          inbound link NAME — cannot reach the trusted arm. The predecessor of this type
  *          returned `std::optional`, whose `nullopt` meant "fully trusted": an
- *          unresolvable caller was granted everything, `WRITE_ACL` and `CREATE` included.
+ *          unresolvable caller was granted everything.
  *
  * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049). The predecessor was
  *       a `std::function` in a plain member that the ACL gate read on every gated read and
@@ -523,8 +523,8 @@ struct session_event_t {
     enum class kind_t : std::uint8_t {
         /**
          * @brief A subscription is about to be admitted for the `session`: the CHECK. Fired after
-         *        the SUBSCRIBE gate and before the edge or its departure-index entry exists. The
-         *        hook's `false` refuses it, and the subscriber is answered `BACKPRESSURE`.
+         *        the subscribe (READ) gate and before the edge or its departure-index entry exists.
+         * The hook's `false` refuses it, and the subscriber is answered `BACKPRESSURE`.
          */
         ADMIT,
         /**
@@ -562,8 +562,8 @@ struct session_event_t {
      */
     wire::key_view_t producer;
     /**
-     * @brief The caller context the SUBSCRIBE gate ran under — the subscriber's SUBJECT, which
-     *        several sessions may share. Set on `ADMIT` only; empty on `RELEASE` and `END`.
+     * @brief The caller context the subscribe (READ) gate ran under — the subscriber's SUBJECT,
+     * which several sessions may share. Set on `ADMIT` only; empty on `RELEASE` and `END`.
      */
     std::string_view caller;
 };
@@ -628,7 +628,7 @@ struct graph_hook_t {
  * (for example `BACKPRESSURE` from a registration the graph's source refused) passes through to
  * the writer unchanged.
  *
- * The graph has already evaluated the parent's `CREATE` right for the subject before the call;
+ * The graph has already evaluated the parent's `WRITE` right for the subject before the call;
  * a denial never reaches the hook. A hook that answers success but registers nothing answers
  * the writer `NOT_FOUND`. Any bound on how many children a peer may cause is the hook's own
  * decision; the library adds none (`CONTEXT.md` §Resource bound).
@@ -1059,8 +1059,7 @@ class graph_t {
      */
     [[nodiscard]] vertex_handle_t register_vertex(const path_t& path, role_t role,
                                                   handlers_t handlers = {},
-                                                  vertex_policy_t policy = {},
-                                                  std::span<const payload_right_t> rights = {});
+                                                  vertex_policy_t policy = {});
 
     /**
      * @brief Register a vertex at @p path — FALLIBLE (the runtime-path form of
@@ -1070,27 +1069,12 @@ class graph_t {
      * @param policy The owner's declarations about the vertex (@ref vertex_policy_t), applied
      *        before the handle is returned. A default policy costs nothing. An illegal
      *        retention for @p role answers `SCHEMA_NOT_FOUND` and registers nothing.
-     * @param rights OPTIONAL payload-type → required-ACL-right table (RFC-0014 Amendment 2) —
-     *        the general contract by which a control vertex demands something other than
-     *        plain `WRITE` for a given written TLV type. BORROWED for the call: the rows are
-     *        copied onto the graph, under the same lock that publishes the vertex, so the
-     *        declaration is in force before the first write can reach it. Empty (the default)
-     *        ⇒ every write gates on `acl_right_t::WRITE`, and the vertex carries not one byte
-     *        for this; the write gate then stops at one relaxed flag-bit test on a word it
-     *        already holds. A row whose `%payload_right_t::type` equals the written value's
-     *        leading TLV type supplies the right demanded instead; an unmatched type (and a
-     *        value whose leading link cannot be read, e.g. a device-memory link) falls back to
-     *        `WRITE`. Rows are scanned in order, first match wins. The refusal is still the
-     *        ONE write gate's, counted into `delivery_drops_t::denied`: this declaration
-     *        changes WHICH right is demanded, never where the demand is made. (It was
-     *        `handlers_t::payload_rights` until RFC-0028 slice 7 took it out of the seam
-     *        struct.)
      * @return The pinned @ref vertex_handle_t, or `PATH_IN_USE` if the path is already
      *         registered.
      */
-    [[nodiscard]] result_t<vertex_handle_t> try_register_vertex(
-        const path_t& path, role_t role, handlers_t handlers = {}, vertex_policy_t policy = {},
-        std::span<const payload_right_t> rights = {});
+    [[nodiscard]] result_t<vertex_handle_t> try_register_vertex(const path_t& path, role_t role,
+                                                                handlers_t handlers = {},
+                                                                vertex_policy_t policy = {});
 
     /**
      * @brief Register a vertex by its canonical PATH-payload @p key directly (the in-band
@@ -1098,21 +1082,20 @@ class graph_t {
      *
      * The key is a composed parent-key + `NAME(child)`, not parsed from a string. This is the
      * genuine runtime path (a `:children[]` write can race a duplicate name), so it stays
-     * fallible. @p handlers, @p policy and @p rights are exactly @ref try_register_vertex's.
+     * fallible. @p handlers and @p policy are exactly @ref try_register_vertex's.
      * @param schema_catalog OPTIONAL content of the vertex's `:schema` `SETTINGS` — the catalog
      *        a CONTROL vertex declares for what its writes accept (RFC-0014 Amendment 3: the
      *        creator endpoint's `POINT{NAME, SETTINGS{…catalog…}}`). The bytes are a sequence of
      *        encoded TLVs, served VERBATIM and never parsed here; the declaring caller owns their
      *        vocabulary and validates writes against it itself. BORROWED for the call: copied
-     *        onto the graph beside @p rights, under the same lock and in the same record, so it
-     *        is in force before the vertex is reachable. Empty (the default) ⇒ the
+     *        onto the graph under the lock that publishes the vertex, so it is in force before
+     *        the vertex is reachable. Empty (the default) ⇒ the
      *        ordinary empty `SETTINGS`, and a vertex that declares no catalog carries nothing.
      * @return The pinned @ref vertex_handle_t, or `PATH_IN_USE` if the key is already registered.
      */
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key(
         std::span<const std::byte> key, role_t role, handlers_t handlers = {},
-        vertex_policy_t policy = {}, std::span<const payload_right_t> rights = {},
-        std::span<const std::byte> schema_catalog = {});
+        vertex_policy_t policy = {}, std::span<const std::byte> schema_catalog = {});
 
     /**
      * @brief Retire a vertex and its whole subtree — the owner-facing mirror of
@@ -1256,7 +1239,7 @@ class graph_t {
      * (registration, then the write-create `mkdir -p` and branch-write decomposition, which
      * RFC-0030 §7 replaced with a parent's creation hook) allocated until
      * the allocator itself refused. A branch writer that is already resolved and already
-     * WRITE-gated is therefore governed — every landing site passes its CREATE/WRITE gate —
+     * WRITE-gated is therefore governed — every landing site passes its WRITE gate —
      * but its landing sites cost nothing, so "more writes, wider writes" is an unbounded
      * vertex population multiplied by a peer's choice. That is the peer/writer-multiplied
      * allocation class
@@ -2389,7 +2372,7 @@ class graph_t {
      * consumer-initiated SUBSCRIBER write into the producer's `:subscribers[]` field
      * (ADR-0026), exactly as connect() is sugar over that field-write. Per ADR-0049 (#59)
      * this overload ENCODES a `SUBSCRIBER{PATH}` TLV and enters the same `:subscribers[]`
-     * field-write admission door as a wire subscribe — one parse, one SUBSCRIBE gate, one
+     * field-write admission door as a wire subscribe — one parse, one subscribe (READ) gate, one
      * durability latch, and the edge's stored SUBSCRIBER view reads back byte-identically
      * from `:subscribers[]`.
      *
@@ -2410,7 +2393,7 @@ class graph_t {
      * no `std::function` clone. Delivery is value-agnostic (RFC-0008): WHICH vertices a
      * sweep propagates is the source vertex's delivery_mode, not a per-edge policy. A
      * callback cannot ride a TLV, so this overload skips the door's parse — but it enters
-     * the SAME single admission step (SUBSCRIBE gate → append → durability latch,
+     * the SAME single admission step (subscribe (READ) gate → append → durability latch,
      * ADR-0049) as every other door.
      * @param fn  The per-delivery sink; @p ctx is passed back as its first argument.
      * @param ctx Caller-owned context, passed back to @p fn on every delivery. Its lifetime
@@ -2426,7 +2409,7 @@ class graph_t {
      *               all-zero, i.e. today's behaviour. A callback edge carries no TLV, so
      *               the policy is set on the slot directly rather than parsed out of one.
      * @return A @ref subscription_t handle for @ref unsubscribe; error on an unknown @p src
-     *         or a denied SUBSCRIBE gate, and `SCHEMA_NOT_FOUND` on a @p src with a `:field`
+     *         or a denied subscribe (READ) gate, and `SCHEMA_NOT_FOUND` on a @p src with a `:field`
      *         tail, as for the edge form.
      */
     [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, subscriber_fn_t fn,
@@ -2518,7 +2501,7 @@ class graph_t {
      * @brief Suspend or resume the in-process subscription @p sub without removing it (#1533).
      *
      * The edge keeps its slot index, its callback pair, its binding and its admission
-     * decision; only its suspended flag moves, and no SUBSCRIBE gate runs again. A suspended
+     * decision; only its suspended flag moves, and no subscribe gate runs again. A suspended
      * edge leaves the RFC-0005 counts (@ref own_subs, @ref has_subscribers, the ancestors'
      * bubbling count), so a vertex whose every edge is suspended skips the fan-out exactly as
      * one with none does; while other edges deliver, each suspended one costs a write one
@@ -2719,7 +2702,7 @@ class graph_t {
      * re-dispatch target — remote delivery rides @p return_route (a view over a refcounted
      * segment — the ONE copy of the route; every later delivery clones the refcount,
      * ADR-0041 §2) over @p link via the remote sink. Admission is the single ADR-0049
-     * step: SUBSCRIBE gate on @p v's `:acl` under @p link (#81, ADR-0026,
+     * step: subscribe (READ) gate on @p v's `:acl` under @p link (#81, ADR-0026,
      * `PERMISSION_DENIED` on denial) → slot append → durability latch (if the parsed
      * `delivery_policy_t` sets `durability_request` and @p v holds a value, the LKV is
      * latched to this subscriber — one synchronous sink call, RFC-0004 §D / RFC-0022 §3.A).
@@ -2749,7 +2732,7 @@ class graph_t {
      * EMPTY means "the same as @p link", which is every pre-split caller and is byte for byte
      * what this door did before: a FLAT listener's peers all subscribed as their shared link
      * name. A terminus that derived a per-writer subject from the frame's `peer_handle_t`
-     * passes it here, and then the SUBSCRIBE gate, the stored `subscriber_remote_t::caller`
+     * passes it here, and then the subscribe (READ) gate, the stored `subscriber_remote_t::caller`
      * and each delivery's WRITE re-gate all name the writer rather than the wire it used.
      * The delivery link is unaffected, which is the point of splitting them: the edge still
      * routes back over @p link (or, for a mount-routed target, over the mount).
@@ -2813,18 +2796,18 @@ class graph_t {
      * A hit returns the vertex. A miss answers `NOT_FOUND` and creates nothing, whatever the
      * write's origin, unless the build allows creation hooks (`config_t::kCreationHooks`, off
      * by default) and the parent of the first missing level carries one. Then the parent's
-     * `CREATE` right is evaluated for @p caller (`PERMISSION_DENIED`: the hook does not run and
+     * `WRITE` right is evaluated for @p caller (`PERMISSION_DENIED`: the hook does not run and
      * @p payload is not asked for), and the hook decides. A level the hook created is the parent of
      * the next, so a deeper miss is decided by that new vertex's own hook: `mkdir -p` is
      * expressible only where every level opted in.
      *
      * Only a fieldless data write may create (§7.1). Every other request (a read, a `:field`
      * write, any op without a payload) resolves with @ref find instead, so a miss is
-     * `NOT_FOUND` without consulting a hook or the `CREATE` gate.
+     * `NOT_FOUND` without consulting a hook or the creation `WRITE` gate.
      *
      * @param payload Produces the written payload the hook is shown, and is called only when a
-     *        hook is about to decide, after the `CREATE` gate admitted @p caller. It returns an
-     *        empty rope when the payload could not be held (`BACKPRESSURE`). It may be called
+     *        hook is about to decide, after the creation `WRITE` gate admitted @p caller. It
+     * returns an empty rope when the payload could not be held (`BACKPRESSURE`). It may be called
      *        more than once for one write.
      * @retval INVALID_PATH @p key is not a well-formed canonical PATH payload (checked before a
      *         hook creates anything).
@@ -3037,7 +3020,6 @@ class graph_t {
     // placeholder, which carries none.
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key_span(
         std::span<const std::byte> key, role_t role, const handlers_t& handlers,
-        std::span<const payload_right_t> rights = {},
         std::span<const std::byte> schema_catalog = {}, vertex_policy_t policy = {});
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
@@ -3160,7 +3142,7 @@ class graph_t {
                                                       vertex_t::ring_take_t* take = nullptr);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
-    // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-
+    // refcount SUBVIEW of the written frame (creating missing vertices, WRITE-
     // gated), then notifies each covered subscription point once with its slice. A
     // decomposable POINT is contiguous, so the walk reads the materialized head
     // (single-link: zero copy) and lands rope slices of it (ADR-0053 §6).
@@ -3305,11 +3287,12 @@ class graph_t {
     // Clear subscriber slot `slot` of `v` and, iff it was active, unwind the bookkeeping above
     // and report the removal to the subscription observer under `caller` (a no-op for the
     // empty, local caller): the one clear `unsubscribe` and the wire `:subscribers[N]` clear
-    // both run (#1711). False iff the slot was not active. `retired_ctx` as for
+    // both run (#1711). False iff the slot was not active. `retired_ctx` and `expect` as for
     // vertex_t::clear_edge.
     [[nodiscard]] bool clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_view caller,
-                                             void** retired_ctx = nullptr);
-    // The single SUBSCRIBER admission step (ADR-0049): SUBSCRIBE gate under `caller` →
+                                             void** retired_ctx = nullptr,
+                                             const subscriber_remote_t* expect = nullptr);
+    // The single SUBSCRIBER admission step (ADR-0049): READ gate under `caller` →
     // slot append → transient-local durability latch (delivered outside the lock, per
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
     // the local `:subscribers[]` field-write, and the wire subscribe_wire — ends here,
@@ -3317,10 +3300,12 @@ class graph_t {
     // `link_token` is the carried interned identity (#1417), forwarded verbatim to
     // `link_index_t::index_vertex` — which ignores it unless it names a live slot spelling the key
     // this admission actually indexes under. Defaulted, so the three local doors that carry
-    // none are unchanged.
+    // none are unchanged. `expect` is the edge the `[N]` gate checked, handed to
+    // vertex_t::replace_edge so a replace lands only on it.
     [[nodiscard]] result_t<subscription_t> admit_subscriber(
         vertex_t* v, subscriber_t s, std::string_view caller,
-        std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {});
+        std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {},
+        const subscriber_remote_t* expect = nullptr);
     // Fire the external-subscription observer for ONE slot mutation
     // (graph_hooks_t::subscription_observer). Returns immediately when no observer is installed or
     // `caller` is EMPTY — the latter is the whole external/local discrimination, in one place.
@@ -3397,6 +3382,17 @@ class graph_t {
     // vertex mutex — the ancestor mutex-walk happens only inside the lazy rebuild
     // of a dirty cache (after a :acl write marked the written vertex's subtree).
     [[nodiscard]] bool acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const;
+    // The `:subscribers[N]` gate (RFC-0036 §3.4): the owner (an empty `caller`) passes; anyone
+    // else needs READ on `v`, tested first, and must then hold slot `slot`. A slot past the
+    // end, a cleared slot and an edge with an empty stored context have no holder, so each is
+    // the owner's. With a resolver installed, both contexts must resolve, to the same
+    // unreserved token; without one, they must be equal byte for byte. A failed lookup on
+    // either side is "not the holder". `edge` is left holding the edge slot `slot` carried at
+    // the check, for the owner too; the slot verb is handed it and lands only on that edge, so
+    // a slot cleared and reused after the check is not written. Runs on the `:subscribers[N]`
+    // control path only, never on delivery.
+    [[nodiscard]] bool may_write_slot(vertex_t* v, std::size_t slot, std::string_view caller,
+                                      remote_ptr_t& edge) const;
     /** @brief The @ref subject_lookup_fn_t that adapts a resolver installed in the returning
      *         form (@ref graph_hooks_t::subject_resolver): @p ctx is the graph, and the token
      *         the resolver returns is copied into @p out. */
@@ -3440,7 +3436,7 @@ class graph_t {
     // otherwise the direct child vertices registered under v's key are enumerated.
     [[nodiscard]] result_t<view::view_t> read_children(vertex_t* v) const;
     // ":acl" read => the stored ACEs RE-ENCODED (#81-A, ADR-0018/0020, #907) — a projection
-    // of the list acl_allows walks. The READ_ACL gate runs in read(v, field, caller).
+    // of the list acl_allows walks. The READ gate runs in read(v, field, caller).
     [[nodiscard]] result_t<view::view_t> read_acl(vertex_t* v) const;
     // Bare ":settings" read (RFC-0010 §A.4 as amended by RFC-0022 §4) => the settings
     // container: the reserved `app` record iff a descriptor table is installed, and
@@ -4056,53 +4052,49 @@ class graph_t {
     };
 
     /**
-     * @brief One grow-only table-source block a payload-right latch side points at: one
+     * @brief One grow-only table-source block a `:schema` catalog latch side points at: one
      *        declaration encoded as 32-bit words, rewritten in place while it is big enough.
      *
-     * The words: the row count, the catalog length in bytes, two words per row (its type, its
-     * right), then the catalog packed four bytes to a word. Every word is an atomic, written
-     * and read relaxed under the node's latch. A block too small for a new declaration is
-     * SUPERSEDED rather than freed, since a reader may still hold it: it stays on its
-     * successor's chain until the node is destroyed. A successor is at least twice its
-     * predecessor's size, so a side's chain holds fewer words than its live block — bounded by
-     * the largest declaration the address ever made, never by how often it made one.
+     * The words: the catalog length in bytes, then the catalog packed four bytes to a word.
+     * Every word is an atomic, written and read relaxed under the node's latch. A block too
+     * small for a new declaration is SUPERSEDED rather than freed, since a reader may still
+     * hold it: it stays on its successor's chain until the node is destroyed. A successor is at
+     * least twice its predecessor's size, so a side's chain holds fewer words than its live
+     * block — bounded by the largest declaration the address ever made, never by how often it
+     * made one.
      */
-    struct payload_block_t {
+    struct catalog_block_t {
         std::size_t words = 0;                      /**< @brief Its capacity, fixed at birth. */
         std::atomic<std::uint32_t>* word = nullptr; /**< @brief The words, after this header. */
-        payload_block_t* superseded = nullptr;      /**< @brief The block this one replaced. */
+        catalog_block_t* superseded = nullptr;      /**< @brief The block this one replaced. */
     };
 
-    /** @brief One side of a payload-right latch: the block it reads. Stored with release once
-     *         the block is built and loaded with acquire, so a reader that meets a new block
-     *         also meets its construction, whichever side it is reading. */
-    struct payload_side_t {
-        std::atomic<payload_block_t*> block{nullptr}; /**< @brief The side's block, or null. */
+    /** @brief One side of a catalog latch: the block it reads. Stored with release once the
+     *         block is built and loaded with acquire, so a reader that meets a new block also
+     *         meets its construction, whichever side it is reading. */
+    struct catalog_side_t {
+        std::atomic<catalog_block_t*> block{nullptr}; /**< @brief The side's block, or null. */
     };
 
     /**
-     * @brief One vertex address's declared payload-type → required-ACL-right rows (RFC-0014
-     *        Am. 2) and `:schema` catalog (Am. 3), as a node of `%payload_rights_`.
+     * @brief One vertex address's declared `:schema` catalog (RFC-0014 Am. 3), as a node of
+     *        `%schema_catalogs_`.
      *
      * Published through the same two-sided `tr::seq_latch_t` as the admission hooks (#2032):
      * a re-registration rewrites the inactive side's block in place, or grows it, and points
-     * readers at it. A reader scans the rows, or copies the catalog out, inside one latch read,
-     * so it sees one declaration whole and never a mix of two — lock-free under every slot and
-     * guard binding, with no reference count and nothing freed while the graph lives.
+     * readers at it. A reader copies the catalog out inside one latch read, so it sees one
+     * declaration whole and never a mix of two — lock-free under every slot and guard binding,
+     * with no reference count and nothing freed while the graph lives.
      */
-    struct payload_right_node_t {
-        const vertex_t* v = nullptr;          /**< @brief The declaring vertex. */
-        tr::seq_latch_t<payload_side_t> decl; /**< @brief Its current declaration. */
-        payload_right_node_t* next = nullptr; /**< @brief The previously linked node. */
+    struct schema_catalog_node_t {
+        const vertex_t* v = nullptr;           /**< @brief The declaring vertex. */
+        tr::seq_latch_t<catalog_side_t> decl;  /**< @brief Its current declaration. */
+        schema_catalog_node_t* next = nullptr; /**< @brief The previously linked node. */
 
-        /** @brief Publish @p rows and @p catalog, growing the inactive side's block from @p src
-         *         when it is too small. Under the unique map lock.
+        /** @brief Publish @p catalog, growing the inactive side's block from @p src when it is
+         *         too small. Under the unique map lock.
          *         @retval false @p src refused a larger block; the declaration is unchanged. */
-        [[nodiscard]] bool publish(mem::block_source_t& src, std::span<const payload_right_t> rows,
-                                   std::span<const std::byte> catalog);
-        /** @brief The right the current declaration demands for @p type — `WRITE` when it has
-         *         no row for it. Lock-free. */
-        [[nodiscard]] acl_right_t right_for(wire::type_t type) const noexcept;
+        [[nodiscard]] bool publish(mem::block_source_t& src, std::span<const std::byte> catalog);
         /** @brief Copy the current declaration's catalog into @p out, replacing its contents.
          *         Lock-free. @retval false @p out's source refused the bytes. */
         [[nodiscard]] bool copy_catalog(mem::bytes_t& out) const noexcept;
@@ -4112,10 +4104,10 @@ class graph_t {
     };
 
     /**
-     * @brief The payload-right declarations — the RFC-0014 Amendment 2 rows and Amendment 3
-     *        catalog of every vertex address that ever declared any.
+     * @brief The `:schema` catalog declarations (RFC-0014 Amendment 3) of every vertex address
+     *        that ever declared one.
      *
-     * **Why the rows are here and not on the vertex.** The declaration is control-plane data
+     * **Why the catalog is here and not on the vertex.** The declaration is control-plane data
      * on a handful of control vertices, and every candidate per-vertex home charges the
      * vertices that declare nothing: the value-seam block is allocated for any vertex with a
      * seam (a bus link's `on_children` identity vertex, every handler), the app-field group
@@ -4126,16 +4118,15 @@ class graph_t {
      * one level further, so it is made the same way.
      *
      * **What it costs the rest of the graph:** two members here, and one relaxed flag-bit test
-     * on the write path. A node that declares nothing allocates nothing and never walks.
+     * on a `:schema` read. A node that declares nothing allocates nothing and never walks.
      */
-    immortal_list_t<payload_right_node_t> payload_rights_;
+    immortal_list_t<schema_catalog_node_t> schema_catalogs_;
 
-    /** @brief Publish @p rows and @p catalog as @p v's declaration and set its flag. Call with
-     *         `map_mutex_` held UNIQUE (the registration hold). A declaration with neither is
-     *         ignored. @retval false The table source refused a block or the node; the
-     *         previous declaration, if any, still stands. */
-    [[nodiscard]] bool declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
-                                              std::span<const std::byte> catalog);
+    /** @brief Publish @p catalog as @p v's declaration and set its flag. Call with `map_mutex_`
+     *         held UNIQUE (the registration hold). An empty catalog is ignored.
+     *         @retval false The table source refused a block or the node; the previous
+     *         declaration, if any, still stands. */
+    [[nodiscard]] bool declare_schema_catalog(vertex_t* v, std::span<const std::byte> catalog);
 
     /** @brief Copy @p v's declared `:schema` catalog into @p out (empty unless it declared
      *         one). Lock-free, and behind the flag bit: a vertex that declared nothing, or a
@@ -4149,10 +4140,6 @@ class graph_t {
      *         Amendment 3, #2208). Empty for every other vertex.
      *  @retval false The table source refused the staging; @p out is partial. */
     [[nodiscard]] bool schema_protocol_part(const vertex_t* v, mem::bytes_t& out) const noexcept;
-
-    /** @brief The right @p v demands for a written TLV of @p type — `WRITE` unless @p v
-     *         declared a row for it. Lock-free; the caller has already tested the flag. */
-    [[nodiscard]] acl_right_t declared_write_right(const vertex_t* v, wire::type_t type) const;
 
     /**
      * @brief A @ref hook_t held as two atomic words, so a reader can copy it out while the
@@ -4255,7 +4242,7 @@ class graph_t {
      *        ever installed one.
      *
      * **Why the filters are here and not on the vertex**, which is the same question
-     * `%payload_rights_` answers and the same answer, measured the same way. A filter is
+     * `%schema_catalogs_` answers and the same answer, measured the same way. A filter is
      * control-plane data on the few vertices that defend an invariant; every per-vertex home
      * charges the vertices that install none. Two `std::function`s on the value-seam block cost
      * **+64 B on every seam-bearing vertex** (the `reg_escape` memory probe caught exactly

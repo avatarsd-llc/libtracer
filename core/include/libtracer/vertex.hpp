@@ -299,19 +299,6 @@ struct write_ctx_t {
 };
 
 /**
- * @brief One row of a handler vertex's payload-type → required-ACL-right table
- *        (RFC-0014 Amendment 2).
- *
- * The selector is the written TLV's **type only** — never its content. That is what keeps the
- * declaration ahead of the gate: `graph_t::write_impl` reads one byte of the value's leading
- * link to pick the right, and no user code runs before the ACL check.
- */
-struct payload_right_t {
-    wire::type_t type; /**< @brief The written value's LEADING TLV type. */
-    acl_right_t right; /**< @brief The right the write gate demands for that type. */
-};
-
-/**
  * @brief What an ADMISSION filter decided about one write, BEFORE it becomes state.
  *
  * Three outcomes in one value, and no fourth:
@@ -360,8 +347,8 @@ using app_field_read_hook_t = hook_t<std::optional<value_ref_t>(std::string_view
  * vertex is registered (see `libtracer/hook.hpp` for the two idiomatic spellings and
  * @ref tr::graph::thunk). An empty hook is an uninstalled seam.
  *
- * The RFC-0014 Amendment 2 payload-right rows are not a seam and are not carried here: they
- * are the trailing `rights` argument of `graph_t::register_vertex` and its siblings.
+ * The RFC-0014 Amendment 3 `:schema` catalog is not a seam and is not carried here: it is the
+ * trailing `schema_catalog` argument of `graph_t::register_vertex_key`.
  */
 struct handlers_t {
     /**
@@ -522,7 +509,7 @@ struct handlers_t {
  * synthesized listing whatever the role. `on_app_field_write`
  * co-occurs with app fields, not the value seam, so it moved to @ref app_field_group_t.
  * The two ADMISSION filters live on the GRAPH, not here, for the reason
- * `graph_t::admissions_` states — the same reason the payload-right rows do.
+ * `graph_t::admissions_` states — the same reason the `:schema` catalog does.
  * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
  */
 struct value_handlers_t {
@@ -1207,21 +1194,22 @@ class vertex_t {
     void mark_enumeration_hidden() noexcept { set_flag(flag_t::ENUM_HIDDEN, true); }
 
     /**
-     * @brief Record that this vertex DECLARED a payload-right table (RFC-0014 Amendment 2).
+     * @brief Record that this vertex DECLARED a `:schema` catalog (RFC-0014 Amendment 3).
      *
-     * The rows themselves are the graph's — see `graph_t::declare_payload_rights` for why
-     * they are not here. This bit is the whole of the per-vertex cost, and it is why a vertex
-     * that declares nothing pays not one byte and not one dereference for the feature: the
-     * write gate reads this already-hot flags word and stops.
+     * The catalog itself is the graph's — see `graph_t::declare_schema_catalog` for why it is
+     * not here. This bit is the whole of the per-vertex cost, and it is why a vertex that
+     * declares nothing pays not one byte and not one dereference for the feature: a `:schema`
+     * read tests this already-hot flags word and stops.
      * Set by the graph under the map lock at registration; cleared by
-     * @ref revert_to_placeholder, so a retired vertex's rows can never gate its successor.
+     * @ref revert_to_placeholder, so a retired vertex's catalog is never served for its
+     * successor.
      */
-    void mark_payload_rights() noexcept { set_flag(flag_t::PAYLOAD_RIGHTS, true); }
+    void mark_schema_catalog() noexcept { set_flag(flag_t::SCHEMA_CATALOG, true); }
 
-    /** @brief True iff this vertex declared a payload-right table (RFC-0014 Amendment 2) —
-     *         the write gate's one-load precondition for consulting the graph's rows. */
-    [[nodiscard]] bool has_payload_rights() const noexcept {
-        return test_flag(flag_t::PAYLOAD_RIGHTS, std::memory_order_relaxed);
+    /** @brief True iff this vertex declared a `:schema` catalog (RFC-0014 Amendment 3) — the
+     *         one-load precondition for consulting the graph's catalog nodes. */
+    [[nodiscard]] bool has_schema_catalog() const noexcept {
+        return test_flag(flag_t::SCHEMA_CATALOG, std::memory_order_relaxed);
     }
 
     /**
@@ -1240,7 +1228,7 @@ class vertex_t {
      * @brief True iff this vertex installed an admission filter (@ref handlers_t::on_admit) —
      *        the store path's one-load precondition for consulting the graph's filter list.
      *
-     * The same shape, and the same argument, as `has_payload_rights`: a vertex that installed
+     * The same shape, and the same argument, as `has_schema_catalog`: a vertex that installed
      * no filter pays one relaxed test of an already-hot word and no dereference, so the seam
      * costs the plain leaf write nothing — and, the point of the placement, it costs the
      * SEAM-BEARING vertices nothing either.
@@ -2129,11 +2117,18 @@ class vertex_t {
      * @param was_suspended Optional out-parameter: whether the cleared edge was suspended
      *        (#1533), in which case it was not counted and the caller owes the RFC-0005
      *        bookkeeping nothing. Same write rule as @p retired_ctx.
-     * @return true iff the slot existed and was active (the caller then adjusts the
-     *         RFC-0005 listener bookkeeping, unless @p was_suspended).
+     * @param expect Optional: the cold half of the edge a check saw in slot @p idx (from
+     *        @ref edge_holder). When given, the clear lands only on that edge, compared under
+     *        this lock, so a slot cleared and reused after the check is left alone. Null leaves
+     *        the clear unchecked: an `unsubscribe`, or a check that saw no remote edge. The
+     *        caller keeps its share alive across the call, so the address cannot be reused.
+     * @return true iff the slot existed, was active and (with @p expect) still carried that
+     *         edge (the caller then adjusts the RFC-0005 listener bookkeeping, unless
+     *         @p was_suspended).
      */
     bool clear_edge(std::size_t idx, void** retired_ctx = nullptr,
-                    remote_ptr_t* retired_remote = nullptr, bool* was_suspended = nullptr) {
+                    remote_ptr_t* retired_remote = nullptr, bool* was_suspended = nullptr,
+                    const subscriber_remote_t* expect = nullptr) {
         edge_block_t* b = nullptr;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
@@ -2141,6 +2136,7 @@ class vertex_t {
             if (b == nullptr) return false;
             if (idx >= b->slots.size() || !b->slots[idx].active) return false;
             pub_edge_t& e = entry_of(*b, idx);
+            if (expect != nullptr && e.remote.get() != expect) return false;
             if (retired_ctx != nullptr) *retired_ctx = e.callback_ctx;
             if (retired_remote != nullptr) *retired_remote = e.remote;  // a share of the record
             if (was_suspended != nullptr)
@@ -2162,13 +2158,15 @@ class vertex_t {
         return true;
     }
 
-    /** @brief Outcome of @ref replace_edge — tells the caller which bookkeeping it owes. The two
+    /** @brief Outcome of @ref replace_edge — tells the caller which bookkeeping it owes. The three
      *         refusals come first, in this order: `graph_t::admit_subscriber` tests them with
      *         one comparison and indexes its status table by them. */
     enum class edge_replace_t {
         OUT_OF_RANGE,    /**< @brief No slot @p idx exists; nothing was written. */
         REFUSED,         /**< @brief The array carrying the replacement could not be published; the
                           *   slot and its edge are exactly as they were (#1622). */
+        EDGE_CHANGED,    /**< @brief The slot no longer carries the edge the write was checked
+                          *   against (RFC-0036 §3.4); nothing was written. */
         FILLED_EMPTY,    /**< @brief The slot existed but was cleared — this is an ADD. */
         REPLACED_ACTIVE, /**< @brief A live edge was swapped out; the listener count is unchanged.
                           */
@@ -2201,17 +2199,24 @@ class vertex_t {
      *
      * @param idx   The `:subscribers[N]` slot number.
      * @param s     The replacing edge.
+     * @param expect The cold half of the edge the `[N]` check saw in slot @p idx (from
+     *              @ref edge_holder; null for a slot it saw empty or holding an in-process
+     *              edge). The replace lands only while the slot still carries it, compared
+     *              under this lock; otherwise it answers @ref edge_replace_t::EDGE_CHANGED. The
+     *              caller keeps its share alive across the call, so the address cannot be reused.
      * @param latch Optional durability latch; snapshotted iff the REPLACING subscriber
      *              requested durability (RFC-0022 §3.A) and the vertex holds an LKV.
      * @param displaced_remote Optional out-parameter receiving the displaced edge's cold
      *              `remote` half (#1816), moved out under the lock. A cleared slot holds none,
      *              so it stays empty unless a live remote edge was displaced.
+
      * @return Which case applied — see @ref edge_replace_t.
      */
     // Inlined into its one caller (`graph_t::admit_subscriber`) on every build: GCC 15 outlined
     // it once the #1533 suspended case grew its result, which makes the slot reclaim's heap
     // reach a NEW function to the MCU link check rather than the pinned caller it was (#1783).
     [[gnu::always_inline]] edge_replace_t replace_edge(std::size_t idx, subscriber_t s,
+                                                       const subscriber_remote_t* expect,
                                                        edge_latch_t* latch = nullptr,
                                                        remote_ptr_t* displaced_remote = nullptr) {
         edge_block_t* b = nullptr;
@@ -2231,6 +2236,7 @@ class vertex_t {
                 was_suspended = !old.active.load(std::memory_order_relaxed);
                 displaced = old.remote;
             }
+            if (displaced.get() != expect) return edge_replace_t::EDGE_CHANGED;
             if (!try_publish_edges(*b, &s, idx)) return edge_replace_t::REFUSED;
             if (displaced_remote != nullptr) *displaced_remote = std::move(displaced);
             b->slots[idx] = {
@@ -2260,7 +2266,7 @@ class vertex_t {
      * @brief Suspend or resume the edge in slot @p idx IN PLACE (#1533).
      *
      * The slot keeps everything its admission decided — index, target, minted binding, cold
-     * half, the SUBSCRIBE gate's verdict — and only its `suspended` flag and its published
+     * half, the subscribe (READ) gate's verdict — and only its `suspended` flag and its published
      * entry's liveness bit move. Nothing is republished and nothing is allocated, either way:
      * the suspended slot keeps its entry, clear, and the copy loop skips it. Every snapshot
      * taken after this returns sees the new state; a snapshot already taken still delivers
@@ -2563,6 +2569,21 @@ class vertex_t {
         return std::nullopt;
     }
 
+    /**
+     * @brief A share of the cold half of the edge in active slot @p idx: its `caller` is the
+     *        context the slot's HOLDER is judged by (RFC-0036 §3.4), and the record itself is
+     *        the edge's identity, which @ref replace_edge and @ref clear_edge compare against.
+     *        The record is immutable once published, so it is read after the lock is released.
+     * @return Empty for a slot past the end, a cleared slot and an edge the owner made in
+     *         process: none has a holder, so each is the owner's.
+     */
+    [[nodiscard]] remote_ptr_t edge_holder(std::size_t idx) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const edge_block_t* b = edges_locked();
+        if (b == nullptr || idx >= b->slots.size() || !b->slots[idx].active) return {};
+        return entry_of(*b, idx).remote;
+    }
+
     /** @brief Every active slot's stored SUBSCRIBER view, in slot order (the
      *         `:subscribers[]` array read) — each a refcount clone. */
     [[nodiscard]] std::vector<view::view_t> edge_sources() {
@@ -2596,10 +2617,10 @@ class vertex_t {
      * @brief Take back everything a registration DECLARES, to an unregistered placeholder's
      *        default: the policy members (retention by role with no `RETAIN_NONE`, depth 1, no
      *        ring so no ring source and best-effort, the default share threshold, no
-     *        app-field group) and the payload-right and admission flags.
+     *        app-field group) and the schema-catalog and admission flags.
      *
-     * The flags belong to the occupant, not to the address (RFC-0014 Amendment 2): the
-     * graph's rows and filter nodes for this vertex stay parked and unreachable while the bits
+     * The flags belong to the occupant, not to the address (RFC-0014 Amendment 3): the
+     * graph's catalog and filter nodes for this vertex stay parked and unreachable while the bits
      * are clear, and a re-registration that declares again prepends its own, newer node.
      *
      * Retirement calls it, and so does a registration refused after its declarations landed on
@@ -2609,7 +2630,7 @@ class vertex_t {
      */
     void clear_declarations() noexcept {
         set_flag(flag_t::RETAIN_NONE, false);
-        set_flag(flag_t::PAYLOAD_RIGHTS, false);
+        set_flag(flag_t::SCHEMA_CATALOG, false);
         set_flag(flag_t::ADMISSION, false);
         set_flag(flag_t::CREATION_HOOK, false);
         vertex_ext_t* const e = ext_.load(std::memory_order_acquire);
@@ -2684,7 +2705,7 @@ class vertex_t {
         // next registration at this key is a different vertex kind and must be listed unless
         // it asks not to be (RFC-0014 §3 / S4).
         set_flag(flag_t::ENUM_HIDDEN, false);
-        // The same argument for everything the occupant declared: its payload rights, its
+        // The same argument for everything the occupant declared: its `:schema` catalog, its
         // admission filters and its policy (RFC-0028 §5.4 retention, the ring, the threshold,
         // the app fields). The next occupant starts from its own role's defaults.
         clear_declarations();
@@ -3321,11 +3342,11 @@ class vertex_t {
         REGISTERED_CHILD = 1U << 1, /**< @brief At least one DIRECT child is registered (#652). */
         ENUM_HIDDEN = 1U << 2,      /**< @brief Registered, addressable, but NOT a `:children[]`
                                      *          member (RFC-0014 §3, S4). */
-        PAYLOAD_RIGHTS = 1U << 3,   /**< @brief This vertex DECLARED a payload-type →
-                                     *          required-ACL-right table (RFC-0014 Am. 2). The
-                                     *          rows live on the graph, not here; this bit is
-                                     *          what keeps the write gate from looking for them
-                                     *          on the vertices that declared none. */
+        SCHEMA_CATALOG = 1U << 3,   /**< @brief This vertex DECLARED a `:schema` catalog
+                                     *          (RFC-0014 Am. 3). The catalog lives on the
+                                     *          graph, not here; this bit is what keeps a
+                                     *          `:schema` read from looking for it on the
+                                     *          vertices that declared none. */
         ADMISSION = 1U << 4,        /**< @brief This vertex installed an `on_admit` filter. The
                                      *          seam lives in the value-seam block; this bit is
                                      *          what keeps the store path from loading that
