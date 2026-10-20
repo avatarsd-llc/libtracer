@@ -683,6 +683,33 @@ jobs:
             bench/conditions.jsonl
           retention-days: 90
 
+      # STORE SIZE (#2229). GitHub rejects a file over 100 MB, and `data.js` grows by
+      # ~0.9 MB per banked point, so an unbounded store stops accepting pushes (it did, at
+      # 102.7 MB). Before the two history steps below push, bound the live store to the
+      # newest 40 points per series (the rolling baseline reads 21, step detection 5) and
+      # move the older entries into immutable `data-archive-NNN.js` files beside it,
+      # nothing deleted. Pruning waits for 50 points (hysteresis: one gh-pages commit per
+      # ~10 points). The guard then fails here, with a named message, if the store nears
+      # the limit anyway, instead of a GH001 rejection from the push after the bench.
+      - name: Bound the history store (prune to an archive) + size guard
+        run: |
+          git fetch --no-tags --depth=1 origin gh-pages
+          git worktree add ../ghp-prune FETCH_HEAD
+          cd ../ghp-prune
+          if [ -f dev/bench-local/data.js ]; then
+            python3 "$GITHUB_WORKSPACE/bench/store_prune.py" prune --dir dev/bench-local --keep 40 --trigger 50
+            if [ -n "$(git status --porcelain dev/bench-local)" ]; then
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add dev/bench-local
+              git commit -m "bench-local: archive older points, keep the live store small (#2229)"
+              git push origin HEAD:gh-pages
+            fi
+            python3 "$GITHUB_WORKSPACE/bench/store_prune.py" guard --data dev/bench-local/data.js
+          fi
+          cd "$GITHUB_WORKSPACE"
+          git worktree remove --force ../ghp-prune
+
       # BANKING is unconditional (2026-10-07). A sample a guard distrusts is banked
       # FLAGGED (`CONTAMINATED` in `extra`): the page draws it marked, and no gating
       # consumer, density count or rolling baseline trusts it (#1236). `ref` names the

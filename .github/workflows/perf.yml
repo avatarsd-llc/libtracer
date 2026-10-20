@@ -228,7 +228,9 @@ jobs:
       # invisible as the RAM ratchet's. They read a fixture store and measure nothing,
       # so they belong before anything is timed.
       - name: Banked-series validity tests (density, rolling drift, toolchain)
-        run: python3 bench/test_store_guard.py
+        run: |
+          python3 bench/test_store_guard.py
+          python3 bench/test_store_prune.py
       # The RAM-census series + warn ratchet (#1228), tested here for the same reason:
       # it runs on the pinned host, and for its whole warn-first life a wrong verdict is
       # INVISIBLE — nothing turns red to report it. These are the only check that the
