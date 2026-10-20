@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0033 |
 | **Title** | A minimal Noise link binding: NNpsk0 over a datagram carrier |
-| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. **The binding's normative text lives in [reference/23](../../reference/23-noise-link-binding.md)** (slice S1, [#2071](https://github.com/avatarsd-llc/libtracer/issues/2071)), which `docs/spec/v1.md` §3 incorporates as an annex for a link that uses the binding (§10.1). Where that page and this record disagree, the page wins. **Amendment 1 (2026-10-10, ruled)** moves §6.8's two MUST clauses (constant-time primitives; no ephemeral key reuse, in either role) into §5.2, so that they bind an implementation ([#2084](https://github.com/avatarsd-llc/libtracer/issues/2084)). **Erratum (2026-10-10)**: Appendix A.4 no longer says the generator prints all of A.3. |
+| **Status** | **accepted** (2026-10-10; proposed 2026-10-09). The maintainer approved the direction on 2026-10-09 (issue [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063)) and ruled **"all rec"** on every §15 question on 2026-10-10. Q7 was ruled as (a) together with (b), with three refinements, which §5.4 carries. The comment window was waived by default and not invoked. **The binding's normative text lives in [reference/23](../../reference/23-noise-link-binding.md)** (slice S1, [#2071](https://github.com/avatarsd-llc/libtracer/issues/2071)), which `docs/spec/v1.md` §3 incorporates as an annex for a link that uses the binding (§10.1). Where that page and this record disagree, the page wins. **Amendment 1 (2026-10-10, ruled)** moves §6.8's two MUST clauses (constant-time primitives; no ephemeral key reuse, in either role) into §5.2, so that they bind an implementation ([#2084](https://github.com/avatarsd-llc/libtracer/issues/2084)). **Erratum (2026-10-10)**: Appendix A.4 no longer says the generator prints all of A.3. **Erratum (2026-10-11)**: Appendix A.3 now shows the responder's empty acknowledgement at n = 0 and `pang` at n = 1, as §5.4 step 7 requires. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-10-09 |
 | **Comment window** | Waived by default while the project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"). Invoke it explicitly if outside input is wanted. At drafting, `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -1108,6 +1108,28 @@ and `k` values. A.4 now says so. The script, the vectors and every clause are un
 is an erratum. The text has been wrong since the RFC's first draft, 565f790a: the script never
 printed the step-by-step states, so no later change made the two diverge.
 
+## Erratum (2026-10-11) — Appendix A.3's responder messages contradicted §5.4 step 7
+
+**What the text said.** A.3 listed three transport messages: the initiator's empty confirmation
+(n = 0), its `ping` (n = 1), and the responder's `pang` at n = 0, which it called *"its first
+message on the session, so the reply is also the acknowledgement"*. A.4's generator sealed `pang`
+at n = 0.
+
+**What the behaviour is.** §5.4 responder step 7 makes the responder answer every empty transport
+message from the initiator with one empty transport message. The empty confirmation is therefore
+answered first, at n = 0, and that answer is the acknowledgement. `pang` follows at n = 1. The
+host link of [#2073](https://github.com/avatarsd-llc/libtracer/issues/2073) follows step 7 and
+sends exactly those two datagrams. A.3 now lists four transport messages, with the acknowledgement
+`04 0000000000000000 4a986111144b7702d0a867a37da80f23` and `pang` at n = 1
+`04 0100000000000000 d4df8a687acd1ca414ed6223ec12519b15a8e6edc0328c18`. A.4's generator seals
+and prints both. The handshake, the keys, the first two transport messages and every clause are
+unchanged. No wire byte a conforming implementation sends changes, so this is an erratum.
+
+**Which change made them diverge.** The empty-answer rule entered §5.4 step 7 with the
+2026-10-10 rulings (b591ae62). Appendix A's transport messages predate it and were not
+regenerated. [reference/23](../../reference/23-noise-link-binding.md) Appendix A and the
+conformance case `tests/conformance/vectors/v1/noise/nnpsk0-appendix-a` carry the same fix.
+
 ---
 
 ## Appendix A — Test vectors
@@ -1214,8 +1236,10 @@ k_r2i           f8ca9cf382ec15ac3609fa976595baafec96af6729b05edab8e41839ed09f6cd
 ```
 
 Transport messages (type `04` = key phase 0, then the nonce, the ciphertext and the tag). In this
-transcript the initiator confirms with an empty message and then sends its request. The responder's
-reply is its first message on the session, so the reply is also the acknowledgement:
+transcript the initiator confirms with an empty message and then sends its request. The responder
+answers the empty confirmation with an empty message (§5.4 responder step 7; erratum
+2026-10-11), which is its first message on the session and so the acknowledgement. Its reply to
+the request follows at the next nonce:
 
 ```
 confirmation, initiator -> responder, n = 0, empty plaintext (25 B)
@@ -1224,16 +1248,19 @@ confirmation, initiator -> responder, n = 0, empty plaintext (25 B)
 frame "ping", initiator -> responder, n = 1 (33 B)
   04 0100000000000000 843c7ef02f4b3184 8add30c2b08aa1eef0985b2201f08621
 
-frame "pang", responder -> initiator, n = 0 (33 B)
-  04 0000000000000000 8402810c9207079d 65de2bc6ba0de7827759a468234362ac
+acknowledgement, responder -> initiator, n = 0, empty plaintext (25 B)
+  04 0000000000000000 4a986111144b7702d0a867a37da80f23
+
+frame "pang", responder -> initiator, n = 1 (33 B)
+  04 0100000000000000 d4df8a687acd1ca4 14ed6223ec12519b15a8e6edc0328c18
 ```
 
 ### A.4 The generator
 
 Run with Python 3 and the `cryptography` package. It prints the two handshake datagrams, the
-handshake hash, the two transport keys and the three transport messages of A.3, each as one hex
+handshake hash, the two transport keys and the four transport messages of A.3, each as one hex
 line. It does not print the step-by-step symmetric states. It fails if the two sides disagree
-(erratum 2026-10-10).
+(errata 2026-10-10 and 2026-10-11).
 
 ```python
 import hashlib, hmac, struct
@@ -1290,9 +1317,11 @@ r.e(pub(E_R)); r.mix_key(dh(E_R, m1[1:33])); m2 = b"\x02" + pub(E_R) + r.enc(b"\
 i.e(m2[1:33]); i.mix_key(dh(E_I, m2[1:33])); assert i.dec(m2[33:]) == b"\x02"
 (k1, k2), (r1, r2) = hkdf(i.ck, b"", 2), hkdf(r.ck, b"", 2)
 assert (k1, k2, i.h) == (r1, r2, r.h) and (len(m1), len(m2)) == (58, 50)
-c, f, g = seal(k1, 0, b""), seal(k1, 1, PING), seal(k2, 0, PANG)
-assert unseal(r1, c) == (0, b"") and unseal(r1, f) == (1, PING) and unseal(r2, g) == (0, PANG)
+c, f = seal(k1, 0, b""), seal(k1, 1, PING)
+a, g = seal(k2, 0, b""), seal(k2, 1, PANG)  # the empty confirmation is answered first (§5.4 step 7)
+assert unseal(r1, c) == (0, b"") and unseal(r1, f) == (1, PING)
+assert unseal(r2, a) == (0, b"") and unseal(r2, g) == (1, PANG)
 for name, v in (("msg1", m1), ("msg2", m2), ("hash", i.h), ("k_i2r", k1), ("k_r2i", k2),
-                ("confirm", c), ("ping", f), ("pang", g)):
+                ("confirm", c), ("ping", f), ("ack", a), ("pang", g)):
     print(name, v.hex())
 ```
