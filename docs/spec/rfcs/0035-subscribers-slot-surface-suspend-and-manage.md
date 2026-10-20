@@ -19,12 +19,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#2019](https://github.com/avatarsd-llc/libtracer/issues/2019) (wire spelling for a suspended subscriber slot). The core half is [#1533](https://github.com/avatarsd-llc/libtracer/issues/1533) (suspend a subscription in place), landed in [#2045](https://github.com/avatarsd-llc/libtracer/pull/2045). |
 | **Target spec version** | v1 itself. `docs/spec/v1.md` still reads "(DRAFT)". |
 | **Amends** | [RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A (one reserved bit); [RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md) §10.4 ("bits 9–15 stay reserved") and §9.7 items 2 and 3; [RFC-0009](0009-vertex-removal-and-subscriber-eviction.md) §D.1 (the `[N]` arms and their gate) and §D.2 (what a read shows for a cleared slot); [RFC-0005](0005-subtree-subscriptions.md) §A (a suspended edge is not delivered to). |
-| **Relies on, unchanged** | [RFC-0036](0036-two-rights-fields-are-paths-under-their-vertex.md) §3.3–§3.4 (the owner, the holder and the `:subscribers` gate), [RFC-0034](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0034-subscription-selector-fields.md) §2.3 (who owns a selector ref's suspend bit), [RFC-0021](0021-wire-subscriber-target-frame-of-reference.md) §E (the gate is the writer's), [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §4 (the standing-binding hold), [RFC-0017](0017-element-addressing-value-plane-index.md) §B (`[n]` is structural). |
+| **Relies on, unchanged** | [RFC-0036](0036-two-rights-fields-are-paths-under-their-vertex.md) §3.3–§3.4 (the owner, the holder and the `:subscribers` gate), [RFC-0034](0034-subscription-selector-fields.md) §2.3 (who owns a selector ref's suspend bit), [RFC-0021](0021-wire-subscriber-target-frame-of-reference.md) §E (the gate is the writer's), [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §4 (the standing-binding hold), [RFC-0017](0017-element-addressing-value-plane-index.md) §B (`[n]` is structural). |
 
-> **Numbering note.** RFC-0034 is the subscription selector, open in
-> [#2068](https://github.com/avatarsd-llc/libtracer/pull/2068), and RFC-0036 (two ACL rights,
-> [#2089](https://github.com/avatarsd-llc/libtracer/pull/2089)) lands before this document. Numbering gaps and why they are not reused are recorded in the
-> [ADR and RFC index](../../adr-rfc-index.md).
+> **Numbering note.** RFC-0034 is the subscription selector, merged in
+> [#2068](https://github.com/avatarsd-llc/libtracer/pull/2068). RFC-0036 (two ACL rights,
+> [#2089](https://github.com/avatarsd-llc/libtracer/pull/2089)) lands before this document, and
+> until this one merges the index lists RFC-0035 as a held gap. Numbering gaps and why they are not reused are
+> recorded in the [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 ---
 
