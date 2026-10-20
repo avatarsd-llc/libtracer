@@ -1319,11 +1319,15 @@ void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle,
     // transport that advances the generation by one per claim; the bus spells it, and a name
     // it cannot spell (a first tenancy, a transport that does not reuse slots) has none. In
     // the ordinary case the departure already ran and every step finds nothing.
-    bus_peer_down(ctx, handle, peer);
+    // One departure per name, the arriving one first: it holds the slot, so it retires the
+    // anchor and drops the token. The predecessor's does not hold it (the bus resolves the
+    // slot to the arriving endpoint), so its departure evicts that name's state and nothing
+    // slot-keyed. A name the bus cannot spell is skipped.
     std::array<char, kPeerNameChars> scratch{};
-    const std::string_view prior =
-        resolve_peer_name(ctx, peer_handle_t{handle.index, handle.generation - 1}, scratch);
-    if (!prior.empty() && prior != peer) link_down(prior);
+    const std::array<std::string_view, 2> names{
+        peer, resolve_peer_name(ctx, peer_handle_t{handle.index, handle.generation - 1}, scratch)};
+    for (const std::string_view name : names)
+        if (!name.empty()) bus_peer_down(ctx, handle, name);
     // The anchor is therefore never live here, so PATH_IN_USE cannot answer; discarded by
     // value. An id too long for one key record anchors nothing, as the departure finds nothing.
     const session_anchor_id_t id = session_anchor_id(ctx.name, peer);
