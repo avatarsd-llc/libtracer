@@ -395,8 +395,8 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
  * max_peers, the RFC-0006 injected bound).  What this class adds to that base
  * is its FRAMING: the shared u32-LE length prefix, read by frame ingress
  * (`%frame_ingress.hpp`, #2141) with no stream buffer, where WS has RFC 6455 packaging.  There is
- * NO handshake phase: a peer is open (named `p<slot>`, ADR-0073 §2 / #426) from the moment its
- * connection is accepted.  The board↔board listener shape: leaner than WS packaging (no HTTP
+ * NO handshake phase: a peer is open (named `p<slot>~<gen>`, ADR-0073 §2 / #426) from the moment
+ * its connection is accepted.  The board↔board listener shape: leaner than WS packaging (no HTTP
  * upgrade, no frame masking) with the same per-peer return-route identity when @p peer_named.
  */
 class tcp_server_transport_t final : public stream_server_base_t {

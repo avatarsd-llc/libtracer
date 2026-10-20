@@ -719,7 +719,7 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
  *
  * This string is NOT the peer's graph name and has not been since #994: it carries `.` and
  * `:`, both rejected by `graph::valid_segment`, so a session named with it could be listed
- * and never addressed. @ref httpd_ws_link_t::session_t::name holds the routable `p<slot>`;
+ * and never addressed. @ref httpd_ws_link_t::session_t::name holds the routable `p<slot>~<gen>`;
  * this is what an operator needs to tell which physical client that slot is.
  *
  * Writes into the caller's buffer rather than returning a `std::string`, which is what made
@@ -1072,7 +1072,7 @@ struct httpd_ws_link_t::session_t {
     peer_handle_t handle;
     bool open = false; /**< @brief True between handshake and close. */
     /**
-     * @brief The peer's ROUTABLE name — `p<slot>` (ADR-0073 §2, #426, #994).
+     * @brief The peer's ROUTABLE name — `p<slot>~<gen>` (ADR-0073 §2, #426, #994).
      *
      * The slot index, and nothing else, because this string is what the graph spells: a
      * peer-named link's synthesized `:children[]` lists it and a `dst` path addresses the
@@ -3982,7 +3982,7 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
         if (close_now) slot->dead = true;
     }
     if (!close_now) return;  // the drop itself is already logged by tx_work
-    // BOTH names, because after #994 neither one alone identifies the peer: `p<slot>` is
+    // BOTH names, because after #994 neither one alone identifies the peer: `p<slot>~<gen>` is
     // what an operator can address the session by, and `<ip>:<port>` is what tells them
     // which physical client that slot is. Both come from the slot, filled at admission.
     // Never `getpeername` here: the socket is by definition the one that is not working,

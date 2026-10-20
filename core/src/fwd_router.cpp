@@ -1310,13 +1310,20 @@ void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle,
     // mount was already removed anchors nothing — the same skip every name-keyed consumer
     // makes. Read `retired` the way the frame paths do.
     if (ctx.retired.load(std::memory_order_acquire)) return;
-    // An arrival is the moment the NAME changes hands (#1609), and the new session has sent
-    // nothing yet — so whatever is still filed under the name is a predecessor's whose
-    // departure never reached this router. Run that departure now: it retires a still-live
-    // anchor (the generation bump), evicts the name's edges and label state, and drops the
-    // slot's cached token (the cache is keyed by slot index, which the successor shares). In
+    // An arrival is the moment the SLOT changes hands (#1609), and the new session has sent
+    // nothing yet — so whatever the slot still holds is a predecessor's whose departure never
+    // reached this router. Run that departure now. Under the arriving name it retires a
+    // still-live anchor (the generation bump; the anchor is keyed by slot) and drops the
+    // slot's cached token (keyed by slot index, which the successor shares). The edges, label
+    // state and pending awaits sit under the PREDECESSOR's name, `p<slot>~<gen-1>` for a
+    // transport that advances the generation by one per claim; the bus spells it, and a name
+    // it cannot spell (a first tenancy, a transport that does not reuse slots) has none. In
     // the ordinary case the departure already ran and every step finds nothing.
     bus_peer_down(ctx, handle, peer);
+    std::array<char, kPeerNameChars> scratch{};
+    const std::string_view prior =
+        resolve_peer_name(ctx, peer_handle_t{handle.index, handle.generation - 1}, scratch);
+    if (!prior.empty() && prior != peer) link_down(prior);
     // The anchor is therefore never live here, so PATH_IN_USE cannot answer; discarded by
     // value. An id too long for one key record anchors nothing, as the departure finds nothing.
     const session_anchor_id_t id = session_anchor_id(ctx.name, peer);
@@ -1325,6 +1332,13 @@ void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle,
 
 void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle,
                                  std::string_view peer) {
+    // A departure that lands after the slot's SUCCESSOR has claimed it must leave the
+    // successor's anchor and cached token alone: both are keyed by slot. The slot still
+    // belongs to this tenancy when the bus resolves it to this name's endpoint (both null
+    // once torn down); a transport that does not reuse slots resolves the two alike.
+    bus_link_t* const bus = ctx.bus.load(std::memory_order_acquire);
+    const bool holds_slot =
+        bus == nullptr || bus->slot_link(session_slot_of(peer)) == bus->peer_link(peer);
     // Retire BEFORE the eviction. Retirement is what bumps the saturating generation
     // (RFC-0024 §4.4 rule 3), and the slot this session sat in can be handed to the next
     // dialer the moment the poll thread returns from here — so the stamp has to have moved
@@ -1332,17 +1346,18 @@ void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle
     // session still matches. `find_session_anchor` answers nullopt for an announce-census
     // peer (which was never anchored) and for a double departure, both of which then take
     // the unchanged eviction-only path.
-    if (const std::optional<graph::vertex_handle_t> anchor =
-            graph_.find_session_anchor(session_anchor_id(ctx.name, peer)))
-        (void)graph_.retire(*anchor);
+    const std::optional<graph::vertex_handle_t> anchor =
+        holds_slot ? graph_.find_session_anchor(session_anchor_id(ctx.name, peer)) : std::nullopt;
+    if (anchor) (void)graph_.retire(*anchor);
     link_down(peer);
     // The eviction inside `link_down` RELEASED this peer's index slot, so the token cached
     // for it names a stamp that can never validate again (#1417). Dropping it is what lets
     // the next session in this slot mint a fresh one on its first subscribe instead of
     // asking with a dead stamp for the rest of its life. Ordered AFTER the eviction so no
     // window can refill the entry from a frame still in flight for the departing session.
-    if (bus_token_cache_t* const cache = ctx.peer_tokens.load(std::memory_order_acquire))
-        cache->drop(handle);
+    bus_token_cache_t* const cache =
+        holds_slot ? ctx.peer_tokens.load(std::memory_order_acquire) : nullptr;
+    if (cache != nullptr) cache->drop(handle);
 }
 
 // --- bound paths (RFC-0024) and path labels (RFC-0027) -----------------------

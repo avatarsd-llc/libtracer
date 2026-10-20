@@ -2049,16 +2049,18 @@ class fwd_router_t {
      */
     child_rx_ctx_t* ctl_ctx_by_name(std::string_view name);
     /**
-     * @brief A bus mount admitted a session named @p peer — reclaim what the name's previous
-     *        holder left, then give the session an identity anchor (#1223 step 2, #1609).
+     * @brief A bus mount admitted a session named @p peer — reclaim what the slot's previous
+     *        tenancy left, then give the session an identity anchor (#1223 step 2, #1609).
      *
-     * An arrival is the RE-TENANT edge: the name has just changed hands and the new session
-     * has sent nothing, so every edge and await still filed under @p peer is a
-     * predecessor's whose departure never reached this router. The arrival runs that
-     * departure (`bus_peer_down`) first, which makes "edges under a peer name belong to
-     * its current holder" true by construction rather than by a sweeper's care; when the
-     * departure already ran, it finds nothing. Then it registers (or REVIVES, at the same
-     * slot, one generation up) the anchor vertex for `:<mount>/<peer>`.
+     * An arrival is the RE-TENANT edge: the slot has just changed hands and the new session
+     * has sent nothing, so whatever the slot still holds is a predecessor's whose departure
+     * never reached this router. The arrival runs that departure (`bus_peer_down`) for the
+     * slot-keyed state (the anchor and the cached token), then evicts the edges, label state
+     * and pending awaits filed under the PREDECESSOR's name, which the bus spells from
+     * @p handle one generation down. That makes "edges under a session name belong to that
+     * session" true by construction rather than by a sweeper's care; when the departure
+     * already ran, it finds nothing. Then it registers (or REVIVES, at the same slot, one
+     * generation up) the anchor vertex for `:<mount>/<slot>`.
      *
      * Fired ONLY by an accepting listener (`slot_server_t` and the ESP httpd link), never by
      * an announce-census bus, so CAN peers keep ADR-0044 §Decision 1 in full force and grow
@@ -2073,6 +2075,9 @@ class fwd_router_t {
      * successor. Eviction (@ref link_down) is unchanged and still keyed by the peer NAME.
      * An anchor that was never created (an announce-census peer, or a session that departed
      * before its arrival was wired) simply resolves to nothing and the eviction runs alone.
+     * A departure that lands after a successor already claimed the slot (the bus resolves
+     * the slot to an endpoint that is not @p peer's) evicts @p peer's name only: the anchor
+     * and the cached token are keyed by slot and belong to the successor by then.
      *
      * @p handle is the departing peer's, and it is what the per-peer LINK-TOKEN cache is
      * keyed by (#1417): the eviction below releases the graph's index slot, so the cached

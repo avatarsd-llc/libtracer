@@ -272,13 +272,15 @@ class bus_link_t {
      * session's identity anchor in the graph's vertex map, so the session gains an index and
      * a saturating generation. Must be set before frames flow, like the receivers.
      *
-     * **An arrival is also the RE-TENANT edge for the peer's NAME (#1609).** A transport that
+     * **An arrival is also the RE-TENANT edge for the peer's SLOT (#1609).** A transport that
      * reuses slots (a slot-positional `p<slot>~<gen>`) fires it once per new session, at the
-     * claim, and BEFORE delivering any frame of that session. The router's notifier first
-     * reclaims everything still filed under the name — subscriber edges, label state,
-     * pending awaits, the anchor's generation — as the departure notifier would have, so a
-     * predecessor whose departure was never reported leaves nothing for the successor to
-     * inherit and nothing for a later name-keyed eviction to confuse with the successor's.
+     * claim, and BEFORE delivering any frame of that session, advancing the generation by
+     * one per claim. The router's notifier first reclaims what the predecessor tenancy left:
+     * the slot-keyed anchor generation, and the subscriber edges, label state and pending
+     * awaits filed under the predecessor's name, which @ref peer_name spells from the
+     * arriving handle one generation down. So a predecessor whose departure was never
+     * reported leaves nothing for the successor to inherit and nothing for a later
+     * name-keyed eviction to confuse with the successor's.
      * @note REFUSED on a link that is not @ref peer_named, for the reason
      *       @ref set_peer_down_notifier is: a flat link has one routing identity for every
      *       peer it carries, so there is no per-session identity to anchor.

@@ -815,7 +815,7 @@ result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, std::s
     // `name` is REQUIRED and stays required (ADR-0073 §5, #622): an omitted name with a
     // node-assigned fallback would cost retry idempotency — a create retried over a link
     // that dropped its reply would append a SECOND connection instead of answering
-    // PATH_IN_USE. The `p<slot>` fallback exists only for creator-LESS inbound peers, where
+    // PATH_IN_USE. The `p<slot>~<gen>` fallback exists only for creator-LESS inbound peers, where
     // there is no retry because the peer dialed us.
     if (name.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
     // The wire minting boundary runs THE shared segment predicate (ADR-0073 §1) — the same
@@ -1096,7 +1096,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // every read from the transport's live-traffic table. NO vertex is ever
     // created for a peer. Every listed name is also a routable next-hop segment
     // (the registry's peer fallback): CAN's names always were legal segments, and
-    // the ws/tcp bus servers now name accepted sessions `p<slot>` (#426, ADR-0073
+    // the ws/tcp bus servers now name accepted sessions `p<slot>~<gen>` (#426, ADR-0073
     // §2) instead of the unaddressable `<ip>:<port>`, so the ADR-0044 promise holds
     // per the enumerable⇒addressable invariant (ADR-0073 §1). Routing a `dst`
     // through a bus link's own connection NAME remains the sharp edge:

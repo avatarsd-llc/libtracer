@@ -233,9 +233,9 @@ test('topology: a BUS link is reported with its peers, never descended', { skip 
   assert.ok(bus, 'the peer_named listener is reported as a bus link');
   assert.equal(bus.at, BUS);
   assert.equal(bus.peers.length, 2, 'it hears exactly its two dialers');
-  for (const p of bus.peers) assert.match(p, /^p\d+$/);
+  for (const p of bus.peers) assert.match(p, /^p\d+~\d+$/);
 
-  // #426 closed the finding this test used to pin: a ws bus now names peers p<slot>,
+  // #426 closed the finding this test used to pin: a ws bus now names peers p<slot>~<gen>,
   // a legal path segment, so ADR-0044's "each listed name doubles as a routable
   // next-hop segment" holds for EVERY bus kind (the enumerable⇒addressable invariant,
   // ADR-0073 §1). The walk's routable flag — computed from RESERVED_SEGMENT_CHARS —

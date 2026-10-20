@@ -83,8 +83,14 @@ Then check three things:
     many sessions pass through it (ADR-0044 amendment); `fwd_router_t::session_anchor_id`
     applies it.
   - `child_registry_t::resolve_peer` takes the bus lookup to use, defaulting to `peer_link`.
-  - An application that spelled a session's name by hand as `p<slot>` must take it from
-    `enumerate_peers` or `peer_name` instead.
+  - An arrival in a reused slot also evicts the edges, labels and pending awaits still filed
+    under the predecessor's name (`p<slot>~<gen-1>`) when that session's departure never
+    reached the router (#1609). A departure that is reported only after a successor claimed
+    the slot no longer retires the successor's anchor.
+  - **Behaviour change:** the name is visible wherever a peer name is, in `:children[]`,
+    `enumerate_peers` output, return routes and ACL subjects. An application that spelled a
+    session's name by hand as `p<slot>` must take it from `enumerate_peers` or `peer_name`
+    instead, and a client matching the old shape must accept `p<slot>~<gen>`.
 
 ## [0.20.0] — 2026-10-20
 
