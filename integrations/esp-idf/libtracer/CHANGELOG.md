@@ -66,7 +66,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **`httpd_ws_link_t` conflates a peer's TX frames per path, never across paths
 - **An adopted `httpd_ws_link_t` returns its handler gate at teardown when no WebSocket client
   is left ([#2202](https://github.com/avatarsd-llc/libtracer/issues/2202)).** The destructor hands
   the gate to its session-detach work item, which asks the server, on its own task after the

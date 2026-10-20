@@ -467,8 +467,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   knows a frame's length receives the body straight into its segment. The shared 4 KiB chunk
   read moved into `tcp_server_transport_t::on_readable`. The unused peer-tier seams
   `peer_tier_wants_rope` and `deliver_to_peer_borrowed` are deleted.
-- **A local `subscribe` or `await` on a `:field` path is refused, and a second `:` is a
-  malformed path ([#2113](https://github.com/avatarsd-llc/libtracer/issues/2113)).** Both
 - **A local `subscribe` or `await` on a `:field` path is refused, and a field name is held to
   the segment rules ([#2113](https://github.com/avatarsd-llc/libtracer/issues/2113)).** Both
   `graph_t::subscribe` overloads and the path-taking `graph_t::await` now answer
