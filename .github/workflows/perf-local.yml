@@ -176,8 +176,8 @@ jobs:
             .github/workflows/perf-local.yml > "$RUNNER_TEMP/bench_shas.txt"
           # depth=1: the store is ~28 MB and only its tip is ever read.
           git fetch --no-tags --depth=1 origin gh-pages
-          git show FETCH_HEAD:dev/bench-local/data.js > "$RUNNER_TEMP/data.js" \
-            || : >"$RUNNER_TEMP/data.js"
+          # data.js plus its data-archive-*.js, side by side (#2229).
+          python3 bench/store_load.py mirror --ref FETCH_HEAD --dir dev/bench-local --out "$RUNNER_TEMP"
           python3 bench/store_guard.py density \
             --data "$RUNNER_TEMP/data.js" \
             --shas-file "$RUNNER_TEMP/bench_shas.txt" \
@@ -208,7 +208,7 @@ jobs:
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           here="$(git rev-parse HEAD^{commit})"
           if [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
-            if grep -q "\"$here\"" "$RUNNER_TEMP/data.js"; then
+            if grep -q "\"$here\"" "$RUNNER_TEMP"/data*.js; then
               echo "measure=false" >> "$GITHUB_OUTPUT"
               echo "::notice::tag ${GITHUB_REF_NAME} is commit ${here:0:8}, which already has a point"
             else
@@ -686,13 +686,24 @@ jobs:
       # STORE SIZE (#2229). GitHub rejects a file over 100 MB, and `data.js` grows by
       # ~0.9 MB per banked point, so an unbounded store stops accepting pushes (it did, at
       # 102.7 MB). Before the two history steps below push, bound the live store to the
-      # newest 40 points per series (the rolling baseline reads 21, step detection 5) and
+      # newest 40 points per series and
       # move the older entries into immutable `data-archive-NNN.js` files beside it,
-      # nothing deleted. Pruning waits for 50 points (hysteresis: one gh-pages commit per
+      # nothing deleted; the readers load archives + data.js through
+      # bench/store_load.py. Pruning waits for 50 points (hysteresis: one gh-pages commit per
       # ~10 points). The guard then fails here, with a named message, if the store nears
       # the limit anyway, instead of a GH001 rejection from the push after the bench.
       - name: Bound the history store (prune to an archive) + size guard
         run: |
+          # A failed earlier run must not wedge this persistent runner: clear any leftover
+          # worktree first, and always remove ours on exit.
+          clean() {
+            cd "$GITHUB_WORKSPACE"
+            git worktree remove --force ../ghp-prune 2>/dev/null || true
+            rm -rf ../ghp-prune
+            git worktree prune
+          }
+          clean
+          trap clean EXIT
           git fetch --no-tags --depth=1 origin gh-pages
           git worktree add ../ghp-prune FETCH_HEAD
           cd ../ghp-prune
@@ -703,12 +714,16 @@ jobs:
               git config user.email "github-actions[bot]@users.noreply.github.com"
               git add dev/bench-local
               git commit -m "bench-local: archive older points, keep the live store small (#2229)"
-              git push origin HEAD:gh-pages
+              # The prune is idempotent, so a lost race is not fatal: retry once on a fresh
+              # fetch, else warn and let the next run prune. Banking this point goes on.
+              if ! git push origin HEAD:gh-pages; then
+                git fetch --no-tags --depth=1 origin gh-pages
+                git rebase FETCH_HEAD && git push origin HEAD:gh-pages \
+                  || echo "::warning::the store prune push was rejected; the next run re-prunes"
+              fi
             fi
             python3 "$GITHUB_WORKSPACE/bench/store_prune.py" guard --data dev/bench-local/data.js
           fi
-          cd "$GITHUB_WORKSPACE"
-          git worktree remove --force ../ghp-prune
 
       # BANKING is unconditional (2026-10-07). A sample a guard distrusts is banked
       # FLAGGED (`CONTAMINATED` in `extra`): the page draws it marked, and no gating
@@ -772,7 +787,7 @@ jobs:
         id: drift
         run: |
           git fetch --no-tags --depth=1 origin gh-pages
-          git show FETCH_HEAD:dev/bench-local/data.js > "$RUNNER_TEMP/data.js"
+          python3 bench/store_load.py mirror --ref FETCH_HEAD --dir dev/bench-local --out "$RUNNER_TEMP"
           python3 bench/store_guard.py drift --data "$RUNNER_TEMP/data.js" --mode warn
           # The read side of the compiler stamp: written per point since #1301's
           # item 3, and until here nothing read it back, so a toolchain bump and a
@@ -790,8 +805,11 @@ jobs:
           import json, pathlib, sys
           sys.path.insert(0, "bench")
           import store_guard as sg
-          doc = sg.parse_data_js(pathlib.Path(sys.argv[1]).read_text())
+          import store_load
+          doc = store_load.load_path(sys.argv[1])
           for suite, entries in doc["entries"].items():
+              if not sg.trusted(entries):
+                  continue  # nothing trusted in this suite: nothing to doctor
               # Move the newest TRUSTED point half a step in the WORSE direction for
               # that suite's sign — the flagged points the comparator ignores are the
               # wrong thing to doctor, and +50% is an improvement on a

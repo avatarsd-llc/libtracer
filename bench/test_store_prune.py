@@ -54,6 +54,40 @@ class StorePrune(unittest.TestCase):
         doc = sg.parse_data_js((d / "data.js").read_text())
         self.assertEqual(len(next(iter(doc["entries"].values()))), 120)
 
+    def test_loader_concatenates_archives_and_live(self):
+        import store_load
+        d = self._dir(200)
+        sp.prune(d, 40, 50)
+        doc = store_load.load_path(d / "data.js")
+        for ents in doc["entries"].values():
+            self.assertEqual([e["date"] for e in ents], list(range(200)))
+
+    def test_loader_dedupes_a_crashed_prune(self):
+        import store_load
+        d = self._dir(200)
+        sp.prune(d, 40, 50)
+        (d / "data.js").write_text(sp.render(_store(200)))  # live still holds everything
+        doc = store_load.load_path(d / "data.js")
+        for ents in doc["entries"].values():
+            self.assertEqual(len(ents), 200)
+
+    def test_existing_archive_is_never_overwritten(self):
+        d = self._dir(151)
+        (d / "data-archive-001.js").write_text("sentinel")
+        sp.prune(d, 120, 150)
+        self.assertEqual((d / "data-archive-001.js").read_text(), "sentinel")
+        self.assertTrue((d / "data-archive-002.js").exists())
+
+    def test_archives_split_by_bytes(self):
+        d = self._dir(151)
+        old = sp.ARCHIVE_MAX_BYTES
+        sp.ARCHIVE_MAX_BYTES = 4_000
+        self.addCleanup(setattr, sp, "ARCHIVE_MAX_BYTES", old)
+        sp.prune(d, 120, 150)
+        arch = sorted(d.glob("data-archive-*.js"))
+        self.assertGreater(len(arch), 1)
+        self.assertTrue(all(a.stat().st_size < 4_000 + 2_000 for a in arch))
+
     def test_guard(self):
         d = self._dir(3)
         f = d / "data.js"

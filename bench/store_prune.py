@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """@brief Keep the bench-local history store under GitHub's 100 MB file limit (#2229).
 
-`dev/bench-local/data.js` grows by one entry per series per banked point. At roughly
-0.26 MB per point (both suites) it passed 100 MB after 361 points and every gh-pages push
+`dev/bench-local/data.js` grows by one entry per series per banked point. It averaged
+0.29 MB per point (both suites) over its life, and about 1.0 MB per point now; it passed 100 MB after 361 points and every gh-pages push
 was rejected. This tool bounds the live store and moves older entries into an archive
 beside it, so nothing is deleted.
 
     store_prune.py prune --dir D [--keep 40] [--trigger 50]
     store_prune.py guard --data F [--warn-mb 60] [--fail-mb 85]
 
-**Window.** The live store keeps the newest `--keep` entries of every series. A point is
-now about 0.9 MB (both suites), so 40 points is about 37 MB. Every in-repo reader needs
-less: the rolling baseline (#1301) reads 20 trusted points plus the newest, step
-detection reads the last 5, and the results page charts and pickers read the live store.
-40 leaves the baseline two windows deep for contaminated points that `trusted()` drops.
+**Window.** The live store keeps the newest `--keep` entries of every series, about 1.0 MB
+a point, so 40 points is about 40 MB. That is NOT enough history for the rolling baseline
+(#1301): it needs 21 TRUSTED points and on the real store only about 11 of the newest 40
+entries are trusted. So the readers never read `data.js` alone: `store_load.py` is their one
+loader and concatenates the archives and the live store (drift, density, step detection and
+the results page all go through it). The live window only bounds the file GitHub sees.
 
 **Hysteresis.** Pruning only starts once a series holds more than `--trigger` entries
 (about 46 MB at the peak), then cuts back to `--keep`: one gh-pages commit per ~10 points.
 
 **Archive.** Each prune writes its evicted entries to a NEW `data-archive-NNN.js`, the
-same `window.BENCHMARK_DATA = {...}` shape as `data.js`, oldest range first. Files are
+same `window.BENCHMARK_DATA = {...}` shape as `data.js`, oldest range first, at most
+`ARCHIVE_SLICE` entries per series and `ARCHIVE_MAX_BYTES` per file. Files are
 never rewritten, so gh-pages history grows by the evicted slice only, and no archive
 file can approach the limit.
 
@@ -36,6 +38,7 @@ import sys
 
 PREFIX = "window.BENCHMARK_DATA = "
 ARCHIVE_SLICE = 100
+ARCHIVE_MAX_BYTES = 40_000_000
 _ARCHIVE = re.compile(r"^data-archive-(\d{3})\.js$")
 
 
@@ -49,7 +52,7 @@ def parse(text: str) -> dict:
 
 def render(doc: dict) -> str:
     """@brief Serialise a store the way benchmark-action does (two-space JSON)."""
-    return PREFIX + json.dumps(doc, indent=2) + "\n"
+    return PREFIX + json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
 
 
 def _key(entry: dict) -> tuple:
@@ -84,13 +87,24 @@ def prune(d: pathlib.Path, keep: int, trigger: int) -> str:
     # Archive first: a crash between the writes leaves a duplicate range, never a gap.
     # At most ARCHIVE_SLICE entries per series per file keeps every file far below the limit
     # even on the first prune of a long-grown store.
-    names = []
-    for lo in range(0, max(len(v) for v in gone.values()), ARCHIVE_SLICE):
-        arch = _next_archive(d)
+    names: list[str] = []
+
+    def write(chunk: dict[str, list[dict]]) -> None:
         adoc = {k: v for k, v in doc.items() if k != "entries"}
-        adoc["entries"] = {k: v[lo:lo + ARCHIVE_SLICE] for k, v in gone.items()}
-        arch.write_text(render(adoc))
+        adoc["entries"] = chunk
+        text = render(adoc)
+        n = max((len(v) for v in chunk.values()), default=0)
+        if len(text.encode()) > ARCHIVE_MAX_BYTES and n > 1:
+            h = (n + 1) // 2
+            write({k: v[:h] for k, v in chunk.items()})
+            write({k: v[h:] for k, v in chunk.items()})
+            return
+        arch = _next_archive(d)
+        arch.write_text(text)
         names.append(arch.name)
+
+    for lo in range(0, max(len(v) for v in gone.values()), ARCHIVE_SLICE):
+        write({k: v[lo:lo + ARCHIVE_SLICE] for k, v in gone.items()})
     data.write_text(render(live))
     moved = sum(len(v) for v in gone.values())
     return f"moved {moved} entries to {', '.join(names)}; live {data.stat().st_size / 1e6:.1f} MB"

@@ -1094,30 +1094,24 @@ def _load_history(store: str = "dev/bench/data.js") -> dict | None:
     Parameterized by path because the page now charts TWO stores: `dev/bench/data.js`
     (the GitHub-hosted series) and `dev/bench-local/data.js` (the fixed pinned host).
     They live on the same branch in the same format and differ only in which machine
-    produced them, so a second loader would be a copy free to drift.
+    produced them, so a second loader would be a copy free to drift. The loader also reads
+    the `data-archive-*.js` files beside a store (#2229), so a pruned store keeps its
+    long-range history.
     """
-    import json
-    raw = None
+    import store_load
     local = REPO / pathlib.Path(store)
-    if local.exists():
-        raw = local.read_text()
-    else:
+    try:
+        if local.exists():
+            return store_load.load_path(local) if local.stat().st_size else None
         subprocess.run(["git", "fetch", "--depth=1", "origin", "gh-pages"],
                        capture_output=True, cwd=REPO)
         for ref in ("FETCH_HEAD", "origin/gh-pages"):
-            p = subprocess.run(["git", "show", f"{ref}:{store}"],
-                               capture_output=True, text=True, cwd=REPO)
-            if p.returncode == 0 and p.stdout:
-                raw = p.stdout
-                break
-    if not raw:
-        return None
-    raw = raw.strip()
-    raw = raw.removeprefix("window.BENCHMARK_DATA = ").rstrip(";")
-    try:
-        return json.loads(raw)
+            doc = store_load.load_git(ref, store, REPO)
+            if doc is not None:
+                return doc
     except ValueError:
-        return None
+        pass
+    return None
 
 
 def history_sections(data: dict | None, local: dict | None = None) -> tuple[dict[str, str], str]:
