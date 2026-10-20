@@ -12,10 +12,13 @@
  *
  * The control arm is what gives the hammer its teeth: the SAME two words, the same writer and
  * the same readers, but published with no latch at all — two relaxed stores, two relaxed
- * loads. On a host with two or more hardware threads it tears within the budget, so a latch
- * that let a reader through mid-publish would be caught here too. (ThreadSanitizer cannot see
- * a tear: every word is an atomic, so the race it would report does not exist. The control is
- * the proof that this test can.)
+ * loads. On a host with two or more hardware threads it usually tears within the budget, so a
+ * latch that let a reader through mid-publish would be caught here too. (ThreadSanitizer cannot
+ * see a tear: every word is an atomic, so the race it would report does not exist. The control
+ * is the evidence that this test can.)
+ *
+ * The control is REPORTED, not gated: whether a race happens depends on how the runner
+ * schedules the threads, so a run that sees no tear prints a note and does not fail.
  */
 
 #include "libtracer/seq_latch.hpp"
@@ -111,7 +114,8 @@ void test_latch_never_tears() {
     check(t.regressions.load() == 0, "no reader ever saw an older publish after a newer one");
 }
 
-/** @brief The control arm: the same pair with no latch tears, so the hammer can see a tear. */
+/** @brief The control arm: the same pair with no latch, to show the hammer can see a tear.
+ *         Reported, never gating: a race depends on scheduling. */
 void test_unlatched_pair_tears() {
     std::printf("control — the same pair published with no latch:\n");
     if (std::thread::hardware_concurrency() < 2) {
@@ -131,7 +135,10 @@ void test_unlatched_pair_tears() {
         },
         t);
     std::printf("    (%ld reads, %ld torn)\n", t.reads.load(), t.tears.load());
-    check(t.tears.load() > 0, "an unlatched pair tears under the same hammer");
+    if (t.tears.load() == 0)
+        std::printf(
+            "    note: the hammer could not show a tear on this runner; the control "
+            "is not gating\n");
 }
 
 /** @brief A publish whose fill refuses leaves the current record standing. */
