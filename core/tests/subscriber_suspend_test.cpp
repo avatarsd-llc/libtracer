@@ -15,10 +15,10 @@
  *      handle resumes and then unsubscribes it, and a cleared handle answers NOT_FOUND.
  *   3. The published array carries the ACTIVE edges: a cleared slot leaves it, a suspended
  *      one keeps its entry (clear), so a toggle republishes nothing.
- *   4. A toggle draws nothing from any source, so it succeeds with the source exhausted. A
- *      resume after a REFUSED republish rebuilds the stale array itself: with the source still
- *      exhausted it answers BACKPRESSURE and changes nothing, and the RETRY succeeds once the
- *      source has room, with no other mutation in between.
+ *   4. A toggle draws nothing from any source, so it succeeds with the source exhausted, and
+ *      that holds after a REFUSED compaction too: since #1622 a replace either publishes or
+ *      changes nothing, so an uncompacted array only ever carries dead entries for cleared slots
+ *      and never an entry naming a slot's previous occupant.
  *   5. The liveness flip finds its entry by slot — the published array no longer mirrors the
  *      slot table — observed as a suspend silencing exactly its own edge.
  *   6. The RFC-0005 counts are of DELIVERING edges: with 0 live and M suspended edges the
@@ -196,10 +196,9 @@ void test_published_array_is_the_active_edges() {
         check(sinks[i].seen == 1 && sinks[i].last == 0x44, "each resumed edge takes the write");
 }
 
-/** @brief (4) A toggle draws nothing; a resume after a refused republish rebuilds the array,
- *         answering BACKPRESSURE, unchanged, only while the source has no room. */
+/** @brief (4) A toggle draws nothing, before and after a refused compaction (#1622). */
 void test_toggle_allocates_nothing() {
-    std::printf("a toggle allocates nothing; a resume over a stale array rebuilds it:\n");
+    std::printf("a toggle allocates nothing, even over an uncompacted array:\n");
     gate_source_t gate;
     graph_t g{gate};
     const vertex_handle_t src = g.register_vertex(path_t("/s/d"), role_t::STORED_VALUE);
@@ -221,27 +220,16 @@ void test_toggle_allocates_nothing() {
     check(g.set_suspended(*sa, true).has_value(), "... as does the next suspend");
 
     check(g.unsubscribe(*sx).has_value(), "an unsubscribe with no room still takes effect");
-    const auto r = g.set_suspended(*sa, false);
-    check(!r && r.error() == status_t::BACKPRESSURE,
-          "after that refused republish, a resume with no room answers BACKPRESSURE");
+    check(published(src) == 4, "... and its dead entry waits for the next republish");
+    check(g.set_suspended(*sa, false).has_value() && g.set_suspended(*sa, true).has_value() &&
+              g.set_suspended(*sa, false).has_value(),
+          "over that uncompacted array a switch still draws nothing: no entry in it is stale");
     gate.disarm();
-    check(g.is_suspended(*sa).value_or(false) && g.own_subs(src) == 2,
-          "... and the edge is still suspended, its speculative count given back");
+    check(!g.is_suspended(*sa).value_or(true) && g.own_subs(src) == 3,
+          "... the edge is live again and counted");
     (void)g.write(src, byte_value(0x66));
-    check(a.seen == 0 && x.seen == 1, "... still receives nothing, and the cleared edge neither");
-
-    // The source has room again and NOTHING else on the vertex changed: the retry itself
-    // rebuilds the stale array (the selector's case: switch edges under memory pressure).
-    check(g.set_suspended(*sa, false).has_value(), "the retry, once the source has room, succeeds");
-    check(g.own_subs(src) == 3 && published(src) == 3,
-          "... counts the edge, and rebuilt the array without the cleared edge");
-    (void)g.write(src, byte_value(0x77));
-    check(a.seen == 1 && a.last == 0x77 && x.seen == 1 && lo.seen == 3,
-          "... and the edge delivers again, the cleared one still does not");
-    gate.arm(0);
-    check(g.set_suspended(*sa, true).has_value() && g.set_suspended(*sa, false).has_value(),
-          "... and with the array current again, a switch draws nothing");
-    gate.disarm();
+    check(a.seen == 1 && a.last == 0x66 && x.seen == 1 && lo.seen == 2,
+          "... it delivers, and the cleared edge does not");
 }
 
 /** @brief A sink for the graph's remote-delivery hook: deliveries per link name. */

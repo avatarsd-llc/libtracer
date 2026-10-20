@@ -348,15 +348,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   through `graph_t::set_suspended`: no unsubscribe or re-subscribe, no frame, no draw, and no
   double delivery among the refs it lists. The selector owns the suspend bit of those refs and
   does not watch it: a peer's (re)subscribe is admitted delivering and delivers until the owner
-  lists it and switches (a remote "admit suspended" is #2019's). A resume that answers
-  `BACKPRESSURE` fails the switch with `BACKPRESSURE` and leaves it partly applied (the new
-  option active, `settled()` false); selecting it again retries. A ref whose subscription is
+  lists it and switches (a remote "admit suspended" is #2019's). A switch is never partly
+  applied: a toggle answers only success or `NOT_FOUND` (#1622). A ref whose subscription is
   gone is listed `inert` and skipped until the owner removes it or adds the same address again,
   which re-reads it. Operations that meet on one instance never wait: the later one answers
   `BACKPRESSURE` and changes nothing. The selector never creates or deletes a subscription,
   persists nothing and copies no option name (names are borrowed; a temporary owning string
   does not compile, and a slot past 65,535 is refused with `INVALID_PATH`). A read of `active`
-  never refuses, so a `BACKPRESSURE` switch tells "busy" from "partly applied". Its tables are
+  never refuses. Its tables are
   fixed arrays sized by the template: `<8, 4>` by default, 176 B on LP64 and 100 B on ILP32; `<64, 16>` is
   1,064 B and 680 B. An `options` read renders at most `kRefs × kOptions` ref records, each with
   a key of up to 1 KiB, staged at about twice that on the graph's table source. An instance is
@@ -546,10 +545,9 @@ This patch release also carries RFC-0032's deletion of COMPACT delivery, ADVERTI
   its slot index, callback pair, binding, cold half and admission decision, and receives no
   delivery; a resume delivers from the next propagated value with no replay. A toggle flips the
   edge's published entry under the vertex's stripe lock: no republish, nothing drawn from any
-  source, no frame. A suspend cannot fail. A resume draws only after an edge republish on that
-  vertex was refused for want of memory: it rebuilds the array itself, and answers
-  `BACKPRESSURE`, unchanged, if that draw is refused too; a retry succeeds once the source has
-  room. It is not a grace point: a fan-out that took its
+  source, no frame. Neither a suspend nor a resume can fail, even after an edge republish on
+  that vertex was refused for want of memory (#1622). It is not a grace point: a fan-out that
+  took its
   snapshot before the flip still delivers once after the call returns.
   - The RFC-0005 counts are of delivering edges: `own_subs`, `has_subscribers` and the
     ancestors' bubbling count leave a suspended edge out, so a vertex whose every edge is
@@ -557,12 +555,11 @@ This patch release also carries RFC-0032's deletion of COMPACT delivery, ADVERTI
   - The published edge array now holds one entry per ACTIVE slot: a cleared slot has none (it
     used to keep a dead one the copy loop loaded and skipped), and a suspended slot keeps its
     entry with the liveness bit clear, so each suspended edge still costs a write one skipped
-    entry while other edges deliver. The array is still sized for every slot, so a cleared slot
-    costs the same capacity as before; nothing here saves memory.
+    entry while other edges deliver.
   - `pub_edge_t` gains `slot`, in the padding after `active`: 32 bits on LP64, 16 on ILP32, so
     the entry stays 56 B and 32 B, both pinned by `static_assert`. On ILP32 a vertex is capped
-    at 65,536 subscriber slots (`add_edge` refuses past it). `subscriber_t::suspended` rides the
-    record's tail padding (80 B and 44 B, unchanged). `edge_block_t` gains `pub_current`.
+    at 65,536 subscriber slots (`add_edge` refuses past it). The suspended state is the
+    entry's liveness bit and nothing else (#1622).
   - `vertex_t::set_edge_suspended` is the slot primitive; `vertex_t::published_edges()`
     reports the array's width; `vertex_t::clear_edge`, `evict_link_edges` and
     `evict_route_edges` report suspended edges so the counts are not unwound twice, and
@@ -622,6 +619,31 @@ This patch release also carries RFC-0032's deletion of COMPACT delivery, ADVERTI
     `slot_server_t::session_base_t` or `stream_server_base_t` drops `override` from its
     destructor;
   - a class that derived from one of the concrete links derives from `transport_t` instead.
+
+- **The subscriber table is stored once
+  ([#1622](https://github.com/avatarsd-llc/libtracer/issues/1622)).** A vertex kept every edge
+  twice: the slot table held whole `subscriber_t` records, and the published edge array repeated
+  their dispatch fields. The published array is now the only copy of those fields, and the slot
+  table keeps the cold remainder as the new `subscriber_slot_t` (the retained SUBSCRIBER view,
+  the delivery policy, the occupied flag). Per slot that is 32 B where it was 80 B on LP64, and
+  16 B where it was 44 B on ILP32; `pub_edge_t` and the fan-out loop that reads it are
+  unchanged (56 B and 32 B). A republish rebuilds the array from the one it displaces and is
+  sized for its entries, so a cleared slot no longer costs a published entry's capacity either.
+  - `subscriber_t` is the admission doors' stack record only. Its `active` and `suspended`
+    members are gone (an occupied slot is `subscriber_slot_t::active`; suspension is the
+    published entry's liveness bit). `edge_block_t::slots` holds `subscriber_slot_t`, and
+    `edge_block_t::published()` returns the current array's entries.
+  - A `:subscribers[N]` replace is all or nothing. A replace whose republish is refused used to
+    stop the old edge and leave the new one undelivered while answering success; it now
+    changes nothing and answers `BACKPRESSURE`, and `vertex_t::replace_edge` answers the new
+    `edge_replace_t::REFUSED`.
+  - `vertex_t::revert_to_placeholder` takes a `detached_edges_t`, which carries the slot table
+    and the published array out of the retired vertex and retires the array when dropped.
+  - New `mem::bitwise_relocatable`: a type that declares `using bitwise_relocatable_t = void;`
+    is relocated by `mem::block_array_t` with `memcpy`, and the old bytes are not destroyed.
+    `subscriber_slot_t` and `detached_edges_t` declare it, so growing the slot table or the
+    retire batch runs no destructor and no longer reaches the heap.
+
 - **Docs: `heap_backend()` and a null `memory.io` no longer promise "the heap"
   ([#2051](https://github.com/avatarsd-llc/libtracer/issues/2051)).** On a build with
   `kSlabPool = false` they draw from the static arena, not the platform heap. No behaviour
