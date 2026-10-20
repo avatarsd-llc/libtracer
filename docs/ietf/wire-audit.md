@@ -186,12 +186,12 @@ rows here.
 | ACE `access_mask` | key, u32 (RFC-0026) | assigned | `core/include/libtracer/acl_ace.hpp:acl_right_t` | — | **keep** | |
 | right READ | `0x01` | assigned | reads, `await` | — | **keep** | |
 | right WRITE | `0x02` | assigned | writes, delivery gate, connection removal | — | **keep** | |
-| right SUBSCRIBE | `0x04` | assigned | the `:subscribers[]` append | — | **keep** | |
-| right CREATE | `0x08` | assigned | write-creates, creator endpoint | 4 (#1945 makes creation opt-in) | **keep**: still the gate on an opted-in parent. | |
-| right DELETE | `0x10` | assigned, "no core surface yet" | none: removal takes WRITE (RFC-0009 §A.2) | — | **delete** | F8 |
-| right READ_ACL | `0x20` | assigned | `:acl` read | — | **keep** | |
-| right WRITE_ACL | `0x40` | assigned | `:acl` write (the admin right) | — | **keep** | |
-| right WRITE_OWNER | `0x80` | assigned, "no core surface yet" | none: no owner identity exists | — | **delete** | F8 |
+| right SUBSCRIBE | `0x04` | assigned | the `:subscribers[]` append | — | **retired** by RFC-0036 (two rights) | |
+| right CREATE | `0x08` | assigned | write-creates, creator endpoint | 4 (#1945 makes creation opt-in) | **retired** by RFC-0036 (two rights) | |
+| right DELETE | `0x10` | assigned, "no core surface yet" | none: removal takes WRITE (RFC-0009 §A.2) | — | **retired** by RFC-0036 (two rights) | F8 |
+| right READ_ACL | `0x20` | assigned | `:acl` read | — | **retired** by RFC-0036 (two rights) | |
+| right WRITE_ACL | `0x40` | assigned | `:acl` write (the admin right) | — | **retired** by RFC-0036 (two rights) | |
+| right WRITE_OWNER | `0x80` | assigned, "no core surface yet" | none: no owner identity exists | — | **retired** by RFC-0036 (two rights) | F8 |
 | reserved rights | `0x100`+ | reserved | none | — | **keep** | |
 | ACE `expires_ns` | key, u64 | optional | evaluated against the core's own clock (`graph.cpp`) | — | **keep** on the wire; the clock moves to an app seam (#1792 (findings: dropping await, existing timers)). | |
 

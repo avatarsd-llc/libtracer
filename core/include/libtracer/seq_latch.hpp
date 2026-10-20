@@ -8,10 +8,10 @@
  *
  * The graph's declaration nodes (#2032) are immortal and keyed by vertex address, so a
  * re-registration must REPLACE what a node holds rather than prepend a new node, and must do
- * it under readers that take no lock: the write gate copies an admission hook, or scans
- * payload-right rows, on every write to a declaring vertex. What a replacement must never do
+ * it under readers that take no lock: the write gate copies an admission hook, or reads a
+ * `:schema` catalog, on every write to a declaring vertex. What a replacement must never do
  * is let a reader assemble one record from two registrations — a hook's `fn` from one and its
- * `ctx` from the next, or one occupant's row count over another's rows.
+ * `ctx` from the next, or one occupant's word count over another's words.
  *
  * **Why two sides.** The latch holds the record twice. Readers read the side the sequence's
  * low bit names; the writer rewrites only the OTHER side, then advances the sequence to point
@@ -32,7 +32,7 @@
  *
  * **What a side may hold.** Only atomics, read RELAXED by the projection a reader passes and
  * written relaxed by the fill a writer passes — never a plain field, which a rewrite would race.
- * A side may point at storage of its own (the payload-right tables do); then that storage must
+ * A side may point at storage of its own (the `:schema` catalogs do); then that storage must
  * outlive every reader that can still hold the pointer, and a projection must bound every index
  * it derives from words it read, since a torn copy is discarded only AFTER it was made.
  *

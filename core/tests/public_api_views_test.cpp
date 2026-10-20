@@ -221,7 +221,7 @@ void test_acl_and_spec() {
     using tr::graph::ace_t;
     std::vector<ace_t> aces(2);
     aces[0].subject.assign(bytes_of("peer-a").begin(), bytes_of("peer-a").end());
-    aces[0].access_mask = 0x41;
+    aces[0].access_mask = 0x03;
     aces[0].flags = tr::graph::kAceInherit;
     aces[1].subject.assign(bytes_of("EVERYONE@").begin(), bytes_of("EVERYONE@").end());
     aces[1].access_mask = 0x01;

@@ -720,24 +720,18 @@ result_t<void> transport_vertex_t::mint_module_locked(std::string_view module,
             return out;
         },
         ctx};
-    // RFC-0014 §5, discharged by the Amendment 2 general contract: the two control payloads
-    // this endpoint accepts demand DIFFERENT rights, so the endpoint declares them rather
-    // than having `graph_t` learn a transport concept. `SPEC` (create) demands `CREATE`, so
-    // the create right is delegable on the endpoint's own ACL without any right on the parent
-    // transport; `NAME` (remove) demands `WRITE`, per RFC-0009 §A.2's reserved-and-unused
-    // `DELETE`. A peer may hold either without the other. Anything else written here takes the
-    // default `WRITE` and is refused by `endpoint_write` on its shape (§2), not by the gate.
-    static constexpr graph::payload_right_t kRights[] = {
-        graph::payload_right_t{wire::type_t::SPEC, graph::acl_right_t::CREATE},
-        graph::payload_right_t{wire::type_t::NAME, graph::acl_right_t::WRITE},
-    };
-    // Empty for a catalog-less module, which then costs the graph nothing beyond the rows.
+    // Both control payloads this endpoint accepts, `SPEC` (create) and `NAME` (remove), are
+    // writes and demand WRITE on the endpoint (RFC-0036 §3.2, §12 Q4), so the create right is
+    // still delegable on the endpoint's own ACL without any right on the parent transport.
+    // Anything else written here is refused by `endpoint_write` on its shape (§2), not by the
+    // gate.
+    // Empty for a catalog-less module, which then costs the graph nothing.
     // A catalog that cannot be encoded is refused like a registration that cannot be made.
     mem::bytes_t encoded(*egress_src_);
     auto endpoint =
         encode_catalog(encoded, catalog)
             ? graph_.register_vertex_key(mem::as_span(endpoint_key), graph::role_t::HANDLER,
-                                         handlers, {}, kRights, mem::as_span(encoded))
+                                         handlers, {}, mem::as_span(encoded))
             : std::unexpected(status_t::BACKPRESSURE);
     if (!endpoint) {
         // Nothing may answer for a module whose endpoint does not exist: the context pushed

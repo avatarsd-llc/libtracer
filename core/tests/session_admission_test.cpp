@@ -260,8 +260,10 @@ void test_churn_gives_back() {
     install(g, &budget);
     for (int i = 0; i < 2 * kBudget; ++i) {
         check(!wire_sub(g, p, "s1", "alice"), "churn: the subscribe is admitted");
-        // The freed slot is reused, so the one live edge is always at [0].
-        check(g.write(p, subscribers(0), tr::view::rope_t{make_value(b_clear())}, "s1").has_value(),
+        // The freed slot is reused, so the one live edge is always at [0]. Its holder clears it:
+        // `alice`, the subject the subscribe was admitted under (RFC-0036 §3.4).
+        check(g.write(p, subscribers(0), tr::view::rope_t{make_value(b_clear())}, "alice")
+                  .has_value(),
               "churn: the :subscribers[0] clear lands");
     }
     check(budget.charged["s1"] == 0, "churn: every clear gave its charge back");

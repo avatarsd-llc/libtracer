@@ -170,7 +170,7 @@ the 1024-byte `PATH` budget binds well before the 255-segment cap, giving a diam
 ### 2. A peer is not the owner — creation is asymmetric
 
 A **local** data write to a nonexistent vertex creates it, `mkdir -p` style, gated by the
-`CREATE` bit on the nearest existing ancestor. A **remote** fieldless `FWD{WRITE}` to an
+`WRITE` bit on the nearest existing ancestor (the `CREATE` bit before RFC-0036). A **remote** fieldless `FWD{WRITE}` to an
 unresolved `dst` does **not** create — it answers `tr::path::not_found`
 (RFC-0005 §D amendment 1, [#1139](https://github.com/avatarsd-llc/libtracer/issues/1139)).
 Creation authority is *local-or-governed-channel*: a peer creates through the **creator

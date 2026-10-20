@@ -1,0 +1,12 @@
+{
+  "name": "ace-retired-bit",
+  "category": "acl",
+  "hex": "0A403D000A40390002000400747970650100010000020007007375626A65637401000600706565722D6102000B006163636573735F6D61736B0100040004000000",
+  "total_bytes": 65,
+  "decoded": {
+    "type": "0x0A ACL",
+    "structured": true,
+    "meaning": "ACL{ ACL{ NAME \"type\" VALUE 0x00, NAME \"subject\" VALUE \"peer-a\", NAME \"access_mask\" VALUE u32=0x00000004 } } — one ALLOW ACE whose mask carries a bit outside READ|WRITE (0x04, the old SUBSCRIBE): every ACE reader REJECTS this record (TYPE_MISMATCH)",
+    "note": "RFC-0036 §3.1: the rights registry is READ=0x01 and WRITE=0x02; a mask with any other bit is refused at install, never masked off. The codec round-trips these bytes — the refusal is the reader's, bound by each core's host suite (HARNESS.md)"
+  }
+}

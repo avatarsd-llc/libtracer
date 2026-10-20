@@ -395,20 +395,23 @@ template <class Policy, class Out>
         // field loads as its 0 default.
         const std::uint64_t type = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceType]);
         const std::uint64_t flags = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceFlags]);
+        const std::uint64_t mask = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceMask]);
         // ALLOW=0 / DENY=1, DENY only where the policy evaluates it (the highest type
-        // accepted is `kAcceptsDeny`); and the single INHERIT flag bit only
+        // accepted is `kAcceptsDeny`); the single INHERIT flag bit only
         // (INHERIT_ONLY/NO_PROPAGATE/GROUP would be silently mis-evaluated by the
-        // merge) — never store semantics the evaluator would silently weaken.
+        // merge); and READ|WRITE only (RFC-0036 §3.1: a retired right, or one defined later,
+        // would be stored and gate nothing) — never store semantics the evaluator would
+        // silently weaken.
         if ((seen & detail_acl::kAceRequired) != detail_acl::kAceRequired ||
             type > std::uint64_t{Policy::kAcceptsDeny} ||
-            (flags & ~std::uint64_t{kAceInherit}) != 0)
+            ((flags & ~std::uint64_t{kAceInherit}) | (mask & ~std::uint64_t{kAceRights})) != 0)
             return std::unexpected(status_t::TYPE_MISMATCH);
         ace_t ace;
         ace.type = static_cast<ace_type_t>(type);
         ace.flags = static_cast<std::uint8_t>(flags);
         ace.subject.assign(raw[detail_acl::kAceSubject].begin(),
                            raw[detail_acl::kAceSubject].end());
-        ace.access_mask = tr::detail::load_le<std::uint32_t>(raw[detail_acl::kAceMask]);
+        ace.access_mask = static_cast<std::uint32_t>(mask);
         ace.expires_ns = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceExpires]);
         push_ace(out, std::move(ace));  // the core-array caller reserved one slot per entry
     }

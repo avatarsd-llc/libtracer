@@ -27,14 +27,14 @@ from the same operations.
 
 None of the following is a fixed role or a privileged node — they are **hats any peer
 wears transiently**. The same peer is a producer on one edge and a consumer on
-another; "orchestrating" means *a peer holding admin and issuing formation writes*;
+another; "orchestrating" means *a peer holding the rights to issue formation writes*;
 "forwarding" means *a peer that has ≥2 transports*. The network has **no central
 authority**.
 
 | Hat | What it means (transient) |
 | --- | --- |
-| **Owner** | A peer holding the provisioned root token that bootstraps a device's ACL and **delegates admin** ([CONTEXT.md](../../CONTEXT.md) *ACL / subject-token*). |
-| **Orchestrating** | A peer the owner granted `WRITE_ACL` (admin) that is issuing formation writes. Usually a web UI, joining temporarily. Not architecturally special — a peer doing vertex writes, then leaving. |
+| **Owner** | The node's local host — the empty caller context — the only party that writes a vertex's `:acl` ([RFC-0036](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md) §3.3). It bootstraps the device's ACL and grants the rights a formation needs ([CONTEXT.md](../../CONTEXT.md) *ACL / subject-token*). |
+| **Orchestrating** | A peer the owner granted `WRITE` where it creates and binds and `READ` where it subscribes, issuing formation writes. Usually a web UI, joining temporarily. Not architecturally special — a peer doing vertex writes, then leaving. |
 | **Producing** | A vertex that holds an edge and fans out (e.g. `/A/sensor`). |
 | **Consuming** | A vertex that receives delivery (e.g. `/B/in`). **Control-passive, data-rich.** |
 
@@ -104,9 +104,30 @@ the same way every other fact does: as a read. This is why the tuple above is a
 
 A device persists **identity only** — a stable `peer_id`, and a PKI key as a stronger
 subject-token where one is provisioned. It does **not** persist graph wiring. The
-owner peer grants the orchestrator `WRITE_ACL` on the subtree it may manage (NFSv4-style
-ACE with `INHERIT`; [ADR-0020 — Access control uses NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
-The orchestrator holds delegated admin for the duration of its session.
+owner grants the orchestrator `WRITE` on the subtree it may create and bind in, and `READ`
+where it subscribes (NFSv4-style ACEs with `INHERIT`; [ADR-0020 — Access control uses
+NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
+There is no admin right to delegate: a vertex's `:acl` is written by the node's owner only, the
+empty caller context of a local call ([RFC-0036](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md) §3.3). An orchestrator that has to
+set an ACL asks an owner-app vertex to do it.
+
+#### Recipe: an owner-app vertex that applies ACEs
+
+*Informative.* The protocol defines no admin vertex type ([RFC-0036](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md) §12 Q7). A
+deployment that wants a remote peer to manage ACLs registers an ordinary vertex, say
+`/admin/acl`, and grants the managing peer `WRITE` on it and nothing else:
+
+1. The vertex's write handler (or its `settings.app` admission, RFC-0010 §A.3) receives the
+   request together with the writer's subject, `write_ctx_t::subject`. A request names a target
+   path and the ACEs to install there; the encoding is the application's.
+2. The handler decides by the application's own policy whether to honour it: who may grant what
+   to whom, how far delegation goes, and what gets audited.
+3. If it agrees, it writes the target's `:acl` through the host API with an empty caller, as the
+   owner, and answers the request with the result of that write.
+
+The peer never touches `:acl` itself, and a refused request changes nothing. Because the policy
+lives in the application, two deployments can delegate differently without any protocol
+change.
 
 ### Creation — controllers and transport connections through one mechanism
 
@@ -190,11 +211,11 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
 - **Creation is atomic.** One write yields a fully configured connection vertex; there
   is no live-but-unconfigured window.
 - **Gating reuses the existing access-mask bits** (see [05 — Protocol TLVs](05-protocol-tlvs.md)):
-  `SPEC` (create) gates on **`CREATE` (0x08)** on the endpoint's own ACL, so the create
-  right is delegable without any right on the parent transport; `NAME` (remove) gates on
-  **`WRITE` (0x02)**, not on `DELETE` — `DELETE` (0x10) is reserved-and-unused for
-  protocol v1 ([RFC-0009 — Vertex removal and subscriber eviction](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §A.2).
-  A peer can hold create-but-not-remove, or the reverse.
+  `SPEC` (create) and `NAME` (remove) both gate on **`WRITE` (0x02)** on the endpoint's own
+  ACL, so the right is delegable without any right on the parent transport
+  ([RFC-0036](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md) retired RFC-0014 Amendment 2's `CREATE`/`WRITE` split). An
+  application that wants create-but-not-remove refuses removals from non-owners in the
+  endpoint's admission filter.
 - **An absent creator endpoint answers `PATH_NOT_FOUND`** — the missing-`/`-vertex
   answer, and the sanctioned creatability probe, since `conn` is hidden from
   `/net/<module>:children[]`. `SCHEMA_NOT_FOUND` is reserved for the distinct
@@ -219,8 +240,8 @@ eager by design. The module-side half of S3 is in too
 `conn:schema` catalog at `register_module`, which its endpoint serves inside Amendment 3's
 `SETTINGS` and validates each `SPEC` against; a module that declares none answers the
 conforming empty `SETTINGS`. A routed subscription holds its link's refcount since
-[#1816](https://github.com/avatarsd-llc/libtracer/issues/1816), and the `CREATE`/`WRITE`
-gating split (S2c) is in. The addressing half was already there — a created connection mounts and routes at
+[#1816](https://github.com/avatarsd-llc/libtracer/issues/1816), and the endpoint's
+`WRITE` gate is in (RFC-0036, which retired the S2c `CREATE`/`WRITE` split). The addressing half was already there — a created connection mounts and routes at
 `/net/<module>/<name>`, with the module name declared by the application (never
 library-derived — ADR-0073 §4) — and the `:children[]` creation spelling RFC-0014
 supersedes is **gone**: S7 unregistered the `client` and `listener` child types, so the

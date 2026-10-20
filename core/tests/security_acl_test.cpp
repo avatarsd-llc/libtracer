@@ -264,7 +264,7 @@ int main() {
     {
         const std::vector<ace_t> in{ace("alice", bit(acl_right_t::READ) | bit(acl_right_t::WRITE),
                                         ace_type_t::ALLOW, kAceInherit, /*expires=*/42),
-                                    ace("EVERYONE@", bit(acl_right_t::SUBSCRIBE))};
+                                    ace("EVERYONE@", bit(acl_right_t::WRITE))};
         const std::vector<std::byte> wire = encode_acl(in);
         const auto acl = tr::wire::tlv_node_t::over(wire);
         check(acl.has_value() && acl->type() == tr::wire::type_t::ACL,

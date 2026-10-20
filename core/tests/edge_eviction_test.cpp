@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <expected>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -622,9 +623,23 @@ void test_stale_index_entries_are_harmless() {
  * is the caller fallback. Ablating the fallback to `s.remote->link` turns the two assertions
  * below red — that is the check that this test is not decorative.
  */
+/** @brief A resolver naming every caller as one principal, `fleet`: two links, one holder. */
+std::expected<tr::graph::subject_token_t, tr::wire::err_t> one_principal(void*, std::string_view) {
+    constexpr std::string_view kFleet = "fleet";
+    const auto* p = reinterpret_cast<const std::byte*>(kFleet.data());
+    return tr::graph::subject_token_t(p, p + kFleet.size());
+}
+
 void test_field_write_admitted_edge_is_indexed_under_its_caller() {
     std::printf("#1071/#943 — a field-write-admitted edge is indexed by its CALLER:\n");
     graph_t g;
+    // 'seed' and 'cli' are one principal, so 'cli' holds the slot 'seed' made and may replace it
+    // (RFC-0036 §3.4); with no ACE anywhere the resolver gates nothing else.
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {one_principal, nullptr};
+        g.set_hooks(hooks);
+    }
     fwd_router_t router(g);
     fake_link_t seed_link;
     fake_link_t cli;

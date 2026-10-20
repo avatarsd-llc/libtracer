@@ -493,8 +493,9 @@ pub struct Ace {
     pub flags: u8,
     /** @brief `subject` token bytes (e.g. `"peer-a"`, or the one special subject `"EVERYONE@"`). */
     pub subject: Vec<u8>,
-    /** @brief `access_mask` u32 bitfield (READ=0x01, WRITE=0x02, SUBSCRIBE=0x04, …) —
-     * canonical wire width per RFC-0026. */
+    /** @brief `access_mask` u32 bitfield — two rights, READ=0x01 and WRITE=0x02
+     * (RFC-0036 §3.1); every other bit is retired or reserved and [`acl_aces`] refuses it.
+     * Canonical wire width per RFC-0026. */
     pub access_mask: u32,
     /** @brief Optional `expires_ns` u64 (absent ⇒ never expires). */
     pub expires_ns: Option<u64>,
@@ -556,8 +557,10 @@ pub fn acl(aces: &[Ace]) -> Tlv {
  * desynchronized pair stream), an UNKNOWN key (a silently dropped attribute would
  * widen access), a REPEATED key (last-wins would let `access_mask` narrow-then-wide
  * widen the grant — the shared `acl/ace-duplicate-key` vector pins the refusal in
- * both cores), a numeric field whose value is not a `VALUE`, an empty `subject`, and
- * a missing required `type` / `subject` / `access_mask`.
+ * both cores), a numeric field whose value is not a `VALUE`, an empty `subject`, an
+ * `access_mask` with any bit outside READ|WRITE (`0x03`, RFC-0036 §3.1 — the shared
+ * `acl/ace-retired-bit` vector pins it), and a missing required `type` / `subject` /
+ * `access_mask`.
  *
  * What is deliberately NOT mirrored here: the terminus's policy-tier checks (DENY
  * acceptance, the flag-bit subset, per-field width caps) — those gate what a graph
@@ -616,9 +619,13 @@ pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
                     if access_mask.is_some() || val.type_code != type_code::VALUE {
                         return Err(BuildError::TypeMismatch);
                     }
-                    // The full canonical u32 (RFC-0026) — narrowing here would silently
-                    // drop the high rights bits a wider mask grants.
-                    access_mask = Some(val.payload_uint() as u32);
+                    // The full canonical u32 (RFC-0026), read without narrowing, and refused
+                    // whole when it sets a bit outside READ|WRITE (RFC-0036 §3.1).
+                    let mask = val.payload_uint();
+                    if mask & !0x03 != 0 {
+                        return Err(BuildError::TypeMismatch);
+                    }
+                    access_mask = Some(mask as u32);
                 }
                 "expires_ns" => {
                     if expires_ns.is_some() || val.type_code != type_code::VALUE {

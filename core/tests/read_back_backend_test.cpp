@@ -328,7 +328,7 @@ int main() {
             ace_t grant;
             grant.subject = subject_bytes("EVERYONE@");
             grant.access_mask = static_cast<std::uint32_t>(acl_right_t::READ) |
-                                static_cast<std::uint32_t>(acl_right_t::READ_ACL);
+                                static_cast<std::uint32_t>(acl_right_t::WRITE);
             aces.push_back(std::move(grant));
             (void)g.write(path_t("/s:acl"), tr::testing::make_value(tr::graph::encode_acl(aces)));
             return v;

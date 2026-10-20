@@ -82,7 +82,7 @@ namespace tr::mem {
  *       flipped `tr::view::segment_ptr_t::reset` from an out-of-line call into
  *       `graph_t::dispatch_edge_remote`, growing that pinned symbol by 32 B (318 → 350) for no
  *       reason connected to what the wrapper does. Bisected against the symbol ratchet; the same
- *       hazard class `graph_t`'s `payload_right_store_` comment records. Keep them out of line.
+ *       hazard class the symbol ratchet has caught before. Keep them out of line.
  *
  * @note Concurrency, alignment and lifetime are ENTIRELY the injected source's contract —
  *       this adapter adds no state beyond one pointer. ADR-0060 §2's requirement stands:

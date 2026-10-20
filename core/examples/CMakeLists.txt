@@ -275,7 +275,7 @@ endif()
 set(LIBTRACER_ACL_EXAMPLES
     acl_open_by_default   # enforcement is opt-in twice; the first ACE is what closes a vertex
     acl_subject_resolver  # ADR-0018 caller context -> subject token; the error arm DENIES
-    acl_right_bits        # access_mask is a bitfield; every gate tests exactly one bit
+    acl_right_bits        # two rights; `:` fields are gated by their vertex (RFC-0036)
     acl_everyone_reserved # the one wildcard subject, reserved against the resolver's output
     acl_inherit           # effective ACL = own ACEs + INHERIT-flagged ancestor ACEs
     acl_expiry            # expires_ns is evaluated against the caller's `now`, nothing cached

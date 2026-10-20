@@ -62,7 +62,7 @@ Because the choice is per-target configuration and the check runs on the data
 plane, it is made at compile time — a runtime branch on every access would be a
 cost paid by the target that does not need the feature.
 
-The **owner peer** is the provisioned root that bootstraps a device's ACL and delegates `WRITE_ACL` (admin) to orchestrators, which is what makes third-party binding possible.
+The **owner** is the node's local host, the empty caller context. It bootstraps the device's ACL and is the only party that writes `:acl` ([RFC-0036](../spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md) §3.3); it grants orchestrators WRITE where they create and bind and READ where they subscribe, which is what makes third-party binding possible. A remote peer that must manage ACLs asks an owner-app vertex ([reference/13](../reference/13-network-formation.md)).
 
 ## The wire side
 
@@ -126,6 +126,10 @@ peer legitimately sends more than the receiver understands; an ACL is not.
 ```
 
 ```{doxygenenum} tr::graph::acl_right_t
+:project: libtracer
+```
+
+```{doxygenvariable} tr::graph::kAceRights
 :project: libtracer
 ```
 

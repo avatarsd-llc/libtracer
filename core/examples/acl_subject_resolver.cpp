@@ -19,7 +19,7 @@
  *
  *  - The ERROR arm is a **deny**, not a fallback (#905). "I cannot name this caller" refuses at
  *    every gate. Its predecessor returned `std::optional`, whose `nullopt` meant FULLY TRUSTED —
- *    so an unresolvable caller used to be granted everything, `WRITE_ACL` included.
+ *    so an unresolvable caller used to be granted everything.
  *  - The EMPTY caller context never reaches the resolver at all. The graph settles it as the
  *    trusted local channel first, so the resolver is never asked to have an opinion about it.
  *  - It is a `{fn, ctx}` pair, not a `std::function` (#1049): whatever state the resolver needs

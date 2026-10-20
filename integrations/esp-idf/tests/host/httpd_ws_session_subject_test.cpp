@@ -322,8 +322,10 @@ bool reached(const std::vector<std::string>& got, std::string_view name) {
  *        evicted when that session leaves, and two sessions bound to the SAME subject never
  *        share that eviction.
  *
- * The owner wires two local edges on `/src` (slots 0 and 1). Two sessions sign in as
- * `role:operator`; each replaces one slot over the wire with an edge to its own target. The
+ * Two local edges on `/src` (slots 0 and 1) are seeded under the subject `role:operator`, so
+ * that subject holds them (RFC-0036 §3.4: an edge the owner wires is the owner's alone). Two
+ * sessions sign in as `role:operator`; each replaces one slot over the wire with an edge to its
+ * own target. The
  * replace is the field-write door's (RFC-0009 §D.1): it binds no delivery link, so what its
  * session's departure finds it by is the only thing under test.
  */
@@ -332,7 +334,7 @@ void slot_edge_leaves_with_its_session() {
     reset();
     graph_t g;
     fwd_router_t router(g);
-    (void)g.register_vertex(*path_t::parse("/src"), role_t::STORED_VALUE);
+    const auto src = g.register_vertex(*path_t::parse("/src"), role_t::STORED_VALUE);
     (void)g.register_vertex(*path_t::parse("/a"), role_t::HANDLER, record_as("a"));
     (void)g.register_vertex(*path_t::parse("/b"), role_t::HANDLER, record_as("b"));
     (void)g.register_vertex(*path_t::parse("/c"), role_t::HANDLER, record_as("c"));
@@ -340,13 +342,15 @@ void slot_edge_leaves_with_its_session() {
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&accept_as, nullptr);
     check(router.add_child("ws", *link), "the link is a routed child");
-    // The owner's two edges, both to `/c`: the slots the sessions replace (a replace needs an
-    // active slot), so a delivery to `/a` or `/b` can only come from a session's edge.
+    // Two edges, both to `/c`, held by `role:operator`: the slots the sessions replace (a
+    // replace needs an active slot the caller holds), so a delivery to `/a` or `/b` can only
+    // come from a session's edge.
     const std::vector<std::byte> to_c = subscriber_to("c");
-    check(
-        g.write(*path_t::parse("/src:subscribers[]"), *tr::view::over_bytes(to_c)).has_value() &&
-            g.write(*path_t::parse("/src:subscribers[]"), *tr::view::over_bytes(to_c)).has_value(),
-        "the owner wired slots 0 and 1");
+    const auto seed = [&] {
+        return g.write(src, path_t::parse("/src:subscribers[]")->field(),
+                       tr::view::rope_t{*tr::view::over_bytes(to_c)}, "role:operator");
+    };
+    check(seed().has_value() && seed().has_value(), "role:operator holds slots 0 and 1");
 
     constexpr int kFirst = 840;
     constexpr int kSecond = 841;

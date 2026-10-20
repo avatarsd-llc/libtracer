@@ -217,7 +217,7 @@ void test_read_is_pre_auth() {
     // :acl itself stays gated — the exemption is narrow and names one field.
     const auto acl_read = read_as(g, "/dev:acl", "mallory");
     check(!acl_read.has_value() && acl_read.error() == status_t::PERMISSION_DENIED,
-          ":acl stays READ_ACL-gated — the exemption applies to :identity ALONE");
+          ":acl stays READ-gated — the exemption applies to :identity ALONE");
 }
 
 /** @brief RFC-0011 §C.3: no keypair ⇒ SCHEMA_NOT_FOUND — the surface is absent, not empty. */

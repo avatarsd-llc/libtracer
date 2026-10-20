@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- `structured::acl_aces` refuses an ACE whose `access_mask` sets any bit outside `0x03` with `BuildError::TypeMismatch` (RFC-0036 §3.1, #2091). The rights registry is now two bits, READ (`0x01`) and WRITE (`0x02`); SUBSCRIBE, CREATE, DELETE, READ_ACL, WRITE_ACL and WRITE_OWNER are retired. The `Ace::access_mask` doc comment lists the two rights. A new shared vector, `acl/ace-retired-bit`, pins the refusal, and `acl/ace-duplicate-key` was repaired in place (its second mask is now `0x0003`). The builder `structured::acl` still encodes any mask it is given.
+
 ## [0.20.0] — 2026-10-20
 
 No Rust-binding changes. The Rust crate is a native implementation and does not link the C++ core. Released in lockstep with core 0.20.0. A packed sample block (RFC-0025 Amendment 5) reaches this binding as an ordinary opaque value.

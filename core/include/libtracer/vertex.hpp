@@ -299,19 +299,6 @@ struct write_ctx_t {
 };
 
 /**
- * @brief One row of a handler vertex's payload-type → required-ACL-right table
- *        (RFC-0014 Amendment 2).
- *
- * The selector is the written TLV's **type only** — never its content. That is what keeps the
- * declaration ahead of the gate: `graph_t::write_impl` reads one byte of the value's leading
- * link to pick the right, and no user code runs before the ACL check.
- */
-struct payload_right_t {
-    wire::type_t type; /**< @brief The written value's LEADING TLV type. */
-    acl_right_t right; /**< @brief The right the write gate demands for that type. */
-};
-
-/**
  * @brief What an ADMISSION filter decided about one write, BEFORE it becomes state.
  *
  * Three outcomes in one value, and no fourth:
@@ -360,8 +347,8 @@ using app_field_read_hook_t = hook_t<std::optional<value_ref_t>(std::string_view
  * vertex is registered (see `libtracer/hook.hpp` for the two idiomatic spellings and
  * @ref tr::graph::thunk). An empty hook is an uninstalled seam.
  *
- * The RFC-0014 Amendment 2 payload-right rows are not a seam and are not carried here: they
- * are the trailing `rights` argument of `graph_t::register_vertex` and its siblings.
+ * The RFC-0014 Amendment 3 `:schema` catalog is not a seam and is not carried here: it is the
+ * trailing `schema_catalog` argument of `graph_t::register_vertex_key`.
  */
 struct handlers_t {
     /**
@@ -522,7 +509,7 @@ struct handlers_t {
  * synthesized listing whatever the role. `on_app_field_write`
  * co-occurs with app fields, not the value seam, so it moved to @ref app_field_group_t.
  * The two ADMISSION filters live on the GRAPH, not here, for the reason
- * `graph_t::admissions_` states — the same reason the payload-right rows do.
+ * `graph_t::admissions_` states — the same reason the `:schema` catalog does.
  * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
  */
 struct value_handlers_t {
@@ -1207,21 +1194,22 @@ class vertex_t {
     void mark_enumeration_hidden() noexcept { set_flag(flag_t::ENUM_HIDDEN, true); }
 
     /**
-     * @brief Record that this vertex DECLARED a payload-right table (RFC-0014 Amendment 2).
+     * @brief Record that this vertex DECLARED a `:schema` catalog (RFC-0014 Amendment 3).
      *
-     * The rows themselves are the graph's — see `graph_t::declare_payload_rights` for why
-     * they are not here. This bit is the whole of the per-vertex cost, and it is why a vertex
-     * that declares nothing pays not one byte and not one dereference for the feature: the
-     * write gate reads this already-hot flags word and stops.
+     * The catalog itself is the graph's — see `graph_t::declare_schema_catalog` for why it is
+     * not here. This bit is the whole of the per-vertex cost, and it is why a vertex that
+     * declares nothing pays not one byte and not one dereference for the feature: a `:schema`
+     * read tests this already-hot flags word and stops.
      * Set by the graph under the map lock at registration; cleared by
-     * @ref revert_to_placeholder, so a retired vertex's rows can never gate its successor.
+     * @ref revert_to_placeholder, so a retired vertex's catalog is never served for its
+     * successor.
      */
-    void mark_payload_rights() noexcept { set_flag(flag_t::PAYLOAD_RIGHTS, true); }
+    void mark_schema_catalog() noexcept { set_flag(flag_t::SCHEMA_CATALOG, true); }
 
-    /** @brief True iff this vertex declared a payload-right table (RFC-0014 Amendment 2) —
-     *         the write gate's one-load precondition for consulting the graph's rows. */
-    [[nodiscard]] bool has_payload_rights() const noexcept {
-        return test_flag(flag_t::PAYLOAD_RIGHTS, std::memory_order_relaxed);
+    /** @brief True iff this vertex declared a `:schema` catalog (RFC-0014 Amendment 3) — the
+     *         one-load precondition for consulting the graph's catalog nodes. */
+    [[nodiscard]] bool has_schema_catalog() const noexcept {
+        return test_flag(flag_t::SCHEMA_CATALOG, std::memory_order_relaxed);
     }
 
     /**
@@ -1240,7 +1228,7 @@ class vertex_t {
      * @brief True iff this vertex installed an admission filter (@ref handlers_t::on_admit) —
      *        the store path's one-load precondition for consulting the graph's filter list.
      *
-     * The same shape, and the same argument, as `has_payload_rights`: a vertex that installed
+     * The same shape, and the same argument, as `has_schema_catalog`: a vertex that installed
      * no filter pays one relaxed test of an already-hot word and no dereference, so the seam
      * costs the plain leaf write nothing — and, the point of the placement, it costs the
      * SEAM-BEARING vertices nothing either.
@@ -2260,7 +2248,7 @@ class vertex_t {
      * @brief Suspend or resume the edge in slot @p idx IN PLACE (#1533).
      *
      * The slot keeps everything its admission decided — index, target, minted binding, cold
-     * half, the SUBSCRIBE gate's verdict — and only its `suspended` flag and its published
+     * half, the subscribe (READ) gate's verdict — and only its `suspended` flag and its published
      * entry's liveness bit move. Nothing is republished and nothing is allocated, either way:
      * the suspended slot keeps its entry, clear, and the copy loop skips it. Every snapshot
      * taken after this returns sees the new state; a snapshot already taken still delivers
@@ -2563,6 +2551,25 @@ class vertex_t {
         return std::nullopt;
     }
 
+    /**
+     * @brief Copy the caller context active slot @p idx was admitted under — the context its
+     *        HOLDER is judged by (RFC-0036 §3.4) — into @p out. @p out is left empty, which
+     *        is the owner's, for an edge the owner made, for a cleared slot (nobody holds it,
+     *        and a concurrent append may reuse it) and for a context @p out's source refused,
+     *        so each fails closed.
+     * @retval false No slot @p idx exists, so there is nothing to hold.
+     */
+    [[nodiscard]] bool edge_holder(std::size_t idx, tr::mem::string_t& out) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const edge_block_t* b = edges_locked();
+        if (b == nullptr || idx >= b->slots.size()) return false;
+        if (b->slots[idx].active) {
+            const remote_ptr_t& r = entry_of(*b, idx).remote;
+            if (r != nullptr && !out.assign(r->caller.view())) out.clear();
+        }
+        return true;
+    }
+
     /** @brief Every active slot's stored SUBSCRIBER view, in slot order (the
      *         `:subscribers[]` array read) — each a refcount clone. */
     [[nodiscard]] std::vector<view::view_t> edge_sources() {
@@ -2596,10 +2603,10 @@ class vertex_t {
      * @brief Take back everything a registration DECLARES, to an unregistered placeholder's
      *        default: the policy members (retention by role with no `RETAIN_NONE`, depth 1, no
      *        ring so no ring source and best-effort, the default share threshold, no
-     *        app-field group) and the payload-right and admission flags.
+     *        app-field group) and the schema-catalog and admission flags.
      *
-     * The flags belong to the occupant, not to the address (RFC-0014 Amendment 2): the
-     * graph's rows and filter nodes for this vertex stay parked and unreachable while the bits
+     * The flags belong to the occupant, not to the address (RFC-0014 Amendment 3): the
+     * graph's catalog and filter nodes for this vertex stay parked and unreachable while the bits
      * are clear, and a re-registration that declares again prepends its own, newer node.
      *
      * Retirement calls it, and so does a registration refused after its declarations landed on
@@ -2609,7 +2616,7 @@ class vertex_t {
      */
     void clear_declarations() noexcept {
         set_flag(flag_t::RETAIN_NONE, false);
-        set_flag(flag_t::PAYLOAD_RIGHTS, false);
+        set_flag(flag_t::SCHEMA_CATALOG, false);
         set_flag(flag_t::ADMISSION, false);
         set_flag(flag_t::CREATION_HOOK, false);
         vertex_ext_t* const e = ext_.load(std::memory_order_acquire);
@@ -2684,7 +2691,7 @@ class vertex_t {
         // next registration at this key is a different vertex kind and must be listed unless
         // it asks not to be (RFC-0014 §3 / S4).
         set_flag(flag_t::ENUM_HIDDEN, false);
-        // The same argument for everything the occupant declared: its payload rights, its
+        // The same argument for everything the occupant declared: its `:schema` catalog, its
         // admission filters and its policy (RFC-0028 §5.4 retention, the ring, the threshold,
         // the app fields). The next occupant starts from its own role's defaults.
         clear_declarations();
@@ -3321,11 +3328,11 @@ class vertex_t {
         REGISTERED_CHILD = 1U << 1, /**< @brief At least one DIRECT child is registered (#652). */
         ENUM_HIDDEN = 1U << 2,      /**< @brief Registered, addressable, but NOT a `:children[]`
                                      *          member (RFC-0014 §3, S4). */
-        PAYLOAD_RIGHTS = 1U << 3,   /**< @brief This vertex DECLARED a payload-type →
-                                     *          required-ACL-right table (RFC-0014 Am. 2). The
-                                     *          rows live on the graph, not here; this bit is
-                                     *          what keeps the write gate from looking for them
-                                     *          on the vertices that declared none. */
+        SCHEMA_CATALOG = 1U << 3,   /**< @brief This vertex DECLARED a `:schema` catalog
+                                     *          (RFC-0014 Am. 3). The catalog lives on the
+                                     *          graph, not here; this bit is what keeps a
+                                     *          `:schema` read from looking for it on the
+                                     *          vertices that declared none. */
         ADMISSION = 1U << 4,        /**< @brief This vertex installed an `on_admit` filter. The
                                      *          seam lives in the value-seam block; this bit is
                                      *          what keeps the store path from loading that

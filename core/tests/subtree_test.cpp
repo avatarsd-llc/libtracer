@@ -12,7 +12,7 @@
  * never walks ancestors (asserted via graph_t::ancestor_walks()). A POINT
  * payload written to V decomposes: each value-carrying node lands at the
  * corresponding descendant vertex as a refcount SUBVIEW of the written frame
- * (zero copy), creating missing vertices mkdir-p style (CREATE-gated), and each
+ * (zero copy), creating missing vertices mkdir-p style (WRITE-gated at the parent), and each
  * covered subscription point is notified once with its slice. A data write to a
  * nonexistent path creates it. The branch is NOT a transaction: admission
  * (ACL/creation) is all-or-nothing, application is per-leaf (each leaf a
@@ -332,7 +332,7 @@ void test_write_creates() {
 }
 
 void test_write_creates_acl_gate() {
-    std::printf("creation CREATE-ACL gate at the parent (denied => PERMISSION_DENIED):\n");
+    std::printf("creation WRITE-ACL gate at the parent (denied => PERMISSION_DENIED):\n");
     graph_t g;
     const vertex_handle_t parent = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     if (!tr::testing::allow_creation(g, parent)) return;  // no hook slot: every miss refuses
@@ -347,34 +347,38 @@ void test_write_creates_acl_gate() {
             nullptr};
         g.set_hooks(hooks);
     }
-
-    // /p grants WRITE (with INHERIT) but NOT CREATE — creating below /p is denied.
-    // Built via the typed ADR-0050 surface (encode_acl) — no hand-rolled ACE bytes.
     std::vector<std::byte> everyone;
     for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
-    const std::vector<tr::graph::ace_t> aces{
-        {.flags = tr::graph::kAceInherit,
-         .subject = everyone,
-         .access_mask = static_cast<std::uint32_t>(acl_right_t::WRITE)}};
-    const std::vector<std::byte> acl = tr::graph::encode_acl(aces);
-    check(g.write(path_t("/p:acl"), make_value(acl)).has_value(),
-          "install a WRITE-only (no CREATE) ACL on /p");
+    // Built via the typed ADR-0050 surface (encode_acl) — no hand-rolled ACE bytes.
+    const auto grant = [&](acl_right_t right) {
+        const std::vector<tr::graph::ace_t> aces{
+            {.flags = tr::graph::kAceInherit,
+             .subject = everyone,
+             .access_mask = static_cast<std::uint32_t>(right)}};
+        return g.write(path_t("/p:acl"), make_value(tr::graph::encode_acl(aces))).has_value();
+    };
 
+    // /p grants READ (with INHERIT) but not WRITE — creating below /p is denied.
+    check(grant(acl_right_t::READ), "install a READ-only ACL on /p");
     // The creation door, under an ATTRIBUTED caller — the empty context is the local owner's
     // and is trusted by convention, so the gate is only meaningful for a named one. The hook
-    // never runs: the parent's CREATE right is checked first (RFC-0030 §7.2 step 1).
+    // never runs: the parent's WRITE right is checked first (RFC-0030 §7.2 step 1, RFC-0036
+    // §3.2: creating is a write to the parent).
     const path_t child{"/p/child"};
     const tr::view::rope_t payload = make_value({0x01});
-    const auto denied =
-        g.find_or_create(child.key(), "peer", [&]() -> const tr::view::rope_t& { return payload; });
+    const auto create = [&] {
+        return g.find_or_create(child.key(), "peer",
+                                [&]() -> const tr::view::rope_t& { return payload; });
+    };
+    const auto denied = create();
     check(!denied.has_value() && denied.error() == status_t::PERMISSION_DENIED,
-          "creation under /p without the CREATE right => PERMISSION_DENIED");
+          "creation under /p without the WRITE right => PERMISSION_DENIED");
     check(!g.find(child.key()).has_value(), "denied create made no vertex");
 
-    // Writing to the existing /p itself is still allowed (WRITE granted).
-    const vertex_handle_t p = *g.find(path_t{"/p"}.key());
-    check(g.write(p, make_value({0x01, 0, 1, 0, 9}), "peer").has_value(),
-          "plain write to /p still allowed by the WRITE grant");
+    // WRITE on /p is what creation needs (RFC-0036 §12: CREATE is retired into WRITE).
+    check(grant(acl_right_t::WRITE), "install a WRITE ACL on /p");
+    check(create().has_value(), "creation under /p with the WRITE right succeeds");
+    check(g.find(child.key()).has_value(), "and the child exists");
 }
 
 void test_branch_write_acl_admission() {
@@ -416,7 +420,7 @@ void test_branch_write_acl_admission() {
  * Decomposition below an already-resolved, already-WRITE-gated `dst` creates a missing landing
  * vertex only through its parent's creation hook (RFC-0030 §7), whose registration goes through
  * the same door as any other. They were governed
- * (each passes CREATE/WRITE) but uncounted: nothing charged them, so "write more, write wider"
+ * (each passes WRITE) but uncounted: nothing charged them, so "write more, write wider"
  * grew the node's vertex population without a bound. With a ceiling in force the creation
  * answers BACKPRESSURE and the refusal is tallied.
  */

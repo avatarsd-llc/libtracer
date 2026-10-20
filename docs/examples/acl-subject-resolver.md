@@ -20,7 +20,7 @@ libtracer does **authorization**, and the transport does authentication.
 - **The ERROR arm is a deny, not a fallback.** "I cannot name this caller" — a stale link, a
   revoked peer, a lookup that failed — refuses at *every* gate. The predecessor of this signature
   returned `std::optional`, whose `nullopt` meant **fully trusted**, so an unresolvable caller
-  used to be granted everything, `WRITE_ACL` included
+  used to be granted everything
   ([#905](https://github.com/avatarsd-llc/libtracer/issues/905)). The example's last check is
   that specific disaster: the unnameable caller cannot rewrite the `:acl` to grant itself access.
 - **The empty caller context never reaches the resolver.** The example counts invocations through

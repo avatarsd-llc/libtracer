@@ -611,7 +611,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *
      * This is the JOIN: the terminus asks it once per locally-terminating operation, and a
      * non-empty answer replaces the inbound link's name as the ACL caller context, the
-     * subject the READ, WRITE and SUBSCRIBE gates evaluate and the `write_ctx_t::subject` a
+     * subject the READ and WRITE gates evaluate and the `write_ctx_t::subject` a
      * handler sees. An empty answer is the base contract's fallback, so a session that never
      * signed in, one admitted by @ref admission_verdict_t::ADMIT_AUTHENTICATED, and every
      * session of a link with no auth hook keep the link-name caller they had before.

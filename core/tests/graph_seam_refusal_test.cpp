@@ -50,7 +50,6 @@ using tr::graph::emission_mode_t;
 using tr::graph::graph_t;
 using tr::graph::handlers_t;
 using tr::graph::path_t;
-using tr::graph::payload_right_t;
 using tr::graph::result_t;
 using tr::graph::retention_t;
 using tr::graph::role_t;
@@ -207,11 +206,9 @@ bool inherits_nothing(graph_t& g, std::string_view p) {
 
 /** @brief Registration: a deep STREAM with every per-vertex declaration that allocates. */
 void test_register() {
-    std::printf("register_vertex — descent, index, extension, policy, rights, admission:\n");
-    const payload_right_t rows[] = {
-        payload_right_t{.type = tr::wire::type_t::VALUE, .right = tr::graph::acl_right_t::WRITE}};
+    std::printf("register_vertex — descent, index, extension, policy, catalog, admission:\n");
     const std::byte catalog[] = {std::byte{0x01}, std::byte{0x02}};
-    const auto op = [&rows, &catalog](graph_t& g, none_t&) {
+    const auto op = [&catalog](graph_t& g, none_t&) {
         handlers_t h;
         auto admit = [](const tr::graph::value_t&,
                         const tr::graph::write_ctx_t&) -> tr::graph::admission_t {
@@ -223,8 +220,8 @@ void test_register() {
         p.retention = retention_t::N;
         p.depth = 4;
         p.app_fields = {app_field_t{.name = "gain", .access = app_access_t::RW}};
-        return verdict(g.register_vertex_key(key_of("/a/b/c"), role_t::STREAM, h, std::move(p),
-                                             rows, catalog));
+        return verdict(
+            g.register_vertex_key(key_of("/a/b/c"), role_t::STREAM, h, std::move(p), catalog));
     };
     const auto untouched = [](graph_t& g, none_t&) { return inherits_nothing(g, "/a/b/c"); };
     report(drive<none_t>([](graph_t&) { return none_t{}; }, op, untouched), "register");
@@ -234,16 +231,15 @@ void test_register() {
  *         the policy landed leaves the placeholder with none of it (#1778 review). */
 void test_register_policy_reset() {
     std::printf("register_vertex — a refused registration leaves no policy on the placeholder:\n");
-    const payload_right_t rows[] = {
-        payload_right_t{.type = tr::wire::type_t::VALUE, .right = tr::graph::acl_right_t::WRITE}};
-    const auto op = [&rows](graph_t& g, none_t&) {
+    const std::byte catalog[] = {std::byte{0x01}};
+    const auto op = [&catalog](graph_t& g, none_t&) {
         vertex_policy_t p;
         p.retention = retention_t::NONE;
         p.share_hint = tr::graph::share_hint_t::SHARE;
         p.ring_reliable = true;
         p.app_fields = {app_field_t{.name = "gain", .access = app_access_t::RW}};
-        return verdict(g.register_vertex_key(key_of("/n/v"), role_t::STORED_VALUE, {}, std::move(p),
-                                             rows, {}));
+        return verdict(
+            g.register_vertex_key(key_of("/n/v"), role_t::STORED_VALUE, {}, std::move(p), catalog));
     };
     const auto untouched = [](graph_t& g, none_t&) { return inherits_nothing(g, "/n/v"); };
     report(drive<none_t>([](graph_t&) { return none_t{}; }, op, untouched), "register policy");

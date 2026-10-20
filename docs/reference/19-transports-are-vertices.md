@@ -245,10 +245,10 @@ tree, and one is not:
   could be driven to publish connections that no `dst` resolves and no removal can take down.
 - `SPEC` naming an existing name answers `PATH_IN_USE`, and the reserved `conn` name is
   refused in both directions, so the endpoint cannot be made to destroy itself.
-- Create and remove are two rights, not one: the endpoint declares RFC-0014 §5's mapping
-  through the Amendment 2 payload-right table — `SPEC` demands `CREATE`(0x08), `NAME` demands
-  `WRITE`(0x02) — so the one write gate demands a different right per payload type, and a peer
-  may hold either without the other (S2c, pinned by `core/tests/payload_right_table_test.cpp`).
+- Create and remove are one right: both a `SPEC` and a `NAME` demand `WRITE`(0x02) on the
+  endpoint. RFC-0036 retired RFC-0014 Amendment 2's payload-right table, which used to demand
+  `CREATE` for a `SPEC`; an application that wants create-but-not-remove refuses removals in
+  the endpoint's admission filter (pinned by `core/tests/creator_endpoint_test.cpp`).
 
 ### 6. No reconfiguration door
 
@@ -392,7 +392,7 @@ unchanged. And
 so the creator endpoint is the sole door and the role is positional in fact, not only on
 paper.
 
-**Implemented** too: the `CREATE`/`WRITE` gating split (S2c, RFC-0014 Amendment 2), the
+**Implemented** too: the endpoint's one `WRITE` gate (RFC-0036, replacing S2c's `CREATE`/`WRITE` split), the
 catalog envelope (S3, Amendment 3 — an empty `SETTINGS` for a module that declares none), and
 the S3 module-side half: a module-declared `conn:schema` catalog, served in that envelope and
 validated against at creation ([#1815](https://github.com/avatarsd-llc/libtracer/issues/1815)).
@@ -417,8 +417,9 @@ no standing hold.
 - **Treating the connection vertex as a config record.** Its value is liveness; its config is
   creation-time and const thereafter. There is no `:settings` edit that moves a peer's
   address, and a re-`SPEC` answers `PATH_IN_USE`.
-- **Granting `WRITE` on the endpoint and expecting it to create.** Since the `CREATE`/`WRITE`
-  split (S2c), `WRITE` admits only removal; creating needs `CREATE` on the endpoint.
+- **Granting `WRITE` on the endpoint and expecting it to admit only removal.** Since RFC-0036
+  `WRITE` admits both create and remove; withhold `WRITE` on the endpoint to stop a peer from
+  opening connections.
 - **Inferring structural-ness from path shape.** "Two segments under the root" claims every
   application `/zone/<child>` as well. Ask the object that minted the vertex.
 - **Adding a kind's key to `conn_settings_t` "just for now".** The record is shared by every
