@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-10-20
+
+No Rust-binding changes. The Rust crate is a native implementation and does not link the C++ core. Released in lockstep with core 0.20.0. A packed sample block (RFC-0025 Amendment 5) reaches this binding as an ordinary opaque value.
+
 ## [0.19.1] — 2026-10-11
 
 No Rust-binding changes. The Rust crate is a native implementation and does not link the C++ core. Released in lockstep with core 0.19.1.
