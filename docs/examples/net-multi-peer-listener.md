@@ -1,4 +1,4 @@
-# One listener, many slots — and why `p<slot>` is not an identity (transport plane)
+# One listener, many slots — and why a resolved endpoint is not an identity (transport plane)
 
 `tcp_transport_t`'s LISTEN constructor accepts one peer at a time — the board↔board shape. A
 node that fans out to browser tabs or to a fleet needs the other one: `tcp_server_transport_t`
@@ -11,10 +11,11 @@ that is where the two naming regimes part company.
 
 ## What to notice
 
-- **CAN names by IDENTITY, a slot server names by POSITION.** `n<node-id>` is derived from the
-  peer's own bus id, so the name, the table key and the endpoint are one thing no other peer can
-  inherit. `p<slot>` is a *position*: after that peer departs, a pointer resolved for it
-  addresses whatever session inherits the slot, and the endpoint's own liveness check is
+- **CAN names by IDENTITY, a slot server names by SLOT AND TENANCY.** `n<node-id>` is derived
+  from the peer's own bus id, so the name, the table key and the endpoint are one thing no other
+  peer can inherit. `p<slot>~<gen>` carries the slot's tenancy generation, so a reused slot gets a
+  fresh name and a stale name resolves nothing. The ENDPOINT is still the slot's: after that
+  peer departs, a pointer resolved for it addresses whatever session inherits the slot, and the endpoint's own liveness check is
   satisfied by that stranger. The pointer never dangles; it silently changes who it means
   ([#1153](https://github.com/avatarsd-llc/libtracer/issues/1153)).
 - **So: resolve per use.** `child_registry_t` resolves and sends in one expression, which is why
@@ -25,7 +26,7 @@ that is where the two naming regimes part company.
   once at construction (a request of `0` takes the liveness window's own ceiling), so the
   example reads back what the server *enforces* instead of assuming it got what it asked for.
 - **One object, two addressing surfaces.** `server.send(frame)` fans out to every open peer;
-  `facet.peer_link("p1")->send(frame)` reaches exactly one. The example checks the directed send
+  `facet.peer_link("p1~1")->send(frame)` reaches exactly one. The example checks the directed send
   arrived at p1 **and** that p0 and p2 got nothing.
 - **A name outside the live slot set resolves to `nullptr`.** Endpoints are not synthesized on
   demand, so a stale name cannot be sent to.

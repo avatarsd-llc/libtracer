@@ -330,6 +330,27 @@ namespace {
 egress_step_t step_of(const write_result_t& r) noexcept {
     return {r.moved, r.outcome == write_outcome_t::STALLED, r.outcome == write_outcome_t::FAILED};
 }
+
+/**
+ * @brief Write the session name of @p peer, `p<slot>~<gen>`, into @p out; empty when it
+ *        does not fit.
+ *
+ * The ONE spelling both the accept-side stamp and @ref slot_server_t::peer_name use, so the
+ * name a frame is tagged with and the name the slot holds cannot disagree. The tenancy
+ * generation is part of it: a reused slot gets a fresh name, so a route another node still
+ * holds for the previous session names nobody, and a delivery along it is refused.
+ */
+std::string_view format_session_name(peer_handle_t peer, std::span<char> out) noexcept {
+    if (out.size() < 2) return {};
+    char* const last = out.data() + out.size();
+    out[0] = 'p';
+    auto r = std::to_chars(out.data() + 1, last, peer.index);
+    if (r.ec != std::errc{} || r.ptr == last) return {};
+    *r.ptr = kTenancySeparator;
+    r = std::to_chars(r.ptr + 1, last, peer.generation);
+    if (r.ec != std::errc{}) return {};
+    return std::string_view(out.data(), static_cast<std::size_t>(r.ptr - out.data()));
+}
 }  // namespace
 
 egress_step_t stream_endpoint_t::write_gather(int fd, std::span<const ::iovec> vec,
@@ -519,21 +540,17 @@ void slot_server_t::enumerate_peers(const peer_visitor_t& visit) const {
 }
 
 std::string_view slot_server_t::peer_name(peer_handle_t peer, std::span<char> scratch) const {
-    // Positional by construction (ADR-0073 §2): the name a slot is stamped with at accept
-    // IS 'p' + its index, so the inverse is that same formatting and needs neither peers_m_
-    // nor the slot vector. That is what makes this callable per frame from the delivery
-    // callback at the cost the free string_view tag used to have.
-    if (!peer.valid() || scratch.size() < 2) return {};
-    scratch[0] = 'p';
-    const auto [end, ec] =
-        std::to_chars(scratch.data() + 1, scratch.data() + scratch.size(), peer.index);
-    if (ec != std::errc{}) return {};
-    return std::string_view(scratch.data(), static_cast<std::size_t>(end - scratch.data()));
+    // The name a slot is stamped with at accept IS `p<slot>~<gen>` of its handle, so the
+    // inverse is that same formatting and needs neither peers_m_ nor the slot vector. That
+    // is what makes this callable per frame from the delivery callback at the cost the free
+    // string_view tag used to have.
+    if (!peer.valid()) return {};
+    return format_session_name(peer, scratch);
 }
 
 std::string_view slot_server_t::peer_subject(peer_handle_t peer, std::span<char> scratch) const {
     // The SUBJECT and the peer NAME coincide for this kind, and deliberately so: the session
-    // token `p<slot>` is the only per-writer discriminator a stream server has until an
+    // token `p<slot>~<gen>` is the only per-writer discriminator a stream server has until an
     // authentication layer mints a real one (ADR-0045). What does NOT coincide is their
     // AVAILABILITY to the ROUTING PLANE — `peer_name` is an ADDRESSING answer the plane
     // reaches through the `bus_link_t` facet, which a FLAT server does not expose (and which
@@ -545,12 +562,12 @@ std::string_view slot_server_t::peer_subject(peer_handle_t peer, std::span<char>
 }
 
 /**
- * @brief Resolve `p<slot>` to that slot's directed endpoint — SLOT-scoped, not
- *        session-scoped (#1153).
+ * @brief Resolve `p<slot>~<gen>` to that slot's directed endpoint — the facade is
+ *        SLOT-scoped, not session-scoped (#1153).
  *
- * The returned facade is one object per slot for the link's life, and the name is a
- * pure function of the slot index (see accept_peer), so BOTH halves of a resolution
- * survive the session that produced it: a caller holding this pointer across the named
+ * The returned facade is one object per slot for the link's life. The NAME is
+ * session-scoped (it carries the tenancy generation, see accept_peer), so a fresh resolve
+ * never reaches the next session; but a caller holding the POINTER across the named
  * peer's departure sends into whichever session next claims the slot, and
  * `peer_endpoint_t::send`'s `open` check cannot catch it — that check is true for
  * whoever occupies the slot at send time, which is precisely the stranger. Hence the
@@ -565,9 +582,20 @@ std::string_view slot_server_t::peer_subject(peer_handle_t peer, std::span<char>
  * #1013's resolution is the precedent to point at, not a plan already decided.
  */
 transport_t* slot_server_t::peer_link(std::string_view peer) {
+    return open_endpoint(peer, [](std::string_view name) { return name; });
+}
+
+transport_t* slot_server_t::slot_link(std::string_view slot) {
+    return open_endpoint(slot, session_slot_of);
+}
+
+template <class Key>
+transport_t* slot_server_t::open_endpoint(std::string_view want, Key key) {
+    // The exact compare IS the tenancy check for peer_link: a name carrying a departed
+    // session's generation, or none at all, equals no open slot's name and is refused.
     const std::lock_guard lock(peers_m_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_)
-        if (s->open.load(std::memory_order_relaxed) && s->name_view() == peer)
+        if (s->open.load(std::memory_order_relaxed) && key(s->name_view()) == want)
             return s->peer_endpoint;
     return nullptr;
 }
@@ -688,18 +716,20 @@ void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
             slot = slots_.back().get();
             idx = slots_.size() - 1;
         }
-        // The routable NAME is the slot index — `p<slot>`, legal by construction and a
-        // pure function of the slot's position (ADR-0073 §2), so a reused slot gets the
-        // SAME name back (teardown_slot copied the old one out for the eviction seam).
-        slot->name[0] = 'p';
-        const auto named = std::to_chars(slot->name + 1, slot->name + kPeerNameChars - 1, idx);
-        *named.ptr = '\0';  // kPeerNameChars holds the widest index: never truncated
-        // Mint this tenancy's HANDLE (#1294) beside the name, under the same lock and from
-        // the same slot index. The generation never repeats and never lands on 0 (which is
-        // reserved for "no peer"), so a handle minted against the session that used to hold
-        // this slot can never be mistaken for its successor's.
+        // Mint this tenancy's HANDLE (#1294), under the lock and from the slot index. The
+        // generation never repeats and never lands on 0 (which is reserved for "no peer"), so
+        // a handle minted against the session that used to hold this slot can never be
+        // mistaken for its successor's.
         if (++slot->gen_seq == 0) slot->gen_seq = 1;
         slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen_seq};
+        // The routable NAME is the handle spelled out — `p<slot>~<gen>`, legal by
+        // construction (ADR-0073 §2). It carries the generation, so a reused slot gets a
+        // FRESH name: a route another node still holds for the previous session names
+        // nobody, its delivery is refused, and that refusal reaps the stale edge.
+        // kPeerNameChars holds the widest index and generation: never truncated.
+        const std::string_view named =
+            format_session_name(slot->handle, std::span<char>(slot->name, kPeerNameChars - 1));
+        slot->name[named.size()] = '\0';
     }
     // The bounded send (#838), armed here rather than in either derived on_accept. Every
     // egress write on a server is nonblocking (#2144), the WS 101 included; the bound stays

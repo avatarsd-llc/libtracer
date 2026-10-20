@@ -100,16 +100,15 @@ class bus_link_t {
      *        between the handle the inbound seam carries and the name the routing plane
      *        grows into `src` (#1294).
      *
-     * Every kind answers this as a PURE FUNCTION of the handle's index, because every
-     * kind's peer name already is one: `slot_server_t` names a peer `p<slot>` for the slot
-     * it landed in, and @ref can_transport_t names one `n<node>` for its bus node id. So the
-     * call takes no lock, allocates nothing, and is safe to make from the delivery callback
-     * on the transport's own receive thread — which is where the router makes it, once per
-     * inbound frame, exactly where the name used to arrive for free.
+     * Every kind answers this as a PURE FUNCTION of the handle, because every kind's peer
+     * name already is one: `slot_server_t` names a peer `p<slot>~<gen>` for the slot it
+     * landed in and the tenancy generation it was minted at, and @ref can_transport_t names one
+     * `n<node>` for its bus node id. So the call takes no lock, allocates nothing, and is safe to
+     * make from the delivery callback on the transport's own receive thread — which is where the
+     * router makes it, once per inbound frame, exactly where the name used to arrive for free.
      *
-     * Being positional, the answer is about the SLOT and not about the session that
-     * occupies it — the same distinction @ref peer_link documents. A caller that wants the
-     * SESSION's identity holds the handle, whose generation is what tells the two apart.
+     * The answer carries the handle's generation, so it names the SESSION and not merely the
+     * slot it occupies: a handle of a departed session formats a name no live peer holds.
      *
      * @param peer    The handle a delivery was tagged with.
      * @param scratch Caller-owned characters the impl MAY format into; at least
@@ -142,12 +141,27 @@ class bus_link_t {
      *  - IDENTITY-derived names are immune — @ref can_transport_t names a peer `n<node-id>`
      *    for its own bus node id, so the name, the table key and the endpoint are one
      *    identity that no other peer can inherit.
-     *  - POSITIONAL names are exposed — @ref slot_server_t names a peer `p<slot>` for the
-     *    slot index it landed in, and slots are recycled in place.
+     *  - POSITIONAL names carry their tenancy — @ref slot_server_t names a peer
+     *    `p<slot>~<gen>`, so a recycled slot answers a fresh name and a stale one resolves
+     *    nothing. The returned POINTER is still slot-scoped: resolve per use.
      *
      * @retval nullptr @p peer names no currently-known bus peer.
      */
     [[nodiscard]] virtual transport_t* peer_link(std::string_view peer) = 0;
+
+    /**
+     * @brief The endpoint of whichever session currently holds @p slot — a session name's
+     *        SLOT part (`%net::session_slot_of`), with no tenancy generation.
+     *
+     * What a session ANCHOR egresses through: the anchor is keyed by slot (so their count
+     * is the slot count, ADR-0044 amendment) and its own generation has already refused a
+     * departed session at the deref, so this answers only "who is in the slot now". A NAME
+     * hop never comes here; it goes through @ref peer_link, which refuses a stale or
+     * generation-less name. The default is @ref peer_link itself, right for every kind
+     * whose names carry no generation (`n<node>`).
+     * @retval nullptr no live session holds @p slot.
+     */
+    [[nodiscard]] virtual transport_t* slot_link(std::string_view slot) { return peer_link(slot); }
 
     /**
      * @brief Close one peer's connection by NAME, freeing its slot for reuse.
@@ -259,7 +273,7 @@ class bus_link_t {
      * a saturating generation. Must be set before frames flow, like the receivers.
      *
      * **An arrival is also the RE-TENANT edge for the peer's NAME (#1609).** A transport that
-     * recycles names (a slot-positional `p<slot>`) fires it once per new session, at the
+     * reuses slots (a slot-positional `p<slot>~<gen>`) fires it once per new session, at the
      * claim, and BEFORE delivering any frame of that session. The router's notifier first
      * reclaims everything still filed under the name — subscriber edges, label state,
      * pending awaits, the anchor's generation — as the departure notifier would have, so a
@@ -905,7 +919,7 @@ class transport_t {
      * ACL caller context (ADR-0018's pluggable subject token) and the `graph::write_ctx_t`
      * a HANDLER sees. It is deliberately NOT `bus_link_t::peer_name`: that is an ADDRESSING
      * answer gated on the bus facet, and this must answer on a FLAT link too. A kind whose
-     * two answers coincide — the stream servers, whose subject is the same `p<slot>` session
+     * two answers coincide — the stream servers, whose subject is the same `p<slot>~<gen>` session
      * token their peer name is — implements both from one place.
      *
      * @warning The token attests to NOTHING about the far end on its own: it is minted by

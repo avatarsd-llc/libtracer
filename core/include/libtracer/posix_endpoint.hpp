@@ -746,7 +746,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
  * one owns a VECTOR of them. Everything the two servers used to restate
  * line-for-line lives here exactly once — the slot struct and its threading
  * rule, the bind/listen/getsockname bring-up, the free-slot-or-grow accept
- * with its @p max_peers refusal and `p<slot>` naming, the poll loop, the
+ * with its @p max_peers refusal and `p<slot>~<gen>` naming, the poll loop, the
  * two-phase teardown, the peer query trio, and the broadcast's
  * pristine-iovec-copy-per-peer fan-out. Only the FRAMING and the HANDSHAKE
  * differ between the two servers, and those are the variance points below
@@ -856,16 +856,16 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      */
     [[nodiscard]] bool peer_named() const noexcept { return bus_mode(); }
 
-    /** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */
+    /** @brief Visit the currently-OPEN peers' names, `p<slot>~<gen>` (#426). */
     void enumerate_peers(const peer_visitor_t& visit) const;
 
     /**
-     * @brief Resolve an inbound handle back to its peer name, `p<slot>` (#1294).
+     * @brief Resolve an inbound handle back to its peer name, `p<slot>~<gen>` (#1294).
      *
-     * A pure function of the handle's index, exactly as the accept-side stamp is
-     * (ADR-0073 §2) — formatted into @p scratch with no lock and no slot lookup, so the
-     * router pays nothing for asking on the delivery callback that a name string used to
-     * arrive on.
+     * A pure function of the handle — its index and its tenancy generation — exactly as
+     * the accept-side stamp is (ADR-0073 §2), formatted into @p scratch with no lock and no
+     * slot lookup, so the router pays nothing for asking on the delivery callback that a
+     * name string used to arrive on.
      */
     [[nodiscard]] std::string_view peer_name(peer_handle_t peer, std::span<char> scratch) const;
 
@@ -875,7 +875,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *
      * A peer-named server tags every frame through the bus seam and never needs this. A FLAT
      * one cannot: it has exactly one routing identity for every peer it carries, and the
-     * `p<slot>` tag it computes is thrown away at the delivery fork. This is where that tag
+     * `p<slot>~<gen>` tag it computes is thrown away at the delivery fork. This is where that tag
      * survives — stamped on the poll thread immediately before the flat delivery, read
      * back, on that same thread, by the router's terminus, and cleared once the frame has
      * been handed up. Outside a delivery it answers the default (invalid) handle (#1915).
@@ -889,7 +889,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     [[nodiscard]] peer_handle_t inbound_peer() const noexcept override { return delivering_; }
 
     /**
-     * @brief The SUBJECT token of @p peer — `p<slot>`, this kind's session identity.
+     * @brief The SUBJECT token of @p peer — `p<slot>~<gen>`, this kind's session identity.
      *
      * The same string @ref peer_name answers with, reachable without the `bus_link_t` facet;
      * see the implementation's note on why the two coincide in value and not in availability.
@@ -906,6 +906,16 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * @retval nullptr @p peer names no currently-open connection.
      */
     [[nodiscard]] transport_t* peer_link(std::string_view peer);
+
+    /**
+     * @brief The endpoint of whichever session currently holds slot @p slot (`p<slot>`, no
+     *        generation) — the session anchor's egress (ADR-0044 amendment).
+     *
+     * The anchor is keyed by slot and its own generation says which tenancy it stands for,
+     * so the caller has already refused a departed session; this only finds the live one.
+     * @retval nullptr no open session holds @p slot.
+     */
+    [[nodiscard]] transport_t* slot_link(std::string_view slot);
 
     /**
      * @brief Close the open peer named @p peer, freeing its slot for reuse.
@@ -939,8 +949,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     }
 
    protected:
-    /** @brief Bytes a session's `p<slot>` name holds, terminator included: `p` and the
-     *         widest slot index. */
+    /** @brief Bytes a session's `p<slot>~<gen>` name holds, terminator included: `p`, the
+     *         widest slot index, `~` and the widest generation. */
     static constexpr std::size_t kPeerNameChars = 24;
 
     /**
@@ -970,9 +980,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
         /** @brief The peer has begun a frame or a handshake and not finished it (#2198):
          *         @ref mid_frame as of the poll thread's last pass over it. */
         std::atomic<bool> rx_owed{false};
-        /** @brief The peer's routable NAME, `p<slot>` — a pure function of the slot index
-         *         (ADR-0073 §2, #426): stamped at accept, moved out by teardown (the
-         *         eviction seam), so a reused slot gets the SAME name back. A legal path
+        /** @brief The peer's routable NAME, `p<slot>~<gen>` — the slot index and this
+         *         tenancy's generation (ADR-0073 §2, #426): stamped at accept, moved out by
+         *         teardown (the eviction seam), so a reused slot gets a FRESH name and a
+         *         route held for the previous session names nobody. A legal path
          *         segment, unlike the old `<ip>:<port>`. It identifies a SESSION, not a
          *         device — a reconnecting peer may land in a different slot; device-stable
          *         identity is a named link (RFC-0014). */
@@ -1284,6 +1295,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     peer_handle_t delivering_{};
 
    private:
+    /** @brief The endpoint of the first OPEN slot whose `key(name)` equals @p want — the one
+     *         scan @ref peer_link (whole name) and @ref slot_link (slot part) share. */
+    template <class Key>
+    [[nodiscard]] transport_t* open_endpoint(std::string_view want, Key key);
     /**
      * @brief Admit one inbound connection into a free (or newly grown) slot.
      *
@@ -1357,8 +1372,8 @@ class flat_slot_server_t : public slot_server_t {
  *        notifier pairs (#1438).
  *
  * Everything a bus facet needs to ANSWER already lives one tier up, because every one of
- * those questions is a question about the slot table: `p<slot>` is a pure function of the
- * slot index either way. What lives HERE is the facet itself — the identity
+ * those questions is a question about the slot table: `p<slot>~<gen>` is a pure function of
+ * the slot's handle either way. What lives HERE is the facet itself — the identity
  * `transport_t::bus()` hands out, the peer-named receiver slot, and the arrival/departure
  * notifiers — so the four `bus_link_t` pure virtuals below are one-line forwards to the
  * implementations they always had, not a second copy of them.
@@ -1408,6 +1423,11 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
     /** @brief The facet's spelling of @ref slot_server_t::peer_link. */
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override {
         return slot_server_t::peer_link(peer);
+    }
+
+    /** @brief The facet's spelling of @ref slot_server_t::slot_link. */
+    [[nodiscard]] transport_t* slot_link(std::string_view slot) override {
+        return slot_server_t::slot_link(slot);
     }
 
     /** @brief The facet's spelling of @ref slot_server_t::close_peer. */

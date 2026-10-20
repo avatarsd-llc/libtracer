@@ -176,7 +176,8 @@ void run() {
     auto s1 = std::make_unique<client_t>(port);
     check(s1->ok(), "S1 dialled the listener");
     check(wait_until([&] { return peers_of(server).size() == 1; }), "the listener shows one peer");
-    check(peers_of(server) == std::vector<std::string>{"p0"}, "S1 was named p0 (first-free slot)");
+    check(peers_of(server) == std::vector<std::string>{"p0~1"},
+          "S1 was named p0~1 (first-free slot, first tenancy)");
     check(wait_until([&] { return node.find_session_anchor(id0).has_value(); }),
           "S1's arrival registered its identity anchor");
 
@@ -239,8 +240,8 @@ void run() {
     auto s2 = std::make_unique<client_t>(port);
     check(s2->ok(), "S2 dialled the listener");
     check(wait_until([&] { return peers_of(server).size() == 1; }), "the listener shows one peer");
-    check(peers_of(server) == std::vector<std::string>{"p0"},
-          "S2 landed in the RECYCLED slot and got the SAME name p0");
+    check(peers_of(server) == std::vector<std::string>{"p0~2"},
+          "S2 landed in the RECYCLED slot under a FRESH name p0~2 — the same anchor key p0");
     check(wait_until([&] { return node.find_session_anchor(id0).has_value(); }),
           "S2's arrival revived the anchor");
     const vertex_handle_t a2 = *node.find_session_anchor(id0);

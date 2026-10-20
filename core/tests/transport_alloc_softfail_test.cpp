@@ -391,7 +391,7 @@ bool raw_handshake(int cfd) {
  * opens the session (its egress, then `open = true`). A broadcast in that instant skips the
  * slot, so a `send` here could be lost (#2144). This barrier asserts the predicate DIRECTLY:
  * `enumerate_peers` visits exactly the open, named slots, which is the same predicate `send`
- * broadcasts over. (The peer's routable `p<slot>` name is stamped at accept regardless of the
+ * broadcasts over. (The peer's routable `p<slot>~<gen>` name is stamped at accept regardless of the
  * server's `peer_named` setting, so this works on a default server too.)
  */
 [[nodiscard]] bool wait_for_peers(const tr::net::ws_server_transport_t& server, std::size_t want,
@@ -560,7 +560,7 @@ void test_ws_peer_endpoint_send_iov_overflow_drops() {
 
     tr::net::transport_t* peer = nullptr;
     for (int i = 0; i < 200 && peer == nullptr; ++i) {
-        peer = server.peer_link("p0");
+        peer = server.peer_link("p0~1");
         if (peer == nullptr) std::this_thread::sleep_for(10ms);
     }
     check(peer != nullptr, "the peer resolved by name");
@@ -1056,7 +1056,7 @@ void test_ws_server_iov_uses_injected_egress_source() {
     // The directed facade draws from its OWNER's store — the same one injection.
     tr::net::transport_t* peer = nullptr;
     for (int i = 0; i < 200 && peer == nullptr; ++i) {
-        peer = server.peer_link("p0");
+        peer = server.peer_link("p0~1");
         if (peer == nullptr) std::this_thread::sleep_for(10ms);
     }
     check(peer != nullptr, "the peer resolved by name");

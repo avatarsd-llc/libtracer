@@ -417,7 +417,7 @@ void test_an_exhausted_class_drops_and_counts() {
     check(peer != nullptr, "the peer resolved to a directed endpoint");
     if (peer == nullptr) return;
     claim(kFd + 1);
-    tr::net::transport_t* const other = link->peer_link("p1");
+    tr::net::transport_t* const other = link->peer_link("p1~1");
     check(other != nullptr, "the second peer resolved to a directed endpoint");
     if (other == nullptr) return;
     drain();

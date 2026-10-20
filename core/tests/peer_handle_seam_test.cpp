@@ -10,7 +10,7 @@
  *  1. The handle is an 8-byte POD with a reserved-zero generation, so "no peer" is
  *     expressible and every handle the seam hands down is valid — no null arm (ruling 3).
  *  2. `bus_link_t::peer_name` is the ONE bridge back to the routing plane's name, and it is
- *     a pure function of the handle's index — the same `p<slot>` the accept edge stamps, and
+ *     a pure function of the handle — the same `p<slot>~<gen>` the accept edge stamps, and
  *     the same string `enumerate_peers` lists, resolved with no lock.
  *  3. A frame's handle round-trips: the tag delivery carries is the tag the arrival notifier
  *     minted, and it resolves to the name the peer is addressable under.
@@ -159,8 +159,8 @@ void test_seam_over_slot_server() {
     bus->set_peer_receiver(sink);
 
     // --- property 2: resolution is a pure function of the index, live peer or not ---
-    check(name_of(*bus, peer_handle_t{3, 7}) == "p3",
-          "peer_name is the accept edge's own p<slot> formatting");
+    check(name_of(*bus, peer_handle_t{3, 7}) == "p3~7",
+          "peer_name is the accept edge's own p<slot>~<gen> formatting");
     check(name_of(*bus, peer_handle_t{}).empty(), "an invalid handle names no peer");
 
     const std::uint16_t port = server.local_port();
@@ -212,8 +212,10 @@ void test_seam_over_slot_server() {
     check(sink.wait_count(2, 2000ms), "the successor's frame reached the sink");
     const peer_handle_t second_handle = sink.at(1);
     check(second_handle.valid(), "the successor's handle is valid too");
-    check(name_of(*bus, second_handle) == first_name,
-          "it inherits the slot's NAME — names are positional and always were");
+    check(name_of(*bus, second_handle) != first_name &&
+              tr::net::session_slot_of(name_of(*bus, second_handle)) ==
+                  tr::net::session_slot_of(first_name),
+          "it takes the slot's NAME with a fresh generation — the same slot, a new session");
     check(!(second_handle == first_handle),
           "but NOT the departed session's HANDLE — the generation moved (#1294 / #1013)");
     check(second_handle.index == first_handle.index,

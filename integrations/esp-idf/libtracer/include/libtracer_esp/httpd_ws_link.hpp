@@ -595,10 +595,14 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         the peer's slot, pointer-valid for this link's lifetime). */
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
+    /** @brief Resolve whichever live session holds slot @p slot (`p<slot>`, no generation)
+     *         — the session anchor's egress; see `bus_link_t::slot_link`. */
+    [[nodiscard]] transport_t* slot_link(std::string_view slot) override;
+
     /**
-     * @brief Resolve an inbound handle back to its `p<slot>` peer name (#1294).
+     * @brief Resolve an inbound handle back to its `p<slot>~<gen>` peer name (#1294).
      *
-     * A pure function of the handle's index — the same formatting the claim edge stamps
+     * A pure function of the handle — the same formatting the claim edge stamps
      * @ref session_t::name with (ADR-0073 §2) — so it takes no `peers_m_` and can be called
      * from the delivery callback, on the httpd task, where the name used to arrive for free.
      */
@@ -1416,13 +1420,14 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     struct refusal_req_t;     // a refusal-after-upgrade work item (defined in the .cpp)
     class peer_resolution_t;  // one RESOLUTION's directed endpoint (defined in the .cpp)
 
-    /** @brief Bytes a peer's routable name needs, NUL included: `p`, up to the 20 digits of a
-     *         64-bit slot index, and the terminator. */
-    static constexpr std::size_t kSlotNameChars = 22;
+    /** @brief Bytes a peer's routable name needs, NUL included: `p`, up to the 10 digits of
+     *         a 32-bit slot index, `~`, up to the 10 digits of its generation, and the
+     *         terminator. */
+    static constexpr std::size_t kSlotNameChars = 24;
     /**
-     * @brief A peer's routable name, `p<slot>` (ADR-0073 §2), held in place.
+     * @brief A peer's routable name, `p<slot>~<gen>` (ADR-0073 §2), held in place.
      *
-     * A pure function of the slot index with a fixed upper length, so it is an array rather
+     * A pure function of the slot's handle with a fixed upper length, so it is an array rather
      * than an owned string: a claim, a departure and every log line that names a peer cost
      * no allocation (#1880).
      */
@@ -1448,6 +1453,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * outlive its session.
      */
     [[nodiscard]] peer_resolution_t* acquire_resolution(session_t* slot);
+    /** @brief The resolution of the first live slot whose `key(name)` equals @p want — the one
+     *         scan @ref peer_link (whole name) and @ref slot_link (slot part) share. */
+    template <class Key>
+    [[nodiscard]] transport_t* open_resolution(std::string_view want, Key key);
     /**
      * @brief Retire @p slot's resolution handle, if it holds one — the session it named
      *        is over (@ref peers_m_ held).

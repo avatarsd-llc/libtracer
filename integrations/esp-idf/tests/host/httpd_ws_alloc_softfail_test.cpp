@@ -165,12 +165,12 @@ void test_resolution_refusal_is_no_such_peer() {
     check(claim(830) == ESP_OK, "the peer is admitted");
 
     state.refusing = true;
-    tr::net::transport_t* const refused = link->peer_link("p0");
+    tr::net::transport_t* const refused = link->peer_link("p0~1");
     state.refusing = false;
     check(refused == nullptr, "no handle is handed out when none can be drawn");
     check(open_peers(*link) == 1, "and the peer itself is untouched");
 
-    tr::net::transport_t* const to = link->peer_link("p0");
+    tr::net::transport_t* const to = link->peer_link("p0~1");
     check(to != nullptr, "the next resolve draws a handle");
     to->send(std::span<const std::byte>(kBody));
     drain();
@@ -183,7 +183,7 @@ void test_tx_payload_refusal_is_an_enqueue_drop() {
     gated_source_t io;
     auto link = make_link(nullptr, &io, /*rx_scratch=*/0, /*tx_inline=*/32);
     check(claim(840) == ESP_OK, "the peer is admitted");
-    tr::net::transport_t* const to = link->peer_link("p0");
+    tr::net::transport_t* const to = link->peer_link("p0~1");
     check(to != nullptr, "the directed endpoint resolved");
     const std::vector<std::byte> big(256, std::byte{0x77});
     const auto before = link->stats();
@@ -215,7 +215,7 @@ void test_the_stores_balance_at_teardown() {
         // Grow every connection-state site once: a session, a resolution handle and a
         // reassembly buffer left mid-message.
         check(claim(850) == ESP_OK, "a peer is admitted");
-        check(link->peer_link("p0") != nullptr, "and resolved");
+        check(link->peer_link("p0~1") != nullptr, "and resolved");
         check(fake_httpd::instance().deliver_frame(850, kBody, /*final=*/false) == ESP_OK,
               "and left mid-reassembly");
     }

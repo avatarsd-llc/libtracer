@@ -16,7 +16,7 @@ no vertex is ever created for a peer).
   to notice it leave. No join protocol, no coordinator, no departure event.
 - **Names are DERIVED, not assigned.** `n<node-id>` comes straight out of the structured CAN ID,
   so it is collision-safe by construction and a rejoining node reappears under the name it had.
-  Contrast the stream servers, which name peers `p<slot>` **positionally** — see
+  Contrast the stream servers, which name peers `p<slot>~<gen>` by **slot and tenancy** — see
   [the multi-peer listener](net-multi-peer-listener.md) for why that difference decides whether
   a resolved endpoint may be cached.
 - **A directed send on a broadcast medium.** Every node's link sees the CAN frames; the group's

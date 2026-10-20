@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 #include "libtracer/byteorder.hpp"
@@ -132,10 +133,31 @@ static_assert(!std::is_convertible_v<wire::pair_t, peer_handle_t>,
 
 /**
  * @brief Scratch big enough for any per-peer NAME or SUBJECT token a link resolves
- *        (`bus_link_t::peer_name`, `transport_t::peer_subject`) — `p<slot>` / `n<node>`
+ *        (`bus_link_t::peer_name`, `transport_t::peer_subject`) — `p<slot>~<gen>` / `n<node>`
  *        are both far inside it. Beside the handle because the terminus derives the
  *        subject into it from the handle (ADR-0082), in the graph layer.
  */
 inline constexpr std::size_t kPeerNameChars = 32;
+
+/**
+ * @brief The character that separates a session name's SLOT part from its tenancy
+ *        generation: a slot server names a session `p<slot>~<gen>`.
+ *
+ * A reused slot gets a fresh name, so a route another node still holds for the previous
+ * session names nobody and its delivery is refused. `~` is a legal path segment character
+ * (`path::valid_segment` rejects `/:.[]*?`) that no other minted name uses.
+ */
+inline constexpr char kTenancySeparator = '~';
+
+/**
+ * @brief The SLOT part of session name @p name: everything before @ref kTenancySeparator,
+ *        or the whole name when it carries no generation (`n<node>`, a registered name).
+ *
+ * What a per-slot record — the session anchor (ADR-0044 amendment) — is keyed by, so one
+ * slot keeps one record however many sessions pass through it.
+ */
+[[nodiscard]] constexpr std::string_view session_slot_of(std::string_view name) noexcept {
+    return name.substr(0, name.find(kTenancySeparator));
+}
 
 }  // namespace tr::net

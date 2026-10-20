@@ -128,7 +128,7 @@ carries — the registered child NAME — so its only seam is the whole link
 (`posix_endpoint.cpp:slot_server_t::any_open_session`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
-The library invents no path text. The one name it mints itself is the creatorless-session fallback `p<slot>`, which identifies a **session**, not a device; a device-stable identity is a named link.
+The library invents no path text. The one name it mints itself is the creatorless-session fallback `p<slot>~<gen>` (the slot and its tenancy generation, so a reused slot gets a fresh name), which identifies a **session**, not a device; a device-stable identity is a named link.
 
 ## Closing the bus module out at build time
 

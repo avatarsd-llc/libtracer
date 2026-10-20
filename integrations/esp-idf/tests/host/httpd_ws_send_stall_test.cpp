@@ -314,9 +314,9 @@ void test_jammed_queue_still_closes_the_doomed_fd() {
 
     // Fill the control queue with frames for the peer that is about to be found
     // desynchronised — the fan-out backlog, undrained.
-    // `p0` — the routable slot name (#994). This used to spell the `fd<n>` fallback, which
+    // `p0~1` — the routable session name (#994). This used to spell the `fd<n>` fallback, which
     // was the peer's name only because a fake fd has no `getpeername` to decode.
-    auto* const doomed = link->peer_link("p0");
+    auto* const doomed = link->peer_link("p0~1");
     check(doomed != nullptr, "the doomed peer resolves through the bus facet");
     for (int i = 0; i < 4; ++i) doomed->send(std::span<const std::byte>(kBody));
     check(fake_httpd::instance().queue_depth() == kCtrlDepth, "the control queue is full");
@@ -467,7 +467,7 @@ void test_peer_name_on_an_ipv6_socket() {
     check(endpoint.rfind("::1:", 0) == 0, "the address carries the loopback it connected from");
     // #994: the NAME is the routable slot index, and it must be spellable as a path
     // segment — the whole point of moving the address off it.
-    check(named == "p0", "the peer's graph name is its slot, p0");
+    check(named == "p0~1", "the peer's graph name is its session, p0~1");
     // Asserted through THE predicate (ADR-0073 §1), not a hand-rolled character list: this
     // is the exact function the wire boundary and the path parser call, so the test cannot
     // pass while a real `dst` would still be rejected. The old `<ip>:<port>` name fails it.

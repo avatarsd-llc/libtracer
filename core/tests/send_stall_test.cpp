@@ -501,7 +501,7 @@ void test_concurrent_directed_sends_share_one_window() {
     std::vector<std::thread> senders;
     for (std::size_t i = 0; i < peers; ++i)
         senders.emplace_back([&server, &frame, &ready, &go, frames_per_peer, i] {
-            const std::string name = "p" + std::to_string(i);
+            const std::string name = "p" + std::to_string(i) + "~1";  // first tenancy
             ready.fetch_add(1, std::memory_order_relaxed);
             while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
             for (int n = 0; n < frames_per_peer; ++n) {

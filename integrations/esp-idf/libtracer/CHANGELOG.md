@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reused session slot gets a fresh name.** `httpd_ws_link_t` named a session `p<slot>`,
+  so a session in a reused slot answered to its predecessor's name and a route another node
+  held for the predecessor kept reaching it. The name is now `p<slot>~<gen>`, the slot's
+  handle spelled out (`kSlotNameChars` grows from 22 to 24). A delivery along a stale route is
+  refused and the far node's edge is reaped. `slot_link(slot)` is the new session-anchor
+  egress (see core's changelog).
+
 ## [0.20.0] — 2026-10-20
 
 ### Added

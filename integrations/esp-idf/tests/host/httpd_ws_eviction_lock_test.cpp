@@ -196,7 +196,7 @@ void test_gate_released_across_notifier() {
     check(probe.calls.load() > before, "the notification fired for the departure");
     // `p0` — the departure seam carries the ROUTABLE name (#994), which is what a listener
     // would have to spell to act on the departure. Peer 700 landed in slot 0.
-    check(probe.peer == "p0", "it named the peer that departed, not another one");
+    check(probe.peer == "p0~1", "it named the peer that departed, not another one");
 
     // THE MEASUREMENT. A second acquirer of `gate_t::m`, on another task, while the
     // notifier is still in flight. The URI handler's admission take is the door the fake

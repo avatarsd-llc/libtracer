@@ -1290,6 +1290,9 @@ void fwd_router_t::link_down(std::string_view link_name) {
 session_anchor_id_t fwd_router_t::session_anchor_id(std::string_view mount,
                                                     std::string_view peer) noexcept {
     session_anchor_id_t id;
+    // Keyed by the SLOT, not the session: one slot keeps one anchor however many sessions
+    // pass through it (ADR-0044 amendment), and the anchor's own generation tells them apart.
+    peer = session_slot_of(peer);
     // Over one segment record ⇒ EMPTY: no anchor key could hold it (see the declaration).
     if (mount.size() + peer.size() + 2 > id.bytes.size()) return id;
     char* out = id.bytes.data();
@@ -1870,7 +1873,9 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
         // the deref and here is `NOT_FOUND`, below.
         const child_registry_t::child_t* const door = registry_.entry_by_name(ar->mount);
         if (!door_allows(door, inbound_name, graph::acl_right_t::WRITE)) return head_dst_t::HANDLED;
-        egress = door != nullptr ? child_registry_t::resolve_peer(*door, ar->peer) : nullptr;
+        egress = door != nullptr
+                     ? child_registry_t::resolve_peer(*door, ar->peer, &bus_link_t::slot_link)
+                     : nullptr;
     }
     if (egress == nullptr) {
         reject(graph::status_t::NOT_FOUND, pre);

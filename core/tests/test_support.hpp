@@ -97,6 +97,19 @@ inline void fail(std::string_view what, const std::source_location& loc) {
 }  // namespace detail
 
 /**
+ * @brief True when @p name has the slot-server session spelling, `p<slot>~<gen>`: a `p`, the
+ *        slot digits, `~`, and the generation digits, none of them empty.
+ */
+inline bool is_session_name(std::string_view name) noexcept {
+    const auto digits = [](std::string_view d) {
+        return !d.empty() && d.find_first_not_of("0123456789") == std::string_view::npos;
+    };
+    const std::size_t sep = name.find('~');
+    return name.size() >= 4 && name[0] == 'p' && sep != std::string_view::npos &&
+           digits(name.substr(1, sep - 1)) && digits(name.substr(sep + 1));
+}
+
+/**
  * @brief Record one assertion: print its verdict, and count it if it failed.
  *
  * @param ok   The claim under test.

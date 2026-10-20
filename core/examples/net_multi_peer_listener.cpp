@@ -6,9 +6,9 @@
 /**
  * @file
  * @brief ONE CONCEPT — a LISTEN link is not one link per peer: `tcp_server_transport_t` holds
- *        many peers in recycled SLOTS behind one `transport_t`, names them POSITIONALLY as
- *        `p<slot>`, and that positional naming is precisely why a resolved peer endpoint
- *        must be re-resolved per use instead of cached.
+ *        many peers in recycled SLOTS behind one `transport_t`, names each session
+ *        `p<slot>~<gen>`, and hands out a SLOT-scoped endpoint — which is precisely why a
+ *        resolved peer endpoint must be re-resolved per use instead of cached.
  *
  * `tcp_transport_t`'s LISTEN constructor accepts one peer at a time — the board↔board
  * shape. A node that fans out to browser tabs or to a fleet needs the other one:
@@ -23,7 +23,8 @@
  *
  *  - CAN names a peer `n<node-id>` — an IDENTITY. The name, the table key and the endpoint
  *    are one thing that no other peer can inherit.
- *  - A slot server names a peer `p<slot>` — a POSITION. The endpoint is scoped to the SLOT,
+ *  - A slot server names a peer `p<slot>~<gen>` — a slot and its tenancy, so a reused slot
+ *    gets a fresh name. The ENDPOINT, though, is scoped to the SLOT,
  *    so after that peer departs a pointer resolved for it addresses whatever session
  *    inherits the slot, and the endpoint's own liveness check is satisfied by that stranger.
  *    The pointer never dangles; it silently changes who it means (#1153). Resolve, send,
@@ -207,13 +208,13 @@ int main() {
 
     const auto names = peers_of(facet);
     check(ok, names.size() == 3, "…and lists exactly three peers");
-    check(ok, names == std::vector<std::string>{"p0", "p1", "p2"},
+    check(ok, names == std::vector<std::string>{"p0~1", "p1~1", "p2~1"},
           "…named p0/p1/p2 — by SLOT, which is a position and not an identity");
 
     // A DIRECTED send: one named peer's socket, and nobody else's.
     std::printf("a directed send:\n");
     const auto only_for_p1 = frame_of(6, 0x10);
-    tr::net::transport_t* to_p1 = facet.peer_link("p1");
+    tr::net::transport_t* to_p1 = facet.peer_link("p1~1");
     check(ok, to_p1 != nullptr, "peer_link('p1') resolved a directed endpoint");
     if (to_p1 != nullptr) to_p1->send(only_for_p1);
     const auto want = record(only_for_p1);

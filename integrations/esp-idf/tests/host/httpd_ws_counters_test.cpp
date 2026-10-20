@@ -153,7 +153,7 @@ void test_send_to_departed_peer_is_counted() {
     // Take the endpoint FIRST, then let the peer leave: this reproduces the real race —
     // a fan-out that already resolved its destinations against a peer departing under it —
     // rather than asking the link for an endpoint it would refuse to hand out.
-    tr::net::transport_t* const to = link->peer_link("p0");
+    tr::net::transport_t* const to = link->peer_link("p0~1");
     check(to != nullptr, "the directed endpoint resolved while the peer was open");
     const auto before = link->stats();
 
@@ -184,7 +184,7 @@ void test_refusal_and_conflation_are_told_apart() {
     const auto before = link->stats();
 
     fake_httpd::instance().set_queue_refusing(true);
-    tr::net::transport_t* const to = link->peer_link("p0");
+    tr::net::transport_t* const to = link->peer_link("p0~1");
     check(to != nullptr, "the directed endpoint resolved");
     to->send(std::span<const std::byte>(kBody));
     fake_httpd::instance().set_queue_refusing(false);
@@ -354,7 +354,7 @@ void test_directed_handle_projects_link_drop_stats() {
     claim(770);
     drain();
 
-    tr::net::transport_t* const to = link->peer_link("p0");
+    tr::net::transport_t* const to = link->peer_link("p0~1");
     check(to != nullptr, "the directed endpoint resolved while the peer was open");
     if (to == nullptr) return;
     const auto before = to->drop_stats();
@@ -430,7 +430,7 @@ void test_traffic_half_is_opt_in() {
     claim(780);  // the claiming frame is the first delivered message
     (void)fake_httpd::instance().deliver_frame(780, kBody);
     drain();
-    tr::net::transport_t* const to = link->peer_link("p0");
+    tr::net::transport_t* const to = link->peer_link("p0~1");
     check(to != nullptr, "the directed endpoint resolved");
     if (to == nullptr) return;
     to->send(std::span<const std::byte>(kBody));
