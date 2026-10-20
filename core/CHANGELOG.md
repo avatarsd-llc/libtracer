@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-10-20
+
 ### Added
 
 - **`config_t::kDefaultShareHint`, the build-wide copy-or-share default
@@ -79,158 +81,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** The WebSocket dialer
   overrides the gathered send: the spans go out as one masked BINARY message, gathered and
   masked in one pass, instead of the base class flattening them into a temporary first.
-
-### Changed
-
-- **A WebSocket client frame is gathered and masked in one pass
-  ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** The retained send and the
-  gathered send write each payload byte once, straight from the caller's head spans and the
-  value's links into the frame, masking as they copy (`ws::detail::mask_copy`); the flatten
-  copy into the link's egress store is gone. `ws::try_encode_client_frame` and
-  `ws::detail::put_client_frame` take the payload as a span of spans; the single-span forms
-  remain. A retained record with more links than the inline gather holds falls back to the
-  base class's flatten.
-- **A send to an idle peer takes no mutex
-  ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** `egress_t::send` claims
-  the writer role first and reads "nothing waits" from an atomic, so a dialer or server send
-  that finds its peer idle takes no mutex at all, and one that has to queue takes the queue
-  mutex once (it took three before). `egress_peer_t` keeps its size (24 B).
-
-### Breaking
-
-- **Copy-or-share is a compile-time trait of the block source plus a per-vertex hint;
-  `config_t::kShareThresholdBytes` and `vertex_policy_t::share_threshold_bytes` are gone
-  ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143), RFC-0022 Amendment 3).**
-  Whether a trailer-less written value keeps its inbound receive block (shared, zero copy) or
-  is copied into the value's own block is now the build's answer, decided at compile time
-  (`tr::mem::share_fits`): the static arena and the heap root always share, and the host slab
-  pool shares when a copy would draw a block no smaller than the one the value already sits in:
-  a class no smaller inside the size-class table, and no fewer bytes above its last row (64 KiB
-  + 48 B), where the pool draws exact blocks. A vertex may declare `vertex_policy_t::share_hint` (`share_hint_t::DEFAULT`, `SHARE`
-  or `COPY`), read back with `graph_t::share_hint(v)`. A borrowed span and a trailered TLV are
-  copied whatever the hint, and a value spanning more than one receive link (a reassembled CAN
-  group) is copied unless the vertex declares `SHARE`, so a default value is always one link. On the host this shares a 1 KiB value received in an exact-size
-  block, which the 4,096 B threshold used to copy; on ESP-IDF the arena now shares by default
-  where the component used to copy always. Also deleted: `graph_t::share_threshold_bytes(v)`,
-  `tr::graph::kShareThresholdBytes` and `saturate_threshold`.
-  **Migration:** drop `kShareThresholdBytes` from a `config_override.hpp`. Replace
-  `{.share_threshold_bytes = SIZE_MAX}` with `{.share_hint = share_hint_t::COPY}`, `0` with
-  `share_hint_t::SHARE`, and any other byte count with the default (or `COPY` for a long-held
-  value on a small receive pool). A build that set `kShareThresholdBytes = SIZE_MAX` (copy by
-  default) and gave the vertices that shared their own thresholds binds
-  `static constexpr share_hint_t kDefaultShareHint = share_hint_t::COPY;` instead
-  ([#2226](https://github.com/avatarsd-llc/libtracer/issues/2226)) and declares
-  `share_hint_t::SHARE` on those vertices.
-- **`view::alloc_rx(backend, len)` drops `loan_min`; the ingress-loan reserve is taken only
-  where it is free ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143)).** The
-  RFC-0028 §6.9 reserve now lands on a receive block only when the frame plus `kRxLoanBytes`
-  stays in the frame's own size class (`tr::mem::rx_loan_free`), and never on the heap root,
-  whose blocks are exact. `length_prefix_framer_t::on_prefix` takes `bool loan` in place of
-  `std::size_t loan_min`. **Migration:** delete the third argument of `alloc_rx`; pass `true`
-  for a threshold to `on_prefix`, or nothing for `SIZE_MAX`.
-
-- **reclaim_local is withdrawn; `reclaim_qsbr_t` is the default on every target
-  ([#2127](https://github.com/avatarsd-llc/libtracer/issues/2127), ADR-0080 Amendment 1).**
-  `default_config_t::reclaim_policy_t` is now `reclaim_qsbr_t` on WIDE, MID and NARROW, and the
-  tag set is closed at two: `reclaim_qsbr_t` and `reclaim_strict_t`. A `config_override.hpp` that still binds `reclaim_local_t` is refused at
-  compile time with a message that points here. The policy traits `kReentrantUnsubscribe` and
-  `kGraceSpansThreads` are removed; `kDefersToDispatchExit` is the one trait left, true for
-  `reclaim_qsbr_t` and false for `reclaim_strict_t`. Under the default, a release hook passed
-  to `unsubscribe(sub, release)` runs once, after every snapshot naming the pair is gone, on
-  whichever dispatching thread completes the grace period, which may not be the caller.
-  Per-thread TLS falls from 272 B to 16 B on the host and from 192 B to 56 B per FreeRTOS task
-  (ESP32-C6 `full_node`).
-  `kDeferredReleaseSlots` changes meaning: it bounded the pairs ONE THREAD parked in its own
-  storage (256 B per dispatching thread on a 64-bit host at the default 16), and it now bounds
-  ONE process-wide table every thread shares (512 B in `.bss` on a 64-bit host, 256 B on a
-  32-bit MCU). A full table is drained and scanned again before a pair is refused. A build that
-  raised it for deep re-entrant unsubscribes on one thread should size it for the largest burst
-  of unsubscribes, on all threads together, that can overlap another thread's dispatch.
-  The CI `build-test-reclaim-qsbr` and `tsan-reclaim-qsbr` legs, and the `reclaim-qsbr` and
-  `reclaim-qsbr-hazard-slot` presets, duplicated the default and are deleted; the membarrier
-  TSan leg is now `tsan (fence=membarrier)`.
-
-  **Migration:**
-  - Delete the `using reclaim_policy_t = reclaim_local_t;` line to take the default, or the
-    `using reclaim_policy_t = reclaim_qsbr_t;` line, which is now redundant.
-  - Make every release hook short, thread-safe, non-blocking and `noexcept`. Posting the
-    context to an app-owned queue is the ideal shape.
-  - A context that must be released on its own thread binds `reclaim_strict_t`. Then no
-    dispatch may be live, on any thread, when it unsubscribes; strict does not detect a
-    violation.
-  - Replace `kReentrantUnsubscribe` and `kGraceSpansThreads` with `kDefersToDispatchExit`.
-
-- **Every reclaim refusal is answered and counted; `graph_t::deferred_release_drops()` is
-  gone ([#2117](https://github.com/avatarsd-llc/libtracer/issues/2117)).** An `unsubscribe`
-  whose deferred release hook finds no parking slot now answers `BACKPRESSURE` instead of `{}`:
-  the edge is removed all the same and the hook never runs, as before, but the caller is told.
-  Do not retry it; a second call answers `NOT_FOUND`. The process-wide static
-  `graph_t::deferred_release_drops()` and the QSBR domain's own drop tally it summed are deleted;
-  the count is per graph now, `graph_t::reclaim_refusals().release_refused`.
-
-- **Stream links write through one shared-frame egress, one ring per (peer, vertex)
-  ([#2144](https://github.com/avatarsd-llc/libtracer/issues/2144)).** TCP and WebSocket links,
-  dialers and servers, now send through `egress_t` (ADR-0087 §2). A remote delivery waits, when
-  it has to, in its own vertex's ring toward that peer: depth 1 (a SAMPLE) keeps the latest,
-  depth N (a STREAM) keeps order and a full ring takes the vertex's §4.4 arm. The lanes leave
-  round-robin. API changes:
-  - `transport_t::send(head, value)` gains a third parameter, `const graph::delivery_lane_t&`:
-    the lane the value rides. An override adds it; a link that writes in-call ignores it.
-    `graph::remote_delivery_t` carries the edge's lane in its new `lane` field, and
-    `subscriber_remote_t` records the vertex's depth and arm at admission (`lane_depth`,
-    `lane_reliable`, in its tail padding: still 120 B).
-  - `write_result_t::partial` is replaced by `write_result_t::moved` (bytes written), and
-    `slot_server_t::broadcast_iov` by `broadcast` and `send_to`.
-
-  Behaviour changes:
-  - A write the socket cuts short is kept and finished when the socket is writable again,
-    on the link's own wait; it no longer abandons the record and condemns the peer.
-  - Server writes never block, the WebSocket `101` included: it is the session's first egress
-    frame. A strike is an offer that found its STREAM lane full and whose turn moved no byte; a peer
-    is condemned after `kEgressStallStrikes` (`kMaxConsecutiveStalls` on a dialer) whole
-    rings of strikes in a row, counted in the depth of the lane being offered. A burst that
-    only fills rings strikes nothing, and a poll timeout is not an offer. A SAMPLE lane
-    (depth 1) never strikes: its overwrite is bounded at one slot, so a fast publisher cannot
-    condemn a briefly stalled peer, and a peer stuck behind SAMPLE lanes alone is left to
-    the link's own down detection.
-  - A full delivery ring now sheds its oldest frame by default, where the one link queue
-    refused the newest. A vertex that wants the old arm declares it reliable
-    (`vertex_policy_t::ring_reliable`). Frames from no vertex (replies, control) ride a
-    best-effort control lane of `kEgressControlDepth` (8).
-
-- **A UDP link with no `max_frame` accepts one MTU, not 64 KiB
-  ([#2132](https://github.com/avatarsd-llc/libtracer/issues/2132)).** The unset receive cap of
-  `udp_transport_t` is the new `udp_transport_t::kDefaultMaxFrame` (1,472 B, the payload of one
-  1,500-byte Ethernet MTU) instead of `kMaxDatagram` (65,536 B). The cap also sizes the receive
-  segment and scratch, so an idle UDP link on the default heap backend holds a 1,473-byte segment
-  instead of a 65,536-byte one. A wider datagram is refused and counted in `malformed_rx`, never
-  truncated, while the rx backend can furnish `max_frame + 1` bytes. This narrows
-  [#1074](https://github.com/avatarsd-llc/libtracer/issues/1074) (a narrow backend truncates):
-  a link on a 1,536-byte pool slot now refuses an oversize datagram by default, because the
-  default cap plus its sentinel byte fits the slot. A link that carries wider datagrams sets `max_frame`, which on `udp` may now raise
-  the cap above the default, up to `kMaxDatagram`.
-- **`slot_server_t::on_readable` takes the socket, not bytes read from it
-  ([#2140](https://github.com/avatarsd-llc/libtracer/issues/2140)).** The stream-server hook is
-  now `on_readable(session_base_t&, int fd)`: each server reads its own socket, so a framing that
-  knows a frame's length receives the body straight into its segment. The shared 4 KiB chunk
-  read moved into `tcp_server_transport_t::on_readable`. The unused peer-tier seams
-  `peer_tier_wants_rope` and `deliver_to_peer_borrowed` are deleted.
-- **A local `subscribe` or `await` on a `:field` path is refused, and a second `:` is a
-  malformed path ([#2113](https://github.com/avatarsd-llc/libtracer/issues/2113)).** Both
-- **A local `subscribe` or `await` on a `:field` path is refused, and a field name is held to
-  the segment rules ([#2113](https://github.com/avatarsd-llc/libtracer/issues/2113)).** Both
-  `graph_t::subscribe` overloads and the path-taking `graph_t::await` now answer
-  `SCHEMA_NOT_FOUND` when the source path has a field tail, the status a wire AWAIT with a FIELD
-  selector already answered (docs/reference/02 §#585), and the edge form answers the same for a
-  `:field` target. Every field is refused, `:subscribers` and `:acl` included. These calls used
-  to succeed silently: the subscription bound the whole vertex (or delivered to the whole target
-  vertex) and the await waited on the vertex until it timed out. `path_t::parse` now checks each
-  field name with `valid_segment`, the predicate address segments already used, so a name with a
-  reserved character (reference/03 §reserved characters) or over 64 bytes is `INVALID_PATH`. That
-  includes a second `:`: `/x:schema:subscribers[]` used to parse as one field named
-  `schema:subscribers` and answer `SCHEMA_NOT_FOUND`.
-
-### Added
 
 - **A CAN link's learned-binding table is bounded by `config_t::kCanLearnedBindings`, and an
   advertise binds only its carrier's own slots
@@ -400,6 +250,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A WebSocket client frame is gathered and masked in one pass
+  ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** The retained send and the
+  gathered send write each payload byte once, straight from the caller's head spans and the
+  value's links into the frame, masking as they copy (`ws::detail::mask_copy`); the flatten
+  copy into the link's egress store is gone. `ws::try_encode_client_frame` and
+  `ws::detail::put_client_frame` take the payload as a span of spans; the single-span forms
+  remain. A retained record with more links than the inline gather holds falls back to the
+  base class's flatten.
+- **A send to an idle peer takes no mutex
+  ([#2145](https://github.com/avatarsd-llc/libtracer/issues/2145)).** `egress_t::send` claims
+  the writer role first and reads "nothing waits" from an atomic, so a dialer or server send
+  that finds its peer idle takes no mutex at all, and one that has to queue takes the queue
+  mutex once (it took three before). `egress_peer_t` keeps its size (24 B).
+
 - **`delivery_lane_t::key` is documented as aligned to at least 4 bytes
   ([#2195](https://github.com/avatarsd-llc/libtracer/issues/2195)).** A link may keep a tag in
   its two low bits; the ESP-IDF WebSocket server link keeps its per-lane policy there. The
@@ -446,8 +310,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the dispatch bracket's depth is the record's. Under the other policies `fan_out` opens one
   frame bracket at its first remote edge, and every later remote edge nests in it.
 
-### Changed
-
 - **An idle TCP or WebSocket server link draws 64 B from its memory seam, not 1,992 B
   ([#2156](https://github.com/avatarsd-llc/libtracer/issues/2156)).** A multi-peer server no
   longer carries the single-peer send ring its base class built (8 slots, 384 B, never used: a
@@ -485,6 +347,138 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   both by construction; no in-tree caller passes one. Out-of-tree code that builds a
   `write_ctx_t` with designated initializers under `-Wmissing-field-initializers -Werror` must
   now name `.session` too.
+
+### Breaking
+
+- **Copy-or-share is a compile-time trait of the block source plus a per-vertex hint;
+  `config_t::kShareThresholdBytes` and `vertex_policy_t::share_threshold_bytes` are gone
+  ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143), RFC-0022 Amendment 3).**
+  Whether a trailer-less written value keeps its inbound receive block (shared, zero copy) or
+  is copied into the value's own block is now the build's answer, decided at compile time
+  (`tr::mem::share_fits`): the static arena and the heap root always share, and the host slab
+  pool shares when a copy would draw a block no smaller than the one the value already sits in:
+  a class no smaller inside the size-class table, and no fewer bytes above its last row (64 KiB
+  + 48 B), where the pool draws exact blocks. A vertex may declare `vertex_policy_t::share_hint` (`share_hint_t::DEFAULT`, `SHARE`
+  or `COPY`), read back with `graph_t::share_hint(v)`. A borrowed span and a trailered TLV are
+  copied whatever the hint, and a value spanning more than one receive link (a reassembled CAN
+  group) is copied unless the vertex declares `SHARE`, so a default value is always one link. On the host this shares a 1 KiB value received in an exact-size
+  block, which the 4,096 B threshold used to copy; on ESP-IDF the arena now shares by default
+  where the component used to copy always. Also deleted: `graph_t::share_threshold_bytes(v)`,
+  `tr::graph::kShareThresholdBytes` and `saturate_threshold`.
+  **Migration:** drop `kShareThresholdBytes` from a `config_override.hpp`. Replace
+  `{.share_threshold_bytes = SIZE_MAX}` with `{.share_hint = share_hint_t::COPY}`, `0` with
+  `share_hint_t::SHARE`, and any other byte count with the default (or `COPY` for a long-held
+  value on a small receive pool). A build that set `kShareThresholdBytes = SIZE_MAX` (copy by
+  default) and gave the vertices that shared their own thresholds binds
+  `static constexpr share_hint_t kDefaultShareHint = share_hint_t::COPY;` instead
+  ([#2226](https://github.com/avatarsd-llc/libtracer/issues/2226)) and declares
+  `share_hint_t::SHARE` on those vertices.
+- **`view::alloc_rx(backend, len)` drops `loan_min`; the ingress-loan reserve is taken only
+  where it is free ([#2143](https://github.com/avatarsd-llc/libtracer/issues/2143)).** The
+  RFC-0028 §6.9 reserve now lands on a receive block only when the frame plus `kRxLoanBytes`
+  stays in the frame's own size class (`tr::mem::rx_loan_free`), and never on the heap root,
+  whose blocks are exact. `length_prefix_framer_t::on_prefix` takes `bool loan` in place of
+  `std::size_t loan_min`. **Migration:** delete the third argument of `alloc_rx`; pass `true`
+  for a threshold to `on_prefix`, or nothing for `SIZE_MAX`.
+
+- **reclaim_local is withdrawn; `reclaim_qsbr_t` is the default on every target
+  ([#2127](https://github.com/avatarsd-llc/libtracer/issues/2127), ADR-0080 Amendment 1).**
+  `default_config_t::reclaim_policy_t` is now `reclaim_qsbr_t` on WIDE, MID and NARROW, and the
+  tag set is closed at two: `reclaim_qsbr_t` and `reclaim_strict_t`. A `config_override.hpp` that still binds `reclaim_local_t` is refused at
+  compile time with a message that points here. The policy traits `kReentrantUnsubscribe` and
+  `kGraceSpansThreads` are removed; `kDefersToDispatchExit` is the one trait left, true for
+  `reclaim_qsbr_t` and false for `reclaim_strict_t`. Under the default, a release hook passed
+  to `unsubscribe(sub, release)` runs once, after every snapshot naming the pair is gone, on
+  whichever dispatching thread completes the grace period, which may not be the caller.
+  Per-thread TLS falls from 272 B to 16 B on the host and from 192 B to 56 B per FreeRTOS task
+  (ESP32-C6 `full_node`).
+  `kDeferredReleaseSlots` changes meaning: it bounded the pairs ONE THREAD parked in its own
+  storage (256 B per dispatching thread on a 64-bit host at the default 16), and it now bounds
+  ONE process-wide table every thread shares (512 B in `.bss` on a 64-bit host, 256 B on a
+  32-bit MCU). A full table is drained and scanned again before a pair is refused. A build that
+  raised it for deep re-entrant unsubscribes on one thread should size it for the largest burst
+  of unsubscribes, on all threads together, that can overlap another thread's dispatch.
+  The CI `build-test-reclaim-qsbr` and `tsan-reclaim-qsbr` legs, and the `reclaim-qsbr` and
+  `reclaim-qsbr-hazard-slot` presets, duplicated the default and are deleted; the membarrier
+  TSan leg is now `tsan (fence=membarrier)`.
+
+  **Migration:**
+  - Delete the `using reclaim_policy_t = reclaim_local_t;` line to take the default, or the
+    `using reclaim_policy_t = reclaim_qsbr_t;` line, which is now redundant.
+  - Make every release hook short, thread-safe, non-blocking and `noexcept`. Posting the
+    context to an app-owned queue is the ideal shape.
+  - A context that must be released on its own thread binds `reclaim_strict_t`. Then no
+    dispatch may be live, on any thread, when it unsubscribes; strict does not detect a
+    violation.
+  - Replace `kReentrantUnsubscribe` and `kGraceSpansThreads` with `kDefersToDispatchExit`.
+
+- **Every reclaim refusal is answered and counted; `graph_t::deferred_release_drops()` is
+  gone ([#2117](https://github.com/avatarsd-llc/libtracer/issues/2117)).** An `unsubscribe`
+  whose deferred release hook finds no parking slot now answers `BACKPRESSURE` instead of `{}`:
+  the edge is removed all the same and the hook never runs, as before, but the caller is told.
+  Do not retry it; a second call answers `NOT_FOUND`. The process-wide static
+  `graph_t::deferred_release_drops()` and the QSBR domain's own drop tally it summed are deleted;
+  the count is per graph now, `graph_t::reclaim_refusals().release_refused`.
+
+- **Stream links write through one shared-frame egress, one ring per (peer, vertex)
+  ([#2144](https://github.com/avatarsd-llc/libtracer/issues/2144)).** TCP and WebSocket links,
+  dialers and servers, now send through `egress_t` (ADR-0087 §2). A remote delivery waits, when
+  it has to, in its own vertex's ring toward that peer: depth 1 (a SAMPLE) keeps the latest,
+  depth N (a STREAM) keeps order and a full ring takes the vertex's §4.4 arm. The lanes leave
+  round-robin. API changes:
+  - `transport_t::send(head, value)` gains a third parameter, `const graph::delivery_lane_t&`:
+    the lane the value rides. An override adds it; a link that writes in-call ignores it.
+    `graph::remote_delivery_t` carries the edge's lane in its new `lane` field, and
+    `subscriber_remote_t` records the vertex's depth and arm at admission (`lane_depth`,
+    `lane_reliable`, in its tail padding: still 120 B).
+  - `write_result_t::partial` is replaced by `write_result_t::moved` (bytes written), and
+    `slot_server_t::broadcast_iov` by `broadcast` and `send_to`.
+
+  Behaviour changes:
+  - A write the socket cuts short is kept and finished when the socket is writable again,
+    on the link's own wait; it no longer abandons the record and condemns the peer.
+  - Server writes never block, the WebSocket `101` included: it is the session's first egress
+    frame. A strike is an offer that found its STREAM lane full and whose turn moved no byte; a peer
+    is condemned after `kEgressStallStrikes` (`kMaxConsecutiveStalls` on a dialer) whole
+    rings of strikes in a row, counted in the depth of the lane being offered. A burst that
+    only fills rings strikes nothing, and a poll timeout is not an offer. A SAMPLE lane
+    (depth 1) never strikes: its overwrite is bounded at one slot, so a fast publisher cannot
+    condemn a briefly stalled peer, and a peer stuck behind SAMPLE lanes alone is left to
+    the link's own down detection.
+  - A full delivery ring now sheds its oldest frame by default, where the one link queue
+    refused the newest. A vertex that wants the old arm declares it reliable
+    (`vertex_policy_t::ring_reliable`). Frames from no vertex (replies, control) ride a
+    best-effort control lane of `kEgressControlDepth` (8).
+
+- **A UDP link with no `max_frame` accepts one MTU, not 64 KiB
+  ([#2132](https://github.com/avatarsd-llc/libtracer/issues/2132)).** The unset receive cap of
+  `udp_transport_t` is the new `udp_transport_t::kDefaultMaxFrame` (1,472 B, the payload of one
+  1,500-byte Ethernet MTU) instead of `kMaxDatagram` (65,536 B). The cap also sizes the receive
+  segment and scratch, so an idle UDP link on the default heap backend holds a 1,473-byte segment
+  instead of a 65,536-byte one. A wider datagram is refused and counted in `malformed_rx`, never
+  truncated, while the rx backend can furnish `max_frame + 1` bytes. This narrows
+  [#1074](https://github.com/avatarsd-llc/libtracer/issues/1074) (a narrow backend truncates):
+  a link on a 1,536-byte pool slot now refuses an oversize datagram by default, because the
+  default cap plus its sentinel byte fits the slot. A link that carries wider datagrams sets `max_frame`, which on `udp` may now raise
+  the cap above the default, up to `kMaxDatagram`.
+- **`slot_server_t::on_readable` takes the socket, not bytes read from it
+  ([#2140](https://github.com/avatarsd-llc/libtracer/issues/2140)).** The stream-server hook is
+  now `on_readable(session_base_t&, int fd)`: each server reads its own socket, so a framing that
+  knows a frame's length receives the body straight into its segment. The shared 4 KiB chunk
+  read moved into `tcp_server_transport_t::on_readable`. The unused peer-tier seams
+  `peer_tier_wants_rope` and `deliver_to_peer_borrowed` are deleted.
+- **A local `subscribe` or `await` on a `:field` path is refused, and a field name is held to
+  the segment rules ([#2113](https://github.com/avatarsd-llc/libtracer/issues/2113)).** Both
+  `graph_t::subscribe` overloads and the path-taking `graph_t::await` now answer
+  `SCHEMA_NOT_FOUND` when the source path has a field tail, the status a wire AWAIT with a FIELD
+  selector already answered (docs/reference/02 §#585), and the edge form answers the same for a
+  `:field` target. Every field is refused, `:subscribers` and `:acl` included. These calls used
+  to succeed silently: the subscription bound the whole vertex (or delivered to the whole target
+  vertex) and the await waited on the vertex until it timed out. `path_t::parse` now checks each
+  field name with `valid_segment`, the predicate address segments already used, so a name with a
+  reserved character (reference/03 §reserved characters) or over 64 bytes is `INVALID_PATH`. That
+  includes a second `:`: `/x:schema:subscribers[]` used to parse as one field named
+  `schema:subscribers` and answer `SCHEMA_NOT_FOUND`.
 
 ## [0.19.1] — 2026-10-11
 

@@ -7,6 +7,10 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-10-20
+
+No TypeScript-binding changes. Released in lockstep with core 0.20.0. A packed sample block (RFC-0025 Amendment 5) reaches this client as an ordinary opaque value.
+
 ## [0.19.1] — 2026-10-11
 
 This patch release also carries RFC-0032's deletion of COMPACT delivery, ADVERTISE, HANDLE_NACK and the route-handle tables, which was planned for 0.20.0. A 0.19.0 peer that still sends them gets a counted unknown-member error.

@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-10-20
+
 ### Added
 
 - **The `LIBTRACER_DEFAULT_SHARE_HINT` Kconfig choice
@@ -25,9 +27,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   clock. Each close is counted in the new `stats_t::peers_frozen`, appended after
   `rx_drain_waits` (the struct grows from 15 to 16 tallies), and in `sessions_condemned`.
 
+### Changed
+
+- **`httpd_ws_link_t` rings the httpd task once per burst, not once per peer
+  ([#2146](https://github.com/avatarsd-llc/libtracer/issues/2146)).** A broadcast stores the
+  shared frame in every peer's waiting slot first and then wakes a parked drain and posts the
+  flush once, so one flush writes them all. Before, each peer's store rang on its own, and an
+  httpd task of higher priority than the producer ran a flush for every peer: a broadcast to
+  8 peers cost 8 posted flushes, about 24 task switches, where it now costs 1 flush and about
+  3 [est, a static count from code; silicon measurement pending]. A refused flush still takes
+  back, and counts, every frame it would have written.
+- **A unicore chip build binds `kSingleCore`, so its frame bracket pays no fence
+  ([#2126](https://github.com/avatarsd-llc/libtracer/issues/2126)).** The generated config
+  fragment derives it from `CONFIG_FREERTOS_UNICORE` on a chip target; the `linux` target and
+  the early expansion pass keep `false`. `critical_pool.cpp` static-asserts the value against
+  `sdkconfig.h`. On the ESP32-C6 the outermost bracket goes from 3 fences to 0 and
+  `.flash.text` shrinks by 32 B; a dual-core chip such as the ESP32 or ESP32-S3 is unchanged.
+- **The recommended sdkconfig turns lwIP core locking on
+  ([#2131](https://github.com/avatarsd-llc/libtracer/issues/2131)).** The README's new
+  *Recommended sdkconfig* section sets `CONFIG_LWIP_TCPIP_CORE_LOCKING=y` and
+  `CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y`, and the `full_node` and `concepts/one_link`
+  examples carry both. A socket call then takes the lwIP core mutex in the calling task instead
+  of a round trip to the tcpip task: about 8 fewer task switches per inbound WebSocket frame
+  and about 6 fewer per queued send per peer [est, from code; silicon measurement pending].
+  The component's own code is unchanged; an app that keeps the IDF default keeps today's
+  behaviour.
+- **`esp_ws_client_link_t` holds nothing connection-sized while it is not connected
+  ([#1606](https://github.com/avatarsd-llc/libtracer/issues/1606)).** The read scratch
+  (`rx_bytes`, from `memory.state`) and the write scratch (`tx_bytes`, from `memory.io`) are
+  drawn when a handshake lands and returned, with the transport pair, when that connection
+  goes down. A store that refuses one is now backpressure: the fresh connection is closed and
+  the attempt counts as a failed dial, where it used to abort the constructor (read scratch)
+  or leave a zero-size write scratch (`tx_bytes()` reported 0). `rx_bytes()` and `tx_bytes()`
+  now always report the configured ceilings. A `defer_recv` link spawns its recv thread in
+  `start_receiving()` instead of parking one from the constructor. The link now overrides
+  `transport_t::shut_down()`: it stops the recv thread and closes the connection at once, and
+  the destructor returns the memory.
+
 ### Fixed
 
-- **`httpd_ws_link_t` conflates a peer's TX frames per path, never across paths
 - **An adopted `httpd_ws_link_t` returns its handler gate at teardown when no WebSocket client
   is left ([#2202](https://github.com/avatarsd-llc/libtracer/issues/2202)).** The destructor hands
   the gate to its session-detach work item, which asks the server, on its own task after the
@@ -77,42 +115,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - A slow peer gets its held frames oldest first across paths, and the newest value of each
     SAMPLE path.
 
-### Changed
-
-- **`httpd_ws_link_t` rings the httpd task once per burst, not once per peer
-  ([#2146](https://github.com/avatarsd-llc/libtracer/issues/2146)).** A broadcast stores the
-  shared frame in every peer's waiting slot first and then wakes a parked drain and posts the
-  flush once, so one flush writes them all. Before, each peer's store rang on its own, and an
-  httpd task of higher priority than the producer ran a flush for every peer: a broadcast to
-  8 peers cost 8 posted flushes, about 24 task switches, where it now costs 1 flush and about
-  3 [est, a static count from code; silicon measurement pending]. A refused flush still takes
-  back, and counts, every frame it would have written.
-- **A unicore chip build binds `kSingleCore`, so its frame bracket pays no fence
-  ([#2126](https://github.com/avatarsd-llc/libtracer/issues/2126)).** The generated config
-  fragment derives it from `CONFIG_FREERTOS_UNICORE` on a chip target; the `linux` target and
-  the early expansion pass keep `false`. `critical_pool.cpp` static-asserts the value against
-  `sdkconfig.h`. On the ESP32-C6 the outermost bracket goes from 3 fences to 0 and
-  `.flash.text` shrinks by 32 B; a dual-core chip such as the ESP32 or ESP32-S3 is unchanged.
-- **The recommended sdkconfig turns lwIP core locking on
-  ([#2131](https://github.com/avatarsd-llc/libtracer/issues/2131)).** The README's new
-  *Recommended sdkconfig* section sets `CONFIG_LWIP_TCPIP_CORE_LOCKING=y` and
-  `CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y`, and the `full_node` and `concepts/one_link`
-  examples carry both. A socket call then takes the lwIP core mutex in the calling task instead
-  of a round trip to the tcpip task: about 8 fewer task switches per inbound WebSocket frame
-  and about 6 fewer per queued send per peer [est, from code; silicon measurement pending].
-  The component's own code is unchanged; an app that keeps the IDF default keeps today's
-  behaviour.
-- **`esp_ws_client_link_t` holds nothing connection-sized while it is not connected
-  ([#1606](https://github.com/avatarsd-llc/libtracer/issues/1606)).** The read scratch
-  (`rx_bytes`, from `memory.state`) and the write scratch (`tx_bytes`, from `memory.io`) are
-  drawn when a handshake lands and returned, with the transport pair, when that connection
-  goes down. A store that refuses one is now backpressure: the fresh connection is closed and
-  the attempt counts as a failed dial, where it used to abort the constructor (read scratch)
-  or leave a zero-size write scratch (`tx_bytes()` reported 0). `rx_bytes()` and `tx_bytes()`
-  now always report the configured ceilings. A `defer_recv` link spawns its recv thread in
-  `start_receiving()` instead of parking one from the constructor. The link now overrides
-  `transport_t::shut_down()`: it stops the recv thread and closes the connection at once, and
-  the destructor returns the memory.
 ### Breaking
 
 - **The static arena shares a stored value by default; the copy-always binding is gone
