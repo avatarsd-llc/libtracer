@@ -36,6 +36,10 @@
 #include "libtracer/value.hpp"
 #include "libtracer/view.hpp"
 
+namespace tr::graph {
+struct stats_block_t;
+}  // namespace tr::graph
+
 namespace tr::net {
 
 class transport_t;
@@ -549,6 +553,21 @@ class transport_t {
      * (#932); the per-transport accessors stay for callers that hold the concrete type.
      */
     [[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }
+
+    /**
+     * @brief Append this kind's own nouns to its `:stats.link.<child>` block, after the three
+     *        universal ones @ref drop_stats answers.
+     *
+     * A kind with counters of its own beyond the shed-frame triple publishes them here: the
+     * Noise link's ten `noise_*` nouns (RFC-0033 §5.11) are the first. Readers already ignore
+     * unknown names (RFC-0010 Amendment 1 §Compatibility), so a kind that adds nouns breaks no
+     * reader. The DEFAULT adds nothing. Called only from the cold `:stats` read path, on any
+     * thread, and that includes this link's own receive callback when the read arrived over it:
+     * a kind must not hold its own lock across a delivery. Same snapshot rule as
+     * @ref drop_stats.
+     * @param out The block being sampled; nouns must be literals (`graph::stats_counter_t`).
+     */
+    virtual void kind_stats(graph::stats_block_t& out) const noexcept { (void)out; }
 
     /**
      * @brief Scatter-gather send: emit the gathered spans as ONE frame, no flatten copy.

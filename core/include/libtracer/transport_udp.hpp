@@ -105,6 +105,11 @@ struct udp_config_t {
  * (#1783). That path receives on the receive thread's stack when the cap fits
  * `%graph::kUdpStackScratchBytes` (#2142), so the link holds nothing at rest; otherwise, and on
  * the owning path, the link holds ONE segment of `max_frame + 1` bytes from `memory.rx`.
+ *
+ * The span a borrowed-span sink is handed is that receive buffer: the receive thread's stack
+ * array or this link's own segment, writable for the duration of the call. An owner that
+ * decrypts in place, as the Noise link does (RFC-0033 §5.8), may write it; nothing else reads it
+ * after the callback returns.
  */
 class udp_transport_t final : public transport_t, private posix_endpoint_t {
    public:
@@ -167,6 +172,32 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
     void send(std::span<const std::byte> frame) override;                 // sendto(peer)
     void send(std::span<const std::span<const std::byte>> iov) override;  // sendmsg(iovec)
 
+    /**
+     * @brief Send @p iov as one datagram to @p address, whatever the link's own peer is.
+     *
+     * The addressed form of @ref send, for an owner that keeps its own peer address: the Noise
+     * link answers a first message at that datagram's source and moves its session's address
+     * only on an authenticated message (RFC-0033 §5.4), so it never sends to the peer this
+     * link learned from the last datagram. The same best-effort contract as `send`: a
+     * datagram with no socket, no address or no gather store is dropped and counted in
+     * @ref dropped_tx.
+     *
+     * @param address A packed endpoint, as @ref inbound_source and @ref peer_address give it;
+     *                0 is no address.
+     */
+    void send_to(std::uint64_t address, std::span<const std::span<const std::byte>> iov);
+
+    /**
+     * @brief The source of the datagram being delivered, packed as `(ip << 16) | port`.
+     * @warning Valid only inside a receive callback, on the receive thread, like
+     *          @ref transport_t::inbound_peer.
+     */
+    [[nodiscard]] std::uint64_t inbound_source() const noexcept { return source_; }
+
+    /** @brief The peer @ref send targets, packed as @ref inbound_source packs it: the
+     *         configured one, or in listener mode the last datagram's source; 0 = none yet. */
+    [[nodiscard]] std::uint64_t peer_address() const noexcept { return peer(); }
+
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042 §2):
      *         one datagram = one frame = one refcounted segment from the injected
      *         backend, handed up owning; span-only sinks keep the borrowed path. */
@@ -228,6 +259,9 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
     std::atomic<std::uint64_t> peer_{0};
     bool learn_peer_ = false;          // constructed peer-less => adopt each datagram's source
     bool recv_stack_refused_ = false;  // recv_stack below kMinRecvStack (#2142)
+    /** @brief The in-flight datagram's source (@ref inbound_source). Written and read on the
+     *         receive thread only, so it needs no atomic. */
+    std::uint64_t source_ = 0;
 
     // RX segment source for view delivery (ADR-0042 §2) + backend-exhaustion
     // drop counter (backpressure, never OOM).

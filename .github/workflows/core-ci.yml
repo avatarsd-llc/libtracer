@@ -985,8 +985,8 @@ jobs:
           cmake -S core -B core/build-noise -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DLIBTRACER_NOISE_CRYPTO=${{ matrix.crypto }}
           cmake --build core/build-noise --parallel "$BUILD_JOBS" \
-            --target security_noise_test conformance_runner
-          ctest --test-dir core/build-noise --output-on-failure -R '^(security_noise|conformance)$'
+            --target security_noise_test conformance_runner noise_link_test
+          ctest --test-dir core/build-noise --output-on-failure -R '^(security_noise|conformance|noise_link)$'
       - name: Compiler cache statistics (this job)
         # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
         # are shared by every runner. Absent on the hosted route (no `/ccache`).

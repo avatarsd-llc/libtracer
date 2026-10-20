@@ -15,11 +15,14 @@
  *  - **`udp`** — two `udp_transport_t` on loopback: the server end binds an ephemeral port and
  *    learns its peer from the first datagram; the client end dials it. The baseline the Noise
  *    link is judged against.
- *  - **`noise`** — compiled only with `-DLIBTRACER_BENCH_NOISE_LINK=ON`, which also needs the
- *    link kind from #2064 in the tree. `make_noise_pair` is the one place that names that link;
- *    it is written against the shape #2064's issue describes (a UDP-carried link opened with a
- *    pre-shared key, driven by the application's `now`), and #2064 adjusts its few lines to the
- *    constructor it actually ships. Every row, label and reading is shared with `udp`.
+ *  - **`noise`** — the Noise link (`transport_noise.hpp`, #2073) over the same UDP carrier,
+ *    compiled with `-DLIBTRACER_BENCH_NOISE_LINK=ON` and a crypto backend
+ *    (`-DLIBTRACER_NOISE_CRYPTO=openssl|sodium|psa`). `make_noise_pair` is the one place that
+ *    names it. A Noise link delivers only complete Tracer frames (reference/23 §3), so this arm
+ *    wraps each harness payload in a 4-byte VALUE header and strips it at the other end: its
+ *    largest payload is the IPv4 bound less the 25-byte transport overhead and that header.
+ *    The application drives it with `now` (`poll`), as the harness does while it waits. Every
+ *    row, label and reading is shared with `udp`.
  *
  * The crypto floor under the Noise arm (seal/open per frame, the handshake on its own) is
  * `bench_noise_crypto`. Diagnostic, not a gate.
@@ -47,7 +50,13 @@
 #include "link_harness.hpp"
 
 #if defined(LIBTRACER_BENCH_NOISE_LINK)
-#include "libtracer/transport_noise.hpp"  // #2064
+#include <sys/random.h>
+
+#include <atomic>
+#include <cstring>
+#include <string_view>
+
+#include "libtracer/transport_noise.hpp"  // #2073
 #endif
 
 namespace {
@@ -63,10 +72,11 @@ using bench::link::rx_state_t;
 struct server_sink_t {
     rx_state_t* rx = nullptr;            /**< @brief Where frames are reported. */
     tr::net::transport_t* end = nullptr; /**< @brief The server end, for the echo. */
+    std::size_t header = 0; /**< @brief Bytes of frame header before the harness payload. */
     /** @brief The borrowed-span receiver callable. */
     void operator()(std::span<const std::byte> f) const {
         if (!rx->batch.load(std::memory_order_relaxed)) {
-            if (rx->on_server(f)) end->send(f);
+            if (f.size() >= header && rx->on_server(f.subspan(header))) end->send(f);
             return;
         }
         const auto node = tr::wire::tlv_node_t::over(f);
@@ -80,19 +90,32 @@ struct server_sink_t {
 /** @brief The client end's sink: report the echo. */
 struct client_sink_t {
     rx_state_t* rx = nullptr; /**< @brief Where frames are reported. */
+    std::size_t header = 0;   /**< @brief Bytes of frame header before the harness payload. */
     /** @brief The borrowed-span receiver callable. */
-    void operator()(std::span<const std::byte> f) const { rx->on_client(f); }
+    void operator()(std::span<const std::byte> f) const {
+        if (f.size() >= header) rx->on_client(f.subspan(header));
+    }
 };
 
-/** @brief Two libtracer link ends of one kind, wired to the harness. */
-template <class T>
+/** @brief A VALUE TLV header for a @p len-byte payload (`len` below 64 KiB). */
+[[nodiscard]] std::array<std::byte, 4> value_header(std::size_t len) {
+    return {static_cast<std::byte>(tr::wire::type_t::VALUE), std::byte{0},
+            static_cast<std::byte>(len & 0xFF), static_cast<std::byte>((len >> 8) & 0xFF)};
+}
+
+/**
+ * @brief Two libtracer link ends of one kind, wired to the harness.
+ * @tparam kFramed The link carries Tracer frames only (the Noise link): each harness payload
+ *                 travels behind a VALUE header, added at send and stripped at receive.
+ */
+template <class T, bool kFramed = false>
 class pair_t final : public link_pair_t {
    public:
     /** @brief Take the two constructed ends and install their sinks. */
     pair_t(rx_state_t& rx, std::unique_ptr<T> server, std::unique_ptr<T> client)
         : server_(std::move(server)), client_(std::move(client)) {
-        server_sink_ = {&rx, server_.get()};
-        client_sink_ = {&rx};
+        server_sink_ = {&rx, server_.get(), kHeader};
+        client_sink_ = {&rx, kHeader};
         server_->set_receiver(server_sink_);
         client_->set_receiver(client_sink_);
     }
@@ -100,7 +123,15 @@ class pair_t final : public link_pair_t {
         client_.reset();  // the client first, so the server never echoes into a dead socket
         server_.reset();
     }
-    void send(std::span<const std::byte> f) override { client_->send(f); }
+    void send(std::span<const std::byte> f) override {
+        if constexpr (kFramed) {
+            const auto h = value_header(f.size());
+            const std::span<const std::byte> iov[2] = {h, f};
+            client_->send(std::span<const std::span<const std::byte>>(iov));
+        } else {
+            client_->send(f);
+        }
+    }
 
     std::vector<std::span<std::byte>> stage_batch(std::size_t k, std::size_t v) override {
         frames_.assign(k, {});
@@ -127,14 +158,16 @@ class pair_t final : public link_pair_t {
 
 #if defined(LIBTRACER_BENCH_NOISE_LINK)
     void tick(std::uint64_t now) override {
-        if constexpr (requires(T& t) { t.tick(now); }) {
-            server_->tick(now);
-            client_->tick(now);
+        if constexpr (requires(T& t) { t.poll(now); }) {
+            (void)server_->poll(now);
+            (void)client_->poll(now);
         }
     }
 #endif
 
    private:
+    /** @brief The frame header each payload travels behind. */
+    static constexpr std::size_t kHeader = kFramed ? 4 : 0;
     std::unique_ptr<T> server_;
     std::unique_ptr<T> client_;
     server_sink_t server_sink_;
@@ -162,26 +195,64 @@ class pair_t final : public link_pair_t {
 }
 
 #if defined(LIBTRACER_BENCH_NOISE_LINK)
-/** @brief The PSK both Noise ends share. */
-constexpr std::array<std::byte, 32> kPsk = [] {
-    std::array<std::byte, 32> k{};
-    for (std::size_t i = 0; i < k.size(); ++i) k[i] = static_cast<std::byte>(0x20 + i);
-    return k;
-}();
+/**
+ * @brief The application's seams for the Noise arm: one PSK under one name, the kernel's random
+ *        source for the ephemeral keys, and a process-wide increasing counter.
+ */
+struct noise_host_t {
+    /** @brief The key store: the bench's one PSK. */
+    bool resolve_psk(std::string_view ref, tr::net::noise::key32_t& out) {
+        if (ref != "bench") return false;
+        for (std::size_t i = 0; i < out.size(); ++i) out[i] = static_cast<std::byte>(0x20 + i);
+        return true;
+    }
+    /** @brief A fresh ephemeral private key from `getrandom(2)`. */
+    bool ephemeral(tr::net::noise::key32_t& out) {
+        return getrandom(out.data(), out.size(), 0) == static_cast<ssize_t>(out.size());
+    }
+    /** @brief The initiator counter: strictly increasing across every attempt in the process. */
+    std::uint64_t next_counter() { return counter.fetch_add(1, std::memory_order_relaxed) + 1; }
+    std::atomic<std::uint64_t> counter{0}; /**< @brief The last counter handed out. */
+};
+
+/** @brief The process's one host: the setup row builds many pairs. */
+noise_host_t g_noise_host;
+
+/** @brief A Noise link over UDP on the build's crypto backend. */
+using noise_t =
+    tr::net::noise_link_t<tr::net::noise::default_crypto_t, noise_host_t, tr::net::udp_transport_t>;
 
 /**
- * @brief A Noise pair — the ONLY code that names #2064's link kind. Written against the shape
- *        #2064 describes: the UDP carrier's (bind port, peer host, peer port) plus a PSK, with
- *        the application driving `tick(now)`; adjust these lines to the constructor it ships.
+ * @brief The Noise link's config, in the harness's nanoseconds: retransmit after 1 ms (doubling
+ *        to 50 ms), give an attempt 2 s. The harness polls while it waits, so these run.
+ */
+[[nodiscard]] tr::net::noise_config_t noise_config() {
+    return {.psk_ref = "bench",
+            .max_frame = bench::link::kDatagramBound - tr::net::noise::kTransportOverhead,
+            .retry = 1'000'000,
+            .retry_cap = 50'000'000,
+            .attempt = 2'000'000'000,
+            .pending_expiry = 2'000'000'000};
+}
+
+/**
+ * @brief A Noise pair — the ONLY code that names the Noise link: the server end listens on an
+ *        ephemeral UDP port, the client end dials it. The harness's first `send` finds no
+ *        session, which starts the handshake (a demand); its re-sends then confirm it.
  */
 [[nodiscard]] std::unique_ptr<link_pair_t> make_noise_pair(rx_state_t& rx) {
-    using noise_t = tr::net::noise_transport_t;
-    auto server = std::make_unique<noise_t>(0, "", 0, tr::net::noise_config_t{.psk = kPsk});
+    const std::uint64_t now = bench::now_ns();
+    auto server =
+        std::make_unique<noise_t>(tr::net::conn_role_t::LISTEN, g_noise_host, noise_config(),
+                                  std::uint16_t{0}, std::string_view{}, std::uint16_t{0});
     if (!server->ok()) return nullptr;
-    auto client = std::make_unique<noise_t>(0, "127.0.0.1", server->local_port(),
-                                            tr::net::noise_config_t{.psk = kPsk});
+    auto client = std::make_unique<noise_t>(
+        tr::net::conn_role_t::DIAL, g_noise_host, noise_config(), std::uint16_t{0},
+        std::string_view{"127.0.0.1"}, server->carrier().local_port());
     if (!client->ok()) return nullptr;
-    return std::make_unique<pair_t<noise_t>>(rx, std::move(server), std::move(client));
+    (void)server->poll(now);  // deadlines count from the last `now` a link was given
+    (void)client->poll(now);
+    return std::make_unique<pair_t<noise_t, true>>(rx, std::move(server), std::move(client));
 }
 #endif
 
@@ -195,11 +266,12 @@ int main(int argc, char** argv) {
     const bench::link::arm_t arms[] = {
         {"libtracer", "udp", bench::link::kDatagramBound, "link-unbatched", make_udp_pair},
 #if defined(LIBTRACER_BENCH_NOISE_LINK)
-        {"libtracer", "noise", bench::link::kDatagramBound - 16, "link-unbatched", make_noise_pair},
+        {"libtracer", "noise", bench::link::kDatagramBound - tr::net::noise::kTransportOverhead - 4,
+         "link-unbatched", make_noise_pair},
 #endif
     };
 #if !defined(LIBTRACER_BENCH_NOISE_LINK)
-    std::printf("# arm libtracer/noise: compiled out (-DLIBTRACER_BENCH_NOISE_LINK=ON, #2064)\n");
+    std::printf("# arm libtracer/noise: compiled out (-DLIBTRACER_BENCH_NOISE_LINK=ON, #2073)\n");
 #endif
     bool ok = true;
     for (const auto& a : arms) ok &= bench::link::run_arm(a, o);

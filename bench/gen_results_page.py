@@ -471,9 +471,10 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
     instrument_t(
         "bench_noise_link.cpp", "net", (),
         "The Noise link harness's libtracer arms: one warm link pair per arm on loopback — the "
-        "plain UDP link, and the Noise link behind a build switch — timed for one "
-        "request and its echo, for a blast stream with 1-in-64 frames stamped, and for a fresh "
-        "pair's setup to first reply (the handshake, on a secured link), at 64 B, 1 KiB, 4 KiB, "
+        "plain UDP link, and the Noise link (#2073) over the same carrier behind a build "
+        "switch — timed for one request and its echo, for a blast stream with 1-in-64 frames "
+        "stamped, and for a fresh pair's setup to first reply (the handshake, on a secured "
+        "link), at 64 B, 1 KiB, 4 KiB, "
         "16 KiB and the datagram bound, with the heap, resident set and threads one pair costs. "
         "The stream is a libtracer LINK, unbatched (one frame per send); a stream-batch twin "
         "packs K values per send with compose_batch. The composed-graph comparison with Zenoh "
