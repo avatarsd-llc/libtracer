@@ -383,21 +383,13 @@ def text_report(steps: list[dict]) -> str:
 # CLI
 # ---------------------------------------------------------------------------
 def load_store(path: str | None) -> dict | None:
-    """@brief A benchmark-action store from @p path, else bench-local from `origin/gh-pages`."""
-    import json
-    raw = None
+    """@brief A store from @p path, else bench-local from `origin/gh-pages`; archives included."""
+    import store_load
     if path:
-        raw = pathlib.Path(path).read_text()
-    else:
-        subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", "gh-pages"],
-                       capture_output=True, cwd=REPO)
-        p = subprocess.run(["git", "show", "FETCH_HEAD:dev/bench-local/data.js"],
-                           capture_output=True, text=True, cwd=REPO)
-        raw = p.stdout if p.returncode == 0 else None
-    if not raw:
-        return None
-    start = raw.find("{")
-    return json.loads(raw[start:].rstrip().rstrip(";").rstrip()) if start >= 0 else None
+        return store_load.load_path(path) if pathlib.Path(path).stat().st_size else None
+    subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", "gh-pages"],
+                   capture_output=True, cwd=REPO)
+    return store_load.load_git("FETCH_HEAD", "dev/bench-local/data.js", REPO)
 
 
 def main(argv: list[str] | None = None) -> int:

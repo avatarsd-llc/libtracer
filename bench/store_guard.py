@@ -320,7 +320,8 @@ def _fmt_prev(alert: dict) -> str:
 
 
 def _load_doc(path: str) -> dict:
-    return parse_data_js(pathlib.Path(path).read_text())
+    import store_load
+    return store_load.load_path(path)
 
 
 def _gh_output(**kv: object) -> None:
