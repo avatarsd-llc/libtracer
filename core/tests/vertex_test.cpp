@@ -216,6 +216,41 @@ void test_edges_snapshot_clear_latch() {
     check(!drops.any(), "a heap-backed wide snapshot sheds nothing either");
 }
 
+/**
+ * @brief A slot write is checked against the edge it lands on (RFC-0036 §3.4): the identity
+ *        @ref vertex_t::edge_holder hands back is what `replace_edge` and `clear_edge` compare
+ *        under their own lock, so a slot cleared and reused between the check and the write
+ *        refuses the write and keeps the edge that now occupies it.
+ */
+void test_slot_write_checked_against_its_edge() {
+    std::printf("a slot write is checked against the edge it lands on:\n");
+    vertex_t v{role_t::STORED_VALUE, key_of({0x05}), {}};
+    const auto mk_edge = [](std::string_view caller) {
+        subscriber_t s;
+        tr::graph::subscriber_remote_t* r = s.ensure_remote(tr::mem::heap_source());
+        if (r != nullptr) (void)r->caller.assign(caller);
+        return s;
+    };
+    check(v.add_edge(mk_edge("a")) == 0, "a's edge lands in slot 0");
+    const tr::graph::remote_ptr_t seen = v.edge_holder(0);  // the holder check
+    check(seen != nullptr && seen->caller.view() == "a", "the check sees a's edge");
+    check(v.clear_edge(0), "a clears its own slot");
+    check(v.add_edge(mk_edge("b")) == 0, "b's append reuses the cleared slot 0");
+
+    check(v.replace_edge(0, mk_edge("a"), seen.get()) == vertex_t::edge_replace_t::EDGE_CHANGED,
+          "a replace checked against a's edge does not land on b's");
+    check(!v.clear_edge(0, nullptr, nullptr, nullptr, seen.get()), "…and neither does a clear");
+    const tr::graph::remote_ptr_t now = v.edge_holder(0);
+    check(now != nullptr && now->caller.view() == "b", "b's edge still holds slot 0");
+
+    check(v.replace_edge(0, mk_edge("b"), now.get()) == vertex_t::edge_replace_t::REPLACED_ACTIVE,
+          "a replace checked against the edge it lands on proceeds");
+    const tr::graph::remote_ptr_t after = v.edge_holder(0);
+    check(v.clear_edge(0, nullptr, nullptr, nullptr, after.get()), "…and so does a clear");
+    check(v.edge_holder(0) == nullptr, "a cleared slot has no holder");
+    check(v.edge_holder(9) == nullptr, "nor does a slot past the end");
+}
+
 void test_snapshot_under_concurrent_add() {
     std::printf("snapshot_edges under a concurrent add_edge storm:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x05}), {}};
@@ -311,6 +346,7 @@ int main() {
     test_seq_cursor_and_empty_lkv();
     test_await_wake_and_timeout();
     test_edges_snapshot_clear_latch();
+    test_slot_write_checked_against_its_edge();
     test_snapshot_under_concurrent_add();
     test_acl_verbs();
     test_bookkeeping_counters();

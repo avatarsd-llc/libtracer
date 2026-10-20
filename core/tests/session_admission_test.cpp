@@ -19,7 +19,8 @@
  *    peer's departure both run) fires one `END`, the embedder refunds all `kBudget` there, and
  *    the session can subscribe again;
  * 4. every edge that ends one at a time gives its charge back with one `RELEASE`: an admission
- *    the graph then refused (a `:subscribers[N]` replace naming no slot), a clear, a replace's
+ *    the graph then refused (a `:subscribers[N]` replace whose slot was cleared and reused after
+ *    the holder check), a clear, a replace's
  *    displaced edge, a route refusal and the producer's retirement — so subscribe/unsubscribe
  *    churn and repeated `[0]` replaces never exhaust the budget;
  * 5. a local subscription has no session and is never offered;
@@ -36,12 +37,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <initializer_list>
 #include <map>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "graph_sinks.hpp"
@@ -109,6 +112,10 @@ struct budget_t {
     std::vector<std::string> producers; /**< @brief Every `ADMIT`'s producer key, in order. */
     int underflows = 0;                 /**< @brief `RELEASE`s with nothing charged. */
     int releases = 0;                   /**< @brief How many `RELEASE`s arrived. */
+    /** @brief Run on another thread, and waited for, inside the `ADMIT` numbered @ref race_at
+     *         (1-based). The hook itself must not re-enter the graph; this thread may. */
+    std::function<void()> race;
+    std::size_t race_at = 0; /**< @brief Which `ADMIT` runs @ref race; 0 for none. */
 
     /** @brief The installed hook. */
     static bool hook(void* ctx, const session_event_t& e) {
@@ -117,6 +124,7 @@ struct budget_t {
         switch (e.kind) {
             case session_event_t::kind_t::ADMIT:
                 self.callers.emplace_back(e.caller);
+                if (self.race && self.callers.size() == self.race_at) std::thread(self.race).join();
                 self.producers.emplace_back(
                     reinterpret_cast<const char*>(e.producer.bytes().data()),
                     e.producer.bytes().size());
@@ -239,16 +247,34 @@ void test_refused_landing_is_released() {
     (void)g.register_vertex(path_t("/t"), role_t::STORED_VALUE);
     budget_t budget;
     install(g, &budget);
+    const auto sub = [&](std::optional<std::uint16_t> slot, std::string_view caller) {
+        return g.write(p, subscribers(slot), tr::view::rope_t{make_value(b_subscriber("t"))},
+                       caller);
+    };
 
-    // A `:subscribers[99]` replace from a peer: admitted by the hook under its session (the
-    // caller context, since this door binds no link), then refused for naming no slot.
-    field_path_t f;
-    f.steps.push_back(field_step_t{.name = "subscribers", .indexed = true, .index = 99});
-    const auto r = g.write(p, f, tr::view::rope_t{make_value(b_subscriber("t"))}, "peer");
-    check(!r && r.error() == status_t::INVALID_PATH, "the replace naming no slot is refused");
-    check(budget.callers.size() == 1, "the replace was offered to the hook");
-    check(budget.releases == 1, "and its charge released when it did not land");
+    // A peer's `:subscribers[99]` replace names a slot nobody holds, so the `[N]` gate refuses
+    // it (RFC-0036 §3.4) before the hook is offered anything.
+    const auto none = sub(99, "peer");
+    check(!none && none.error() == status_t::PERMISSION_DENIED,
+          "a replace naming no slot is refused at the gate");
+    check(budget.callers.empty(), "…and never offered to the hook");
+
+    // The peer holds slot 0 and replaces it. Inside the replace's ADMIT, after the holder check,
+    // the owner clears slot 0 and another peer's append reuses it: the replace is checked
+    // against the edge it lands on, refused, and its charge given back.
+    check(sub(std::nullopt, "peer").has_value(), "the peer's append lands in slot 0");
+    budget.race_at = 2;
+    budget.race = [&] {
+        (void)g.write(p, subscribers(0), tr::view::rope_t{make_value(b_clear())}, {});
+        (void)sub(std::nullopt, "other");
+    };
+    const auto r = sub(0, "peer");
+    check(!r && r.error() == status_t::PERMISSION_DENIED,
+          "a replace whose slot was reused after the check is refused");
+    check(budget.callers.size() == 3, "the replace was offered to the hook");
+    check(budget.releases == 2, "the cleared edge's charge and the refused replace's came back");
     check(budget.charged["peer"] == 0, "the embedder's charge is exact");
+    check(budget.charged["other"] == 1, "the edge that reused the slot keeps its charge");
     check(budget.underflows == 0, "no RELEASE without its ADMIT");
 }
 

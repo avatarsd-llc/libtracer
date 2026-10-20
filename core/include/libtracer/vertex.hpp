@@ -2117,11 +2117,18 @@ class vertex_t {
      * @param was_suspended Optional out-parameter: whether the cleared edge was suspended
      *        (#1533), in which case it was not counted and the caller owes the RFC-0005
      *        bookkeeping nothing. Same write rule as @p retired_ctx.
-     * @return true iff the slot existed and was active (the caller then adjusts the
-     *         RFC-0005 listener bookkeeping, unless @p was_suspended).
+     * @param expect Optional: the cold half of the edge a check saw in slot @p idx (from
+     *        @ref edge_holder). When given, the clear lands only on that edge, compared under
+     *        this lock, so a slot cleared and reused after the check is left alone. Null leaves
+     *        the clear unchecked: an `unsubscribe`, or a check that saw no remote edge. The
+     *        caller keeps its share alive across the call, so the address cannot be reused.
+     * @return true iff the slot existed, was active and (with @p expect) still carried that
+     *         edge (the caller then adjusts the RFC-0005 listener bookkeeping, unless
+     *         @p was_suspended).
      */
     bool clear_edge(std::size_t idx, void** retired_ctx = nullptr,
-                    remote_ptr_t* retired_remote = nullptr, bool* was_suspended = nullptr) {
+                    remote_ptr_t* retired_remote = nullptr, bool* was_suspended = nullptr,
+                    const subscriber_remote_t* expect = nullptr) {
         edge_block_t* b = nullptr;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
@@ -2129,6 +2136,7 @@ class vertex_t {
             if (b == nullptr) return false;
             if (idx >= b->slots.size() || !b->slots[idx].active) return false;
             pub_edge_t& e = entry_of(*b, idx);
+            if (expect != nullptr && e.remote.get() != expect) return false;
             if (retired_ctx != nullptr) *retired_ctx = e.callback_ctx;
             if (retired_remote != nullptr) *retired_remote = e.remote;  // a share of the record
             if (was_suspended != nullptr)
@@ -2150,13 +2158,15 @@ class vertex_t {
         return true;
     }
 
-    /** @brief Outcome of @ref replace_edge — tells the caller which bookkeeping it owes. The two
+    /** @brief Outcome of @ref replace_edge — tells the caller which bookkeeping it owes. The three
      *         refusals come first, in this order: `graph_t::admit_subscriber` tests them with
      *         one comparison and indexes its status table by them. */
     enum class edge_replace_t {
         OUT_OF_RANGE,    /**< @brief No slot @p idx exists; nothing was written. */
         REFUSED,         /**< @brief The array carrying the replacement could not be published; the
                           *   slot and its edge are exactly as they were (#1622). */
+        EDGE_CHANGED,    /**< @brief The slot no longer carries the edge the write was checked
+                          *   against (RFC-0036 §3.4); nothing was written. */
         FILLED_EMPTY,    /**< @brief The slot existed but was cleared — this is an ADD. */
         REPLACED_ACTIVE, /**< @brief A live edge was swapped out; the listener count is unchanged.
                           */
@@ -2189,17 +2199,24 @@ class vertex_t {
      *
      * @param idx   The `:subscribers[N]` slot number.
      * @param s     The replacing edge.
+     * @param expect The cold half of the edge the `[N]` check saw in slot @p idx (from
+     *              @ref edge_holder; null for a slot it saw empty or holding an in-process
+     *              edge). The replace lands only while the slot still carries it, compared
+     *              under this lock; otherwise it answers @ref edge_replace_t::EDGE_CHANGED. The
+     *              caller keeps its share alive across the call, so the address cannot be reused.
      * @param latch Optional durability latch; snapshotted iff the REPLACING subscriber
      *              requested durability (RFC-0022 §3.A) and the vertex holds an LKV.
      * @param displaced_remote Optional out-parameter receiving the displaced edge's cold
      *              `remote` half (#1816), moved out under the lock. A cleared slot holds none,
      *              so it stays empty unless a live remote edge was displaced.
+
      * @return Which case applied — see @ref edge_replace_t.
      */
     // Inlined into its one caller (`graph_t::admit_subscriber`) on every build: GCC 15 outlined
     // it once the #1533 suspended case grew its result, which makes the slot reclaim's heap
     // reach a NEW function to the MCU link check rather than the pinned caller it was (#1783).
     [[gnu::always_inline]] edge_replace_t replace_edge(std::size_t idx, subscriber_t s,
+                                                       const subscriber_remote_t* expect,
                                                        edge_latch_t* latch = nullptr,
                                                        remote_ptr_t* displaced_remote = nullptr) {
         edge_block_t* b = nullptr;
@@ -2219,6 +2236,7 @@ class vertex_t {
                 was_suspended = !old.active.load(std::memory_order_relaxed);
                 displaced = old.remote;
             }
+            if (displaced.get() != expect) return edge_replace_t::EDGE_CHANGED;
             if (!try_publish_edges(*b, &s, idx)) return edge_replace_t::REFUSED;
             if (displaced_remote != nullptr) *displaced_remote = std::move(displaced);
             b->slots[idx] = {
@@ -2552,22 +2570,18 @@ class vertex_t {
     }
 
     /**
-     * @brief Copy the caller context active slot @p idx was admitted under — the context its
-     *        HOLDER is judged by (RFC-0036 §3.4) — into @p out. @p out is left empty, which
-     *        is the owner's, for an edge the owner made, for a cleared slot (nobody holds it,
-     *        and a concurrent append may reuse it) and for a context @p out's source refused,
-     *        so each fails closed.
-     * @retval false No slot @p idx exists, so there is nothing to hold.
+     * @brief A share of the cold half of the edge in active slot @p idx: its `caller` is the
+     *        context the slot's HOLDER is judged by (RFC-0036 §3.4), and the record itself is
+     *        the edge's identity, which @ref replace_edge and @ref clear_edge compare against.
+     *        The record is immutable once published, so it is read after the lock is released.
+     * @return Empty for a slot past the end, a cleared slot and an edge the owner made in
+     *         process: none has a holder, so each is the owner's.
      */
-    [[nodiscard]] bool edge_holder(std::size_t idx, tr::mem::string_t& out) {
+    [[nodiscard]] remote_ptr_t edge_holder(std::size_t idx) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const edge_block_t* b = edges_locked();
-        if (b == nullptr || idx >= b->slots.size()) return false;
-        if (b->slots[idx].active) {
-            const remote_ptr_t& r = entry_of(*b, idx).remote;
-            if (r != nullptr && !out.assign(r->caller.view())) out.clear();
-        }
-        return true;
+        if (b == nullptr || idx >= b->slots.size() || !b->slots[idx].active) return {};
+        return entry_of(*b, idx).remote;
     }
 
     /** @brief Every active slot's stored SUBSCRIBER view, in slot order (the

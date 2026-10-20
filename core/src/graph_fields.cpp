@@ -530,6 +530,7 @@ struct graph_t::field_surface_t {
         // and admission tail below, and `slot` is the only thing that tells them apart.
         const field_sel_t sel = field_selector(field);
         std::optional<std::size_t> slot;
+        remote_ptr_t edge;  // the edge the `[N]` gate checked; the slot verb lands only on it
         if (sel == field_sel_t::SLOT) {
             // `[N]` is the owner's, or its holder's with READ (RFC-0036 §3.4), and is gated
             // before its payload is looked at (`graph_t::may_write_slot`). The rule holds with
@@ -537,7 +538,7 @@ struct graph_t::field_surface_t {
             // contexts byte for byte. The append is gated by the READ gate inside
             // `admit_subscriber` alone, as it always was.
             slot = field.steps[0].index;
-            if (!g.may_write_slot(v, *slot, ctx.subject))
+            if (!g.may_write_slot(v, *slot, ctx.subject, edge))
                 return std::unexpected(status_t::PERMISSION_DENIED);
             // §D.1 is payload-DISCRIMINATING. Before it, every indexed write cleared the slot
             // payload-blind, so a peer writing a SUBSCRIBER to slot N — plainly meaning to
@@ -550,7 +551,7 @@ struct graph_t::field_surface_t {
                 // Clear-and-report through the ONE slot-clear door `unsubscribe` also runs: the
                 // observer's view is taken before the clear, the RFC-0005 counters unwind, and
                 // only a slot that WAS active is reported as a removal.
-                (void)g.clear_subscriber_slot(v, *slot, ctx.subject);
+                (void)g.clear_subscriber_slot(v, *slot, ctx.subject, nullptr, edge.get());
                 return {};
             }
         } else if (sel != field_sel_t::APPEND) {
@@ -610,7 +611,8 @@ struct graph_t::field_surface_t {
         // The single admission step (ADR-0049): READ gate → append (or replace at
         // `slot` — §D.1's "admitted through the same admission door") → latch. A field-write
         // subscribe returns no host handle — discard it.
-        if (const auto r = g.admit_subscriber(v, std::move(s), ctx.subject, slot); !r)
+        if (const auto r = g.admit_subscriber(v, std::move(s), ctx.subject, slot, {}, edge.get());
+            !r)
             return std::unexpected(r.error());
         return {};
     }

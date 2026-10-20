@@ -1588,7 +1588,7 @@ void graph_t::note_subscriber_removed(vertex_t* v) {
 }
 
 bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_view caller,
-                                    void** retired_ctx) {
+                                    void** retired_ctx, const subscriber_remote_t* expect) {
     // ONE out-of-line clear for both doors, so `vertex_t::clear_edge` is compiled once rather
     // than inlined here and again out of line in graph_fields.cpp (#1711, rv32 flash).
     //
@@ -1601,7 +1601,7 @@ bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_v
                                          : view::view_t{};
     remote_ptr_t retired_remote;
     bool was_suspended = false;
-    if (!v->clear_edge(slot, retired_ctx, &retired_remote, &was_suspended)) return false;
+    if (!v->clear_edge(slot, retired_ctx, &retired_remote, &was_suspended, expect)) return false;
     if (!was_suspended) note_subscriber_removed(v);  // RFC-0005 counts delivering edges only
     // The link hold (#1816) and the session charge (#1841) this clear gives back.
     release_edges(delivery_link(retired_remote), session_of(retired_remote), v);
@@ -1859,23 +1859,23 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     return allowed && (v->registered() || v->parent() == nullptr);
 }
 
-bool graph_t::may_write_slot(vertex_t* v, std::size_t slot, std::string_view caller) const {
+bool graph_t::may_write_slot(vertex_t* v, std::size_t slot, std::string_view caller,
+                             remote_ptr_t& edge) const {
+    // The edge the slot verb is checked against, the owner's included. The share keeps the
+    // record, and so the identity the verb compares, alive. Nothing is disclosed before READ.
+    edge = v->edge_holder(slot);
     if (caller.empty()) return true;  // Rule 2: the owner passes as the owner
     // READ first, so a caller without it learns nothing about slot N (§3.4, Order).
     if (!acl_allows(v, caller, acl_right_t::READ)) return false;
-    std::array<std::byte, kSubjectFrameBytes> held_bytes;
-    mem::bump_source_t held_frame(held_bytes, *tables_);
-    mem::string_t held(held_frame);
-    if (!v->edge_holder(slot, held)) return true;  // no slot N: the slot verb answers
-    // Rule 1: an edge with an empty stored context, or a cleared slot, is the owner's alone,
-    // and the lookup never runs on it (#905).
-    if (held.empty()) return false;
-    // Rule 4: with no resolver, the stored contexts are compared byte for byte (§12 Q1).
-    if (!subject_lookup_.installed()) return held.view() == caller;
+    // Rule 1: a slot past the end, a cleared slot and an edge with an empty stored context
+    // have no holder, so each is the owner's alone, and the lookup never runs on it (#905).
+    if (edge == nullptr || edge->caller.empty()) return false;
+    const std::string_view held = edge->caller.view();
     const auto settled = subject_lookup_.get_settled(kHookSettleReads);
     if (!settled) return false;
     const auto lookup = *settled;
-    if (lookup.fn == nullptr) return held.view() == caller;  // cleared by the republish
+    // Rule 4: with no resolver, the stored contexts are compared byte for byte (§12 Q1).
+    if (lookup.fn == nullptr) return held == caller;
     // Rule 3: both resolve, to the same unreserved token. A failure on either side is "not the
     // holder", so an edge whose creator no longer resolves is the owner's.
     std::array<std::byte, kSubjectFrameBytes> a_bytes;
@@ -1884,7 +1884,7 @@ bool graph_t::may_write_slot(vertex_t* v, std::size_t slot, std::string_view cal
     mem::bump_source_t b_frame(b_bytes, *tables_);
     mem::bytes_t a(a_frame);
     mem::bytes_t b(b_frame);
-    return lookup.fn(lookup.ctx, held.view(), a) && lookup.fn(lookup.ctx, caller, b) &&
+    return lookup.fn(lookup.ctx, held, a) && lookup.fn(lookup.ctx, caller, b) &&
            !is_reserved_subject(mem::as_span(a)) &&
            std::ranges::equal(mem::as_span(a), mem::as_span(b));
 }
@@ -3206,7 +3206,8 @@ result_t<void> graph_t::mark_flushed(vertex_handle_t vh) {
 result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
                                                    std::string_view caller,
                                                    std::optional<std::size_t> slot,
-                                                   link_id_t link_token) {
+                                                   link_id_t link_token,
+                                                   const subscriber_remote_t* expect) {
     // The single admission step (ADR-0049): every door lands here, so the READ gate
     // and the transient-local durability latch apply UNIFORMLY — which invariants fire no
     // longer depends on which door an edge entered through.
@@ -3298,7 +3299,8 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // replace and to an append (ADR-0049); the READ gate ran at the `[N]` arm. An index no
         // slot answers to is a malformed address, not a silent no-op — and refusing it is
         // what stops a wire-supplied `:subscribers[65535]` from growing the slot vector.
-        const vertex_t::edge_replace_t r = v->replace_edge(*slot, std::move(s), &latch, &displaced);
+        const vertex_t::edge_replace_t r =
+            v->replace_edge(*slot, std::move(s), expect, &latch, &displaced);
         // Only filling a CLEARED slot is genuinely a new listener; swapping a live one leaves
         // the count be, and a refused index adds nothing — both give the speculative bump
         // back. The unwind costs a second subtree walk on a control-plane-COLD path, which is
@@ -3308,8 +3310,9 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // A REFUSED replace changed nothing (#1622): the displaced edge still delivers, so the
         // speculative bump and hold go back exactly as for an index no slot answers to. The two
         // refusals lead the enumeration, so one test takes both and the table names the status.
-        if (r <= vertex_t::edge_replace_t::REFUSED) {
-            constexpr status_t kRefusal[] = {status_t::INVALID_PATH, status_t::BACKPRESSURE};
+        if (r <= vertex_t::edge_replace_t::EDGE_CHANGED) {
+            constexpr status_t kRefusal[] = {status_t::INVALID_PATH, status_t::BACKPRESSURE,
+                                             status_t::PERMISSION_DENIED};
             note_subscriber_removed(v);
             release_edges(delivery_link(admitted), session_of(admitted), v);
             return std::unexpected(kRefusal[std::to_underlying(r)]);

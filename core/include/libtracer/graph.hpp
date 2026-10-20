@@ -3287,10 +3287,11 @@ class graph_t {
     // Clear subscriber slot `slot` of `v` and, iff it was active, unwind the bookkeeping above
     // and report the removal to the subscription observer under `caller` (a no-op for the
     // empty, local caller): the one clear `unsubscribe` and the wire `:subscribers[N]` clear
-    // both run (#1711). False iff the slot was not active. `retired_ctx` as for
+    // both run (#1711). False iff the slot was not active. `retired_ctx` and `expect` as for
     // vertex_t::clear_edge.
     [[nodiscard]] bool clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_view caller,
-                                             void** retired_ctx = nullptr);
+                                             void** retired_ctx = nullptr,
+                                             const subscriber_remote_t* expect = nullptr);
     // The single SUBSCRIBER admission step (ADR-0049): READ gate under `caller` →
     // slot append → transient-local durability latch (delivered outside the lock, per
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
@@ -3299,10 +3300,12 @@ class graph_t {
     // `link_token` is the carried interned identity (#1417), forwarded verbatim to
     // `link_index_t::index_vertex` — which ignores it unless it names a live slot spelling the key
     // this admission actually indexes under. Defaulted, so the three local doors that carry
-    // none are unchanged.
+    // none are unchanged. `expect` is the edge the `[N]` gate checked, handed to
+    // vertex_t::replace_edge so a replace lands only on it.
     [[nodiscard]] result_t<subscription_t> admit_subscriber(
         vertex_t* v, subscriber_t s, std::string_view caller,
-        std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {});
+        std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {},
+        const subscriber_remote_t* expect = nullptr);
     // Fire the external-subscription observer for ONE slot mutation
     // (graph_hooks_t::subscription_observer). Returns immediately when no observer is installed or
     // `caller` is EMPTY — the latter is the whole external/local discrimination, in one place.
@@ -3381,13 +3384,15 @@ class graph_t {
     [[nodiscard]] bool acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const;
     // The `:subscribers[N]` gate (RFC-0036 §3.4): the owner (an empty `caller`) passes; anyone
     // else needs READ on `v`, tested first, and must then hold slot `slot`. A slot past the
-    // end has nothing to hold, so the slot verb answers for it (INVALID_PATH for a replace, a
-    // no-op for a clear). A cleared slot is the owner's, and so is an edge with an empty
-    // stored context. With a resolver installed,
-    // both contexts must resolve, to the same unreserved token; without one, they must be
-    // equal byte for byte. A failed lookup on either side is "not the holder". Runs on the
-    // `:subscribers[N]` control path only, never on delivery.
-    [[nodiscard]] bool may_write_slot(vertex_t* v, std::size_t slot, std::string_view caller) const;
+    // end, a cleared slot and an edge with an empty stored context have no holder, so each is
+    // the owner's. With a resolver installed, both contexts must resolve, to the same
+    // unreserved token; without one, they must be equal byte for byte. A failed lookup on
+    // either side is "not the holder". `edge` is left holding the edge slot `slot` carried at
+    // the check, for the owner too; the slot verb is handed it and lands only on that edge, so
+    // a slot cleared and reused after the check is not written. Runs on the `:subscribers[N]`
+    // control path only, never on delivery.
+    [[nodiscard]] bool may_write_slot(vertex_t* v, std::size_t slot, std::string_view caller,
+                                      remote_ptr_t& edge) const;
     /** @brief The @ref subject_lookup_fn_t that adapts a resolver installed in the returning
      *         form (@ref graph_hooks_t::subject_resolver): @p ctx is the graph, and the token
      *         the resolver returns is copied into @p out. */

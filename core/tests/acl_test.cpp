@@ -1544,11 +1544,11 @@ void test_subscribers_slot_is_its_holders() {
           "peer-r cannot clear the owner's slot");
     check(denied(write_subscribers(g, v, "/s:subscribers[7]", clear, "peer-n")),
           "a caller without READ is refused before slot N is looked up");
-    check(write_subscribers(g, v, "/s:subscribers[7]", clear, "peer-r").has_value(),
-          "with READ, a slot past the end answers as the slot verb does: a clear is a no-op");
-    check(fails_with(write_subscribers(g, v, "/s:subscribers[7]", sub, "peer-r"),
-                     status_t::INVALID_PATH),
-          "…and a replace is INVALID_PATH");
+    check(denied(write_subscribers(g, v, "/s:subscribers[7]", clear, "peer-r")),
+          "a slot past the end has no holder, so it is the owner's: peer-r cannot clear it");
+    check(denied(write_subscribers(g, v, "/s:subscribers[7]", sub, "peer-r")), "…or replace it");
+    check(fails_with(write_subscribers(g, v, "/s:subscribers[7]", sub, {}), status_t::INVALID_PATH),
+          "the owner's replace past the end answers as the slot verb does: INVALID_PATH");
 
     check(write_subscribers(g, v, "/s:subscribers[1]", sub, "peer-r").has_value(),
           "peer-r replaces its own slot with READ");

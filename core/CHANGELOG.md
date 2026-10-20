@@ -26,8 +26,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   endpoint needs WRITE, for both the create and the remove payload. `v:acl` is written by the
   owner (the empty caller) only, with or without a subject resolver. `v:subscribers[N]` is
   its holder's: a non-owner needs READ and must hold slot N, judged by the resolver's token when
-  one is installed and by the stored caller bytes when none is; a slot nobody holds is the
-  owner's.
+  one is installed and by the stored caller bytes when none is; a slot nobody holds, cleared or
+  past the end, is the owner's. The replace or clear lands only on the edge the check saw: a
+  slot cleared and reused in between answers `PERMISSION_DENIED` to a replace and is left as
+  it is by a clear. `vertex_t::edge_holder` now returns that edge's `remote_ptr_t`, and
+  `replace_edge` takes it as `expect` and `clear_edge` as an optional one (a new
+  `edge_replace_t::EDGE_CHANGED` outcome).
 - **`payload_right_t` and every `rights` parameter are removed.** `register_vertex`,
   `try_register_vertex`, `register_vertex_key` and `register_vertex_key_span` lose the
   argument (RFC-0014 Amendment 2's payload-right table is retired); the Amendment 3 `:schema`
