@@ -13,13 +13,13 @@
 | `0x20` – `0x7F` | Reserved for future core extensions |
 | `0x80` – `0xFF` | User-defined application payload types (`0x80` = **BATCH**, the one assigned code — §User range) |
 
-Assigned in the first block: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)). The `0x0F`–`0x1F` fast-track range holds the remote-operation, route-handle and bound-path frames (`0x0F`–`0x15` assigned, §reserved range `0x0F` – `0x1F`); `0x20` – `0x7F` is the long-term registry.
+Assigned in the first block: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)). The `0x0F`–`0x1F` fast-track range holds the remote-operation frames and the reverse path (`0x0F`, `0x10` and `0x15` assigned; `0x11`–`0x14` retired and not reassigned, §reserved range `0x0F` – `0x1F`); `0x20` – `0x7F` is the long-term registry.
 
 The names below are the canonical type-code names; an implementation's own enumeration matches them.
 
 ### Structured TLVs
 
-Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. In the first block the structured types are: `0x04` SUBSCRIBER, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. In the fast-track range `0x0F` FWD, `0x10` FIELD and the `0x11`–`0x13` route-handle frames are structured as well (§the fast-track range); `0x14` PATH_REF and `0x15` PATH_REF_REVERSE are the two codes in that range that are not. Each entry below specifies its own children layout.
+Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. In the first block the structured types are: `0x04` SUBSCRIBER, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. In the fast-track range `0x0F` FWD and `0x10` FIELD are structured as well (§the fast-track range); `0x14` PATH_REF and `0x15` PATH_REF_REVERSE are the two codes in that range that are not. Each entry below specifies its own children layout.
 
 There is no generic container type: every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
 
@@ -178,7 +178,7 @@ The `qos_settings` SETTINGS carries **per-subscriber encoding hints and this sub
 ```
 qos_settings = SETTINGS {
   NAME "delivery_scope"    VALUE <u8: DELTA=0, SNAPSHOT=1>   ; reserved (RFC-0005: as-written is the delivery; SNAPSHOT re-aggregation is a BRANCH WRITE)
-  NAME "delivery_compact"  VALUE <u8: 0=off, 1=on>  ; opt into route-handle compaction (§route-handle)
+  NAME "delivery_compact"  VALUE <u8>               ; RETIRED (RFC-0032) — carried verbatim, read by nothing
   NAME "delivery_policy"   VALUE <u16>              ; this subscription's DELIVERY policy (RFC-0022 §3.A)
   NAME "batch_count"       VALUE <u32>              ; RETIRED (RFC-0025 §4.1.3) — carried verbatim, read by nothing
   NAME "batch_window_ns"   VALUE <u64>              ; RETIRED (RFC-0025 §4.1.3) — carried verbatim, read by nothing
@@ -264,7 +264,7 @@ delivers as it always did, whatever a subscriber's word says.
 
 **Per-vertex `delivery_mode` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)).** Whether a vertex rides an *ancestor's* `propagate` sweep is a value-agnostic property of the **vertex** (not the subscriber): `UNCONDITIONAL` (always swept), `IF_NEWER` (default — swept only if it was assigned since the last covering sweep, i.e. it holds a pending mark), `EXPLICIT` (never swept by an ancestor; deliverable only by a direct `propagate` on the vertex). `assign` and a direct `propagate` on the vertex are never gated by it. It is host state defaulting to `IF_NEWER`, set by the owner (`vertex_policy_t::delivery_mode`), and it has **no wire spelling**: a `:settings.delivery_mode` write or read answers `tr::schema::not_found` like any other name in the empty `:settings` core namespace (conformance vector `settings/delivery-mode-not-found`; RFC-0008 §C erratum 2026-10-08, [#1981](https://github.com/avatarsd-llc/libtracer/issues/1981)).
 
-`delivery_compact` ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §E.1, ADR-0035 slice 4) is the consumer's **opt-in to label-compacted deliveries**: on a full-TLV transport (ws/UDP, default *full-route* deliveries) a producer MAY, for a subscriber that set it, advertise a per-link **label** aliasing that subscriber's return route and thereafter stream lean `COMPACT` frames instead of full-route `FWD{WRITE}` (see §route-handle). It is **optional and NAME-tagged**: a parser that does not know it, or a producer that does not honor it, keeps the full-route delivery path, so it perturbs no conformance vector. Header-elided transports (CAN) always label and ignore the hint.
+`delivery_compact` is a **retired key** ([RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §6.2), like `batch_count` and `batch_window_ns`. It was the consumer's opt-in to the retired route-handle delivery (§retired route-handle codes). A receiver MUST admit a `SUBSCRIBER` that carries it, with any value, and MUST NOT refuse it. Nothing reads it: the subscription's deliveries are chain deliveries (§Producer fan-out) whatever its value. It is carried verbatim, so a `:subscribers[N]` read returns the record as the subscriber wrote it, and the pair-consuming `SETTINGS` reader never reads its value as the following member (vectors `subscriber/compact-key-retired`, `subscriber/policy-absent`).
 
 The per-vertex `delivery_mode` is **enforced producer-side** (during the `propagate` sweep, before fan-out), and it applies to bubbled deliveries (below) exactly as to direct ones. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
 
@@ -284,11 +284,11 @@ flowchart BT
 
 ### Producer fan-out to remote subscribers
 
-When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an inbound `FWD{WRITE}` to `:subscribers[]`, RFC-0004 §D), the slot retains the request's **accumulated return route** (the FWD `src`) and the inbound link. The route bytes are copied **once**, at subscribe time, into a refcounted segment; the slot holds a view over it. Thereafter a write to that vertex fans out a delivery back to the consumer along that return route — a `FWD{WRITE, dst=<return route>, payload=<VALUE>}` (delivery-is-a-write), or, when the subscriber set `delivery_compact`, an auto-promoted `COMPACT` (advertised once per flow, then streamed; re-advertised after a reconnect — §route-handle). Each full-route delivery **refcount-clones** the stored route and scatter-gathers the frame from stack-built heads + the roped route + the roped value — no route or payload bytes are copied per delivery, and an in-flight rope keeps the route segment alive across a concurrent unsubscribe. This is the producer half of consumer-initiated subscription; it composes the existing field-writes and adds no wire verb (RFC-0004 / ADR-0035 slice 4).
+When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an inbound `FWD{WRITE}` to `:subscribers[]`, RFC-0004 §D), the slot retains the request's **accumulated return route** (the FWD `src`) and the inbound link. The route bytes are copied **once**, at subscribe time, into a refcounted segment; the slot holds a view over it. Thereafter a write to that vertex fans out one delivery per write back to the consumer — a `FWD{WRITE}` (delivery-is-a-write) whose `dst` is the subscription edge's chain where the edge holds one and its canonical return route otherwise, whose `src` is the empty `PATH`, and whose payload is the value as written ([RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §5.2). Each hop relays it by consuming its own element and holds nothing for the flow; there is no delivery-only frame and no setup exchange. Each delivery **refcount-clones** the stored route and scatter-gathers the frame from stack-built heads + the roped route + the roped value — no route or payload bytes are copied per delivery, and an in-flight rope keeps the route segment alive across a concurrent unsubscribe. This is the producer half of consumer-initiated subscription; it composes the existing field-writes and adds no wire verb (RFC-0004 / ADR-0035 slice 4).
 
-A subscriber that sets **`durability_request`** (bit 5 of its `delivery_policy`, below) additionally receives a **latch**: the subscribe itself emits one immediate delivery of the producer's last-known value, so a late joiner paints the current state without waiting for the next write. A subscriber that does not ask (the default) receives only writes that happen after its subscribe — and the two may sit on the same producer at the same time, which is the point of [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A: this was a producer-side `:settings.durability` flag that replayed to every subscriber, including the ones that never asked. The latch reuses the same delivery path (full-route or `COMPACT`) and carries no new wire bytes of its own, so it is observable only as delivery *timing*; the vectors pin the REQUEST (`subscriber/policy-durability`, `subscriber/policy-absent`).
+A subscriber that sets **`durability_request`** (bit 5 of its `delivery_policy`, below) additionally receives a **latch**: the subscribe itself emits one immediate delivery of the producer's last-known value, so a late joiner paints the current state without waiting for the next write. A subscriber that does not ask (the default) receives only writes that happen after its subscribe — and the two may sit on the same producer at the same time, which is the point of [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A: this was a producer-side `:settings.durability` flag that replayed to every subscriber, including the ones that never asked. The latch reuses the same delivery path and carries no new wire bytes of its own, so it is observable only as delivery *timing*; the vectors pin the REQUEST (`subscriber/policy-durability`, `subscriber/policy-absent`).
 
-The producer fan-out, end to end — the subscribe binds a remote subscriber, its `durability_request` fires the latch immediately, and later writes stream out (auto-promoted to lean `COMPACT` when the subscriber opted in):
+The producer fan-out, end to end — the subscribe binds a remote subscriber, its `durability_request` fires the latch immediately, and later writes stream out, each one `FWD{WRITE}`:
 
 ```{mermaid}
 sequenceDiagram
@@ -296,16 +296,15 @@ sequenceDiagram
     participant Cons as Consumer
     participant Prod as Producer node
     participant V as Vertex (producer)
-    Cons->>Prod: FWD{WRITE, dst=/V, :subscribers[], src=/cons,<br/>SUBSCRIBER{ delivery_compact=1 }}
+    Cons->>Prod: FWD{WRITE, dst=/V, :subscribers[], src=/cons,<br/>SUBSCRIBER{ delivery_policy }}
     Prod->>V: subscribe_wire — the ADR-0049 admission door<br/>(retain return_route=/cons + inbound link)
     Note over Prod,V: durability_request ⇒ latch the current LKV
     Prod-->>Cons: FWD{WRITE, dst=/cons, VALUE}  (delivery #1 — the latch)
     Prod-->>Cons: FWD{REPLY} (subscribe ack)
     Note over V,Prod: a later local write fans out via the injected sink
     V->>Prod: write(new VALUE) → fan_out → remote sink
-    Prod-->>Cons: ADVERTISE{ label, route=/cons }  (once per flow)
-    Prod-->>Cons: COMPACT{ label, VALUE }          (then lean frames…)
-    Prod-->>Cons: COMPACT{ label, VALUE }
+    Prod-->>Cons: FWD{WRITE, dst=/cons, src=<empty PATH>, VALUE}  (delivery #2)
+    Prod-->>Cons: FWD{WRITE, dst=/cons, src=<empty PATH>, VALUE}  (delivery #3…)
 ```
 
 ### Where it appears
@@ -332,7 +331,7 @@ Type code `0x05` is a **reserved code with no assigned meaning** in v1. Structur
 - Receivers MUST treat `type=0x05` as a reserved-but-unassigned code per [01-data-format.md](01-data-format.md) §handling unknown type codes (skip safely, do not crash).
 - The code is not available for reuse; collision-prevention keeps it unassigned.
 
-The structural concept lives in the options bits: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), SPEC (0x0E) in the first block, plus FWD (0x0F), FIELD (0x10) and the route-handle frames ADVERTISE (0x11) / COMPACT (0x12) / HANDLE_NACK (0x13) in the fast-track range; PATH_REF (0x14) and PATH_REF_REVERSE (0x15) are the two codes in that range that are not. PATH (0x06) is **not** structured either — since [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) its body is a packed record run with `opt.PL=0`, so the three address forms (`0x06`, `0x14`, `0x15`) are all opaque-bodied. User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
+The structural concept lives in the options bits: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), SPEC (0x0E) in the first block, plus FWD (0x0F) and FIELD (0x10) in the fast-track range; PATH_REF (0x14) and PATH_REF_REVERSE (0x15) are the two codes in that range that are not. PATH (0x06) is **not** structured either — since [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) its body is a packed record run with `opt.PL=0`, so the three address forms (`0x06`, `0x14`, `0x15`) are all opaque-bodied. User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
 
 ### Why no generic container
 
@@ -434,8 +433,8 @@ Enforcement sits at the resolver, not at the codec. Three rules, in the order a 
 **The two contexts, and why they differ.** In a **frame path** — a `FWD` `dst`/`src` a hop is
 relaying — a forwarder that does not implement an escape record's `kind` MUST step over it by
 its declared length rather than drop a frame it is only relaying; that is the whole reason the
-escape is self-delimiting. In **canonical / key context** — a vertex-map lookup key, an
-`ADVERTISE` route, a pre-encoded path handle — an escape record is rejected, because a PAIR is
+escape is self-delimiting. In **canonical / key context** — a vertex-map lookup key, a
+pre-encoded path handle — an escape record is rejected, because a PAIR is
 not canonical bytes and the key must stay pure-string for the byte-prefix-implies-ancestor
 property [02-graph-model.md](02-graph-model.md) depends on.
 
@@ -582,9 +581,7 @@ The tenancy and link bumps advance the generation **only** — they do not empty
 **Statelessness.** A forwarding hop holds **no hard state** — nothing whose loss changes an answer —
 and no per-request state, ever. The origin's cached chain and a subscription edge's learned chain
 are soft: a miss falls through to the canonical string with the same result. There is no per-hop
-table, no ceiling and no refuse-on-full. The **single named exception** is RFC-0004 §E.1's
-`COMPACT` route handle (§route-handle frames): streams only, recoverable through `HANDLE_NACK` and
-re-advertise, and never a wrong delivery.
+table, no ceiling and no refuse-on-full, and no exception ([RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §5.4).
 
 **Optionality.** Issuing and honouring PAIR elements are both optional. A host that implements
 neither still relays a frame carrying one, by stepping over the escape record by its declared length
@@ -597,14 +594,14 @@ renders an escape element in place inside the address; its PAIR rendering follow
 
 - Inside SUBSCRIBER as `target_path`.
 - As the PATH form of `tracer_read`/`write`/`await` arguments when the path is constructed programmatically (the C API also accepts string form for ergonomics).
-- As the `dst`/`src` routes of a `FWD` frame (§reserved range) and the `route` of an ADVERTISE (§route-handle frames).
+- As the `dst`/`src` routes of a `FWD` frame (§reserved range).
 
 ### Note on string form vs PATH-TLV form
 
 A path has **one wire form**, the PATH TLV. The string form is an API spelling only:
 
 - **String form**: `"/sensor/temp"` — a UTF-8 byte string with `/` separators. Used at the API surface for ergonomics, and converted to the PATH-TLV form before it reaches the wire. Application data that happens to spell a path travels as an ordinary VALUE TLV, and it is never read as an address.
-- **PATH-TLV form**: a PATH TLV (opaque body, packed records — one per path element). Every wire position that expects a path (a SUBSCRIBER's `target_path`, a FWD's `dst` and `src`, an ADVERTISE `route`) carries this form.
+- **PATH-TLV form**: a PATH TLV (opaque body, packed records — one per path element). Every wire position that expects a path (a SUBSCRIBER's `target_path`, a FWD's `dst` and `src`) carries this form.
 
 Both spellings canonicalize to the same internal representation. A receiver MUST NOT read a VALUE TLV as a path where a path is expected: a SUBSCRIBER whose target is a VALUE string names no `target_path`. A `:subscribers[]` or `:subscribers[N]` field write that needs a local target refuses it `tr::schema::type_mismatch` (vector `subscriber/target-as-value-refused`). A routed `:subscribers[]` append (a `FWD{WRITE}`) skips the VALUE child like any unknown child, and its delivery rides the frame's return route; that door needs no target (§`0x04` "Where `target_path` is required", RFC-0021 erratum of 2026-10-08). Erratum ([#1987](https://github.com/avatarsd-llc/libtracer/issues/1987)): this note used to say "Implementations MUST accept either form where a path is expected", but no shipped reader ever accepted a VALUE there.
 
@@ -868,6 +865,7 @@ outcome, not a frame-parse result. The namespace is prefix-filterable
   stays `kind=ERROR` (vector `fwd/reply-error-bare-ignored`; RFC-0004 erratum 2026-10-08).
 - Bare, anywhere other than a `kind=ERROR` `FWD{REPLY}` payload: for example protocol-stack
   reporting where there is no request to answer ([RFC-0002](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0002-protocol-error-model.md) §C).
+  A receiver MUST NOT answer a bare outer `ERROR`: it is a report, not a request (RFC-0032 §6.1).
 
 ---
 
@@ -1137,8 +1135,8 @@ And the NET-PLANE seams ([RFC-0010](https://github.com/avatarsd-llc/libtracer/bl
 | spelling | the seam | nouns |
 | ---- | ---- | ---- |
 | `:stats.router.drops` | the node's forwarder's counted cold-path drops | `flatten_dropped`, `forward_iov_dropped`, `arena_dropped`, `assemble_dropped`, `reply_iov_dropped`, `delivery_iov_dropped`, `malformed_rx`, `retired_rx` (outer frames of a retired type code, RFC-0032 §6.1) |
-| `:stats.labels.table` | the label planes: the `COMPACT` handle store's refusals (`labels_exhausted`, `refused_bindings`, deleted with the handle store by [RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §6.3) beside the RFC-0027 label table's dereference tallies (`label_not_found`, `label_resolves`, deleted with that table by [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) slice S3). Erratum 2026-10-09 ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Erratum (2026-10-09)): this row used to credit all four to the RFC-0027 table. | `labels_exhausted`, `refused_bindings`, `label_not_found`, `label_resolves` |
-| `:stats.link.<child>` | ONE registered transport child, by the NAME its `/net/<module>/<name>` connection vertex carries | `dropped_rx`, `malformed_rx`, `dropped_tx`, and `labels_used` (the `COMPACT` handle store's per-link label occupancy, deleted with it by RFC-0032 §6.3) where the node has path-label switching configured; and, on a Noise link ([RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) §5.11), `noise_handshake_failed`, `noise_handshake_replayed`, `noise_pending_superseded`, `noise_pending_expired`, `noise_retransmits`, `noise_decrypt_failed`, `noise_replayed`, `noise_stale`, `noise_expired` and `noise_oversize` ([23](23-noise-link-binding.md) §11) |
+| `:stats.labels.table` | the RFC-0027 label plane's dereference tallies: `label_not_found` (labelled `dst` elements this node refused) and `label_resolves` (those it dereferenced, whether it forwarded them or resolved them locally). Both are published today (`core/src/fwd_router.cpp:fwd_router_t::sample_stats`) and leave with that table in [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) slice S3. The handle store's `labels_exhausted` and `refused_bindings` left with the store ([RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §6.3). Erratum 2026-10-11: this row's "deleted with that table by RFC-0029 slice S3" could be read as already deleted; S3 has not landed, and both are still emitted. Its back-reference to RFC-0010 §Erratum (2026-10-09) is dropped with the three handle-store nouns that erratum concerned. | `label_not_found`, `label_resolves` |
+| `:stats.link.<child>` | ONE registered transport child, by the NAME its `/net/<module>/<name>` connection vertex carries | `dropped_rx`, `malformed_rx`, `dropped_tx`; and, on a Noise link ([RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) §5.11), `noise_handshake_failed`, `noise_handshake_replayed`, `noise_pending_superseded`, `noise_pending_expired`, `noise_retransmits`, `noise_decrypt_failed`, `noise_replayed`, `noise_stale`, `noise_expired` and `noise_oversize` ([23](23-noise-link-binding.md) §11) |
 
 A node that constructed no router publishes none of the three, and a `link` sub-key naming no registered child — or a removed one — is not a seam: all of these answer `ERROR{tr::schema::not_found}` (`0x0031`), which a monitor reads as "not published here". A link's `rx_capacity` / `tx_capacity` ceilings are deliberately absent: they are per-kind and in per-kind units (buffer bytes on a WebSocket link, TX-pool slots on CAN), so there is no unit-safe ceiling to publish at the interface.
 
@@ -1297,10 +1295,10 @@ Allocated on a fast-track basis during v1. Assigned so far:
 - `0x0F` **FWD** and `0x10` **FIELD** — the remote-operation frames ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §B/§C, ADR-0035).
   - A `FWD`'s `dst` and `src` are `PATH`s; a `dst` MAY spell any node's part as a PAIR element (§`0x06` §path element PAIR), and a `src` on the request leg stays canonical NAMEs. A `dst` presented as `0x14` is refused ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §5.3).
   - The `op` byte's **opcode is `op & 0x3F`**; bits 7–6 are **reserved, MUST be zero** — RFC-0024's bit-7 mint request is retired ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §5.3). A forwarder MUST mask rather than switch on the raw byte ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §9.3).
-  - A request whose **`src` is a zero-length `PATH`** is **unacknowledged**: it carries no return route, and the terminus emits **no** frame for it ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) Amendment 2). A `WRITE` is applied and answered with silence — success, refusal and ACL denial alike, the same drop a denied `COMPACT` delivery takes (§route-handle below). A `READ`, an `AWAIT` or a `:subscribers[]` subscribe with an empty `src` is **malformed** and dropped at the terminus (no route can carry a NACK). The child is **empty, never omitted** — the child run is positional and a `WRITE` payload may itself be `PATH`-typed, so omission is ambiguous; the grammar is unchanged. Forwarders still accumulate into `src` unconditionally, so the marker reaches a terminus only from a **directly attached** origin or on the **delivery leg**, where the producer emits `src=<empty PATH>` itself. The standing plane — a `SUBSCRIBER` plus `delivery_compact` (§`0x04`, §route-handle) — remains the first answer for streaming wherever the topology admits a consumer-initiated subscription; the unacknowledged write is for **push-ingest**, where the producer is the client and subscription would invert who initiates.
+  - A request whose **`src` is a zero-length `PATH`** is **unacknowledged**: it carries no return route, and the terminus emits **no** frame for it ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) Amendment 2). A `WRITE` is applied and answered with silence — success, refusal and ACL denial alike. A `READ`, an `AWAIT` or a `:subscribers[]` subscribe with an empty `src` is **malformed** and dropped at the terminus (no route can carry a NACK). The child is **empty, never omitted** — the child run is positional and a `WRITE` payload may itself be `PATH`-typed, so omission is ambiguous; the grammar is unchanged. Forwarders still accumulate into `src` unconditionally, so the marker reaches a terminus only from a **directly attached** origin or on the **delivery leg**, where the producer emits `src=<empty PATH>` itself. The standing plane — a `SUBSCRIBER` (§`0x04`) — remains the first answer for streaming wherever the topology admits a consumer-initiated subscription; the unacknowledged write is for **push-ingest**, where the producer is the client and subscription would invert who initiates.
   - A forwarded **subscribe request** MAY additionally carry a trailing **`PATH_REF_REVERSE`** (§`0x15`) child after RFC-0004 §B's closed child list — the reverse-direction chain, contributed by **forwarding hops only**, never by the origin ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §7.1). It is identified by its **type code**, never by its position; it is nonetheless last, so a positional reader of an ordinary request is untouched.
   - A `REPLY`'s `src` accumulates the forward route head-first on the way back, each host prepending its part as a PAIR or as its NAME run, never nothing ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §6.2, amending RFC-0004 §B).
-- `0x11`–`0x13` — the **route-handle transport-plane control frames** (below).
+- `0x11`–`0x13` — **retired** (were the route-handle frames `ADVERTISE`, `COMPACT` and `HANDLE_NACK`; [RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md), below). Not reassigned.
 - `0x14` — **retired** (was PATH_REF, RFC-0024's bound path; [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §5.3, below). Not reassigned.
 - `0x15` **PATH_REF_REVERSE** — the **reverse-direction chain** a subscribe request accumulates ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §7.1, below). A `PATH` body; a different role.
 
@@ -1359,34 +1357,33 @@ sequenceDiagram
     A-->>C: FWD{ op=REPLY, dst=C, VALUE }
 ```
 
-### Route-handle frames — `0x11` ADVERTISE, `0x12` COMPACT, `0x13` HANDLE_NACK
+### `0x11`–`0x13` — retired route-handle codes (were ADVERTISE, COMPACT, HANDLE_NACK)
 
-The route-handle (RFC-0004 §E.1, ADR-0035 slice 4) is **ws/UDP delivery-compaction** — the full-TLV counterpart of the CAN transport's `identity↔path` map ([14-can-transport.md](14-can-transport.md)). These three frames are **transport-plane control**, not core conformance TLVs: they ride a link *alongside* `FWD`, are emitted only for a `delivery_compact`-flagged flow, and a peer that ignores them simply keeps the full-route delivery path — so they carry **no conformance vectors** and do not perturb the cross-core machine. All are structured (`opt.PL=1`); the `label` is a per-link **u16** (`VALUE`, little-endian — **65 535** usable labels per link, since `0` is reserved to mean "none"), allocated monotonically per link and **swapped each hop** (MPLS-style).
+**Retired** by [RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §6.1 (accepted 2026-10-09), which removes RFC-0004 §E.1. They were the
+per-link route handle: a `u16` label bound by `ADVERTISE`, lean `COMPACT` deliveries over it and a
+`HANDLE_NACK` repair. Every stream delivery now rides the chain as a `FWD{WRITE}` (§Producer
+fan-out), and no hop holds a binding, label or handle for a flow. The codes are **not reassigned in
+v1**, and a node **MUST NOT** emit any of them. A receiver meets them as unknown core-range codes
+([01-data-format.md](01-data-format.md) §Handling unknown type codes), with this rule:
 
-```
-ADVERTISE (0x11, PL=1) {            ; bind a label to a delivery route, in-band
-  VALUE  label   ; u16, FIRST child — the (per downstream-link) label being bound
-  PATH   route   ; the dst route the label aliases; each hop strips its leading
-                 ; segment, allocates its OWN out-label, and re-advertises downstream
-}
-COMPACT (0x12, PL=1) {             ; a label-compacted delivery (no route rides)
-  VALUE  label   ; u16, FIRST child — names the established route on THIS link
-  <payload TLV>  ; the delivered value (a VALUE), expanded to a write at the terminus
-}
-HANDLE_NACK (0x13, PL=1) {         ; "I have no binding for this label" — prompts re-advertise
-  VALUE  label   ; u16 — the stale/unknown label seen; sent back over the inbound link
-}
-```
+- it MUST NOT crash, MUST respect `length` and MUST continue parsing; it creates no binding and no
+  other state, and it applies, forwards and re-advertises nothing;
+- an **outer** frame of one of them MUST be answered with one bare `ERROR{tr::schema::type_mismatch}`
+  sent back over the **link it arrived on** (none of the three carries a `src`, so the arrival link
+  is the return path), and MUST be counted in the `:stats.router.drops` noun `retired_rx` whether or
+  not the answer could be sent. A refused answer is not retried;
+- nested inside a structured TLV, it is opaque bytes, neither answered nor counted;
+- a forwarder MUST NOT pass them through. None carries a `dst`, so none is ever addressed through a
+  node.
 
-A `COMPACT` whose `label` has no binding on its inbound link is **dropped** and a `HANDLE_NACK` is returned (never a crash); re-advertising on (re)connect — the same producer-holds reconnect trigger — **rebinds** the flow ([ADR-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) self-heal).
+The vectors are `tlv-types/retired-route-handle-advertise`, `tlv-types/retired-route-handle-compact`
+and `tlv-types/retired-route-handle-handle-nack`.
 
-**A `COMPACT` terminus is ACL-gated exactly as the `FWD{WRITE}` it compacts is.** RFC-0004 §E.1 makes the terminus expand the label to the bound route and *apply the write*, and §F gates the target vertex's `:acl` at the final hop — so compaction is a framing optimisation and never an authorization one. The caller context is the **inbound link's name**, the same string the full-route form presents, and it is evaluated **per frame**: a label binding caches the *address, never the authorization* ([ADR-0062](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md)), so an `:acl` written after a flow was advertised applies to that flow's very next `COMPACT` and a label never becomes a capability that outlives its grant. A denied delivery is dropped like any other unwritable one — no new frame, no wire surface change. This is descriptive of the reference core: the two paths used to disagree, because the compacted one wrote with no caller at all and inherited the local-trusted context ([#974](https://github.com/avatarsd-llc/libtracer/issues/974)).
-
-A node clearing a link's label state on (re)connect **MUST** also treat as stale every ingress binding it holds — **on any link** — whose downstream half crossed that link, and drop those bindings too. A forwarding binding is keyed by the link the label *arrives* on while it names the link the swapped label *leaves* by, so clearing only the reconnected link's own tables leaves a mid-chain node still holding a binding aimed at an out-label that no longer exists. The upstream never observed the reconnect and so never re-advertises: it keeps streaming `COMPACT`s, the mid-chain node keeps swapping onto the dead out-label, the downstream keeps returning `HANDLE_NACK`s the mid-chain node can no longer answer, and the flow is silently dead in both directions. Dropping the crossing bindings makes the upstream's next `COMPACT` miss, which draws the ordinary stale-label `HANDLE_NACK` and prompts the upstream's own re-advertise — so recovery uses only the frames above, in the situations already specified for them, and **no wire surface changes**. A **terminus** binding has no downstream half and is never dropped by this rule.
-
-That drop covers the bindings a node already holds; it says nothing about the ones still being made. An `ADVERTISE` is processed on its *inbound* link's receive thread while a reconnect of the *downstream* link is processed on another, so a hop can mint its out-label and retain its egress route against the pre-clear downstream tables and bind the swap only afterwards — after the drop above has already scanned the inbound link. The binding then lands aimed at exactly the out-label the drop existed to invalidate. So the rule is a pair: a node clearing a link's label state **MUST** also refuse any forwarding binding whose downstream half was resolved against that link's *pre-clear* state, and the refusal and the drop **MUST NOT** interleave. A refused binding takes the same path an unbindable label already takes — the peer's next `COMPACT` misses, draws the stale-label `HANDLE_NACK`, and re-advertises against the new state — so, again, no wire surface changes.
-
-A node holds label state **only** for the compact flows crossing it (bounded by the number of such subscriptions); one-shot / cold / non-compact traffic allocates none, which preserves the stateless-forwarder property. Per-hop multiplexing of a reply to a specific request remains the transport's concern (RFC-0004 §D), so no end-to-end handle exists.
+*Erratum 2026-10-11:* this section and the members above (§`0x04` `delivery_compact`, §Producer
+fan-out, §`0x06` statelessness, §`0x08`, the reserved range and the `:stats` seams) still described
+the route handle as live after RFC-0032 removed it and the reference implementation deleted it
+([#1951](https://github.com/avatarsd-llc/libtracer/issues/1951)). They now match RFC-0032 §9.2. No
+wire byte moves.
 
 ### `0x14` — retired (was PATH_REF)
 
