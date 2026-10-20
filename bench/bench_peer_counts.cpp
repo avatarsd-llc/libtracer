@@ -590,7 +590,7 @@ relay_sample_t run_relay(const char* self, const relay_t& r, std::size_t payload
         r.srv_egress ? server_of(r.out) : client_of(r.out, static_cast<std::uint16_t>(c_port));
     const std::string mount = std::string("net/") + kind_name(r.out) + "/c";
     tr::mem::poly_ptr_t<transport_t> in = server_of(r.in);
-    if (!rb.add_child(mount, *to_c) || !rb.add_child("in", *in)) return out;
+    if (!rb.attach_link(mount, *to_c) || !rb.attach_link("in", *in)) return out;
     (void)gb.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     std::atomic<std::uint64_t> local{0};
     auto on_temp = [&](const tr::graph::value_t&) {

@@ -821,8 +821,8 @@ void two_nodes_over_udp() {
     (void)b.poll(now_ns());
     const auto temp = gb.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     (void)gb.write(temp, tr::testing::make_value(value_frame("21.5")));
-    (void)ra.add_child("b", a);
-    (void)rb.add_child("a", b);
+    (void)ra.attach_link("b", a);
+    (void)rb.attach_link("a", b);
 
     got_t dropped;
     tr::net::fwd_router_t::origin_t first{&on_got, &dropped};

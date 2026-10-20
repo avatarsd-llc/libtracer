@@ -157,7 +157,7 @@ void routed_dial_reaches_the_endpoint() {
     graph_t g;
     fwd_router_t router(g);
     listener_t up;
-    (void)router.add_child(kListener, up);
+    (void)router.attach_link(kListener, up);
     listener_t staged;
     transport_vertex_t net(g, router);
     check(net.register_module("m", "", conn_role_t::DIAL).has_value(), "module m is declared");
@@ -180,7 +180,7 @@ void destruction_under_live_dial() {
         graph_t g;
         fwd_router_t router(g);
         listener_t up;
-        (void)router.add_child(kListener, up);
+        (void)router.attach_link(kListener, up);
         auto net = std::make_unique<transport_vertex_t>(g, router);
         check(net->register_module("m", "", conn_role_t::DIAL).has_value(), "module m is declared");
 
@@ -263,7 +263,7 @@ void surviving_link_forwards_after_destruction() {
     graph_t g;
     fwd_router_t router(g);
     listener_t up;
-    (void)router.add_child(kListener, up);
+    (void)router.attach_link(kListener, up);
     probe_t p;
     auto net = plane_owning_x(g, router, p);
     const std::vector<std::byte> frame =
@@ -361,7 +361,7 @@ void forward_held_across_collects() {
     graph_t g;
     fwd_router_t router(g);
     listener_t up;
-    (void)router.add_child(kListener, up);
+    (void)router.attach_link(kListener, up);
     probe_t p;
     auto net = plane_owning_x(g, router, p);
     const std::vector<std::byte> frame =
@@ -442,7 +442,7 @@ void forward_in_flight_across_removal() {
     graph_t g;
     fwd_router_t router(g);
     listener_t up;
-    (void)router.add_child(kListener, up);
+    (void)router.attach_link(kListener, up);
     probe_t p;
     auto net = plane_owning_x(g, router, p);
     const std::vector<std::byte> frame =

@@ -1449,7 +1449,7 @@ void test_retired_type_answer_allocates_nothing() {
     tr::graph::graph_t g;
     tr::net::fwd_router_t router(g);
     silent_link_t up;
-    (void)router.add_child("up", up);
+    (void)router.attach_link("up", up);
 
     // A retired COMPACT `{VALUE label(u16), VALUE payload}`, built OUTSIDE the armed window:
     // the peer's allocation is not the node's.

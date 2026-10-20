@@ -172,7 +172,7 @@ void signed_session_is_the_caller(bool peer_named) {
         tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                             tr::net::httpd_ws_config_t{.peer_named = peer_named});
     link->set_auth_cb(&accept_as, nullptr);
-    check(router.add_child("ws", *link), "the link is a routed child");
+    check(router.attach_link("ws", *link), "the link is a routed child");
 
     constexpr int kOperator = 810;
     constexpr int kAnonymous = 811;
@@ -210,7 +210,7 @@ void unfit_subject_is_refused() {
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&accept_as, nullptr);
-    check(router.add_child("ws", *link), "the link is a routed child");
+    check(router.attach_link("ws", *link), "the link is a routed child");
     // An :acl that grants the exact 127-byte prefix, so a shortened subject WOULD match it.
     const std::string prefix =
         "role:operator" + std::string(httpd_ws_link_t::kMaxSubjectChars - 13, 'x');
@@ -248,7 +248,7 @@ void no_hook_keeps_the_link_name() {
     build_graph(g, /*enforce=*/false);
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
-    check(router.add_child("ws", *link), "the link is a routed child");
+    check(router.attach_link("ws", *link), "the link is a routed child");
     constexpr int kFd = 820;
     (void)fake_httpd::instance().open_session(kFd);
     (void)fake_httpd::instance().deliver_frame(kFd, write_knob());
@@ -341,7 +341,7 @@ void slot_edge_leaves_with_its_session() {
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&accept_as, nullptr);
-    check(router.add_child("ws", *link), "the link is a routed child");
+    check(router.attach_link("ws", *link), "the link is a routed child");
     // Two edges, both to `/c`, held by `role:operator`: the slots the sessions replace (a
     // replace needs an active slot the caller holds), so a delivery to `/a` or `/b` can only
     // come from a session's edge.
