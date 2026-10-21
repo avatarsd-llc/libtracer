@@ -18,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-10-22
+
+No `rmw_tracer`-specific changes. Released in lockstep with core 0.21.0 (see core's 0.21.0 section).
+
 ## [0.20.0] — 2026-10-20
 
 No `rmw_tracer`-specific changes. Released in lockstep with core 0.20.0 (see core's 0.20.0 section).

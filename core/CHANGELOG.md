@@ -14,6 +14,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-10-22
+
+### Fixed
+
+- **A reused session slot gets a fresh name, so a forwarded subscription made by the previous
+  session is reaped.** A `slot_server_t` session (the tcp and ws listeners) was named
+  `p<slot>`, a pure function of the slot's position, so a session landing in a reused slot
+  answered to its predecessor's name. A node that had stored a return route ending in that name
+  kept delivering along it to the new session, and its edge was never reaped. The name now
+  carries the tenancy generation the slot's handle already held: `p<slot>~<gen>` (for example
+  `p0~1`). A delivery along a route made for an earlier session names no live peer, is refused,
+  and the existing refused-route reclaim removes the far node's edge.
+  - `bus_link_t::peer_name` and `transport_t::peer_subject` answer the new spelling, and
+    `bus_link_t::peer_link` resolves only the exact current name: a name with a departed
+    session's generation, or with none, resolves nothing.
+  - New `bus_link_t::slot_link(slot)`: the endpoint of whichever session holds a slot. A
+    session anchor egresses through it; the default forwards to `peer_link`, which is right for
+    every kind whose names carry no generation (`n<node>` on CAN, unchanged).
+  - New `tr::net::kTenancySeparator` (`~`) and `tr::net::session_slot_of(name)` in `pair.hpp`.
+    Session anchors are keyed by `session_slot_of`, so one slot still keeps one anchor however
+    many sessions pass through it (ADR-0044 amendment); `fwd_router_t::session_anchor_id`
+    applies it.
+  - `child_registry_t::resolve_peer` takes the bus lookup to use, defaulting to `peer_link`.
+  - An arrival in a reused slot also evicts the edges, labels and pending awaits still filed
+    under the predecessor's name (`p<slot>~<gen-1>`) when that session's departure never
+    reached the router (#1609). A departure that is reported only after a successor claimed
+    the slot no longer retires the successor's anchor.
+  - **Behaviour change:** the name is visible wherever a peer name is, in `:children[]`,
+    `enumerate_peers` output, return routes and ACL subjects. An application that spelled a
+    session's name by hand as `p<slot>` must take it from `enumerate_peers` or `peer_name`
+    instead, and a client matching the old shape must accept `p<slot>~<gen>`.
+
 ### Changed (breaking)
 
 - **Two ACL rights, and `:` fields are gated by their vertex (RFC-0036,
@@ -61,36 +93,6 @@ Then check three things:
 3. **Remote formation.** An orchestrator that was granted WRITE_ACL now needs WRITE where it
    creates and binds, READ where it subscribes, and an owner-app vertex for any ACL it has to
    set.
-
-### Fixed
-
-- **A reused session slot gets a fresh name, so a forwarded subscription made by the previous
-  session is reaped.** A `slot_server_t` session (the tcp and ws listeners) was named
-  `p<slot>`, a pure function of the slot's position, so a session landing in a reused slot
-  answered to its predecessor's name. A node that had stored a return route ending in that name
-  kept delivering along it to the new session, and its edge was never reaped. The name now
-  carries the tenancy generation the slot's handle already held: `p<slot>~<gen>` (for example
-  `p0~1`). A delivery along a route made for an earlier session names no live peer, is refused,
-  and the existing refused-route reclaim removes the far node's edge.
-  - `bus_link_t::peer_name` and `transport_t::peer_subject` answer the new spelling, and
-    `bus_link_t::peer_link` resolves only the exact current name: a name with a departed
-    session's generation, or with none, resolves nothing.
-  - New `bus_link_t::slot_link(slot)`: the endpoint of whichever session holds a slot. A
-    session anchor egresses through it; the default forwards to `peer_link`, which is right for
-    every kind whose names carry no generation (`n<node>` on CAN, unchanged).
-  - New `tr::net::kTenancySeparator` (`~`) and `tr::net::session_slot_of(name)` in `pair.hpp`.
-    Session anchors are keyed by `session_slot_of`, so one slot still keeps one anchor however
-    many sessions pass through it (ADR-0044 amendment); `fwd_router_t::session_anchor_id`
-    applies it.
-  - `child_registry_t::resolve_peer` takes the bus lookup to use, defaulting to `peer_link`.
-  - An arrival in a reused slot also evicts the edges, labels and pending awaits still filed
-    under the predecessor's name (`p<slot>~<gen-1>`) when that session's departure never
-    reached the router (#1609). A departure that is reported only after a successor claimed
-    the slot no longer retires the successor's anchor.
-  - **Behaviour change:** the name is visible wherever a peer name is, in `:children[]`,
-    `enumerate_peers` output, return routes and ACL subjects. An application that spelled a
-    session's name by hand as `p<slot>` must take it from `enumerate_peers` or `peer_name`
-    instead, and a client matching the old shape must accept `p<slot>~<gen>`.
 
 ## [0.20.0] — 2026-10-20
 
