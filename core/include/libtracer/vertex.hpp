@@ -62,6 +62,7 @@
 #include "libtracer/guard.hpp"
 #include "libtracer/guard_mutex.hpp"
 #include "libtracer/hook.hpp"
+#include "libtracer/link_id.hpp"
 #include "libtracer/link_kind.hpp"
 #include "libtracer/lkv_slot.hpp"
 #include "libtracer/mem_source.hpp"
@@ -296,6 +297,17 @@ struct write_ctx_t {
      * @warning BORROWED for the call, like @ref subject.
      */
     std::string_view session;
+
+    /**
+     * @brief The PAIR of the link named by @ref session (`%link_pair_t`, #1941) — what a
+     *        `:subscribers[N]` replace stores as the edge's session; not valid when no link
+     *        carried the write.
+     *
+     * Set beside @ref session, by the router, on a field write it carries. The edge keeps the
+     * pair and not the name, so its departure finds it by the link and its delivery never
+     * resolves a name.
+     */
+    link_pair_t session_link{};
 };
 
 /**
@@ -2319,10 +2331,10 @@ class vertex_t {
      *        §D, extended to link teardown).
      *
      * Matches each active slot on the link it was ADMITTED over: the cold half's
-     * `subscriber_remote_t::link` when it carries one, and otherwise its
-     * `subscriber_remote_t::caller` — the two spellings the two admission doors
-     * leave behind for the SAME fact. `subscribe_wire` (the `SUBSCRIBE` op and the
-     * wire `:subscribers[]` append) stores both; `graph_t::field_write`'s
+     * `subscriber_remote_t::link` when it carries one (compared to @p pair by `same_link`,
+     * #1941), and otherwise its `subscriber_remote_t::caller` (compared to @p link) — the
+     * two spellings the two admission doors leave behind for the SAME fact. `subscribe_wire` (the
+     * `SUBSCRIBE` op and the wire `:subscribers[]` append) stores both; `graph_t::field_write`'s
      * `:subscribers[]` / `:subscribers[N]` arms store the arrival link too when a link
      * carried the write (#2135), with no route, because those edges deliver to a LOCAL
      * target. The caller fallback is what is left of #943 for the arm reached without a
@@ -2341,6 +2353,9 @@ class vertex_t {
      * @ref edge_view_t snapshot HOLDS the target key and the whole `subscriber_remote_t`
      * by refcount (ADR-0041 §2, #1448), so releasing the slot's pin here never dangles a
      * dispatch — the record it reads outlives this eviction by construction.
+     * @param link   This node's NAME for the departed link — what a caller-keyed edge's
+     *        context is compared to.
+     * @param pair   The departed link's pair — what a stored link is compared to.
      * @param routed Incremented once per evicted edge that was ROUTED through @p link —
      *        stored a return route to deliver over it, not only its name — which
      *        is the count of link holds the eviction gives back (#1816).
@@ -2349,7 +2364,7 @@ class vertex_t {
      * @return The number of edges evicted (the caller unwinds this many, less
      *         @p suspended, from the RFC-0005 listener bookkeeping).
      */
-    std::size_t evict_link_edges(std::string_view link, std::size_t& routed,
+    std::size_t evict_link_edges(std::string_view link, link_pair_t pair, std::size_t& routed,
                                  std::size_t& suspended) {
         // The EMPTY key matches NOTHING (#1056). Every local door leaves both spellings empty,
         // so without this an empty parameter compared EQUAL to a local edge's admitting link
@@ -2368,11 +2383,11 @@ class vertex_t {
             for (pub_edge_t& e : b->published()) {
                 if (!b->slots[e.slot].active || e.remote == nullptr) continue;
                 // The link this edge was ADMITTED over — see the declaration comment: the
-                // stored link, or the caller of a field-write that named none (#943). No copy:
-                // both members are `mem::string_t`.
-                const std::string_view admitted_over =
-                    e.remote->link.empty() ? e.remote->caller.view() : e.remote->link.view();
-                if (admitted_over != link) continue;
+                // stored link's pair (#1941), or the caller of a field-write that named none
+                // (#943).
+                if (e.remote->link.valid() ? !same_link(e.remote->link, pair)
+                                           : e.remote->caller.view() != link)
+                    continue;
                 routed += static_cast<std::size_t>(!e.remote->return_route.empty());
                 suspended += static_cast<std::size_t>(!e.active.load(std::memory_order_relaxed));
                 b->slots[e.slot] = {};  // frees the slot's retained view in place
@@ -2398,10 +2413,11 @@ class vertex_t {
      * is BYTE-equal on the stored PATH TLV (the same bytes `deliver_remote` emits as the
      * delivery `dst`, which are the bytes the refusing hop echoes back — see
      * `reject_bus_name_hop`'s swap). Only `subscribe_wire`-door edges qualify: a field-write
-     * edge stores no route, and `route` never compares equal to its empty view. An EMPTY
-     * @p link or @p route matches nothing, as in @ref evict_link_edges (#1056).
+     * edge stores no route, and `route` never compares equal to its empty view. A @p link
+     * that is not valid, or an EMPTY @p route, matches nothing, as in @ref evict_link_edges
+     * (#1056).
      *
-     * @param link  This node's NAME for the link the refusal arrived on (== the edge's
+     * @param link  The pair of the link the refusal arrived on (`same_link` as the edge's
      *              delivery link).
      * @param route The refused route — the whole TLV bytes echoed by the rejecting hop: a
      *              canonical PATH, or (RFC-0024 §7.1 amendment 1) the PAIR-spelled `PATH` a
@@ -2415,9 +2431,9 @@ class vertex_t {
      * @return The number of edges evicted (the caller unwinds this many, less
      *         @p suspended, from the RFC-0005 listener bookkeeping).
      */
-    std::size_t evict_route_edges(std::string_view link, std::span<const std::byte> route,
+    std::size_t evict_route_edges(link_pair_t link, std::span<const std::byte> route,
                                   bool bound_echo, std::size_t& suspended) {
-        if (link.empty() || route.empty()) return 0;
+        if (!link.valid() || route.empty()) return 0;
         edge_block_t* b = nullptr;
         std::size_t n = 0;
         {
@@ -2431,7 +2447,7 @@ class vertex_t {
                 // a field-write edge stores its arrival link with none (#2135). Such an edge
                 // never matches below — its empty route is never byte-equal to a refused
                 // one, and the bound arm needs a stored reverse route.
-                if (e.remote->link != link) continue;
+                if (!same_link(e.remote->link, link)) continue;
                 bool hit = false;
                 if (!bound_echo) {
                     const std::span<const std::byte> stored = e.remote->return_route.bytes();

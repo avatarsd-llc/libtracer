@@ -443,8 +443,8 @@ void test_subscriber_door_parity() {
            "[N] arm: a non-SUBSCRIBER payload is TYPE_MISMATCH");
     // The route is non-empty at both `subscribe_wire` call sites below so that the PAYLOAD is
     // the only defect under test — an empty one is its own refusal since #1055.
-    const auto wire_junk =
-        g.subscribe_wire(v, junk, make_value({0x06, 0x00, 0x00, 0x00}), "link-a");
+    const auto wire_junk = g.subscribe_wire(v, junk, make_value({0x06, 0x00, 0x00, 0x00}), "link-a",
+                                            {}, {}, {}, tr::testing::test_link("link-a"));
     expect(wire_junk ? kOk : outcome_t{wire_junk.error()}, status_t::TYPE_MISMATCH,
            "subscribe_wire: a non-SUBSCRIBER payload is TYPE_MISMATCH");
 
@@ -455,8 +455,9 @@ void test_subscriber_door_parity() {
            status_t::TYPE_MISMATCH, "append arm: a SUBSCRIBER with no target is TYPE_MISMATCH");
     expect(write_status(g, v, fp("subscribers", sel_t::SLOT), subscriber_tlv_no_target(), {}),
            status_t::TYPE_MISMATCH, "[N] arm: a SUBSCRIBER with no target is TYPE_MISMATCH");
-    const auto wire_ok = g.subscribe_wire(v, subscriber_tlv_no_target(),
-                                          make_value({0x06, 0x00, 0x00, 0x00}), "link-a");
+    const auto wire_ok =
+        g.subscribe_wire(v, subscriber_tlv_no_target(), make_value({0x06, 0x00, 0x00, 0x00}),
+                         "link-a", {}, {}, {}, tr::testing::test_link("link-a"));
     expect(wire_ok ? kOk : outcome_t{wire_ok.error()}, kOk,
            "subscribe_wire: the SAME record is ACCEPTED (it clears target_key itself)");
 
@@ -540,8 +541,8 @@ void test_subscribe_wire_requires_return_route() {
 
     // The defective state, admitted through the public door: a link to deliver over, and no
     // route to deliver to.
-    const auto routeless =
-        g.subscribe_wire(v, subscriber_tlv_no_target(), make_value({}), "link-a");
+    const auto routeless = g.subscribe_wire(v, subscriber_tlv_no_target(), make_value({}), "link-a",
+                                            {}, {}, {}, tr::testing::test_link("link-a"));
     expect(routeless ? kOk : outcome_t{routeless.error()}, status_t::INVALID_PATH,
            "a non-empty link with an EMPTY return route is INVALID_PATH at the door");
     expect(read_status(g, v, fp("subscribers", sel_t::SLOT), {}), status_t::NOT_FOUND,
@@ -555,8 +556,9 @@ void test_subscribe_wire_requires_return_route() {
 
     // The same record WITH a route is still admitted and still delivers — the door narrowed,
     // it did not close.
-    const auto routed = g.subscribe_wire(v, subscriber_tlv_no_target(),
-                                         make_value({0x06, 0x00, 0x00, 0x00}), "link-a");
+    const auto routed =
+        g.subscribe_wire(v, subscriber_tlv_no_target(), make_value({0x06, 0x00, 0x00, 0x00}),
+                         "link-a", {}, {}, {}, tr::testing::test_link("link-a"));
     check(routed.has_value(), "the SAME record with a non-empty route is admitted");
     check(g.write(v, make_value({0x01, 0x00, 0x01, 0x00, 0x7F})).has_value(), "write again");
     check(deliveries == 1, "... and that edge delivers exactly once");

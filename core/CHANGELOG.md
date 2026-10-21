@@ -108,6 +108,52 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     before. The router alone reads the kept pointer, for a frame its receiver was handed.
   - A deferred AWAIT's reply gathers through the waiter's own block source rather than its
     link's, so a reply that fires after its link was removed reads nothing through the link.
+- **BREAKING: a remote subscriber edge names its link by pair, not by name
+  ([#1941](https://github.com/avatarsd-llc/libtracer/issues/1941), the link-identity half of
+  [#1622](https://github.com/avatarsd-llc/libtracer/issues/1622)).** The new
+  `graph::link_pair_t` holds the link's connection-vertex slot and, on a bus, the peer's
+  handle; `same_link` compares two of them. The pair replaces the stored name, so
+  `subscriber_remote_t` shrinks from 120 B to 104 B per edge. A delivery finds its link from
+  the pair, so the registry's name scan is gone from every remote delivery, and on a
+  `slot_server_t` bus the peer-table name scan is gone too. A delivery still walks the
+  registry's published slots by connection slot (one integer compare each, bounded by the
+  router's child count). A bus that does not override `peer_link_of`, the CAN bus among them,
+  still formats the peer's name and scans by it. The session-admission seam (#1841) and the `:subscribers[N]` departure
+  (#2135) still key by name: the name is asked of the link object when an edge leaves, off the
+  delivery path. Source changes:
+  - `remote_delivery_t::link`, `subscriber_remote_t::link` and `edge_view_t::link()` are a
+    `link_pair_t`, not a string.
+  - `graph_t::subscribe_wire` takes the pair after the link token. A remote subscribe
+    without a valid pair is refused `INVALID_PATH`, and so is any remote subscribe a resolver
+    admits without an `on_link_id` supplier.
+  - `graph_t::write` takes the writer's link pair after its session name. A
+    `:subscribers[N]` write without one stores no session, and its departure finds the edge by
+    the caller, as for a write no link carried.
+  - `link_id_fn_t` returns a `carried_link_t` (the token and the pair);
+    `link_hold_fn_t` takes a `link_pair_t`. `graph_hooks_t` gains `link_name`, the seam the
+    session seam names an edge's session through; `fwd_router_t` installs it, and a build
+    without `config_t::kSessionAdmission` stores nothing for it. `fwd_router_t::link_name_of`
+    answers this node's name for a pair.
+  - `graph_t::evict_link_edges` and `evict_route_edges` take the pair after the name. The
+    name still keys the eviction index and matches field-write edges that stored no pair; the
+    pair matches every other edge. `fwd_router_t::link_down(name)` evicts the edges of the
+    registered child of that name only: given a bus peer's name it no longer evicts that
+    peer's edges, which leave through the bus's peer-down seam.
+  - A remote SUBSCRIBE handed to the public `fwd_router_t::on_frame(name)` door under a bus
+    peer's name is refused `INVALID_PATH`: that door resolves registered children, not peers.
+  - Every field write over a link now interns that link's token, as a subscribe does,
+    including `:settings` and `:acl` writes. A peer that only ever writes such a field holds
+    one link-index slot (and, on a bus, one token-cache entry) until it departs; the
+    departure releases both.
+  - An embedder that installs `session_admission` without a router must also install
+    `link_name`. Without it, ADMIT charges the admitting link's name and RELEASE the edge's
+    caller.
+  - `wire_target_split_t` gains `pair`.
+  - `bus_link_t` gains `peer_link_of(peer_handle_t)`, which resolves a peer by its handle.
+    The default formats the peer's name and calls `peer_link`; `slot_server_t` overrides it
+    with a direct slot lookup.
+  - `child_registry_t::resolve_peer` gains a by-handle overload. `by_name` and `erase` resolve
+    through `entry_by_name`; a name has one live slot, so neither changes behaviour.
 
 #### Upgrading
 

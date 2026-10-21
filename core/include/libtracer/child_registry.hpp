@@ -706,6 +706,21 @@ class child_registry_t {
     }
 
     /**
+     * @brief @ref resolve_peer by the peer's HANDLE — the link a stored PAIR names (#1941).
+     *
+     * An invalid @p peer names @p child's own link, whatever its shape: a pair carries a peer
+     * exactly when the slot it was read from was a bus mount. A valid one is resolved by the
+     * bus's @ref bus_link_t::peer_link_of, so no name is formatted or compared.
+     * @return The link or directed per-peer endpoint; nullptr for a tombstone or no such peer.
+     */
+    [[nodiscard]] static transport_t* resolve_peer(const child_t& child, peer_handle_t peer) {
+        const egress_t eg = child.egress();
+        if (!peer.valid() || eg.link == nullptr) return eg.link;
+        bus_link_t* const bus = bus_of(*eg.link);
+        return bus == nullptr ? nullptr : bus->peer_link_of(peer);
+    }
+
+    /**
      * @brief Tombstone the link addressed by @p name — it stops resolving.
      *
      * Call in the same step the link/vertex is torn down, and BEFORE the `transport_t`
@@ -714,21 +729,17 @@ class child_registry_t {
      * @return true if @p name named a live child, false if it named none.
      */
     bool erase(std::string_view name) {
-        bool erased = false;
-        for_each([&](const child_t& c) {
-            if (c.live() && c.name == name) {
-                // Mark it dead, KEEP the shape bit: a tombstoned BUS mount must still reject a
-                // residual segment rather than fall through to the local terminus (ADR-0073
-                // §3). The pointer stays for `child_t::bound` alone. Writers are serialized by
-                // the caller, so the load/store pair needs no RMW.
-                child_t& slot = const_cast<child_t&>(c);
-                slot.egress_.store(slot.egress_.load(std::memory_order_relaxed) | kRetiredBit,
-                                   std::memory_order_release);
-                erased = true;  // keep going: belt-and-braces against any shadow slot
-            }
-            return false;
-        });
-        return erased;
+        // One live slot per name: `add` rebinds a tombstone rather than appending a shadow.
+        const child_t* const c = entry_by_name(name);
+        if (c == nullptr) return false;
+        // Mark it dead, KEEP the shape bit: a tombstoned BUS mount must still reject a
+        // residual segment rather than fall through to the local terminus (ADR-0073 §3). The
+        // pointer stays for `child_t::bound` alone. Writers are serialized by the caller, so
+        // the load/store pair needs no RMW.
+        child_t& slot = const_cast<child_t&>(*c);
+        slot.egress_.store(slot.egress_.load(std::memory_order_relaxed) | kRetiredBit,
+                           std::memory_order_release);
+        return true;
     }
 
     /**
@@ -790,15 +801,8 @@ class child_registry_t {
      * @ref resolve_peer for scoped peer resolution.
      */
     [[nodiscard]] transport_t* by_name(std::string_view name) const {
+        if (const child_t* const c = entry_by_name(name)) return c->link();
         transport_t* hit = nullptr;
-        for_each([&](const child_t& c) {
-            if (c.live() && c.name == name) {
-                hit = c.link();
-                return true;
-            }
-            return false;
-        });
-        if (hit != nullptr) return hit;
         for_each([&](const child_t& c) {
             transport_t* const l = c.link();
             if (l == nullptr) return false;  // tombstone (#494) — no link to ask

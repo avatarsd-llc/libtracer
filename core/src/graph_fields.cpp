@@ -588,13 +588,14 @@ struct graph_t::field_surface_t {
         // The fan-in gate context for this edge's deliveries (#81); the empty (local)
         // context needs no cold half. The edge's SESSION — the name its departure evicts it
         // by (`vertex_t::evict_link_edges`) — is the link a write carried in, stored as
-        // `subscriber_remote_t::link` with NO route (#2135): the edge fans out to a LOCAL
-        // target, and `edge_view_t::has_remote_leg` tests the route, so the stored name adds
-        // no remote leg. The subject is not that key: since #1846 an authenticated session's
+        // `subscriber_remote_t::link`'s PAIR (#1941) with NO route (#2135): the edge fans out
+        // to a LOCAL target, and `edge_view_t::has_remote_leg` tests the route, so the stored
+        // pair adds no remote leg. The departure asks the link object for its name, off the
+        // delivery path. The subject is not that key: since #1846 an authenticated session's
         // subject is its bound identity, which two sessions can share and which no departure
         // evicts by. A write no link carried (an embedder's `graph_t::write` naming its inbound
-        // link as the caller) stores none, and its departure finds the edge by the caller
-        // (#943).
+        // link as the caller, with no pair) stores none, and its departure finds the edge by
+        // the caller (#943).
         //
         // Reachability, as of this commit: the ONE in-tree wire door
         // (`op_resolve_walk.hpp`'s WRITE case) routes a remote `:subscribers[]` append
@@ -605,13 +606,15 @@ struct graph_t::field_surface_t {
         // and IS reached from the wire.
         if (!ctx.subject.empty()) {
             subscriber_remote_t* const r = s.ensure_remote(g.table_source());
-            if (r == nullptr || !r->caller.assign(ctx.subject) || !r->link.assign(ctx.session))
+            if (r == nullptr || !r->caller.assign(ctx.subject))
                 return std::unexpected(status_t::BACKPRESSURE);
+            r->link = ctx.session_link;
         }
         // The single admission step (ADR-0049): READ gate → append (or replace at
         // `slot` — §D.1's "admitted through the same admission door") → latch. A field-write
         // subscribe returns no host handle — discard it.
-        if (const auto r = g.admit_subscriber(v, std::move(s), ctx.subject, slot, {}, edge.get());
+        if (const auto r = g.admit_subscriber(v, std::move(s), ctx.subject, slot, {}, edge.get(),
+                                              ctx.session_link.valid() ? ctx.session : ctx.subject);
             !r)
             return std::unexpected(r.error());
         return {};

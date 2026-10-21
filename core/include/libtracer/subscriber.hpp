@@ -32,6 +32,7 @@
 
 #include "libtracer/config.hpp"
 #include "libtracer/edge_pin.hpp"
+#include "libtracer/link_id.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_string.hpp"
@@ -186,30 +187,33 @@ using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
  * ones being retired. A republish now copies a pointer and increments @ref refs.
  */
 struct subscriber_remote_t {
-    /** @brief An empty record whose names and own block come from @p src (#1885). */
-    explicit subscriber_remote_t(mem::block_source_t& src) noexcept : link(src), caller(src) {}
+    /** @brief An empty record whose name and own block come from @p src (#1885). */
+    explicit subscriber_remote_t(mem::block_source_t& src) noexcept : caller(src) {}
 
     /**
-     * @brief This node's NAME for the link the subscribe arrived on — the edge's SESSION, the
-     *        key its departure evicts it by.
+     * @brief The link the subscribe arrived on, as a pair (`%link_pair_t`: its connection
+     *        vertex's slot, and the bus peer under it) — the edge's SESSION, the key its
+     *        departure evicts it by (#1941, #1622 L6).
      *
      * Every edge a link carried in stores it: a `subscribe_wire` edge delivers over it (or
      * over the mount its target routes through), and a `:subscribers[N]` replace a link
-     * carried stores it with NO route, because it delivers to a local target (#2135). A name
+     * carried stores it with NO route, because it delivers to a local target (#2135). A pair
      * here therefore does not by itself make an edge remote — @ref return_route does.
      *
-     * FIRST, and the member ORDER below is the retired `pub_remote_t`'s, not this record's
-     * historical one. That is deliberate and load-bearing: unifying the two halves means the
-     * DELIVERY path (`graph_t::dispatch_edge_remote` since #1448; `vertex_t`'s published-entry
-     * copy before it) reads this record instead of a published copy, and keeping the offsets
-     * it reads at exactly where they were is what kept that loop's instruction stream
-     * identical across #1442. The slot-side readers (`edge_view_of`, `evict_link_edges`,
-     * `evict_route_edges`) move their displacements instead — control-plane paths, none of
-     * them pinned. A `mem::string_t` over the graph's table source since #1885; the record
-     * itself is returned to that same source (`link.source()`), so it carries no pointer of its
-     * own for it.
+     * It used to be this node's NAME for the link, a `mem::string_t` the delivery sink then
+     * resolved by scanning the registry's names and, for a bus peer, every bus's peers. It is
+     * now what that scan was looking for: twelve bytes, no block of their own, and a pair
+     * deref at the sink. The NAME is asked of the link object when it is needed, which is
+     * never on the delivery path: by the session seam's per-edge `RELEASE`
+     * (`graph_hooks_t::link_name`), and by the departure index, which the admitting door keys
+     * by the name it was handed.
+     *
+     * FIRST, where the retired `pub_remote_t` put its link, so the DELIVERY path
+     * (`graph_t::dispatch_edge_remote`) reads its first word where it always did. The record
+     * is returned to the source its @ref caller draws from (`caller.source()`), so it carries
+     * no pointer of its own for it.
      */
-    mem::string_t link;
+    link_pair_t link{};
     /**
      * @brief The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
      *        `src` the subscribe arrived with).
@@ -261,8 +265,9 @@ struct subscriber_remote_t {
      *        one per PUBLISHED edge array whose entry points at it.
      *
      * **Rides the record's existing TAIL PADDING and therefore costs zero bytes.**
-     * @ref caller ends at offset 112 and the record is 8-aligned, so a 4-byte counter lands
-     * at 112 and `sizeof` stays the pinned 120 B. That is why the shape is an
+     * @ref caller ends at offset 96 and the record is 8-aligned, so a 4-byte counter lands
+     * at 96 and `sizeof` stays the pinned 104 B (120 B before #1941 stored the link as a
+     * pair rather than a name). That is why the shape is an
      * intrusive count and not a `std::shared_ptr`: a 16-byte handle would have widened
      * @ref subscriber_t (pinned at 80 B) AND @ref pub_edge_t, whose width was measured at
      * **+23 %** on the fan-out-1024 publish the last time it grew — the fix would have been
@@ -288,7 +293,7 @@ struct subscriber_remote_t {
      *        #2144; @ref delivery_lane_t). `1` is a SAMPLE.
      *
      * Rides the tail padding after @ref refs with @ref lane_reliable, so `sizeof` stays the
-     * pinned 120 B. Written once at admission, like every other field here.
+     * pinned 104 B. Written once at admission, like every other field here.
      */
     std::uint16_t lane_depth = 1;
     /** @brief The local vertex's §4.4 arm when this edge was admitted (see @ref lane_depth). */
@@ -390,7 +395,7 @@ class remote_ptr_t {
      *         lifetime (an unsubscribe), never per delivery, so its body stays off the
      *         per-edge path that inlines @ref reset. */
     [[gnu::noinline, gnu::cold]] static void free_record(subscriber_remote_t* p) noexcept {
-        mem::drop_in(p->link.source(), p);  // the record and its names share one source
+        mem::drop_in(p->caller.source(), p);  // the record and its name share one source
     }
 
     subscriber_remote_t* p_ = nullptr; /**< @brief The shared record, or null. */
@@ -672,8 +677,9 @@ static_assert(sizeof(void*) != 4 || sizeof(subscriber_slot_t) == 16,
               "a slot is 16 B on ILP32 — dispatch fields belong in pub_edge_t, once (#1622)");
 static_assert(std::is_nothrow_move_constructible_v<subscriber_slot_t>,
               "the slot table grows by MOVE");
-static_assert(sizeof(void*) != 8 || sizeof(subscriber_remote_t) == 120,
-              "the COLD edge half is 120 B — price any growth against the per-edge RAM");
+static_assert(sizeof(void*) != 8 || sizeof(subscriber_remote_t) == 104,
+              "the COLD edge half is 104 B since its link is a pair, not a name (#1941) — "
+              "price any growth against the per-edge RAM");
 static_assert(sizeof(void*) != 8 || alignof(subscriber_remote_t) == 8,
               "the COLD edge half is 8-aligned; it is refcount-owned off to the side, so its "
               "address is stable across a slot-vector reallocation");
@@ -729,15 +735,13 @@ struct edge_view_t {
     remote_ptr_t remote;
 
     /**
-     * @brief The NAME of the link this edge was admitted over (its session); empty for an
-     *        in-process edge. It is the delivery link only when @ref has_remote_leg holds.
-     *
-     * Borrowed from the record this view holds, so it is valid for as long as the view is —
-     * which is exactly as long as the `std::string` member it replaces was.
+     * @brief The link this edge was admitted over (its session, @ref subscriber_remote_t::link);
+     *        not valid for an in-process edge. It is the delivery link only when
+     *        @ref has_remote_leg holds.
      */
-    [[nodiscard]] std::string_view link() const noexcept {
+    [[nodiscard]] link_pair_t link() const noexcept {
         const subscriber_remote_t* r = remote.get();
-        return r != nullptr ? std::string_view(r->link) : std::string_view{};
+        return r != nullptr ? r->link : link_pair_t{};
     }
     /** @brief The edge's stored ACL fan-in context (#81), borrowed from the held record;
      *         empty for a locally-wired edge. */
@@ -751,8 +755,8 @@ struct edge_view_t {
      * The gate `graph_t::dispatch_edge` takes per edge, kept as one named test because it is
      * on the always-inlined per-edge body of the wide fan-out loop. The null check
      * short-circuits, so the in-process edge — the bulk of any fan-out — pays one load and
-     * one branch, exactly what `link.empty()` cost when the string was inline. The route,
-     * not the link, since #2135: a `:subscribers[N]` replace a link carried stores that link
+     * one branch, exactly what `link.empty()` cost when the link was an inline string. The
+     * route, not the link, since #2135: a `:subscribers[N]` replace a link carried stores that link
      * as its session and delivers locally (`subscriber_remote_t::return_route`).
      */
     [[nodiscard]] bool has_remote_leg() const noexcept {

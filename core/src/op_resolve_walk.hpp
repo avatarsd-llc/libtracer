@@ -940,9 +940,10 @@ template <class N, class ReplyError>
             // because every op needs a subject; a token is needed by remote SUBSCRIBE
             // alone, and a control-plane saving charged to every terminus frame is the
             // mistake #1290's prototype was killed for.
-            result_t<void> w =
-                graph.subscribe_wire(v, sub_value, return_route, inbound_link,
-                                     std::move(reverse_route), subject, link_token.ask());
+            const graph::carried_link_t carried = link_token.ask();
+            result_t<void> w = graph.subscribe_wire(v, sub_value, return_route, inbound_link,
+                                                    std::move(reverse_route), subject,
+                                                    carried.token, carried.link);
             if (!w) return assemble_error_reply(route, w.error(), egress);
             const reply_route_t ok = labelled_route();
             return or_backpressure(assemble_reply(ok, reply_kind_t::RESULT, {}, {}, 0, ack, mint),
@@ -961,10 +962,13 @@ template <class N, class ReplyError>
 
         // The arrival link's catalog identity (#1650) rides the token seam the walk already
         // carries into this frame — no parameter of its own, no lookup, no branch. The
-        // arrival link's NAME is the writer's session (#2135): a `:subscribers[N]` replace
-        // stores it so the edge leaves with that session, whatever subject it bound.
-        result_t<void> w =
-            graph.write(v, field, value.rope, subject, link_token.link_kind, inbound_link);
+        // arrival link is the writer's session (#2135): a `:subscribers[N]` replace stores
+        // its PAIR (#1941) so the edge leaves with that session, whatever subject it bound.
+        // A value write asks nothing: only a field write can store a session. (A field write
+        // that asks interns its link's token as a subscribe would; the link's departure
+        // releases it.)
+        result_t<void> w = graph.write(v, field, value.rope, subject, link_token.link_kind,
+                                       inbound_link, link_token.ask(!field.empty()).link);
         // RFC-0004 Amendment 2's whole effect, in one line: the write ran (or was
         // refused by the ACL, or failed) and the terminus stays silent either way. The
         // origin loses per-write backpressure feedback — `or_backpressure` never runs on

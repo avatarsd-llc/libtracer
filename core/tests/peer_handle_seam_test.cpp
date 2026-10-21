@@ -190,6 +190,8 @@ void test_seam_over_slot_server() {
         bus->enumerate_peers([&](std::string_view p) { listed = listed || p == first_name; });
         check(listed, "the resolved name is the one enumerate_peers lists");
         check(bus->peer_link(first_name) != nullptr, "and the one peer_link resolves");
+        check(bus->peer_link_of(first_handle) == bus->peer_link(first_name),
+              "peer_link_of resolves the live handle to that same endpoint (#1941)");
         {
             const std::lock_guard lock(probe.m);
             check(!probe.up_names.empty() && probe.up_names[0] == first_name,
@@ -220,6 +222,16 @@ void test_seam_over_slot_server() {
           "but NOT the departed session's HANDLE — the generation moved (#1294 / #1013)");
     check(second_handle.index == first_handle.index,
           "same slot index, so the difference is entirely the generation");
+
+    // --- #1941: `peer_link_of` is `peer_link`'s tenancy check, done by handle ---
+    check(bus->peer_link_of(second_handle) != nullptr &&
+              bus->peer_link_of(second_handle) == bus->peer_link(name_of(*bus, second_handle)),
+          "the successor's handle resolves to the successor's endpoint");
+    check(bus->peer_link_of(first_handle) == nullptr,
+          "the departed handle, in the SAME slot, resolves to nothing");
+    check(bus->peer_link_of(peer_handle_t{}) == nullptr, "an invalid handle resolves to nothing");
+    check(bus->peer_link_of(peer_handle_t{9999, 1}) == nullptr,
+          "an out-of-range slot resolves to nothing");
 }
 
 }  // namespace

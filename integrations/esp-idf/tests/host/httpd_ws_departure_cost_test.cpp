@@ -82,10 +82,12 @@ std::vector<std::byte> b_subscriber(std::string_view marker) {
 }
 
 /** @brief Bind one remote subscriber at @p v admitted over @p link. */
-bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_view marker) {
+bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_view marker,
+              tr::graph::link_pair_t pair = {}) {
     return g
         .subscribe_wire(v, make_value(b_subscriber(marker)),
-                        make_value(b_path({std::string(link)})), std::string(link))
+                        make_value(b_path({std::string(link)})), std::string(link), {}, {}, {},
+                        pair.valid() ? pair : tr::testing::test_link(link))
         .has_value();
 }
 
@@ -165,13 +167,20 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     // The departing peer subscribes on ONE vertex.
     vertex_handle_t mine = g.register_vertex(path_t("/mine"), role_t::STORED_VALUE);
     std::size_t mine_hits = 0, bystander_hits = 0;
+    // The pair the router stores for slot 0's session on this bus (#1941): the mount's
+    // connection vertex and the session handle the bus tags slot 0's first tenancy with.
+    const auto* const door = router.registry().entry_by_name("ws");
+    check(door != nullptr, "the bus mount has a registry slot");
+    const tr::graph::link_pair_t p0{
+        .conn = door != nullptr ? door->conn_slot : tr::graph::link_pair_t::kNoConn,
+        .peer = {{.index = 0, .generation = 1}}};
     const tr::testing::remote_sink_guard_t sink_guard(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-            (d.link == "p0~1" ? mine_hits : bystander_hits) += 1;
+            (same_link(d.link, p0) ? mine_hits : bystander_hits) += 1;
         });
     claim_session(task, 700);  // lands in slot 0 ⇒ routable name "p0~1" (slot 0, first tenancy)
     claim_session(task, 701);  // a second live session, so the close is not the last one
-    check(wire_sub(g, mine, "p0~1", "m0"), "the peer that will depart subscribes on /mine");
+    check(wire_sub(g, mine, "p0~1", "m0", p0), "the peer that will depart subscribes on /mine");
     check(g.link_edge_candidates("p0~1") == 1, "its departure visits exactly one vertex");
 
     // Forty bystander vertices subscribed by OTHER peers — the graph the old walk charged

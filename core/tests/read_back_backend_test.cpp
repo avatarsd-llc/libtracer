@@ -65,6 +65,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
 #include "libtracer/security_acl.hpp"
@@ -398,7 +399,7 @@ int main() {
                 const std::optional<vertex_handle_t> v = g.find(path_t("/s").key());
                 if (!v) return result_t<void>(std::unexpect, status_t::NOT_FOUND);
                 return g.subscribe_wire(*v, owned(sub), owned(route), "arrival", view_t{}, "",
-                                        tr::graph::link_id_t{});
+                                        tr::graph::link_id_t{}, tr::testing::test_link("arrival"));
             });
     }
 

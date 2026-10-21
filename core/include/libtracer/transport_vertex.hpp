@@ -948,9 +948,10 @@ class transport_vertex_t {
      * @brief The `graph::graph_hooks_t::link_hold` thunk (#1816): a routed subscription
      *        edge was established (@ref acquire_link) or torn down (@ref release_link).
      *        A link that names no connection (a bus peer, a provided child) answers
-     *        `NOT_FOUND`, which is dropped: only a connection has a count to hold.
+     *        `NOT_FOUND`, which is dropped: only a connection has a count to hold. The link
+     *        arrives as its pair (#1941) and is named through the router's registry.
      */
-    static void link_hold_thunk(void* ctx, std::string_view link, bool held);
+    static void link_hold_thunk(void* ctx, graph::link_pair_t link, bool held);
 
     /**
      * @brief `set_link_state`'s body, for a caller that ALREADY holds `ctl_m_`.
