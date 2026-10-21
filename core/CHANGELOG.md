@@ -68,6 +68,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `try_register_vertex`, `register_vertex_key` and `register_vertex_key_span` lose the
   argument (RFC-0014 Amendment 2's payload-right table is retired); the Amendment 3 `:schema`
   catalog argument stays.
+- **A link cannot exist without its connection vertex
+  ([#1940](https://github.com/avatarsd-llc/libtracer/issues/1940), stage 2 of spec
+  [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938)).** `fwd_router_t::add_child`
+  now refuses, by value and with nothing registered, a mount whose connection vertex (the vertex
+  keyed by the mount name) is not registered in the router's graph, so "no connection vertex"
+  always means "no route". The new `fwd_router_t::attach_link` registers a plain `STORED_VALUE`
+  vertex at the mount name (or uses the one already there, for example one that carries an
+  `:acl`) and then calls `add_child`; a refused `add_child` retires the vertex it registered.
+  Every test, bench and example that wired a link by hand now uses it.
+  `transport_vertex_t::make_connection` already registered its vertex first and is unchanged.
+  What callers can observe:
+  - A hand-wired `add_child` with no vertex now returns `false`. Call `attach_link`, or register
+    the vertex first.
+  - `child_registry_t::add` takes a third argument, the resolver asked once for the mount's
+    connection-vertex slot (`std::optional<std::uint32_t>(std::span<const std::byte>)`); a
+    `nullopt` refuses the registration. It also refuses a name with no packed spelling (an
+    over-long segment), which keys no vertex; `add_child` used to accept such a name.
+  - `child_registry_t::kNoConnSlot` is deleted, and `child_registry_t::child_t::conn_slot` is a
+    plain `std::uint32_t`, written once before the entry is published. The late-registered
+    vertex case of the #1939 entry below no longer exists.
+  - A mount whose connection vertex has already saturated its generation (2^32 retirements)
+    is refused, because the slot lookup `add_child` uses refuses a saturated vertex. A vertex
+    that saturates after the link is attached keeps its door and keeps forwarding by NAME
+    (RFC-0029 §4.2); only the PAIR mint is refused for it. The two cases differ on purpose: an
+    index-only lookup to make them agree would add an accessor and branches for a case that
+    takes 2^32 retirements to reach.
 
 #### Upgrading
 

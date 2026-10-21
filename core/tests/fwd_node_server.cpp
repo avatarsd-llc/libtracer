@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "fwd_node_server: ws server failed to bind/listen\n");
         return 1;
     }
-    if (!router.add_child("client", server)) {
+    if (!router.attach_link("client", server)) {
         std::fprintf(stderr, "fwd_node_server: add_child(\"client\") registered nothing\n");
         return 1;
     }

@@ -209,7 +209,7 @@ struct node_t {
         : sink(graph.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE)),
           other(graph.register_vertex(*path_t::parse("/other"), role_t::STORED_VALUE)) {
         router.emplace(graph);
-        (void)router->add_child("cli", link, &rx);
+        (void)router->attach_link("cli", link, &rx);
         (void)graph.write(sink, make_value(b_value_u32(kSeed)));
         (void)graph.write(other, make_value(b_value_u32(kOther)));
     }

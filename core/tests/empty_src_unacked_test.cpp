@@ -194,7 +194,7 @@ struct node_t {
     vertex_handle_t sink;
 
     node_t() : sink(graph.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE)) {
-        (void)router.add_child("cli", link);
+        (void)router.attach_link("cli", link);
         (void)graph.write(sink, make_value(b_value_u32(kSeed)));
         (void)link.drain();
     }
@@ -313,7 +313,7 @@ void vector_f_delivery_draws_no_reply() {
     graph_t prod;
     fwd_router_t prod_router(prod);
     rec_link_t prod_link;
-    (void)prod_router.add_child("consumer", prod_link);
+    (void)prod_router.attach_link("consumer", prod_link);
     const vertex_handle_t src_v =
         prod.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     prod_router.on_frame("consumer",

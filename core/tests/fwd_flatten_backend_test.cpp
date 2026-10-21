@@ -248,8 +248,8 @@ void test_bus_name_reject_flatten_oom_drops_the_frame() {
     p2p_link_t alice;
     bus.peers.emplace_back("alice", &alice);
     rec_link_t in(/*ropes=*/true);
-    (void)router.add_child("net/ws-server/srv", bus);
-    (void)router.add_child("net/ws-client/in", in);
+    (void)router.attach_link("net/ws-server/srv", bus);
+    (void)router.attach_link("net/ws-client/in", in);
 
     // `srv` is the bus link's own NAME and `sensor` names no peer on it — the ADR-0073 §3
     // rejection. `src` is intact, so a well-formed frame is ANSWERED rather than dropped,
@@ -300,7 +300,7 @@ void test_default_backend_unchanged() {
     const vertex_handle_t sink = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router(g);  // no backend argument at all
     rec_link_t up(/*ropes=*/true);
-    (void)router.add_child("up", up);
+    (void)router.attach_link("up", up);
 
     constexpr std::uint32_t kVal = 0x0BADF00Du;
     up.inject(

@@ -164,7 +164,7 @@ void run() {
     tr::net::tcp_server_transport_t server(0, {.max_peers = 2, .peer_named = true});
     check(server.ok(), "the listener bound an ephemeral port");
     const vertex_handle_t mount = register_mount(node, *server.bus());
-    check(router.add_child(std::string(kMount), server), "the listener mounts on the router");
+    check(router.attach_link(std::string(kMount), server), "the listener mounts on the router");
     const std::uint16_t port = server.local_port();
 
     const tr::net::session_anchor_id_t id0 = fwd_router_t::session_anchor_id(kMount, "p0");

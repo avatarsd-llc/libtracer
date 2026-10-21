@@ -229,7 +229,7 @@ int run_sub(int argc, char** argv) {
             node.register_vertex(path_t("/sensor/blob" + std::to_string(i)), role_t::STORED_VALUE);
         (void)node.set_policy(v, {.share_hint = hint});  // the arm's hint, owner-declared
     }
-    router.add_child("a", t);
+    router.attach_link("a", t);
 
     std::atomic<std::uint64_t> delivered{0};
     std::atomic<std::uint64_t> pins{0};

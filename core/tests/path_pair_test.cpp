@@ -241,8 +241,8 @@ struct node_t {
         (void)g.register_vertex(path_t("/net/uplink"), role_t::STORED_VALUE);
         (void)g.register_vertex(path_t("/net/uplink/b"), role_t::STORED_VALUE);
         (void)g.write(path_t("/net/uplink/b"), owned(b_value_u32(77)));
-        (void)r.add_child(std::string(kInLink), cli);
-        (void)r.add_child(std::string(kOutLink), b);
+        (void)r.attach_link(std::string(kInLink), cli);
+        (void)r.attach_link(std::string(kOutLink), b);
     }
 
     /** @brief The pair this node issues for the vertex at @p text. */

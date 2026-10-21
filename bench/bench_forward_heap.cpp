@@ -843,8 +843,8 @@ int main() {
     fwd_router_t router(graph);
     capture_transport_t in_link;
     capture_transport_t out_link;
-    router.add_child("in", in_link);
-    router.add_child("out", out_link);
+    router.attach_link("in", in_link);
+    router.attach_link("out", out_link);
 
     const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
                                   std::byte{0xEF}};

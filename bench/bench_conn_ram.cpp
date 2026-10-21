@@ -618,7 +618,7 @@ sub_sample_t run_remote_sub_arm(Make make, Port port, Dial dial, Push push) {
     tr::graph::graph_t g(g_graph);
     tr::net::fwd_router_t router(g);
     auto link = make();
-    if (!router.add_child("in", *link)) return out;
+    if (!router.attach_link("in", *link)) return out;
     std::vector<tr::graph::vertex_handle_t> v;
     v.reserve(kRemoteSubs + 1);
     for (std::size_t i = 0; i <= kRemoteSubs; ++i)

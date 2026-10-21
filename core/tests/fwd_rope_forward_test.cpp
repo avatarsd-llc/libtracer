@@ -171,8 +171,8 @@ std::vector<std::vector<std::byte>> forward_as_rope(std::span<const std::byte> f
     fwd_router_t router(g);
     fake_rope_link_t cli;
     fake_link_t up;
-    (void)router.add_child("cli", cli);  // inbound (rope) link
-    (void)router.add_child("up", up);    // the dst-resolved forward child
+    (void)router.attach_link("cli", cli);  // inbound (rope) link
+    (void)router.attach_link("up", up);    // the dst-resolved forward child
     cli.inject(rope_split(frame, cuts));
     return std::move(up.sent());
 }
@@ -190,8 +190,8 @@ std::vector<std::vector<std::byte>> forward_as_rope_with(std::span<const std::by
     fwd_router_t router(g, {.rx = &rx});
     fake_rope_link_t cli;
     fake_link_t up;
-    (void)router.add_child("cli", cli);
-    (void)router.add_child("up", up);
+    (void)router.attach_link("cli", cli);
+    (void)router.attach_link("up", up);
     cli.inject(rope_split(frame, cuts));
     return std::move(up.sent());
 }
@@ -229,8 +229,8 @@ std::vector<std::vector<std::byte>> forward_as_rope_per_child(
     fwd_router_t router(g, {.rx = &router_default});
     fake_rope_link_t cli;
     fake_link_t up;
-    (void)router.add_child("cli", cli, &child_rx);  // inbound link brings its own slab
-    (void)router.add_child("up", up);               // forward child falls back to the default
+    (void)router.attach_link("cli", cli, &child_rx);  // inbound link brings its own slab
+    (void)router.attach_link("up", up);               // forward child falls back to the default
     cli.inject(rope_split(frame, cuts));
     return std::move(up.sent());
 }
@@ -241,8 +241,8 @@ std::vector<std::vector<std::byte>> forward_contiguous(std::span<const std::byte
     fwd_router_t router(g);
     fake_link_t cli;
     fake_link_t up;
-    (void)router.add_child("cli", cli);
-    (void)router.add_child("up", up);
+    (void)router.attach_link("cli", cli);
+    (void)router.attach_link("up", up);
     cli.inject(frame);
     return std::move(up.sent());
 }
@@ -370,7 +370,7 @@ int main() {
             (void)g.write(v, make_value(b_value_u32(0x04D2u)));
             fwd_router_t router(g);
             fake_rope_link_t in;
-            (void)router.add_child("in", in);
+            (void)router.attach_link("in", in);
             in.inject(rope_split(f, cuts));
             return in.sent().size();
         };
@@ -440,7 +440,7 @@ int main() {
             (void)g.write(v, make_value(b_value_u32(0x04D2u)));
             fwd_router_t router(g);
             fake_rope_link_t in;
-            (void)router.add_child("in", in);
+            (void)router.attach_link("in", in);
             in.inject(rope_split(f, cuts));
             return in.sent().size();
         };
@@ -490,8 +490,8 @@ int main() {
             fwd_router_t router(g);
             fake_rope_link_t cli;
             fake_link_t up;
-            (void)router.add_child("cli", cli);
-            (void)router.add_child("up", up);
+            (void)router.attach_link("cli", cli);
+            (void)router.attach_link("up", up);
             cli.inject(rope_split(f, cuts));
             return std::move(up.sent());
         };
@@ -547,7 +547,7 @@ int main() {
         tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
         fwd_router_t router(g);
         fake_rope_link_t in;
-        (void)router.add_child("in", in);  // reply goes back over the inbound link
+        (void)router.attach_link("in", in);  // reply goes back over the inbound link
         const std::uint32_t kWritten = 0x0BADF00Du;
         const std::vector<std::byte> wframe = b_fwd(
             fwd_op_t::WRITE, b_path({"sensor"}), b_path({"reply-ep"}), {}, b_value_u32(kWritten));
@@ -576,7 +576,7 @@ int main() {
         tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
         fwd_router_t router(g);
         fake_rope_link_t in;
-        (void)router.add_child("in", in);
+        (void)router.attach_link("in", in);
 
         const std::uint32_t kWritten = 0x0C0FFEE0u;
         const std::vector<std::byte> plain = b_fwd(fwd_op_t::WRITE, b_path({"sensor"}),
@@ -666,8 +666,8 @@ int main() {
         fwd_router_t r2(g2, {.rx = &only_default});
         fake_rope_link_t cli2;
         fake_link_t up2;
-        (void)r2.add_child("cli", cli2);
-        (void)r2.add_child("up", up2);
+        (void)r2.attach_link("cli", cli2);
+        (void)r2.attach_link("up", up2);
         cli2.inject(rope_split(frame, every_byte));
         check(std::move(up2.sent()) == oracle, "a child with no source of its own still routes");
         check(only_default.served > 0, "drawing from the router's default, as before");

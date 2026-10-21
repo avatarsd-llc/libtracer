@@ -108,7 +108,7 @@ int main() {
     // A knows B as "b"; B knows C as "c". Neither name means anything to any other node —
     // the client's address /b/c/... is the composition of the two, spelled by whoever holds
     // both mounts, which is what makes the route explicit and loop-free by construction.
-    if (!router_a.add_child("b", a_to_b) || !router_b.add_child("c", b_to_c)) {
+    if (!router_a.attach_link("b", a_to_b) || !router_b.attach_link("c", b_to_c)) {
         std::fprintf(stderr, "route_multi_hop: add_child failed — nothing registered\n");
         return 1;
     }

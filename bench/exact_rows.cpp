@@ -231,13 +231,22 @@ bool ram_edges() { return ram_edges_on(true) && ram_edges_on(false); }
  *
  * The transports are the caller's and are built outside the window; the mount names are
  * RFC-0014 shaped (`net/tcp/conn-NNNNN`) and built inside it, because the router keeps them.
+ * Each link's connection vertex (#1940) is registered BEFORE the window opens: it is a graph
+ * vertex, already counted by the per-vertex rows, so only `add_child` is measured here.
  */
 bool ram_links() {
     graph_t g;
     tr::net::fwd_router_t router(g);
     std::deque<null_link_t> links(kRamN + 1);
-    if (!router.add_child("net/tcp/warm", links.back())) return false;
+    if (!router.attach_link("net/tcp/warm", links.back())) return false;
     bool ok = true;
+    for (std::size_t i = 0; i < kRamN; ++i) {
+        char path[40];
+        std::snprintf(path, sizeof path, "/net/tcp/conn-%05zu", i);
+        const auto parsed = path_t::parse(path);
+        ok = parsed && g.try_register_vertex(*parsed, role_t::STORED_VALUE).has_value() && ok;
+    }
+    if (!ok) return false;
     probe::window_t win;
     for (std::size_t i = 0; i < kRamN; ++i) {
         char name[40];

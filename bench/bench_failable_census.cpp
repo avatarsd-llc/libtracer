@@ -697,7 +697,7 @@ int run_guard() {
         return out;
     }();
     static tr::net::fwd_router_t* const label_router = [] {
-        label_router_obj.add_child("down", label_link_obj);
+        (void)label_router_obj.attach_link("down", label_link_obj);
         label_router_obj.on_frame("down", retired_compact);
         return &label_router_obj;
     }();

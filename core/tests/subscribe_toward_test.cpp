@@ -111,7 +111,7 @@ void test_single_hop() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t b;
-    (void)router.add_child("net/ws-client/b", b);
+    (void)router.attach_link("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/light/rgb"), role_t::STORED_VALUE);
 
     // Negative control FIRST: an unbound producer write emits nothing.
@@ -133,7 +133,7 @@ void test_multi_hop_residual() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t b;
-    (void)router.add_child("net/ws-client/b", b);
+    (void)router.attach_link("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
 
     const auto s =
@@ -150,7 +150,7 @@ void test_rejections() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t b;
-    (void)router.add_child("net/ws-client/b", b);
+    (void)router.attach_link("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
 
     const auto no_vertex = router.subscribe_toward(path_t("/nope"), path_t("/net/ws-client/b/x"));
@@ -210,7 +210,7 @@ void test_mount_carry_never_scans() {
     std::vector<std::string> names(kLinks);
     for (std::size_t i = 0; i < kLinks; ++i) {
         names[i] = "net/ws-client/p" + std::to_string(i);
-        (void)router.add_child(names[i], links[i]);
+        (void)router.attach_link(names[i], links[i]);
     }
     (void)g.register_vertex(path_t("/light/rgb"), role_t::STORED_VALUE);
     const std::optional<tr::graph::vertex_handle_t> prod = g.find(path_t("/light/rgb").key());

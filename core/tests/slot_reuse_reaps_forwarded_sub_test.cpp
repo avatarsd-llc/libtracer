@@ -199,11 +199,11 @@ void run() {
     fwd_router_t rb(gb);
     pipe_link_t a_to_b;
     pipe_link_t b_to_a;
-    check(ra.add_child("b", a_to_b), "A mounts B as b");
-    check(rb.add_child("a", b_to_a), "B mounts A as a");
+    check(ra.attach_link("b", a_to_b), "A mounts B as b");
+    check(rb.attach_link("a", b_to_a), "B mounts A as a");
     tr::net::tcp_server_transport_t server(0, {.max_peers = 1, .peer_named = true});
     check(server.ok(), "A's listener bound an ephemeral port");
-    check(ra.add_child("srv", server), "A mounts its listener as srv");
+    check(ra.attach_link("srv", server), "A mounts its listener as srv");
     const auto v = gb.register_vertex(*path_t::parse("/ctl/state"), role_t::STORED_VALUE);
     const auto subscribers = [&] {
         const auto s = gb.read_subscribers(v);
