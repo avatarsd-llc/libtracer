@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-10-22
+
 ### Fixed
 
 - **A reused session slot gets a fresh name.** `httpd_ws_link_t` named a session `p<slot>`,

@@ -7,6 +7,10 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-10-22
+
+No TypeScript-binding changes. Released in lockstep with core 0.21.0. A tcp or ws listener's session now has a name of the form `p<slot>~<gen>` (core 0.21.0, Fixed), which this client shows as it shows any peer name; a caller that matched `p<slot>` must accept the new form.
+
 ## [0.20.0] — 2026-10-20
 
 No TypeScript-binding changes. Released in lockstep with core 0.20.0. A packed sample block (RFC-0025 Amendment 5) reaches this client as an ordinary opaque value.
