@@ -1420,7 +1420,7 @@ void test_late_departure_leaves_the_successor_anchor() {
     graph_t g;
     fwd_router_t router(g);
     fake_bus_t bus;
-    (void)router.add_child("srv", bus);
+    (void)router.attach_link("srv", bus);
     const vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     const auto anchor = [&] {
         return g.find_session_anchor(fwd_router_t::session_anchor_id("srv", "p3"));
