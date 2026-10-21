@@ -756,7 +756,7 @@ void test_multi_peer_bus() {
     check(live == 1, "departed peer left enumeration (slot recycled)");
     check(server.bus()->peer_link(name_a) != nullptr, "surviving peer still resolves");
 
-    // --- #426 / ADR-0073 §2: peer names are the routable `p<slot>` fallback ---
+    // --- #426 / ADR-0073 §2: peer names are the routable `p<slot>~<gen>` fallback ---
     // The old `<ip>:<port>` name contained two reserved characters, so a peer was
     // enumerable but unaddressable, and the delivery tag TAINTED the accumulated
     // return route. Every name must now pass THE segment predicate (fails before
@@ -769,13 +769,13 @@ void test_multi_peer_bus() {
             if (!tr::graph::valid_segment(p)) all_legal = false;
         });
         check(all_legal, "every enumerated peer name is a legal path segment (#426)");
-        check(!names.empty() && names[0].size() >= 2 && names[0][0] == 'p',
-              "the fallback name is the p<slot> spelling");
-        check(name_a == "p0" || name_a == "p1",
-              "the DELIVERY TAG is the p<slot> name (the return route is addressable)");
+        check(!names.empty() && tr::testing::is_session_name(names[0]),
+              "the fallback name is the p<slot>~<gen> spelling");
+        check(name_a == "p0~1" || name_a == "p1~1",
+              "the DELIVERY TAG is the p<slot>~<gen> name (the return route is addressable)");
     }
 
-    // --- slot recycling: a new session lands in the freed slot and REUSES its name ---
+    // --- slot recycling: a new session lands in the freed slot under a FRESH name ---
     std::optional<tr::net::ws_client_transport_t> c;
     c.emplace("127.0.0.1", port);
     frame_sink_t c_sink;
@@ -787,10 +787,9 @@ void test_multi_peer_bus() {
     {
         const std::lock_guard lock(srv_sink.m);
         const auto& [peer, bytes] = srv_sink.frames.back();
-        const bool p_form = peer.size() >= 2 && peer[0] == 'p' &&
-                            peer.find_first_not_of("0123456789", 1) == std::string::npos;
+        const bool p_form = tr::testing::is_session_name(peer);
         check(bytes == std::vector<std::byte>(pc.begin(), pc.end()) && p_form,
-              "the new session delivers under a p<slot> name");
+              "the new session delivers under a p<slot>~<gen> name");
         check(peer != name_a, "…and it is not the surviving peer's name (directedness held)");
     }
 }
@@ -1067,8 +1066,8 @@ void test_peer_named_server_does_not_downgrade_to_flat() {
         check(peer_sink.frames.size() == 1 &&
                   peer_sink.frames[0].second ==
                       std::vector<std::byte>(second.begin(), second.end()) &&
-                  peer_sink.frames[0].first == "p0",
-              "the delivered frame is intact and tagged with the p<slot> peer name");
+                  peer_sink.frames[0].first == "p0~1",
+              "the delivered frame is intact and tagged with the p<slot>~<gen> peer name");
     }
     {
         const std::lock_guard lock(flat_sink.m);

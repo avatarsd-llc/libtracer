@@ -628,13 +628,17 @@ class child_registry_t {
      * same-named peers stay distinct and a peer is never reachable through the wrong
      * module. A point-to-point child resolves no peer at all — and neither does anything, on
      * a target that closed the bus module out (`tr::net::bus_of`, #375 deliverable 3).
+     * @param lookup Which bus question to ask: @ref bus_link_t::peer_link for a session NAME
+     *               (the default), @ref bus_link_t::slot_link for a session anchor's slot.
      * @return The directed per-peer endpoint, or nullptr if this child has no such peer.
      */
-    [[nodiscard]] static transport_t* resolve_peer(const child_t& child, std::string_view peer) {
+    [[nodiscard]] static transport_t* resolve_peer(
+        const child_t& child, std::string_view peer,
+        transport_t* (bus_link_t::*lookup)(std::string_view) = &bus_link_t::peer_link) {
         const egress_t eg = child.egress();
         if (!eg.multi_peer || eg.link == nullptr) return nullptr;
         bus_link_t* const bus = bus_of(*eg.link);
-        return bus == nullptr ? nullptr : bus->peer_link(peer);
+        return bus == nullptr ? nullptr : (bus->*lookup)(peer);
     }
 
     /**

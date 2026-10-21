@@ -80,7 +80,7 @@ const utf8 = new TextDecoder();
  * @brief Characters reference/03 forbids inside a path segment (mirrors `tlv.ts`).
  *
  * Used to decide whether a bus peer's name could even be addressed as a hop. Every
- * shipped bus transport now emits legal-segment peer names (`p<slot>`, `n<id>` —
+ * shipped bus transport now emits legal-segment peer names (`p<slot>~<gen>`, `n<id>` —
  * #426, #1145), but a peer name arrives over the wire and a client validates what
  * it is sent rather than trusting a naming convention.
  */
@@ -124,7 +124,7 @@ export interface TopologyEdge {
  *   corrupts a client's reply correlation — so descending by name is not merely
  *   imprecise, it is actively wrong.
  * - Descending **per peer** is expressible — every shipped bus transport names its
- *   peers with legal path segments (`p<slot>`, `n<id>` — #426, #1145), so a directed
+ *   peers with legal path segments (`p<slot>~<gen>`, `n<id>` — #426, #1145), so a directed
  *   hop through the enumerated peer name exists — but this walk deliberately does not
  *   take it, on **cost** grounds: a bus's peer count is unbounded, and a walk that
  *   descends N peers per bus multiplies its request volume by N at every bus it

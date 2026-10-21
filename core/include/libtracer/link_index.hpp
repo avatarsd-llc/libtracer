@@ -220,7 +220,7 @@ class link_index_t {
      * Chosen so the whole slot is 64 bytes — one cache line, and the difference between a
      * measured 128.0 B/link and the 160.8 B a `std::pmr::string` here would cost (that type
      * is 40 bytes of header before a single character is stored, because the polymorphic
-     * allocator is not empty). It covers every name the transport plane mints — `p<slot>`,
+     * allocator is not empty). It covers every name the transport plane mints — `p<slot>~<gen>`,
      * `n<node>`, the `tr::net::kPeerNameChars` tokens — and every dotted-quad `host:port`.
      * A longer registered child name still works; it simply costs one entry in the overflow
      * list and one extra indirection on the doors that scan by name. */

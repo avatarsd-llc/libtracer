@@ -462,7 +462,7 @@ constexpr std::uint8_t kOverflowNameLen = 0xFF;
  * in latency — a `std::pmr::string` here is 40 bytes of header before a single character is
  * stored (measured; the polymorphic allocator is not empty), which would put the slot at 88
  * and hand back most of the saving. 19 characters covers every name the transport plane
- * actually mints (`p<slot>`, `n<node>`, `kPeerNameChars` tokens) and every dotted-quad
+ * actually mints (`p<slot>~<gen>`, `n<node>`, `kPeerNameChars` tokens) and every dotted-quad
  * `host:port` spelling; anything longer goes to @ref long_name_t, which costs nothing at all
  * when it is empty.
  */

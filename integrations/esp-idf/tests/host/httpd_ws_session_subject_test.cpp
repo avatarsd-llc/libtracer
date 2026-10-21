@@ -253,8 +253,8 @@ void no_hook_keeps_the_link_name() {
     (void)fake_httpd::instance().open_session(kFd);
     (void)fake_httpd::instance().deliver_frame(kFd, write_knob());
     run_server();
-    check(g_writers.size() == 1 && g_writers[0] == "p0",
-          "the WRITE ran under the peer's link name p0, unchanged");
+    check(g_writers.size() == 1 && g_writers[0] == "p0~1",
+          "the WRITE ran under the peer's session name p0~1, unchanged");
     fake_httpd::instance().close_session(kFd);
     run_server();
 }

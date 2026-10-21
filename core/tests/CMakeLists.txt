@@ -2464,6 +2464,12 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
     target_link_libraries(session_anchor_test PRIVATE libtracer)
     libtracer_test_warnings(session_anchor_test)
     add_test(NAME session_anchor COMMAND session_anchor_test)
+    # A reused session slot gets a fresh name, so a forwarded subscription the previous session
+    # made is refused and reaped instead of reaching the new occupant. Real sockets on A.
+    add_executable(slot_reuse_reaps_forwarded_sub_test slot_reuse_reaps_forwarded_sub_test.cpp)
+    target_link_libraries(slot_reuse_reaps_forwarded_sub_test PRIVATE libtracer)
+    libtracer_test_warnings(slot_reuse_reaps_forwarded_sub_test)
+    add_test(NAME slot_reuse_reaps_forwarded_sub COMMAND slot_reuse_reaps_forwarded_sub_test)
     # A forwarded WRITE through a mount — bus or point-to-point — is authorized at the mount's
     # connection vertex: real TCP sessions under a restrictive `:acl`, each refusal paired with
     # the identical admitted frame.
@@ -2551,6 +2557,7 @@ set(LIBTRACER_BUS_TESTS
     peer_handle_seam
     send_stall
     session_anchor
+    slot_reuse_reaps_forwarded_sub
     tcp
     transport_can
     transport_can_peers
@@ -2640,7 +2647,7 @@ endif()
 # which is an acceptable answer for a test whose subject was compiled out, and converting all of
 # them would be a much larger diff for no additional safety.
 set(LIBTRACER_BUS_SKIPPABLE_TESTS edge_eviction send_stall session_anchor tcp ws_transport
-    mount_hop_acl pair_hop_acl)
+    mount_hop_acl pair_hop_acl slot_reuse_reaps_forwarded_sub)
 foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_SKIPPABLE_TESTS)
     if(TEST ${_libtracer_bus_test})
         set_property(TEST ${_libtracer_bus_test} PROPERTY SKIP_RETURN_CODE 77)

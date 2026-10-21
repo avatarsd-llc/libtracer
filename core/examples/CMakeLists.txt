@@ -388,7 +388,7 @@ set(LIBTRACER_NET_KIND_EXAMPLES_UDP
 set(LIBTRACER_NET_KIND_EXAMPLES_TCP
     net_dial_and_listen       # DIAL and LISTEN are two constructors of one type
     net_tcp_stream_framing    # a stream has no boundaries, so the kind supplies a prefix
-    net_multi_peer_listener   # one listener, many slots; p<slot> is a POSITION, not an identity
+    net_multi_peer_listener   # one listener, many slots; the endpoint is the slot, not the session
 )
 set(LIBTRACER_NET_KIND_EXAMPLES_WS
     net_ws_upgrade            # no frame crosses a ws link until the HTTP Upgrade completes

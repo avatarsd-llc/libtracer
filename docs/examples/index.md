@@ -79,7 +79,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [A stream has none, so the kind supplies them](net-tcp-stream-framing.md) | transport plane, `tcp` | the `u32-LE` prefix; coalesced writes split, split writes reassembled |
 | [No frame crosses until the Upgrade completes](net-ws-upgrade.md) | transport plane, `ws` | the `101` computed from the client's nonce; the tighten-only pre-auth budget |
 | [The one BUS kind](net-can-bus-peers.md) | transport plane, `can` | ADR-0044 peers synthesized from traffic; `n<node-id>` is an identity |
-| [One listener, many slots](net-multi-peer-listener.md) | transport plane, `tcp`/`ws` | `p<slot>` is a POSITION — resolve per use; the printed skip ctest can SEE |
+| [One listener, many slots](net-multi-peer-listener.md) | transport plane, `tcp`/`ws` | `p<slot>~<gen>` names a session, the endpoint a slot — resolve per use; the printed skip ctest can SEE |
 | [A VALUE frame and its CRC trailer](rust-value-crc.md) | Rust binding | `encode` / `decode`; the opt-in trailer catches a flipped bit, its absence does not |
 | [An address is packed segment records](rust-path-tlv.md) | Rust binding | `path_to_tlv`: `[6]sensor[4]temp`; one canonical spelling; `NotRooted` |
 | [A remote write is one FWD frame](rust-fwd-write.md) | Rust binding | `FWD{WRITE}`: `op`, `dst`, `src`, VALUE — and no correlation id |

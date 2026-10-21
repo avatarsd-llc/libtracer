@@ -216,7 +216,7 @@ void test_pending_session_is_served_nothing() {
     check(g_ctx == &ctx_object, "and the ctx registered alongside it");
     // Gates 2-4: invisible, unresolvable, and skipped by a broadcast.
     check(peer_count(*link) == 0, "it appears in NO peer census");
-    check(link->peer_link("p0") == nullptr, "it cannot be resolved to a sending endpoint");
+    check(link->peer_link("p0~1") == nullptr, "it cannot be resolved to a sending endpoint");
     fake_httpd::instance().clear_sent_frames();
     link->send(kBody);
     run_server();
@@ -241,7 +241,7 @@ void test_accept_promotes_and_binds_subject() {
     check(fake_httpd::instance().deliver_frame(kFd, kCredential) == ESP_OK,
           "the credential frame dispatched");
     check(peer_count(*link) == 1, "the session is now an enumerable peer");
-    check(link->peer_link("p0") != nullptr, "and resolvable to a sending endpoint");
+    check(link->peer_link("p0~1") != nullptr, "and resolvable to a sending endpoint");
 
     std::string bound;
     link->enumerate_peer_stats(

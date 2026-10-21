@@ -658,8 +658,12 @@ constexpr std::size_t kAddrChars = INET_ADDRSTRLEN;
 constexpr std::size_t kEndpointChars = kAddrChars + 6;
 
 /**
- * @brief Write the peer's routable name for slot @p idx — `p<slot>` (ADR-0073 §2) — and its
- *        NUL into @p out, which holds at least 22 characters; returns the name's length.
+ * @brief Write the session name of @p peer — `p<slot>~<gen>` (ADR-0073 §2) — and its NUL
+ *        into @p out, which holds at least `kSlotNameChars`; returns the name's length.
+ *
+ * The tenancy generation is part of the name, so a reused slot gets a fresh one: a route
+ * another node still holds for the previous session names nobody, its delivery is refused,
+ * and that refusal reaps the stale edge.
  *
  * Two measured decisions, both against an A/A null of 0 on this TU's `.text`:
  *
@@ -671,19 +675,24 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
  * The digits are written here rather than by `std::to_string` because that instantiation is
  * **+1456 B** of this TU, and it is NOT shared with the one @ref format_endpoint already pulls in:
  * the body is duplicated per call site, so the second use pays full price again (`int` and
- * `std::size_t` overloads both, measured). A slot index is a small non-negative integer, so
- * the general path buys nothing here. Core's `slot_server_t` keeps `std::to_string`
- * (`core/src/posix_endpoint.cpp:406`) — it is host code with no image budget; the STRING is
- * identical either way, which is all the two have to agree on.
+ * `std::size_t` overloads both, measured). A slot index and a generation are non-negative
+ * integers, so the general path buys nothing here. Core's `slot_server_t` keeps
+ * `std::to_chars` — it is host code with no image budget; the STRING is identical either
+ * way, which is all the two have to agree on.
  */
-[[gnu::noinline]] [[nodiscard]] std::uint8_t format_slot_name(std::size_t idx, char* out) {
+[[gnu::noinline]] [[nodiscard]] std::uint8_t format_slot_name(peer_handle_t peer, char* out) {
     char buf[24];
     char* p = buf + sizeof(buf);
-    do {
-        *--p = static_cast<char>('0' + (idx % 10));
-        idx /= 10;
-    } while (idx != 0);
-    *--p = 'p';
+    // Written back to front: the generation and its separator, then the slot and its `p`.
+    const std::pair<std::uint32_t, char> parts[] = {{peer.generation, kTenancySeparator},
+                                                    {peer.index, 'p'}};
+    for (auto [v, lead] : parts) {
+        do {
+            *--p = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        } while (v != 0);
+        *--p = lead;
+    }
     const auto len = static_cast<std::size_t>(buf + sizeof(buf) - p);
     std::copy_n(p, len, out);
     out[len] = '\0';
@@ -710,7 +719,7 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
  *
  * This string is NOT the peer's graph name and has not been since #994: it carries `.` and
  * `:`, both rejected by `graph::valid_segment`, so a session named with it could be listed
- * and never addressed. @ref httpd_ws_link_t::session_t::name holds the routable `p<slot>`;
+ * and never addressed. @ref httpd_ws_link_t::session_t::name holds the routable `p<slot>~<gen>`;
  * this is what an operator needs to tell which physical client that slot is.
  *
  * Writes into the caller's buffer rather than returning a `std::string`, which is what made
@@ -1063,7 +1072,7 @@ struct httpd_ws_link_t::session_t {
     peer_handle_t handle;
     bool open = false; /**< @brief True between handshake and close. */
     /**
-     * @brief The peer's ROUTABLE name — `p<slot>` (ADR-0073 §2, #426, #994).
+     * @brief The peer's ROUTABLE name — `p<slot>~<gen>` (ADR-0073 §2, #426, #994).
      *
      * The slot index, and nothing else, because this string is what the graph spells: a
      * peer-named link's synthesized `:children[]` lists it and a `dst` path addresses the
@@ -2489,17 +2498,18 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     // generation it is about to leave behind, and that invariant belongs at the
     // claim, next to the bump that would break it.
     retire_resolution(slot, /*inert=*/false);
-    // ADR-0073 §2: the routable NAME is the slot index, legal by construction, and
-    // the `<ip>:<port>` goes to the diagnostics field instead of into the graph.
-    slot->name.len = format_slot_name(idx, slot->name.text.data());
-    format_endpoint(fd, slot->endpoint_str);
-    slot->asm_buf.clear();
-    slot->fd = fd;
     ++slot->gen;  // a NEW session in a recycled slot: fail every stale ref (#954)
     // The seam's handle is minted from that same bump (#1294) — one identity for
     // the TX path and the routing plane, never two that could disagree. `gen` is
     // never 0 after the increment on a claim, so the handle is always valid.
     slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen};
+    // ADR-0073 §2: the routable NAME is the handle spelled out, `p<slot>~<gen>`, legal
+    // by construction, and the `<ip>:<port>` goes to the diagnostics field instead of
+    // into the graph. The generation makes a reused slot's name a fresh one.
+    slot->name.len = format_slot_name(slot->handle, slot->name.text.data());
+    format_endpoint(fd, slot->endpoint_str);
+    slot->asm_buf.clear();
+    slot->fd = fd;
     slot->open = true;
     // THIS claim is the establish edge, whichever of the two it is — the only honest place to
     // stamp "connected at" and to start this connection's counters. For an ordinary session
@@ -3972,7 +3982,7 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
         if (close_now) slot->dead = true;
     }
     if (!close_now) return;  // the drop itself is already logged by tx_work
-    // BOTH names, because after #994 neither one alone identifies the peer: `p<slot>` is
+    // BOTH names, because after #994 neither one alone identifies the peer: `p<slot>~<gen>` is
     // what an operator can address the session by, and `<ip>:<port>` is what tells them
     // which physical client that slot is. Both come from the slot, filled at admission.
     // Never `getpeername` here: the socket is by definition the one that is not working,
@@ -4731,7 +4741,18 @@ void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) co
 }
 
 transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
+    return open_resolution(peer, [](std::string_view name) { return name; });
+}
+
+transport_t* httpd_ws_link_t::slot_link(std::string_view slot) {
+    return open_resolution(slot, session_slot_of);
+}
+
+template <class Key>
+transport_t* httpd_ws_link_t::open_resolution(std::string_view want, Key key) {
     const std::lock_guard lock(peers_m_);
+    // The exact compare IS the tenancy check for peer_link: a name carrying a departed
+    // session's generation, or none at all, equals no live slot's name and is refused.
     // `!dead` for the reason on enumerate_peers (#963): the endpoint this used to hand
     // out for a condemned slot was a guaranteed no-op, so a router lookup succeeded and
     // every frame through it was silently discarded. Refusing here turns that into an
@@ -4740,20 +4761,20 @@ transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
     // plane a working endpoint for a peer that has presented nothing, which is the whole
     // gate defeated by one lookup — a directed FWD reply does not consult the census.
     for (session_t* const s : slots_)
-        if (s->open && !s->dead && !s->auth_pending && s->name.view() == peer)
+        if (s->open && !s->dead && !s->auth_pending && key(s->name.view()) == want)
             return acquire_resolution(s);
     return nullptr;
 }
 
 std::string_view httpd_ws_link_t::peer_name(peer_handle_t peer, std::span<char> scratch) const {
-    // Positional by construction (ADR-0073 §2): the name a slot is stamped with at the
-    // claim IS 'p' + its index, so the inverse is that formatting and needs neither
+    // The name a slot is stamped with at the claim IS `p<slot>~<gen>` of its handle
+    // (ADR-0073 §2), so the inverse is that formatting and needs neither
     // `peers_m_` nor the slot vector. The SAME formatter the claim stamps with (#1880), into
     // a local name and then the CALLER's scratch, so it allocates nothing on the per-frame
     // path.
     if (!peer.valid() || scratch.size() < 2) return {};
     slot_name_t name;
-    name.len = format_slot_name(peer.index, name.text.data());
+    name.len = format_slot_name(peer, name.text.data());
     if (name.len > scratch.size()) return {};
     std::copy_n(name.text.data(), name.len, scratch.data());
     return std::string_view(scratch.data(), name.len);

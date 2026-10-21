@@ -579,7 +579,7 @@ currently audible, wired through the vertex's `on_children` handler by
 `transport_vertex_t` for any link whose `bus()` is non-null.
 
 **Forwarding.** Each listed name doubles as a routable next-hop segment — on this
-transport and on every bus kind — ws/tcp bus sessions are named `p<slot>` (the
+transport and on every bus kind — ws/tcp bus sessions are named `p<slot>~<gen>` (the
 enumerable⇒addressable invariant, ADR-0073 §1): once a
 `FWD`'s leading `dst` segments have matched this connection's **mount run**
 `net/<module>/<name>`, the router resolves the segment that follows it as a peer

@@ -152,11 +152,12 @@ tr::graph::ace_t allow(std::string_view subject, std::uint32_t mask) {
     };
 }
 
-/** @brief `admin` holds both rights, `p0` holds WRITE, everyone else nothing. */
+/** @brief `admin` holds both rights, the first session `p0~1` holds WRITE, everyone else
+ *         nothing. */
 bytes_t mount_acl() {
     const tr::graph::ace_t aces[2] = {
         allow("admin", tr::graph::kAceRights),
-        allow("p0", static_cast<std::uint32_t>(acl_right_t::WRITE)),
+        allow("p0~1", static_cast<std::uint32_t>(acl_right_t::WRITE)),
     };
     return tr::graph::encode_acl(std::span<const tr::graph::ace_t>(aces, 2));
 }
@@ -286,9 +287,9 @@ void name_spelling() {
     const auto at_p0 = [&] { return n.p0->count(); };
     const auto at_p1 = [&] { return n.p1->count(); };
     const auto at_p2p = [&] { return n.p2p.n.load(); };
-    check(!lands(*n.p1, tr::testing::b_path({"net", "tcp-server", "srv", "p0"}), at_p0),
+    check(!lands(*n.p1, tr::testing::b_path({"net", "tcp-server", "srv", "p0~1"}), at_p0),
           "bus mount: p1's WRITE to p0 by NAME is refused at the mount");
-    check(lands(*n.p0, tr::testing::b_path({"net", "tcp-server", "srv", "p1"}), at_p1),
+    check(lands(*n.p0, tr::testing::b_path({"net", "tcp-server", "srv", "p1~1"}), at_p1),
           "bus mount: p0's WRITE to p1 by NAME is admitted (the control)");
     check(!lands(*n.p1, tr::testing::b_path({"net", "tcp", "x", "foo"}), at_p2p),
           "point-to-point mount: p1's WRITE through it by NAME is refused");

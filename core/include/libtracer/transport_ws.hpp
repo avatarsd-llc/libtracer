@@ -207,10 +207,10 @@ struct ws_client_config_t {
  * Binds and listens on a TCP port (localhost is fine for tests); one poll-based
  * thread accepts clients and serves every open connection concurrently. Each
  * inbound BINARY message is delivered tagged with its peer's name
- * (the routable `p<slot>` fallback, ADR-0073 §2 / #426) when a peer-named sink is installed (the
- * router's bus wiring), or to the flat @ref transport_t receiver otherwise —
- * so a single-client deployment behaves exactly as the point-to-point server
- * always did. The dial-out counterpart is ws_client_transport_t below.
+ * (the routable `p<slot>~<gen>` fallback, ADR-0073 §2 / #426) when a peer-named sink is installed
+ * (the router's bus wiring), or to the flat @ref transport_t receiver otherwise — so a
+ * single-client deployment behaves exactly as the point-to-point server always did. The dial-out
+ * counterpart is ws_client_transport_t below.
  *
  * Peer lifecycle: peers occupy SLOTS. A departed peer's slot is recycled for
  * the next accept, so steady-state memory is bounded by the maximum number of

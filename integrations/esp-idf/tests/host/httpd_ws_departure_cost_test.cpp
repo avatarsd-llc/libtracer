@@ -167,12 +167,12 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     std::size_t mine_hits = 0, bystander_hits = 0;
     const tr::testing::remote_sink_guard_t sink_guard(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-            (d.link == "p0" ? mine_hits : bystander_hits) += 1;
+            (d.link == "p0~1" ? mine_hits : bystander_hits) += 1;
         });
-    claim_session(task, 700);  // lands in slot 0 ⇒ routable name "p0"
+    claim_session(task, 700);  // lands in slot 0 ⇒ routable name "p0~1" (slot 0, first tenancy)
     claim_session(task, 701);  // a second live session, so the close is not the last one
-    check(wire_sub(g, mine, "p0", "m0"), "the peer that will depart subscribes on /mine");
-    check(g.link_edge_candidates("p0") == 1, "its departure visits exactly one vertex");
+    check(wire_sub(g, mine, "p0~1", "m0"), "the peer that will depart subscribes on /mine");
+    check(g.link_edge_candidates("p0~1") == 1, "its departure visits exactly one vertex");
 
     // Forty bystander vertices subscribed by OTHER peers — the graph the old walk charged
     // this peer's hangup for. Nothing here belongs to p0.
@@ -181,7 +181,7 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
         vertex_handle_t b = g.register_vertex(path_t(p.c_str()), role_t::STORED_VALUE);
         check(wire_sub(g, b, "other" + std::to_string(i), "b"), "a bystander peer subscribes");
     }
-    check(g.link_edge_candidates("p0") == 1,
+    check(g.link_edge_candidates("p0~1") == 1,
           "40 bystander subscriptions later, the departure STILL visits one vertex");
 
     check(g.write(path_t("/mine"), rope_t{make_value({0x01})}).has_value(),
@@ -192,7 +192,7 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     // runs free_ctx, which notifies, which evicts.
     mine_hits = 0;
     fake_httpd::instance().post([] { fake_httpd::instance().close_session(700); });
-    check(wait_for([&] { return g.link_edge_candidates("p0") == 0; }, kPatience),
+    check(wait_for([&] { return g.link_edge_candidates("p0~1") == 0; }, kPatience),
           "the hangup reached the eviction and cleared the peer's candidates");
 
     check(g.write(path_t("/mine"), rope_t{make_value({0x02})}).has_value(),

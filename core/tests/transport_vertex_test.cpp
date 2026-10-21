@@ -1510,15 +1510,13 @@ void test_ws_peer_named_config() {
         [&] { return enumerate_peers(node, "/net/ws-server/bus:children[]").size() == 2; }, 2s);
     check(listed, "/net/bus:children[] synthesizes exactly the 2 live peers (ADR-0044 Brick C)");
 
-    // The peer names are the routable `p<slot>` fallback (#426, ADR-0073 §2) — the slot
+    // The peer names are the routable `p<slot>~<gen>` fallback (#426, ADR-0073 §2) — the slot
     // assignment is arrival-order-dependent, so assert the shape, never a literal.
     const auto peers = enumerate_peers(node, "/net/ws-server/bus:children[]");
     const bool shaped = std::all_of(peers.begin(), peers.end(), [](const std::string& p) {
-        return p.size() >= 2 && p[0] == 'p' &&
-               p.find_first_not_of("0123456789", 1) == std::string::npos &&
-               tr::graph::valid_segment(p);
+        return tr::testing::is_session_name(p) && tr::graph::valid_segment(p);
     });
-    check(shaped, "each synthesized peer name is the routable p<slot> segment");
+    check(shaped, "each synthesized peer name is the routable p<slot>~<gen> segment");
 
     // NO vertex is created for a peer — the listing is synthesized on every read, so the
     // /net subtree still holds exactly the two CONNECTIONS (ADR-0044: peers are never

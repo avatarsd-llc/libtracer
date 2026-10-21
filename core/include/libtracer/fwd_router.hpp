@@ -935,7 +935,12 @@ class fwd_router_t {
      * @brief The node-scoped identity string of the session @p peer holds on bus mount
      *        @p mount — the key `graph_t::register_session_anchor` allocates against (#1223).
      *
-     * Deliberately NOT a spellable address. It is `:<mount>/<peer>`, and both `:` and `/` are
+     * Keyed by the peer's SLOT (`%session_slot_of`: `p<slot>~<gen>` anchors as `p<slot>`), so
+     * one slot keeps ONE anchor however many sessions pass through it — the count is the slot
+     * count (ADR-0044 amendment) — and the anchor's own retire generation tells its tenancies
+     * apart.
+     *
+     * Deliberately NOT a spellable address. It is `:<mount>/<slot>`, and both `:` and `/` are
      * among the seven characters `path::valid_segment` rejects, so the anchor's rendered key
      * is bytes no registered path in this graph can produce — the property that keeps an
      * anchor out of every listing, every descent and every sweep-set collision. Qualified by
@@ -1225,15 +1230,16 @@ class fwd_router_t {
      * growable table would have to be published to a lock-free reader on the transport's own
      * receive thread, which is a retire list and a lifetime argument for a CACHE whose every
      * miss is already correct — the index simply interns the name it was handed. Peer indices
-     * are slot numbers (`p<slot>`) or bus node ids (`n<node>`), so they are small and dense
+     * are slot numbers (`p<slot>~<gen>`) or bus node ids (`n<node>`), so they are small and dense
      * and the ways collide only past `kWays` live peers on one mount; a collision costs
      * one name lookup and nothing else.
      *
-     * WHY THE PEER'S GENERATION IS NOT PART OF THE KEY: a peer's NAME is a pure function of
-     * its index (`bus_link_t::peer_name` is documented as exactly that), so a recycled index
-     * asks about the same link name and therefore the same interned identity. The stamp that
-     * DOES matter is the token's own, and `graph_t` validates that itself — an entry left
-     * behind by a departed session fails there and degrades to a lookup.
+     * WHY THE PEER'S GENERATION IS NOT PART OF THE KEY: a recycled index carries a NEW
+     * name (`p<slot>~<gen>`), so its entry must not survive the departure — and it does not:
+     * `bus_peer_down` drops the way after the eviction, and an arrival runs that departure
+     * first. The stamp the cache holds is the token's own, and `graph_t` validates that
+     * itself — an entry left behind by a departed session fails there and degrades to a
+     * lookup.
      */
     struct bus_token_cache_t {
         /** @brief Ways in the direct-mapped table. */
@@ -1608,7 +1614,7 @@ class fwd_router_t {
      *
      * Called once per inbound bus frame, on the transport's receive thread inside the
      * delivery callback, which is exactly where the name used to arrive for free. Every
-     * kind answers it as a pure function of the handle's index (`p<slot>`, `n<node>`), so
+     * kind answers it as a pure function of the handle (`p<slot>~<gen>`, `n<node>`), so
      * the resolution is a formatting into @p scratch and takes no transport lock.
      * @retval {} The ctx carries no bus facet, or the handle names no peer of that kind —
      *            the frame is then dropped, exactly as an unnamed inbound hop always was.
@@ -2043,16 +2049,18 @@ class fwd_router_t {
      */
     child_rx_ctx_t* ctl_ctx_by_name(std::string_view name);
     /**
-     * @brief A bus mount admitted a session named @p peer — reclaim what the name's previous
-     *        holder left, then give the session an identity anchor (#1223 step 2, #1609).
+     * @brief A bus mount admitted a session named @p peer — reclaim what the slot's previous
+     *        tenancy left, then give the session an identity anchor (#1223 step 2, #1609).
      *
-     * An arrival is the RE-TENANT edge: the name has just changed hands and the new session
-     * has sent nothing, so every edge and await still filed under @p peer is a
-     * predecessor's whose departure never reached this router. The arrival runs that
-     * departure (`bus_peer_down`) first, which makes "edges under a peer name belong to
-     * its current holder" true by construction rather than by a sweeper's care; when the
-     * departure already ran, it finds nothing. Then it registers (or REVIVES, at the same
-     * slot, one generation up) the anchor vertex for `:<mount>/<peer>`.
+     * An arrival is the RE-TENANT edge: the slot has just changed hands and the new session
+     * has sent nothing, so whatever the slot still holds is a predecessor's whose departure
+     * never reached this router. The arrival runs that departure (`bus_peer_down`) for the
+     * slot-keyed state (the anchor and the cached token), then evicts the edges, label state
+     * and pending awaits filed under the PREDECESSOR's name, which the bus spells from
+     * @p handle one generation down. That makes "edges under a session name belong to that
+     * session" true by construction rather than by a sweeper's care; when the departure
+     * already ran, it finds nothing. Then it registers (or REVIVES, at the same slot, one
+     * generation up) the anchor vertex for `:<mount>/<slot>`.
      *
      * Fired ONLY by an accepting listener (`slot_server_t` and the ESP httpd link), never by
      * an announce-census bus, so CAN peers keep ADR-0044 §Decision 1 in full force and grow
@@ -2067,6 +2075,9 @@ class fwd_router_t {
      * successor. Eviction (@ref link_down) is unchanged and still keyed by the peer NAME.
      * An anchor that was never created (an announce-census peer, or a session that departed
      * before its arrival was wired) simply resolves to nothing and the eviction runs alone.
+     * A departure that lands after a successor already claimed the slot (the bus resolves
+     * the slot to an endpoint that is not @p peer's) evicts @p peer's name only: the anchor
+     * and the cached token are keyed by slot and belong to the successor by then.
      *
      * @p handle is the departing peer's, and it is what the per-peer LINK-TOKEN cache is
      * keyed by (#1417): the eviction below releases the graph's index slot, so the cached

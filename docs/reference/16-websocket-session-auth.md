@@ -115,7 +115,7 @@ token — the very value the vertex's ACL gate was evaluated against
 transport half**: every locally-terminating frame carries the opaque `peer_handle_t` its link
 minted at accept, and the terminus derives the caller context from that handle through
 `transport_t::peer_subject` — at either setting of `peer_named`, so a per-writer subject no
-longer depends on the addressing facet. A stream listener answers that door with its `p<slot>`
+longer depends on the addressing facet. A stream listener answers that door with its `p<slot>~<gen>`
 session token.
 
 The **join** is done ([#1846](https://github.com/avatarsd-llc/libtracer/issues/1846)): a

@@ -31,9 +31,8 @@
  *   2. a refused enqueue answers `false` and leaves the session UNTOUCHED: no half-close,
  *      and no `true` for a teardown that never happened;
  *   3. the close does not follow the SLOT: a peer that departs on its own, whose slot is
- *      then reclaimed by a stranger that inherits the very same positional name, must not
- *      be closed by the queued item (#954's rule on the close path — `p<slot>` is a pure
- *      function of the slot index, so the NAME cannot be the token);
+ *      then reclaimed by a stranger in the very same slot, must not be closed by the queued
+ *      item (#954's rule on the close path — the generation is the token);
  *   4. the guard is not vacuous — an unknown name, and a FLAT link, both answer `false`
  *      without touching anything.
  */
@@ -230,9 +229,9 @@ void test_refused_enqueue_answers_false() {
 /**
  * @brief The identity half, and the reason the work item cannot carry a name or an fd.
  *
- * `p<slot>` is a pure function of the slot index and slots are recycled in place, so a
- * peer that departs and is replaced hands its successor the SAME name AND the same slot
- * address. Only the generation separates them. Here A is named for closure, departs on
+ * Slots are recycled in place, so a peer that departs and is replaced hands its successor
+ * the same slot address; the generation separates them, and the name `p<slot>~<gen>`
+ * carries it. Here A is named for closure, departs on
  * its own before the item drains, and B lands in its slot: draining must close nothing.
  * B's presence afterwards — and the absence of any CLOSE frame to it — is the observable.
  */
@@ -246,11 +245,12 @@ void test_close_does_not_follow_the_slot() {
     check(link->bus()->close_peer(peer_a), "A's close was accepted onto the queue");
     check(fake_httpd::instance().queue_depth() == 1, "and is still queued");
 
-    // A hangs up on its own; B is accepted and claims the freed slot, inheriting the name.
+    // A hangs up on its own; B is accepted and claims the freed slot under a fresh name.
     fake_httpd::instance().close_session(kFd);
     claim(kFd);
     const std::string peer_b = only_peer_name(*link);
-    check(peer_b == peer_a, "B inherited A's positional name — the precondition of this case");
+    check(peer_b != peer_a && tr::net::session_slot_of(peer_b) == tr::net::session_slot_of(peer_a),
+          "B took A's slot under a fresh name — the precondition of this case");
 
     fake_httpd::instance().clear_sent_frames();
     drain();

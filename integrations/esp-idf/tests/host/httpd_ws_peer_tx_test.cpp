@@ -470,7 +470,7 @@ void test_a_quiet_producer_still_delivers_the_newest_frame() {
     fake_httpd::instance().clear_wire(kStalled);
     {
         const std::span<const std::byte> one[] = {std::span<const std::byte>(a)};
-        link->peer_link("p0")->send(std::span<const std::span<const std::byte>>(one));
+        link->peer_link("p0~1")->send(std::span<const std::span<const std::byte>>(one));
     }
     drain();
     check(fake_httpd::instance().wire(kStalled) == want,
@@ -481,7 +481,7 @@ void test_a_quiet_producer_still_delivers_the_newest_frame() {
     fake_httpd::instance().clear_wire(kStalled);
     {
         const std::span<const std::byte> one[] = {std::span<const std::byte>(a)};
-        link->peer_link("p0")->send(std::span<const std::span<const std::byte>>(one));
+        link->peer_link("p0~1")->send(std::span<const std::span<const std::byte>>(one));
     }
     drain();
     check_eq(fake_httpd::instance().wire(kStalled).size(), 0, "(b) held on a full socket");
@@ -498,7 +498,7 @@ void test_a_quiet_producer_still_delivers_the_newest_frame() {
     fake_httpd::instance().clear_wire(kStalled);
     {
         const std::span<const std::byte> one[] = {std::span<const std::byte>(a)};
-        link->peer_link("p0")->send(std::span<const std::span<const std::byte>>(one));
+        link->peer_link("p0~1")->send(std::span<const std::span<const std::byte>>(one));
     }
     drain();
     fake_httpd::instance().set_send_script(kStalled, {send_result_t::FULL});
@@ -656,7 +656,7 @@ void test_producers_race_close_and_reclaim() {
                               tr::graph::delivery_lane_t{});
                 } else if ((i + t) % 3 == 1) {
                     raw->send(std::span<const std::byte>(kBody));
-                } else if (tr::net::transport_t* const to = raw->peer_link("p2")) {
+                } else if (tr::net::transport_t* const to = raw->peer_link("p2~1")) {
                     to->send(std::span<const std::byte>(kBody));
                 }
             }
