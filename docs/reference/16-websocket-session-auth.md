@@ -145,29 +145,35 @@ handshake. Now it holds one while it is deciding what to send, which on an embed
 with a small peer cap is a cheap denial of service: open sockets, say nothing, and the cap
 is spent.
 
-So the window is bounded. A session that has not been accepted within a configured deadline
-is closed. Two properties matter more than the exact number:
+So the window is bounded. A session that has not been accepted by the application's deadline
+is closed. The link reads no clock and runs no timer for it: the application's liveness check
+(`close_frozen_peers(now, deadline)`, the same call that closes frozen peers) stamps each
+unauthenticated session with the first `now` that sees it, and a later check whose `deadline`
+is past that stamp closes it. A node whose application never makes the check leaves such a
+session until it departs. These properties matter more than the exact number:
 
 - **The deadline is not extended by the peer's own traffic.** A multi-frame handshake gets
   the whole window for *all* of its frames. A peer that could refresh the deadline by
   sending anything at all would effectively have none.
-- **An expired session cannot deny a live peer its slot.** The reap that frees expired
-  sessions runs when a new peer arrives, not only on the periodic sweep — so admission
-  always answers from sessions that are still live, whatever the sweep's timing.
+- **An expired session holds its slot only until the next check.** Admission does not reap:
+  a squatter past its deadline keeps one unit of the peer cap until the application's next
+  check closes it, so the check's cadence bounds that exposure. Before #2257 the link reaped
+  on every inbound frame and at every admission, with a clock read, and swept on a timer of
+  its own.
 - **The deadline bounds the SOCKET, not only the session.** The session is claimed lazily,
   on the peer's first data frame, so a peer that completes the 101 and then sends nothing at
   all never holds a session — and for a while it was therefore bounded by nothing here,
   which is exactly the "open sockets, say nothing" case above. The implementation records
-  each upgraded socket at the pre-handshake, with its deadline, and the sweep closes an
+  each upgraded socket at the pre-handshake, and the check stamps and closes an
   un-spoken one on the raw descriptor with the same `4408`. The record set is fixed-size; a
   handshake that would overflow it is **refused** — the 101 is never written — because a
   socket with no record is a socket nothing can close.
 - **It bounds only the sockets whose entitlement is not yet known.** A handshake that answered
   *admit, authenticated* has already given the answer the deadline exists to time out, so its
   session is claimed at the 101 and takes no record and no deadline at all. Recording it
-  anyway is a defect with two heads: the sweep closes a perfectly good peer that simply had
+  anyway is a defect with two heads: the check closes a perfectly good peer that simply had
   nothing to say yet, and — since a closing socket does not retire a record — exempting such
-  records from the sweep instead would let idle authenticated links fill the fixed set and
+  records from the check instead would let idle authenticated links fill the fixed set and
   stall admission for everybody. Claiming the session outright removes both. The cost is that
   the peer cap is charged at the 101 for this verdict, which is the correct charge: the peer is
   authenticated and entitled, and a refusal at the upgrade is a cleaner answer than admitting
@@ -221,8 +227,8 @@ count; the link-level tallies above are the right altitude.
 
 The ESP-IDF WebSocket server link (`httpd_ws_link_t`,
 [`integrations/esp-idf/libtracer/`](https://github.com/avatarsd-llc/libtracer/blob/main/integrations/esp-idf/libtracer/httpd_ws_link.cpp))
-implements this: `set_auth_cb` installs the check, the constructor takes the deadline, and
-the close codes are `kCloseAuthFailed` / `kCloseAuthTimeout`. The three-valued handshake
+implements this: `set_auth_cb` installs the check, `close_frozen_peers` carries the deadline,
+and the close codes are `kCloseAuthFailed` / `kCloseAuthTimeout`. The three-valued handshake
 verdict is `set_admission_verdict_cb` with `admission_verdict_t::ADMIT_AUTHENTICATED`. Its
 host suite (`httpd_ws_auth_test`) pins each property above against the real translation unit.
 

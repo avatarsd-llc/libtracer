@@ -569,32 +569,9 @@ constexpr std::size_t kWsHeaderMax = 10;
  */
 constexpr std::size_t kFanoutChunk = kDefaultPeerCap;
 
-/**
- * @brief How often the unauthenticated-session sweep runs, as a fraction of the deadline.
- *
- * A sweep period equal to the deadline would let a squatter live up to twice it (it can
- * expire the instant after a tick), so the period is half — which bounds the real lifetime
- * at 1.5x the configured window. Finer costs wakeups on a chip that is otherwise idle
- * between frames and buys nothing: the deadline is a bound on a resource, not an SLA on the
- * close, and the resource it protects (the peer cap) is additionally defended
- * synchronously — @ref httpd_ws_link_t::on_data_frame reaps expired sessions before it tests
- * the cap, so an expired squatter can never be the reason a real peer is refused, whatever
- * the timer is doing.
- */
-constexpr std::int64_t kAuthSweepDivisor = 2;
-/** @brief Floor on the sweep period: a sub-100 ms deadline must not turn the timer task
- *         into a spinner. */
-constexpr std::int64_t kMinAuthSweepUs = 100000;
-
-/**
- * @brief Resolve the constructor's `auth_deadline_ms` to microseconds, substituting
- *        @ref httpd_ws_link_t::kDefaultAuthDeadlineMs for 0 — the same "0 means derive"
- *        idiom `send_timeout_ms` uses.
- */
-[[nodiscard]] constexpr std::int64_t resolve_auth_deadline_us(std::uint32_t ms) {
-    const std::int64_t chosen = ms != 0 ? ms : httpd_ws_link_t::kDefaultAuthDeadlineMs;
-    return chosen * 1000;
-}
+/** @brief An auth record no liveness check has seen yet (#2257): the first check stamps
+ *         its `now`, and `now` is never past it, so an unseen record never expires. */
+constexpr std::uint64_t kAuthUnseen = ~std::uint64_t{0};
 
 /**
  * @brief Copy @p reason into @p out, cut to @ref httpd_ws_link_t::kMaxCloseReasonBytes and
@@ -625,13 +602,12 @@ void keep_refusal_mark(void* /*gate*/) {}
  * @brief Resolve one of the three buffer-sizing constructor arguments (#1160): @p want,
  *        or @p fallback when the caller left it 0.
  *
- * The SAME "0 means take the default" idiom `send_timeout_ms` and `auth_deadline_ms`
- * already use on these constructors, so an embedder learns one convention for the whole
- * argument list. There is no clamp and no ceiling: this component does not know the
- * target's heap, and inventing an upper bound here would be exactly the synthetic limit
- * the RAM-bearing three were made arguments to avoid. A value too large simply fails to
- * allocate, and @ref httpd_ws_link_t::alloc_buffers already reports that as the link
- * dropping every send on the counted path.
+ * The SAME "0 means take the default" idiom `send_timeout_ms` already uses on these constructors,
+ * so an embedder learns one convention for the whole argument list. There is no clamp and no
+ * ceiling: this component does not know the target's heap, and inventing an upper bound here would
+ * be exactly the synthetic limit the RAM-bearing three were made arguments to avoid. A value too
+ * large simply fails to allocate, and @ref httpd_ws_link_t::alloc_buffers already reports that as
+ * the link dropping every send on the counted path.
  */
 [[nodiscard]] constexpr std::size_t resolve_size(std::size_t want, std::size_t fallback) noexcept {
     return want != 0 ? want : fallback;
@@ -1243,14 +1219,15 @@ struct httpd_ws_link_t::session_t {
      */
     bool auth_pending = false;
     /**
-     * @brief `esp_timer_get_time()` value at which an @ref auth_pending session is closed
-     *        with `kCloseAuthTimeout` (peers_m_); 0 when there is no deadline to keep.
+     * @brief The application's `now` at the first liveness check that saw this session
+     *        (#2257, peers_m_); @ref kAuthUnseen until one has.
      *
-     * Stamped ONCE, at the claim, and deliberately never extended by the peer's own traffic:
-     * a scheme that needs several frames gets the whole window for all of them, and a peer
-     * that could refresh the deadline by sending anything at all would have no deadline.
+     * Stamped ONCE and never extended by the peer's own traffic: a scheme that needs several
+     * frames gets the whole window for all of them, and a peer that could refresh its record
+     * by sending anything at all would have no deadline. While @ref auth_pending, a record
+     * older than the check's `deadline` closes the session with `kCloseAuthTimeout`.
      */
-    std::int64_t auth_deadline_us = 0;
+    std::uint64_t auth_since = kAuthUnseen;
     /**
      * @brief The identity the hook bound on ACCEPT, NUL-terminated (peers_m_).
      *
@@ -1487,7 +1464,6 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_
       refusal_code_(config.refusal_close_code != 0 ? config.refusal_close_code
                                                    : kCloseTryAgainLater),
       refusal_reason_len_(copy_close_reason(config.refusal_close_reason, refusal_reason_)),
-      auth_deadline_us_(resolve_auth_deadline_us(config.auth_deadline_ms)),
       peer_named_(config.peer_named),
       state_src_(&config.memory.state_or_default()),
       io_src_(&config.memory.io_or_default()),
@@ -1564,7 +1540,6 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
       refusal_code_(config.refusal_close_code != 0 ? config.refusal_close_code
                                                    : kCloseTryAgainLater),
       refusal_reason_len_(copy_close_reason(config.refusal_close_reason, refusal_reason_)),
-      auth_deadline_us_(resolve_auth_deadline_us(config.auth_deadline_ms)),
       peer_named_(config.peer_named),
       state_src_(&config.memory.state_or_default()),
       io_src_(&config.memory.io_or_default()),
@@ -1885,21 +1860,6 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // (httpd_stop closes every session, re-entering on_session_closed) — the routing
     // plane the notifier targets may be tearing down alongside us.
     stopping_.store(true, std::memory_order_relaxed);
-    // Retire the deadline sweep BEFORE the gate is shut, so the two steps compose: stopping
-    // the timer means no NEW tick can be raised, and the close_gate below then joins the one
-    // that may already be inside the barrier (either in the timer callback or in the sweep
-    // work item the httpd task is running). Doing it the other way round would leave a
-    // window where a tick starts against a link whose members are already being freed.
-    //
-    // A tick that was queued and not yet drained is safe to leave behind: auth_sweep_work
-    // resolves the link through the gate and finds it null, exactly as every other latched
-    // callback does.
-    if (auth_timer_ != nullptr) {
-        auto* const timer = static_cast<esp_timer_handle_t>(auth_timer_);
-        (void)esp_timer_stop(timer);
-        (void)esp_timer_delete(timer);
-        auth_timer_ = nullptr;
-    }
     // Shut the handler gate FIRST and join whatever frame is inside it. Unregistering the
     // URI does NOT do this: esp_http_server latched the route into each upgraded session,
     // so frames keep arriving at the handler regardless (see
@@ -2280,23 +2240,6 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
     session_t* claimed = nullptr;
     peer_handle_t claimed_handle;
     slot_name_t claimed_peer;
-    if (admit && verdict == admission_verdict_t::ADMIT_AUTHENTICATED) {
-        // Reap expired sessions BEFORE the cap test, with NO lock of ours held — the same
-        // ordering, and the same argument, as the first-frame claim (see on_data_frame): a
-        // tick that has not fired yet must not let an already-expired squatter spend the one
-        // unit of `max_peers` this claim needs. Skipping it would make an authenticated peer
-        // FARE WORSE at the 101 than it used to on its first frame, which is the opposite of
-        // what #1334 is for. Costs nothing on a link with no auth hook (the sweep returns on
-        // the null-hook test), and it is safe here because the raised `depth` — not the mutex —
-        // is what keeps the link alive across an unlocked call, exactly as ws_handler relies on
-        // for on_data_frame.
-        httpd_ws_link_t* sweeper = nullptr;
-        {
-            const std::lock_guard lock(gate->m);
-            sweeper = gate->link;
-        }
-        if (sweeper != nullptr) sweeper->sweep_auth_deadlines();
-    }
     if (admit) {
         const std::lock_guard lock(gate->m);
         httpd_ws_link_t* const self = gate->link;
@@ -2519,15 +2462,15 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     slot->st = {};
     slot->st.connected_at_us = esp_timer_get_time();
     // A link with an auth hook claims a session UNAUTHENTICATED unless the HANDSHAKE already
-    // settled it (#1245/#1334), and the deadline is stamped from the same clock reading the
-    // session is dated by. An authenticated session gets NO deadline — not a suppressed one, an
-    // unarmed one — because it has already answered the question the auth hook asks, and a
+    // settled it (#1245/#1334), and its auth record starts unseen: the application's next
+    // liveness check stamps it (#2257). An authenticated session is never judged by it,
+    // because it has already answered the question the auth hook asks, and a
     // native dialer cannot answer it a second time in-band: it has no way to send an
-    // authentication frame, so a deadline armed here would close every dialer that is entitled
+    // authentication frame, so a deadline judged here would close every dialer that is entitled
     // to stay silent. The subject is cleared either way: slots are recycled in place, so a
     // stale identity left here would be published for whoever landed on the slot next.
     slot->auth_pending = auth_fn_ != nullptr && !authenticated;
-    slot->auth_deadline_us = slot->auth_pending ? slot->st.connected_at_us + auth_deadline_us_ : 0;
+    slot->auth_since = kAuthUnseen;
     slot->subject[0] = '\0';
     slot->subject_len = 0;
     return slot;
@@ -2729,14 +2672,6 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     bool newly_claimed = false;
     bool pending = false;  // this session has not authenticated yet — see session_t::auth_pending
     bool refused = false;  // refused after its upgrade (#1857) — see queue_refusal
-    // Reap expired unauthenticated sessions BEFORE the cap is tested below. The periodic
-    // sweep is what bounds a squatter's lifetime, but it must not be what decides whether a
-    // real peer gets in: a tick that has not fired yet would otherwise let a session which is
-    // already past its deadline consume the one unit of `max_peers` this claim needs. Doing
-    // it here makes the cap answer from live sessions only, at the one instant that matters,
-    // whatever the timer is doing. Costs nothing on a link with no auth hook (the sweep
-    // returns on the null-hook test) and one slot walk per NEW peer otherwise.
-    if (auth_fn_ != nullptr) sweep_auth_deadlines();
     {
         const std::lock_guard lock(peers_m_);
         for (session_t* const s : slots_)
@@ -2753,7 +2688,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             // Consume the pending-handshake row HERE, ahead of the cap test, because this
             // socket has now spoken and the ledger only ever bounded silent ones (#1247).
             // Consuming it also HANDS THE BOUND OVER: past this point the connection is either
-            // a session with its own `auth_deadline_us` or a refusal httpd is about to close,
+            // a session with its own `auth_since` record or a refusal httpd is about to close,
             // and in neither case may the sweep still see it as an un-spoken socket — it would
             // otherwise be closed twice, on two different arguments, and counted twice.
             take_pending_handshake(fd);
@@ -2884,61 +2819,6 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
 void httpd_ws_link_t::set_auth_cb(auth_fn_t fn, void* ctx) noexcept {
     auth_fn_ = fn;
     auth_ctx_ = ctx;
-    // The sweep is armed ONCE, by the first hook installed, and never re-armed: the deadline
-    // is a constructor fact, so a later set_auth_cb cannot change the period, and clearing
-    // the hook leaves a timer whose sweep returns immediately on the null-hook test.
-    if (fn == nullptr || auth_timer_ != nullptr) return;
-    esp_timer_create_args_t args = {};
-    args.callback = &httpd_ws_link_t::auth_timer_fired;
-    // The GATE, never `this` — a timer can fire at any point in a destructor's run, and the
-    // gate is the object built to survive that (see gate_t). Null when the ctor failed to
-    // allocate one, which the callback handles.
-    args.arg = gate_.load(std::memory_order_relaxed);
-    args.name = "tr_ws_auth";
-    esp_timer_handle_t timer = nullptr;
-    if (esp_timer_create(&args, &timer) != ESP_OK) {
-        // Reported, and NOT fatal to the hook. Refusing to authenticate because a timer was
-        // unavailable would fail OPEN — the one outcome an admission seam must never have —
-        // so the credential check stands and only its bound is missing. The synchronous reap
-        // in on_data_frame still keeps an expired session from consuming the peer cap.
-        ESP_LOGE(kTag, "auth deadline sweep unavailable: esp_timer_create failed");
-        return;
-    }
-    const std::int64_t period = auth_deadline_us_ / kAuthSweepDivisor;
-    if (esp_timer_start_periodic(timer, static_cast<std::uint64_t>(
-                                            period > kMinAuthSweepUs ? period : kMinAuthSweepUs)) !=
-        ESP_OK) {
-        (void)esp_timer_delete(timer);
-        ESP_LOGE(kTag, "auth deadline sweep unavailable: esp_timer_start_periodic failed");
-        return;
-    }
-    auth_timer_ = timer;
-}
-
-void httpd_ws_link_t::auth_timer_fired(void* arg) {
-    auto* const gate = static_cast<gate_t*>(arg);
-    if (gate == nullptr) return;
-    // Resolve the link through the gate and register on its barrier, the idiom every latched
-    // callback here uses: either this finds a null link and returns, or a concurrent
-    // destructor waits in close_gate for the depth to fall. The handle is read under the
-    // same hold, so it cannot be the stale value of a server already stopped.
-    httpd_handle_t h = nullptr;
-    {
-        const std::lock_guard lock(gate->m);
-        if (gate->link == nullptr) return;
-        h = gate->link->handle_.load(std::memory_order_relaxed);
-        ++gate->depth;
-    }
-    // Nothing is swept HERE. This runs on the esp_timer task, and every close the sweep can
-    // reach touches the session table — `shutdown` on a descriptor whose lifetime belongs to
-    // the httpd task, plus the slot bookkeeping that task owns. Marshalling the work over is
-    // the same discipline the send path follows, and for the same reason.
-    if (h != nullptr) (void)httpd_queue_work(h, &httpd_ws_link_t::auth_sweep_work, gate);
-    {
-        const std::lock_guard lock(gate->m);
-        --gate->depth;
-    }
-    gate->cv.notify_all();
 }
 
 void httpd_ws_link_t::auth_sweep_work(void* arg) {
@@ -2947,7 +2827,7 @@ void httpd_ws_link_t::auth_sweep_work(void* arg) {
     httpd_ws_link_t* self = nullptr;
     {
         const std::lock_guard lock(gate->m);
-        // A tick queued before the teardown can drain after it. A null link is the whole
+        // A sweep queued before the teardown can drain after it. A null link is the whole
         // answer: there is nothing left to sweep and nothing left to touch.
         if (gate->link == nullptr) return;
         self = gate->link;
@@ -2962,11 +2842,13 @@ void httpd_ws_link_t::auth_sweep_work(void* arg) {
 }
 
 void httpd_ws_link_t::sweep_auth_deadlines() {
-    if (auth_fn_ == nullptr) return;
-    const std::int64_t now = esp_timer_get_time();
+    // The verdict close_frozen_peers reached, on the caller's task, against its own `deadline`
+    // (#2257). Records only ever move from unseen to a `now` no later than that, so a session
+    // claimed after the check is never caught here.
+    const std::uint64_t cutoff = auth_cutoff_.load(std::memory_order_relaxed);
     // Same chunked, resumable scan the fan-out uses (see send), and for the same two
     // reasons: the snapshot is a FIXED on-stack array rather than a container sized to the
-    // peer set — no allocation on a path that runs on a timer tick — and the closes below
+    // peer set — no allocation on a path the httpd task runs — and the closes below
     // must happen with `peers_m_` released, because close_session takes it again and the
     // frame it writes must not go out under this link's own lock.
     //
@@ -2980,8 +2862,7 @@ void httpd_ws_link_t::sweep_auth_deadlines() {
             const std::lock_guard lock(peers_m_);
             while (next < slots_.size() && n < kFanoutChunk) {
                 session_t* const s = slots_[next++];
-                if (s->open && !s->dead && s->auth_pending && s->auth_deadline_us != 0 &&
-                    now >= s->auth_deadline_us)
+                if (s->open && !s->dead && s->auth_pending && s->auth_since < cutoff)
                     expired[n++] = s;
             }
             more = next < slots_.size();
@@ -2992,10 +2873,10 @@ void httpd_ws_link_t::sweep_auth_deadlines() {
             close_session(expired[i], kCloseAuthTimeout);
         }
     }
-    sweep_pending_handshakes(now);
+    sweep_pending_handshakes(cutoff);
 }
 
-void httpd_ws_link_t::sweep_pending_handshakes(std::int64_t now) {
+void httpd_ws_link_t::sweep_pending_handshakes(std::uint64_t cutoff) {
     // The other half of the same deadline, and the half `slots_` cannot show (#1247). A peer
     // that completed the 101 and sent NOTHING never reached the lazy claim, so it has no
     // session, no `auth_pending` flag and nothing for the walk above to find — it was bounded
@@ -3008,14 +2889,14 @@ void httpd_ws_link_t::sweep_pending_handshakes(std::int64_t now) {
             const std::lock_guard lock(peers_m_);
             std::size_t at = pending_n_;
             for (std::size_t i = 0; i < pending_n_; ++i)
-                if (now >= pending_[i].deadline_us) {
+                if (pending_[i].since < cutoff) {
                     at = i;
                     break;
                 }
             if (at == pending_n_) break;
             fd = pending_[at].fd;
             // Retire the row BEFORE the close, and while still holding the lock: the close
-            // below runs unlocked, and a row left behind would be swept again on the next tick
+            // below runs unlocked, and a row left behind would be swept again on the next check
             // against a descriptor this link no longer has any claim on.
             drop_pending_handshake(at);
         }
@@ -3108,14 +2989,13 @@ void httpd_ws_link_t::close_session(session_t* slot, std::uint16_t code) {
 bool httpd_ws_link_t::note_pending_handshake(int fd) {
     if (fd < 0) return false;
     const std::lock_guard lock(peers_m_);
-    const std::int64_t deadline = esp_timer_get_time() + auth_deadline_us_;
     // REPLACE a stale row for the same descriptor rather than adding a second. A descriptor is
     // reused as soon as the kernel frees it, so a leftover from a handshake whose peer never
     // sent a frame must not charge the NEXT connection to land on that number a deadline that
     // has already half elapsed — the one way this could close a peer that just arrived.
     for (std::size_t i = 0; i < pending_n_; ++i) {
         if (pending_[i].fd != fd) continue;
-        pending_[i].deadline_us = deadline;
+        pending_[i].since = kAuthUnseen;
         return true;
     }
     if (pending_n_ == pending_.size()) {
@@ -3126,12 +3006,12 @@ bool httpd_ws_link_t::note_pending_handshake(int fd) {
         // precisely the resource this ledger exists to bound — and an abort() on an MCU is the
         // one answer to exhaustion this project does not give anywhere else. Reaching this at
         // all means more upgrades are in flight, un-spoken, than kMaxPendingHandshakes; the
-        // sweep frees rows at the deadline, so it is self-clearing.
+        // application's liveness check frees rows past its deadline (#2257).
         ESP_LOGW(kTag, "pending-handshake ledger full (%u) - handshake refused (fd=%d)",
                  static_cast<unsigned>(pending_.size()), fd);
         return false;
     }
-    pending_[pending_n_++] = pending_handshake_t{fd, deadline};
+    pending_[pending_n_++] = pending_handshake_t{fd, kAuthUnseen};
     return true;
 }
 
@@ -3189,10 +3069,9 @@ void httpd_ws_link_t::on_auth_message(session_t* slot, std::span<const std::byte
             slot->subject[n] = '\0';
             slot->subject_len = static_cast<std::uint8_t>(n);
             // The session becomes a peer HERE, and everything that was closed to it opens at
-            // once: enumeration, resolution, fan-out and the graph. Clearing the deadline
-            // with it is what keeps a served session out of the sweep's reach forever after.
+            // once: enumeration, resolution, fan-out and the graph. Clearing the flag is what
+            // keeps a served session out of the sweep's reach forever after.
             slot->auth_pending = false;
-            slot->auth_deadline_us = 0;
             break;
         }
         case auth_verdict_t::CONTINUE:
@@ -3271,7 +3150,6 @@ httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer
         // slot handed to a new peer must not publish its predecessor's identity for the
         // window between the claim and the next ACCEPT. Same rule as the dead mark above.
         slot->auth_pending = false;
-        slot->auth_deadline_us = 0;
         slot->subject[0] = '\0';
         slot->subject_len = 0;
         departed = slot->name;
@@ -4382,14 +4260,32 @@ bool httpd_ws_link_t::flush_peer(session_t* s) {
 std::size_t httpd_ws_link_t::close_frozen_peers(std::uint64_t now, std::uint64_t deadline) {
     // The verdict here, under each session's tx_m (never with peers_m_ under it); the close
     // on the httpd task, through one posted flush. No clock is read: `now` is the caller's.
+    //
+    // The same call bounds the auth handshake, the RX a session owes before it is served
+    // (#2257): every unauthenticated session and silent upgrade is stamped with the first `now`
+    // that sees it, and one recorded before @p deadline is closed with `kCloseAuthTimeout` by
+    // the sweep this posts to the httpd task. Never extended by the peer's own traffic.
     session_t* batch[kFanoutChunk];
     std::size_t next = 0;
     std::size_t frozen = 0;
+    std::size_t expired = 0;
+    {
+        const std::lock_guard lock(peers_m_);
+        for (std::size_t i = 0; i < pending_n_; ++i) {
+            pending_[i].since = std::min(pending_[i].since, now);
+            expired += pending_[i].since < deadline;
+        }
+    }
     for (bool more = true; more;) {
         std::size_t n = 0;
         {
             const std::lock_guard lock(peers_m_);
-            while (next < slots_.size() && n < kFanoutChunk) batch[n++] = slots_[next++];
+            while (next < slots_.size() && n < kFanoutChunk) {
+                session_t* const s = slots_[next++];
+                s->auth_since = std::min(s->auth_since, now);
+                expired += s->open && !s->dead && s->auth_pending && s->auth_since < deadline;
+                batch[n++] = s;
+            }
             more = next < slots_.size();
         }
         for (std::size_t i = 0; i < n; ++i) {
@@ -4405,7 +4301,11 @@ std::size_t httpd_ws_link_t::close_frozen_peers(std::uint64_t now, std::uint64_t
     }
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
     if (frozen != 0 && h != nullptr) (void)post_flush(h);
-    return frozen;
+    auth_cutoff_.store(deadline, std::memory_order_relaxed);
+    if (expired != 0 && h != nullptr)
+        (void)httpd_queue_work(h, &httpd_ws_link_t::auth_sweep_work,
+                               gate_.load(std::memory_order_relaxed));
+    return frozen + expired;
 }
 
 void httpd_ws_link_t::close_frozen(const session_ref_t& to) {

@@ -218,13 +218,6 @@ struct httpd_ws_config_t {
      *         `httpd_ws_link_t::send_timeout_ms`). Clamped to the server's own
      *         `send_wait_timeout`. */
     std::uint32_t send_timeout_ms = 0;
-    /**
-     * @brief How long an admitted session may stay UNAUTHENTICATED before the link closes it,
-     *        ms; 0 = `httpd_ws_link_t::kDefaultAuthDeadlineMs`. Inert unless `set_auth_cb`
-     *        installed a hook, and inert for a session the admission predicate already
-     *        authenticated (#1334).
-     */
-    std::uint32_t auth_deadline_ms = 0;
     /** @brief Reusable RX scratch capacity, bytes; 0 = `kDefaultRxScratchBytes`. A frame past
      *         it still arrives, on a per-frame buffer drawn from `memory.state`. */
     std::size_t rx_scratch_bytes = 0;
@@ -895,7 +888,8 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
         std::uint32_t auth_rejected = 0;
         /**
          * @brief Sessions — and, since #1247, un-spoken upgraded SOCKETS — closed because they
-         *        did not authenticate within `auth_deadline_ms`.
+         *        were still unauthenticated past the deadline of the application's
+         *        liveness check (@ref close_frozen_peers, #2257).
          *
          * The squatter count, and it now counts BOTH shapes of squatter: the peer that spoke
          * and then stalled (it holds a `session_t`) and the peer that completed the 101 and
@@ -1071,12 +1065,18 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *
      * The verdict is reached here, on the caller's task, under each session's own `tx_m`;
      * the close itself runs on the httpd task, the one that owns the descriptors, through
-     * the flush this call posts — the same one @ref flush_held posts. RX does not apply:
-     * the server reads each frame whole itself. Counted in @ref stats_t::peers_frozen (and
-     * so in @ref stats_t::sessions_condemned); a session that departs before the flush
-     * reaches it is not counted.
+     * the flush this call posts — the same one @ref flush_held posts. Counted in
+     * @ref stats_t::peers_frozen (and so in @ref stats_t::sessions_condemned); a session that
+     * departs before the flush reaches it is not counted.
      *
-     * @return How many sessions this call found frozen.
+     * The one RX a session owes is its auth handshake (#2257, @ref set_auth_cb): the server
+     * reads each frame whole itself. An unauthenticated session, or an upgraded socket that
+     * has not spoken, is stamped with the first @p now that sees it, and once that stamp
+     * falls below @p deadline it is closed with @ref kCloseAuthTimeout, through a sweep this
+     * call posts to the httpd task, and counted in @ref stats_t::auth_expired.
+     *
+     * @return How many sessions and silent sockets this call found frozen or past the auth
+     *         deadline.
      */
     std::size_t close_frozen_peers(std::uint64_t now, std::uint64_t deadline) override;
 
@@ -1198,7 +1198,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * WHAT IT COSTS. A peer slot is charged at the 101 rather than at the first frame. That is
      * the correct charge — the peer is authenticated and entitled — and a link at `max_peers`
      * refuses the upgrade outright, which is a cleaner answer than admitting a peer and killing
-     * it `auth_deadline_ms` later. The @ref pending_ ledger keeps only the sessions whose
+     * it at the auth deadline later. The @ref pending_ ledger keeps only the sessions whose
      * entitlement is NOT yet known, which is what its fixed size was always sized for.
      */
     void set_admission_verdict_cb(admission_verdict_fn_t fn, void* ctx) noexcept {
@@ -1301,8 +1301,12 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * @ref peer_link, and a broadcast @ref send skips it. It cannot read a vertex, write
      * one, subscribe, or be discovered by a peer that can.
      *
-     * WHAT BOUNDS IT: the constructor's `auth_deadline_ms`. A session that has not been
-     * ACCEPTed within it is closed with @ref kCloseAuthTimeout — and since #1247 so is a
+     * WHAT BOUNDS IT: the application's liveness check, @ref close_frozen_peers (#2257). The
+     * link reads no clock and runs no timer for it: the first check that sees an
+     * unauthenticated session stamps it with the check's `now`, and a later check whose
+     * `deadline` is past that stamp closes it with @ref kCloseAuthTimeout. The stamp is never
+     * extended by the peer's own traffic. A link whose application never makes the check
+     * leaves such a session until it departs, as it leaves a frozen peer — and since #1247 so is a
      * SOCKET that completed the 101 and never sent a first frame at all, which has no session
      * to bound and used to live until the HTTP server's own keepalive policy noticed it. That
      * is the "open sockets, say nothing" case the deadline was documented to stop; it is now
@@ -1322,12 +1326,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * work to do ON RETURN: the reply to write, the subject to bind, the close code to send.
      * A credential check has no business tearing down the node it is authenticating, so the
      * contract is stated rather than engineered around.
-     *
-     * Installing a hook also ARMS the deadline sweep (one periodic `esp_timer` per link,
-     * created here and never re-created). A sweep that cannot be armed is reported at ERROR
-     * and the hook still takes effect: authentication without a bound is strictly better
-     * than no authentication, and the alternative — refusing to authenticate because a timer
-     * was unavailable — fails open, which is the one outcome this seam must never have.
      */
     void set_auth_cb(auth_fn_t fn, void* ctx) noexcept;
 
@@ -1340,7 +1338,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * a client that has to guess which one it hit will guess wrong. Picked once, here.
      */
     static constexpr std::uint16_t kCloseAuthFailed = 4401;
-    /** @brief WebSocket close code for a session that ran out its `auth_deadline_ms` —
+    /** @brief WebSocket close code for a session that ran out the auth deadline —
      *         mnemonic for HTTP 408. See @ref kCloseAuthFailed for why the two differ. */
     static constexpr std::uint16_t kCloseAuthTimeout = 4408;
     /**
@@ -1360,9 +1358,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief Longest `httpd_ws_config_t::refusal_close_reason` sent, bytes: a close frame's
      *         125-byte payload less its 2-byte code (RFC 6455 §5.5). */
     static constexpr std::size_t kMaxCloseReasonBytes = 123;
-    /** @brief Default `auth_deadline_ms`: long enough for a multi-round-trip handshake over
-     *         a slow link, short enough that a squatting session is not a resource. */
-    static constexpr std::uint32_t kDefaultAuthDeadlineMs = 10000;
     /** @brief Longest @ref auth_result_t::subject a session stores; an ACCEPT with a longer
      *         one is answered as a REJECT. Sized to hold a hex-spelled 32-byte public key (64
      * chars) with room for a scheme prefix. */
@@ -1373,13 +1368,13 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *        ledger, and therefore a HARD bound on concurrent un-spoken upgrades.
      *
      * WHAT AN ENTRY IS. One row per socket that passed admission, whose entitlement is NOT YET
-     * KNOWN, and which has not yet claimed a session — carrying the instant its
-     * `auth_deadline_ms` runs out (#1247). It is a handoff between two points of the SAME
+     * KNOWN, and which has not yet claimed a session — carrying the `now` of the first liveness
+     * check that saw it (#1247, #2257). It is a handoff between two points of the SAME
      * connection's setup, not a table: the row is consumed at the lazy first-frame claim, or
-     * reaped by the deadline sweep, whichever comes first. A link with no auth hook records
-     * nothing and is bounded by nothing here — and neither does a handshake that already
-     * authenticated its peer (#1334), which claims its session outright instead of waiting in
-     * a ledger for an answer it has already given.
+     * reaped by the deadline sweep a liveness check posts, whichever comes first. A link with no
+     * auth hook records nothing and is bounded by nothing here — and neither does a handshake that
+     * already authenticated its peer (#1334), which claims its session outright instead of waiting
+     * in a ledger for an answer it has already given.
      *
      * WHAT THE BOUND COSTS, and it is not "nothing". The `max_open_sockets`+1-th silent
      * upgrade cannot be admitted, so the handshake is REFUSED: `ws_pre_handshake` answers
@@ -1394,10 +1389,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * so it does not ship unverified.
      *
      * WHY IT IS NOT REACHED IN PRACTICE. A row lives only for the gap between the 101 and that
-     * peer's first frame, bounded above by `auth_deadline_ms`, so the ledger holds at most the
-     * upgrades in flight in one deadline window. 24 is above any `max_open_sockets` an ESP node
-     * runs — but "above" is a sizing argument, not a proof, which is exactly why the overflow
-     * arm exists and behaves.
+     * peer's first frame, bounded above by the application's auth deadline, so the ledger holds
+     * at most the upgrades in flight in one deadline window. 24 is above any `max_open_sockets` an
+     * ESP node runs — but "above" is a sizing argument, not a proof, which is exactly why the
+     * overflow arm exists and behaves.
      */
     static constexpr std::size_t kMaxPendingHandshakes = 24;
     /** @brief Former name of @ref kMaxPendingHandshakes, kept so an embedder that read the
@@ -1589,7 +1584,7 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * @param fd            The socket the session is claimed for.
      * @param authenticated The handshake already established this peer's entitlement, so the
      *                      session is claimed SERVED: no `auth_pending`, and — the point of
-     *                      #1334 — no `auth_deadline_us` for the sweep to fire on.
+     *                      #1334 — nothing for the deadline sweep to fire on.
      *
      * @return the claimed slot, or nullptr when `max_peers` is spent. The refusal is answered
      *         by value because its COUNTING differs per edge: the first-frame caller counts it
@@ -2029,9 +2024,10 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      */
     struct pending_handshake_t {
         int fd = -1; /**< @brief The socket the 101 was written on. */
-        /** @brief When @ref sweep_auth_deadlines must close it if it has still said nothing —
-         *         `esp_timer_get_time()` at the pre-handshake plus `auth_deadline_us_`. */
-        std::int64_t deadline_us = 0;
+        /** @brief The application's `now` at the first liveness check that saw this row
+         *         (#2257), all-ones until one has; a check whose `deadline` is past it has
+         *         @ref sweep_auth_deadlines close the socket if it has still said nothing. */
+        std::uint64_t since = ~std::uint64_t{0};
     };
     /**
      * @brief Sockets whose entitlement is NOT YET KNOWN and which have not yet claimed a
@@ -2075,39 +2071,20 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     /** @brief The handle of the frame a FLAT link is delivering (@ref inbound_peer), written
      *         before each flat delivery on the httpd task; unused when `peer_named`. */
     peer_handle_t rx_peer_{};
-    /** @brief The unauthenticated-session bound in MICROseconds, resolved from the ctor's
-     *         milliseconds once (0 there => @ref kDefaultAuthDeadlineMs). */
-    std::int64_t auth_deadline_us_ = 0;
+    /** @brief The `deadline` of the last liveness check (#2257): written by
+     *         @ref close_frozen_peers, read by the @ref sweep_auth_deadlines it posts. */
+    std::atomic<std::uint64_t> auth_cutoff_{0};
     std::atomic<std::uint32_t> auth_rejected_{0};
     std::atomic<std::uint32_t> auth_expired_{0};
     /** @brief See @ref stats_t::rx_drain_waits. Bumped on the httpd task. */
     std::atomic<std::uint32_t> rx_drain_waits_{0};
-    /**
-     * @brief The periodic `esp_timer` that fires the deadline sweep, as an opaque pointer so
-     *        this header names no `esp_timer` type; null when auth is not configured.
-     *
-     * Created by the first @ref set_auth_cb that installs a hook and deleted at the head of
-     * the destructor, BEFORE @ref close_gate — so the join in close_gate is what proves no
-     * sweep is still inside this link. Its callback touches the GATE and nothing else of
-     * ours, for the same reason every other latched callback does.
-     */
-    void* auth_timer_ = nullptr;
-    /**
-     * @brief `esp_timer` callback (timer task): ask the httpd task to run a sweep.
-     *
-     * @p arg is the GATE, never the link — the timer may fire while a destructor is running
-     * and the gate is the object designed to survive that. It does no work of its own beyond
-     * one @ref httpd_queue_work; a refused enqueue is simply this tick skipped, and the next
-     * one covers the same sessions (a deadline is a floor on how long a squatter lives, not
-     * a promise about the instant it dies).
-     */
-    static void auth_timer_fired(void* arg);
     /** @brief `httpd_queue_work` fn: run @ref sweep_auth_deadlines on the httpd task,
      *         resolving the link through the gate @p arg. */
     static void auth_sweep_work(void* arg);
     /**
      * @brief Close every session, and every un-spoken upgraded SOCKET, whose authentication
-     *        deadline has passed (httpd task only).
+     *        record is older than the last liveness check's deadline, @ref auth_cutoff_
+     *        (httpd task only; posted by @ref close_frozen_peers).
      *
      * TWO SETS, because the resource is claimed lazily and the scarce one is the socket
      * (#1247). `slots_` holds the peers that spoke and then stalled; @ref pending_ holds the
@@ -2124,14 +2101,14 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
     void sweep_auth_deadlines();
     /**
      * @brief Close every upgraded socket that has said NOTHING past its deadline (httpd task
-     *        only; @ref peers_m_ must NOT be held). @p now is @ref sweep_auth_deadlines' clock
-     *        reading, shared so both halves of one sweep judge against one instant.
+     *        only; @ref peers_m_ must NOT be held). @p cutoff is @ref sweep_auth_deadlines'
+     *        one reading of @ref auth_cutoff_, so both halves judge against one deadline.
      *
      * Takes @ref peers_m_ per row and RELEASES it around the close, the same shape the session
      * half uses. Each row is retired before its close runs, so a tick that overlaps the next
      * cannot sweep the same descriptor twice.
      */
-    void sweep_pending_handshakes(std::int64_t now);
+    void sweep_pending_handshakes(std::uint64_t cutoff);
     /**
      * @brief Hand one whole message from an unauthenticated session to the auth hook and act
      *        on the verdict (httpd task only; @ref peers_m_ must NOT be held).
