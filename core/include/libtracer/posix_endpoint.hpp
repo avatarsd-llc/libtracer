@@ -735,9 +735,12 @@ class stream_endpoint_t : protected posix_endpoint_t {
  * session's egress (which waits out its writer), and only then resets and closes the fd.
  * A sender reads the fd only INSIDE the session's egress writer role (ADR-0087 §2), which
  * the egress hands over with acquire/release, so it never sees a half-published slot or a
- * closed one. @ref session_base_t::name is guarded by @ref peers_m_; every protocol buffer
- * a slot carries is poll-thread-only. The destructor's closing sweep runs after the poll
- * thread is joined. There is no shared write lock: a stalled peer holds only its own role.
+ * closed one. @ref session_base_t::name and the slot table's growth are guarded by
+ * @ref peers_m_, which no write is ever made under (#2263): a broadcast walks the slots by
+ * @ref session_base_t::next with no lock, and the poll thread, the table's only mutator,
+ * reads it with none. Every protocol buffer a slot carries is poll-thread-only. The
+ * destructor's closing sweep runs after the poll thread is joined. There is no shared write
+ * lock: a stalled peer holds only its own role.
  *
  * @warning A derived destructor MUST call `stop_and_join()` as its FIRST act:
  *          the poll thread dispatches the variance points below into the
@@ -988,6 +991,11 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         moving, or owing nothing (#2198). Written only by @ref close_frozen_peers,
          *         under @ref peers_m_. */
         std::uint64_t live_since = 0;
+        /** @brief The slot admitted after this one, or null: the chain @ref broadcast walks
+         *         without @ref peers_m_ (#2263). Stored once, release, when the next slot is
+         *         admitted, and never again: slots are recycled in place, never freed, so a
+         *         walker that loaded a slot can always follow it. */
+        std::atomic<session_base_t*> next{nullptr};
 
        protected:
         /** @brief Destroyed only as the derived slot it is: the slot table's
@@ -1089,6 +1097,12 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * by reference). Every write is nonblocking, so a stalled peer costs the round one refused
      * syscall and never delays the peers behind it; its frames wait in its own ring for
      * @p lane, and only ITS strikes condemn it. Shed frames and stalls are counted.
+     *
+     * The walk takes no lock (#2263): it follows @ref session_base_t::next, so accept,
+     * teardown, the receive loop and every other sender run beside it. A session that departs
+     * mid-walk has its egress closed, which refuses the claim (a counted shed) or waits out a
+     * write already inside it; a session admitted mid-walk may take the record, as it would
+     * from a broadcast that began a moment later.
      *
      * @param rec   The whole record (framing first, payload after), for the direct writes.
      * @param value The value whose links end @p rec, kept by reference in a shared frame
@@ -1221,14 +1235,17 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     /** @} */
 
     /**
-     * @brief Guards the slot vector and every slot's NAME — the cross-thread reads
+     * @brief Guards the slot vector's growth and every slot's NAME — the cross-thread reads
      *        (@ref enumerate_peers / @ref peer_link) against the poll thread's
-     *        accept/teardown. See the class-level threading rule. A broadcast holds it
-     *        across its nonblocking writes, never across a wait.
+     *        accept/teardown. See the class-level threading rule. Never held across a write
+     *        (#2263): a broadcast walks @ref first_ instead.
      */
     mutable std::mutex peers_m_;
     /** @brief The peer slots: insert-only, recycled in place, never freed early. */
     mem::block_array_t<mem::poly_ptr_t<session_base_t>> slots_;
+    /** @brief The first slot ever admitted, or null: the head of the
+     *         @ref session_base_t::next chain, in slot order (#2263). */
+    std::atomic<session_base_t*> first_{nullptr};
     int listen_fd_ = -1;           /**< @brief The bound+listening socket (-1 = not bound). */
     std::uint16_t bound_port_ = 0; /**< @brief The resolved bound port (see local_port()). */
     /** @brief The ENFORCED admission cap (RFC-0006), resolved once at construction — never
