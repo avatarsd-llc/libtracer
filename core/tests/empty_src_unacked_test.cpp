@@ -495,24 +495,30 @@ void unacked_stream_is_not_a_drop() {
     check(s.assemble_dropped == 0, "  assemble_dropped stays 0 across the stream");
     check(s.malformed_rx == 0, "  and nothing is counted malformed either");
 
-    // Through a bus peer, as from a TCP or WS server session: no reply-link resolution at all.
-    counting_bus_t srv;
-    (void)n.router.attach_link("srv", srv);
-    const std::size_t lookups_before = n.router.reply_name_lookups();
-    for (int i = 0; i < kSamples; ++i)
-        srv.inject(b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_empty(), {},
-                         b_value_u32(kLoud + static_cast<std::uint32_t>(i))));
-    check(stored_u32(n.graph, n.sink) == kLoud + kSamples - 1, "  bus: every delivery applied");
-    check(n.router.reply_name_lookups() == lookups_before,
-          "  bus: reply_link never resolved a name");
-    check(srv.peer_lookups == 0, "  bus: by_name never asked the bus for a peer");
-    check(srv.session.count() == 0, "  bus: ZERO frames to the session");
-    check(n.router.drop_stats().assemble_dropped == 0, "  bus: assemble_dropped still 0");
-    // Control: the same write with a wired src does resolve the session, and is answered.
-    srv.inject(b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_wired(), {}, b_value_u32(kSeed)));
-    check(n.router.reply_name_lookups() == lookups_before + 1 && srv.peer_lookups > 0,
-          "  bus control: a wired src DOES resolve the session's link");
-    check(srv.session.count() == 1, "  bus control: and the session gets exactly one reply");
+    if constexpr (tr::net::kBusLinks) {
+        // Through a bus peer, as from a TCP or WS server session: no reply-link resolution at all.
+        counting_bus_t srv;
+        (void)n.router.attach_link("srv", srv);
+        const std::size_t lookups_before = n.router.reply_name_lookups();
+        for (int i = 0; i < kSamples; ++i)
+            srv.inject(b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_empty(), {},
+                             b_value_u32(kLoud + static_cast<std::uint32_t>(i))));
+        check(stored_u32(n.graph, n.sink) == kLoud + kSamples - 1, "  bus: every delivery applied");
+        check(n.router.reply_name_lookups() == lookups_before,
+              "  bus: reply_link never resolved a name");
+        check(srv.peer_lookups == 0, "  bus: by_name never asked the bus for a peer");
+        check(srv.session.count() == 0, "  bus: ZERO frames to the session");
+        check(n.router.drop_stats().assemble_dropped == 0, "  bus: assemble_dropped still 0");
+        // Control: the same write with a wired src does resolve the session, and is answered.
+        srv.inject(b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_wired(), {}, b_value_u32(kSeed)));
+        check(n.router.reply_name_lookups() == lookups_before + 1 && srv.peer_lookups > 0,
+              "  bus control: a wired src DOES resolve the session's link");
+        check(srv.session.count() == 1, "  bus control: and the session gets exactly one reply");
+    } else {
+        // A bus-closed build mounts the bus as a point-to-point child, so no peer frame
+        // reaches the terminus; the flat and rope cases above cover what it runs.
+        std::printf("  bus peer case SKIPPED: this build closed the ADR-0044 bus module out\n");
+    }
 
     // Control: a wired READ whose every reply head the egress backend refuses IS a drop.
     graph_t g;
