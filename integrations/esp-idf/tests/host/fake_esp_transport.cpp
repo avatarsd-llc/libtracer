@@ -479,12 +479,21 @@ int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int time
     }
     if (!pending(st())) {
         // Nothing queued: a timeout, exactly as ws_read reports it — and, as there, no
-        // header was received, so the opcode accessor answers NONE (`header_received` is
-        // cleared at the top of ws_read_header).
+        // header was received, so the opcode accessor answers NONE. IDF v6.0
+        // transport_ws.c: ws_read_header sets `frame_state.header_received = false` on
+        // entry, and esp_transport_ws_get_read_opcode returns NONE while it is false.
         st().last_op = WS_TRANSPORT_OPCODES_NONE;
         return 0;
     }
     const fake_ws::frame_t& f = st().frames[st().cur];
+    const bool control = (static_cast<unsigned>(f.op) & 0x8U) != 0;
+    if (control && f.payload.size() > static_cast<std::size_t>(len > 0 ? len : 0)) {
+        // IDF v6.0 with propagate_control_frames reads a control payload WHOLE into the
+        // caller's buffer, or fails the read without consuming it (transport_ws.c ws_read,
+        // "Control frame payload exceeds caller buffer").
+        st().last_op = f.op;
+        return -1;
+    }
     // The header is (re-)reported for as long as this frame is being drained.
     st().last_op = f.op;
     st().last_fin = f.fin;

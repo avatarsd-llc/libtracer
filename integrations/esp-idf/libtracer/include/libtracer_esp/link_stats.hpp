@@ -98,7 +98,8 @@ struct link_counters_t {
     std::uint32_t rx_frames = 0; /**< @brief Messages delivered inbound (traffic half). */
     std::uint32_t rx_bytes = 0;  /**< @brief Payload bytes delivered inbound (traffic half). */
     std::uint32_t tx_frames = 0; /**< @brief Messages written outbound (traffic half). */
-    std::uint32_t tx_bytes = 0;  /**< @brief Payload bytes written outbound (traffic half). */
+    std::uint32_t tx_bytes = 0; /**< @brief Bytes written outbound (traffic half); the ESP WS client
+                                   counts whole frames. */
 #endif
     std::uint32_t tx_drops = 0; /**< @brief Frames dropped toward this connection. */
     /**

@@ -57,6 +57,7 @@
  * and belongs on the HIL, not on a host fake.
  */
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -594,10 +595,11 @@ void test_named_rx_source_delivers_owning_ropes() {
     check_drained();
 }
 
-/** @brief #1661 — the TX scratch is drawn from `memory.io`; since #1606 a refusal is
- *         backpressure on the connection, not a zero-size scratch. */
-void test_named_io_store_backs_the_tx_scratch() {
-    std::printf("#1661 memory.io backs the TX scratch:\n");
+/** @brief #1661, #2265 — each send's frame is drawn from `memory.io`; a refusal drops that
+ *         frame, counted, and leaves the connection up. */
+void test_named_io_store_backs_the_send_frame() {
+    std::printf("#1661 memory.io backs each send's frame:\n");
+    const std::array<std::byte, 16> payload{};
     fake_ws::reset();
     app_source_t roomy;
     {
@@ -607,27 +609,28 @@ void test_named_io_store_backs_the_tx_scratch() {
                                             .memory = {.rx = nullptr, .io = &roomy}});
         link.start_receiving();
         check(wait_until([&] { return link.ok(); }, 2s), "the link came up");
-        check(roomy.served.load() >= 1, "the scratch was drawn from the injected store");
-        check(link.tx_bytes() == 512, "at its configured size");
+        const auto before = roomy.served.load();
+        link.send(payload);
+        check(roomy.served.load() > before, "the send drew its frame from the injected store");
+        check(fake_ws::writes_started() == 1, "and wrote it");
+        check(link.tx_bytes() == 512, "the ceiling is the configured one");
     }
     check_drained();
     fake_ws::reset();
     app_source_t refusing;
     refusing.refuse.store(true);
-    gated_source_t state;  // counted, so the read scratch's return is observable
     {
         tr::net::esp_ws_client_link_t link(
             "127.0.0.1", 8080,
-            tr::net::esp_ws_client_config_t{
-                .tx_bytes = 512, .memory = {.rx = nullptr, .io = &refusing, .state = &state}});
+            tr::net::esp_ws_client_config_t{.tx_bytes = 512,
+                                            .memory = {.rx = nullptr, .io = &refusing}});
         link.start_receiving();
-        const int slot = state.live.load();
-        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
-        check(!wait_until([&] { return link.ok(); }, 300ms),
-              "a store that refuses the write scratch keeps the connection down (#1606)");
-        check(link.tx_bytes() == 512, "and the ceiling is still the configured one");
-        check(state.live == slot,
-              "the read scratch drawn before the write scratch was refused went back (#1606)");
+        check(wait_until([&] { return link.ok(); }, 2s),
+              "a store that refuses the send side no longer keeps the connection down");
+        link.send(payload);
+        check(link.stats().c.tx_drops == 1, "the refused frame is dropped and counted");
+        check(fake_ws::writes_started() == 0, "and nothing reached the transport");
+        check(link.ok(), "the connection stays up");
     }
     check_drained();
 }
@@ -646,7 +649,7 @@ int main() {
     test_drop_stats_projects_through_the_base_interface();
     test_default_memory_is_borrowed();
     test_named_rx_source_delivers_owning_ropes();
-    test_named_io_store_backs_the_tx_scratch();
+    test_named_io_store_backs_the_send_frame();
     // Defensive: `main` must never return under a detached orphan still inside the fake,
     // whose static state is destroyed on the way out (#1456).
     check_drained();

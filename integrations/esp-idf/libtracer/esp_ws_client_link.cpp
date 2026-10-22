@@ -247,15 +247,6 @@ class sender_exit_t {
 };
 
 /**
- * @brief Close and destroy one tcp+ws transport pair, and null both handles — the ONE
- *        release every owner of a pair uses (#1606).
- *
- * `esp_transport_ws_init(parent)` does NOT take ownership of the parent, so both handles
- * are destroyed, ws first, then tcp — IDF's own teardown order. Closing a pair whose dial
- * failed is harmless; closing one whose handshake landed takes the connection down on the
- * peer's side too. A null handle is skipped, so a half-built pair releases what it has.
- */
-/**
  * @brief A fresh RFC 6455 masking key for one client frame (#2265), from the source IDF's
  *        `_ws_write` drew it from. On the chip `getrandom` is the hardware RNG and does not
  *        fail; a failure elsewhere gives a zero key, which still frames correctly.
@@ -265,6 +256,15 @@ std::uint32_t mask_key() noexcept {
     return getrandom(&key, sizeof(key), 0) == static_cast<ssize_t>(sizeof(key)) ? key : 0;
 }
 
+/**
+ * @brief Close and destroy one tcp+ws transport pair, and null both handles — the ONE
+ *        release every owner of a pair uses (#1606).
+ *
+ * `esp_transport_ws_init(parent)` does NOT take ownership of the parent, so both handles
+ * are destroyed, ws first, then tcp — IDF's own teardown order. Closing a pair whose dial
+ * failed is harmless; closing one whose handshake landed takes the connection down on the
+ * peer's side too. A null handle is skipped, so a half-built pair releases what it has.
+ */
 void release_pair(esp_transport_handle_t& ws, esp_transport_handle_t& tcp) noexcept {
     if (ws != nullptr) {
         esp_transport_close(ws);
@@ -338,21 +338,19 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
     : dial_(mem::make_in<dial_t>(config.memory.state_or_default(), config.memory.state_or_default(),
                                  host, port, config.ws_path, config.handshake_headers)),
       rx_backend_(config.memory.rx),
-      // The send side's store (#1661): the scratch, the queue's slots and the base class's
-      // gather temporary draw from the application's `memory.io`, EXCEPT that a null `io`
-      // sends the scratch and the queue slots to the platform heap (`heap_source()`) while
-      // the gather temporary stays on the base class's net sub-pool (the static arena on this
-      // target; `set_egress_source` below runs only for a non-null `io`). The host client
-      // (`ws_client_transport_t`) resolves a null `io` to the net sub-pool throughout.
-      tx_src_(config.memory.io != nullptr ? config.memory.io : &tr::mem::heap_source()),
+      // The send side's store (#1661): each send's frame, the queue's slots and the base
+      // class's gather temporary draw from the application's `memory.io`, and a null `io`
+      // resolves to the net sub-pool (the static arena on this target) as on every other
+      // link (#2265). The host client (`ws_client_transport_t`) resolves it the same way.
+      tx_src_(&config.memory.io_or_default()),
       rx_bytes_(config.rx_bytes),
       tx_bytes_(config.tx_bytes),
       recv_stack_(config.recv_stack),
       tx_(kTxQueueDepth, *tx_src_) {
     // The dial slot is drawn at setup, so a store that cannot hold it is a sizing bug, never
     // a runtime condition (ADR-0083): the constructor stops here, before the recv thread
-    // that would read it exists. The scratches are NOT drawn here (#1606): a link that never
-    // reaches its peer never holds them — connect_once() draws them when a handshake lands.
+    // that would read it exists. The read scratch is NOT drawn here (#1606): a link that never
+    // reaches its peer never holds it — connect_once() draws it when a handshake lands.
     mem::block_source_t& state = config.memory.state_or_default();
     if (dial_ == nullptr || !dial_->copied)
         mem::exhausted_at_init(state, "esp_ws_client_link_t dial slot");
@@ -550,13 +548,17 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
         slot->in_flight = false;
         orphaned = slot->condemned;
     }
-    // The connection's scratches are drawn HERE, when a handshake has landed, and not in
-    // the constructor (#1606): a link that never reaches its peer never holds them. An
+    // The connection's read scratch is drawn HERE, when a handshake has landed, and not in
+    // the constructor (#1606): a link that never reaches its peer never holds it. An
     // orphan touches no member, so the draw is skipped for one (`&&` stops at it). A store
     // that refuses is backpressure, not a sizing abort: the fresh connection is released
     // like a failed dial and the next attempt tries again after the backoff.
-    const bool up = !orphaned && rc == 0 && rx_buf_.assign(*slot->src, rx_bytes_) &&
-                    tx_buf_.assign(*tx_src_, ws::detail::client_frame_bytes(tx_bytes_));
+    // The read scratch carries a control frame's worth of room past `rx_bytes` (#2265): IDF
+    // reads a control payload whole into the room offered, and fails the read when it does
+    // not fit (transport_ws.c, ws_read), so a PING arriving mid-message must always find
+    // room. A message itself still stops at `rx_bytes` (recv_loop).
+    const bool up =
+        !orphaned && rc == 0 && rx_buf_.assign(*slot->src, rx_bytes_ + ws::kMaxControlPayload);
     // Invariant 1 of the #1058 ruling, structural rather than remembered: the pair this dial
     // built is released by EXACTLY ONE owner. A dial that did not come up releases it right
     // here, on the failure path (#1606 ask 2) — an orphan, a failed connect and a refused
@@ -572,9 +574,6 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
         return dial_outcome_t::ORPHANED;
     }
     if (!up) {
-        // A draw that half-succeeded returns its half: nothing connection-sized outlives a
-        // dial that did not come up.
-        rx_buf_.reset();
 #ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
         const std::uint32_t failures = dial_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
         // #1606 ask 1: the failure arm is no longer silent. Rate-limited, because a peer
@@ -593,7 +592,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
         return dial_outcome_t::FAILED;
     }
     // Adopted with no lock, deliberately: taking `write_m_` here would put this in front of
-    // every sender, which is the stall #952 is about. The handles and the scratches are
+    // every sender, which is the stall #952 is about. The handles and the read scratch are
     // PUBLISHED by the `connected_` release store at the end of this function, and nothing
     // off this thread may read them without first observing that store (see send()).
     ws_ = slot->ws;
@@ -812,19 +811,25 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov)
         case tr::net::tx_handoff_t::admit_t::WRITE:
             break;
     }
-    // This thread is the writer. Its own frame is built in the private scratch: the header,
-    // then the payload gathered and masked in the same pass (RFC 6455 client rule, #2265).
-    // A delivered frame may be shared with the concurrent server link reading the same
-    // bytes, so the caller's bytes are only ever read; the masked copy is the ONE pass a
-    // frame costs, where it used to be a copy, a mask in place and an unmask back inside
-    // IDF's `_ws_write`. A queued frame is already masked in its slot, so it is written as it
-    // stands. This link never queues a RETAINED record (it does not override the retained
-    // send: a masked frame cannot be written from a shared block), so every record here is
-    // a copy. The scratch is named only inside write_locked, past the connection gate: it
-    // exists only while a connection stands (#1606).
-    write_locked({}, iov, total);
+    // This thread is the writer. Its own frame is drawn for this send from `memory.io` and
+    // built there, outside the write lock: the header, then the payload gathered and masked
+    // in the same pass (RFC 6455 client rule, #2265). A delivered frame may be shared with
+    // the concurrent server link reading the same bytes, so the caller's bytes are only ever
+    // read; the masked copy is the ONE pass a frame costs, where it used to be a copy, a mask
+    // in place and an unmask back inside IDF's `_ws_write`. The block holds this frame only
+    // and goes back when the send returns, so no buffer outlives a send. A queued frame is
+    // already masked in its slot, so it is written as it stands. This link never queues a
+    // RETAINED record (it does not override the retained send: a masked frame cannot be
+    // written from a shared block), so every record here is a copy. A refused draw drops
+    // this frame, counted, and the writer still drains what others queued.
+    fixed_array_t<std::byte> own;
+    if (own.assign(*tx_src_, ws::detail::client_frame_bytes(total))) {
+        write_locked(std::span<const std::byte>(own.data(), frame_into(own.data(), iov, total)));
+    } else {
+        tx_drops_.fetch_add(1, std::memory_order_relaxed);
+    }
     for (tr::net::tx_handoff_t::record_t rec = tx_.next(); rec; rec = tx_.next())
-        write_locked(rec.bytes, {}, 0);
+        write_locked(rec.bytes);
 }
 
 std::size_t esp_ws_client_link_t::frame_into(std::byte* dst,
@@ -835,9 +840,7 @@ std::size_t esp_ws_client_link_t::frame_into(std::byte* dst,
         mask_key(), /*fin=*/true);
 }
 
-void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
-                                        std::span<const std::span<const std::byte>> src,
-                                        std::size_t len) {
+void esp_ws_client_link_t::write_locked(std::span<const std::byte> wire) {
     const std::lock_guard<std::mutex> lk(write_m_);
     // Re-checked, not re-read for tidiness: teardown may have run while this record waited,
     // and it disarms `stop_` BEFORE it takes this very lock to null the handles, so a writer
@@ -847,11 +850,11 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
     if (stop_.load(std::memory_order_acquire)) return;
     // THE handle gate, and the reason nothing above it may read `ws_`. `write_m_` does
     // NOT order a handle read against a re-dial: connect_once() adopts a fresh ws_/tcp_
-    // (and draws the write scratch) holding no lock at all. What orders them is this
+    // holding no lock at all. What orders them is this
     // acquire pairing with the release store connect_once makes only AFTER the adoption —
     // and `connected_` is cleared only under this lock (drop(), a failed write, the
     // shut_down() release) or at shut_down()'s top, whose store the recv loop answers by
-    // breaking rather than re-dialing. The pair and the scratch are destroyed only under
+    // breaking rather than re-dialing. The pair is destroyed only under
     // this lock with `connected_` false: the departure arm, or shut_down() (#1606). So an observed
     // `true` here is a happens-before edge with the writes that built the handle this
     // call is about to use, and a handle check placed AHEAD of this line is read against
@@ -864,14 +867,9 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
         tx_drops_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // Past the gate, the write scratch is drawn and stays drawn until this lock is released:
-    // the departure arm returns it only under `write_m_`, after `connected_` is cleared.
     // The frame goes out as ONE write on the TCP parent (#2265): header and masked payload
     // are contiguous, so it is one `send()`, not IDF's poll plus two writes.
-    const std::span<std::byte> wire =
-        queued.empty() ? std::span<std::byte>(tx_buf_.data(), frame_into(tx_buf_.data(), src, len))
-                       : queued;
-    const int n = esp_transport_write(tcp_, reinterpret_cast<char*>(wire.data()),
+    const int n = esp_transport_write(tcp_, reinterpret_cast<const char*>(wire.data()),
                                       static_cast<int>(wire.size()), kWriteTimeoutMs);
     if (n < 0 || n < static_cast<int>(wire.size())) {
         // Error or short write (a partial WS frame would desync the peer) — tear the
@@ -885,8 +883,9 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
     // (#1663). Nesting is write_m_ -> st_m_, never the reverse.
     const std::lock_guard<std::mutex> st_lk(st_m_);
     ++traffic_.tx_frames;
-    traffic_.tx_bytes += static_cast<std::uint32_t>(
-        ws::detail::decode_header(wire, /*fail_on_violation=*/false, ws::kNoPayloadCap).len);
+    // Frame bytes as written, header included: the frame was built by the caller, so it is
+    // not decoded again here (#2265).
+    traffic_.tx_bytes += static_cast<std::uint32_t>(wire.size());
 #endif
 }
 
@@ -985,16 +984,15 @@ void esp_ws_client_link_t::recv_loop() {
                 // nothing it does retroactively makes this connection productive.
                 backoff_now = !exchanged;
                 // Release the dead connection NOW, before the backoff and the re-dial (#1606):
-                // its transport pair and both scratches, so a link whose peer went away is
+                // its transport pair and the read scratch, so a link whose peer went away is
                 // back to holding only what a never-connected one holds. Under `write_m_`,
-                // because a writer reads the handles and the write scratch only under it, past
+                // because a writer reads the handles only under it, past
                 // the `connected_` gate — and `connected_` is already false. The read scratch
                 // is this thread's own. Before notify_down: no transport lock may be held
                 // across it.
                 {
                     const std::lock_guard<std::mutex> lk(write_m_);
                     release_pair(ws_, tcp_);
-                    tx_buf_.reset();
                 }
                 rx_buf_.reset();
                 // The departure seam (RFC-0009 §D extended to peer departure), and the
@@ -1086,10 +1084,14 @@ void esp_ws_client_link_t::recv_loop() {
             assembling = false;
             continue;
         }
-        // A PING or CLOSE is answered here, echoing its payload (read whole, at `off`, without
-        // moving it), through the same write as every frame. The opcode is NONE after a
-        // read timeout, so a zero-payload PING (which reads 0, like a timeout) is still seen.
-        // A CLOSE then drops the connection. A PONG falls through to the data-opcode filter.
+        // A PING or CLOSE is answered here, echoing its payload through the same write as every
+        // frame. IDF reads a control payload WHOLE at `off` (it fails the read rather than split
+        // one), and the scratch keeps a control frame's room past any message in progress, so
+        // `n` is the whole payload and `off` does not move. The opcode is NONE after a read
+        // timeout, so a zero-payload PING (which reads 0, like a timeout) is still seen. IDF
+        // fails a control payload over 125 B in its header read, so every echo fits the
+        // reply. A CLOSE then drops the connection. A PONG falls through to the data-opcode
+        // filter.
         const ws_transport_opcodes_t op = esp_transport_ws_get_read_opcode(ws_);
         if (op == WS_TRANSPORT_OPCODES_PING || op == WS_TRANSPORT_OPCODES_CLOSE) {
             std::array<std::byte, ws::kMaxClientControlFrame> reply{};
@@ -1097,7 +1099,7 @@ void esp_ws_client_link_t::recv_loop() {
                 reply, op == WS_TRANSPORT_OPCODES_PING ? ws::opcode_t::PONG : ws::opcode_t::CLOSE,
                 std::span<const std::byte>(rx_buf_.data() + off, static_cast<std::size_t>(n)),
                 mask_key());
-            write_locked(std::span<std::byte>(reply.data(), len), {}, 0);
+            write_locked(std::span<const std::byte>(reply.data(), len));
             if (op == WS_TRANSPORT_OPCODES_PING) continue;
             drop();
             off = 0;
@@ -1151,9 +1153,24 @@ void esp_ws_client_link_t::recv_loop() {
         }
 
         off += consumed;
-        if (message_done) {
+        if (off > rx_bytes_) {
+            // The message has passed `rx_bytes`: it cannot fit. Drop it rather than deliver a
+            // partial TLV (never silently truncate) — and, unless this read ended it, discard
+            // the rest of it, or the remainder would re-accumulate from 0 and be handed up as a
+            // bogus standalone frame while the peer's stream desynchronised in silence (#901).
+            // The scratch holds a control frame's room past `rx_bytes` (#2265), so a read can
+            // overshoot the ceiling rather than stop at it. The drop is tallied by
+            // `dropped_rx_` — this link keeps ONE inbound-drop truth, and `stats()` reads
+            // `c.rx_drops` from it.
+            ESP_LOGW(kTag, "inbound message exceeds %u B rx buffer — dropped",
+                     static_cast<unsigned>(rx_bytes_));
+            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+            off = 0;
+            assembling = false;
+            discarding = !message_done;
+        } else if (message_done) {
             // A complete message that fit in the buffer: deliver borrowed, serviced
-            // in-call by the router on this recv thread. `off == rx_buf_.size()` is an
+            // in-call by the router on this recv thread. `off == rx_bytes_` is an
             // EXACT FIT and delivers — it used to take the overflow branch (#901).
             //
             // Counted BEFORE the delivery, and only when the application asked for traffic
@@ -1184,21 +1201,8 @@ void esp_ws_client_link_t::recv_loop() {
             }
             off = 0;
             assembling = false;
-        } else if (off == rx_buf_.size()) {
-            // The buffer is full and the message is NOT over: it cannot fit. Drop it
-            // rather than deliver a partial TLV (never silently truncate) — and discard
-            // the rest of it, or the remainder would re-accumulate from 0 and be handed
-            // up as a bogus standalone frame while the peer's stream desynchronised in
-            // silence (#901). The drop is tallied by `dropped_rx_` just below — this link
-            // keeps ONE inbound-drop truth, and `stats()` reads `c.rx_drops` from it.
-            ESP_LOGW(kTag, "inbound message exceeds %u B rx buffer — dropped",
-                     static_cast<unsigned>(rx_buf_.size()));
-            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
-            off = 0;
-            assembling = false;
-            discarding = true;
         }
-        // else (!message_done && off < size): keep accumulating the fragmented message.
+        // else (!message_done && off <= rx_bytes_): keep accumulating the fragmented message.
     }
 }
 
