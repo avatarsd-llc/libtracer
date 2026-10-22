@@ -35,9 +35,10 @@
  * `(mem::mem_backend_t*, max_frame)` pair tcp/quic/webtransport take, and both expose the
  * same `dropped_rx()`/`malformed_rx()` counters, so one operator vocabulary reads across
  * every framed transport. The cap is checked against the DECLARED length in the WS frame
- * header — before a body byte is buffered — and against the reassembled total of a
- * fragmented message, so neither a 64-bit length nor a million CONTs can make the receiver
- * hold more than the deployment allowed.
+ * header — before a body byte is buffered — and against the charged cost of a fragmented
+ * message: each fragment counts its payload plus the segment it was received into and its
+ * chain slot, all drawn from the link's rx source. So neither a 64-bit length nor a million
+ * CONTs, however small, can make the receiver hold more than the deployment allowed.
  * send(frame) broadcasts to every open peer (the flat point-to-point surface);
  * a directed per-peer send is peer_link(name)->send().
  *
@@ -221,7 +222,8 @@ class ws_server_transport_t final : public stream_server_base_t {
      *
      * One WS message is one libtracer frame, so this is the same per-connection receive cap
      * tcp/quic/webtransport apply to their length prefix — it just reads off a WS frame
-     * header instead. A frame (or a reassembled message) claiming more is malformed:
+     * header instead. A frame claiming more, or a fragmented message whose fragments cost
+     * more (each one's payload plus its segment and chain slot), is malformed:
      * @ref malformed_rx ticks and the connection is failed, RFC 6455 §7.1.7. */
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 

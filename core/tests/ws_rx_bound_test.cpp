@@ -32,6 +32,10 @@
  *  - the honored cap is the CONFIGURED one, not the built-in default (a frame legal under
  *    the 16 MiB default is refused under a 4 KiB `max_frame`, and accepted without it);
  *  - fragments summing past the cap are refused, so the CONT route is not a way around it;
+ *  - each fragment is charged its segment and chain slot, so a message of tiny fragments is
+ *    refused long before its payload nears the cap;
+ *  - with an rx source that is not the heap, assembling a message draws nothing from the
+ *    heap per fragment (a global `operator new` counter, so this TU is its own binary);
  *  - a bounded backend's exhaustion is `dropped_rx` backpressure, not a dead connection;
  *  - the effective cap is `min(max_frame, backend.max_segment_size())` — the bound comes
  *    from the two injected resources, never a literal;
@@ -46,11 +50,14 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
+#include <new>
 #include <span>
 #include <string>
 #include <string_view>
@@ -59,9 +66,70 @@
 
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
 #include "test_support.hpp"
+
+namespace {
+
+/** @brief Global-new calls, counted on every thread while @ref g_heap_armed is set. */
+std::atomic<std::size_t> g_heap_calls{0};
+/** @brief Arms @ref g_heap_calls. */
+std::atomic<bool> g_heap_armed{false};
+
+/** @brief The counted allocation itself — malloc-backed so `operator delete` can free it. */
+void* counted(std::size_t n) {
+    if (g_heap_armed.load(std::memory_order_relaxed))
+        g_heap_calls.fetch_add(1, std::memory_order_relaxed);
+    return std::malloc(n == 0 ? 1 : n);
+}
+
+/** @brief The aligned counted allocation: `aligned_alloc` only for an over-aligned request. */
+void* counted_aligned(std::size_t n, std::size_t align) {
+    if (align <= alignof(std::max_align_t)) return counted(n);
+    if (g_heap_armed.load(std::memory_order_relaxed))
+        g_heap_calls.fetch_add(1, std::memory_order_relaxed);
+    return std::aligned_alloc(align, ((n == 0 ? 1 : n) + align - 1) / align * align);
+}
+
+}  // namespace
+
+void* operator new(std::size_t n) {
+    void* const p = counted(n);
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new[](std::size_t n) {
+    void* const p = counted(n);
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
+void* operator new(std::size_t n, std::align_val_t a) {
+    void* const p = counted_aligned(n, static_cast<std::size_t>(a));
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new[](std::size_t n, std::align_val_t a) { return operator new(n, a); }
+void* operator new(std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept {
+    return counted_aligned(n, static_cast<std::size_t>(a));
+}
+void* operator new[](std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept {
+    return counted_aligned(n, static_cast<std::size_t>(a));
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
 
 namespace {
 
@@ -445,23 +513,129 @@ void test_fragments_cannot_walk_past_the_cap() {
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
 
-    const std::vector<std::byte> chunk(kCap / 2, std::byte{0x2C});
+    const std::vector<std::byte> chunk(kCap / 4, std::byte{0x2C});
     check(write_bytes(cfd, masked_client_frame(ws::opcode_t::BINARY, chunk, /*fin=*/false)),
-          "fragment 1 (half the cap) written");
+          "fragment 1 (a quarter of the cap) written");
     check(write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, chunk, /*fin=*/false)),
-          "fragment 2 (the cap is now exactly reached) written");
+          "fragment 2 (half the cap is now held) written");
     std::this_thread::sleep_for(200ms);
     check(server.malformed_rx() == 0 && sink.count() == 0,
           "neither fragment is refused on its own");
 
-    check(write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, chunk, /*fin=*/true)),
-          "fragment 3 (past the cap) written");
+    const std::vector<std::byte> rest(kCap / 2 + 1, std::byte{0x2C});
+    check(write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, rest, /*fin=*/true)),
+          "fragment 3 (its payload alone takes the total past the cap) written");
     check(wait_until([&] { return server.malformed_rx() == 1; }, 2s),
           "the over-cap TOTAL is malformed");
     check(sink.count() == 0, "and no message was delivered");
     bool closed = false;
     (void)read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
     check(closed, "the connection was failed");
+    ::close(cfd);
+}
+
+/**
+ * @brief Each fragment is charged its segment and chain slot, not its payload alone: a
+ *        message of one-byte fragments is refused while its payload is far under the cap.
+ *
+ * Every fragment holds a segment and a link however few bytes it carries, so a cap that
+ * counted payload alone let a few hundred bytes of payload hold hundreds of segments.
+ */
+void test_tiny_fragments_are_charged_their_segment() {
+    std::printf("ws server — tiny fragments are charged their segment and chain slot:\n");
+    constexpr std::size_t kCap = 4096;
+    constexpr std::size_t kFragments = 400;  // 400 B of payload, a tenth of the cap
+    frame_sink_t sink;
+    tr::net::ws_server_transport_t server(0, {.max_frame = kCap});
+    server.set_receiver(sink);
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
+
+    const std::array<std::byte, 1> one{std::byte{0x5A}};
+    std::vector<std::byte> wire = masked_client_frame(ws::opcode_t::BINARY, one, /*fin=*/false);
+    for (std::size_t i = 1; i < kFragments; ++i) {
+        const std::vector<std::byte> f = masked_client_frame(ws::opcode_t::CONT, one, false);
+        wire.insert(wire.end(), f.begin(), f.end());
+    }
+    // The write may be cut short once the server fails the connection; that is the answer.
+    (void)write_bytes(cfd, wire);
+    check(wait_until([&] { return server.malformed_rx() == 1; }, 2s),
+          "the charged cost passed the cap and the message is malformed");
+    check(sink.count() == 0, "and no message was delivered");
+    bool closed = false;
+    (void)read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
+    check(closed, "the connection was failed");
+    ::close(cfd);
+}
+
+/** @brief A span sink that counts messages and bytes and allocates nothing itself. */
+struct counting_sink_t {
+    std::atomic<std::size_t> messages{0}; /**< @brief Messages delivered. */
+    std::atomic<std::size_t> bytes{0};    /**< @brief Their bytes, summed. */
+
+    /** @brief The receiver callable. */
+    void operator()(std::span<const std::byte> f) {
+        bytes.fetch_add(f.size(), std::memory_order_relaxed);
+        messages.fetch_add(1, std::memory_order_relaxed);
+    }
+};
+
+/**
+ * @brief With an rx source that is not the heap, the heap draws of one fragmented message do
+ *        not grow with its fragment count, and the message still reassembles byte-exact.
+ *
+ * The rx source is a bump slab with nothing behind it, so every segment, the fragment chain
+ * and the span sink's materialize come from the slab or are refused. A 4-fragment and a
+ * 64-fragment message are each sent whole and counted with the global `operator new` armed:
+ * a chain on the heap grows with the count, a chain on the rx source does not.
+ */
+void test_assembly_draws_no_heap_per_fragment() {
+    std::printf("ws server — assembly draws nothing from the heap per fragment:\n");
+    std::vector<std::byte> slab(1u << 20);
+    tr::mem::bump_source_t bump(slab, tr::mem::null_source());
+    tr::mem::source_backend_t rx(bump);
+    counting_sink_t sink;
+    tr::net::ws_server_transport_t server(0, {.memory = {.rx = &rx}, .max_frame = kSmallCap});
+    server.set_receiver(sink);
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
+
+    constexpr std::size_t kPiece = 16;
+    const std::vector<std::byte> piece(kPiece, std::byte{0x33});
+    // One fragmented message as one write, built before the counter is armed.
+    const auto message = [&](std::size_t fragments) {
+        std::vector<std::byte> wire =
+            masked_client_frame(ws::opcode_t::BINARY, piece, /*fin=*/false);
+        for (std::size_t i = 1; i < fragments; ++i) {
+            const std::vector<std::byte> f =
+                masked_client_frame(ws::opcode_t::CONT, piece, /*fin=*/i + 1 == fragments);
+            wire.insert(wire.end(), f.begin(), f.end());
+        }
+        return wire;
+    };
+    // The heap calls one message costs, on every thread, from its first byte to its delivery.
+    const auto heap_calls_for = [&](const std::vector<std::byte>& wire) {
+        const std::size_t before = sink.messages.load();
+        g_heap_calls.store(0);
+        g_heap_armed.store(true);
+        const bool written = write_bytes(cfd, wire);
+        const bool delivered = wait_until([&] { return sink.messages.load() == before + 1; }, 2s);
+        g_heap_armed.store(false);
+        check(written && delivered, "the fragmented message was delivered");
+        return g_heap_calls.load();
+    };
+
+    const std::vector<std::byte> few = message(4);
+    const std::vector<std::byte> many = message(64);
+    (void)heap_calls_for(few);  // warm-up: first-use allocations are not the claim
+    const std::size_t bytes_before = sink.bytes.load();
+    const std::size_t at_few = heap_calls_for(few);
+    const std::size_t at_many = heap_calls_for(many);
+    std::printf("  heap calls: %zu at 4 fragments, %zu at 64\n", at_few, at_many);
+    check(at_many <= at_few, "16x the fragments draw no more from the heap");
+    check(sink.bytes.load() - bytes_before == (4 + 64) * kPiece,
+          "and both messages reassembled byte-exact in length");
+    check(server.dropped_rx() == 0 && server.malformed_rx() == 0, "with nothing refused");
     ::close(cfd);
 }
 
@@ -647,6 +821,8 @@ int main() {
     test_partial_frame_under_the_cap_is_held_then_delivered();
     test_the_cap_is_the_configured_one();
     test_fragments_cannot_walk_past_the_cap();
+    test_tiny_fragments_are_charged_their_segment();
+    test_assembly_draws_no_heap_per_fragment();
     test_effective_cap_is_the_min_of_the_two_seams();
     test_backend_exhaustion_is_counted_backpressure();
     test_client_refuses_an_oversize_server_frame();
