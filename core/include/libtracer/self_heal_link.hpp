@@ -193,6 +193,14 @@ class self_heal_link_t final : public transport_t {
     /** @brief Scatter-gather twin of @ref send(std::span<const std::byte>) — same gate. */
     void send(std::span<const std::span<const std::byte>> iov) override;
 
+    /**
+     * @brief Retained twin of @ref send(std::span<const std::byte>) — same gate. The inner
+     *        socket gets the delivery unchanged: @p lane picks its per-vertex ring and a frame
+     *        that waits keeps @p value by reference (ADR-0087 §2).
+     */
+    void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+              const graph::delivery_lane_t& lane) override;
+
     /** @brief The kind's delivery capability, answered for the router at registration
      *         time (see the constructor's `inner_delivers_ropes`). */
     [[nodiscard]] bool delivers_ropes() const override { return inner_ropes_; }

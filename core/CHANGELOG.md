@@ -75,6 +75,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   constructed DIAL link installs its receivers and then calls `start_receiving()`, as
   `transport_vertex_t` and the self-heal engine already do. A link that is never armed never
   receives. LISTEN links are unchanged.
+### Fixed
+
+- **A self-healing link keeps each delivery's lane and value** (#2238). `self_heal_link_t` did
+  not override the retained send, `send(head, value, lane)`, so every delivery through it took
+  the base lowering: flattened into an iov and handed to the inner link's control lane. All
+  vertices then shared one 8-deep FIFO toward the peer (one vertex's flood shed another's
+  frames), a SAMPLE vertex queued a backlog instead of keeping only its newest frame, and a
+  waiting frame copied its payload. The engine now forwards the delivery to the inner link
+  unchanged, so it behaves as the link it wraps. The link seam suite gains a SAMPLE case and a
+  per-vertex STREAM case, run over the fake link and over a self-healing link that wraps it.
+  The wait for one dial attempt on a `DORMANT` link is unchanged.
 
 ## [0.21.0] — 2026-10-22
 

@@ -16,9 +16,14 @@
  *   drawn at its exact length from the link's own receive source and filled in place. An
  *   unfragmented frame goes up as one view over that segment; fragments chain into a rope
  *   with no copy. The fragments of one message together count against `max_frame`.
- * - **Egress.** A send appends one record to the peer's window and never waits. A record
- *   that does not fit (the peer stopped reading), or any send once the peer has gone, is
- *   shed and counted in `dropped_tx`.
+ * - **Egress.** Every send goes through the shared-frame egress module (ADR-0087 §2,
+ *   `egress.hpp`), the one a socket link uses: a record the peer's window takes is appended
+ *   whole and never waits; one that does not fit (the peer stopped reading) waits on the
+ *   wire, and the records behind it wait in their vertex's lane at its depth, a retained
+ *   send keeping its value by reference. A plain send rides the control lane. What a lane
+ *   cannot keep, and any send once the peer has gone, is shed and counted in `dropped_tx`.
+ *   The peer reading (@ref fake_link_t::wire_out) is the writability event that resumes the
+ *   waiting records.
  *
  * The wire format is the fake's own: a u32 little-endian header whose low 31 bits are the
  * body length and whose top bit says another fragment of the same message follows. Only the
@@ -41,9 +46,12 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/egress.hpp"
 #include "libtracer/length_prefix_framer.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/transport.hpp"
+#include "libtracer/value.hpp"
 #include "link_seam_suite.hpp"
 
 namespace tr::testing::link_seam {
@@ -61,26 +69,27 @@ class fake_link_t final : public net::transport_t {
      *        @p max_frame; the peer's receive window holds @p peer_window bytes.
      */
     fake_link_t(mem::mem_backend_t& rx, std::size_t max_frame, std::size_t peer_window) noexcept
-        : rx_backend_(&rx), max_frame_(max_frame), peer_window_(peer_window) {}
-    /** @brief Destroyed as the class it is. */
-    ~fake_link_t() = default;
+        : rx_backend_(&rx), max_frame_(max_frame), peer_window_(peer_window) {
+        egress_.open(peer_);
+    }
+    /** @brief Destroyed as the class it is; every waiting record goes back to its source. */
+    ~fake_link_t() { egress_.close(peer_); }
     fake_link_t(const fake_link_t&) = delete;
     fake_link_t& operator=(const fake_link_t&) = delete;
 
-    /** @brief Append one record to the peer's window, or shed and count it. Never waits. */
+    /** @brief One record on the control lane. */
     void send(std::span<const std::byte> frame) override {
-        const std::lock_guard lock(tx_m_);
-        const bool fits = out_.size() + kHeaderBytes + frame.size() <= peer_window_;
-        if (!up_.load(std::memory_order_acquire) || !fits || frame.size() >= kMore) {
-            dropped_tx_.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-        const std::size_t at = out_.size();
-        out_.resize(at + kHeaderBytes + frame.size());
-        wire::store_le<std::uint32_t>(std::span<std::byte>(out_).subspan(at, kHeaderBytes),
-                                      static_cast<std::uint32_t>(frame.size()));
-        if (!frame.empty())
-            std::memcpy(out_.data() + at + kHeaderBytes, frame.data(), frame.size());
+        const std::span<const std::byte> one[1] = {frame};
+        send_record(one, nullptr, {});
+    }
+    /** @brief One gathered record on the control lane. */
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        send_record(iov, nullptr, {});
+    }
+    /** @brief One record in @p lane; a record that waits keeps @p value by reference. */
+    void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+              const graph::delivery_lane_t& lane) override {
+        send_record(head, &value, lane);
     }
 
     /** @brief Owning delivery: an unfragmented frame is a single-link rope. */
@@ -119,16 +128,78 @@ class fake_link_t final : public net::transport_t {
         }
     }
 
-    /** @brief The peer reads: everything the link has put on the wire since the last read. */
+    /**
+     * @brief The peer reads: everything the link has put on the wire since the last read.
+     *
+     * The window it frees is the writability event: the records waiting behind it are then
+     * written into the window, for the next read.
+     */
     [[nodiscard]] std::vector<std::byte> wire_out() {
-        const std::lock_guard lock(tx_m_);
-        return std::exchange(out_, {});
+        std::vector<std::byte> in;
+        {
+            const std::lock_guard lock(tx_m_);
+            in = std::exchange(out_, {});
+        }
+        const net::egress_result_t r = egress_.flush(
+            peer_, [&](const net::egress_frame_t& f, std::size_t off) { return put(f, off); },
+            [&] { close(); });
+        dropped_tx_.fetch_add(r.shed, std::memory_order_relaxed);
+        return in;
     }
 
-    /** @brief The peer leaves: the link goes down and says so. */
-    void peer_gone() { close(); }
+    /** @brief The peer leaves: the link goes down and says so, and sheds what waits. */
+    void peer_gone() {
+        close();
+        egress_.close(peer_);
+    }
 
    private:
+    /** @brief Put @p head, then @p value's bytes when given, on the wire as ONE record. */
+    void send_record(std::span<const std::span<const std::byte>> head, const graph::value_t* value,
+                     const graph::delivery_lane_t& lane) {
+        std::size_t len = value != nullptr ? value->total_length() : 0;
+        for (const std::span<const std::byte>& s : head) len += s.size();
+        if (len >= kMore) {
+            dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        std::array<std::byte, kHeaderBytes> hdr{};
+        wire::store_le<std::uint32_t>(hdr, static_cast<std::uint32_t>(len));
+        // The copied part of a waiting frame is the header and the head; the value is kept.
+        std::vector<std::span<const std::byte>> copied{std::span<const std::byte>(hdr)};
+        copied.insert(copied.end(), head.begin(), head.end());
+        std::vector<std::span<const std::byte>> whole = copied;
+        if (value != nullptr)
+            for (const view::view_t& l : value->links()) whole.push_back(l.bytes());
+        net::egress_once_t once(
+            [&] { return net::egress_frame_t::make(mem::heap_source(), copied, value); });
+        const net::egress_result_t r = egress_.send(
+            peer_, lane, once, [&] { return put(whole, len + kHeaderBytes); },
+            [&](const net::egress_frame_t& f, std::size_t off) { return put(f, off); },
+            [&] { close(); });
+        dropped_tx_.fetch_add(r.shed, std::memory_order_relaxed);
+    }
+
+    /** @brief The rest of a waiting frame from @p off, as one write. */
+    net::egress_step_t put(const net::egress_frame_t& f, std::size_t off) {
+        std::vector<std::span<const std::byte>> spans(f.span_count());
+        spans.resize(f.spans_from(off, spans.data()));
+        return put(spans, f.size() - off);
+    }
+
+    /**
+     * @brief The socket: the peer's window takes the @p bytes of @p spans whole, or nothing
+     *        (the write is held). A record is never torn, so a read is always whole records.
+     */
+    net::egress_step_t put(std::span<const std::span<const std::byte>> spans, std::size_t bytes) {
+        const std::lock_guard lock(tx_m_);
+        if (!up_.load(std::memory_order_acquire)) return {0, false, true};
+        if (out_.size() + bytes > peer_window_) return {0, true, false};
+        for (const std::span<const std::byte>& s : spans)
+            out_.insert(out_.end(), s.begin(), s.end());
+        return {bytes, false, false};
+    }
+
     /** @brief Close the link once, and fire the down notifier. */
     void close() {
         if (up_.exchange(false, std::memory_order_acq_rel)) notify_down();
@@ -199,6 +270,8 @@ class fake_link_t final : public net::transport_t {
     // Egress.
     std::mutex tx_m_;            /**< @brief Guards @ref out_. */
     std::vector<std::byte> out_; /**< @brief Bytes on the wire toward the peer, unread. */
+    net::egress_t egress_{mem::heap_source()}; /**< @brief The lanes, drawn from the heap. */
+    net::egress_peer_t peer_;                  /**< @brief The one peer's wire and lanes. */
 
     std::atomic<std::uint64_t> dropped_rx_{0};   /**< @brief Inbound frames shed. */
     std::atomic<std::uint64_t> malformed_rx_{0}; /**< @brief Inbound headers refused. */
@@ -215,6 +288,7 @@ class fake_rig_t final : public link_rig_t {
     [[nodiscard]] bool ready() const override { return true; }
     [[nodiscard]] net::transport_t& link() override { return link_; }
     [[nodiscard]] counting_backend_t& rx_backend() override { return rx_; }
+    [[nodiscard]] bool lane_cases() const override { return true; }
 
     [[nodiscard]] bytes_t encode(std::span<const std::byte> body) const override {
         return record(body, false);
@@ -242,7 +316,14 @@ class fake_rig_t final : public link_rig_t {
     void peer_stall() override {}  // the fake peer reads only inside peer_drain
     [[nodiscard]] bool peer_drain(std::chrono::milliseconds /*budget*/,
                                   std::vector<bytes_t>& whole) override {
-        const bytes_t in = link_.wire_out();
+        return decode(link_, whole);
+    }
+    void peer_leave() override { link_.peer_gone(); }
+
+    /** @brief The peer reads @p link's wire and decodes it into @p whole (see
+     *         @ref link_rig_t::peer_drain). */
+    [[nodiscard]] static bool decode(fake_link_t& link, std::vector<bytes_t>& whole) {
+        const bytes_t in = link.wire_out();
         std::size_t at = 0;
         while (in.size() - at >= fake_link_t::kHeaderBytes) {
             const std::size_t len = wire::load_le<std::uint32_t>(
@@ -252,11 +333,9 @@ class fake_rig_t final : public link_rig_t {
             whole.emplace_back(b, b + static_cast<std::ptrdiff_t>(len));
             at += fake_link_t::kHeaderBytes + len;
         }
-        return at == in.size() || !link_.link_up();
+        return at == in.size() || !link.link_up();
     }
-    void peer_leave() override { link_.peer_gone(); }
 
-   private:
     /** @brief One record of @p body, with the MORE bit when @p more. */
     [[nodiscard]] static bytes_t record(std::span<const std::byte> body, bool more) {
         bytes_t out(fake_link_t::kHeaderBytes + body.size());
@@ -268,6 +347,7 @@ class fake_rig_t final : public link_rig_t {
         return out;
     }
 
+   private:
     counting_backend_t rx_;                         /**< @brief The receive source. */
     fake_link_t link_{rx_, kMaxFrame, kPeerWindow}; /**< @brief The link under test. */
 };

@@ -173,16 +173,25 @@ void self_heal_link_t::stop() {
 }
 
 void self_heal_link_t::send(std::span<const std::byte> frame) {
-    if (const sock_ref_t s = ready_socket()) {
-        s->link->send(frame);
-        return;
-    }
-    engine_dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
 }
 
 void self_heal_link_t::send(std::span<const std::span<const std::byte>> iov) {
     if (const sock_ref_t s = ready_socket()) {
         s->link->send(iov);
+        return;
+    }
+    engine_dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void self_heal_link_t::send(std::span<const std::span<const std::byte>> head,
+                            const graph::value_t& value, const graph::delivery_lane_t& lane) {
+    // The whole delivery, unchanged (#2238): the inner link picks the vertex's ring from the
+    // lane and keeps the value by reference. The base lowering would flatten it onto the
+    // inner link's control lane.
+    if (const sock_ref_t s = ready_socket()) {
+        s->link->send(head, value, lane);
         return;
     }
     engine_dropped_tx_.fetch_add(1, std::memory_order_relaxed);
