@@ -617,6 +617,11 @@ the wire: +3 B per hop over the bare `PATH_REF` it replaces, +4 B over the label
 `path_t::cache_path_label` (`core/include/libtracer/path.hpp`) is **generalised** to the 8-byte
 element rather than deleted — it is the origin-side cache §6.2 fills.
 
+> **Corrected 2026-10-22 by the S3 erratum ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22) at the end of
+> this document.** S3 landed before S2, so `cache_path_label` is **deleted**, not generalised. S2
+> carries the learned chain in `path_t`'s existing binding slot
+> ([#2245](https://github.com/avatarsd-llc/libtracer/issues/2245)).
+
 **What is added.** §6.2's "never nothing" rule has a wire cost that the deletions above do not
 offset:
 
@@ -705,6 +710,12 @@ Per ruling 10 no slice carries a compatibility shim. Symbol and flash move throu
 their number.
 
 ### 13.2 Slices
+
+> **Corrected 2026-10-22 by the S3 erratum ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22) at the end of
+> this document.** S3 landed ahead of S2, so the order below is no longer S1→S2→S3. The S2 row's
+> "generalised `cache_path_label`" now reads "the learned chain in `path_t`'s existing binding
+> slot" ([#2245](https://github.com/avatarsd-llc/libtracer/issues/2245)), and its round-trip test
+> no longer replaces `path_label_origin_test`, which S3 deleted.
 
 | # | slice | contents | gate |
 | --- | --- | --- | --- |
@@ -964,8 +975,9 @@ the terminus mint seam on the resolver. A `kind = 0x16`, `len = 4` record is mal
 refuses the address (§5.1, §5.3). Because S2 has not landed, nothing fills an origin-side chain
 cache yet, so `path_t`'s RFC-0027 slot (`cache_path_label`, `clear_path_label`, `path_label`)
 had no producer once the label plane was gone. It is **deleted**, and `sizeof(path_t)` falls from
-15 to 11 pointer widths. S2 adds the PAIR-chain cache it fills when it lands, sized for the
-8-byte element, instead of reshaping a label slot.
+15 to 11 pointer widths. S2 needs no replacement slot: it carries the learned chain in
+`path_t`'s existing binding slot, which becomes the one learned chain
+([#2245](https://github.com/avatarsd-llc/libtracer/issues/2245)).
 
 **Which change made them diverge.** The slice order. S3 was scheduled after S2 and was
 re-sequenced ahead of it (#2244), so the slot §11 meant to generalise had no consumer to keep.

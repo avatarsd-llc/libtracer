@@ -453,7 +453,7 @@ struct stats_block_t {
  * installs — so L4 still names nothing below it.
  *
  * @param ctx        The caller-owned context installed beside the function.
- * @param seam_class The seam CLASS — `router`, `labels` or `link` (Amendment 2 §D.4).
+ * @param seam_class The seam CLASS — `router` or `link` (Amendment 2 §D.4).
  * @param seam_name  The seam NAME within that class; for `link` it is the router's
  *                   `child_registry_t` name.
  * @param out        Where to write the block, or `nullptr` for a RECOGNITION PROBE: answer
@@ -699,7 +699,7 @@ struct graph_hooks_t {
      * @brief The NET-PLANE `:stats` seam sampler (RFC-0010 Amendment 2, #1503); the router
      *        installs it.
      *
-     * Null ⇒ the census answers for the graph alone and every `router` / `labels` / `link`
+     * Null ⇒ the census answers for the graph alone and every `router` / `link`
      * spelling answers `SCHEMA_NOT_FOUND`.
      */
     graph_hook_t<stats_sampler_fn_t> stats_sampler{};
@@ -2723,7 +2723,7 @@ class graph_t {
      * (it needs no friendship and mints no other symbol), and useful on its own to an
      * in-process supervisor that wants one seam's block without going through the wire door.
      *
-     * @param seam_class The seam CLASS (`router`, `labels`, `link`).
+     * @param seam_class The seam CLASS (`router`, `link`).
      * @param seam_name  The seam NAME within it.
      * @param out        Where to write the block, or `nullptr` to probe recognition only.
      * @return `false` when no sampler is installed or the spelling names no seam.

@@ -365,7 +365,7 @@ class fwd_router_t {
         //  - wire_target (RFC-0021, #491): a SUBSCRIBER's PATH child is an address in THIS
         //    node's frame, so deciding whether it leaves the node is a mount question — the
         //    transport plane's, which L4 cannot name.
-        //  - stats_sampler (RFC-0010 Amendment 2, #1503): the router / label-table / per-link
+        //  - stats_sampler (RFC-0010 Amendment 2, #1503): the router / per-link
         //    counters live on this side of the L4<->net-plane seam, so the router registers a
         //    sampler UP rather than L4 reaching DOWN.
         graph_.set_hook(

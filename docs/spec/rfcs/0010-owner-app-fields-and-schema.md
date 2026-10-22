@@ -852,6 +852,12 @@ samplers with the graph at configure time, the way it already installs its sinks
 [#1503](https://github.com/avatarsd-llc/libtracer/issues/1503). A future amendment that opens
 it adds `<seam-class>` values (`router`, `labels`, `link`) and changes nothing above.
 
+> **Corrected 2026-10-22 by the `:stats.labels` erratum
+> ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22)
+> at the end of this document.** Amendment 2 opened `router`, `labels` and `link`; `labels` is since
+> retired with the RFC-0027 label plane (RFC-0029 slice S3), so the net-plane classes are
+> `router` and `link`.
+
 ### D.5 The VALUE resolves BELOW the READ gate — the gating is INVERTED against `:identity`
 
 A recognised seam's value MUST be gated on `READ` against the addressed vertex's effective
@@ -940,6 +946,11 @@ grammar rule or error identity changes.
 
 This is that amendment, and it opens exactly that door in exactly that way.
 
+> **Corrected 2026-10-22 by the `:stats.labels` erratum
+> ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22)
+> at the end of this document.** The `labels` class this amendment opened is retired with the RFC-0027
+> label plane (RFC-0029 slice S3); the net-plane classes are `router` and `link`.
+
 ### D.4 (extended) — the net-plane seams
 
 The boundary Amendment 1 drew was a **dependency** boundary: the graph is L4, the router is
@@ -988,6 +999,11 @@ is labels on every kind alike.
 > **A seam whose sampler is not registered — a node that constructed no router — and a
 > `link` sub-key that names no registered child, or one whose child has been removed, MUST
 > answer `ERROR{tr::schema::not_found}` (`0x0031`), caller-independently.**
+
+> **Corrected 2026-10-22 by the `:stats.labels` erratum
+> ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22)
+> at the end of this document.** A node with a router also answers `SCHEMA_NOT_FOUND` for the `labels`
+> class: `:stats.labels.table` is no longer published by any node.
 
 This mints nothing: §Compatibility of Amendment 1 already anticipated exactly this answer
 (":867–876" — *"An implementation that does not serve the census keeps answering
@@ -1391,5 +1407,7 @@ construction: its §Compatibility told it to read `SCHEMA_NOT_FOUND` as "not pub
 
 **Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). The one
 wire-readable change, the `labels` class answering `SCHEMA_NOT_FOUND`, is the
-consequence of a retirement RFC-0029 already made normative (§5.3, §11). This erratum changes
+consequence of a retirement RFC-0029 already made normative (§1, §5.3, §11), whose deletion
+of these nouns by S3 the maintainer-ruled §Erratum (2026-10-09) above assigned and #2244
+executes. This erratum changes
 no other seam name, noun, frame, type code, grammar rule or error identity.
