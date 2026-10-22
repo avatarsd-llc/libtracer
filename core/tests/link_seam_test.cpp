@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Five link kinds run the same eight cases:
+ * Five link kinds run the same cases, and a sixth runs the lane cases:
  *
  * - **fake**: the socket-free adapter of `fake_link.hpp`, deterministic, every case.
  * - **tcp (dial)**: a real `tcp_transport_t` dialled to a raw localhost socket that plays the
@@ -20,6 +20,11 @@
  * - **tcp server**: a real `tcp_server_transport_t` (flat, one peer) dialled by a raw socket
  *   that speaks length-prefixed records (#2141). The ingress cases only, for the same reason
  *   as the ws server; no fragments on its wire.
+ *
+ * - **self-heal (fake)**: a `self_heal_link_t` whose one dial builds a fake link (#2238).
+ *   The lane cases only: they check that the engine hands a retained send to the link it
+ *   wraps with its lane and value, as the link would take it directly. Skipped on a build
+ *   without the engine (`kSelfHealLinks = false`).
  *
  * Not here, and why: UDP has no partial frame, no several-per-read and no stall on a
  * datagram socket; the other server links are buses (`ctest -LE bus` deselects them) whose
@@ -54,6 +59,8 @@
 
 #include "fake_link.hpp"
 #include "libtracer/byteorder.hpp"
+#include "libtracer/self_heal_link.hpp"
+#include "libtracer/transport_factory.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
@@ -555,6 +562,70 @@ class ws_server_rig_t final : public link_rig_t {
     tr::net::ws_server_transport_t link_;
 };
 
+// --- self-heal -----------------------------------------------------------------------------
+
+/**
+ * @brief A `self_heal_link_t` whose first dial builds a fake link, and the fake's peer.
+ *
+ * Later dials are refused, so the engine never replaces the fake a case is driving. The
+ * engine is acquired (a standing binding) and the rig is ready once it is `UP`.
+ *
+ * @tparam Engine `tr::net::self_heal_link_t`: named through a parameter so a build without
+ *         the engine instantiates nothing of it.
+ */
+template <class Engine>
+class self_heal_rig_t final : public link_rig_t {
+   public:
+    self_heal_rig_t()
+        : link_(
+              [this](
+                  const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+                  tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+                  if (inner_ != nullptr)
+                      return std::unexpected(tr::graph::status_t::TRANSPORT_DOWN);
+                  tr::net::transport_ptr_t p = tr::net::make_transport<fake_link_t>(
+                      src, rx_, kMaxFrame, fake_rig_t::kPeerWindow);
+                  if (!p) return std::unexpected(tr::graph::status_t::BACKPRESSURE);
+                  inner_ = static_cast<fake_link_t*>(p.get());
+                  return p;
+              },
+              tr::net::conn_settings_t{}, {}, true, tr::mem::heap_source()) {
+        link_.acquire();
+        (void)eventually([&] { return link_.state() == tr::net::link_state_t::UP; }, kWait);
+    }
+
+    [[nodiscard]] std::string_view name() const override { return "self-heal (fake)"; }
+    [[nodiscard]] bool ready() const override {
+        return link_.state() == tr::net::link_state_t::UP && inner_ != nullptr;
+    }
+    [[nodiscard]] tr::net::transport_t& link() override { return link_; }
+    [[nodiscard]] counting_backend_t& rx_backend() override { return rx_; }
+    [[nodiscard]] bool lane_cases() const override { return true; }
+
+    [[nodiscard]] bytes_t encode(std::span<const std::byte> body) const override {
+        return fake_rig_t::record(body, false);
+    }
+    [[nodiscard]] bool supports_fragments() const override { return false; }
+    [[nodiscard]] bytes_t encode_fragments(std::span<const std::byte> body,
+                                           std::size_t /*pieces*/) const override {
+        return encode(body);
+    }
+    [[nodiscard]] bytes_t oversize_header() const override { return {}; }
+
+    void peer_write(std::span<const std::byte> bytes) override { inner_->wire_in(bytes); }
+    void peer_stall() override {}  // the fake peer reads only inside peer_drain
+    [[nodiscard]] bool peer_drain(std::chrono::milliseconds /*budget*/,
+                                  std::vector<bytes_t>& whole) override {
+        return fake_rig_t::decode(*inner_, whole);
+    }
+    void peer_leave() override { inner_->peer_gone(); }
+
+   private:
+    counting_backend_t rx_;        /**< @brief The receive source, outliving the engine. */
+    fake_link_t* inner_ = nullptr; /**< @brief The one fake the engine dialled. */
+    Engine link_;                  /**< @brief The link under test. */
+};
+
 /** @brief The fake link, as a factory. */
 std::unique_ptr<link_rig_t> make_fake() { return std::make_unique<fake_rig_t>(); }
 /** @brief A dialled tcp link, as a factory. */
@@ -566,6 +637,21 @@ std::unique_ptr<link_rig_t> make_ws() { return std::make_unique<ws_rig_t>(); }
 /** @brief A ws server with one dialled peer, as a factory. */
 std::unique_ptr<link_rig_t> make_ws_server() { return std::make_unique<ws_server_rig_t>(); }
 
+/**
+ * @brief The lane cases over the self-healing link, or a skip on a build without the engine:
+ *        a template, so that build instantiates nothing that names it.
+ */
+template <bool kEngine>
+void run_self_heal() {
+    if constexpr (kEngine) {
+        run_lane_cases([]() -> std::unique_ptr<link_rig_t> {
+            return std::make_unique<self_heal_rig_t<tr::net::self_heal_link_t>>();
+        });
+    } else {
+        std::printf("[self-heal (fake)] skipped: kSelfHealLinks = false\n");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -575,5 +661,6 @@ int main() {
     run_suite(make_tcp_server);
     run_suite(make_ws);
     run_suite(make_ws_server);
+    run_self_heal<tr::net::kSelfHealLinks>();
     return tr::testing::summary("link_seam");
 }

@@ -42,12 +42,26 @@
  *     sender is busy releases the sender, the link reports itself down, and one later send is
  *     counted as exactly one drop.
  *
+ * The lane cases (ADR-0087 §2, #2238) drive the retained send, `send(head, value, lane)`, the
+ * one a subscription edge's delivery takes:
+ *
+ *  7. **SAMPLE is latest-wins**: a SAMPLE vertex that keeps publishing to a stalled peer has
+ *     ONE frame waiting, the newest; once the peer reads it gets that frame and none of the
+ *     ones it replaced, and the waiting frame keeps the value by reference, not a copy.
+ *  8. **one lane per vertex**: a STREAM vertex flooding a stalled peer sheds only its own
+ *     frames, keeping its newest `depth` in order; another vertex's frame queued behind the
+ *     same stall still arrives.
+ *
+ * They need a link whose window a case can fill on demand, so a rig opts in through
+ * @ref link_rig_t::lane_cases; a real socket's window is the host's.
+ *
  * A kind that cannot express a case says so through its rig and the case reports N/A; it
  * never weakens the assertion for that kind.
  */
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -66,6 +80,7 @@
 #include "libtracer/backend.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/transport.hpp"
+#include "libtracer/value.hpp"
 #include "test_support.hpp"
 
 namespace tr::testing::link_seam {
@@ -191,6 +206,8 @@ class link_rig_t {
     [[nodiscard]] virtual bool link_closed() { return !link().link_up(); }
     /** @brief False for a kind whose egress the cases cannot drive point to point. */
     [[nodiscard]] virtual bool egress_cases() const { return true; }
+    /** @brief True for a kind whose peer window fills deterministically (the lane cases). */
+    [[nodiscard]] virtual bool lane_cases() const { return false; }
 };
 
 /** @brief A factory for a fresh rig: each case gets its own link, since several end it. */
@@ -512,6 +529,142 @@ inline void case_peer_leaves_mid_send(rig_factory_t make) {
           "a send after the peer left is counted as exactly one drop, not lost silently");
 }
 
+/** @brief The frames a lane case sends: big enough that a few fill a rig's window. */
+inline constexpr std::size_t kLaneFrame = 256u * 1024u;
+
+/** @brief One retained send of a @p seed frame: a one-byte head naming it, then the value. */
+inline void lane_send(net::transport_t& l, const graph::value_t& v, std::uint8_t seed,
+                      const graph::delivery_lane_t& lane) {
+    const std::byte head[1] = {std::byte{seed}};
+    const std::span<const std::byte> parts[1] = {head};
+    l.send(std::span<const std::span<const std::byte>>(parts), v, lane);
+}
+
+/** @brief A value of @p seed's payload, and its frame as the peer reads it (head ++ value). */
+struct lane_value_t {
+    graph::value_ref_t value; /**< @brief The published value. */
+    bytes_t wire;             /**< @brief The frame body the peer should read. */
+};
+
+/** @brief Mint the value a @p seed frame carries. */
+[[nodiscard]] inline lane_value_t lane_value(std::uint8_t seed) {
+    const bytes_t body = payload(kLaneFrame, seed);
+    lane_value_t out{graph::value_ref_t::copy(body), bytes_t{std::byte{seed}}};
+    out.wire.insert(out.wire.end(), body.begin(), body.end());
+    return out;
+}
+
+/** @brief The peer reads until a read brings nothing new; true when every read framed. */
+[[nodiscard]] inline bool drain_all(link_rig_t& rig, std::vector<bytes_t>& whole) {
+    bool framed = true;
+    for (std::size_t before = SIZE_MAX; before != whole.size();) {
+        before = whole.size();
+        framed = rig.peer_drain(kQuiet, whole) && framed;
+    }
+    return framed;
+}
+
+/** @brief Case 7: a SAMPLE vertex's frames to a stalled peer are latest-wins. */
+inline void case_sample_latest_wins(rig_factory_t make) {
+    frame_sink_t sink;
+    const std::unique_ptr<link_rig_t> rig = make();
+    banner(*rig, "SAMPLE is latest-wins");
+    if (!rig->lane_cases()) {
+        check(true, "this kind's window is not filled on demand: N/A");
+        return;
+    }
+    check(rig->ready(), "the rig came up");
+    if (!rig->ready()) return;
+    attach(*rig, sink);
+
+    net::transport_t& l = rig->link();
+    int vertex = 0;
+    const graph::delivery_lane_t lane{.key = &vertex, .depth = 1};
+    constexpr std::uint8_t kSends = 24;
+    std::vector<lane_value_t> sent;
+    for (std::uint8_t i = 0; i < kSends; ++i) sent.push_back(lane_value(i));
+    rig->peer_stall();
+    for (std::uint8_t i = 0; i < kSends; ++i) lane_send(l, *sent[i].value, i, lane);
+    check(sent.back().value->use_count() > 1,
+          "the newest frame waits holding the value by reference, not a copy of it");
+
+    std::vector<bytes_t> got;
+    check(drain_all(*rig, got), "the peer reads whole frames");
+    // Before the stall, consecutive frames; after it, at most the one that was on the wire
+    // and then only the newest: every frame in between was replaced while it waited.
+    std::size_t run = 0;
+    while (run < got.size() && got[run] == sent[run].wire) ++run;
+    const bool newest_last = !got.empty() && got.back() == sent.back().wire;
+    check(run < kSends - 1 && newest_last && got.size() <= run + 2,
+          "the peer gets the newest value and none of the frames it replaced");
+    check(sent.back().value->use_count() == 1, "once written, the frame lets the value go");
+}
+
+/** @brief Case 8: one STREAM vertex's flood never sheds another vertex's frame. */
+inline void case_one_lane_per_vertex(rig_factory_t make) {
+    frame_sink_t sink;
+    const std::unique_ptr<link_rig_t> rig = make();
+    banner(*rig, "one lane per vertex");
+    if (!rig->lane_cases()) {
+        check(true, "this kind's window is not filled on demand: N/A");
+        return;
+    }
+    check(rig->ready(), "the rig came up");
+    if (!rig->ready()) return;
+    attach(*rig, sink);
+
+    net::transport_t& l = rig->link();
+    int vertex_a = 0, vertex_b = 0;
+    constexpr std::uint16_t kDepth = 4;
+    const graph::delivery_lane_t a{.key = &vertex_a, .depth = kDepth};
+    const graph::delivery_lane_t b{.key = &vertex_b, .depth = kDepth};
+    constexpr std::uint8_t kFlood = 32;
+    std::vector<lane_value_t> flood;
+    for (std::uint8_t i = 0; i < kFlood; ++i) flood.push_back(lane_value(i));
+    const lane_value_t other = lane_value(200);
+    rig->peer_stall();
+    const std::uint64_t dropped_before = l.drop_stats().dropped_tx;
+    // A fills the window and puts a frame on the wire; B's one frame waits behind it, then A
+    // floods far past its depth.
+    for (std::uint8_t i = 0; i < 8; ++i) lane_send(l, *flood[i].value, i, a);
+    lane_send(l, *other.value, 200, b);
+    for (std::uint8_t i = 8; i < kFlood; ++i) lane_send(l, *flood[i].value, i, a);
+    check(l.drop_stats().dropped_tx > dropped_before, "A's flood past its depth was counted");
+
+    std::vector<bytes_t> got;
+    check(drain_all(*rig, got), "the peer reads whole frames");
+    std::size_t from_b = 0;
+    std::vector<std::uint8_t> from_a;
+    for (const bytes_t& f : got) {
+        if (f == other.wire) {
+            ++from_b;
+            continue;
+        }
+        const auto seed = std::to_integer<std::uint8_t>(f.empty() ? std::byte{0xFF} : f[0]);
+        if (seed < kFlood && f == flood[seed].wire) from_a.push_back(seed);
+    }
+    check(from_b == 1, "B's frame arrives: A's flood shed none of it");
+    check(from_a.size() + from_b == got.size(), "and every frame read is whole and known");
+    check(std::is_sorted(from_a.begin(), from_a.end()), "A's frames arrive in order");
+    const bool newest =
+        from_a.size() >= kDepth &&
+        std::equal(
+            from_a.end() - kDepth, from_a.end(),
+            std::vector<std::uint8_t>{kFlood - 4, kFlood - 3, kFlood - 2, kFlood - 1}.begin());
+    // Best-effort STREAM sheds the oldest waiting: what A's lane held at the end is its newest
+    // `depth`, and nothing older survived past them.
+    check(newest, "A's lane keeps its newest frames, up to its depth");
+    std::size_t before_newest = 0;
+    for (std::uint8_t s : from_a) before_newest += s < kFlood - kDepth && s >= 8 ? 1 : 0;
+    check(before_newest == 0, "and the frames it displaced never reach the peer");
+}
+
+/** @brief Run the lane cases against one link kind. */
+inline void run_lane_cases(rig_factory_t make) {
+    case_sample_latest_wins(make);
+    case_one_lane_per_vertex(make);
+}
+
 /** @brief Run every case against one link kind. */
 inline void run_suite(rig_factory_t make) {
     case_partial_frame(make);
@@ -522,6 +675,7 @@ inline void run_suite(rig_factory_t make) {
     case_fragmented_message(make);
     case_stalled_peer(make);
     case_peer_leaves_mid_send(make);
+    run_lane_cases(make);
 }
 
 }  // namespace tr::testing::link_seam
