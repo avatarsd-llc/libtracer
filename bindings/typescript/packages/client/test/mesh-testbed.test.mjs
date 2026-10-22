@@ -328,6 +328,55 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     assert.deepEqual(seen[1], le32(SEEDED_TEMP));
   });
 
+  await t.test('two subscriptions to two producers: no cross-delivery (#2240)', async () => {
+    // Two producers on two nodes, both subscribed from ONE client: c's /sensor/temp two hops
+    // away and b's one hop away. Each subscription has its own target below the client's
+    // endpoint, so each delivery's dst names exactly one handler.
+    const FROM_C = 0x0c0c0c0c;
+    const FROM_B = 0x0b0b0b0b;
+    const fromC = [];
+    const fromB = [];
+    /** @brief Resolve once @p seen holds a value equal to @p want (deadline-bounded). */
+    const arrival = (seen, want) =>
+      new Promise((resolve, reject) => {
+        const deadline = setTimeout(() => {
+          clearInterval(iv);
+          reject(new Error(`no delivery of 0x${want.toString(16)} within deadline`));
+        }, 10000);
+        const iv = setInterval(() => {
+          if (seen.some((v) => v.every((x, i) => x === le32(want)[i]))) {
+            clearInterval(iv);
+            clearTimeout(deadline);
+            resolve();
+          }
+        }, 20);
+      });
+    const has = (seen, want) => seen.some((v) => v.every((x, i) => x === le32(want)[i]));
+
+    const unsubC = await cli.a.subscribe([...via('b', 'c'), 'sensor', 'temp'], (value) =>
+      fromC.push(new Uint8Array(value)),
+    );
+    await cli.a.subscribe([...via('b'), 'sensor', 'temp'], (value) => fromB.push(new Uint8Array(value)));
+
+    // Every handler a delivery reaches runs in the same dispatch, so by the time one
+    // handler has a value, a cross-delivered copy would already sit in the other.
+    await cli.c.write(['sensor', 'temp'], encodeValue(le32(FROM_C)));
+    await arrival(fromC, FROM_C);
+    assert.equal(has(fromB, FROM_C), false, "b's handler never sees c's value");
+
+    await cli.b.write(['sensor', 'temp'], encodeValue(le32(FROM_B)));
+    await arrival(fromB, FROM_B);
+    assert.equal(has(fromC, FROM_B), false, "c's handler never sees b's value");
+
+    // A local unsubscribe stops only its own handler: b's subscription keeps delivering.
+    unsubC();
+    const before = fromC.length;
+    await cli.c.write(['sensor', 'temp'], encodeValue(le32(SEEDED_TEMP)));
+    await cli.b.write(['sensor', 'temp'], encodeValue(le32(SEEDED_TEMP)));
+    await arrival(fromB, SEEDED_TEMP);
+    assert.equal(fromC.length, before, 'the detached handler stays silent');
+  });
+
   await t.test('ADR-0044 Brick C: the bus lists its live peers from real traffic', async () => {
     // /net/mesh is a peer_named ws listener CREATED IN BAND (its peer_named key is
     // ws-private config, parsed by the ws factory — ADR-0043 §5). Both a and b dialled it.

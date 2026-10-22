@@ -7,6 +7,17 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`subscribe()` handlers no longer receive other subscriptions' values** (#2240). Every
+  subscription shared the client's one reply endpoint, so with two subscriptions each handler
+  also got the other producer's deliveries. Each `subscribe()` now targets its own path below
+  the reply endpoint (`<replyEndpoint>/sub<n>`, sent as the subscribe write's `src` and the
+  SUBSCRIBER `target`), and a delivery reaches only the handler its `dst` names. A local
+  `unsubscribe()` stops only that handler. `onValue()` handlers still see every delivery; a
+  bare or ROUTER-wrapped VALUE, which carries no `dst`, now reaches `onValue()` handlers only.
+  Clearing the remote `:subscribers[]` slot on unsubscribe is still open (#1932).
+
 ## [0.21.0] — 2026-10-22
 
 No TypeScript-binding changes. Released in lockstep with core 0.21.0. A tcp or ws listener's session now has a name of the form `p<slot>~<gen>` (core 0.21.0, Fixed), which this client shows as it shows any peer name; a caller that matched `p<slot>` must accept the new form.
