@@ -1057,11 +1057,12 @@ template <class N>
         route.echo_ts = root.trailer_ts();
     // #766, guard 1 of 2 — the reply's OWN route bytes. On the rope tier these two spans are
     // materialized (a multi-link PATH pays one flatten from the injected backend), so a
-    // refusal here leaves no trustworthy address to answer TO: an assemble_error built on a
-    // short `src` would put a truncated route on the wire. Answer on the ERROR side instead —
-    // BACKPRESSURE by value, which the router answers from the request's own bytes (#2256).
-    // This is also the only guard that can fire
-    // before `parse_fwd`'s op byte is acted on, so it comes first.
+    // refusal here leaves the walk no route to build on: an assemble_error over a short `src`
+    // would put a truncated route on the wire. Answer BACKPRESSURE by value instead. The router
+    // answers it from the stack, reading `src` from the request's own bytes rather than from
+    // the refused flatten, so the requester still gets an intact route back (#2256). This is
+    // also the only guard that can fire before `parse_fwd`'s op byte is acted on, so it comes
+    // first.
     if (!req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);
 
     // RFC-0004 Amendment 2 (#1502, ruling on #1491) — THE EMPTY RETURN ROUTE. A `src` whose

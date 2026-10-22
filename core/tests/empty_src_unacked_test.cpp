@@ -431,6 +431,45 @@ class rope_link_t final : public rec_link_t {
 };
 
 /**
+ * @brief A server-style bus with one peer session, `p0`, that counts every peer resolution.
+ *
+ * A reply to a bus peer resolves the peer's endpoint by name (`reply_link` → `by_name` →
+ * @ref peer_link): on a TCP or WS server that is a lock and a scan of every session. Counting
+ * the calls is how the test sees that an unacknowledged delivery never asks.
+ */
+class counting_bus_t : public transport_t, public tr::net::bus_link_t {
+   public:
+    /** @brief Undirected sends are not part of this test; drop. */
+    void send(std::span<const std::byte>) override {}
+    /** @brief Expose the bus facet. */
+    tr::net::bus_link_t* bus() override { return this; }
+    /** @brief The one session. */
+    void enumerate_peers(const peer_visitor_t& visit) const override { visit("p0"); }
+    /** @brief Resolve the one session by name, and count the resolution. */
+    transport_t* peer_link(std::string_view peer) override {
+        ++peer_lookups;
+        return peer == "p0" ? &session : nullptr;
+    }
+    /** @brief Resolve the one session by handle, and count the resolution. */
+    transport_t* peer_link_of(tr::net::peer_handle_t peer) override {
+        ++peer_lookups;
+        return peer.valid() ? &session : nullptr;
+    }
+    /** @brief The session's name, from its handle. */
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t peer,
+                                             std::span<char>) const override {
+        return peer.valid() ? std::string_view("p0") : std::string_view{};
+    }
+    /** @brief One inbound frame from the session. */
+    void inject(std::span<const std::byte> frame) {
+        peer_rx_.deliver_borrowed(tr::net::peer_handle_t{0, 1}, frame);
+    }
+
+    rec_link_t session;           /**< @brief The session's directed endpoint. */
+    std::size_t peer_lookups = 0; /**< @brief Peer resolutions asked of this bus. */
+};
+
+/**
  * @brief An unacknowledged delivery is not a drop (#2256): `assemble_dropped` stays 0 across
  *        a stream of them, at both termini, while a real assembly OOM still counts.
  *
@@ -455,6 +494,25 @@ void unacked_stream_is_not_a_drop() {
     check(n.link.count() == 0 && roped.count() == 0, "  ZERO frames emitted on either tier");
     check(s.assemble_dropped == 0, "  assemble_dropped stays 0 across the stream");
     check(s.malformed_rx == 0, "  and nothing is counted malformed either");
+
+    // Through a bus peer, as from a TCP or WS server session: no reply-link resolution at all.
+    counting_bus_t srv;
+    (void)n.router.attach_link("srv", srv);
+    const std::size_t lookups_before = n.router.reply_name_lookups();
+    for (int i = 0; i < kSamples; ++i)
+        srv.inject(b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_empty(), {},
+                         b_value_u32(kLoud + static_cast<std::uint32_t>(i))));
+    check(stored_u32(n.graph, n.sink) == kLoud + kSamples - 1, "  bus: every delivery applied");
+    check(n.router.reply_name_lookups() == lookups_before,
+          "  bus: reply_link never resolved a name");
+    check(srv.peer_lookups == 0, "  bus: by_name never asked the bus for a peer");
+    check(srv.session.count() == 0, "  bus: ZERO frames to the session");
+    check(n.router.drop_stats().assemble_dropped == 0, "  bus: assemble_dropped still 0");
+    // Control: the same write with a wired src does resolve the session, and is answered.
+    srv.inject(b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_wired(), {}, b_value_u32(kSeed)));
+    check(n.router.reply_name_lookups() == lookups_before + 1 && srv.peer_lookups > 0,
+          "  bus control: a wired src DOES resolve the session's link");
+    check(srv.session.count() == 1, "  bus control: and the session gets exactly one reply");
 
     // Control: a wired READ whose every reply head the egress backend refuses IS a drop.
     graph_t g;
