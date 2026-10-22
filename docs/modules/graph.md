@@ -170,16 +170,17 @@ class graph_t {
     result_t<void>        mark_flushed(vertex_handle_t);
 
     // owner-side declarations (RFC-0022 §3.C) — host API only, NO wire surface. ONE verb:
-    // the policy is stated whole, so a member left at its default resets that property.
+    // only the members the caller names move; an unset member keeps what the vertex holds.
     result_t<void> set_policy(vertex_handle_t, vertex_policy_t);  // SCHEMA_NOT_FOUND if illegal
     retention_t   retention             (vertex_handle_t) const noexcept;
     result_t<std::size_t>   ring_reserved_bytes(vertex_handle_t) const;
     result_t<std::uint64_t> stream_gaps        (vertex_handle_t) const;
     share_hint_t  share_hint            (vertex_handle_t) const noexcept;
 
-    // graph-wide seams — read-modify-write, for a party wired after construction (the router)
-    void          set_hooks(const graph_hooks_t&) noexcept;
-    graph_hooks_t hooks() const noexcept;
+    // graph-wide seams — one at a time, named by their graph_hooks_t member (#2239)
+    void          set_hook  (graph_hook_t<Fn> graph_hooks_t::*, graph_hook_t<Fn>) noexcept;
+    void          clear_hook(graph_hook_t<Fn> graph_hooks_t::*, const void* owner) noexcept;
+    graph_hook_t<Fn> hook   (graph_hook_t<Fn> graph_hooks_t::*) const noexcept;
 
     // composed reads — they build a value, so they return a reference to a fresh block
     result_t<value_ref_t> read_children_folded(vertex_handle_t) const;
@@ -451,9 +452,10 @@ total over a `status_t` that had no member for it.
 Five installers configure a graph before frames flow. Each is set once at wiring time,
 from one thread. That is the **doctrine**, and since #1049 it is stated by the API rather
 than requested in a comment: the callback seams are `{fn, ctx}` slots of one
-`graph_hooks_t` aggregate (RFC-0028 D9) — handed to the constructor, or installed later with
-`set_hooks` (a router wired after its graph reads `hooks()`, sets its three, and writes the
-whole back) — never a `std::function`.
+`graph_hooks_t` aggregate (RFC-0028 D9) — handed to the constructor, or installed later one
+seam at a time with `set_hook` (#2239): a router wired after its graph installs its three and
+touches no other, and its destructor clears them with `clear_hook` if they are still its own —
+never a `std::function`.
 
 The shape is the enforcement. A `std::function` cannot be handed to a racing reader at
 all — assigning one *destroys the old target*, freeing its captures while a reader may be

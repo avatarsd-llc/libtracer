@@ -520,11 +520,7 @@ void refusals() {
 void authorization() {
     std::printf("\n8) §6.4: the hop's verdict is the same whichever way the hop is spelled\n");
     node_t n;
-    {
-        auto hooks = n.g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        n.g.set_hooks(hooks);
-    }
+    n.g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     // READ and nothing else through the egress connection vertex, for the inbound subject.
     (void)n.g.write(path_t("/net/uplink/b:acl"),
                     owned(allow_acl(kInLink, static_cast<std::uint32_t>(acl_right_t::READ))));

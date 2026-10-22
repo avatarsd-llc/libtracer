@@ -234,11 +234,8 @@ void vector_b_denied_write_dropped_silently() {
     check(n.graph.write(*acl_path, make_value(acl_allowing("peer-z", acl_right_t::WRITE)))
               .has_value(),
           "  an ACL granting WRITE to `peer-z` ALONE is installed");
-    {
-        auto hooks = n.graph.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        n.graph.set_hooks(hooks);
-    }  // enforcement on
+    n.graph.set_hook(&tr::graph::graph_hooks_t::subject_resolver,
+                     {caller_is_subject, nullptr});  // enforcement on
     (void)n.link.drain();
 
     n.router.on_frame(

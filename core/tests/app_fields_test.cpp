@@ -284,11 +284,7 @@ void test_field_set_is_closed() {
 void test_gating() {
     std::printf("access gating (RFC-0010 sketch 3):\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     const vertex_handle_t v = g.register_vertex(path_t("/dev/y"), role_t::STORED_VALUE);
 
     std::vector<app_field_t> table;
@@ -383,7 +379,7 @@ void test_schema_merge() {
           "wo field is DESCRIBED in :schema (only its value has no read surface)");
 
     // Uninstall (empty table) restores today's shape byte-for-byte.
-    (void)g.set_policy(v, {.app_fields = {}});
+    (void)g.set_policy(v, {.app_fields = tr::graph::app_fields_decl_t{}});
     const std::optional<decoded_t> cleared = decode_read(g.read(path_t("/dev/z:schema")));
     check(cleared.has_value() && tr::wire::encode(cleared->tlv) == tr::wire::encode(before->tlv),
           "empty table uninstalls: schema byte-identical to the pre-install read");
@@ -647,7 +643,7 @@ void test_borrowed_static_install() {
           "borrowed: undeclared sibling stays SCHEMA_NOT_FOUND");
 
     // Empty table uninstalls, reverting to the closed pre-RFC surface.
-    (void)g.set_policy(borrow, {.app_fields = {}});
+    (void)g.set_policy(borrow, {.app_fields = tr::graph::app_fields_decl_t{}});
     check(fails_with(g.read(path_t("/y/pid:settings.app.kp")), status_t::SCHEMA_NOT_FOUND),
           "borrowed: empty table uninstalls (back to SCHEMA_NOT_FOUND)");
 }

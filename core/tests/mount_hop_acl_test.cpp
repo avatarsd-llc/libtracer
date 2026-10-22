@@ -125,19 +125,17 @@ hook_arm_t g_arm = hook_arm_t::RESOLVER;
 
 /** @brief Install the current arm's subject hook, and only that one, on @p g. */
 void enforce(graph_t& g) {
-    auto hooks = g.hooks();
     if (g_arm == hook_arm_t::LOOKUP) {
-        hooks.subject_lookup = {caller_is_subject_into, nullptr};
+        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject_into, nullptr});
     } else {
-        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     }
-    g.set_hooks(hooks);
-    const auto back = g.hooks();
-    tr::testing::check_quiet(
-        g_arm == hook_arm_t::LOOKUP
-            ? back.subject_lookup.fn != nullptr && back.subject_resolver.fn == nullptr
-            : back.subject_resolver.fn != nullptr && back.subject_lookup.fn == nullptr,
-        "exactly the arm's one subject hook is installed");
+    const auto lookup = g.hook(&tr::graph::graph_hooks_t::subject_lookup);
+    const auto resolver = g.hook(&tr::graph::graph_hooks_t::subject_resolver);
+    tr::testing::check_quiet(g_arm == hook_arm_t::LOOKUP
+                                 ? lookup.fn != nullptr && resolver.fn == nullptr
+                                 : resolver.fn != nullptr && lookup.fn == nullptr,
+                             "exactly the arm's one subject hook is installed");
 }
 
 /** @brief One inheritable ALLOW ACE for @p subject over @p mask. */

@@ -389,11 +389,7 @@ int main() {
             "subscribe_wire / the owned mount-route PATH", width,
             [](graph_t& g) {
                 (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
-                {
-                    auto hooks = g.hooks();
-                    hooks.wire_target = {stub_split, nullptr};
-                    g.set_hooks(hooks);
-                }
+                g.set_hook(&tr::graph::graph_hooks_t::wire_target, {stub_split, nullptr});
             },
             [&](graph_t& g) {
                 const std::optional<vertex_handle_t> v = g.find(path_t("/s").key());

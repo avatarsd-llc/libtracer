@@ -146,11 +146,7 @@ void test_missing_target_is_counted() {
 void test_denied_fan_in_is_counted() {
     std::printf("\nthe target's :acl denies the edge's caller — counted separately:\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     (void)g.register_vertex(path_t("/sink"), role_t::STORED_VALUE);
     vertex_handle_t src = g.register_vertex(path_t("/src"), role_t::STORED_VALUE);
 

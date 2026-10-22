@@ -337,13 +337,11 @@ void test_subject_lookup() {
 
     for (const bool caller_storage : {true, false}) {
         tr::graph::graph_t g;
-        auto hooks = g.hooks();
         if (caller_storage) {
-            hooks.subject_lookup = {lookup_caller, nullptr};
+            g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {lookup_caller, nullptr});
         } else {
-            hooks.subject_resolver = {resolve_caller, nullptr};
+            g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {resolve_caller, nullptr});
         }
-        g.set_hooks(hooks);
         const auto v = g.register_vertex(tr::graph::path_t("/x"), role_t::STORED_VALUE);
         check(g.write(v, tr::testing::make_value({7})).has_value(), "value");
         check(g.write(tr::graph::path_t("/x:acl"), tr::testing::make_value(acl)).has_value(),
@@ -354,12 +352,11 @@ void test_subject_lookup() {
                                "peer-b does not"
                              : "the returning resolver gates identically through the adapter");
         check(!g.read(v, "ghost").has_value(), "an unnameable caller is denied");
-        const auto back = g.hooks();
-        check(
-            caller_storage
-                ? back.subject_lookup.fn == &lookup_caller && back.subject_resolver.fn == nullptr
-                : back.subject_resolver.fn == &resolve_caller && back.subject_lookup.fn == nullptr,
-            "hooks() hands back exactly what was installed, never the adapter");
+        const auto lookup = g.hook(&tr::graph::graph_hooks_t::subject_lookup);
+        const auto resolver = g.hook(&tr::graph::graph_hooks_t::subject_resolver);
+        check(caller_storage ? lookup.fn == &lookup_caller && resolver.fn == nullptr
+                             : resolver.fn == &resolve_caller && lookup.fn == nullptr,
+              "hook() hands back exactly what was installed, never the adapter");
     }
 }
 

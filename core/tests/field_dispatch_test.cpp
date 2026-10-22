@@ -394,11 +394,7 @@ void test_field_wildcard_divergence() {
     // BELOW its own, so one spelling has two answers split by who is asking.
     graph_t gated;
     const vertex_handle_t gv = gated.register_vertex(path_t("/g"), role_t::STORED_VALUE);
-    {
-        auto hooks = gated.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        gated.set_hooks(hooks);
-    }
+    gated.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     // A non-empty ACL that grants "peer-a" nothing at all (an empty effective ACL would be
     // unrestricted, so the ACE has to exist and name someone else).
     std::vector<tr::graph::ace_t> closed;

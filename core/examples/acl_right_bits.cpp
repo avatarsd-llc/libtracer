@@ -111,11 +111,7 @@ bool denied(const tr::graph::result_t<T>& r) {
 int main() {
     bool ok = true;
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, some_value());  // trusted local seed, so a refused read is the only failure
 

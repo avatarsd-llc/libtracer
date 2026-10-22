@@ -125,11 +125,7 @@ int main() {
 
     // The same predicate at the real door, where `now` comes from the graph's own clock.
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     const vertex_handle_t v = g.register_vertex(path_t("/room"), role_t::STORED_VALUE);
     (void)g.write(v, some_value());
     const ace_t both[] = {

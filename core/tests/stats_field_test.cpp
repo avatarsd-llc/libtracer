@@ -220,11 +220,7 @@ void test_node_scoped() {
 void test_value_is_read_gated() {
     std::printf("RFC-0010 Am.1 §D.5: the VALUE is READ-gated (inverted vs :identity):\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     const auto v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     (void)g.write(v, make_value({std::uint8_t{7}}));
     check(g.set_identity(0x01, std::array<std::byte, 32>{}).has_value(), "identity installed");
@@ -259,11 +255,7 @@ void test_value_is_read_gated() {
 void test_unknown_spellings_are_caller_independent() {
     std::printf("RFC-0010 Am.1 §D.2: unknown :stats spellings are caller-INDEPENDENT:\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     const std::vector<ace_t> grant{
         ace_t{.type = tr::graph::ace_type_t::ALLOW,
@@ -294,11 +286,7 @@ void test_unknown_spellings_are_caller_independent() {
 void test_census_is_read_only() {
     std::printf("RFC-0010 Am.1 §D.6: :stats is read-only — a write is ENOTTY:\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
 
     const auto p = path_t::parse("/dev:stats.mem.control");

@@ -436,9 +436,8 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
     // where an engine can exist to hold (#1470): on a `kSelfHealLinks = false` build every
     // acquire would be the documented no-op, so the graph is left with nothing to call.
     if constexpr (kSelfHealLinks) {
-        graph::graph_hooks_t hooks = graph_.hooks();
-        hooks.link_hold = {&transport_vertex_t::link_hold_thunk, this};
-        graph_.set_hooks(hooks);
+        graph_.set_hook(&graph::graph_hooks_t::link_hold,
+                        {&transport_vertex_t::link_hold_thunk, this});
     }
 }
 
@@ -484,12 +483,7 @@ transport_vertex_t::~transport_vertex_t() {
     // Last: closing a socket above can fire its departure eviction, which gives back each
     // evicted edge's hold through this seam. Cleared only if it is still this plane's, so a
     // plane wired later onto the same graph keeps its own.
-    if constexpr (kSelfHealLinks) {
-        graph::graph_hooks_t hooks = graph_.hooks();
-        if (hooks.link_hold.ctx != this) return;
-        hooks.link_hold = {};
-        graph_.set_hooks(hooks);
-    }
+    if constexpr (kSelfHealLinks) graph_.clear_hook(&graph::graph_hooks_t::link_hold, this);
 }
 
 void transport_vertex_t::link_hold_thunk(void* ctx, graph::link_pair_t link, bool held) {

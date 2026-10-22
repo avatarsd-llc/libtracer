@@ -194,9 +194,7 @@ struct node_t {
      *         child (with its connection vertex) as well as the bus. */
     explicit node_t(bool enforce = true, bool p2p_mounted = true) {
         if (enforce) {
-            auto hooks = g.hooks();
-            hooks.subject_resolver = {caller_is_subject, nullptr};
-            g.set_hooks(hooks);
+            g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
         }
         const bytes_t acl = mount_acl();
         check(router.attach_link(std::string(kBus), bus), "bus mounted with its vertex");

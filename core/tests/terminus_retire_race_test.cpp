@@ -187,9 +187,7 @@ void bracket(graph_t& g, park_t& park, const std::function<void()>& op) {
 /** @brief A graph whose `/t` admits only `admin`, with the parking subject lookup. */
 struct bracket_node_t {
     bracket_node_t() {
-        auto hooks = g.hooks();
-        hooks.subject_lookup = {park_then_name, &park};
-        g.set_hooks(hooks);
+        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {park_then_name, &park});
         (void)g.register_vertex(path_t("/t"), role_t::STORED_VALUE);
         (void)g.write(path_t("/t:acl"), tr::testing::make_value(admin_only_acl()));
         h = g.find(path_t("/t").key());
@@ -253,9 +251,7 @@ void no_terminus_mid_retire(bool pair) {
     std::printf("a %s terminus WRITE inside a retire never reaches the handler:\n",
                 pair ? "PAIR" : "NAME");
     graph_t g;
-    auto hooks = g.hooks();
-    hooks.subject_resolver = {caller_is_subject, nullptr};
-    g.set_hooks(hooks);
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     fwd_router_t router{g};
     const path_t at("/t");
     const path_t acl_at("/t:acl");

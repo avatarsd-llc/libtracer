@@ -499,11 +499,8 @@ int main() {
                 // the door — which is exactly the §8.2 re-check under assertion. READ is
                 // granted in both arms because the minting round trip is itself a READ that
                 // crosses this same vertex by name, and that hop is gated too.
-                {
-                    auto hooks = h.g.hooks();
-                    hooks.subject_resolver = {caller_is_subject, nullptr};
-                    h.g.set_hooks(hooks);
-                }
+                h.g.set_hook(&tr::graph::graph_hooks_t::subject_resolver,
+                             {caller_is_subject, nullptr});
                 (void)h.g.write(
                     path_t("/net/uplink/b:acl"),
                     owned(allow_acl(

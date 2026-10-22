@@ -96,11 +96,7 @@ int main() {
     // 2. A resolver, and a vertex nobody wrote an ACE to. Open, per vertex.
     {
         graph_t g;
-        {
-            auto hooks = g.hooks();
-            hooks.subject_resolver = {caller_is_subject, nullptr};
-            g.set_hooks(hooks);
-        }
+        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
         const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
         check(ok, g.write(v, some_value(), "peer-a").has_value(),
               "a resolver alone enforces nothing — a vertex with no ACE is open");
@@ -110,11 +106,7 @@ int main() {
     //    refuses everyone else — including for rights it never mentions.
     {
         graph_t g;
-        {
-            auto hooks = g.hooks();
-            hooks.subject_resolver = {caller_is_subject, nullptr};
-            g.set_hooks(hooks);
-        }
+        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
         const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
         (void)g.write(v, some_value());  // seed a value as the trusted local caller
         (void)g.write(path_t("/x:acl"), one_grant("peer-z", acl_right_t::READ));

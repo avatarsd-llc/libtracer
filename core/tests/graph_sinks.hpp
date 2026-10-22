@@ -57,22 +57,17 @@ constexpr tr::graph::link_pair_t test_link(std::string_view name) noexcept {
 
 /**
  * @brief Install on @p g the link-name answer a transport plane would (#1941): each of
- *        @p names for its @ref test_link pair. Only a build with the session seam carries the
- *        hook; elsewhere this installs nothing. @p names must outlive @p g's use of it.
+ *        @p names for its @ref test_link pair. Only a build with the session seam stores the
+ *        hook; elsewhere the install stores nothing. @p names must outlive @p g's use of it.
  */
 inline void name_test_links(tr::graph::graph_t& g, const std::vector<std::string>& names) {
-    auto hooks = g.hooks();
-    [&names](auto& hook) {
-        if constexpr (requires { hook.fn; })
-            hook = {
-                [](void* ctx, tr::graph::link_pair_t link, std::span<char>) -> std::string_view {
+    g.set_hook(&tr::graph::graph_hooks_t::link_name,
+               {[](void* ctx, tr::graph::link_pair_t link, std::span<char>) -> std::string_view {
                     for (const std::string& n : *static_cast<const std::vector<std::string>*>(ctx))
                         if (test_link(n) == link) return n;
                     return {};
                 },
-                const_cast<std::vector<std::string>*>(&names)};
-    }(hooks.link_name);
-    g.set_hooks(hooks);
+                const_cast<std::vector<std::string>*>(&names)});
 }
 
 /** @brief `g.evict_link_edges(name, test_link(name))` — a departure in a router-less test. */
@@ -102,15 +97,12 @@ class remote_sink_guard_t {
    public:
     /** @brief Install @p f on @p g; it stays installed until this guard dies. */
     remote_sink_guard_t(tr::graph::graph_t& g, F f) : fn_(std::move(f)) {
-        {
-            auto hooks = g.hooks();
-            hooks.remote_delivery = {
-                [](void* ctx, const tr::graph::remote_delivery_t& d, const tr::graph::value_t& v) {
-                    static_cast<remote_sink_guard_t*>(ctx)->fn_(d, v);
-                },
-                this};
-            g.set_hooks(hooks);
-        }
+        g.set_hook(
+            &tr::graph::graph_hooks_t::remote_delivery,
+            {[](void* ctx, const tr::graph::remote_delivery_t& d, const tr::graph::value_t& v) {
+                 static_cast<remote_sink_guard_t*>(ctx)->fn_(d, v);
+             },
+             this});
     }
     remote_sink_guard_t(const remote_sink_guard_t&) = delete;            /**< @brief Immovable. */
     remote_sink_guard_t& operator=(const remote_sink_guard_t&) = delete; /**< @brief Immovable. */
@@ -129,16 +121,12 @@ class subject_resolver_guard_t {
    public:
     /** @brief Install @p f on @p g; it stays installed until this guard dies. */
     subject_resolver_guard_t(tr::graph::graph_t& g, F f) : fn_(std::move(f)) {
-        {
-            auto hooks = g.hooks();
-            hooks.subject_resolver = {
-                [](void* ctx, std::string_view caller)
-                    -> std::expected<tr::graph::subject_token_t, tr::wire::err_t> {
-                    return static_cast<subject_resolver_guard_t*>(ctx)->fn_(caller);
-                },
-                this};
-            g.set_hooks(hooks);
-        }
+        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver,
+                   {[](void* ctx, std::string_view caller)
+                        -> std::expected<tr::graph::subject_token_t, tr::wire::err_t> {
+                        return static_cast<subject_resolver_guard_t*>(ctx)->fn_(caller);
+                    },
+                    this});
     }
     subject_resolver_guard_t(const subject_resolver_guard_t&) = delete; /**< @brief Immovable. */
     /** @brief Immovable. */
@@ -158,14 +146,11 @@ class sub_observer_guard_t {
    public:
     /** @brief Install @p f on @p g; it stays installed until this guard dies. */
     sub_observer_guard_t(tr::graph::graph_t& g, F f) : fn_(std::move(f)) {
-        {
-            auto hooks = g.hooks();
-            hooks.subscription_observer = {[](void* ctx, const tr::graph::sub_event_t& e) {
-                                               static_cast<sub_observer_guard_t*>(ctx)->fn_(e);
-                                           },
-                                           this};
-            g.set_hooks(hooks);
-        }
+        g.set_hook(&tr::graph::graph_hooks_t::subscription_observer,
+                   {[](void* ctx, const tr::graph::sub_event_t& e) {
+                        static_cast<sub_observer_guard_t*>(ctx)->fn_(e);
+                    },
+                    this});
     }
     sub_observer_guard_t(const sub_observer_guard_t&) = delete;            /**< @brief Immovable. */
     sub_observer_guard_t& operator=(const sub_observer_guard_t&) = delete; /**< @brief Immovable. */

@@ -198,11 +198,7 @@ void test_reregistration_is_flat_and_current() {
     counting_source_t src;
     {
         graph_t g(src);
-        {
-            auto hooks = g.hooks();
-            hooks.subject_resolver = {caller_is_subject, nullptr};
-            g.set_hooks(hooks);
-        }
+        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
         const path_t path("/ctl");
         const std::span<const std::byte> key = path.key();
         // What `:schema` serves an occupant that declared no catalog: what a BARE cycle must get.

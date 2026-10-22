@@ -1089,9 +1089,10 @@ struct default_config_t {
      * each session to its own subscription budget; the library keeps no count of its own.
      *
      * **Default `false` on every profile — the lean choice.** Closed out, the graph has no slot
-     * for the hook, the subscribe and teardown paths carry no load or branch for it, and a
-     * `graph_hooks_t::session_admission` handed to `graph_t::set_hooks` is not stored (a debug
-     * build asserts on it, because a budget that silently does not apply is worse than none).
+     * for the hook, the subscribe and teardown paths carry no load or branch for it, and
+     * `graph_hooks_t::session_admission` is an empty type, so installing one (through the
+     * constructor or `graph_t::set_hook`) does not compile: a budget that silently does not
+     * apply is worse than none.
      *
      * **Who sets it.** An embedder that bounds what one session may subscribe to. The core test
      * build sets it in its preset fragment `core/tests/instrumented/libtracer/config_override.hpp`.

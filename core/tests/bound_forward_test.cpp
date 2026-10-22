@@ -305,11 +305,8 @@ int main() {
     transport_vertex_t net_cli(g_cli, r_cli);
 
     graph_t g_a;
-    {
-        auto hooks = g_a.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g_a.set_hooks(hooks);
-    }  // A gates its own relays by inbound link
+    g_a.set_hook(&tr::graph::graph_hooks_t::subject_resolver,
+                 {caller_is_subject, nullptr});  // A gates its own relays by inbound link
     fwd_router_t r_a(g_a);
     transport_vertex_t net_a(g_a, r_a);
 
@@ -794,11 +791,7 @@ int main() {
     {
         const auto forward_op = [&](std::uint8_t op_byte) {
             graph_t g;
-            {
-                auto hooks = g.hooks();
-                hooks.subject_resolver = {caller_is_subject, nullptr};
-                g.set_hooks(hooks);
-            }
+            g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
             (void)g.register_vertex(path_t("/up"), role_t::STORED_VALUE);
             (void)g.write(path_t("/up:acl"),
                           owned(allow_acl("cli", static_cast<std::uint32_t>(acl_right_t::READ))));

@@ -94,11 +94,7 @@ std::vector<std::byte> allow_all(std::string_view subject, std::uint64_t expires
 
 int main() {
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     const vertex_handle_t open = g.register_vertex(path_t("/open"), role_t::STORED_VALUE);
     const vertex_handle_t standing = g.register_vertex(path_t("/standing"), role_t::STORED_VALUE);
     const vertex_handle_t leased = g.register_vertex(path_t("/leased"), role_t::STORED_VALUE);

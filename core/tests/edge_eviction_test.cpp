@@ -662,11 +662,7 @@ void test_field_write_admitted_edge_is_indexed_under_its_caller() {
     graph_t g;
     // 'seed' and 'cli' are one principal, so 'cli' holds the slot 'seed' made and may replace it
     // (RFC-0036 §3.4); with no ACE anywhere the resolver gates nothing else.
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {one_principal, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {one_principal, nullptr});
     fwd_router_t router(g);
     fake_link_t seed_link;
     fake_link_t cli;

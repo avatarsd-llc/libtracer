@@ -114,11 +114,7 @@ bool denied(const tr::graph::result_t<void>& r) {
 void test_creator_endpoint_gates_on_write() {
     std::printf("RFC-0036: the creator endpoint gates SPEC and NAME on WRITE:\n");
     graph_t node;
-    {
-        auto hooks = node.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        node.set_hooks(hooks);
-    }
+    node.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
     declare_fake_module(net);

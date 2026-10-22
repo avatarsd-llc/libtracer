@@ -95,9 +95,7 @@ std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(
 
 /** @brief Make @p g ACL-enforcing and grant @p subject READ|WRITE on vertex @p path. */
 void grant_hop(graph_t& g, std::string_view path, std::string_view subject) {
-    auto hooks = g.hooks();
-    hooks.subject_resolver = {caller_is_subject, nullptr};
-    g.set_hooks(hooks);
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     (void)g.register_vertex(tr::graph::path_t(path), tr::graph::role_t::STORED_VALUE);
     const auto* sp = reinterpret_cast<const std::byte*>(subject.data());
     const tr::graph::ace_t ace{

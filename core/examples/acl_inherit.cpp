@@ -85,11 +85,7 @@ bool denied(const tr::graph::result_t<T>& r) {
 int main() {
     bool ok = true;
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
 
     const vertex_handle_t dev = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     const vertex_handle_t temp = g.register_vertex(path_t("/dev/temp"), role_t::STORED_VALUE);

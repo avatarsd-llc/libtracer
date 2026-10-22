@@ -293,9 +293,7 @@ bytes_t value_byte() {
 void no_door_mid_retire() {
     std::printf("a hop inside a retire never crosses a door whose ACEs are already gone:\n");
     graph_t g;
-    auto hooks = g.hooks();
-    hooks.subject_resolver = {caller_is_subject, nullptr};
-    g.set_hooks(hooks);
+    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
     fwd_router_t router{g};
     link_t out;
     const path_t at("/net/tcp/out");
