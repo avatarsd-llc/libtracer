@@ -657,11 +657,12 @@ void slot_server_t::send_one(session_base_t& s, function_ref_t<egress_frame_t*()
 void slot_server_t::broadcast(std::span<const ::iovec> rec, const graph::value_t* value,
                               const graph::delivery_lane_t& lane) {
     // ONE shared frame for the whole fan-out, built only if some peer has to wait for it
-    // (ADR-0087 §2). peers_m_ keeps the slot table still; every write under it is
-    // nonblocking, so the hold is a few syscalls and never a stalled peer's wait.
+    // (ADR-0087 §2). No lock (#2263): the chain only ever grows and its slots are never freed,
+    // so a loaded slot stays walkable, and the egress role, not peers_m_, is what keeps a
+    // departing session's fd its own while a write is in it.
     egress_once_t once([&] { return frame_of(rec, value); });
-    const std::lock_guard plock(peers_m_);
-    for (const mem::poly_ptr_t<session_base_t>& s : slots_)
+    for (session_base_t* s = first_.load(std::memory_order_acquire); s != nullptr;
+         s = s->next.load(std::memory_order_acquire))
         if (s->open.load(std::memory_order_acquire)) send_one(*s, once, rec, lane);
 }
 
@@ -716,6 +717,9 @@ void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
             }
             slot = slots_.back().get();
             idx = slots_.size() - 1;
+            // Link the slot into the broadcast's chain, release: a walker that loads it
+            // sees it constructed (#2263). Its egress is still closed, so it takes nothing.
+            (idx == 0 ? first_ : slots_[idx - 1]->next).store(slot, std::memory_order_release);
         }
         // Mint this tenancy's HANDLE (#1294), under the lock and from the slot index. The
         // generation never repeats and never lands on 0 (which is reserved for "no peer"), so
@@ -864,10 +868,8 @@ void slot_server_t::shut_down_slots() {
 }
 
 bool slot_server_t::any_open_session() const {
-    // peers_m_ guards the slot VECTOR against the cross-thread readers (enumerate_peers /
-    // peer_link); the `open` loads are relaxed for the same reason they are everywhere else
-    // — the lock, not the memory order, is what orders them.
-    const std::lock_guard lock(peers_m_);
+    // No lock: this runs on the poll thread (or after it is joined), the only thread that
+    // grows the slot vector or stores `open`, so its own reads need no ordering (#2263).
     for (const mem::poly_ptr_t<session_base_t>& s : slots_)
         if (s->open.load(std::memory_order_relaxed)) return true;
     return false;
@@ -890,8 +892,9 @@ void slot_server_t::run() {
     while (!stop_.load(std::memory_order_relaxed)) {
         pfds.clear();
         pslots.clear();
+        // No lock (#2263): this thread is the slot vector's only mutator and the only writer
+        // of every fd, so it reads both as they are; peers_m_ orders the OTHER threads' reads.
         if (pfds.push_back(listen_only)) {
-            const std::lock_guard lock(peers_m_);
             for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
                 const int fd = s->fd.load(std::memory_order_relaxed);
                 if (fd < 0) continue;

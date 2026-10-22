@@ -2111,6 +2111,19 @@ if(LIBTRACER_TRANSPORT_TCP)
     set_tests_properties(send_stall PROPERTIES TIMEOUT 60)
 endif()
 
+if(LIBTRACER_TRANSPORT_TCP)
+    # #2263 — a stream server's broadcast holds no lock across its writes: with one write
+    # parked by the link-time wrap, name resolution, a second broadcast, a directed send, an
+    # accept and a departure all complete. Run under TSan with `setarch $(uname -m) -R`.
+    add_executable(server_broadcast_unlocked_test server_broadcast_unlocked_test.cpp)
+    target_link_libraries(server_broadcast_unlocked_test PRIVATE libtracer)
+    target_link_options(server_broadcast_unlocked_test PRIVATE "-Wl,--wrap=sendmsg"
+        "-Wl,--wrap=send")
+    libtracer_test_warnings(server_broadcast_unlocked_test)
+    add_test(NAME server_broadcast_unlocked COMMAND server_broadcast_unlocked_test)
+    set_tests_properties(server_broadcast_unlocked PROPERTIES TIMEOUT 60)
+endif()
+
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
     # #2198 — the application's liveness check: on every stream transport vertex a peer
     # that owes the wire progress and makes none past the app's deadline is closed and
@@ -2517,6 +2530,7 @@ set(LIBTRACER_BUS_TESTS
     pair_hop_acl
     peer_handle_seam
     send_stall
+    server_broadcast_unlocked
     session_anchor
     slot_reuse_reaps_forwarded_sub
     tcp
@@ -2608,7 +2622,7 @@ endif()
 # which is an acceptable answer for a test whose subject was compiled out, and converting all of
 # them would be a much larger diff for no additional safety.
 set(LIBTRACER_BUS_SKIPPABLE_TESTS edge_eviction send_stall session_anchor tcp ws_transport
-    mount_hop_acl pair_hop_acl slot_reuse_reaps_forwarded_sub)
+    mount_hop_acl pair_hop_acl slot_reuse_reaps_forwarded_sub server_broadcast_unlocked)
 foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_SKIPPABLE_TESTS)
     if(TEST ${_libtracer_bus_test})
         set_property(TEST ${_libtracer_bus_test} PROPERTY SKIP_RETURN_CODE 77)
