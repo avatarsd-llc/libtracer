@@ -17,7 +17,8 @@
  *   - await(path, ns?)      — FWD{ op=AWAIT, dst=path, src=…, await_timeout? }
  *   - readField(path, sel)  — FWD{ op=READ,  dst=path, FIELD=sel, src=… }
  *   - subscribe(prod, h)    — FWD{ op=WRITE, dst=prod, FIELD=:subscribers[],
- *                                  src=…, payload=SUBSCRIBER{ target=<reply-ep> } }
+ *                                  src=<reply-ep>/sub<n>,
+ *                                  payload=SUBSCRIBER{ target=<reply-ep>/sub<n> } }
  * Each one-shot op sends a FWD and resolves the FWD{REPLY} the responder
  * source-routes back (RESULT → the value, ERROR → a typed {@link FwdError}).
  *
@@ -77,7 +78,8 @@ export type Unsubscribe = () => void;
 export interface ClientOptions {
   /**
    * @brief The originator's reply endpoint, as path segments — the `src` route seeded on
-   * every outbound FWD and the SUBSCRIBER `target` on a subscribe. Over a single
+   * every outbound FWD. A subscription targets its own path one segment below it
+   * (`<reply-ep>/sub<n>`), used as both its `src` and its SUBSCRIBER `target`. Over a single
    * ws hop the responder replies back over the same link, so any 1+-segment path
    * is fine; default `["client"]`.
    */
@@ -193,6 +195,13 @@ export class LibtracerClient {
   private readonly replyEndpoint: string[];
   private readonly requestTimeoutMs: number;
   private readonly valueHandlers = new Set<ValueHandler>();
+  /**
+   * @brief Each live subscription's handler, keyed by its target's last segment
+   * (`sub<n>`, the one segment below the reply endpoint).
+   */
+  private readonly subscriptions = new Map<string, ValueHandler>();
+  /** @brief The number the next subscription's target segment carries. */
+  private nextSubscription = 1;
   private readonly pending: Pending[] = [];
   private errorHandler: ((err: Error) => void) | null = null;
   private closed: Error | null = null;
@@ -228,7 +237,8 @@ export class LibtracerClient {
    *
    * A delivery is a FWD{WRITE} (delivery-is-a-write, RFC-0004 §D); a bare VALUE
    * or a single ROUTER wrapper is also accepted. Multiple handlers may be
-   * registered; each receives every delivery.
+   * registered; each receives every delivery, including the ones a
+   * {@link subscribe} handler also receives.
    */
   onValue(handler: ValueHandler): void {
     this.valueHandlers.add(handler);
@@ -271,7 +281,7 @@ export class LibtracerClient {
       }
       // A delivery IS a FWD{WRITE} (RFC-0004 §D): deliver its VALUE payload.
       if (parsed.op === FWD_OP.WRITE && parsed.payload && parsed.payload.type === TYPE.VALUE) {
-        this.deliver(parsed.payload);
+        this.deliver(parsed.payload, parsed.dst);
       }
       return;
     }
@@ -280,7 +290,7 @@ export class LibtracerClient {
     // (the directly-delivered / bridge-mounted path, ADR-0034 inbound rule).
     const data =
       tlv.type === TYPE.ROUTER && tlv.children.length > 0 ? tlv.children[tlv.children.length - 1] : tlv;
-    if (data.type === TYPE.VALUE) this.deliver(data);
+    if (data.type === TYPE.VALUE) this.deliver(data, null);
   }
 
   /**
@@ -334,8 +344,32 @@ export class LibtracerClient {
     return fifo;
   }
 
-  private deliver(value: Tlv): void {
+  /**
+   * @brief Hand a delivered VALUE to every {@link onValue} handler, and to the one
+   * subscription its `dst` names.
+   *
+   * A producer addresses a delivery by the return route its subscribe request
+   * carried, which is that subscription's own target `<reply-ep>/sub<n>`. `dst`
+   * shrinks per hop, so what arrives is a TAIL of that target: its last segment
+   * names the subscription and whatever precedes it must end the reply endpoint (a
+   * node whose link shares the endpoint's first segment consumes that segment as a
+   * hop). A delivery whose `dst` names no live subscription (no `dst` at all, the bare
+   * reply endpoint, a detached or unknown subscription, a `PATH_REF` or an escaped
+   * path) reaches the {@link onValue} handlers only.
+   *
+   * @param value the delivered VALUE TLV
+   * @param dst   the delivery's `dst` route, or `null` for a bare / ROUTER-wrapped VALUE
+   */
+  private deliver(value: Tlv, dst: Tlv | null): void {
     for (const handler of this.valueHandlers) handler(value.payload, value);
+    let segs: string[] = [];
+    try {
+      if (dst !== null) segs = pathSegments(dst);
+    } catch {
+      return; // a PATH_REF / escaped dst names no subscription this client minted
+    }
+    if (segs.length === 0 || !endsWith(this.replyEndpoint, segs.slice(0, -1))) return;
+    this.subscriptions.get(segs[segs.length - 1])?.(value.payload, value);
   }
 
   private emitError(err: Error): void {
@@ -543,16 +577,20 @@ export class LibtracerClient {
 
   /**
    * @brief Subscribe to a remote producer: a `WRITE` of a `SUBSCRIBER{
-   * target=<reply-ep> }` into `producer:subscribers[]` (RFC-0004 §C/§D —
+   * target=<reply-ep>/sub<n> }` into `producer:subscribers[]` (RFC-0004 §C/§D —
    * subscribe is a field-write).
    *
-   * Once the responder acks, `handler` fires for every inbound VALUE delivery.
+   * Each call targets its own path `<reply-ep>/sub<n>` below the reply endpoint and
+   * sends the write from it, so the producer addresses its deliveries there. `handler`
+   * fires only for deliveries whose `dst` is that path; another subscription's
+   * deliveries never reach it.
    *
    * SCOPE: this issues the SUBSCRIBER and receives VALUEs the producer directly
    * delivers to this client's reply endpoint. Full standing-stream delivery
    * additionally needs the producer auto-promote / flush seam (#136 / RFC-0004 §E)
    * — out of scope for this client slice. `unsubscribe()` is a LOCAL detach: it
-   * stops firing `handler` but does not clear the remote slot (an indexed
+   * stops firing `handler`, leaves every other subscription working, and does not
+   * clear the remote slot (an indexed
    * `:subscribers[N]` field-write, which REPLACES that slot rather than adding
    * to it — RFC-0009 §D.1).
    *
@@ -570,29 +608,31 @@ export class LibtracerClient {
     opts: SubscriberOptions = {},
   ): Promise<Unsubscribe> {
     const dst = splitPath(producerPath);
-    const subscriber = encodeSubscriber(this.replyEndpoint, opts);
+    const key = `sub${this.nextSubscription++}`;
+    const target = [...this.replyEndpoint, key];
+    const subscriber = encodeSubscriber(target, opts);
     // Register the handler BEFORE awaiting the ack: a producer may stream its
     // first delivery before its subscribe REPLY is seen on the wire, and we must
     // not drop it. On a rejected subscribe we detach again.
-    this.valueHandlers.add(handler);
+    this.subscriptions.set(key, handler);
     try {
       const reply = await this.request(
         encodeFwd({
           op: FWD_OP.WRITE,
           dst,
           field: ':subscribers[]',
-          src: this.replyEndpoint,
+          src: target,
           payload: subscriber,
         }),
         dst,
       );
       this.result(reply); // throws on ERROR
     } catch (err) {
-      this.valueHandlers.delete(handler);
+      this.subscriptions.delete(key);
       throw err;
     }
     return () => {
-      this.valueHandlers.delete(handler);
+      this.subscriptions.delete(key);
     };
   }
 
@@ -627,7 +667,8 @@ Object.defineProperty(LibtracerClient.prototype, 'await', {
 });
 
 /**
- * @brief Does @p path end with the segments @p tail — the reply-`src` suffix test.
+ * @brief Does @p path end with the segments @p tail — the reply-`src` suffix test,
+ * and the test that a delivery's shrunken `dst` still names this client's endpoint.
  *
  * A suffix rather than an equality because `dst` shrinks per hop (RFC-0004 §B): the
  * responder's own endpoint is what is left of the request's `dst` once every mount

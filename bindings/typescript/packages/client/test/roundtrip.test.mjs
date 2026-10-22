@@ -61,12 +61,17 @@ function resultReply(payload) {
   });
 }
 
-/** @brief A delivery: a FWD{WRITE} carrying a VALUE, addressed back to the reply endpoint. */
-function delivery(valueBytes) {
+/**
+ * @brief A delivery: a FWD{WRITE} carrying a VALUE, addressed to a subscription's target.
+ *
+ * A producer addresses a delivery by the subscribe request's `src`, which is the
+ * subscription's own target below the reply endpoint (the first one is `/client/sub1`).
+ */
+function delivery(valueBytes, dst = ['client', 'sub1'], src = ['sensor', 'temp']) {
   return encodeFwd({
     op: FWD_OP.WRITE,
-    dst: ['client'],
-    src: ['sensor', 'temp'],
+    dst,
+    src,
     payload: encodeValue(valueBytes),
   });
 }
@@ -174,14 +179,15 @@ test('subscribe emits a FWD{WRITE} to :subscribers[] and delivers injected VALUE
     got.push({ value, type: tlv.type });
   });
 
-  // Outbound: a FWD{WRITE, dst=/sensor/temp, FIELD=:subscribers[], payload=SUBSCRIBER{ target=/client }}.
+  // Outbound: a FWD{WRITE, dst=/sensor/temp, FIELD=:subscribers[], src=/client/sub1,
+  // payload=SUBSCRIBER{ target=/client/sub1 }}: the subscription's own target.
   assert.equal(t.sent.length, 1);
   const expected = encodeFwd({
     op: FWD_OP.WRITE,
     dst: ['sensor', 'temp'],
     field: ':subscribers[]',
-    src: ['client'],
-    payload: encodeSubscriber(['client']),
+    src: ['client', 'sub1'],
+    payload: encodeSubscriber(['client', 'sub1']),
   });
   assert.ok(
     sameBytes(t.sent[0], expected),
@@ -203,6 +209,78 @@ test('subscribe emits a FWD{WRITE} to :subscribers[] and delivers injected VALUE
   unsubscribe();
   t.inject(delivery(new Uint8Array([0xbe, 0xef])));
   assert.equal(got.length, 1);
+});
+
+test('two subscriptions to two producers: each handler gets only its own deliveries (#2240)', async () => {
+  const t = new FakeTransport();
+  const client = new LibtracerClient(t);
+  const temp = [];
+  const hum = [];
+  const all = [];
+  client.onValue((value) => all.push(value[0]));
+
+  // Both subscribes are outstanding at once; their acks arrive out of order. The reply
+  // correlation (#1530) keys on the responder's src, so each still resolves its own.
+  const tempP = client.subscribe('/sensor/temp', (value) => temp.push(value[0]));
+  const humP = client.subscribe('/sensor/hum', (value) => hum.push(value[0]));
+  assert.equal(t.sent.length, 2);
+  assert.ok(
+    sameBytes(
+      t.sent[1],
+      encodeFwd({
+        op: FWD_OP.WRITE,
+        dst: ['sensor', 'hum'],
+        field: ':subscribers[]',
+        src: ['client', 'sub2'],
+        payload: encodeSubscriber(['client', 'sub2']),
+      }),
+    ),
+    'the second subscription targets its own path',
+  );
+  const ack = (dst, src) =>
+    encodeFwd({ op: FWD_OP.REPLY, dst, src, kind: FWD_KIND.RESULT });
+  t.inject(ack(['client', 'sub2'], ['sensor', 'hum']));
+  t.inject(ack(['client', 'sub1'], ['sensor', 'temp']));
+  const unsubTemp = await tempP;
+  await humP;
+
+  t.inject(delivery(new Uint8Array([0x01]), ['client', 'sub1'], ['sensor', 'temp']));
+  t.inject(delivery(new Uint8Array([0x02]), ['client', 'sub2'], ['sensor', 'hum']));
+  assert.deepEqual(temp, [0x01], 'the temp handler saw only temp');
+  assert.deepEqual(hum, [0x02], 'the hum handler saw only hum');
+  assert.deepEqual(all, [0x01, 0x02], 'onValue still observes every delivery');
+
+  // A local unsubscribe stops only its own handler.
+  unsubTemp();
+  t.inject(delivery(new Uint8Array([0x03]), ['client', 'sub1'], ['sensor', 'temp']));
+  t.inject(delivery(new Uint8Array([0x04]), ['client', 'sub2'], ['sensor', 'hum']));
+  assert.deepEqual(temp, [0x01], 'the detached handler stays silent');
+  assert.deepEqual(hum, [0x02, 0x04], 'the other subscription keeps working');
+});
+
+test('a delivery routes by its dst tail; one naming no live subscription reaches onValue only', async () => {
+  const t = new FakeTransport();
+  const client = new LibtracerClient(t);
+  const sub = [];
+  const all = [];
+  client.onValue((value) => all.push(value[0]));
+  const p = client.subscribe('/sensor/temp', (value) => sub.push(value[0]));
+  t.inject(resultReply());
+  await p;
+
+  // dst shrinks per hop: a node whose link is also named "client" consumes that segment,
+  // so the tail /sub1 alone still names the subscription; a foreign prefix does not.
+  t.inject(delivery(new Uint8Array([0x08]), ['sub1']));
+  t.inject(delivery(new Uint8Array([0x09]), ['other', 'sub1']));
+  assert.deepEqual(sub, [0x08], 'a shrunken dst tail routes; a foreign prefix does not');
+  sub.length = 0;
+  all.length = 0;
+
+  t.inject(delivery(new Uint8Array([0x05]), ['client']));
+  t.inject(delivery(new Uint8Array([0x06]), ['client', 'sub9']));
+  t.inject(encodeValue(new Uint8Array([0x07])));
+  assert.deepEqual(sub, [], 'no subscription handler fires for an unrouted delivery');
+  assert.deepEqual(all, [0x05, 0x06, 0x07]);
 });
 
 test('inbound ROUTER envelope is shed to its wrapped VALUE before delivery', () => {
