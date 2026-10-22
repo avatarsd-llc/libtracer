@@ -701,25 +701,25 @@ void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
         if (slot == nullptr) {
             // max_peers_ is the RESOLVED cap, never 0, so there is no "0 means uncapped" arm
             // left to test: a newcomer past it is refused and no admitted peer is evicted.
-            if (slots_.size() >= max_peers_) {
-                ::close(fd);  // clean refusal at the deployment cap, not a hung SYN
-                return;
-            }
             // A refused session, or a refused place for it in the poll set (the listen socket
             // plus every slot, #2156), refuses the peer exactly as the cap does: a clean close,
             // nothing half-built in the table, and no admitted peer the poll loop cannot see.
             // The set is grown here, before the slot exists, so a refusal never evicts anyone.
-            mem::poly_ptr_t<session_base_t> fresh = make_session();
-            if (!pfds.reserve(slots_.size() + 2) || !pslots.reserve(slots_.size() + 1) || !fresh ||
+            // The fd was never published, so its close never waits.
+            mem::poly_ptr_t<session_base_t> fresh;
+            if (slots_.size() >= max_peers_ || !pfds.reserve(slots_.size() + 2) ||
+                !pslots.reserve(slots_.size() + 1) || !(fresh = make_session()) ||
                 !slots_.push_back(std::move(fresh))) {
-                ::close(fd);
+                ::close(fd);  // a clean refusal, not a hung SYN
                 return;
             }
             slot = slots_.back().get();
             idx = slots_.size() - 1;
-            // Link the slot into the broadcast's chain, release: a walker that loads it
-            // sees it constructed (#2263). Its egress is still closed, so it takes nothing.
-            (idx == 0 ? first_ : slots_[idx - 1]->next).store(slot, std::memory_order_release);
+            // Link the slot at the HEAD of the broadcast's chain (#2263): this thread is its
+            // only writer, and the release makes a walker that loads the slot see it
+            // constructed. Its egress is still closed, so it takes nothing yet.
+            slot->next.store(first_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            first_.store(slot, std::memory_order_release);
         }
         // Mint this tenancy's HANDLE (#1294), under the lock and from the slot index. The
         // generation never repeats and never lands on 0 (which is reserved for "no peer"), so
