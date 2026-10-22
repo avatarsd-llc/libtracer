@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -51,7 +52,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_t;
 using tr::wire::type_t;
@@ -67,8 +67,9 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 }
 
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 /** @brief A link whose interface-level drop counters this test dictates outright. */
@@ -304,7 +305,7 @@ void test_net_seams_are_node_scoped() {
 void test_unserved_net_names_are_caller_independent() {
     std::printf("RFC-0010 Am.2 §D.2: an unserved net-plane NAME is caller-INDEPENDENT:\n");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     (void)g.register_vertex(*path_t::parse("/dev"), role_t::STORED_VALUE);
     fwd_router_t router(g);
     counting_link_t up;

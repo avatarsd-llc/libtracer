@@ -55,6 +55,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -1127,7 +1128,7 @@ void test_stream_depth_is_carried_and_ignored() {
     check(g_client_writes == 0, "…and buys nothing: no window was requested of the producer");
 
     // Verbatim: the `:subscribers[]` read-back is the stored source view, byte for byte.
-    const auto stored = g.read_subscribers(producer);
+    const auto stored = tr::testing::read_subscribers(g, producer);
     check(stored.has_value() && stored->size() == 1, "the subscription is on the vertex");
     const std::span<const std::byte> back = stored->front().bytes();
     check(std::ranges::equal(back, std::span<const std::byte>(sub)),

@@ -158,15 +158,15 @@ void sink_b(void* ctx, const tr::graph::remote_delivery_t&, const tr::graph::val
     score(ctx, 'B');
 }
 
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> resolver_a(void* ctx,
-                                                                      std::string_view caller) {
+std::expected<void, tr::wire::err_t> resolver_a(void* ctx, std::string_view caller,
+                                                tr::mem::bytes_t& out) {
     score(ctx, 'A');
-    return tr::graph::subject_token_t(caller.size(), std::byte{'a'});
+    return tr::testing::subject_into(out, std::vector<std::byte>(caller.size(), std::byte{'a'}));
 }
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> resolver_b(void* ctx,
-                                                                      std::string_view caller) {
+std::expected<void, tr::wire::err_t> resolver_b(void* ctx, std::string_view caller,
+                                                tr::mem::bytes_t& out) {
     score(ctx, 'B');
-    return tr::graph::subject_token_t(caller.size(), std::byte{'a'});
+    return tr::testing::subject_into(out, std::vector<std::byte>(caller.size(), std::byte{'a'}));
 }
 
 void observer_a(void* ctx, const tr::graph::sub_event_t&) { score(ctx, 'A'); }
@@ -407,7 +407,7 @@ void remote_sink_flip_race() {
 /**
  * @brief The subject resolver — the ACL gate, on every gated read and write.
  */
-void subject_resolver_flip_race() {
+void subject_lookup_flip_race() {
     std::printf("subject resolver, flipped under a gated read/write storm:\n");
     graph_t g;
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
@@ -426,15 +426,15 @@ void subject_resolver_flip_race() {
     std::thread flipper([&] {
         while (!go.load(std::memory_order_acquire)) {
         }
-        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {&resolver_a, &a});
+        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {&resolver_a, &a});
         armed.store(true, std::memory_order_release);
         while (!stop.load(std::memory_order_relaxed)) {
             if (!burst_then_settle(
                     [&] {
-                        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {&resolver_a, &a});
+                        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {&resolver_a, &a});
                     },
                     [&] {
-                        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {&resolver_b, &b});
+                        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {&resolver_b, &b});
                     },
                     cycles, publishes, stop))
                 break;
@@ -478,7 +478,7 @@ void subject_resolver_flip_race() {
     check(hits > 0, "the resolver was reachable DURING the storm (the torn check is not vacuous)");
     check(g_torn.load() == torn_before, "no resolver was handed the other resolver's context");
     // Settled positive control — no flipper, so every gated read must consult the resolver.
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {&resolver_a, &a});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {&resolver_a, &a});
     const long before = a.hits.load();
     for (int i = 0; i < kSettled; ++i) (void)g.read(v, "peer-a");
     check(a.hits.load() - before == kSettled, "settled: every gated read consults the resolver");
@@ -675,7 +675,7 @@ void child_catalog_flip_race() {
             g.register_child_type(
                 fillers[static_cast<std::size_t>(i) % fillers.size()],
                 tr::graph::thunk(
-                    [](graph_t& gg, std::vector<std::byte> key, const tr::wire::tlv_node_t*) {
+                    [](graph_t& gg, std::span<const std::byte> key, const tr::wire::tlv_node_t*) {
                         return gg.register_vertex_key(std::move(key), role_t::STORED_VALUE);
                     }));
             registrations.fetch_add(1, std::memory_order_relaxed);
@@ -873,12 +873,13 @@ void identity_flip_race() {
 std::atomic<long> g_y_resolved{0};
 
 /** @brief Resolves a caller to its own bytes — the subject the ACEs below name. */
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> resolver_identity(
-    void*, std::string_view caller) {
+std::expected<void, tr::wire::err_t> resolver_identity(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
     if (caller == "peer-y") g_y_resolved.fetch_add(1, std::memory_order_relaxed);
-    return tr::graph::subject_token_t(
-        reinterpret_cast<const std::byte*>(caller.data()),
-        reinterpret_cast<const std::byte*>(caller.data()) + caller.size());
+    return tr::testing::subject_into(
+        out,
+        std::vector<std::byte>(reinterpret_cast<const std::byte*>(caller.data()),
+                               reinterpret_cast<const std::byte*>(caller.data()) + caller.size()));
 }
 
 /**
@@ -900,7 +901,7 @@ void settled_hook_slot_storm() {
         graph_t g;
         const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
         (void)g.write(v, make_value({0x42}));
-        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {&resolver_identity, nullptr});
+        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {&resolver_identity, nullptr});
         const auto as_bytes = [](std::string_view t) {
             return std::vector<std::byte>(reinterpret_cast<const std::byte*>(t.data()),
                                           reinterpret_cast<const std::byte*>(t.data()) + t.size());
@@ -919,7 +920,7 @@ void settled_hook_slot_storm() {
         std::atomic<long> publishes{0};
         std::thread flipper([&] {
             while (!stop.load(std::memory_order_relaxed)) {
-                g.set_hook(&tr::graph::graph_hooks_t::subject_resolver,
+                g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
                            {&resolver_identity, nullptr});
                 publishes.fetch_add(1, std::memory_order_relaxed);
             }
@@ -948,7 +949,7 @@ void settled_hook_slot_storm() {
 int main() {
     std::printf("graph_t configuration-seam publish coherence (#1049):\n");
     remote_sink_flip_race();
-    subject_resolver_flip_race();
+    subject_lookup_flip_race();
     subscription_observer_flip_race();
     child_catalog_flip_race();
     identity_flip_race();

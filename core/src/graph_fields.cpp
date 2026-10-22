@@ -1052,16 +1052,15 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view::view_t& spec_
     // Compose the child key = parent's canonical PATH-payload + one packed record for
     // `child_name` (RFC-0018). The graph owns this addressing; the factory only sees the
     // finished key.
-    // The factory's key is an owning `std::vector` by its public signature (the public-API
-    // half of the seam migration); the render itself draws from the table source (#1778).
-    mem::bytes_t parent_key(*tables_);
-    if (!try_build_key(parent, parent_key)) return std::unexpected(status_t::BACKPRESSURE);
-    std::vector<std::byte> child_key(parent_key.begin(), parent_key.end());
-    if (!wire::emit_path_segment(child_key, child_name))
-        return std::unexpected(status_t::INVALID_PATH);
+    // The key is drawn from the table source (#1778) and lent to the factory as a view for the
+    // call. `child_name` already passed the segment predicate above, so the append can fail
+    // only when the source refuses it.
+    mem::bytes_t child_key(*tables_);
+    if (!try_build_key(parent, child_key) || !wire::emit_path_segment(child_key, child_name))
+        return std::unexpected(status_t::BACKPRESSURE);
 
     result_t<vertex_handle_t> made =
-        factory(*this, std::move(child_key), config ? &*config : nullptr);
+        factory(*this, mem::as_span(child_key), config ? &*config : nullptr);
     if (!made) return std::unexpected(made.error());  // PATH_IN_USE on a duplicate name
     return {};
 }

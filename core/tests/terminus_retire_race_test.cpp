@@ -84,10 +84,10 @@ using tr::wire::type_t;
 using bytes_t = std::vector<std::byte>;
 
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(void*,
-                                                                             std::string_view c) {
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view c,
+                                                       tr::mem::bytes_t& out) {
     const auto* p = reinterpret_cast<const std::byte*>(c.data());
-    return tr::graph::subject_token_t(p, p + c.size());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + c.size()));
 }
 
 /** @brief An `:acl` that admits `admin` to everything and nobody else. */
@@ -251,7 +251,7 @@ void no_terminus_mid_retire(bool pair) {
     std::printf("a %s terminus WRITE inside a retire never reaches the handler:\n",
                 pair ? "PAIR" : "NAME");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     fwd_router_t router{g};
     const path_t at("/t");
     const path_t acl_at("/t:acl");

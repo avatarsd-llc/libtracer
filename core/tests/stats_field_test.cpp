@@ -37,6 +37,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv.hpp"
@@ -54,7 +55,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::wire::type_t;
 
 using tr::testing::check;
@@ -70,8 +70,9 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 void count_cb(void* ctx, const tr::graph::value_t& /*value*/) { ++*static_cast<int*>(ctx); }
 
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 std::string hex(std::span<const std::byte> b) {
@@ -220,7 +221,7 @@ void test_node_scoped() {
 void test_value_is_read_gated() {
     std::printf("RFC-0010 Am.1 §D.5: the VALUE is READ-gated (inverted vs :identity):\n");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     const auto v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     (void)g.write(v, make_value({std::uint8_t{7}}));
     check(g.set_identity(0x01, std::array<std::byte, 32>{}).has_value(), "identity installed");
@@ -255,7 +256,7 @@ void test_value_is_read_gated() {
 void test_unknown_spellings_are_caller_independent() {
     std::printf("RFC-0010 Am.1 §D.2: unknown :stats spellings are caller-INDEPENDENT:\n");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     const std::vector<ace_t> grant{
         ace_t{.type = tr::graph::ace_type_t::ALLOW,
@@ -286,7 +287,7 @@ void test_unknown_spellings_are_caller_independent() {
 void test_census_is_read_only() {
     std::printf("RFC-0010 Am.1 §D.6: :stats is read-only — a write is ENOTTY:\n");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
 
     const auto p = path_t::parse("/dev:stats.mem.control");

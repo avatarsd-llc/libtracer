@@ -233,7 +233,7 @@ void test_custom_factory() {
     // a controller / transport connection. The graph composes the key; the factory
     // only chooses the role (and could register several port sub-vertices).
     bool factory_ran = false;
-    auto streamy = [&factory_ran](graph_t& gg, std::vector<std::byte> key,
+    auto streamy = [&factory_ran](graph_t& gg, std::span<const std::byte> key,
                                   const tr::wire::tlv_node_t*) {
         factory_ran = true;
         return gg.register_vertex_key(std::move(key), role_t::STREAM);

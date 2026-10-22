@@ -2,7 +2,7 @@
 
 An ACE names a **subject token** — opaque bytes. An operation arrives carrying a **caller
 context** — this node's own NAME for the inbound link the frame came in on. Those are different
-things, and the pluggable `subject_resolver_fn_t` is the seam between them
+things, and the pluggable `subject_lookup_fn_t` is the seam between them
 ([ADR-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0018-access-control-authorization-pluggable-subject-token.md)):
 it is where an integrator turns *"the frame came in on link `ws:7`"* into *"and that link belongs
 to `alice`"*.
@@ -33,7 +33,10 @@ libtracer does **authorization**, and the transport does authentication.
   `sink_slot_t` and the gate reads a coherent snapshot
   ([#1049](https://github.com/avatarsd-llc/libtracer/issues/1049)). Whatever state the resolver
   needs travels in `ctx`, which the caller owns and must keep alive across every gated operation.
-- **Install it at wiring time, from one thread, before frames flow.** `graph_hooks_t::subject_resolver`
+- **The token goes into the gate's buffer.** The seam appends the subject to the `out` buffer the
+  gate hands it, a stack frame that spills to the graph's own source only past 64 bytes, so a
+  gated operation allocates nothing for its subject. A refused append is a deny too.
+- **Install it at wiring time, from one thread, before frames flow.** `graph_hooks_t::subject_lookup`
   is configuration, which the verb says on purpose.
 - **Nothing here is conditional** — the target builds and runs under every CI leg.
 

@@ -953,8 +953,7 @@ namespace acl_bench {
 /** @brief Install a subject lookup writing a non-empty caller's own bytes as its token.
  *
  * The caller-storage form (#1781): the token lands in the gate's stack frame, so a gated op
- * allocates nothing for it. The deprecated returning-form `subject_resolver` still works, through
- * an adapter that copies its vector into the same frame. */
+ * allocates nothing for it. It is the only subject seam (#2239). */
 void install_resolver(graph_t& g) {
     g.set_hook(
         &tr::graph::graph_hooks_t::subject_lookup,

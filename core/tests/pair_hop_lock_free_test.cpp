@@ -58,6 +58,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_source.hpp"
@@ -262,10 +263,10 @@ void mint_never_carries_successor() {
 }
 
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(void*,
-                                                                             std::string_view c) {
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view c,
+                                                       tr::mem::bytes_t& out) {
     const auto* p = reinterpret_cast<const std::byte*>(c.data());
-    return tr::graph::subject_token_t(p, p + c.size());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + c.size()));
 }
 
 /** @brief An `:acl` that admits `admin` to everything and nobody else. */
@@ -293,7 +294,7 @@ bytes_t value_byte() {
 void no_door_mid_retire() {
     std::printf("a hop inside a retire never crosses a door whose ACEs are already gone:\n");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     fwd_router_t router{g};
     link_t out;
     const path_t at("/net/tcp/out");

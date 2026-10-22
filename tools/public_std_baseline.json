@@ -36,12 +36,6 @@
       "vector": 2
     }
   },
-  "core/include/libtracer/graph.hpp": {
-    "owner": "#1781 step 3: subject_resolver, the vector read_subscribers / drain_unflushed and the child-factory key are removed",
-    "counts": {
-      "vector": 4
-    }
-  },
   "core/include/libtracer/key_view.hpp": {
     "owner": "#1781 step 3: split_levels removed; for_each_level is the allocation-free form",
     "counts": {

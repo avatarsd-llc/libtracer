@@ -550,7 +550,7 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     roots_ = mem::make_block<roots_t>(*tables_, *tables_);
     if (!roots_ || !vertex_slots_.reserve_next()) mem::exhausted_at_init(*tables_, "graph_t");
     // Each seam lands in its own slot (#2239), exactly as a later `set_hook` would put it.
-    set_subject(hooks.subject_resolver, hooks.subject_lookup);
+    set_hook(&graph_hooks_t::subject_lookup, hooks.subject_lookup);
     set_hook(&graph_hooks_t::subscription_observer, hooks.subscription_observer);
     set_hook(&graph_hooks_t::remote_delivery, hooks.remote_delivery);
     set_hook(&graph_hooks_t::wire_target, hooks.wire_target);
@@ -577,9 +577,9 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
     // beyond the standard `:settings` field, written separately). Devices add richer
     // types (controllers, transport connections — #83) via register_child_type.
-    register_child_type("stored_value", {[](void*, graph_t& g, std::vector<std::byte> child_key,
+    register_child_type("stored_value", {[](void*, graph_t& g, std::span<const std::byte> child_key,
                                             const tlv_node_t*) -> result_t<vertex_handle_t> {
-                                             return g.register_vertex_key(std::move(child_key),
+                                             return g.register_vertex_key(child_key,
                                                                           role_t::STORED_VALUE);
                                          },
                                          nullptr});
@@ -1787,7 +1787,7 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // ONE coherent read of the {fn, ctx} pair for the whole gate (#1049) — never a
     // re-read at the call below, which is what let a concurrent install free the
     // std::function predecessor's captures under a gate that was already inside it.
-    // Unset, this is the same single relaxed load the old `if (!subject_resolver_)` was.
+    // Unset, this is one relaxed load.
     if (!subject_lookup_.installed()) return true;  // enforcement disabled — the hot-path check
     // Installed, the gate reads a SETTLED slot: a reader that overlaps a `set_hook` republish
     // waits the publish out rather than reading the slot as unset. A slot that does not settle
@@ -1815,7 +1815,7 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // The wildcard spelling is RESERVED in the subject-token space (#908): the wire has one
     // spelling for a subject, so a principal that could BE `EVERYONE@` is indistinguishable
     // from the wildcard ACE. Enforced HERE, which is the only site that invokes
-    // `subject_resolver_` at all, rather than left to every integrator to blacklist — and
+    // the subject seam at all, rather than left to every integrator to blacklist — and
     // BEFORE the bearing-ancestor walk,
     // so a misconfigured resolver is refused at an unguarded vertex too. Fail closed, exactly
     // like the resolver's own error arm above.
@@ -3204,22 +3204,14 @@ result_t<std::size_t> graph_t::history(vertex_handle_t vh, std::span<value_ref_t
     return v->history_into(out);  // one refcount share per entry, no allocation
 }
 
-result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh, std::vector<value_ref_t>& out,
+result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh,
+                                               mem::block_array_t<value_ref_t>& out,
                                                std::uint64_t* gap_before) {
     vertex_t* v = vh.get();
     if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // Same gate as `history`, for the same reason: a drain hands back the same ring entries a
     // history read serves, so an ungated drain would be a READ-gate bypass (local-only helper
     // => local (empty) context).
-    if (!acl_allows(v, {}, acl_right_t::READ)) return std::unexpected(status_t::PERMISSION_DENIED);
-    return v->drain_unflushed(out, gap_before);
-}
-
-result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh,
-                                               mem::block_array_t<value_ref_t>& out,
-                                               std::uint64_t* gap_before) {
-    vertex_t* v = vh.get();
-    if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     if (!acl_allows(v, {}, acl_right_t::READ)) return std::unexpected(status_t::PERMISSION_DENIED);
     return v->drain_unflushed(out, gap_before);
 }
@@ -3616,34 +3608,6 @@ graph_t::reclaim_refusals_t graph_t::reclaim_refusals() const noexcept {
     return {.release_refused = refused_release_.load(std::memory_order_relaxed),
             .park_refused = refused_park_.load(std::memory_order_relaxed),
             .retire_refused = refused_retire_.load(std::memory_order_relaxed)};
-}
-
-std::expected<void, wire::err_t> graph_t::lookup_via_resolver(void* ctx, std::string_view caller,
-                                                              mem::bytes_t& out) {
-    // The adapter reads a SETTLED hook slot, as the gate does: a republish in flight is waited
-    // out by re-reading the slot's generation (bounded, no clock, no sleep), and the resolver it
-    // settles on is the one that runs. A slot that does not settle, or settles cleared because
-    // the hooks were being removed, refuses the caller.
-    const auto resolver =
-        static_cast<const graph_t*>(ctx)->subject_resolver_.get_settled(kHookSettleReads);
-    if (!resolver || resolver->fn == nullptr) return std::unexpected(wire::err_t::ACCESS_DENIED);
-    const std::expected<subject_token_t, wire::err_t> token = resolver->fn(resolver->ctx, caller);
-    if (!token) return std::unexpected(token.error());
-    if (!out.append(token->data(), token->size()))
-        return std::unexpected(wire::err_t::ACCESS_DENIED);
-    return {};
-}
-
-void graph_t::set_subject(graph_hook_t<subject_resolver_fn_t> resolver,
-                          graph_hook_t<subject_lookup_fn_t> lookup) noexcept {
-    // The returning-form resolver is kept for `lookup_via_resolver`, which stands in for it in
-    // the gate's one slot; a caller-storage `subject_lookup` takes precedence (#1781). The
-    // resolver lands first, so a gate that reaches the adapter between the two stores fails
-    // closed rather than open.
-    subject_resolver_.set(resolver.fn, resolver.ctx);
-    if (lookup.fn == nullptr && resolver.fn != nullptr)
-        lookup = {&graph_t::lookup_via_resolver, this};
-    subject_lookup_.set(lookup.fn, lookup.ctx);
 }
 
 void graph_t::hold_link(link_pair_t link, bool held, std::size_t n) const {
@@ -4366,14 +4330,6 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, const field_path_t& fiel
     // value nothing published and wraps it once, at the bottom.
     if (field.empty()) return read(vh, caller);
     return read_field_composed(vh, field, caller);
-}
-
-result_t<std::vector<view::view_t>> graph_t::read_subscribers(vertex_handle_t vh,
-                                                              std::string_view caller) const {
-    vertex_t* v = vh.get();
-    if (!acl_allows(v, caller, acl_right_t::READ))  // control-surface read, like ":schema"
-        return std::unexpected(status_t::PERMISSION_DENIED);
-    return v->edge_sources();  // each a clone (refcount bump, no byte copy)
 }
 
 result_t<std::size_t> graph_t::read_subscribers(vertex_handle_t vh,

@@ -87,15 +87,16 @@ using tr::wire::type_t;
  * @brief The `acl` arm's subject resolver (ADR-0018's test shape): the caller context IS the
  *        subject token, so the inbound link's qualified name is what the `:acl` grants.
  */
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(
-    void*, std::string_view caller) {
-    const auto* p = reinterpret_cast<const std::byte*>(caller.data());
-    return tr::graph::subject_token_t(p, p + caller.size());
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))
+        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+    return {};
 }
 
 /** @brief Make @p g ACL-enforcing and grant @p subject READ|WRITE on vertex @p path. */
 void grant_hop(graph_t& g, std::string_view path, std::string_view subject) {
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     (void)g.register_vertex(tr::graph::path_t(path), tr::graph::role_t::STORED_VALUE);
     const auto* sp = reinterpret_cast<const std::byte*>(subject.data());
     const tr::graph::ace_t ace{

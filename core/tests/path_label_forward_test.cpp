@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/conn_spec.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/fwd_router.hpp"
@@ -132,10 +133,10 @@ tr::view::view_t owned(std::span<const std::byte> bytes) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it as
  * trusted before invoking one (#905) — so the error arm here means DENY and nothing else.
  */
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(
-    void*, std::string_view caller) {
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
-    return tr::graph::subject_token_t(p, p + caller.size());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + caller.size()));
 }
 
 /** @brief An ACL granting @p subject exactly @p mask, and nothing else. */
@@ -499,7 +500,7 @@ int main() {
                 // the door — which is exactly the §8.2 re-check under assertion. READ is
                 // granted in both arms because the minting round trip is itself a READ that
                 // crosses this same vertex by name, and that hop is gated too.
-                h.g.set_hook(&tr::graph::graph_hooks_t::subject_resolver,
+                h.g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
                              {caller_is_subject, nullptr});
                 (void)h.g.write(
                     path_t("/net/uplink/b:acl"),

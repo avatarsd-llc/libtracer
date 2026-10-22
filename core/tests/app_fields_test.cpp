@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -47,7 +48,6 @@ using tr::graph::handlers_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::view::rope_t;
 using tr::wire::opt_t;
@@ -106,8 +106,9 @@ bool fails_with(const tr::graph::result_t<void>& r, status_t s) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 constexpr std::uint32_t bit(acl_right_t r) { return static_cast<std::uint32_t>(r); }
@@ -284,7 +285,7 @@ void test_field_set_is_closed() {
 void test_gating() {
     std::printf("access gating (RFC-0010 sketch 3):\n");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     const vertex_handle_t v = g.register_vertex(path_t("/dev/y"), role_t::STORED_VALUE);
 
     std::vector<app_field_t> table;
@@ -448,7 +449,8 @@ void test_storage_shape() {
           "declaring+writing 16 fields minted NO child vertices (member listing empty)");
     check(!g.find(path_t("/dev/n/f0").key()).has_value(),
           "an app field name is not an addressable vertex");
-    check(g.read_subscribers(v).has_value() && g.read_subscribers(v)->empty(),
+    check(tr::testing::read_subscribers(g, v).has_value() &&
+              tr::testing::read_subscribers(g, v)->empty(),
           "no subscriber slots appeared");
 }
 

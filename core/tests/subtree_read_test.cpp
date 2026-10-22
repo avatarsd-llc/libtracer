@@ -37,6 +37,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -50,7 +51,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::view::rope_t;
 using tr::view::view_t;
@@ -338,9 +338,10 @@ void test_acl_prune() {
 
     // Enforcement on for the attributed caller "peer"; the empty (local) context is settled
     // as trusted before the resolver runs (#905), which is what the setup writes above use.
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver,
-               {[](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-                    return subject_token_t{std::byte{'u'}};
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+               {[](void*, std::string_view,
+                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+                    return tr::testing::subject_into(out, "u");
                 },
                 nullptr});
     std::vector<std::byte> everyone;
@@ -427,9 +428,10 @@ void test_acl_prune_zero_children() {
     (void)g.write(path_t("/q/a"), make_value(value_tlv({0x01})));
     (void)g.write(path_t("/q/b"), make_value(value_tlv({0x02})));
 
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver,
-               {[](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-                    return subject_token_t{std::byte{'u'}};
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+               {[](void*, std::string_view,
+                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+                    return tr::testing::subject_into(out, "u");
                 },
                 nullptr});
     std::vector<std::byte> everyone;

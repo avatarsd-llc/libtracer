@@ -42,7 +42,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 
 /** @brief Report expectation @p what and record a failure on @p ok. */
@@ -58,9 +57,17 @@ std::vector<std::byte> as_bytes(std::string_view s) {
     return out;
 }
 
+/** @brief Append @p subject to the gate's buffer @p out; a refused append fails closed. */
+std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::string_view subject) {
+    if (!out.append(reinterpret_cast<const std::byte*>(subject.data()), subject.size()))
+        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+    return {};
+}
+
 /** @brief The simplest resolver there is: the caller context IS the subject token. */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return put_subject(out, caller);
 }
 
 /** @brief One ALLOW ACE granting @p subject exactly @p right, as a writable `:acl` value. */
@@ -96,7 +103,7 @@ int main() {
     // 2. A resolver, and a vertex nobody wrote an ACE to. Open, per vertex.
     {
         graph_t g;
-        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
         const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
         check(ok, g.write(v, some_value(), "peer-a").has_value(),
               "a resolver alone enforces nothing — a vertex with no ACE is open");
@@ -106,7 +113,7 @@ int main() {
     //    refuses everyone else — including for rights it never mentions.
     {
         graph_t g;
-        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
         const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
         (void)g.write(v, some_value());  // seed a value as the trusted local caller
         (void)g.write(path_t("/x:acl"), one_grant("peer-z", acl_right_t::READ));

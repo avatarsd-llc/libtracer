@@ -16,9 +16,9 @@
  * 2. `wire::encode(tlv, bytes_t&)` and `wire::path_key`'s view;
  * 3. `rope_t` / `value_ref_t::to_iovec` into a caller span;
  * 4. `encode_acl` / `parse_acl` into core containers, and `conn_spec_t::bytes(bytes_t&)`;
- * 5. `graph_t::read_subscribers` / `drain_unflushed` into core arrays;
- * 6. the `subject_lookup` hook, which writes the subject token into the gate's own frame, and
- *    the returning `subject_resolver`, which still gates through the adapter.
+ * 5. `graph_t::read_subscribers` / `drain_unflushed` into core arrays (their `std::vector`
+ *    spellings are gone, #2239, so these pin the core form alone);
+ * 6. the `subject_lookup` hook, which writes the subject token into the gate's own frame.
  */
 
 #include <array>
@@ -270,12 +270,12 @@ void test_graph_arrays() {
                                tr::testing::test_link(link))
                   .has_value(),
               "a wire edge (the link is passed as a view)");
-    const auto legacy = g.read_subscribers(src);
     mem::block_array_t<tr::view::view_t> subs(mem::heap_source());
     const auto n = g.read_subscribers(src, subs);
-    check(legacy && legacy->size() == 2 && n && *n == 2 && subs.size() == 2,
-          "read_subscribers into a core array answers the vector form's views");
-    check(n && legacy && subs[0].bytes().data() == (*legacy)[0].bytes().data(),
+    mem::block_array_t<tr::view::view_t> again_subs(mem::heap_source());
+    const auto n2 = g.read_subscribers(src, again_subs);
+    check(n && *n == 2 && subs.size() == 2, "read_subscribers into a core array: both views");
+    check(n && n2 && subs[0].bytes().data() == again_subs[0].bytes().data(),
           "…the same stored views, cloned not copied");
     mem::block_array_t<tr::view::view_t> refused(mem::null_source());
     const auto rn = g.read_subscribers(src, refused);
@@ -307,13 +307,6 @@ std::expected<void, tr::wire::err_t> lookup_caller(void*, std::string_view calle
     return {};
 }
 
-/** @brief The returning resolver, for the adapter arm. */
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> resolve_caller(void*,
-                                                                          std::string_view caller) {
-    if (caller == "ghost") return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
-    return tr::graph::subject_token_t(bytes_of(caller).begin(), bytes_of(caller).end());
-}
-
 /** @brief Gate a read of `/x` for each caller and report allow/deny as a 3-char string. */
 [[nodiscard]] std::array<bool, 3> gate(tr::graph::graph_t& g, tr::graph::vertex_handle_t v,
                                        std::string_view long_name) {
@@ -335,29 +328,18 @@ void test_subject_lookup() {
     aces[1].access_mask = static_cast<std::uint32_t>(acl_right_t::READ);
     const std::vector<std::byte> acl = tr::graph::encode_acl(aces);
 
-    for (const bool caller_storage : {true, false}) {
-        tr::graph::graph_t g;
-        if (caller_storage) {
-            g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {lookup_caller, nullptr});
-        } else {
-            g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {resolve_caller, nullptr});
-        }
-        const auto v = g.register_vertex(tr::graph::path_t("/x"), role_t::STORED_VALUE);
-        check(g.write(v, tr::testing::make_value({7})).has_value(), "value");
-        check(g.write(tr::graph::path_t("/x:acl"), tr::testing::make_value(acl)).has_value(),
-              "a closing :acl");
-        const auto seen = gate(g, v, long_name);
-        check(seen[0] && !seen[1] && seen[2],
-              caller_storage ? "subject_lookup: peer-a and the spilled long subject read, "
-                               "peer-b does not"
-                             : "the returning resolver gates identically through the adapter");
-        check(!g.read(v, "ghost").has_value(), "an unnameable caller is denied");
-        const auto lookup = g.hook(&tr::graph::graph_hooks_t::subject_lookup);
-        const auto resolver = g.hook(&tr::graph::graph_hooks_t::subject_resolver);
-        check(caller_storage ? lookup.fn == &lookup_caller && resolver.fn == nullptr
-                             : resolver.fn == &resolve_caller && lookup.fn == nullptr,
-              "hook() hands back exactly what was installed, never the adapter");
-    }
+    tr::graph::graph_t g;
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {lookup_caller, nullptr});
+    const auto v = g.register_vertex(tr::graph::path_t("/x"), role_t::STORED_VALUE);
+    check(g.write(v, tr::testing::make_value({7})).has_value(), "value");
+    check(g.write(tr::graph::path_t("/x:acl"), tr::testing::make_value(acl)).has_value(),
+          "a closing :acl");
+    const auto seen = gate(g, v, long_name);
+    check(seen[0] && !seen[1] && seen[2],
+          "subject_lookup: peer-a and the spilled long subject read, peer-b does not");
+    check(!g.read(v, "ghost").has_value(), "an unnameable caller is denied");
+    check(g.hook(&tr::graph::graph_hooks_t::subject_lookup).fn == &lookup_caller,
+          "hook() hands back exactly what was installed");
 }
 
 }  // namespace

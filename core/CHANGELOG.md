@@ -105,11 +105,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   holds, where before it reset that property to its default. At registration an unset member
   still takes the default, so `register_vertex` behaves as it did. `retention_t::N` named
   without a `depth` keeps the current depth.
+- **The returning-form subject resolver is deleted; `subject_lookup` is the one ACL subject
+  seam (ADR-0083 Decision 11, #1781 step 3).** `subject_resolver_fn_t`, `subject_token_t` and
+  `graph_hooks_t::subject_resolver` are removed, with the adapter that stood in for them and the
+  rule that made `subject_lookup` win when both were installed. A gated operation no longer
+  allocates a `std::vector` for its subject. The three owning-`std` twins go with it:
+  `read_subscribers` returning `std::vector<view_t>` and `drain_unflushed(std::vector&)` (the
+  `block_array_t` overloads stay), and `child_factory_t` now takes its child key as a
+  `std::span<const std::byte>`, borrowed for the call. `graph.hpp` names no owning `std` type.
 
 ### Upgrading
 
-- `auto h = g.hooks(); h.subject_resolver = {fn, ctx}; g.set_hooks(h);` becomes
-  `g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {fn, ctx});`, one call per seam.
+- `auto h = g.hooks(); h.remote_delivery = {fn, ctx}; g.set_hooks(h);` becomes
+  `g.set_hook(&tr::graph::graph_hooks_t::remote_delivery, {fn, ctx});`, one call per seam.
   Clear a seam with `g.set_hook(&graph_hooks_t::<seam>, {})`, or, from the destructor of the
   object that installed it, with `g.clear_hook(&graph_hooks_t::<seam>, this)`. Read one with
   `g.hook(&graph_hooks_t::<seam>)`.
@@ -120,6 +128,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `.app_fields = tr::graph::app_fields_decl_t{}`. A braced field list is spelled
   `.app_fields = app_fields_decl_t{app_field_t{…}}` in a designated initializer; a vector, a
   borrowed table or a static array converts as before.
+- A subject resolver must return the token through the out buffer: `std::expected<subject_token_t,
+  err_t> f(void* ctx, std::string_view caller)` becomes `std::expected<void, err_t> f(void* ctx,
+  std::string_view caller, tr::mem::bytes_t& out)`, which appends the token to `out` (answer
+  `ACCESS_DENIED` if the append is refused) and is installed as `graph_hooks_t::subject_lookup`.
+- `g.read_subscribers(v)` becomes `g.read_subscribers(v, out)` and `g.drain_unflushed(v, vec)`
+  becomes `g.drain_unflushed(v, out)`, with `out` a `tr::mem::block_array_t` over a source of
+  your choice. A child factory takes `std::span<const std::byte> child_key` and copies the key
+  if it keeps it.
 
 ## [0.21.0] — 2026-10-22
 

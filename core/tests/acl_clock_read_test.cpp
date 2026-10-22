@@ -31,6 +31,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -61,7 +62,6 @@ namespace {
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::testing::check;
 using tr::testing::make_value;
@@ -74,8 +74,9 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 }
 
 /** @brief The test resolver: the caller context IS the subject token. */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 /**
@@ -94,7 +95,7 @@ std::vector<std::byte> allow_all(std::string_view subject, std::uint64_t expires
 
 int main() {
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     const vertex_handle_t open = g.register_vertex(path_t("/open"), role_t::STORED_VALUE);
     const vertex_handle_t standing = g.register_vertex(path_t("/standing"), role_t::STORED_VALUE);
     const vertex_handle_t leased = g.register_vertex(path_t("/leased"), role_t::STORED_VALUE);

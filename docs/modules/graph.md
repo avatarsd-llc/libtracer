@@ -102,13 +102,12 @@ class  subscription_t { /* opaque: producer vertex + :subscribers[] slot index; 
 
 template <class Fn> struct graph_hook_t { Fn fn; void* ctx; };  // one graph-wide seam
 struct graph_hooks_t {        // the graph-wide seams as ONE aggregate (RFC-0028 D9)
-    graph_hook_t<subject_resolver_fn_t> subject_resolver;       // ACL enforcement switch
     graph_hook_t<sub_observer_fn_t>     subscription_observer;
     graph_hook_t<remote_delivery_fn_t>  remote_delivery;        // the router installs it
     graph_hook_t<wire_target_fn_t>      wire_target;            // the router installs it
     graph_hook_t<stats_sampler_fn_t>    stats_sampler;          // the router installs it
     graph_hook_t<link_hold_fn_t>        link_hold;              // the transport plane's (#1816)
-    graph_hook_t<subject_lookup_fn_t>   subject_lookup;         // caller-storage ACL switch
+    graph_hook_t<subject_lookup_fn_t>   subject_lookup;         // ACL enforcement switch
     graph_hook_t<session_admission_fn_t> session_admission;     // per-session subscribe check
                               // + teardown event (#1841); needs config_t::kSessionAdmission
     graph_hook_t<link_name_fn_t>        link_name;              // the router installs it (#1941)
@@ -482,7 +481,7 @@ the seam: clearing a sink does not stop a dispatch already in flight.
 | `register_child_type(type, factory)` | populates the in-band creation catalog: which `type` selector a `:children[]` `SPEC` write may instantiate. Generic, and still live — but **not** the door to a connection any more: the net plane's `client` / `listener` types were unregistered at RFC-0014 S7, which left `/net/<module>/conn` the only connection-creation surface | only the built-in `stored_value`; an unregistered `type` answers `SCHEMA_NOT_FOUND` |
 | `set_identity(kind, key)` / `clear_identity()` | installs the node-scoped record `read <vertex>:identity` serves, byte-identical from every vertex | absent — `:identity` answers `SCHEMA_NOT_FOUND` |
 | `graph_hooks_t::remote_delivery` | where the producer fan-out hands each **remote** subscriber's delivery (the router installs it) | **null — remote subscriber slots are stored but never deliver** |
-| `graph_hooks_t::subject_resolver` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
+| `graph_hooks_t::subject_lookup` | maps a caller context to a subject token, written into the gate's buffer, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
 | `subscribe_wire(v, source, route, link, reverse, caller)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the durability latch the subscriber requested. `link` is WHERE the edge delivers; `caller` is WHO subscribed (empty ⇒ the same as `link`, every pre-#375-Part-2 caller) | — (called by the FWD resolver, not a default) |
 
 The two defaults in bold are load-bearing and are the two failure modes a node wired by
@@ -857,10 +856,6 @@ a reply already being assembled.
 ```
 
 ```{doxygentypedef} tr::graph::subject_lookup_fn_t
-:project: libtracer
-```
-
-```{doxygentypedef} tr::graph::subject_resolver_fn_t
 :project: libtracer
 ```
 

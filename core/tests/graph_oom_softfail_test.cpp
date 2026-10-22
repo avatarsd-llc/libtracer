@@ -617,10 +617,10 @@ void test_ring_best_effort_sheds_oldest_with_a_gap() {
 
     std::vector<tr::graph::value_ref_t> batch;
     std::uint64_t gap_before = 0;
-    (void)g.drain_unflushed(v, batch, &gap_before);
+    (void)tr::testing::drain_unflushed(g, v, batch, &gap_before);
     check(gap_before > 0, "the consumer is TOLD about the discontinuity, in order, at the drain");
     std::uint64_t again = 1;
-    (void)g.drain_unflushed(v, batch, &again);
+    (void)tr::testing::drain_unflushed(g, v, batch, &again);
     check(again == 0, "…exactly once — a gap already surfaced is not re-reported");
 }
 

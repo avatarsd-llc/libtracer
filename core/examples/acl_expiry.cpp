@@ -45,7 +45,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 
 /** @brief Report expectation @p what and record a failure on @p ok. */
@@ -61,9 +60,17 @@ std::vector<std::byte> as_bytes(std::string_view s) {
     return out;
 }
 
+/** @brief Append @p subject to the gate's buffer @p out; a refused append fails closed. */
+std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::string_view subject) {
+    if (!out.append(reinterpret_cast<const std::byte*>(subject.data()), subject.size()))
+        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+    return {};
+}
+
 /** @brief The caller context IS the subject token. */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return put_subject(out, caller);
 }
 
 /** @brief @p right as the single `access_mask` bit it is. */
@@ -125,7 +132,7 @@ int main() {
 
     // The same predicate at the real door, where `now` comes from the graph's own clock.
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     const vertex_handle_t v = g.register_vertex(path_t("/room"), role_t::STORED_VALUE);
     (void)g.write(v, some_value());
     const ace_t both[] = {

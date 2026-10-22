@@ -30,6 +30,7 @@
 #include <thread>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_history.hpp"
 #include "test_support.hpp"
@@ -220,28 +221,28 @@ void test_stream_drain_cursor() {
           "trim drops the oldest entries (ring holds 3,4,5)");
 
     std::vector<tr::graph::value_ref_t> batch;
-    const auto d1 = g.drain_unflushed(v, batch);
+    const auto d1 = tr::testing::drain_unflushed(g, v, batch);
     check(d1.has_value() && *d1 == 3, "5 unflushed appends drain to the 3 ring survivors");
     check(batch.size() == 3 && std::to_integer<int>(batch[0]->only().bytes()[0]) == 3 &&
               std::to_integer<int>(batch[2]->only().bytes()[0]) == 5,
           "drain is in append order");
-    const auto d2 = g.drain_unflushed(v, batch);
+    const auto d2 = tr::testing::drain_unflushed(g, v, batch);
     check(d2.has_value() && *d2 == 0, "a drained stream has nothing more to drain");
 
     (void)g.assign(v, make_value({6}));
-    const auto d3 = g.drain_unflushed(v, batch);
+    const auto d3 = tr::testing::drain_unflushed(g, v, batch);
     check(d3.has_value() && *d3 == 1 && std::to_integer<int>(batch[0]->only().bytes()[0]) == 6,
           "the next append drains alone (a queue, not a coalesce)");
 
     (void)g.assign(v, make_value({7}));
     check(g.mark_flushed(v).has_value(), "mark_flushed is accepted on a STREAM");
-    const auto d4 = g.drain_unflushed(v, batch);
+    const auto d4 = tr::testing::drain_unflushed(g, v, batch);
     check(d4.has_value() && *d4 == 0, "mark_flushed advances the cursor without draining");
 
     // The role gate on both verbs: a non-stream role owns no ring, so it owns no cursor —
     // the same disposition `history` already gives.
     tr::graph::vertex_handle_t sv = g.register_vertex(path_t("/log/cell"), role_t::STORED_VALUE);
-    const auto nd = g.drain_unflushed(sv, batch);
+    const auto nd = tr::testing::drain_unflushed(g, sv, batch);
     check(!nd.has_value() && nd.error() == status_t::SCHEMA_NOT_FOUND,
           "drain_unflushed on a non-stream role is SchemaNotFound");
     const auto nf = g.mark_flushed(sv);
@@ -641,8 +642,8 @@ void test_admission_door_uniformity() {
         check(g.subscribe(path_t("/a"), path_t("/sink")).has_value(), "sugar door subscribes");
         check(g.write(path_t("/b:subscribers[]"), subscriber_tlv("sink")).has_value(),
               "field-write door subscribes");
-        const auto ra = g.read_subscribers(a);
-        const auto rb = g.read_subscribers(b);
+        const auto ra = tr::testing::read_subscribers(g, a);
+        const auto rb = tr::testing::read_subscribers(g, b);
         check(ra && ra->size() == 1, "sugar edge reads back from :subscribers[]");
         check(rb && rb->size() == 1, "field-write edge reads back from :subscribers[]");
         check(ra && rb && ra->size() == 1 && rb->size() == 1 &&

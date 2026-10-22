@@ -9,7 +9,7 @@
  *
  * An ACE names a SUBJECT TOKEN — opaque bytes. An operation arrives carrying a CALLER CONTEXT —
  * this node's own NAME for the inbound link the frame came in on. Those are different things,
- * and the pluggable `subject_resolver_fn_t` is the seam between them (ADR-0018): it is where an
+ * and the pluggable `subject_lookup_fn_t` is the seam between them (ADR-0018): it is where an
  * integrator turns "the frame came in on link `ws:7`" into "and that link belongs to `alice`".
  * Authorization is what libtracer does; deciding whose identity a link carries is the
  * resolver's, which is why v1's transport-authenticated peer id and a later ed25519 key both
@@ -24,6 +24,8 @@
  *    trusted local channel first, so the resolver is never asked to have an opinion about it.
  *  - It is a `{fn, ctx}` pair, not a `std::function` (#1049): whatever state the resolver needs
  *    travels in a caller-owned `ctx` that must outlive every gated operation.
+ *  - It returns the token through the gate's `out` buffer, never as an owning container, so a
+ *    gated operation allocates nothing for its subject (#1781).
  *
  * Runs under ctest as `example_acl_subject_resolver`; returns non-zero on any failed check.
  */
@@ -47,7 +49,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 
 /** @brief Report expectation @p what and record a failure on @p ok. */
@@ -69,17 +70,24 @@ struct link_directory_t {
     int invocations = 0;
 };
 
+/** @brief Append @p subject to the gate's buffer @p out; a refused append fails closed. */
+std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::string_view subject) {
+    if (!out.append(reinterpret_cast<const std::byte*>(subject.data()), subject.size()))
+        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+    return {};
+}
+
 /**
  * @brief A resolver with a real mapping in it: link name in, principal out.
  *
  * `ws:7` is a link this node accepted; `alice` is who is behind it. An ACE names `alice`,
  * because a principal outlives the link it happens to be dialled in on today.
  */
-std::expected<subject_token_t, tr::wire::err_t> resolve_link_owner(void* ctx,
-                                                                   std::string_view caller) {
+std::expected<void, tr::wire::err_t> resolve_link_owner(void* ctx, std::string_view caller,
+                                                        tr::mem::bytes_t& out) {
     static_cast<link_directory_t*>(ctx)->invocations += 1;
-    if (caller == "ws:7") return as_bytes("alice");
-    if (caller == "ws:8") return as_bytes("bob");
+    if (caller == "ws:7") return put_subject(out, "alice");
+    if (caller == "ws:8") return put_subject(out, "bob");
     // Every other link is one this node cannot put a name to: a stale link, a revoked peer,
     // a lookup that failed. That is a DENY, and saying so is the whole point of the arm.
     return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
@@ -111,7 +119,7 @@ int main() {
     link_directory_t directory;
 
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {resolve_link_owner, &directory});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {resolve_link_owner, &directory});
     const vertex_handle_t v = g.register_vertex(path_t("/dev/temp"), role_t::STORED_VALUE);
     (void)g.write(v, some_value());  // the trusted local caller seeds a value…
     (void)g.write(path_t("/dev/temp:acl"), one_grant("alice", acl_right_t::READ));  // …and the ACL

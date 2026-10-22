@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/packed_path.hpp"
@@ -65,7 +66,6 @@ using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::net::fwd_router_t;
 using tr::net::peer_handle_t;
@@ -82,9 +82,10 @@ constexpr std::string_view kBus = "net/srv/bus";
 constexpr std::string_view kP2p = "net/tcp/x";
 
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
-    return subject_token_t(p, p + caller.size());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + caller.size()));
 }
 
 /** @brief One inheritable ALLOW ACE for @p subject over @p mask. */
@@ -194,7 +195,7 @@ struct node_t {
      *         child (with its connection vertex) as well as the bus. */
     explicit node_t(bool enforce = true, bool p2p_mounted = true) {
         if (enforce) {
-            g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+            g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
         }
         const bytes_t acl = mount_acl();
         check(router.attach_link(std::string(kBus), bus), "bus mounted with its vertex");

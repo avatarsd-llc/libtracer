@@ -6,13 +6,12 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * `graph_hooks_t::remote_delivery` / `graph_hooks_t::subject_resolver` /
- * `graph_hooks_t::subscription_observer` take the ADR-0047 pair — a bare function pointer plus an
- * opaque context — because a `std::function` cannot be published coherently to a racing
- * reader: assigning one DESTROYS the old target, so a setter racing a hot-path reader freed
- * the captured state that reader was standing on (#1049). Production installs a captureless
- * thunk over a long-lived object (`fwd_router_t` passes `this`), which is exactly what the
- * shape is for.
+ * `graph_hooks_t::remote_delivery` / `graph_hooks_t::subscription_observer` take the ADR-0047 pair
+ * — a bare function pointer plus an opaque context — because a `std::function` cannot be published
+ * coherently to a racing reader: assigning one DESTROYS the old target, so a setter racing a
+ * hot-path reader freed the captured state that reader was standing on (#1049). Production installs
+ * a captureless thunk over a long-lived object (`fwd_router_t` passes `this`), which is exactly
+ * what the shape is for.
  *
  * Tests, though, overwhelmingly want a lambda that captures a counter on the stack. These
  * guards are that: a named local that OWNS the callable, installs a captureless thunk over
@@ -20,6 +19,9 @@
  * lifetime obligation the seam states, made local and visible, rather than a `std::function`
  * smuggled back into the graph. Immovable and non-copyable on purpose: the installed context
  * is `this`, so a moved guard would leave the graph pointing at a dead object.
+ *
+ * Beside them: the subject-seam and core-array conveniences the graph tests share
+ * (`subject_into`, `read_subscribers`, `drain_unflushed`).
  *
  * `tr::testing` is a tests-only namespace — it is not a layer in the L0..L5 model and nothing
  * under `core/src` or `core/include` may name it.
@@ -39,6 +41,50 @@
 #include "libtracer/view.hpp"
 
 namespace tr::testing {
+
+/** @brief Write @p token into a subject seam's caller buffer — the one step every test subject
+ *         seam ends in (@ref tr::graph::subject_lookup_fn_t). A refused append fails closed. */
+inline std::expected<void, tr::wire::err_t> subject_into(tr::mem::bytes_t& out,
+                                                         std::span<const std::byte> token) {
+    if (!out.append(token.data(), token.size()))
+        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+    return {};
+}
+
+/** @brief @ref subject_into over a text token. */
+inline std::expected<void, tr::wire::err_t> subject_into(tr::mem::bytes_t& out,
+                                                         std::string_view token) {
+    return subject_into(out, std::as_bytes(std::span(token.data(), token.size())));
+}
+
+/** @brief The subject seam most tests install: the caller context IS the subject token. */
+inline std::expected<void, tr::wire::err_t> caller_is_subject_into(void* /*ctx*/,
+                                                                   std::string_view caller,
+                                                                   tr::mem::bytes_t& out) {
+    return subject_into(out, caller);
+}
+
+/** @brief `g.read_subscribers` copied into a `std::vector` — a test convenience over the
+ *         core-array form the library serves. */
+inline tr::graph::result_t<std::vector<tr::view::view_t>> read_subscribers(
+    const tr::graph::graph_t& g, tr::graph::vertex_handle_t v, std::string_view caller = {}) {
+    tr::mem::block_array_t<tr::view::view_t> out(tr::mem::heap_source());
+    const tr::graph::result_t<std::size_t> n = g.read_subscribers(v, out, caller);
+    if (!n) return std::unexpected(n.error());
+    return std::vector<tr::view::view_t>(out.begin(), out.end());
+}
+
+/** @brief `g.drain_unflushed` into a `std::vector` (overwritten on success) — a test
+ *         convenience over the core-array form the library serves. */
+inline tr::graph::result_t<std::size_t> drain_unflushed(tr::graph::graph_t& g,
+                                                        tr::graph::vertex_handle_t v,
+                                                        std::vector<tr::graph::value_ref_t>& out,
+                                                        std::uint64_t* gap_before = nullptr) {
+    tr::mem::block_array_t<tr::graph::value_ref_t> got(tr::mem::heap_source());
+    const tr::graph::result_t<std::size_t> n = g.drain_unflushed(v, got, gap_before);
+    if (n) out.assign(got.begin(), got.end());
+    return n;
+}
 
 /**
  * @brief The pairs a test with no transport plane admits a remote edge over @p name with
@@ -114,31 +160,6 @@ class remote_sink_guard_t {
 /** @brief CTAD so a call site spells `const remote_sink_guard_t sink(g, [&]{…});`. */
 template <typename F>
 remote_sink_guard_t(tr::graph::graph_t&, F) -> remote_sink_guard_t<F>;
-
-/** @brief Owns a capturing subject resolver and keeps it installed for its own lifetime. */
-template <typename F>
-class subject_resolver_guard_t {
-   public:
-    /** @brief Install @p f on @p g; it stays installed until this guard dies. */
-    subject_resolver_guard_t(tr::graph::graph_t& g, F f) : fn_(std::move(f)) {
-        g.set_hook(&tr::graph::graph_hooks_t::subject_resolver,
-                   {[](void* ctx, std::string_view caller)
-                        -> std::expected<tr::graph::subject_token_t, tr::wire::err_t> {
-                        return static_cast<subject_resolver_guard_t*>(ctx)->fn_(caller);
-                    },
-                    this});
-    }
-    subject_resolver_guard_t(const subject_resolver_guard_t&) = delete; /**< @brief Immovable. */
-    /** @brief Immovable. */
-    subject_resolver_guard_t& operator=(const subject_resolver_guard_t&) = delete;
-
-   private:
-    F fn_; /**< @brief The owned callable the installed thunk forwards to. */
-};
-
-/** @brief CTAD so a call site spells `const subject_resolver_guard_t r(g, [&]{…});`. */
-template <typename F>
-subject_resolver_guard_t(tr::graph::graph_t&, F) -> subject_resolver_guard_t<F>;
 
 /** @brief Owns a capturing subscription observer and keeps it installed for its own lifetime. */
 template <typename F>

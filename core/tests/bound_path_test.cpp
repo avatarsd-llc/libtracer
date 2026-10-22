@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/path_pair.hpp"
@@ -57,7 +58,6 @@ using tr::graph::op_resolver_t;
 using tr::graph::path_t;
 using tr::graph::reply_kind_t;
 using tr::graph::role_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::graph::vertex_slot_t;
 using tr::wire::opt_t;
@@ -184,9 +184,10 @@ reply_facts_t reply_facts(const tr::view::rope_t& reply) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
-    return subject_token_t(p, p + caller.size());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + caller.size()));
 }
 
 std::vector<std::byte> allow_acl(std::string_view subject, std::uint32_t mask) {
@@ -533,7 +534,7 @@ void test_residual_length_drops() {
 void test_mint_denied_by_acl() {
     std::printf("a denied operation mints NOTHING (§6.1 anti-enumeration):\n");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0x05})));
@@ -568,7 +569,7 @@ void test_mint_denied_by_acl() {
 void test_revocation_is_immediate() {
     std::printf("a revoked right takes effect on the next op over an existing binding (§6.2):\n");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0x05})));

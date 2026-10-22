@@ -70,6 +70,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -275,7 +276,8 @@ void test_best_effort_sheds_and_accounts(std::size_t entry) {
     // The CONSUMER's face of the same loss: an in-order gap, delivered once, at the shed point.
     std::vector<tr::graph::value_ref_t> batch;
     std::uint64_t gap = 0;
-    const tr::graph::result_t<std::size_t> drained = g.drain_unflushed(rx.v, batch, &gap);
+    const tr::graph::result_t<std::size_t> drained =
+        tr::testing::drain_unflushed(g, rx.v, batch, &gap);
     check(drained.has_value(), "best-effort: the consumer drains its own ring");
     check(gap == kOver, "best-effort: the drain reports the gap — silence is the forbidden answer");
     check(drained.has_value() && *drained == kFit,
@@ -283,7 +285,8 @@ void test_best_effort_sheds_and_accounts(std::size_t entry) {
 
     std::uint64_t again = 0;
     batch.clear();
-    const tr::graph::result_t<std::size_t> second = g.drain_unflushed(rx.v, batch, &again);
+    const tr::graph::result_t<std::size_t> second =
+        tr::testing::drain_unflushed(g, rx.v, batch, &again);
     check(second.has_value() && again == 0,
           "best-effort: the gap is reported ONCE — a re-drain does not re-report it");
 
@@ -369,12 +372,12 @@ void test_recovery_resumes_stops_counting_and_leaks_nothing(std::size_t entry) {
     // The CONSUMER learns of the whole loss exactly once, then hears only clean batches.
     std::vector<tr::graph::value_ref_t> batch;
     std::uint64_t gap = 0;
-    check(g.drain_unflushed(rx.v, batch, &gap).has_value() && gap == shed,
+    check(tr::testing::drain_unflushed(g, rx.v, batch, &gap).has_value() && gap == shed,
           "recovery: the drain accounts exactly what was dropped, once");
     check(g.assign(rx.v, payload(0x6F)).has_value(), "recovery: one more clean admission");
     batch.clear();
     gap = 1;
-    check(g.drain_unflushed(rx.v, batch, &gap).has_value() && gap == 0,
+    check(tr::testing::drain_unflushed(g, rx.v, batch, &gap).has_value() && gap == 0,
           "recovery: and the batch after recovery carries NO gap");
 
     // NO LEAK. Retiring the vertex releases every reservation to the source that served it

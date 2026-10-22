@@ -27,6 +27,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/conn_spec.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -42,7 +43,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::net::conn_role_t;
 using tr::net::fwd_router_t;
@@ -61,8 +61,9 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 }
 
 /** @brief The test resolver: the caller context IS the subject (acl_test's shape). */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 /** @brief One ALLOW ACE per (subject, mask) pair, encoded as a whole `:acl` payload. */
@@ -114,7 +115,7 @@ bool denied(const tr::graph::result_t<void>& r) {
 void test_creator_endpoint_gates_on_write() {
     std::printf("RFC-0036: the creator endpoint gates SPEC and NAME on WRITE:\n");
     graph_t node;
-    node.set_hook(&tr::graph::graph_hooks_t::subject_resolver, {caller_is_subject, nullptr});
+    node.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
     declare_fake_module(net);
