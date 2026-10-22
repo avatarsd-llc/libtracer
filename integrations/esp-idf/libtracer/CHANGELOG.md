@@ -41,7 +41,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   even in the middle of a fragmented message. `timing().write_timeout_ms` is now a half of the write budget, not a third, since a
   frame's write spends it on two legs (625 ms at the 5 s watchdog fallback, was 416 ms). With
   `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS`, `tx_frames` and `tx_bytes` now include the PONG and
-  CLOSE replies, and `tx_bytes` counts whole frames, header included.
+  CLOSE replies.
 
 ### Changed (breaking)
 

@@ -757,7 +757,7 @@ class esp_ws_client_link_t final : public transport_t {
         std::uint32_t rx_bytes = 0;  /**< @brief Payload bytes delivered inbound. */
         std::uint32_t tx_frames = 0; /**< @brief Messages written outbound. */
         std::uint32_t tx_bytes =
-            0; /**< @brief Frame bytes written outbound (header included, control replies too). */
+            0; /**< @brief Payload bytes written outbound, control replies included. */
         std::int64_t last_rx_us = -1; /**< @brief Last delivered message; -1 = never. */
     };
     /**

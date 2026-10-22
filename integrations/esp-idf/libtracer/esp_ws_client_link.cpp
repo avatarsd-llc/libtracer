@@ -883,9 +883,12 @@ void esp_ws_client_link_t::write_locked(std::span<const std::byte> wire) {
     // (#1663). Nesting is write_m_ -> st_m_, never the reverse.
     const std::lock_guard<std::mutex> st_lk(st_m_);
     ++traffic_.tx_frames;
-    // Frame bytes as written, header included: the frame was built by the caller, so it is
-    // not decoded again here (#2265).
-    traffic_.tx_bytes += static_cast<std::uint32_t>(wire.size());
+    // Payload bytes, as every kind counts them. A client frame's header is 6, 8 or 14 bytes,
+    // and its second byte's length code (126, 127, or the length itself) says which (#2265).
+    const unsigned code = static_cast<unsigned>(wire[1]) & 0x7FU;
+    traffic_.tx_bytes += static_cast<std::uint32_t>(wire.size() - (code < 126    ? 6U
+                                                                   : code == 126 ? 8U
+                                                                                 : 14U));
 #endif
 }
 
