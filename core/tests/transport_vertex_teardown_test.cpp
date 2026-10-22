@@ -163,7 +163,7 @@ void routed_dial_reaches_the_endpoint() {
     check(net.register_module("m", "", conn_role_t::DIAL).has_value(), "module m is declared");
     net.provide_link("m", "x", staged);
     router.on_frame(kListener, dial_frame("x"));
-    check(net.settings_of("net/m/x") != nullptr,
+    check(net.settings_of("net/m/x").has_value(),
           "a dial from the app-owned listener creates through the endpoint's handler");
     (void)router.remove_child(kListener);
 }

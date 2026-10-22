@@ -661,9 +661,9 @@ void test_config_constructed_webtransport() {
                                  wt_conn_spec("b", srv_port, "127.0.0.1", "dev"));
     check(wa.has_value(),
           "A: SPEC{kind=webtransport, addr, port, ca} constructs the dialing endpoint");
-    const auto* s = net_a.settings_of("net/webtransport-client/b");
+    const auto s = net_a.settings_of("net/webtransport-client/b");
     check(
-        s != nullptr && s->kind == "webtransport" && s->addr == "127.0.0.1" && s->port == srv_port,
+        s.has_value() && s->kind == "webtransport" && s->addr == "127.0.0.1" && s->port == srv_port,
         "A: the parsed :settings carry kind/addr/port");
 }
 

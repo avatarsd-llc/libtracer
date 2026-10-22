@@ -216,7 +216,7 @@ void test_engine_creation_is_dormant() {
         const std::lock_guard l(script.m);
         check(script.attempts == 0, "the factory has NOT run — creation dials nothing");
     }
-    check(net.settings_of("net/fake-client/a") != nullptr &&
+    check(net.settings_of("net/fake-client/a").has_value() &&
               net.settings_of("net/fake-client/a")->backoff_ms == 1,
           "the parsed settings carry the SPEC's backoff");
 

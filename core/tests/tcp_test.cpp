@@ -730,8 +730,8 @@ void test_config_constructed_tcp() {
         node_a.write(path_t("/net/tcp-client/conn"), tcp_conn_spec("b", port, "127.0.0.1"));
     check(wa.has_value(),
           "A: SPEC{kind=tcp, addr, port} on the DIAL module constructs the dialing socket");
-    const auto* s = net_a.settings_of("net/tcp-client/b");
-    check(s != nullptr && s->kind == "tcp" && s->addr == "127.0.0.1" && s->port == port,
+    const auto s = net_a.settings_of("net/tcp-client/b");
+    check(s.has_value() && s->kind == "tcp" && s->addr == "127.0.0.1" && s->port == port,
           "A: the parsed :settings carry kind/addr/port");
 
     // End-to-end: FWD{READ dst=/b/temp} from A crosses A's config-created stream to

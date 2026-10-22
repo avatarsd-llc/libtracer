@@ -192,7 +192,7 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
   `:settings` surface* — a device-private facet ([ADR-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md) §Decision 3)
   reached through the transport's own config door. Nor is there a post-creation
   reconfiguration door: the only accessor, `transport_vertex_t::settings_of`, hands out
-  a **const** view. So a peer's IP changing is *not* a `:settings` edit — today it means
+  a **copy** of the record. So a peer's IP changing is *not* a `:settings` edit — today it means
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which does tear down the
   routes under it, because `remove_connection` un-routes and retires the identity vertex.
   Routing that makes `/net/<module>/<name>` addressable is [ADR-0061 — Per-module mount routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md).

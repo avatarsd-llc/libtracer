@@ -153,8 +153,8 @@ void test_create_connection_vertex() {
     check(node.find(path_t::parse("/net/ws-client/up")->key()).has_value(),
           "the connection resolves as /net/ws-client/up (a first-class / vertex)");
 
-    const auto* s = net.settings_of("net/ws-client/up");
-    check(s != nullptr && s->role == conn_role_t::DIAL && s->port == 8080,
+    const auto s = net.settings_of("net/ws-client/up");
+    check(s.has_value() && s->role == conn_role_t::DIAL && s->port == 8080,
           "its transport-private :settings (role, port) parsed from the SPEC config");
 
     // Brick 3a: the NAME→link demux table has ONE owner — the router's child_registry_t.
@@ -312,8 +312,8 @@ void test_backoff_connect_timeout_parsed() {
     net.provide_link("ws-client", "c", channel.a());
     (void)node.write(path_t("/net/ws-client/conn"),
                      conn_spec_t("c").port(0).backoff_ms(250).connect_timeout_ms(3000).view());
-    const auto* s = net.settings_of("net/ws-client/c");
-    check(s != nullptr && s->backoff_ms == 250 && s->connect_timeout_ms == 3000,
+    const auto s = net.settings_of("net/ws-client/c");
+    check(s.has_value() && s->backoff_ms == 250 && s->connect_timeout_ms == 3000,
           "backoff=250 / connect_timeout=3000 parsed into the transport-private settings");
     channel.shutdown();
 }
@@ -511,8 +511,8 @@ void test_config_constructed_udp() {
     const auto wa =
         node_a.write(path_t("/net/udp-client/conn"), conn_spec("b", b_port, "udp", "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{kind=udp, addr, port} at the DIAL endpoint creates the dialer");
-    const auto* s = net_a.settings_of("net/udp-client/b");
-    check(s != nullptr && s->kind == "udp" && s->addr == "127.0.0.1" && s->port == b_port,
+    const auto s = net_a.settings_of("net/udp-client/b");
+    check(s.has_value() && s->kind == "udp" && s->addr == "127.0.0.1" && s->port == b_port,
           "A: the parsed :settings carry kind/addr/port");
 
     // Since the #1548 S5 flip the DIAL half of a built-in kind is ENGINE-MANAGED, so creation
@@ -566,8 +566,8 @@ void test_provide_link_wins() {
     check(w.has_value(), "SPEC with kind=udp still creates the connection");
     check(router.registry().by_name("net/udp-client/up") == &channel.a(),
           "the staged provide_link transport is the wired one (no socket constructed)");
-    const auto* s = net.settings_of("net/udp-client/up");
-    check(s != nullptr && s->kind == "udp", "the config kind is still parsed into :settings");
+    const auto s = net.settings_of("net/udp-client/up");
+    check(s.has_value() && s->kind == "udp", "the config kind is still parsed into :settings");
     channel.shutdown();
 }
 
@@ -1423,8 +1423,8 @@ void test_udp_max_frame_reaches_the_transport() {
         node.write(path_t("/net/udp-server/conn"),
                    conn_spec_t("capped").port(kEphemeral).kind("udp").max_frame(4096).view());
     check(capped.has_value(), "SPEC{kind=udp, max_frame=4096} constructs the socket");
-    const auto* const s = net.settings_of("net/udp-server/capped");
-    check(s != nullptr && s->max_frame == 4096, "the key was parsed into conn_settings_t");
+    const auto s = net.settings_of("net/udp-server/capped");
+    check(s.has_value() && s->max_frame == 4096, "the key was parsed into conn_settings_t");
     auto* const capped_link =
         dynamic_cast<tr::net::udp_transport_t*>(tr::testing::link_of(net, "net/udp-server/capped"));
     check(capped_link != nullptr, "the owned transport is a live udp_transport_t");
@@ -1455,8 +1455,8 @@ void test_keepalive_key_is_accepted_and_not_stored() {
         path_t("/net/udp-server/conn"),
         conn_spec_t("ka").port(kEphemeral).kind("udp").keepalive_ms(30000).max_frame(4096).view());
     check(made.has_value(), "SPEC{kind=udp, keepalive=30000} still constructs the socket");
-    const auto* const s = net.settings_of("net/udp-server/ka");
-    check(s != nullptr && s->max_frame == 4096 && s->kind == "udp",
+    const auto s = net.settings_of("net/udp-server/ka");
+    check(s.has_value() && s->max_frame == 4096 && s->kind == "udp",
           "the keys beside the ignored keepalive are still parsed");
 }
 
@@ -1636,7 +1636,7 @@ void test_unregistered_kind_is_schema_not_found() {
           "and it created no vertex there");
     check(!node.find(path_t::parse("/net/udp-client/x")->key()).has_value(),
           "nothing mounted under the old derived /net/udp-client name");
-    check(net.settings_of("net/udp-client/x") == nullptr,
+    check(!net.settings_of("net/udp-client/x").has_value(),
           "no connection record exists — the SPEC reached no creation path");
     check(router.registry().size() == 0, "and no link entered the router's demux table");
 }
@@ -1670,8 +1670,8 @@ void test_conn_endpoint_spec_creates() {
           "its link is wired into the router's child_registry_t");
     // The role is POSITIONAL: the module declared DIAL, and the endpoint fixed it without
     // the SPEC saying anything about a role.
-    const auto* s = net.settings_of("net/ws-client/up");
-    check(s != nullptr && s->role == conn_role_t::DIAL,
+    const auto s = net.settings_of("net/ws-client/up");
+    check(s.has_value() && s->role == conn_role_t::DIAL,
           "the role came from the module, not from the payload");
     channel.shutdown();
 }
@@ -1804,8 +1804,8 @@ void test_conn_endpoint_malformed_refuses() {
         check(!node.find(path_t::parse(p)->key()).has_value(), "no vertex was minted");
     }
     check(router.registry().size() == 0, "no link was wired into the demux table");
-    check(net.settings_of("net/udp-client/x") == nullptr &&
-              net.settings_of("net/udp-client/y") == nullptr,
+    check(!net.settings_of("net/udp-client/x").has_value() &&
+              !net.settings_of("net/udp-client/y").has_value(),
           "no connection record was kept");
 }
 
@@ -2035,8 +2035,8 @@ void test_app_chosen_root_and_module() {
     check(wa.has_value(), "A: a SPEC to /io/w/conn creates under the app-chosen /io/w");
     check(node_a.find(path_t::parse("/io/w/b")->key()).has_value(),
           "A: the connection vertex is /io/w/b");
-    const auto* s = net_a.settings_of("io/w/b");
-    check(s != nullptr && s->kind == "udp" && s->port == b_port,
+    const auto s = net_a.settings_of("io/w/b");
+    check(s.has_value() && s->kind == "udp" && s->port == b_port,
           "A: settings_of resolves by the app-chosen qualified key");
 
     // End-to-end: a READ routed through /io/w/b reaches B and the reply returns.
@@ -2484,10 +2484,10 @@ void test_conformance_vectors() {
               "... and the connection vertex /net/ws-client/up exists");
         check(router.registry().by_name("net/ws-client/up") == &channel.a(),
               "... with its link in the router's single demux table");
-        const auto* s = net.settings_of("net/ws-client/up");
-        check(s != nullptr && s->addr == "127.0.0.1" && s->port == 8080,
+        const auto s = net.settings_of("net/ws-client/up");
+        check(s.has_value() && s->addr == "127.0.0.1" && s->port == 8080,
               "... and the vector's config reached conn_settings_t (addr/port)");
-        check(s != nullptr && s->role == conn_role_t::DIAL,
+        check(s.has_value() && s->role == conn_role_t::DIAL,
               "... and the role came from the MODULE — nothing on the wire said DIAL");
 
         // conn/spec-name-in-use: refused, and it changed nothing it named.
@@ -2495,8 +2495,8 @@ void test_conformance_vectors() {
         check(!again.has_value() && again.error() == status_t::PATH_IN_USE,
               "conn/spec-name-in-use => PATH_IN_USE (retry-idempotent, never a second link)");
         check(router.registry().size() == 1, "... still exactly one link in the demux table");
-        const auto* s2 = net.settings_of("net/ws-client/up");
-        check(s2 != nullptr && s2->addr == "127.0.0.1" && s2->port == 8080,
+        const auto s2 = net.settings_of("net/ws-client/up");
+        check(s2.has_value() && s2->addr == "127.0.0.1" && s2->port == 8080,
               "... and the LIVE config is untouched: re-SPEC is not a reconfiguration door");
 
         // conn/remove-nonexistent-noop: success, and the live connection survives it.

@@ -216,7 +216,7 @@ void test_refused_wiring_rolls_back() {
     // answering `tr::path::not_found` is the claim that discriminates.
     check(!node.read(path_t("/net/fake-client/a")).has_value(),
           "reading the address answers not-found — nothing was published there");
-    check(net.settings_of("net/fake-client/a") == nullptr, "no conns_ entry survives");
+    check(!net.settings_of("net/fake-client/a").has_value(), "no conns_ entry survives");
     check(tr::testing::link_of(net, "net/fake-client/a") == nullptr,
           "and no link is held under the name");
     check(router.registry().live_size() == 0, "the router registry holds nothing");
@@ -247,7 +247,7 @@ void test_open_allocator_creates() {
     check(w.has_value(), "the create succeeds");
     check(node.find(path_t::parse("/net/fake-client/a")->key()).has_value(),
           "the identity vertex resolves");
-    check(net.settings_of("net/fake-client/a") != nullptr, "the conns_ entry exists");
+    check(net.settings_of("net/fake-client/a").has_value(), "the conns_ entry exists");
     check(router.registry().live_size() == 1, "the child IS registered");
     check(router.registry().by_name("net/fake-client/a") != nullptr,
           "and a dst resolves the name — so the checks above are not vacuous");
