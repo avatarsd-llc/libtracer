@@ -301,6 +301,7 @@ void test_session_and_raw_duplex() {
 
     listener.set_receiver(listener_rx);
     dialer.set_receiver(dialer_rx);
+    dialer.start_receiving();
 
     const auto f1 = test_frame(5, 0x10);
     dialer.send(f1);
@@ -538,6 +539,7 @@ void test_fwd_read_round_trip() {
 
     router_a.attach_link("b", ta);
     router_b.attach_link("a", tb);
+    ta.start_receiving();
 
     router_a.on_reply(
         [](void* ctx, const tr::view::rope_t& reply) {
@@ -1457,7 +1459,7 @@ void test_peer_stream_cycling_is_bounded() {
 }
 
 /**
- * @brief #1101 — a `defer_rx` DIAL link delivers NOTHING until start_receiving(), so a frame
+ * @brief #1101 — a DIAL link delivers NOTHING until start_receiving(), so a frame
  *        the server pushes the instant the session comes up cannot land in an empty sink.
  *
  * The window is `transport_vertex_t::make_connection`: it installs the receiver several steps
@@ -1482,7 +1484,7 @@ void test_peer_stream_cycling_is_bounded() {
  *    from being vacuous: the bytes were really there, held in msquic's window, and really
  *    decodable.
  *
- * Reverting the gate (constructing with `defer_rx = false`, or removing the zero-byte drain
+ * Reverting the gate (constructing with `rx_held` clear, or removing the zero-byte drain
  * in `on_stream_rx`) reddens this in one run: the pushed frame is delivered inside the
  * silence window instead of after the arming.
  */
@@ -1497,8 +1499,7 @@ void test_push_on_session_waits_for_start_receiving() {
     check(listener.ok(), "listener started (ALPN h3, ephemeral port, dev cert)");
     listener.set_receiver(server_rx);
     {
-        webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls(),
-                                        {.defer_rx = true});
+        webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
         check(dialer.ok(), "the deferred dialer still completed CONNECT + 200 in its constructor");
         check(dialer.session_up(),
               "the H3 handshake ran to completion while delivery was held (the gate is on "
@@ -1546,8 +1547,8 @@ void test_push_on_session_waits_for_start_receiving() {
  * @brief #1101 — `start_receiving()` is inert on every link that has no gate to open.
  *
  * `transport_vertex_t::make_connection` calls it unconditionally on every link it wires, so
- * the three shapes that are NOT a deferred DIAL must all be safe: a ONE-PHASE dialer (never
- * held), a LISTENER (its peer's frame channel is not gated), and a dial that NEVER CAME UP
+ * the three shapes with no gate left to open must all be safe: an ARMED dialer (armed
+ * twice), a LISTENER (its peer's frame channel is not gated), and a dial that NEVER CAME UP
  * (no frame stream to re-enable — the ADR-0081 idempotence requirement).
  */
 void test_start_receiving_is_inert_where_it_must_be() {
@@ -1561,16 +1562,17 @@ void test_start_receiving_is_inert_where_it_must_be() {
     listener.start_receiving();  // a LISTEN link: nothing to arm
     listener.start_receiving();
     {
-        // A ONE-PHASE dialer (the historical shape): armed or not, it delivers.
+        // An armed dialer, armed twice: the second call finds the gate already open.
         webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
-        check(dialer.ok(), "one-phase dialer up");
+        check(dialer.ok(), "dialer up");
         dialer.set_receiver(dialer_rx);
         dialer.start_receiving();
         dialer.start_receiving();
 
         const auto f1 = test_frame(5, 0x21);
         dialer.send(f1);
-        check(at_server.wait_for_count(1, 3000ms), "the un-gated dialer still delivers upstream");
+        check(at_server.wait_for_count(1, 3000ms),
+              "the twice-armed dialer still delivers upstream");
         const auto f2 = test_frame(6, 0x22);
         listener.send(f2);
         check(at_dialer.wait_for_count(1, 3000ms),
@@ -1583,8 +1585,7 @@ void test_start_receiving_is_inert_where_it_must_be() {
     // test_spec_dial_trust_keys stands up one listener per leg.
     webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key);
     webtransport_transport_t dead("127.0.0.1", listener2.local_port(), "/",
-                                  webtransport_dial_tls_t{.ca_file = g_other_cert},
-                                  {.defer_rx = true});
+                                  webtransport_dial_tls_t{.ca_file = g_other_cert});
     check(!dead.ok(), "the wrong-CA dial did not come up (no session, no frame stream)");
     dead.start_receiving();
     dead.start_receiving();

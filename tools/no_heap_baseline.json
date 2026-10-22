@@ -67,7 +67,7 @@
           "_ZN2tr3net20esp_ws_client_link_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": {"via _ZN2tr3net12tx_handoff_t4nextEv": 1},
           "_ZN2tr3net20esp_ws_client_link_t4sendESt4spanIKSt4byteLj4294967295EE": {"via _ZN2tr3net20esp_ws_client_link_t4sendESt4spanIKS2_IKSt4byteLj4294967295EELj4294967295EE": 1},
           "_ZN2tr3net20esp_ws_client_link_t9recv_loopEv": {"via _ZN2tr3net20esp_ws_client_link_t13deliver_ownedEj": 1},
-          "_ZN2tr3net20esp_ws_client_link_tC2ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_22esp_ws_client_config_tE": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE12grow_emplaceIJRNS0_14block_source_tEEEEPS4_jDpOT_": 1, "via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE6regrowEj": 1, "via _ZN2tr3net20esp_ws_client_link_t15start_receivingEv": 1},
+          "_ZN2tr3net20esp_ws_client_link_tC2ESt17basic_string_viewIcSt11char_traitsIcEEtRKNS0_22esp_ws_client_config_tE": {"via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE12grow_emplaceIJRNS0_14block_source_tEEEEPS4_jDpOT_": 1, "via _ZN2tr3mem13block_array_tINS_3net12tx_handoff_t6slot_tEE6regrowEj": 1},
           "_ZN2tr3net20esp_ws_client_link_tD2Ev": {"via _ZN2tr5graph7value_t7releaseEPKS1_": 1},
           "_ZN2tr4view13segment_ptr_t5resetEv": {"via _ZN2tr3mem16destroy_dispatchEPNS_4view9segment_tE": 1},
           "_ZN2tr5graph7value_t7releaseEPKS1_": {"via _ZN2tr5graph7value_t7destroyEPS1_": 1},
