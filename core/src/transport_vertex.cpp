@@ -1359,11 +1359,13 @@ result_t<void> transport_vertex_t::release_link(std::string_view name) {
     return {};
 }
 
-const conn_settings_t* transport_vertex_t::settings_of(std::string_view name) const {
-    // ADR-0063 §3 — readers of conns_ race the insert's rebalance
+result_t<conn_settings_t> transport_vertex_t::settings_of(std::string_view name) const {
+    // ADR-0063 §3 — readers of conns_ race the insert's rebalance, so the record is copied
+    // while the lock is held: a pointer into the block would outlive it (#2241).
     const ctl_txn_t txn(*this);
     const conn_t* const it = conns_.find(name);
-    return it == nullptr ? nullptr : &it->settings;
+    if (it == nullptr) return std::unexpected(status_t::NOT_FOUND);
+    return it->settings;
 }
 
 bool transport_vertex_t::with_link(std::string_view name, link_fn_t fn, void* ctx) const {

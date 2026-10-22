@@ -729,8 +729,8 @@ void test_config_constructed_quic() {
     const auto wa = node_a.write(path_t("/net/quic-client/conn"),
                                  quic_conn_spec("b", srv_port, "127.0.0.1", "dev"));
     check(wa.has_value(), "A: SPEC{kind=quic, addr, port, ca} constructs the dialing socket");
-    const auto* s = net_a.settings_of("net/quic-client/b");
-    check(s != nullptr && s->kind == "quic" && s->addr == "127.0.0.1" && s->port == srv_port,
+    const auto s = net_a.settings_of("net/quic-client/b");
+    check(s.has_value() && s->kind == "quic" && s->addr == "127.0.0.1" && s->port == srv_port,
           "A: the parsed :settings carry kind/addr/port");
 
     // End-to-end: FWD{READ dst=/b/temp} from A crosses A's config-created stream

@@ -14,6 +14,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **`transport_vertex_t::settings_of` returns a copy of the record, not a pointer into the
+  connection table (#2241).** The table is one sorted block, and a connection created or
+  removed on another thread (a peer's `SPEC` arrives on a receive thread) shifted it, so a
+  returned pointer could dangle at any time. The record is now copied under the table lock and
+  returned as `graph::result_t<conn_settings_t>`, `NOT_FOUND` for an unknown key. Its text keys
+  (`addr`, `kind`) still view the connection's own config block, which no table shift moves;
+  they stay valid until that connection is removed and a later `graph_t::collect()` frees it.
+  - **Migration:** replace `const auto* s = net.settings_of(key)` with
+    `const auto s = net.settings_of(key)`, and `s != nullptr` / `s == nullptr` with
+    `s.has_value()` / `!s.has_value()`. `s->field` reads unchanged.
+
 ## [0.21.0] — 2026-10-22
 
 ### Fixed

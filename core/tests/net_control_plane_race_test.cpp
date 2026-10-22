@@ -262,12 +262,95 @@ void transport_vertex_control_plane_churn() {
     // appended is still exactly what it appended (nothing rewrites a recorded module now).
     int lingering = 0;
     for (const std::string& q : qualified)
-        if (net.settings_of(q) != nullptr) ++lingering;
+        if (net.settings_of(q).has_value()) ++lingering;
     check(lingering == 0, "no connection outlived its removal (conns_ survived the churn intact)");
 
     const auto declared = net.module_for(kChurnKind, conn_role_t::DIAL);
     check(declared.has_value() && *declared == "g",
           "module_for answers the churned pair's one declaration, not a torn string");
+}
+
+/** @brief Create/remove cycles the #2241 churner runs — bounded, so CI cannot hang. */
+constexpr int kSettingsRounds = 2000;
+/** @brief Churned names, all sorting BEFORE the read one, so each create shifts its record. */
+constexpr std::size_t kSettingsChurn = 6;
+/** @brief The read connection's `backoff`; every churned one carries a different value. */
+constexpr std::uint32_t kReadBackoff = 7;
+
+/**
+ * @brief #2241 — reading a connection's settings while other connections come and go.
+ *
+ * The connection table is one sorted block (#1780): a creation whose key sorts first shifts
+ * every later record, and a removal shifts them back. Creation is wire-driven (a peer's SPEC
+ * lands on a receive thread), so the reader here holds ONE connection, `net/m/x`, that nobody
+ * removes, while a churner creates and removes `net/m/a<i>` — keys that sort before it — on
+ * another thread. A reader handed a pointer into the block reads `x`'s record after the
+ * lookup's lock is gone, under the shift: TSan reports that, and without TSan the read can
+ * land on a churned record (whose `backoff` differs). A reader handed a copy taken under the
+ * lock races nothing, and the text key it reads views `x`'s own config block, which no other
+ * connection's create or remove moves.
+ */
+void settings_read_vs_create_remove() {
+    std::printf(
+        "\ntransport_vertex_t: settings read vs other connections' create/remove (#2241)\n");
+
+    graph_t g;
+    fwd_router_t router(g);
+    transport_vertex_t net(g, router);
+    check(net.register_module(std::string(kChurnModule), "", conn_role_t::DIAL).has_value(),
+          "the module is declared");
+    const path_t conn_endpoint("/net/" + std::string(kChurnModule) + "/conn");
+
+    sink_t read_link;
+    net.provide_link(std::string(kChurnModule), "x", read_link);
+    check(g.write(conn_endpoint,
+                  tr::net::conn_spec_t("x").addr("10.0.0.7").backoff_ms(kReadBackoff).view())
+              .has_value(),
+          "the read connection is created");
+    const std::string read_key = "net/" + std::string(kChurnModule) + "/x";
+
+    std::vector<std::string> names, qualified;
+    for (std::size_t i = 0; i < kSettingsChurn; ++i) {
+        names.push_back("a" + std::to_string(i));
+        qualified.push_back("net/" + std::string(kChurnModule) + "/" + names.back());
+    }
+    std::array<sink_t, kSettingsChurn> links;
+
+    std::atomic<int> cycles{0};
+    const auto churner = [&] {
+        for (int r = 0; r < kSettingsRounds; ++r) {
+            for (std::size_t i = 0; i < kSettingsChurn; ++i) {
+                net.provide_link(std::string(kChurnModule), names[i], links[i]);
+                const auto spec = tr::net::conn_spec_t(names[i])
+                                      .addr("10.0.0.1")
+                                      .backoff_ms(static_cast<std::uint32_t>(100 + i));
+                if (g.write(conn_endpoint, spec.view()) && net.remove_connection(qualified[i]))
+                    cycles.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> reads{0}, wrong{0};
+    const auto reader = [&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            const auto s = net.settings_of(read_key);
+            if (!s.has_value() || s->backoff_ms != kReadBackoff || s->addr != "10.0.0.7")
+                wrong.fetch_add(1, std::memory_order_relaxed);
+            reads.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    std::thread read(reader);
+    std::thread churn(churner);
+    churn.join();
+    stop.store(true, std::memory_order_relaxed);
+    read.join();
+
+    check(cycles.load() == kSettingsRounds * static_cast<int>(kSettingsChurn),
+          "every churned connection was created and removed — the table really moved");
+    check(reads.load() > 0, "the reader ran alongside the churn");
+    check(wrong.load() == 0, "every read saw x's own settings, never a shifted neighbour's");
 }
 
 /**@}*/
@@ -350,6 +433,7 @@ int main() {
           "and no name grew a second slot — the name→slot mapping stayed one-to-one");
 
     transport_vertex_control_plane_churn();
+    settings_read_vs_create_remove();
 
     return tr::testing::summary("net_control_plane_race");
 }

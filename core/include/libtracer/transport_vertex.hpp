@@ -647,15 +647,18 @@ class transport_vertex_t {
     [[nodiscard]] graph::result_t<void> remove_connection(std::string_view name);
 
     /**
-     * @brief The parsed transport-private settings of connection @p name (nullptr if none).
+     * @brief A copy of the parsed transport-private settings of connection @p name.
      *
-     * The record's text keys view this connection's own copy of its config, so they live as
-     * long as the connection. The POINTER is valid until the next connection is created or
-     * removed: the table is one sorted block (#1780), and growing or shrinking it moves the
-     * records. Read what you need and drop it.
+     * The record is copied out under the table lock, so no other connection's create or
+     * remove can move it under the caller (#2241): the table is one sorted block (#1780),
+     * and a wire-driven creation on another thread shifts it. The copy's text keys (`addr`,
+     * `kind`) view this connection's own config block, which no table shift moves; they stay
+     * valid until this connection is removed AND a later `graph_t::collect()` frees its
+     * parked block. Copy them out to keep them past that.
      * @param name The connection's **qualified** key `net/<module>/<name>` (#605).
+     * @return NotFound if @p name names no created connection.
      */
-    [[nodiscard]] const conn_settings_t* settings_of(std::string_view name) const;
+    [[nodiscard]] graph::result_t<conn_settings_t> settings_of(std::string_view name) const;
 
     /** @brief What @ref with_link calls: the connection's owned link, valid until it returns. */
     using link_fn_t = void (*)(void* ctx, transport_t& link);

@@ -253,7 +253,7 @@ tree, and one is not:
 ### 6. No reconfiguration door
 
 The only accessor for a connection's parsed settings, `transport_vertex_t::settings_of`,
-hands out a **const** view, and there is no post-creation config write: a re-`SPEC` is
+hands out a **copy** of the record, and there is no post-creation config write: a re-`SPEC` is
 `PATH_IN_USE`, never a reconfiguration. A peer whose IP changed is therefore retired
 (`NAME`) and re-created (`SPEC`), which un-routes the link and cascade-evicts the
 subscriptions routed through it. That is the cost of "the vertex is the identity, the config
