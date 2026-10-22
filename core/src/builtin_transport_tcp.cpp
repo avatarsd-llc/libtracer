@@ -37,11 +37,9 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     //    target that closed the bus module out (`kBusLinks = false`, #375 deliverable 3)
     //    asking for it is REFUSED below rather than quietly served as FLAT, exactly as the
     //    ws factory refuses it.
-    //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006). Default
-    //    0 no longer means UNBOUNDED (#1295): the transport resolves it through
-    //    derive_max_peers, so an omitted key takes the liveness window's own ceiling and
-    //    an over-ceiling request is clamped to it. The cap is the denominator every send
-    //    bound divides by, so "no cap" would mean "no bound".
+    //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006), enforced
+    //    as given: a newcomer past it is refused, no admitted peer is evicted. An omitted
+    //    key (0) takes kDefaultMaxPeers, never "unbounded".
     // A third tcp-private key, honored on BOTH halves and mirroring ws's verbatim (#838):
     //  - `liveness_window` (VALUE u32, ms; default 0 = kDefaultLivenessWindowMs) — how long
     //    a peer may fail to take bytes before it is broken. It is the send bound's

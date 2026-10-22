@@ -23,7 +23,7 @@ that is where the two naming regimes part company.
   the pointer.
 - **`max_peers` is an injected bound, not a backlog** (RFC-0006). A connection past the cap is
   accepted and immediately closed — a clean refusal rather than a hung SYN. It is also resolved
-  once at construction (a request of `0` takes the liveness window's own ceiling), so the
+  once at construction (a request of `0` takes `kDefaultMaxPeers`), so the
   example reads back what the server *enforces* instead of assuming it got what it asked for.
 - **One object, two addressing surfaces.** `server.send(frame)` fans out to every open peer;
   `facet.peer_link("p1~1")->send(frame)` reaches exactly one. The example checks the directed send

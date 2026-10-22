@@ -137,10 +137,8 @@ struct tcp_server_config_t {
     std::size_t max_frame = 0;
     /**
      * @brief Concurrent-peer admission cap (RFC-0006) — a connection beyond it is accepted
-     *        and immediately closed. `0` takes the liveness window's own ceiling
-     *        (`window / kBoundedWaitMs`, #1295), and a larger request is clamped to it,
-     *        because the cap is the denominator every send bound divides by. Read the
-     *        enforced value back from `slot_server_t::max_peers`.
+     *        and immediately closed. `0` takes `%kDefaultMaxPeers`; any other value is
+     *        enforced as given. Read the enforced value back from `slot_server_t::max_peers`.
      */
     std::size_t max_peers = 0;
     /** @brief Expose the @ref bus_link_t facet (see @ref transport_t::bus) — the board↔board
