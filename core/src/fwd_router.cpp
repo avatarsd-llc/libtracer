@@ -974,7 +974,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         drop_tokens();
         return false;
     }
-    child_rx_ctx_t* const ctx_p = acquire_ctx(name, rx);
+    child_rx_ctx_t* const ctx_p = acquire_ctx(name);
     if (ctx_p == nullptr) {
         // Only a name with no ctx at all gets here, so its slot was not live before this
         // call: tombstoning it again is the whole undo.
@@ -982,6 +982,11 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         drop_tokens();
         return false;
     }
+    // The registration's own facts, its decode source and its catalog claim, go on the
+    // child's ctx (#1941): only a router child has them, so the link object carries nothing
+    // for them. The ctx is hidden until `publish_ctx` below, which is their publication edge.
+    ctx_p->rx.store(rx, std::memory_order_relaxed);
+    ctx_p->kind.store(interned_kind, std::memory_order_relaxed);
     // Capability-matched receiver (ADR-0042 §1 / ADR-0044): a BUS link delivers
     // frames tagged with the SENDING peer's name, which becomes the hop's inbound
     // NAME — so the `src` grown on a forward (and the link a terminus reply goes
@@ -991,7 +996,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     // path. No adapter wraps a span into a lying view.
     // Asked through `bus_of` (#375 deliverable 3): a target that closed the bus module out
     // wires every child point-to-point, and the whole peer-named arm below — the two
-    // peer-lifecycle notifiers, the peer-named receivers, the `child_rx_ctx_t::bus` stamp
+    // peer-lifecycle notifiers, the peer-named receivers, the slot shape bit
     // `resolve_peer_name` keys off — is discarded at compile time rather than branched over.
     if (bus != nullptr) {
         // A reassembling bus that delivers ropes (ADR-0053 §5) hands its group up
@@ -1010,14 +1015,6 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         // amended, #1223). Such a route fails validation here and the origin falls back to
         // the canonical spelling.
         child_rx_ctx_t& bctx = *ctx_p;
-        // The bus facet the frame paths resolve a peer handle's NAME through (#1294) —
-        // recorded before publication, like every other resolved-once fact on this ctx.
-        bctx.bus.store(bus, std::memory_order_relaxed);
-        // The link itself, for the SUBJECT seam (#375 Part 2). Recorded on both arms of this
-        // registration and not only the bus one, because ADR-0082 rules the subject a
-        // separate claim from addressing: it has to be askable of a FLAT child too.
-        bctx.link.store(&link, std::memory_order_relaxed);
-        bctx.kind.store(interned_kind, std::memory_order_relaxed);
         // The BUS tier's per-peer LINK-TOKEN cache (#1417). Allocated on this name's first
         // bus registration and REUSED — never replaced — on every later one, so a lock-free
         // reader on the receive thread can hold its address across a re-add. `acquire_ctx`
@@ -1073,18 +1070,13 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     // Point-to-point: the inbound NAME is fixed per child, carried by a stable
     // per-child ctx (the chain holds the address for the router's lifetime).
     child_rx_ctx_t& ctx = *ctx_p;
-    // No bus facet on this tenancy — CLEARED rather than left, because a re-add rebinds
-    // this ctx (#884) and a name that used to be a bus mount must not keep answering with
-    // the facet it no longer has (#1294).
-    ctx.bus.store(nullptr, std::memory_order_relaxed);
-    // No per-peer token cache on this tenancy either, and CLEARED for the same reason the
-    // bus facet is: a name re-added as a point-to-point child must not keep answering
-    // `link_id_of` through the bus table it used to have (#884, #1417). The table itself is
-    // kept alive on the ctx — a later re-add as a bus mount reuses it rather than allocating
-    // a second one a reader might still be standing on.
+    // No per-peer token cache on this tenancy — CLEARED rather than left, because a re-add
+    // rebinds this ctx (#884) and a name re-added as a point-to-point child must not keep
+    // answering `link_id_of` through the bus table it used to have (#1417). The table itself
+    // is kept alive on the ctx — a later re-add as a bus mount reuses it rather than
+    // allocating a second one a reader might still be standing on. (The bus FACET itself is
+    // the link's, and the slot's shape bit says whether to ask for it: #1294, #1941.)
     ctx.peer_tokens.store(nullptr, std::memory_order_relaxed);
-    ctx.link.store(&link, std::memory_order_relaxed);  // the subject seam's door (#375 Part 2)
-    ctx.kind.store(interned_kind, std::memory_order_relaxed);  // the link-kind claim (#1650)
     // LAST: every field a lock-free reader may look at is written above, and this is the
     // release edge that makes the node visible to one (see `child_rx_ctx_t::next`).
     publish_ctx(ctx);
@@ -1313,7 +1305,9 @@ void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle
     // successor's anchor and cached token alone: both are keyed by slot. The slot still
     // belongs to this tenancy when the bus resolves it to this name's endpoint (both null
     // once torn down); a transport that does not reuse slots resolves the two alike.
-    bus_link_t* const bus = ctx.bus.load(std::memory_order_acquire);
+    // The bus facet is the link's (#1941): this is only ever a bus mount's ctx, so the
+    // slot's link is that bus, and a build with the bus module closed out answers null.
+    bus_link_t* const bus = bus_of(*ctx.entry->bound().link);
     const bool holds_slot =
         bus == nullptr || bus->slot_link(session_slot_of(peer)) == bus->peer_link(peer);
     // Retire BEFORE the eviction. Retirement is what bumps the saturating generation
@@ -1363,8 +1357,7 @@ fwd_router_t::child_rx_ctx_t* fwd_router_t::ctl_ctx_by_name(std::string_view nam
     return nullptr;
 }
 
-fwd_router_t::child_rx_ctx_t* fwd_router_t::acquire_ctx(std::string_view name,
-                                                        mem::block_source_t* rx) {
+fwd_router_t::child_rx_ctx_t* fwd_router_t::acquire_ctx(std::string_view name) {
     if (child_rx_ctx_t* const hit = ctl_ctx_by_name(name)) {
         // One ctx per NAME, for the router's life — `child_registry_t::add`'s rule, one layer
         // out and for its two reasons (#884). A second ctx SHADOWS the first on every
@@ -1376,7 +1369,6 @@ fwd_router_t::child_rx_ctx_t* fwd_router_t::acquire_ctx(std::string_view name,
         // nothing is being published here, and the publication edge is `publish_ctx`'s
         // release-store of `false`.
         hit->retired.store(true, std::memory_order_relaxed);
-        hit->rx.store(rx, std::memory_order_relaxed);
         // The interned LINK TOKEN goes with the tenancy (#1417), both tiers. A token is an
         // index-slot address, and the departing tenancy's `link_down` released the slot it
         // named — so carrying one across a re-add would hand the new tenancy a stamp that
@@ -1416,7 +1408,7 @@ fwd_router_t::child_rx_ctx_t* fwd_router_t::acquire_ctx(std::string_view name,
             label_src_->release(raw, sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
         return nullptr;
     }
-    child_rx_ctx_t& fresh = *::new (raw) child_rx_ctx_t(this, entry->name, entry->mount_tlv, rx);
+    child_rx_ctx_t& fresh = *::new (raw) child_rx_ctx_t(this, entry->name, entry->mount_tlv);
     fresh.entry = entry;
     // The §8.3 ceiling needs an identity a single far side cannot spend on everyone else's
     // behalf, and a point-to-point child has none of its own (#1294 mints handles for a bus
@@ -2017,29 +2009,34 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
 
 std::string_view fwd_router_t::resolve_peer_name(const child_rx_ctx_t& ctx, peer_handle_t peer,
                                                  std::span<char> scratch) {
-    bus_link_t* const bus = ctx.bus.load(std::memory_order_relaxed);
+    // The bus facet is the link's (#1941), asked only of a slot whose shape says it has one —
+    // the shape `add` captured from the same `bus_of` answer, in the same word as the link.
+    const child_registry_t::egress_t eg = ctx.entry->bound();
+    bus_link_t* const bus = eg.multi_peer ? bus_of(*eg.link) : nullptr;
     if (bus == nullptr) return {};
     return bus->peer_name(peer, scratch);
 }
 
 peer_handle_t fwd_router_t::terminus_peer(const child_rx_ctx_t* ctx, peer_handle_t peer) noexcept {
-    if (peer.valid()) return peer;  // the bus seam already tagged this frame
-    if (ctx == nullptr) return {};
-    transport_t* const link = ctx->link.load(std::memory_order_relaxed);
+    // Tagged by the bus seam already, or handed in with no receive context (the public
+    // `on_frame` entries): either way there is no link to ask.
+    if (peer.valid() || ctx == nullptr) return peer;
     // The FLAT arm. The link has one routing identity for every peer it carries — that is
     // what `peer_named=false` means — so the frame arrived untagged and the only place the
     // writer's identity still exists is inside the link, which is delivering it right now.
     // Asked HERE, at the point of consumption, and on the transport's own receive thread:
-    // this call is meaningful only inside the delivery callback we are standing in.
-    return link != nullptr ? link->inbound_peer() : peer_handle_t{};
+    // this call is meaningful only inside the delivery callback we are standing in. The
+    // router keeps no copy of the link (#1941): it is read off the registry slot's binding,
+    // tombstoned or not (`child_registry_t::child_t::bound`), because the frame is inside the
+    // link's receive callback and the link is alive while it runs.
+    return ctx->entry->bound().link->inbound_peer();
 }
 
 std::string_view fwd_router_t::peer_subject_of(const child_rx_ctx_t* ctx, peer_handle_t peer,
                                                std::span<char> scratch) {
-    if (ctx == nullptr || !peer.valid()) return {};
-    transport_t* const link = ctx->link.load(std::memory_order_relaxed);
-    if (link == nullptr) return {};
-    return link->peer_subject(peer, scratch);
+    if (!peer.valid() || ctx == nullptr) return {};
+    // Asked of the link the frame is inside, as `terminus_peer` asks it (#1941).
+    return ctx->entry->bound().link->peer_subject(peer, scratch);
 }
 
 graph::link_id_t fwd_router_t::link_id_of(const child_rx_ctx_t* ctx, peer_handle_t peer,
@@ -2526,7 +2523,7 @@ std::span<const std::byte> fwd_router_t::terminus_label_record(std::string_view 
     // ctx's `label_peer` is one identity for the whole child, so a label cached on it would be
     // presentable by EVERY peer behind the bus — the owner check that makes §4.1's node-scope
     // rule bite would be checking the wrong thing. §6.3 makes the refusal free.
-    if (ctx->bus.load(std::memory_order_relaxed) != nullptr) return {};
+    if (ctx->entry->egress().multi_peer) return {};
     const peer_handle_t peer =
         peer_handle_from_bits(ctx->label_peer.load(std::memory_order_relaxed));
     if (!peer.valid()) return {};  // no identity to own the label ⇒ the residual stays a string
@@ -2614,7 +2611,7 @@ template <class Cursor>
     // Read off the CTX rather than the caller's `from_peer` flag, so the answer is a property
     // of the child and not of one frame: a bus child relaying a frame with no resolvable peer
     // must still not acquire a label standing for one peer's address.
-    if (ctx->bus.load(std::memory_order_relaxed) != nullptr) return {};
+    if (ctx->entry->egress().multi_peer) return {};
     // WHO the label is minted for: the peer this reply is being relayed OUT to, because that
     // origin is the one that will present the label back. Minting it for the link the reply
     // ARRIVED on would produce a label whose owner can never present it — a slot spent on
@@ -2831,10 +2828,9 @@ transport_t* fwd_router_t::reply_link(std::string_view inbound_name,
     // (ADR-0073 §3) — the peer resolution below is the one ADR-0044 rules. A tombstoned ctx
     // (#884) falls through too, so a child removed mid-frame is answered exactly as before:
     // by a name the registry no longer holds, i.e. not at all.
-    if (inbound_ctx != nullptr && inbound_ctx->bus.load(std::memory_order_relaxed) == nullptr &&
-        !inbound_ctx->retired.load(std::memory_order_acquire)) {
-        if (transport_t* const link = inbound_ctx->link.load(std::memory_order_relaxed))
-            return link;
+    if (inbound_ctx != nullptr && !inbound_ctx->retired.load(std::memory_order_acquire)) {
+        const child_registry_t::egress_t eg = inbound_ctx->entry->bound();
+        if (!eg.multi_peer) return eg.link;  // a registered slot always binds a link
     }
     reply_name_lookups_.fetch_add(1, std::memory_order_relaxed);
     return registry_.by_name(inbound_name);
@@ -3186,7 +3182,6 @@ struct fwd_router_t::pending_await_t {
     fwd_router_t* router = nullptr;           /**< @brief The owner the fire thunk calls back. */
     mem::block_source_t* source = nullptr;    /**< @brief The rx source this block came from. */
     std::size_t block_bytes = 0;              /**< @brief The block's size, for its release. */
-    const child_rx_ctx_t* ctx = nullptr;      /**< @brief Receive ctx (iov table source). */
     graph::vertex_handle_t vertex;            /**< @brief The awaited vertex. */
     pending_await_t* prev = nullptr;          /**< @brief Plane list link. */
     pending_await_t* next = nullptr;          /**< @brief Plane list link. */
@@ -3307,7 +3302,6 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     p->router = this;
     p->source = &source;
     p->block_bytes = bytes;
-    p->ctx = ctx;
     // No deadline is stored: the requester owns the timeout (RFC-0004 Amendment 3, ADR-0084),
     // so `req.timeout` is ignored here. A waiter whose vertex never changes ends on link_down /
     // remove_child or at teardown, and it costs only this block of its own link's source.
@@ -3400,7 +3394,9 @@ void fwd_router_t::answer_await(pending_await_t& p) {
         count_drop(assemble_dropped_);
         return;
     }
-    mem::block_array_t<std::span<const std::byte>> iov{rx_for(p.ctx)};
+    // The waiter's own source, not its link's: the fire may land after the link it arrived
+    // over was removed, when nothing may be read through that link any more (#1941).
+    mem::block_array_t<std::span<const std::byte>> iov{*p.source};
     if (!gather_reply_iov(reply, iov)) {
         count_drop(reply_iov_dropped_);
         return;

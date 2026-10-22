@@ -94,6 +94,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     (RFC-0029 §4.2); only the PAIR mint is refused for it. The two cases differ on purpose: an
     index-only lookup to make them agree would add an accessor and branches for a case that
     takes 2^32 retirements to reach.
+- **The router keeps only the binding to a link
+  ([#1941](https://github.com/avatarsd-llc/libtracer/issues/1941), stage 3 of spec
+  [#1938](https://github.com/avatarsd-llc/libtracer/issues/1938)).** `fwd_router_t`'s per-link
+  receive context no longer copies the link pointer or its bus facet: a frame asks its bus facet
+  and its writer's subject of the link it arrived in, reached through the registry slot's
+  binding. The registration's decode source and catalog kind stay on that context, so
+  `transport_t` gains nothing and a link no router registers (a bus peer's endpoint) pays
+  nothing. The context shrinks by 16 B. `add_child`'s signature and behaviour are unchanged.
+  - A registry tombstone is now a bit in the slot's egress word
+    (`child_registry_t::kRetiredBit`) rather than a null pointer. Every public reader is
+    unchanged: `child_t::egress()`, `link()` and `live()` answer a tombstoned slot exactly as
+    before. The router alone reads the kept pointer, for a frame its receiver was handed.
+  - A deferred AWAIT's reply gathers through the waiter's own block source rather than its
+    link's, so a reply that fires after its link was removed reads nothing through the link.
 
 #### Upgrading
 
