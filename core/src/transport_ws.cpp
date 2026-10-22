@@ -612,14 +612,10 @@ bool ws_server_transport_t::read_handshake(session_t& s, int fd) {
 
 ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_t port,
                                              const ws_client_config_t& config)
-    // The egress's shared frames hold this link's own masked copies, so they are egress store
-    // too (#1661): drawn from `memory.io` like `tx_buf_`, not from the process heap.
+    // Every masked frame this link sends is egress store (#1661, #2267): drawn from
+    // `memory.io` per send, not from the process heap, and never kept past its write.
     : stream_endpoint_t(config.memory.io != nullptr ? *config.memory.io : mem::net_source()),
       backend_(config.memory.rx),
-      // `block_array_t` binds its source ONCE, here (#873): a post-construction
-      // set_egress_source can never re-seat this member, which is why the store is a
-      // constructor argument on this class and not only a base-class setter.
-      tx_buf_(config.memory.io != nullptr ? *config.memory.io : mem::net_source()),
       pipelined_(config.memory.state_or_default()),
       recv_stack_(config.recv_stack) {
     mem::block_source_t* const egress_src = config.memory.io;
@@ -627,8 +623,8 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
     const std::size_t max_handshake = config.max_handshake;
     // Wire the BASE's egress store to the same one, before anything can send: the gather
-    // temporary of `transport_t::send(iov)` and this class's `tx_buf_` are then one store,
-    // not two. First statement on purpose — `start_receiving()` at the end of this body
+    // temporary of `transport_t::send(iov)` and this class's masked frames are then one
+    // store, not two. First statement on purpose — `start_receiving()` at the end of this body
     // spawns the recv thread.
     if (egress_src != nullptr) set_egress_source(*egress_src);
     liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
@@ -737,17 +733,13 @@ void ws_client_transport_t::send_masked(std::span<const std::span<const std::byt
                                         const graph::delivery_lane_t& lane) {
     // One MASKED record per frame, through the link's egress (ADR-0087 §2). A client frame
     // MUST be masked (RFC 6455 §5.1), so unlike every server-side send this one cannot gather
-    // the caller's bytes by reference and genuinely needs a buffer — the NOTHROW encode over
-    // a REUSED buffer (#848): steady state allocates nothing, and exhaustion drops the frame
-    // instead of aborting under -fno-exceptions.
-    //
-    // The payload's spans are gathered and masked in ONE pass (`ws::detail::mask_copy`,
-    // #2145): the caller's bytes are written once, straight into the masked frame.
-    //
-    // The writer encodes into tx_buf_, which only the thread holding the writer role touches;
-    // a publisher that arrives while a write is in flight encodes ONE shared frame with the
-    // same key — the same bytes — and returns rather than waiting for the rest of that write.
-    // Each writer turn is still bounded by the liveness window (#838).
+    // the caller's bytes by reference: its wire bytes are written once, gathered and masked in
+    // ONE pass (`ws::detail::mask_copy`, #2145), into the one frame `once` draws from the
+    // link's own egress source (#2267). The idle writer writes that frame and lets it go; a
+    // write the socket holds keeps the SAME frame on the wire, never a second masked copy; a
+    // publisher that arrives while a write is in flight shares it. So the link keeps no
+    // buffer between sends, and exhaustion drops the frame (#848, #932) instead of aborting
+    // under -fno-exceptions. Each writer turn is still bounded by the liveness window (#838).
     const std::uint32_t key = next_mask_key();
     std::size_t len = 0;
     for (const std::span<const std::byte>& part : frame) len += part.size();
@@ -760,12 +752,10 @@ void ws_client_transport_t::send_masked(std::span<const std::span<const std::byt
     egress_send(
         once,
         [&](int fd, std::uint32_t bound) {
-            const std::size_t n =
-                ws::try_encode_client_frame(tx_buf_, ws::opcode_t::BINARY, frame, key);
-            // Frame buffer exhausted => a counted drop (#932), nothing written.
-            if (n == 0) return egress_step_t{0, false, true};
-            const ::iovec v{tx_buf_.data(), n};
-            return write_gather(fd, std::span<const ::iovec>(&v, 1), bound, false);
+            const egress_frame_t* const f = once();
+            // No block for the frame => a counted drop (#932), nothing written.
+            if (f == nullptr) return egress_step_t{0, false, true};
+            return write_frame(fd, *f, 0, bound, false);
         },
         lane);
 }

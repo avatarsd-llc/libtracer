@@ -749,10 +749,9 @@ class transport_t {
      * @warning This setter reaches the allocations a send makes THROUGH this base — it does
      *          not re-seat a concrete link's CONSTRUCTION-BOUND buffers. A
      *          `mem::block_array_t` member takes its source in its own constructor and keeps
-     *          it for life, so a link that owns one (e.g. `ws_client_transport_t::tx_buf_`)
-     *          takes the store as a CONSTRUCTOR argument and applies it to both halves
-     *          there (#873). Wiring such a link only through this setter would leave that
-     *          buffer on whatever source it was built with.
+     *          it for life, so a link that owns one takes the store as a CONSTRUCTOR argument and
+     * applies it to both halves there (#873). Wiring such a link only through this setter would
+     * leave that buffer on whatever source it was built with.
      */
     void set_egress_source(mem::block_source_t& src) noexcept { egress_src_ = &src; }
 

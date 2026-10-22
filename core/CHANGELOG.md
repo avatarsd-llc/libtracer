@@ -172,6 +172,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   your choice. A child factory takes `std::span<const std::byte> child_key` and copies the key
   if it keeps it.
 
+### Changed
+
+- **`ws_client_transport_t` keeps no send buffer, and masks each frame once (#2267).** Its
+  `tx_buf_` member, a masked-frame buffer reused across sends, kept its high water for the
+  link's life: about 16 KiB stayed drawn after one 16 KiB send. A send now masks its payload
+  once, into one frame drawn from the link's `memory.io` source, and returns that frame when it
+  is written; a write the socket holds keeps the same frame on the wire instead of masking a
+  second copy. `sizeof(ws_client_transport_t)` shrinks by 32 B on a 64-bit host. The trade is
+  one block drawn and returned per send. An exhausted source still drops the frame and counts
+  it. No signature changes.
+
 ## [0.21.0] — 2026-10-22
 
 ### Fixed

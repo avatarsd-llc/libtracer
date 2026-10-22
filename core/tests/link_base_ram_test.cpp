@@ -22,6 +22,11 @@
  * One more arm (#2140) counts a WS peer across one 16 KiB message: its connected draw is
  * pinned like the base, and it must hold no more after the message than before it, on every
  * pointer width.
+ *
+ * And one (#2267) counts a WS CLIENT's sends at 64 B, 1 KiB, 4 KiB and 16 KiB: each one draws
+ * exactly one block, the masked frame (so its payload is masked once, into that block), and
+ * the link holds no more after the 16 KiB send than before the first. It used to keep a
+ * `tx_buf_` at its high water for life.
  */
 
 #include <arpa/inet.h>
@@ -41,8 +46,10 @@
 #include <thread>
 #include <vector>
 
+#include "libtracer/egress.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_ws.hpp"
+#include "libtracer/ws.hpp"
 
 namespace {
 
@@ -62,14 +69,20 @@ class counting_source_t final : public tr::mem::block_source_t {
     counting_source_t() noexcept : block_source_t("link_base_ram") {}
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
         void* const p = tr::mem::heap_source().try_alloc(bytes, align);
-        if (p != nullptr) live.fetch_add(bytes, std::memory_order_relaxed);
+        if (p != nullptr) {
+            live.fetch_add(bytes, std::memory_order_relaxed);
+            drawn.fetch_add(bytes, std::memory_order_relaxed);
+            draws.fetch_add(1, std::memory_order_relaxed);
+        }
         return p;
     }
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
         live.fetch_sub(bytes, std::memory_order_relaxed);
         tr::mem::heap_source().release(p, bytes, align);
     }
-    std::atomic<std::size_t> live{0}; /**< @brief Bytes drawn and not yet released. */
+    std::atomic<std::size_t> live{0};  /**< @brief Bytes drawn and not yet released. */
+    std::atomic<std::size_t> drawn{0}; /**< @brief Bytes drawn in all. */
+    std::atomic<std::size_t> draws{0}; /**< @brief Blocks drawn in all. */
 };
 
 /** @brief Pinned idle draw of a stream server on a 64-bit target: the poll set's first block
@@ -223,6 +236,64 @@ void run_idle_peer_after_16k() {
     check(src.live.load(std::memory_order_relaxed) == 0, "teardown returned every byte");
 }
 
+/**
+ * @brief #2267: a WS client's send draws one block, its masked frame, from the link's egress
+ *        source and returns it when the frame is written, at 64 B, 1 KiB, 4 KiB and 16 KiB.
+ *
+ * The payload is masked straight into that block, so the bytes a send writes are the frame's
+ * bytes once. The client keeps no buffer between sends: after the 16 KiB send it holds what
+ * it held before the first.
+ */
+void run_ws_client_sends() {
+    counting_source_t src;
+    std::size_t before = 0;
+    std::size_t after = 0;
+    {
+        drop_sink_t sink;
+        tr::net::ws_server_transport_t server(0);
+        if (server.delivers_ropes()) {
+            server.set_rope_receiver(sink);
+        } else {
+            server.set_receiver(sink);
+        }
+        server.start_receiving();
+        check(server.ok(), "ws server bound");
+        tr::net::ws_client_config_t cfg{};
+        cfg.memory.io = &src;
+        tr::net::ws_client_transport_t client("127.0.0.1", server.local_port(), cfg);
+        check(client.ok(), "ws client handshaken");
+        std::this_thread::sleep_for(50ms);
+        before = src.live.load(std::memory_order_relaxed);
+
+        std::size_t sent = 0;
+        for (const std::size_t len :
+             {std::size_t{64}, std::size_t{1024}, std::size_t{4096}, std::size_t{16384}}) {
+            const std::vector<std::byte> payload(len, std::byte{0x5A});
+            const std::size_t n0 = src.draws.load(std::memory_order_relaxed);
+            const std::size_t b0 = src.drawn.load(std::memory_order_relaxed);
+            client.send(payload);
+            ++sent;
+            for (int i = 0; i < 1500 && sink.frames.load() < sent; ++i)
+                std::this_thread::sleep_for(2ms);
+            const std::size_t draws = src.draws.load(std::memory_order_relaxed) - n0;
+            const std::size_t bytes = src.drawn.load(std::memory_order_relaxed) - b0;
+            const std::size_t frame =
+                sizeof(tr::net::egress_frame_t) + tr::net::ws::detail::client_frame_bytes(len);
+            std::printf("ws-client send %zu B: %zu draw(s), %zu B drawn (one frame: %zu B)\n", len,
+                        draws, bytes, frame);
+            check(sink.frames.load() == sent, "the message reached the server");
+            check(draws == 1 && bytes == frame, "the send drew exactly one masked frame");
+            check(src.live.load(std::memory_order_relaxed) == before,
+                  "and returned it once written");
+        }
+        std::this_thread::sleep_for(50ms);
+        after = src.live.load(std::memory_order_relaxed);
+    }
+    std::printf("ws-client: %zu B before, %zu B after a 16 KiB send\n", before, after);
+    check(after == before, "the client holds 0 B more after a 16 KiB send");
+    check(src.live.load(std::memory_order_relaxed) == 0, "teardown returned every byte");
+}
+
 }  // namespace
 
 int main() {
@@ -230,6 +301,7 @@ int main() {
     run_arm<tr::net::tcp_server_transport_t, tr::net::tcp_server_config_t>("tcp-server");
     run_arm<tr::net::ws_server_transport_t, tr::net::ws_server_config_t>("ws-server");
     run_idle_peer_after_16k();
+    run_ws_client_sends();
     if (g_failures != 0) {
         std::printf("%d check(s) FAILED\n", g_failures);
         return EXIT_FAILURE;

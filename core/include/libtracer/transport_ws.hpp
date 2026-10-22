@@ -506,9 +506,10 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     /**
      * @brief Send @p frame as one client→server MASKED BINARY WebSocket message.
      *
-     * Encodes via ws::encode_client_frame(BINARY, frame, key) (FIN=1, MASK=1,
-     * fresh per-frame key) and writes the whole frame to the peer. No-op once the
-     * connection has been torn down. Thread-safe (the socket write is guarded).
+     * Masks @p frame once (FIN=1, MASK=1, fresh per-frame key) into one frame drawn from
+     * the link's egress source for this send (#2267), and writes it to the peer; the link
+     * keeps no buffer between sends. No-op once the connection has been torn down.
+     * Thread-safe (the socket write is guarded).
      *
      * @param frame A complete TLV's bytes.
      */
@@ -663,22 +664,6 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     // accessors widen on read; a 32-bit target wraps after 2^32.
     std::atomic<std::size_t> dropped_rx_{0};
     std::atomic<std::size_t> malformed_rx_{0};
-    /**
-     * @brief The REUSED masked-frame buffer `send` encodes into, touched only by the thread
-     *        holding the link's egress writer role (`egress_send`, ADR-0087 §2).
-     *
-     * A client frame must be masked (RFC 6455 §5.1), so its wire bytes are not the caller's
-     * bytes and cannot be gathered by reference — this is the one WS egress path that still
-     * needs a buffer. Reused across sends so the steady state allocates nothing, and drawn
-     * from the failable seam (ADR-0065) so exhaustion is a `nullptr` the send turns into a
-     * dropped frame, never the `abort()` a throwing grow becomes under `-fno-exceptions`
-     * (#848).
-     *
-     * The source is the constructor's `egress_src` (#873), NOT the process heap: a
-     * `block_array_t` binds its source at construction, so this member is the reason that
-     * argument exists rather than relying on @ref transport_t::set_egress_source.
-     */
-    mem::block_array_t<std::byte> tx_buf_;
     /** @brief The came-up fact `ok()` reports: written once, in the constructor, on
      *         handshake success — before any thread this object owns exists — and never
      *         again, so a plain bool is race-free here. */
