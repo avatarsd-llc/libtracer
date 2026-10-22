@@ -452,7 +452,7 @@ Five installers configure a graph before frames flow. Each is set once at wiring
 from one thread. That is the **doctrine**, and since #1049 it is stated by the API rather
 than requested in a comment: the callback seams are `{fn, ctx}` slots of one
 `graph_hooks_t` aggregate (RFC-0028 D9) — handed to the constructor, or installed later one
-seam at a time with `set_hook` (#2239): a router wired after its graph installs its three and
+seam at a time with `set_hook` (#2239): a router wired after its graph installs its four and
 touches no other, and its destructor clears them with `clear_hook` if they are still its own —
 never a `std::function`.
 

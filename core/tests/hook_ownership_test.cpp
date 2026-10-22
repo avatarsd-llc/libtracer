@@ -30,6 +30,7 @@
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/transport_vertex.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -176,6 +177,35 @@ void write_after_router_destroyed_calls_nothing() {
     check(link.take() == 0, "and sends nothing: no router was called");
 }
 
+/** @brief The application's link-hold seam; its body is never reached here. */
+void app_link_hold(void*, tr::graph::link_pair_t, bool) {}
+
+/**
+ * @brief A transport vertex clears the link-hold seam it installed when it is destroyed, and
+ *        leaves one the application installed after it.
+ */
+void transport_vertex_clears_its_link_hold() {
+    std::printf("a destroyed transport vertex clears only its own link-hold seam (#2239):\n");
+    graph_t g;
+    fwd_router_t router(g);
+    {
+        tr::net::transport_vertex_t net(g, router);
+        if constexpr (tr::net::kSelfHealLinks) {
+            check(g.hook(&graph_hooks_t::link_hold).ctx == &net,
+                  "control: the transport vertex installed its link-hold seam");
+        }
+    }
+    check(g.hook(&graph_hooks_t::link_hold).fn == nullptr,
+          "the destroyed transport vertex left no link-hold seam behind");
+
+    {
+        tr::net::transport_vertex_t net(g, router);
+        g.set_hook(&graph_hooks_t::link_hold, {&app_link_hold, &g});
+    }
+    check(g.hook(&graph_hooks_t::link_hold).ctx == &g,
+          "it left the link-hold seam the application installed since");
+}
+
 /** @brief `set_policy` naming one member leaves every other member as it was. */
 void partial_set_policy_keeps_the_rest() {
     std::printf("set_policy changes only the members it names (#2239):\n");
@@ -223,5 +253,6 @@ int main() {
     subject_seam_after_router_keeps_remote_delivery();
     write_after_router_destroyed_calls_nothing();
     partial_set_policy_keeps_the_rest();
+    transport_vertex_clears_its_link_hold();
     return tr::testing::summary("hook_ownership");
 }
