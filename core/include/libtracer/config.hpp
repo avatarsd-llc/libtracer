@@ -1151,6 +1151,31 @@ struct default_config_t {
      * `static constexpr std::size_t kCanLearnedBindings = 512;`
      */
     static constexpr std::size_t kCanLearnedBindings = 8 * 4095;
+
+    /**
+     * @brief The longest message one CAN link reassembles, in bytes (#2258).
+     *
+     * A receiver admits a multi-frame group when its advertise arrives and draws the group's
+     * whole segment then, so the advertised total is charged before any slice is seen. An
+     * advertise claiming more than this is refused, counted on
+     * `%net::can_transport_t::dropped_groups()`, and nothing is drawn. The default covers a
+     * 64 KiB CAN-FD message; per link, `%net::transport_can_config_t::max_message` overrides it.
+     * Override fragment: `static constexpr std::size_t kCanMaxMessageBytes = 4096;`
+     */
+    static constexpr std::size_t kCanMaxMessageBytes = 65536;
+
+    /**
+     * @brief The most reassembly segment bytes one CAN link holds across all its open groups
+     *        (#2258).
+     *
+     * Each admitted group is charged its segment (the message plus one presence bit per slice)
+     * until it is delivered or dropped. An advertise whose segment would push the link past this
+     * is refused and counted on `%net::can_transport_t::dropped_groups()`; no open group is
+     * evicted to make room. The default holds two maximum-size messages in flight; per link,
+     * `%net::transport_can_config_t::rx_inflight_bytes` overrides it. Override fragment:
+     * `static constexpr std::size_t kCanRxInflightBytes = 8192;`
+     */
+    static constexpr std::size_t kCanRxInflightBytes = 2 * (kCanMaxMessageBytes + 1024);
 };
 
 }  // namespace tr::graph

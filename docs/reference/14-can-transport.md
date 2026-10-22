@@ -208,6 +208,15 @@ group" serves CAN, UDP scatter-gather, and QUIC alike.
   is refused at admission and counted on `dropped_groups`; the slices that follow find
   no group and are counted on `dropped_rx`. A slice shorter than its place is refused
   the same way, which covers a DLC-0 data frame.
+- **Admission is bounded per link.** A claim over the link's `max_message`, a slice count
+  past the endpoint slots left from its base (a run that can never be filled), or a segment
+  that would take the link's open groups past `rx_inflight_bytes` is refused before any
+  draw and counted on `dropped_groups`. A full budget refuses the newcomer and never evicts
+  an open group. Both caps default at compile time (`config_t::kCanMaxMessageBytes`,
+  64 KiB, and `config_t::kCanRxInflightBytes`, two such messages).
+- **Sizing a receive backend.** The segment holds the message plus one presence bit per
+  slice, `total + ceil(count / 8)` bytes, so a size-class pool sized to exactly the largest
+  message needs the next class up for it.
 
 ```{admonition} Layer placement of the reassembly buffer
 :class: note

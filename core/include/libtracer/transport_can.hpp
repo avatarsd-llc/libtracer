@@ -353,10 +353,21 @@ struct transport_can_config_t {
                                                    resource). A constrained node injects a
                                                    bounded source; `nullptr` = the process net
                                                    sub-pool. Must outlive the transport. */
-    std::size_t max_groups = 0;  /**< @brief Live reassembly-group ceiling; `0` = unbounded
-                                      (host-bounded per RFC-0006). Overflow evicts the
-                                      oldest group and ticks @ref
-                                      can_transport_t::dropped_groups. */
+    std::size_t max_groups = 0; /**< @brief Live reassembly-group ceiling; `0` = unbounded
+                                     (host-bounded per RFC-0006). Overflow evicts the
+                                     oldest group and ticks @ref
+                                     can_transport_t::dropped_groups. */
+    std::size_t max_message =
+        graph::config_t::kCanMaxMessageBytes; /**< @brief The longest message this link
+                                                   reassembles; a longer advertised total is
+                                                   refused at admission and ticks @ref
+                                                   can_transport_t::dropped_groups (#2258). */
+    std::size_t rx_inflight_bytes =
+        graph::config_t::kCanRxInflightBytes; /**< @brief The most reassembly segment bytes
+                                                   this link's open groups hold together; an
+                                                   admission past it is refused (never
+                                                   evicting) and ticks @ref
+                                                   can_transport_t::dropped_groups (#2258). */
     std::size_t max_pending = 0; /**< @brief Ceiling on data slices parked awaiting their
                                       advertise; `0` = unbounded (host-bounded per
                                       RFC-0006). Overflow evicts the oldest parked slice
@@ -376,8 +387,10 @@ struct transport_can_config_t {
     mem::mem_backend_t* rx_backend =
         nullptr; /**< @brief The byte seam each reassembled message is drawn from: ONE
                     segment of the advertised total per group, drawn when the group is
-                    admitted, that every slice is copied into (#2258). `nullptr` = the process net
-                    sub-pool
+                    admitted, that every slice is copied into (#2258). The segment is the
+                    message plus one presence bit per slice, `total + ceil(count / 8)` bytes:
+                    size a class pool one class above the largest message. `nullptr` = the process
+                    net sub-pool
                       (`mem::net_backend()`; the static arena on an MCU build, not the
                     heap). A constrained node injects a bounded backend (`mem::pool_t`)
                     so ingress exhaustion is a by-value refusal on the RX thread

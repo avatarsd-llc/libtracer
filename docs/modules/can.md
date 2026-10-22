@@ -45,8 +45,11 @@ from the link's receive backend when the advertise admits the group — libtrace
 address-shift slicing, not ISO-TP. Its structure comes from an injected
 `block_source_t` and its group count is bounded by configuration, so exhaustion on a
 constrained node is a bounded, counted drop (evict-oldest, or a refused admission),
-never an allocation failure. The defaults — process heap, unbounded — are what a
-host gets unless it says otherwise. The in-band spelling of those bounds — the
+never an allocation failure. Admission is also bounded in bytes per link: a message over
+`max_message` or a segment past `rx_inflight_bytes` (compile-time defaults
+`config_t::kCanMaxMessageBytes` and `config_t::kCanRxInflightBytes`) is refused and counted,
+and a full budget never evicts an open group. The defaults — the process net sub-pool, no
+group-count cap — are what a host gets unless it says otherwise. The in-band spelling of those bounds — the
 `can`-private `max_groups` / `max_pending` / `rx_ttl_ms` keys a `:children[]`
 creation SPEC carries, alongside the bus identity `ifname` / `node` — is
 [connection config](connection-config.md).

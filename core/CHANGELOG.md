@@ -112,8 +112,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     returns the owning `view_t` trimmed to the total. A slice for a group that was never
     admitted is refused rather than starting one.
   - `transport_can_config_t::rx_backend` now serves one segment per group rather than one per
-    slice, and its refusal ticks `dropped_groups` (and each of the group's slices
-    `dropped_rx`).
+    slice, `total + ceil(count / 8)` bytes, and its refusal ticks `dropped_groups` (and each of
+    the group's slices `dropped_rx`).
+  - Admission is bounded per link by two new `transport_can_config_t` fields with compile-time
+    defaults: `max_message` (`config_t::kCanMaxMessageBytes`, 65536) caps one group's total,
+    and `rx_inflight_bytes` (`config_t::kCanRxInflightBytes`, 133120) caps the segment bytes
+    all open groups hold. A claim over either, or one whose slice count runs past the endpoint
+    window, is refused before any draw and counted on `dropped_groups`; no open group is
+    evicted. `can_reassembly_t`'s constructor takes the two caps, and `open_group` takes the
+    run's `max_count`.
 
 ### Breaking
 

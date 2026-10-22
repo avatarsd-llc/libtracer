@@ -34,6 +34,39 @@
 
 namespace {
 
+/** @brief The endpoint run a test group may span: the whole CAN data window. */
+constexpr std::uint32_t kRun = 4095;
+
+/** @brief A pass-through backend that counts its draws and releases. */
+class counting_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    counting_backend_t() noexcept : mem_backend_t("counting") {}
+    tr::view::segment_t* alloc(std::size_t size,
+                               tr::mem::alloc_hint_t hint = tr::mem::alloc_hint_t::NONE) override {
+        ++allocs;
+        tr::view::segment_t* const seg = tr::mem::heap_backend().alloc(size, hint);
+        // Re-pointed at this backend, untagged, so the segment's release comes back HERE: the
+        // test can see which backend a segment was returned to.
+        if (seg != nullptr) {
+            seg->backend = this;
+            seg->btag = tr::mem::backend_tag::UNKNOWN;
+        }
+        return seg;
+    }
+    void destroy(tr::view::segment_t* seg) noexcept override {
+        ++frees;
+        tr::mem::heap_backend().destroy(seg);
+    }
+    std::size_t alignment() const noexcept override { return tr::mem::heap_backend().alignment(); }
+    std::size_t max_segment_size() const noexcept override {
+        return tr::mem::heap_backend().max_segment_size();
+    }
+    tr::mem::mem_space_t space() const noexcept override { return tr::mem::heap_backend().space(); }
+
+    int allocs = 0; /**< @brief Draws served. */
+    int frees = 0;  /**< @brief Segments released. */
+};
+
 /** @brief A whole advertise frame in a `std::vector` — the test-side form of
  *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
  *         the advertise is unencodable. */
@@ -186,7 +219,7 @@ int main() {
 
         // Feed slices OUT OF ORDER: 2, 0, 1, into the group's one segment (#2258).
         tr::net::can_reassembly_t reasm;
-        check(reasm.open_group(key, 3, 20, 8, tr::mem::heap_backend()),
+        check(reasm.open_group(key, 3, 20, 8, kRun, tr::mem::heap_backend()),
               "the advertise admits the group (3 slices of 8 carry 20 bytes)");
         check(reasm.add_slice(key, 2, slice(2).bytes()), "the 4-byte tail slice is taken");
         check(reasm.add_slice(key, 0, slice(0).bytes()), "slice 0 is taken");
@@ -211,7 +244,7 @@ int main() {
         tr::net::can_reassembly_t strict;
         check(!strict.add_slice(key, 0, slice(0).bytes()),
               "a slice with no admitted group is refused");
-        check(strict.open_group(key, 3, 20, 8, tr::mem::heap_backend()), "admitted");
+        check(strict.open_group(key, 3, 20, 8, kRun, tr::mem::heap_backend()), "admitted");
         check(!strict.add_slice(key, 3, slice(0).bytes()), "an index past the count is refused");
         check(!strict.add_slice(key, 0, slice(2).bytes()), "a short interior slice is refused");
         check(!strict.add_slice(key, 2, {}), "an empty (DLC-0) slice is refused");
@@ -227,19 +260,19 @@ int main() {
         tr::net::reassembly_key_t key;
         key.ts = 7;
         tr::net::can_reassembly_t reasm;
-        check(!reasm.open_group(key, 2, 1000, 8, tr::mem::heap_backend()),
+        check(!reasm.open_group(key, 2, 1000, 8, kRun, tr::mem::heap_backend()),
               "2 classic slices cannot carry 1000 bytes: refused");
-        check(!reasm.open_group(key, 2, 0xFFFFFFFFu, 64, tr::mem::heap_backend()),
+        check(!reasm.open_group(key, 2, 0xFFFFFFFFu, 64, kRun, tr::mem::heap_backend()),
               "a 4 GiB claim on 2 FD slices is refused without a draw");
-        check(!reasm.open_group(key, 3, 16, 8, tr::mem::heap_backend()),
+        check(!reasm.open_group(key, 3, 16, 8, kRun, tr::mem::heap_backend()),
               "16 bytes fit in 2 slices, so a 3-slice claim is refused");
-        check(!reasm.open_group(key, 0, 0, 8, tr::mem::heap_backend()),
+        check(!reasm.open_group(key, 0, 0, 8, kRun, tr::mem::heap_backend()),
               "a 0-slice group is refused");
-        check(!reasm.open_group(key, 2, 100, 8, tr::mem::heap_backend()),
+        check(!reasm.open_group(key, 2, 100, 8, kRun, tr::mem::heap_backend()),
               "an FD-sized claim (64 + 36) on a classic link is refused");
         check(reasm.dropped_groups() == 5 && !reasm.contains(key),
               "each refusal is counted, and nothing is tracked");
-        check(reasm.open_group(key, 2, 100, 64, tr::mem::heap_backend()),
+        check(reasm.open_group(key, 2, 100, 64, kRun, tr::mem::heap_backend()),
               "the same claim on an FD link is admitted at the FD width");
         std::array<std::byte, 64> fd_slice{};
         fd_slice.fill(std::byte{0x5A});
@@ -247,6 +280,47 @@ int main() {
               "a padded FD tail and a full FD slice are taken");
         const auto fd = reasm.take(key);
         check(fd && fd->length == 100, "the FD group is delivered trimmed to its 100 bytes");
+    }
+
+    // --- 3 (caps). Admission is bounded by the link's caps, refused rather than drawn, and a
+    //     full budget refuses the newcomer without evicting an open group. ---
+    {
+        const auto key_ts = [](std::uint64_t ts) {
+            tr::net::reassembly_key_t k;
+            k.ts = ts;
+            return k;
+        };
+        counting_backend_t counting;
+        tr::net::can_reassembly_t capped(tr::mem::heap_source(), 0, /*max_message=*/1024,
+                                         /*max_inflight=*/2 * (1024 + 16));
+        // A geometry-valid claim of 65535 FD slices (about 4 MiB) is over the message cap.
+        check(!capped.open_group(key_ts(1), 65535, 65535u * 64u - 10u, 64, 65535, counting),
+              "a geometry-valid 65535-slice claim over max_message is refused");
+        // A run longer than the endpoint slots left can never be filled.
+        check(!capped.open_group(key_ts(2), 3, 20, 8, /*max_count=*/2, counting),
+              "a slice count past the endpoint window is refused");
+        // The u32 extremes: the segment size is computed wide and never wraps into a draw.
+        check(!capped.open_group(key_ts(3), 0x20000000u, 0xFFFFFFFFu, 8, 0xFFFFFFFFu, counting),
+              "a claim whose segment size would wrap a u32 is refused");
+        check(counting.allocs == 0, "none of those refusals drew from the backend");
+        check(capped.dropped_groups() == 3, "each refusal is counted on dropped_groups");
+
+        // Two 1 KiB groups fill the in-flight budget; a third is refused, and both stay open.
+        check(capped.open_group(key_ts(10), 128, 1024, 8, kRun, counting) &&
+                  capped.open_group(key_ts(11), 128, 1024, 8, kRun, counting),
+              "two maximum-size groups are admitted within the budget");
+        check(capped.inflight_bytes() == 2 * (1024 + 16), "each is charged message + bits");
+        check(!capped.open_group(key_ts(12), 1, 8, 8, kRun, counting),
+              "a third group past the in-flight budget is refused");
+        check(capped.contains(key_ts(10)) && capped.contains(key_ts(11)),
+              "... and no open group was evicted to make room");
+        check(capped.dropped_groups() == 4, "the budget refusal is counted");
+        capped.erase(key_ts(10));
+        check(capped.inflight_bytes() == 1024 + 16, "a dropped group returns its charge");
+        check(capped.open_group(key_ts(12), 1, 8, 8, kRun, counting),
+              "and the next group fits again");
+        check(counting.allocs == 3 && counting.frees == 1,
+              "three draws, and the dropped one went back to its own backend");
     }
 
     // --- 3a. The group's own count (#2049): a re-sent slice counts once, and dropping a group
@@ -265,7 +339,7 @@ int main() {
         };
         tr::net::can_reassembly_t reasm;
         for (const std::uint64_t ts : {1u, 2u, 3u}) {
-            (void)reasm.open_group(key_ts(ts), 3, 20, 8, tr::mem::heap_backend());
+            (void)reasm.open_group(key_ts(ts), 3, 20, 8, kRun, tr::mem::heap_backend());
             (void)reasm.add_slice(key_ts(ts), 0, slice(0).bytes());
             (void)reasm.add_slice(key_ts(ts), 1, slice(1).bytes());
         }
@@ -308,7 +382,7 @@ int main() {
         // never OOM (the no-synthetic-limits doctrine: bounded drop + a counter).
         tr::net::can_reassembly_t bounded(tr::mem::heap_source(), /*max_groups=*/2);
         const auto admit = [&](std::uint64_t ts) {
-            (void)bounded.open_group(key_ts(ts), 3, 20, 8, tr::mem::heap_backend());
+            (void)bounded.open_group(key_ts(ts), 3, 20, 8, kRun, tr::mem::heap_backend());
             (void)bounded.add_slice(key_ts(ts), 0, slice(0).bytes());
         };
         admit(1);
@@ -342,7 +416,7 @@ int main() {
 
         tr::net::can_reassembly_t aging;
         aging.set_now(1000);
-        (void)aging.open_group(key_ts(1), 3, 20, 8, tr::mem::heap_backend());  // 3 promised
+        (void)aging.open_group(key_ts(1), 3, 20, 8, kRun, tr::mem::heap_backend());  // 3 promised
         (void)aging.add_slice(key_ts(1), 0, slice(0).bytes());  // ... only 1 of which lands
         check(!aging.is_complete(key_ts(1)), "the group is incomplete (a slice was lost)");
 

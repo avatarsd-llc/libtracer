@@ -42,8 +42,10 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <utility>
 
 #include "libtracer/can_framing.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
@@ -101,6 +103,11 @@ struct reassembly_key_t {
  * total length, so a re-sent slice is still counted once without a second draw. The delivered
  * view stops at the total, so the bits never reach the receiver.
  *
+ * Admission is bounded per link, by caps fixed at construction: a message longer than the
+ * link's `max_message` is refused, and so is a group whose segment would take the link's bytes
+ * in flight, summed over every open group, past `max_inflight`. A full budget refuses the
+ * newcomer; it never evicts a group already open. Both refusals tick @ref dropped_groups.
+ *
  * Structure is drawn from the injected block source; when `max_groups` is non-zero and a new
  * group would exceed it, the oldest group is evicted (its segment freed) and @ref
  * dropped_groups is incremented: a bounded drop rather than unbounded growth. Independently of
@@ -110,15 +117,31 @@ struct reassembly_key_t {
 class can_reassembly_t {
    public:
     /**
-     * @brief Construct over @p src, bounding the live group count at @p max_groups.
-     * @param src        Where the group structure is drawn from
-     *                   (default: the process net sub-pool).
-     * @param max_groups Live-group ceiling; `0` means unbounded (the default, and
-     *                   the pre-rehome behavior).
+     * @brief Construct over @p src, bounding the live group count at @p max_groups and the
+     *        bytes admission may draw at @p max_message and @p max_inflight.
+     * @param src          Where the group structure is drawn from
+     *                     (default: the process net sub-pool).
+     * @param max_groups   Live-group ceiling; `0` means unbounded (the default, and
+     *                     the pre-rehome behavior).
+     * @param max_message  The longest message one group may claim, in bytes.
+     * @param max_inflight The most segment bytes all open groups may hold together.
      */
-    explicit can_reassembly_t(mem::block_source_t& src = mem::net_source(),
-                              std::size_t max_groups = 0) noexcept
-        : max_groups_(max_groups), groups_(src) {}
+    explicit can_reassembly_t(
+        mem::block_source_t& src = mem::net_source(), std::size_t max_groups = 0,
+        std::size_t max_message = graph::config_t::kCanMaxMessageBytes,
+        std::size_t max_inflight = graph::config_t::kCanRxInflightBytes) noexcept
+        : max_groups_(max_groups),
+          max_message_(max_message),
+          max_inflight_(max_inflight),
+          groups_(src) {}
+
+    /** @brief Releases every open group's segment to the backend it came from. */
+    ~can_reassembly_t() {
+        for (std::size_t i = 0; i < groups_.size(); ++i) release(groups_.at(i).value.seg);
+    }
+
+    can_reassembly_t(const can_reassembly_t&) = delete;            /**< @brief Owns segments. */
+    can_reassembly_t& operator=(const can_reassembly_t&) = delete; /**< @brief Owns segments. */
 
     /**
      * @brief Admit group @p key: draw its one segment from @p bytes.
@@ -126,51 +149,64 @@ class can_reassembly_t {
      * A group already tracked under @p key is replaced, uncounted (its producer re-advertised
      * the run). Every refusal ticks @ref dropped_groups, since the group is lost before delivery.
      *
-     * @param key   The `(origin, ts)` group identity.
-     * @param count The advertised slice count.
-     * @param total The advertised total length, in bytes.
+     * @param key       The `(origin, ts)` group identity.
+     * @param count     The advertised slice count.
+     * @param total     The advertised total length, in bytes.
      * @param max_width The widest slice this link carries (8 classic, 64 CAN-FD).
-     * @param bytes The receive backend the segment is drawn from.
-     * @retval false The geometry is impossible (`count` slices of the producer's width cannot
-     *               carry `total`), or the backend or the group table refused: nothing is
-     *               tracked.
+     * @param max_count The most slices the group can ever receive (the endpoint slots left
+     *                  from its base).
+     * @param bytes     The receive backend the segment is drawn from.
+     * @retval false The claim is impossible (no slices, more than @p max_count, or a slice
+     *               geometry that cannot carry `total`), over the link's caps, or the backend
+     *               or the group table refused: nothing is tracked and nothing is drawn.
      */
     [[nodiscard]] bool open_group(const reassembly_key_t& key, std::uint32_t count,
                                   std::uint32_t total, std::size_t max_width,
-                                  mem::mem_backend_t& bytes) noexcept {
+                                  std::uint32_t max_count, mem::mem_backend_t& bytes) noexcept {
         if (groups_.contains(key)) drop_group(key);
         // The producer sliced at its mode's width, and (count, total) names it: a classic group
         // fits `count * 8`, an FD group of two or more slices never does. Every slice but the
         // last is `width` bytes, so `count` slices carry exactly the totals in
-        // ((count-1)*width, count*width]. In 64 bits, so no product wraps for a peer's u32.
+        // ((count-1)*width, count*width]. All in 64 bits, so nothing wraps for any u32 claim,
+        // and the segment size is checked against the budget before it becomes a `size_t`.
         const std::uint64_t classic = std::uint64_t{count} * can::kCanClassicMaxData;
-        const std::uint32_t width =
-            static_cast<std::uint32_t>(total <= classic ? can::kCanClassicMaxData : max_width);
+        const std::uint64_t width = total <= classic ? can::kCanClassicMaxData : max_width;
         const std::uint64_t full = std::uint64_t{count} * width;
-        if (count == 0 || total > full || total + std::uint64_t{width} <= full) {
+        const std::uint64_t bits = (std::uint64_t{count} + 7) / 8;
+        const std::uint64_t size = std::uint64_t{total} + bits;
+        // `count - 1 >= max_count` refuses both 0 slices (it wraps) and a run past the window.
+        if (count - 1u >= max_count || total > full || total + width <= full ||
+            total > max_message_ || size > max_inflight_ - inflight_) {
             ++dropped_groups_;
             return false;
         }
         if (max_groups_ != 0 && groups_.size() >= max_groups_) evict_oldest();
-        tr::view::segment_ptr_t seg = tr::view::segment_alloc(bytes, total + (count + 7) / 8);
-        group_meta_t* const g = seg ? groups_
-                                          .try_emplace(key, group_meta_t{.seg = std::move(seg),
-                                                                         .total = total,
-                                                                         .width = width,
-                                                                         .expected = count,
-                                                                         .count = 0,
-                                                                         .highest = 0,
-                                                                         .seq = next_seq_++,
-                                                                         .last_touch = now_})
-                                          .value
-                                    : nullptr;
+        tr::view::segment_t* const seg = bytes.alloc(static_cast<std::size_t>(size));
+        group_meta_t* const g =
+            seg == nullptr
+                ? nullptr
+                : groups_
+                      .try_emplace(key, group_meta_t{.seg = seg,
+                                                     .total = total,
+                                                     .width = static_cast<std::uint32_t>(width),
+                                                     .expected = count,
+                                                     .count = 0,
+                                                     .highest = 0,
+                                                     .seq = next_seq_++,
+                                                     .last_touch = now_})
+                      .value;
         if (g == nullptr) {
+            release(seg);
             ++dropped_groups_;
             return false;
         }
-        std::memset(g->seg->bytes.data() + total, 0, (count + 7) / 8);
+        inflight_ += static_cast<std::size_t>(size);
+        std::memset(seg->bytes.data() + total, 0, static_cast<std::size_t>(bits));
         return true;
     }
+
+    /** @brief Segment bytes all open groups hold together (charged against `max_inflight`). */
+    [[nodiscard]] std::size_t inflight_bytes() const noexcept { return inflight_; }
 
     /**
      * @brief Copy slice @p index of group @p key into the group's segment.
@@ -244,7 +280,9 @@ class can_reassembly_t {
         group_meta_t* const g = groups_.find(key);
         if (g == nullptr || g->count != g->expected) return std::nullopt;
         const std::size_t total = g->total;
-        tr::view::view_t whole = tr::view::view_t::over(std::move(g->seg));
+        inflight_ -= seg_bytes(*g);
+        tr::view::view_t whole =
+            tr::view::view_t::over(tr::view::segment_ptr_t::adopt(std::exchange(g->seg, nullptr)));
         (void)groups_.erase(key);
         whole.length = total;  // the presence bits past the total stay behind
         return whole;
@@ -318,17 +356,32 @@ class can_reassembly_t {
 
    private:
     struct group_meta_t {
-        tr::view::segment_ptr_t seg;   // total bytes, then ceil(expected / 8) presence bits.
-        std::uint32_t total = 0;       // advertised total length.
-        std::uint32_t width = 0;       // advertised slice width.
-        std::uint32_t expected = 0;    // advertised slice count.
-        std::uint32_t count = 0;       // distinct slices received.
-        std::uint32_t highest = 0;     // highest slice index received.
-        std::uint64_t seq = 0;         // admission order, for evict-oldest.
-        std::uint64_t last_touch = 0;  // caller's stamp at the last progress.
+        tr::view::segment_t* seg = nullptr;  // owned: total bytes, then ceil(expected / 8) bits.
+        std::uint32_t total = 0;             // advertised total length.
+        std::uint32_t width = 0;             // advertised slice width.
+        std::uint32_t expected = 0;          // advertised slice count.
+        std::uint32_t count = 0;             // distinct slices received.
+        std::uint32_t highest = 0;           // highest slice index received.
+        std::uint64_t seq = 0;               // admission order, for evict-oldest.
+        std::uint64_t last_touch = 0;        // caller's stamp at the last progress.
     };
 
-    void drop_group(const reassembly_key_t& key) noexcept { (void)groups_.erase(key); }
+    // The segment's bytes, presence bits included: what admission charged.
+    [[nodiscard]] static std::size_t seg_bytes(const group_meta_t& g) noexcept {
+        return std::size_t{g.total} + (std::size_t{g.expected} + 7) / 8;
+    }
+    // A group's segment is held raw and never shared until `take`, so it goes straight back to
+    // the backend it came from: the injected seam, not the process heap (ADR-0083).
+    static void release(tr::view::segment_t* seg) noexcept {
+        if (seg != nullptr) seg->backend->destroy(seg);
+    }
+    void drop_group(const reassembly_key_t& key) noexcept {
+        group_meta_t* const g = groups_.find(key);
+        if (g == nullptr) return;
+        inflight_ -= seg_bytes(*g);
+        release(g->seg);
+        (void)groups_.erase(key);
+    }
 
     // Evict the oldest-admitted group to make room (bounded drop, counted).
     void evict_oldest() noexcept {
@@ -343,6 +396,9 @@ class can_reassembly_t {
     }
 
     std::size_t max_groups_ = 0;
+    std::size_t max_message_ = 0;   // per-group cap on the claimed total.
+    std::size_t max_inflight_ = 0;  // per-link cap on segment bytes held by open groups.
+    std::size_t inflight_ = 0;      // segment bytes held by open groups now.
     std::uint64_t next_seq_ = 0;
     std::uint64_t dropped_groups_ = 0;
     std::uint64_t now_ = 0;  // the caller's latest stamp (set_now); no clock here.

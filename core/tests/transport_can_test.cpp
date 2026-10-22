@@ -897,6 +897,55 @@ void test_oversize_advertise_is_refused_and_counted() {
 }
 
 /**
+ * @brief #2258 — admission is bounded by the link's own caps: a geometry-valid claim over
+ *        `max_message`, a run past the endpoint window, and a group past the in-flight budget
+ *        are each refused before any draw and counted, and a full budget never evicts.
+ */
+void test_admission_is_bounded_by_the_link_caps() {
+    std::printf("transport_can admission bounded by max_message / rx_inflight_bytes (#2258):\n");
+
+    fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    counting_backend_t counting;
+    fake_link_t injector(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    tr::net::transport_can_config_t cfg = rx_test_config();
+    cfg.rx_backend = &counting;
+    cfg.max_message = 1024;
+    cfg.rx_inflight_bytes = 64 + 8 + 16;  // one 64-byte group in flight, not two
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg);
+    tx_b.set_receiver(rx);
+
+    const auto advertise = [&](std::uint16_t base, std::uint16_t count, std::uint32_t total) {
+        can::advertise_t adv;
+        adv.can_id = can::encode_can_id({0, 1, base});
+        adv.group = true;
+        adv.group_total_len = total;
+        adv.slice_count = count;
+        adv.path = "sensor/temp";
+        inject_advertise(injector, /*node=*/1, adv);
+    };
+    // 4000 classic slices carrying 32000 bytes: geometry-valid, over max_message.
+    advertise(tr::net::kCanFirstDataEndpoint, 4000, 32000);
+    // A run of 200 from endpoint 4000 runs past the 4095-slot window: it can never complete.
+    advertise(4000, 200, 1600);
+    check(wait_until([&] { return tx_b.dropped_groups() >= 2; }, 2s),
+          "the over-cap claim and the over-the-run claim were both refused, counted");
+    check(counting.allocs.load() == 0, "neither drew from the receive backend");
+
+    // One 64-byte group fills the budget; the second is refused and the first still completes.
+    advertise(100, 8, 64);
+    advertise(200, 8, 64);
+    check(wait_until([&] { return tx_b.dropped_groups() >= 3; }, 2s),
+          "the group past the in-flight budget was refused, counted");
+    check(counting.allocs.load() == 1, "only the admitted group drew its segment");
+    for (std::uint16_t i = 0; i < 8; ++i) inject_data(injector, /*node=*/1, 100 + i);
+    check(sink.wait_for_count(1, 2s), "the open group was not evicted: it completes");
+    check(tx_b.dropped_groups() == 3, "and nothing else was dropped");
+}
+
+/**
  * @brief #911, the second door — a DLC-0 data slice reaches the SAME corruption by the
  *        success path, so it takes the same disposition.
  *
@@ -1807,6 +1856,7 @@ int main() {
     test_u16_slice_count_wrap_cannot_advertise_a_hello();
     test_rx_segment_refusal_drops_the_group_and_counts();
     test_oversize_advertise_is_refused_and_counted();
+    test_admission_is_bounded_by_the_link_caps();
     test_rx_zero_length_slice_drops_the_group_and_counts();
     test_endpoint_wraparound_does_not_alias_stale_state();
     test_stale_lap_binding_is_refused_not_welded();

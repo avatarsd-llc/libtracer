@@ -52,6 +52,9 @@
 
 namespace {
 
+/** @brief The endpoint run a test group may span: the whole CAN data window. */
+constexpr std::uint32_t kRun = 4095;
+
 using tr::testing::check;
 
 /**
@@ -273,7 +276,7 @@ int main() {
         // The advertise admits the group, then out-of-order arrival, then assembly. The group's
         // one segment is the receive backend's (#2258); its table entry is the slab's.
         const auto admit = [&](std::uint64_t ts) {
-            return reasm.open_group(key_ts(ts), static_cast<std::uint32_t>(n), 20, 8,
+            return reasm.open_group(key_ts(ts), static_cast<std::uint32_t>(n), 20, 8, kRun,
                                     tr::mem::heap_backend());
         };
         reasm.set_now(1000);

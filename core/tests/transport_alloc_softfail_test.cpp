@@ -117,6 +117,9 @@
 
 namespace {
 
+/** @brief The endpoint run a test group may span: the whole CAN data window. */
+constexpr std::uint32_t kRun = 4095;
+
 /** @brief A whole advertise frame in a `std::vector` — the test-side form of
  *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
  *         the advertise is unencodable. */
@@ -1877,14 +1880,15 @@ void test_can_reassembly_refusal_is_reported() {
     tr::net::can_reassembly_t reasm(budget);
     const tr::net::reassembly_key_t key{{}, 7};
     const std::array<std::byte, 8> bytes{};
-    check(!reasm.open_group(key, 1, 8, 8, tr::mem::heap_backend()),
+    check(!reasm.open_group(key, 1, 8, 8, kRun, tr::mem::heap_backend()),
           "a refused group entry => open_group reports false");
     check(!reasm.add_slice(key, 0, bytes), "and a slice for it finds no group");
     check(!reasm.contains(key), "and nothing half-recorded was left behind");
     check(reasm.dropped_groups() == 1, "the refused admission is counted");
     check(budget.refused() >= 1, "the refusal was at the injected seam");
     budget.lift();
-    check(reasm.open_group(key, 1, 8, 8, tr::mem::heap_backend()) && reasm.add_slice(key, 0, bytes),
+    check(reasm.open_group(key, 1, 8, 8, kRun, tr::mem::heap_backend()) &&
+              reasm.add_slice(key, 0, bytes),
           "once the store has room the SAME reassembler takes the group and its slice");
     check(reasm.contains(key), "and tracks the group");
 }

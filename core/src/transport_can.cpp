@@ -126,7 +126,7 @@ can_transport_t::can_transport_t(mem::poly_ptr_t<can_link_t> link,
       // reached (#912): before this it was default-constructed, so max_groups was
       // 0 and its evict-oldest never fired. Every RX table draws from the same
       // injected source — the RX thread never reaches the global heap.
-      reasm_(rx_source(config), cfg_.max_groups),
+      reasm_(rx_source(config), cfg_.max_groups, cfg_.max_message, cfg_.rx_inflight_bytes),
       learned_(rx_source(config)),
       nodes_(rx_source(config)),
       pending_(rx_source(config)),
@@ -619,13 +619,17 @@ void transport_can::learn_advertise(const can::advertise_t& adv, std::uint32_t c
     bound->adv.path = bound->path.view();
     bound->prior_lap = false;  // the fresh binding is current, whatever the lap test marked
     // Admit the group: ONE segment of the advertised total, drawn from this link's own receive
-    // backend (#2258), so the receiver pays for the size its peer announced. A classic link
+    // backend (#2258), so the receiver pays for the size its peer announced, within this link's
+    // `max_message` and `rx_inflight_bytes`. A classic link
     // takes classic slice widths only, so an FD-sized claim on one is refused like any geometry
     // that cannot carry its total. A refusal (geometry, backend or table) ticks dropped_groups;
     // the group's slices then find no group and tick dropped_rx.
+    // The endpoint slots left from the base bound the count: a run past the window can never
+    // be filled, so it is refused rather than drawn.
     if (deliver)
         (void)reasm_.open_group(key_of(base->node, base->endpoint), adv.slice_count,
-                                adv.group_total_len, can::can_max_data(cfg_.mode), *rx_backend_);
+                                adv.group_total_len, can::can_max_data(cfg_.mode),
+                                can::kEndpointMax + 1u - base->endpoint, *rx_backend_);
 
     // A data frame may have arrived ahead of its manifest (cross-ID arbitration);
     // re-drive any now-matchable pending slices. Compact in place and lift only the
