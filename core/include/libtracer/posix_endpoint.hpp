@@ -991,10 +991,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         moving, or owing nothing (#2198). Written only by @ref close_frozen_peers,
          *         under @ref peers_m_. */
         std::uint64_t live_since = 0;
-        /** @brief The slot admitted after this one, or null: the chain @ref broadcast walks
-         *         without @ref peers_m_ (#2263). Stored once, release, when the next slot is
-         *         admitted, and never again: slots are recycled in place, never freed, so a
-         *         walker that loaded a slot can always follow it. */
+        /** @brief The slot admitted before this one, or null: the chain @ref broadcast walks
+         *         without @ref peers_m_ (#2263). Stored once, before this slot is published
+         *         at the chain's head, and never again: slots are recycled in place, never
+         *         freed, so a walker that loaded a slot can always follow it. */
         std::atomic<session_base_t*> next{nullptr};
 
        protected:
@@ -1243,8 +1243,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     mutable std::mutex peers_m_;
     /** @brief The peer slots: insert-only, recycled in place, never freed early. */
     mem::block_array_t<mem::poly_ptr_t<session_base_t>> slots_;
-    /** @brief The first slot ever admitted, or null: the head of the
-     *         @ref session_base_t::next chain, in slot order (#2263). */
+    /** @brief The slot admitted last, or null: the head of the @ref session_base_t::next
+     *         chain, newest first (#2263). Stored only by the poll thread, release. */
     std::atomic<session_base_t*> first_{nullptr};
     int listen_fd_ = -1;           /**< @brief The bound+listening socket (-1 = not bound). */
     std::uint16_t bound_port_ = 0; /**< @brief The resolved bound port (see local_port()). */
