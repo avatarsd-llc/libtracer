@@ -1610,6 +1610,7 @@ void test_blocked_group_does_not_hold_a_concurrent_sender() {
               "B's last slice reached the driver before A's parked slice did");
     }
     check(tx_b.dropped_rx() == 0 && tx_b.dropped_groups() == 0, "the receiver dropped nothing");
+    check(tx_a.tx_fence_waits() == 0, "no send parked at the lap fence: nothing wrapped");
 }
 
 /**
@@ -1654,8 +1655,9 @@ void test_wrap_waits_for_the_group_in_flight() {
         tx_a.send(w_payload);
         w_done.store(true);
     });
-    // A negative check needs a window; 200 ms is ample for a 4 KiB-slot send that runs free.
-    std::this_thread::sleep_for(200ms);
+    // Deterministic: the fence counts the park before it waits, under tx_m_.
+    check(wait_until([&] { return tx_a.tx_fence_waits() >= 1; }, 2s),
+          "the wrapping group parked at the lap fence while group A was in flight");
     check(!w_done.load(), "the wrapping group waits while group A is still in flight");
     check(run_of(gate.snapshot(), kFirst, kA).size() == 2,
           "nothing reached A's run while A was parked (only its first two slices)");

@@ -31,6 +31,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed (breaking)
 
+- **`can_link_t::write_raw` is called concurrently (#2262).** `can_transport_t` used to
+  hold its TX lock across a whole group, so every `write_raw` on a link was serialized and a
+  second sender waited out the first group's driver back-pressure. The lock now covers only
+  the slot reservation and the advertise; data slices go out unlocked, on a run of slice ids
+  no other group in flight shares. Ordering is per group: each advertise goes out whole,
+  each group's slices in index order on its own run, and slices of concurrent sends may
+  interleave on the bus. `socketcan_link_t` and `twai_link_t` already serialize internally.
+  - **Migration:** an application-supplied `can_link_t` must make `write_raw` safe under
+    concurrent calls, for example with a mutex around its driver submission. A link that
+    blocks on back-pressure needs no change.
+
 - **`transport_vertex_t::settings_of` returns a copy of the record, not a pointer into the
   connection table (#2241).** The table is one sorted block, and a connection created or
   removed on another thread (a peer's `SPEC` arrives on a receive thread) shifted it, so a
@@ -190,6 +201,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   already passed `true`. **Migration:** drop `.defer_rx = ...` from the config; a directly
   constructed DIAL link installs its receivers and then calls `start_receiving()`. Sending
   needs no arming. The LISTEN constructor is unchanged.
+
+### Added
+
+- **`can_transport_t::tx_fence_waits()` (#2262).** Counts the times a send parked at the lap
+  fence: a reservation that must wrap the endpoint allocator waits until no group is in
+  flight, so no slice id is re-issued while its group is still being sent.
 
 ## [0.21.0] — 2026-10-22
 

@@ -221,6 +221,12 @@ class can_link_t {
      * completion (#383; `%can_tx_pool.hpp` is that storage). A synchronous
      * link (`socketcan_link_t`: the kernel copies inside the write(2) call)
      * may use @p frame directly.
+     *
+     * **Called concurrently (#2262).** @ref can_transport_t calls this from every
+     * thread that sends on it, at the same time, with no lock of its own held; one
+     * thread's calls for one group arrive in order. An implementation must therefore
+     * be safe under concurrent calls (`socketcan_link_t` and `twai_link_t` serialize
+     * their submission internally) and may block on driver back-pressure.
      */
     virtual void write_raw(const can_frame_data_t& frame) = 0;
 
@@ -447,8 +453,12 @@ class can_transport_t final : public transport_t, public bus_link_t {
     /**
      * @brief Fragment @p frame across CAN frames and emit it (advertise + data).
      *
-     * Empty frames are dropped. Thread-safe: a whole group (its advertise and data
-     * frames) is emitted under one lock so concurrent sends never interleave.
+     * Empty frames are dropped. Thread-safe, with a per-group guarantee rather than a
+     * per-transport one (#2262): the group's advertise is emitted whole, and its data
+     * slices follow in index order on a run of slice ids no other group in flight
+     * shares. Slices of concurrent sends may interleave on the bus, each on its own run,
+     * so the receiver never mixes them; a send never waits out another's driver
+     * back-pressure, except at a wrap of the endpoint allocator (see @ref tx_fence_waits).
      * @param frame A complete libtracer frame (a ROUTER-wrapped TLV's bytes).
      */
     void send(std::span<const std::byte> frame) override;
@@ -565,6 +575,20 @@ class can_transport_t final : public transport_t, public bus_link_t {
      */
     [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
         return dropped_tx_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Times a send parked at the lap fence (#2262): its reservation had to wrap the
+     *        endpoint allocator while another group was still in flight.
+     *
+     * The only place one sender waits for another. A wrap re-issues slice ids from the
+     * first data slot, so it waits until every group of the ending lap has its last slice
+     * out; otherwise the wrapping advertise would retire a binding mid-group. Counts each
+     * park, so a wake that finds a group still in flight counts again. Not a drop: the
+     * send goes out once the fence opens.
+     */
+    [[nodiscard]] std::uint64_t tx_fence_waits() const noexcept {
+        return tx_fence_waits_.load(std::memory_order_relaxed);
     }
 
     /**
@@ -814,6 +838,7 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // on read; a 32-bit target wraps after 2^32.
     std::atomic<std::size_t> dropped_rx_{0};
     std::atomic<std::size_t> dropped_tx_{0};
+    std::atomic<std::size_t> tx_fence_waits_{0};
     std::atomic<std::size_t> dropped_presink_{0};
     std::atomic<std::size_t> dropped_stale_binding_{0};
     std::atomic<std::size_t> dropped_binding_cap_{0};

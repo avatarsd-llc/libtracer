@@ -314,15 +314,21 @@ std::optional<std::uint16_t> transport_can::alloc_base(std::size_t slice_count,
     // whole data-endpoint window fits at no base and no wrap rescues it. Refuse it
     // here so the caller never advertises a count it cannot deliver.
     if (span > kCanMaxGroupSlices) return std::nullopt;
-    if (static_cast<std::size_t>(next_base_) + span - 1u > can::kEndpointMax) {
+    while (static_cast<std::size_t>(next_base_) + span - 1u > can::kEndpointMax) {
         // THE LAP FENCE (#2262). Slices go out without tx_m_, so a group of this lap may
         // still be on its way. Re-issuing its ids before its last slice is out would let
         // the new group's advertise retire its binding mid-group, and its tail would weld
         // onto the new one. So a wrap waits until no group is in flight. It is the only
         // place a sender waits for another one, at most once per lap of the endpoint window.
-        // The wait releases tx_m_ and is woken by the last group out: no clock, no timer.
-        tx_drained_.wait(lock, [this] { return tx_in_flight_ == 0; });
-        next_base_ = kCanFirstDataEndpoint;  // wrap, leaving the control slot free
+        // The wait releases tx_m_ and is woken by a group going out: no clock, no timer.
+        // The loop re-tests the fit on every wake, so a waiter that finds the allocator
+        // already wrapped by another one takes the next base instead of wrapping again.
+        if (tx_in_flight_ == 0) {
+            next_base_ = kCanFirstDataEndpoint;  // wrap, leaving the control slot free
+        } else {
+            tx_fence_waits_.fetch_add(1, std::memory_order_relaxed);
+            tx_drained_.wait(lock);
+        }
     }
     const std::uint16_t base = next_base_;
     next_base_ = static_cast<std::uint16_t>(static_cast<std::size_t>(base) + span);
@@ -481,7 +487,8 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
         link_->write_raw(out);
     }
     lock.lock();
-    if (--tx_in_flight_ == 0) tx_drained_.notify_all();
+    --tx_in_flight_;
+    tx_drained_.notify_all();  // a fence waiter re-tests its own predicate
 }
 
 void transport_can::on_rx(const can_frame_data_t& frame) {
