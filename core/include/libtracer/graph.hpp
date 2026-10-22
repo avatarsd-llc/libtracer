@@ -79,15 +79,15 @@ class graph_t;
  * @brief What the producer fan-out hands a remote subscriber's delivery sink (#136).
  *
  * A pure description of one remote subscription edge: the consumer's accumulated
- * return route and this node's NAME for the link it arrived on, both opaque to L4. The
- * injected sink (a `tr::net` concern — @ref graph_hooks_t::remote_delivery) interprets
- * these: it maps @ref link to a transport child and emits a `FWD{WRITE}` (RFC-0004 §D).
- * @ref link is borrowed for the sink call only; @ref return_route is a refcount
- * clone of the stored route segment (ADR-0041 §2) — the sink may rope it into an
- * egress frame, and it stays alive across a concurrent unsubscribe.
+ * return route and the pair of the link it delivers over, both opaque to L4. The injected
+ * sink (a `tr::net` concern — @ref graph_hooks_t::remote_delivery) interprets these: it
+ * dereferences @ref link to a transport child (#1941: a pair deref, no name scan) and emits
+ * a `FWD{WRITE}` (RFC-0004 §D). @ref return_route is a refcount clone of the stored route segment
+ * (ADR-0041 §2) — the sink may rope it into an egress frame, and it stays alive across a concurrent
+ * unsubscribe.
  */
 struct remote_delivery_t {
-    std::string_view link;     /**< @brief This node's NAME for the consumer link. */
+    link_pair_t link;          /**< @brief The pair of the link the edge delivers over. */
     view::view_t return_route; /**< @brief Consumer return route (PATH TLV view, refcount clone). */
     /** @brief Completed reverse bound route (`PATH_REF` view, refcount clone; empty ⇒
      *         canonical-only). Element 0 is this node's own reference, consumed locally by
@@ -387,6 +387,11 @@ struct wire_target_split_t {
      */
     link_id_t token{};
     /**
+     * @brief The matched mount's pair — its connection vertex's slot — which the edge stores
+     *        and delivers over (#1941). Not valid exactly when @ref link is empty.
+     */
+    link_pair_t pair{};
+    /**
      * @brief A mount WAS named, but it cannot carry a directed delivery — the target named
      *        the mount exactly (nothing below it), or its first hop landed on a bus link's
      *        own NAME (ADR-0073 §3 / RFC-0020). RFC-0021 §B.3: the subscribe-write is
@@ -494,8 +499,8 @@ using stats_sampler_fn_t = bool (*)(void* ctx, std::string_view seam_class,
  * replaced, or evicted — so the receiver can keep a plain reference count and nothing else.
  *
  * @param ctx  The caller-owned context installed beside the function.
- * @param link This node's NAME for the link — the router's registry name. Borrowed for the
- *             call only.
+ * @param link The pair of the link (`%link_pair_t`) — the connection vertex the edge
+ *             delivers over, and the bus peer under it when it delivers to one.
  * @param held `true` on establishment, `false` on teardown.
  *
  * @note Called on the subscribing or unsubscribing thread, OUTSIDE every graph lock, after
@@ -503,7 +508,23 @@ using stats_sampler_fn_t = bool (*)(void* ctx, std::string_view seam_class,
  *       briefly on the receiver's own control-plane lock; it MUST NOT re-enter `graph_t`.
  *       @p ctx must outlive every subscribe the graph can still admit.
  */
-using link_hold_fn_t = void (*)(void* ctx, std::string_view link, bool held);
+using link_hold_fn_t = void (*)(void* ctx, link_pair_t link, bool held);
+
+/**
+ * @brief The LINK-NAME seam (#1941): `(ctx, a link's pair, scratch) → this node's NAME for
+ *        that link`, asked of the transport plane, which owns the link object.
+ *
+ * A remote edge stores its link as a pair (`%subscriber_remote_t::link`), not as the name
+ * it used to store, so the one consumer that still keys by name and holds only the edge asks
+ * here: the session seam's per-edge `RELEASE` (#1841). Asked on unsubscribe, replace and
+ * retirement only, never on the delivery path. A bus peer's name may be formatted into
+ * @p scratch (at least `%tr::net::kPeerNameChars`); the answer is borrowed for the call.
+ * Empty ⇒ the pair names no link the plane still knows, and the event is not offered.
+ *
+ * @note Asked only in a build with `config_t::kSessionAdmission`, beside the seam it serves;
+ *       `tr::net::fwd_router_t` installs it in every build.
+ */
+using link_name_fn_t = std::string_view (*)(void* ctx, link_pair_t link, std::span<char> scratch);
 
 /**
  * @brief One SESSION-ADMISSION event (#1841) — what @ref graph_hooks_t::session_admission is
@@ -742,6 +763,20 @@ struct graph_hooks_t {
     [[no_unique_address]] std::conditional_t<kSessionAdmission,
                                              graph_hook_t<session_admission_fn_t>,
                                              no_session_admission_t> session_admission{};
+
+    /**
+     * @brief The LINK-NAME seam (#1941, @ref link_name_fn_t) — how the session seam names the
+     *        session of an edge that stores only its link's pair. The router installs it.
+     *
+     * Declared in every build so an installer names it unconditionally; a graph built without
+     * @ref session_admission stores nothing for it and never asks it.
+     *
+     * An embedder that installs @ref session_admission without a router must install this
+     * too. Without it, ADMIT charges the link name the edge was admitted under while RELEASE
+     * falls back to the edge's caller, so a charge goes back to a different session whenever
+     * the caller is not the link.
+     */
+    graph_hook_t<link_name_fn_t> link_name{};
 };
 
 /**
@@ -1662,10 +1697,13 @@ class graph_t {
      * @brief Evict every subscriber edge a departed link left behind — the graph half
      *        of link-teardown eviction (RFC-0009 §D, extended to peer departure).
      *
-     * Walks the whole graph and deactivates + RECLAIMS each active subscriber edge
-     * whose stored link NAME equals @p link_name (the NAME this node addressed the
-     * link by — a bus peer's tag, or a point-to-point child's registered NAME),
-     * unwinding the RFC-0005 listener bookkeeping for each. Local edges and edges of
+     * Walks the vertices the departure index files under @p link_name (the NAME this node
+     * addressed the link by — a bus peer's tag, or a point-to-point child's registered NAME)
+     * and deactivates + RECLAIMS each active subscriber edge the link admitted, unwinding the
+     * RFC-0005 listener bookkeeping for each. An edge a link carried in stores the link's
+     * pair, and matches @p link by `same_link` (#1941); an edge no link carried (an
+     * embedder's `:subscribers[]` write naming its inbound link as the caller, #943) stores
+     * none, and matches by its caller context equalling @p link_name. Local edges and edges of
      * other links are untouched; slot indices of surviving edges never renumber
      * (§D.2), and the freed slots are reused by later appends (@ref vertex_t's
      * add_edge reuse) — so a redialing peer's re-subscriptions reoccupy the memory
@@ -1687,9 +1725,10 @@ class graph_t {
      * context, so before #1056 an empty key compared equal to every local edge that
      * carried a cold half and reclaimed it graph-wide.
      * @param link_name This node's NAME for the departed link; empty ⇒ no-op, 0.
+     * @param link      The departed link's pair; not valid ⇒ only the caller-keyed edges match.
      * @return The number of edges evicted, summed over the graph.
      */
-    std::size_t evict_link_edges(std::string_view link_name);
+    std::size_t evict_link_edges(std::string_view link_name, link_pair_t link);
 
     /**
      * @brief How many vertices a @ref evict_link_edges for @p link_name would EXAMINE — the
@@ -1829,14 +1868,15 @@ class graph_t {
      * observe an error — RFC-0020 (which postdates §D.4) made the observation normative,
      * and this reclaim acts only on it.
      *
-     * @param link_name  This node's NAME for the link the refusal arrived on.
+     * @param link_name  This node's NAME for the link the refusal arrived on (the index key).
+     * @param link       That link's pair — what the edge's delivery link is compared to.
      * @param route_wire The refused route — whole TLV bytes echoed by the rejecting hop: a
      *                   canonical PATH, or (RFC-0024 §7.1 amendment 1) the bound `PATH_REF`
      *                   a reverse-list delivery was refused as. This door classifies the
      *                   type byte; the per-vertex half stays wire-type-agnostic.
      * @return The number of edges evicted, summed over the graph.
      */
-    std::size_t evict_route_edges(std::string_view link_name,
+    std::size_t evict_route_edges(std::string_view link_name, link_pair_t link,
                                   std::span<const std::byte> route_wire);
 
     /**
@@ -2018,16 +2058,19 @@ class graph_t {
      * `handlers_t::on_admit` and `on_write`, and a `:settings.app.<name>` field write hands it,
      * with @p caller, to `handlers_t::on_app_field_admit` in the same `write_ctx_t` (#1832).
      *
-     * @p session is this node's name for the link the write arrived over, as
-     * `write_ctx_t::session` (#2135). A `:subscribers[N]` replace stores it as the edge's
-     * departure key, so the edge is evicted with that session even when @p caller is a
-     * subject the session bound. Empty, the replace falls back to @p caller, which is the key
-     * an embedder that names its inbound link as the caller has always got.
+     * @p session is this node's name for the link the write arrived over, and
+     * @p session_link that link's pair, as `write_ctx_t::session` and
+     * `write_ctx_t::session_link` (#2135, #1941). A `:subscribers[N]` replace stores the pair
+     * as the edge's session and files it under the name, so the edge is evicted with that
+     * session even when @p caller is a subject the session bound. Without a pair the replace
+     * falls back to @p caller, which is the key an embedder that names its inbound link as
+     * the caller has always got.
      */
     [[nodiscard]] result_t<void> write(vertex_handle_t v, const field_path_t& field,
                                        view::rope_t value, std::string_view caller = {},
                                        const net::link_kind_t* link = nullptr,
-                                       std::string_view session = {});
+                                       std::string_view session = {},
+                                       link_pair_t session_link = {});
     /**
      * @brief Assign a vertex's value — the STATE transition only, sends NOTHING (RFC-0008).
      *
@@ -2751,12 +2794,22 @@ class graph_t {
      * link with no token, or on its `caller` when no link carried it, #943 / #2135), and a token
      * silently indexing under the wrong link is exactly the leaked subscriber edge #1071 exists to
      * prevent.
+     *
+     * @p link_pair is where the edge DELIVERS (#1941, #1622 L6): the pair of the connection
+     * vertex @p link names, and of the bus peer under it when the subscribe came from one.
+     * The edge stores this and not @p link, so a delivery dereferences it instead of looking
+     * a name up. It is the edge's only record of where to deliver, so a call that carries none
+     * is refused as `INVALID_PATH` — the same door, and the same reason, as an empty
+     * @p return_route. A mount-routed target replaces it with the mount's
+     * (`%wire_target_split_t::pair`), as it replaces @p link_token. @p link stays the name the
+     * departure index and the session seam key the edge by.
      */
     [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view::view_t source_view,
                                                 view::view_t return_route, std::string_view link,
                                                 view::view_t reverse_route = {},
                                                 std::string_view caller = {},
-                                                link_id_t link_token = {});
+                                                link_id_t link_token = {},
+                                                link_pair_t link_pair = {});
 
     /**
      * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.
@@ -3301,11 +3354,15 @@ class graph_t {
     // `link_index_t::index_vertex` — which ignores it unless it names a live slot spelling the key
     // this admission actually indexes under. Defaulted, so the three local doors that carry
     // none are unchanged. `expect` is the edge the `[N]` gate checked, handed to
-    // vertex_t::replace_edge so a replace lands only on it.
+    // vertex_t::replace_edge so a replace lands only on it. `session` is the NAME the edge's
+    // stored pair stands for — the key the departure index files it under and the session
+    // seam is offered (#1941): the edge itself keeps only the pair. A field write no link
+    // carried passes the edge's caller context, which is what its departure finds it by
+    // (#943); a local door, which admits no remote half, passes nothing.
     [[nodiscard]] result_t<subscription_t> admit_subscriber(
         vertex_t* v, subscriber_t s, std::string_view caller,
         std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {},
-        const subscriber_remote_t* expect = nullptr);
+        const subscriber_remote_t* expect = nullptr, std::string_view session = {});
     // Fire the external-subscription observer for ONE slot mutation
     // (graph_hooks_t::subscription_observer). Returns immediately when no observer is installed or
     // `caller` is EMPTY — the latter is the whole external/local discrimination, in one place.
@@ -3316,12 +3373,12 @@ class graph_t {
     void notify_subscription(sub_event_t::kind_t kind, const vertex_t* v, std::string_view caller,
                              const view::view_t& sub_tlv, std::size_t slot) const;
     // Report @p n routed edges over `link` established or torn down through the
-    // `link_hold` seam (#1816). An empty `link` — a local edge, a field-write edge, or no
-    // edge at all — reports nothing. Called with NO graph lock held.
+    // `link_hold` seam (#1816). A `link` that is not valid — a local edge, a field-write edge,
+    // or no edge at all — reports nothing. Called with NO graph lock held.
     // Out of line and cold on purpose: it runs on subscribe and teardown only, and letting it
     // inline at its six call sites re-partitioned this TU's budget onto the fan-out copy
     // loop (`vertex_t::copy_published` +277 B on the symbol ratchet).
-    [[gnu::noinline, gnu::cold]] void hold_link(std::string_view link, bool held,
+    [[gnu::noinline, gnu::cold]] void hold_link(link_pair_t link, bool held,
                                                 std::size_t n = 1) const;
     // Admit a remote edge's SESSION, then index its producer under that session (#1841, #1071)
     // — the one step that keys an edge to the departure that will reclaim it. The session is
@@ -3329,16 +3386,23 @@ class graph_t {
     // entry behind (a refusal a peer can repeat must not grow the index), and an index refusal
     // after an admitting hook is RELEASEd back to it. A local edge (no cold half) has no
     // session and is not indexed: true. False ⇒ refused, nothing admitted, nothing owed.
+    // `session` is the session's NAME, as `admit_subscriber` was handed it (non-empty here).
     [[nodiscard]] bool admit_session(const remote_ptr_t& remote, vertex_t* v,
-                                     std::string_view caller, link_id_t link_token);
+                                     std::string_view caller, link_id_t link_token,
+                                     std::string_view session);
     // The ONE give-back for @p n admitted edges that ended — refused by the slot verb, cleared,
     // displaced by a replace, reclaimed by a route refusal or by their producer's retirement: the
     // link hold each took over @p link (#1816) and the session charge each made to @p session
     // (#1841), one event per edge. A session departure is not one of these: `END` resets the
-    // session instead. An empty @p link or @p session gives back nothing on that side. Called
-    // with NO graph lock held.
-    void release_edges(std::string_view link, std::string_view session, const vertex_t* v,
+    // session instead. A @p link that is not valid, or an empty @p session, gives back nothing
+    // on that side. Called with NO graph lock held.
+    void release_edges(link_pair_t link, std::string_view session, const vertex_t* v,
                        std::size_t n = 1) const;
+    // @ref release_edges for ONE ended edge known only by its cold half: the session's NAME
+    // is asked of the link object (`graph_hooks_t::link_name`, #1941), and only in a build
+    // that has the session seam to tell. Out of line and cold for `hold_link`'s reason.
+    [[gnu::noinline, gnu::cold]] void release_edge(const remote_ptr_t& remote,
+                                                   const vertex_t* v) const;
     // Offer one event to the session-admission seam (#1841); true = admitted, which is also the
     // answer with nothing installed, for an empty session, and for every RELEASE / END. In a
     // build without `config_t::kSessionAdmission` this folds to `true` at compile time, so the
@@ -3795,22 +3859,28 @@ class graph_t {
     // The routed-subscription hold (#1816): read only where a remote edge is admitted or
     // reclaimed, never on the write or delivery path.
     tr::sink_slot_t<link_hold_fn_t> link_hold_;
-    /** @brief The session-admission slot of a build without `config_t::kSessionAdmission`:
-     *         it stores nothing and reads back as the uninstalled seam. */
+    /** @brief A session-seam slot of a build without `config_t::kSessionAdmission`: it
+     *         stores nothing and reads back as the uninstalled seam. */
+    template <class Fn>
     struct no_session_slot_t {
         /** @brief Store nothing. */
-        void set(session_admission_fn_t /*fn*/, void* /*ctx*/) noexcept {}
+        void set(Fn /*fn*/, void* /*ctx*/) noexcept {}
         /** @brief Read back as the uninstalled seam. */
-        [[nodiscard]] tr::sink_slot_t<session_admission_fn_t>::snapshot_t get() const noexcept {
+        [[nodiscard]] typename tr::sink_slot_t<Fn>::snapshot_t get() const noexcept {
             return {nullptr, nullptr};
         }
     };
     // The session-admission seam (#1841): read where a session's edge is admitted and where
     // its departure evicts it, never on the write or delivery path — and zero bytes, with every
     // read folded away, in a build without `config_t::kSessionAdmission`.
+    [[no_unique_address]] std::conditional_t<
+        config_t::kSessionAdmission, tr::sink_slot_t<session_admission_fn_t>,
+        no_session_slot_t<session_admission_fn_t>> session_admission_;
+    // The link-name seam (#1941) the session seam names an edge's session through; present
+    // exactly when that seam is.
     [[no_unique_address]] std::conditional_t<config_t::kSessionAdmission,
-                                             tr::sink_slot_t<session_admission_fn_t>,
-                                             no_session_slot_t> session_admission_;
+                                             tr::sink_slot_t<link_name_fn_t>,
+                                             no_session_slot_t<link_name_fn_t>> link_name_;
     // The NODE's identity record, pre-serialized (#406, RFC-0011 §B): the complete
     // SETTINGS{kind,key} TLV, built once at install so every `:identity` read is a copy
     // of settled bytes rather than a re-emit — the "all vertices return byte-identical

@@ -1,6 +1,7 @@
 /**
  * @file
- * @brief The node-scoped interned link identity that keys the subscriber index.
+ * @brief The node-scoped interned link identity that keys the subscriber index, and the
+ *        pair a remote edge delivers over.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -20,6 +21,8 @@
 
 #include <cstdint>
 #include <type_traits>
+
+#include "libtracer/pair.hpp"
 
 namespace tr::graph {
 
@@ -68,5 +71,70 @@ struct link_id_t {
 
 static_assert(sizeof(link_id_t) == 8, "the carried link token stays an 8-byte POD");
 static_assert(std::is_trivially_copyable_v<link_id_t>);
+
+/**
+ * @brief The link a remote subscriber edge delivers over, named by pairs (#1941, #1622 L6):
+ *        the slot of the link's connection vertex, and the bus peer's handle under it.
+ *
+ * What a remote edge stores in place of the link NAME it used to store, and so the
+ * identity a delivery resolves. Resolving it is a pair deref, not a name scan: the
+ * connection vertex's slot selects the registry slot bound to it, and on a bus door the
+ * peer's handle selects the peer (`tr::net::bus_link_t::peer_link_of`). L4 never
+ * interprets either; the transport plane fills them at admission and reads them back at
+ * delivery. The link's NAME, which the session seam and the departure index still key by,
+ * is asked of the link object off the delivery path (`graph_hooks_t::link_name`).
+ *
+ * **Why the connection vertex's slot and not its whole PAIR.** A connection vertex is keyed
+ * by its mount and never retired while the node lives (#1940), so its slot's generation
+ * never moves and the slot alone stands for the mount's name for the node's lifetime.
+ *
+ * **What makes two of them the same link** is `same_link`: the slot, and the peer's whole
+ * handle, generation included. A bus peer's NAME carries its tenancy (`p<slot>~<gen>`), so
+ * a reused slot is a different session, and the handle compare is the name compare with the
+ * name taken out: a departure evicts exactly the edges its session admitted.
+ *
+ * A default-constructed value names no link (@ref valid is false).
+ */
+struct link_pair_t {
+    /** @brief The @ref conn value that names no connection vertex. */
+    static constexpr std::uint32_t kNoConn = 0xFFFFFFFFu;
+
+    /** @brief The slot of the link's connection vertex; @ref kNoConn ⇒ no link. */
+    std::uint32_t conn = kNoConn;
+    /** @brief The bus peer under it; not valid ⇒ the link itself, not one of its peers. */
+    net::peer_handle_t peer{};
+
+    /** @brief True iff this names a link. */
+    [[nodiscard]] constexpr bool valid() const noexcept { return conn != kNoConn; }
+
+    /** @brief True iff this names one peer of a bus link rather than the link itself. */
+    [[nodiscard]] constexpr bool has_peer() const noexcept { return peer.valid(); }
+
+    /** @brief Exact equality, generation included; an invalid pair equals another one,
+     *         which is why delivery and eviction compare with `same_link`. */
+    [[nodiscard]] friend constexpr bool operator==(link_pair_t, link_pair_t) noexcept = default;
+    /** @brief True iff @p a and @p b both name a link and it is the same one: the same slot
+     *         and the same peer session (see above). */
+    [[nodiscard]] friend constexpr bool same_link(link_pair_t a, link_pair_t b) noexcept {
+        return a.valid() && a == b;
+    }
+};
+
+static_assert(sizeof(link_pair_t) == 12, "a remote edge's link is a slot and a peer handle");
+static_assert(std::is_trivially_copyable_v<link_pair_t>);
+
+/**
+ * @brief What the transport plane hands a remote SUBSCRIBE about the link it arrived on: the
+ *        index token and the delivery pair.
+ *
+ * The two answer different questions. @ref token is the subscriber index's subscript, an
+ * optimisation the index validates against the name (see @ref link_id_t). @ref link is where
+ * the edge delivers, and it is the edge's only record of that: an edge admitted without one
+ * has nowhere to deliver and is refused.
+ */
+struct carried_link_t {
+    link_id_t token{};  /**< @brief The index token; default ⇒ the index interns the name. */
+    link_pair_t link{}; /**< @brief The pair the edge delivers over; default ⇒ none. */
+};
 
 }  // namespace tr::graph

@@ -78,9 +78,9 @@
       "source": "measured",
       "arm": "tcp-remote-sub",
       "metric": "per_sub",
-      "value": 558,
+      "value": 526,
       "goal": null,
-      "moved_by": "#1622 (store the subscriber table once: a slot keeps only its cold remainder)",
+      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
       "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
     },
     {
@@ -89,9 +89,9 @@
       "source": "measured",
       "arm": "ws-remote-sub",
       "metric": "per_sub",
-      "value": 558,
+      "value": 526,
       "goal": null,
-      "moved_by": "#1622 (store the subscriber table once: a slot keeps only its cold remainder)",
+      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
       "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
     },
     {
@@ -100,9 +100,9 @@
       "source": "measured",
       "arm": "udp-remote-sub",
       "metric": "per_sub",
-      "value": 558,
+      "value": 526,
       "goal": null,
-      "moved_by": "#1622 (store the subscriber table once: a slot keeps only its cold remainder)",
+      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
       "note": "Live bytes one more remote subscription holds (a peer's `:subscribers[]` append to a vertex with no subscriber yet, after the link's first subscription), charged at the slab class each block takes. #2136 gives 527 B -> about 375 B on its own basis; this row holds until the peer record moves it."
     },
     {
@@ -112,9 +112,9 @@
       "arm": "tcp-remote-sub",
       "metric": "sub_blocks",
       "unit": "blocks",
-      "value": 6,
+      "value": 5,
       "goal": 2,
-      "moved_by": "#2171 (first pin)",
+      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
       "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
     },
     {
@@ -124,9 +124,9 @@
       "arm": "ws-remote-sub",
       "metric": "sub_blocks",
       "unit": "blocks",
-      "value": 6,
+      "value": 5,
       "goal": 2,
-      "moved_by": "#2171 (first pin)",
+      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
       "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
     },
     {
@@ -136,9 +136,9 @@
       "arm": "udp-remote-sub",
       "metric": "sub_blocks",
       "unit": "blocks",
-      "value": 6,
+      "value": 5,
       "goal": 2,
-      "moved_by": "#2171 (first pin)",
+      "moved_by": "#1941 (a remote edge stores its link as a pair, not a name: the name's own block is gone)",
       "note": "Blocks one more remote subscription holds. Goal from #2136 user story 28: 2 blocks."
     },
     {

@@ -347,7 +347,7 @@ class fwd_router_t {
         // handle belongs to, and only it has somewhere to CACHE the graph's answer. Asked
         // lazily, at a remote subscribe and nowhere else, so an ordinary read/write/await
         // frame never touches it.
-        resolver_.on_link_id(&fwd_router_t::link_id_thunk, this);
+        resolver_.on_link_id(&fwd_router_t::link_id_of, this);
         resolver_.on_await_defer(&fwd_router_t::defer_await_thunk, this);
         // The wire `:subscribers[]` door's target descent (RFC-0021, #491): a SUBSCRIBER's
         // PATH child is an address in THIS node's frame, so deciding whether it leaves the
@@ -380,6 +380,13 @@ class fwd_router_t {
             },
             this};
         hooks.stats_sampler = {&fwd_router_t::stats_sampler_thunk, this};
+        //  - link_name (#1941): an edge stores its link as a pair, and the session seam
+        //    (#1841) still names a session. A build without that seam stores nothing for it.
+        hooks.link_name = {[](void* ctx, graph::link_pair_t link, std::span<char> scratch) {
+                               return static_cast<const fwd_router_t*>(ctx)->link_name_of(link,
+                                                                                          scratch);
+                           },
+                           this};
         graph_.set_hooks(hooks);
     }
 
@@ -968,7 +975,9 @@ class fwd_router_t {
      * inbound frames were tagged with, hence the name subscriber edges stored). A host
      * that learns of a departure out-of-band (its own session manager) may call it
      * directly; calling it for a live or unknown link is safe (eviction of nothing is a
-     * no-op).
+     * no-op). Edges name their link by PAIR (#1941), so this by-name door evicts the edges of
+     * the registered child @p link_name names; a bus PEER's edges leave through the bus's
+     * own peer-down seam, which holds the peer's handle.
      *
      * Runs on the calling thread (typically a transport receive/close thread) and takes
      * graph locks — callers must hold no transport-internal locks (the
@@ -976,6 +985,19 @@ class fwd_router_t {
      * @param link_name The routing plane's inbound NAME for the departed link/peer.
      */
     void link_down(std::string_view link_name);
+
+    /**
+     * @brief This node's NAME for the link @p link names (#1941): its registry slot's name,
+     *        or, for a bus peer under it, the bus's positional peer name.
+     *
+     * The edge stores its link as a pair, so a consumer that still keys by name asks here,
+     * off the delivery path: the session seam's `RELEASE` (`graph::graph_hooks_t::link_name`)
+     * and the link-hold count (`transport_vertex_t`). A peer's name may be formatted into
+     * @p scratch (at least `kPeerNameChars`); the answer is borrowed for the call.
+     * @retval {} @p link names no live slot.
+     */
+    [[nodiscard]] std::string_view link_name_of(graph::link_pair_t link,
+                                                std::span<char> scratch) const;
 
     /**
      * @brief The node-scoped identity string of the session @p peer holds on bus mount
@@ -1220,26 +1242,6 @@ class fwd_router_t {
      */
     [[nodiscard]] transport_t* bound_egress(wire::path_ref_element_t e, std::string_view caller,
                                             std::optional<graph::acl_right_t> right) const;
-
-    /**
-     * @brief Reclaim the subscriber edge a refused delivery route names (#1223 step 5).
-     *
-     * Called on every inbound `FWD{REPLY}` that terminates here and IS an addressed
-     * `tr::path::invalid` refusal (RFC-0020's bus-residual reject — op REPLY, kind ERROR,
-     * `STATUS{ERROR{0x0021}}`), BEFORE the reply sink and whether or not one is installed. The
-     * shape is recognised by the ingress driver off the routing peek's own offsets, so a reply
-     * that is not a refusal costs the warm read-reply path a few header reads past its `dst`
-     * and nothing else. On a refusal, the reply's `src` — the refused route the rejecting hop
-     * echoed back verbatim ("so it can correlate", `reject_bus_name_hop`) — is handed with
-     * @p inbound_name to `graph_t::evict_route_edges`, which reclaims exactly the edge(s) that
-     * stored that route over that link. This is the producer-side half of the RFC-0020
-     * exchange: the reject already ships; this makes the producer act on it instead of
-     * dropping it into a sink that never matched it.
-     *
-     * @param inbound_name This node's NAME for the link the reply arrived on.
-     * @param route        The echoed route TLV's contiguous bytes (header and body).
-     */
-    void reclaim_refused_route(std::string_view inbound_name, std::span<const std::byte> route);
 
     /**
      * @brief A link's stable per-child receiver state — its identity AND its mount run.
@@ -1694,21 +1696,41 @@ class fwd_router_t {
      * Both mints go through `graph_t::intern_link`, which is idempotent by NAME — so a race
      * between two receive threads, or between this and a redial, agrees by construction.
      *
-     * @retval {} No context, or an empty name — the index interns what it was handed, which
-     *            is exactly what it did before the carry existed.
+     * Each tier also answers the PAIR the edge stores (#1941): the slot's connection vertex,
+     * and on the bus tier the peer under it. The tier test is the only shape test, so a flat
+     * child's per-session handle (`transport_t::inbound_peer`) never reaches a pair.
+     *
+     * It IS the `graph::link_id_fn_t` the resolver calls: @p ctx is the router (this supplier
+     * has state, unlike the subject one), and the receive context comes back out of the
+     * opaque `inbound_ref_t::origin` the terminus put there.
+     *
+     * @retval {} token No receive context (a direct embedder's resolve): the pair alone, by
+     *            the name's cold scan.
      */
-    [[nodiscard]] graph::link_id_t link_id_of(const child_rx_ctx_t* ctx, peer_handle_t peer,
-                                              std::string_view link_name);
-    /** @brief The `graph::link_id_fn_t` trampoline: `ctx` is the router (this supplier has
-     *         state, unlike the subject one), and the receive context comes back out of the
-     *         opaque `inbound_ref_t::origin` the terminus put there. */
-    static graph::link_id_t link_id_thunk(void* ctx, const graph::inbound_ref_t& inbound);
+    [[nodiscard]] static graph::carried_link_t link_id_of(void* ctx,
+                                                          const graph::inbound_ref_t& inbound);
+    /** @brief The pair of the link a frame arrived on (#1941): its receive context's slot,
+     *         or — for a frame handed in with none (the public `on_frame` doors) — the slot
+     *         named @p name, found by the cold scan; not valid for neither. @p peer is the
+     *         bus tag the frame carried, invalid on a flat child. */
+    [[nodiscard]] graph::link_pair_t inbound_pair(const child_rx_ctx_t* ctx, std::string_view name,
+                                                  peer_handle_t peer) const {
+        const child_registry_t::child_t* const door =
+            ctx != nullptr ? ctx->entry : registry_.entry_by_name(name);
+        return door != nullptr ? graph::link_pair_t{.conn = door->conn_slot, .peer = peer}
+                               : graph::link_pair_t{};
+    }
+    /** @brief @ref link_down with the departed link's pair in hand — the body every
+     *         departure seam runs. */
+    void link_gone(std::string_view link_name, graph::link_pair_t link);
     /** @brief The `graph::stats_sampler_fn_t` trampoline: `ctx` is the router
      *         (RFC-0010 Amendment 2). */
     static bool stats_sampler_thunk(void* ctx, std::string_view seam_class,
                                     std::string_view seam_name, graph::stats_block_t* out);
-    static std::string_view resolve_peer_name(const child_rx_ctx_t& ctx, peer_handle_t peer,
-                                              std::span<char> scratch);
+    /** @brief The name @p peer spells under @p door: a bus peer's positional name, or the
+     *         door's own when it has no bus facet (a flat link, or the bus module closed). */
+    static std::string_view resolve_peer_name(const child_registry_t::child_t& door,
+                                              peer_handle_t peer, std::span<char> scratch);
     /** @brief The shared rope routing body; @p inbound_ctx is the link's receiver ctx when the
      *         frame arrived through one (nullptr on the public `on_frame_rope` entry). */
     void on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,

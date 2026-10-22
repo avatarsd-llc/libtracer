@@ -99,7 +99,7 @@ std::vector<std::byte> b_route(std::string_view link) {
 std::optional<status_t> wire_sub(graph_t& g, vertex_handle_t v, std::string_view link,
                                  std::string_view subject) {
     const auto r = g.subscribe_wire(v, make_value(b_subscriber("t")), make_value(b_route(link)),
-                                    link, {}, subject);
+                                    link, {}, subject, {}, tr::testing::test_link(link));
     if (r) return std::nullopt;
     return r.error();
 }
@@ -164,6 +164,9 @@ static_assert(tr::graph::kSessionAdmission == has_session_hook<tr::graph::graph_
  * still builds (and skips) where it does not.
  */
 void install(graph_t& g, budget_t* b) {
+    // The sessions this file's edges name, by the pair each stores (#1941).
+    static const std::vector<std::string> kSessions{"s1", "s2", "s3"};
+    tr::testing::name_test_links(g, kSessions);
     auto hooks = g.hooks();
     [b](auto& hook) {
         if constexpr (requires { hook.fn; }) hook = {b != nullptr ? &budget_t::hook : nullptr, b};
@@ -192,10 +195,10 @@ field_path_t subscribers(std::optional<std::uint16_t> slot) {
 void test_budget_per_session() {
     graph_t g;
     const vertex_handle_t p = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
-    std::map<std::string, int> delivered;
+    std::map<std::uint32_t, int> delivered;
     const tr::testing::remote_sink_guard_t sink(
         g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-            ++delivered[std::string(d.link)];
+            ++delivered[d.link.conn];
         });
     budget_t budget;
     install(g, &budget);
@@ -218,11 +221,13 @@ void test_budget_per_session() {
           "session s2: past its own budget is refused");
 
     check(g.write(p, make_value({0x01})).has_value(), "write the producer");
-    check(delivered["s1"] == kBudget, "s1's admitted subscriptions all stayed and deliver");
-    check(delivered["s2"] == kBudget, "s2's admitted subscriptions all stayed and deliver");
+    check(delivered[tr::testing::test_link("s1").conn] == kBudget,
+          "s1's admitted subscriptions all stayed and deliver");
+    check(delivered[tr::testing::test_link("s2").conn] == kBudget,
+          "s2's admitted subscriptions all stayed and deliver");
 
     // 3. The session departs: one END, the whole charge refunded, and the budget is whole again.
-    check(g.evict_link_edges("s1") == static_cast<std::size_t>(kBudget),
+    check(tr::testing::evict_test_link(g, "s1") == static_cast<std::size_t>(kBudget),
           "s1's departure evicts its edges");
     check(budget.ends == std::vector<std::string>{"s1"}, "one END, for the departed session");
     check(budget.charged.count("s1") == 0, "the END refunded all of s1's charges");
@@ -236,7 +241,7 @@ void test_budget_per_session() {
     for (int i = 0; i < kBudget + 2; ++i)
         check(!wire_sub(g, p, "s3", "alice"), "with no hook every subscription is admitted");
     check(budget.charged.count("s3") == 0, "an uninstalled hook is told nothing");
-    (void)g.evict_link_edges("s3");
+    (void)tr::testing::evict_test_link(g, "s3");
     check(budget.ends.size() == 1, "nor of a departure");
 }
 
@@ -324,7 +329,8 @@ void test_route_refusal_and_retire_give_back() {
 
     for (int i = 0; i < kBudget; ++i) check(!wire_sub(g, p, "s1", "alice"), "route: admitted");
     const std::vector<std::byte> route = b_route("s1");
-    check(g.evict_route_edges("s1", route) == static_cast<std::size_t>(kBudget),
+    check(g.evict_route_edges("s1", tr::testing::test_link("s1"), route) ==
+              static_cast<std::size_t>(kBudget),
           "route: the refusal reclaims the session's edges");
     check(budget.charged["s1"] == 0 && budget.releases == kBudget,
           "route: one RELEASE per reclaimed edge");

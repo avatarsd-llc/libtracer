@@ -57,24 +57,13 @@ inline constexpr std::size_t kNameHeaderBytes = 4;
 inline constexpr std::size_t kFanoutFrameBytes = 8 * vertex_t::kInlineFanout * sizeof(edge_view_t);
 
 /**
- * @brief The link an edge's cold half DELIVERS over — the one it holds (#1816); empty for an
- *        edge with no cold half or a `:subscribers[]` field-write edge, which delivers locally
- *        and stores no route even when it stores its arrival link as its session (#2135).
+ * @brief The link an edge's cold half DELIVERS over — the one it holds (#1816); not valid for
+ *        an edge with no cold half or a `:subscribers[]` field-write edge, which delivers
+ *        locally and stores no route even when it stores its arrival link as its session
+ *        (#2135).
  */
-std::string_view delivery_link(const remote_ptr_t& remote) noexcept {
-    return remote && !remote->return_route.empty() ? std::string_view(remote->link)
-                                                   : std::string_view{};
-}
-
-/**
- * @brief The SESSION an edge's cold half was admitted for (#1841) — the name its departure
- *        evicts it by (`vertex_t::evict_link_edges`' `admitted_over`): the link it was admitted
- *        over, or the caller context for a field-write edge that named none (#943, the
- *        embedder's API write). Empty for no cold half.
- */
-std::string_view session_of(const remote_ptr_t& remote) noexcept {
-    if (!remote) return {};
-    return remote->link.empty() ? remote->caller.view() : remote->link.view();
+link_pair_t delivery_link(const remote_ptr_t& remote) noexcept {
+    return remote && !remote->return_route.empty() ? remote->link : link_pair_t{};
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1212,9 +1201,7 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     // The session charge goes back with it (#1841); the producer has just retired, so the
     // event names none. An edge with no link or no session gives back nothing on that side.
     for (const detached_edges_t& table : gone)
-        table.for_each_edge([this](const pub_edge_t& e) {
-            release_edges(delivery_link(e.remote), session_of(e.remote), nullptr);
-        });
+        table.for_each_edge([this](const pub_edge_t& e) { release_edge(e.remote, nullptr); });
     // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so the
     // sweep lock is not held across the retire walk. A stale entry would otherwise (a) leak, and
     // worse (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the leaked
@@ -1341,7 +1328,7 @@ std::size_t graph_t::link_edge_candidates(std::string_view link_name) const {
     return link_index_.candidate_count(link_name);
 }
 
-std::size_t graph_t::evict_link_edges(std::string_view link_name) {
+std::size_t graph_t::evict_link_edges(std::string_view link_name, link_pair_t link) {
     // Two-phase, per the graph.hpp lock-order docs — but the first phase is now an INDEX
     // LOOKUP rather than a walk of the whole vertex tree (#1071). What it replaced collected
     // every vertex in the graph holding any subscriber edge, into a global-heap vector sized
@@ -1367,11 +1354,11 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
     const mem::block_array_t<vertex_t*> candidates =
         link_index_.candidates(link_name, /*take=*/true);
     std::size_t total = 0;
-    std::size_t routed = 0;  // the edges that held `link_name` (#1816), given back below
+    std::size_t routed = 0;  // the edges that held `link` (#1816), given back below
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
         std::size_t quiet = 0;  // suspended edges were never counted (#1533)
-        const std::size_t k = v->evict_link_edges(link_name, routed, quiet);
+        const std::size_t k = v->evict_link_edges(link_name, link, routed, quiet);
         if (k == 0) continue;  // a stale index entry: the vertex's edges went individually
         // The k-fold mirror of note_subscriber_removed, under the same shared hold as
         // the clear (RFC-0005 bookkeeping: descendants' writes stop bubbling here).
@@ -1380,14 +1367,14 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
         total += k;
     }
     // Outside every graph lock: the receiver takes its own control-plane lock (#1816).
-    hold_link(link_name, false, routed);
+    hold_link(link, false, routed);
     // The session's teardown event (#1841), once per departure and whatever it held: the
     // embedder refunds the session's whole charge here instead of tracking each edge.
     (void)session_event(session_event_t::kind_t::END, link_name, nullptr, {});
     return total;
 }
 
-std::size_t graph_t::evict_route_edges(std::string_view link_name,
+std::size_t graph_t::evict_route_edges(std::string_view link_name, link_pair_t link,
                                        std::span<const std::byte> route_wire) {
     // Byte-for-byte the evict_link_edges discipline (see its comment): snapshot under one
     // shared hold, evict per vertex under a fresh shared hold + the vertex's stripe lock,
@@ -1413,15 +1400,15 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
         std::size_t quiet = 0;
-        const std::size_t k = v->evict_route_edges(link_name, route_wire, bound_echo, quiet);
+        const std::size_t k = v->evict_route_edges(link, route_wire, bound_echo, quiet);
         if (k == 0) continue;
         v->bump_own_subs(-static_cast<std::int32_t>(k - quiet));
         bump_subtree_listeners(v, -static_cast<std::int32_t>(k - quiet));
         total += k;
     }
-    // Every match was keyed on its delivery link, so every one held `link_name` (#1816) and was
-    // charged to it as its session (#1841): both go back, one edge at a time.
-    release_edges(link_name, link_name, nullptr, total);
+    // Every match was keyed on its delivery link, so every one held `link` (#1816) and was
+    // charged to `link_name` as its session (#1841): both go back, one edge at a time.
+    release_edges(link, link_name, nullptr, total);
     return total;
 }
 
@@ -1604,7 +1591,7 @@ bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_v
     if (!v->clear_edge(slot, retired_ctx, &retired_remote, &was_suspended, expect)) return false;
     if (!was_suspended) note_subscriber_removed(v);  // RFC-0005 counts delivering edges only
     // The link hold (#1816) and the session charge (#1841) this clear gives back.
-    release_edges(delivery_link(retired_remote), session_of(retired_remote), v);
+    release_edge(retired_remote, v);
     // Only a slot that WAS active is an unsubscribe; clearing an already-empty one changed
     // nothing and must not be reported as a removal. A no-op for the empty caller.
     notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, cleared_tlv, slot);
@@ -2062,7 +2049,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     if (sink.fn == nullptr) return;
     // The five wire fields are read straight off the SHARED cold half (#1448) rather than
     // out of five members the snapshot had copied for us. The snapshot holds a reference to
-    // this record, so the two `string_view`s below are valid for the whole sink call and the
+    // this record, so the caller `string_view` below is valid for the whole sink call and the
     // two route clones are the same refcount bumps `remote_delivery_t` always took — what
     // disappeared is the pair of `std::string` copies and the pair of `view_t` clones the
     // SNAPSHOT paid, per remote edge, per delivery. `has_remote_leg()` gated this call, so
@@ -3103,7 +3090,7 @@ result_t<void> graph_t::write(vertex_handle_t v, view::rope_t value, std::string
 
 result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, view::rope_t value,
                               std::string_view caller, const net::link_kind_t* link,
-                              std::string_view session) {
+                              std::string_view session, link_pair_t session_link) {
     vertex_t* v = vh.get();
     if (field.empty()) return write_impl(v, std::move(value), caller, link);
     // A field write targets a contiguous control TLV (settings / acl / subscribers);
@@ -3120,8 +3107,10 @@ result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, vie
                                    ? status_t::BACKPRESSURE
                                    : status_t::TYPE_MISMATCH);
     }
-    return field_write(v, field, *head,
-                       write_ctx_t{.subject = caller, .link = link, .session = session});
+    return field_write(
+        v, field, *head,
+        write_ctx_t{
+            .subject = caller, .link = link, .session = session, .session_link = session_link});
 }
 
 result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds timeout,
@@ -3203,11 +3192,9 @@ result_t<void> graph_t::mark_flushed(vertex_handle_t vh) {
     return {};
 }
 
-result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
-                                                   std::string_view caller,
-                                                   std::optional<std::size_t> slot,
-                                                   link_id_t link_token,
-                                                   const subscriber_remote_t* expect) {
+result_t<subscription_t> graph_t::admit_subscriber(
+    vertex_t* v, subscriber_t s, std::string_view caller, std::optional<std::size_t> slot,
+    link_id_t link_token, const subscriber_remote_t* expect, std::string_view session) {
     // The single admission step (ADR-0049): every door lands here, so the READ gate
     // and the transient-local durability latch apply UNIFORMLY — which invariants fire no
     // longer depends on which door an edge entered through.
@@ -3263,12 +3250,12 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // value — the new subscriber would miss that write outright. Bumping first inverts the
     // window into the harmless direction (a count with no slot yet ⇒ one snapshot that finds
     // nothing). vertex_t::own_subs_ordered carries the ordering argument.
-    // Index this vertex under the link the edge is admitted OVER, before `s` is moved into
-    // the slot below and while its cold half is still readable (#1071). The spelling is
-    // `vertex_t::evict_link_edges`'s, not a paraphrase of it: `link` first, `caller` when
-    // that is empty. The stored link is the link the edge was admitted over, which for a
-    // field_write edge is a name with no route (#2135); a field_write that no link carried
-    // has only its caller (#943), and keying on the delivery link alone un-indexes either.
+    // Index this vertex under the link the edge is admitted OVER (#1071). The spelling is
+    // `vertex_t::evict_link_edges`'s, not a paraphrase of it: the NAME of the link whose pair
+    // the edge stores first, `caller` when it stores none. The stored link is the link the
+    // edge was admitted over, which for a field_write edge is a link with no route (#2135); a
+    // field_write that no link carried has only its caller (#943), and keying on the delivery
+    // link alone un-indexes either.
     //
     // Deliberately BEFORE the append and not conditional on it succeeding. The index is a
     // superset (see link_index_t): an admission that then fails BACKPRESSURE or OUT_OF_RANGE
@@ -3287,7 +3274,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     //
     // The session-admission seam (#1841) runs inside the same step, ahead of the index entry:
     // an embedder's per-session budget refuses here, BACKPRESSURE, before anything exists.
-    if (!admit_session(admitted, v, caller, link_token))
+    if (!admit_session(admitted, v, caller, link_token, session))
         return std::unexpected(status_t::BACKPRESSURE);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     // The hold is taken BEFORE the edge can be seen, for the reason the index entry above is:
@@ -3314,7 +3301,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
             constexpr status_t kRefusal[] = {status_t::INVALID_PATH, status_t::BACKPRESSURE,
                                              status_t::PERMISSION_DENIED};
             note_subscriber_removed(v);
-            release_edges(delivery_link(admitted), session_of(admitted), v);
+            release_edges(delivery_link(admitted), session, v);
             return std::unexpected(kRefusal[std::to_underlying(r)]);
         }
         if (r == vertex_t::edge_replace_t::REPLACED_ACTIVE) note_subscriber_removed(v);
@@ -3333,7 +3320,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // status (ADR-0060 §3), the same one the store leg answers on exhaustion.
         if (idx == vertex_t::kNoSlot) {
             note_subscriber_removed(v);
-            release_edges(delivery_link(admitted), session_of(admitted), v);
+            release_edges(delivery_link(admitted), session, v);
             return std::unexpected(status_t::BACKPRESSURE);
         }
     }
@@ -3354,14 +3341,13 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // The admitted edge's hold was taken before the slot verb, so a replace over the same
     // link never lets the count touch zero between the two (#1816).
     // The displaced edge's charge goes back with its hold (#1841): a replace is net zero.
-    release_edges(delivery_link(displaced), session_of(displaced), v);
+    release_edge(displaced, v);
     return subscription_t{v, idx};
 }
 
 bool graph_t::admit_session(const remote_ptr_t& remote, vertex_t* v, std::string_view caller,
-                            link_id_t link_token) {
+                            link_id_t link_token, std::string_view session) {
     if (!remote) return true;  // a local edge: no session, no departure to index it for
-    const std::string_view session = session_of(remote);
     if (!session_event(session_event_t::kind_t::ADMIT, session, v, caller)) return false;
     // A refused entry (#1778: the table source is exhausted) refuses the admission, and what
     // the hook charged for it is given back: it is answered exactly as a refusal.
@@ -3370,7 +3356,22 @@ bool graph_t::admit_session(const remote_ptr_t& remote, vertex_t* v, std::string
     return false;
 }
 
-void graph_t::release_edges(std::string_view link, std::string_view session, const vertex_t* v,
+void graph_t::release_edge(const remote_ptr_t& remote, const vertex_t* v) const {
+    // The session's NAME, asked of the link object (#1941): the edge stores its link as a
+    // pair, and only the session seam still keys by name. An edge no link carried has its
+    // caller as its session (#943). A build without that seam has no name slot (its read is
+    // the uninstalled constant) and its RELEASE folds away below, so nothing here survives.
+    std::array<char, net::kPeerNameChars> scratch{};
+    std::string_view session;
+    const auto name = link_name_.get();
+    if (remote)
+        session = remote->link.valid() && name.fn != nullptr
+                      ? name.fn(name.ctx, remote->link, scratch)
+                      : remote->caller.view();
+    release_edges(delivery_link(remote), session, v);
+}
+
+void graph_t::release_edges(link_pair_t link, std::string_view session, const vertex_t* v,
                             std::size_t n) const {
     // One event per edge, like the hold (#1816): the receiver keeps a plain count and nothing
     // else. In a build without the seam the loop's body is `true` and folds away.
@@ -3611,9 +3612,12 @@ void graph_t::set_hooks(const graph_hooks_t& hooks) noexcept {
     // A build without the seam has no `fn` to store (#1841): the member is an empty type there,
     // so an install does not compile rather than being dropped. The generic lambda is what lets
     // the discarded arm name a member the closed build does not have.
-    [this](const auto& hook) {
-        if constexpr (requires { hook.fn; }) session_admission_.set(hook.fn, hook.ctx);
-    }(hooks.session_admission);
+    [this](const auto& hook, const auto& name) {
+        if constexpr (requires { hook.fn; }) {
+            session_admission_.set(hook.fn, hook.ctx);
+            link_name_.set(name.fn, name.ctx);
+        }
+    }(hooks.session_admission, hooks.link_name);
 }
 
 graph_hooks_t graph_t::hooks() const noexcept {
@@ -3632,19 +3636,21 @@ graph_hooks_t graph_t::hooks() const noexcept {
                       .stats_sampler = {ss.fn, ss.ctx},
                       .link_hold = {lh.fn, lh.ctx},
                       .subject_lookup = {sl.fn, sl.ctx}};
-    [this](auto& hook) {  // the closed build's member has nothing to fill (#1841)
+    [this](auto& hook, auto& name) {  // the closed build's members have nothing to fill (#1841)
         if constexpr (requires { hook.fn; }) {
             const auto sa = session_admission_.get();
+            const auto ln = link_name_.get();
             hook = {sa.fn, sa.ctx};
+            name = {ln.fn, ln.ctx};
         }
-    }(out.session_admission);
+    }(out.session_admission, out.link_name);
     return out;
 }
 
-void graph_t::hold_link(std::string_view link, bool held, std::size_t n) const {
+void graph_t::hold_link(link_pair_t link, bool held, std::size_t n) const {
     // One call per edge, never a batched delta: the receiver's reference count is the whole
     // of the hold (#1816), so it is told exactly what an edge-by-edge walk would tell it.
-    if (link.empty()) return;
+    if (!link.valid()) return;
     const auto hook = link_hold_.get();
     if (hook.fn == nullptr) return;
     for (std::size_t i = 0; i < n; ++i) hook.fn(hook.ctx, link, held);
@@ -3663,7 +3669,7 @@ bool graph_t::sample_stats(std::string_view seam_class, std::string_view seam_na
 result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_view,
                                        view::view_t return_route, std::string_view link,
                                        view::view_t reverse_route, std::string_view caller,
-                                       link_id_t link_token) {
+                                       link_id_t link_token, link_pair_t link_pair) {
     vertex_t* v = vh.get();
     // The route is this door's precondition, not an optional extra (#1055). This door's edge
     // delivers over the RETURN ROUTE and nowhere else: when `dispatch_edge` gated its remote
@@ -3677,7 +3683,10 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // An empty LINK is refused the same way, so a routed edge always has both (#2135): a
     // route with no link would take the remote leg and hand the sink a delivery with nowhere
     // to go. Every in-tree caller passes the arrival link; an embedder's call is the case.
-    if (return_route.empty() || link.empty()) return std::unexpected(status_t::INVALID_PATH);
+    // The link's PAIR is the edge's stored session (#1941), so one without it is refused
+    // the same way: the edge would hold a name its delivery never reads.
+    if (return_route.empty() || link.empty() || !link_pair.valid())
+        return std::unexpected(status_t::INVALID_PATH);
     // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) through the door parse every subscriber
     // door shares (#869): decode, type check, parse, and the zero-copy retain the slot keeps.
     // The delivery policy comes from this parse (the resolver's parallel parse is retired).
@@ -3705,7 +3714,8 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // when the data goes somewhere else), so the two must not be the same variable. Since
     // #375 Part 2 they are not even the same STRING: at a FLAT listener every peer shares
     // one delivery link and each has its own subject.
-    std::string_view delivery_link = link;  // copied into the cold half below
+    // Named for the session seam's ADMIT, stored as the pair (#1941).
+    std::string_view delivery_link = link;
     // The parse never holds an empty key (`try_make_target_key` answers null for one), so an
     // engaged key is a non-empty PATH.
     if (s.target_key) {
@@ -3724,6 +3734,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
                 if (!route_view) return std::unexpected(status_t::BACKPRESSURE);
                 return_route = *std::move(route_view);
                 delivery_link = split.link;
+                link_pair = split.pair;
                 // The carried token moves with the key it names (#1437). The arrival's token
                 // spells the arrival link, and the index is about to be keyed on the MOUNT —
                 // so from here it is the wrong token, correctly rejected by the name compare
@@ -3751,11 +3762,12 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // It is also the context the subscribe (READ) gate runs under (#81/ADR-0026), not the delivery
     // link's.
     const std::string_view gate_ctx = caller.empty() ? std::string_view(link) : caller;
-    // A wire subscriber always carries the cold half; it and both names draw from the table
-    // source (#1885), and a refusal there is BACKPRESSURE before anything was admitted.
+    // A wire subscriber always carries the cold half; it and the caller name draw from the
+    // table source (#1885), and a refusal there is BACKPRESSURE before anything was admitted.
+    // The link is a pair, not a name (#1941): delivery resolves it without a string compare.
     subscriber_remote_t* const r = s.ensure_remote(*tables_);
-    if (r == nullptr || !r->caller.assign(gate_ctx) || !r->link.assign(delivery_link))
-        return std::unexpected(status_t::BACKPRESSURE);
+    if (r == nullptr || !r->caller.assign(gate_ctx)) return std::unexpected(status_t::BACKPRESSURE);
+    r->link = link_pair;
     r->return_route = std::move(return_route);
     // The completed reverse bound route (RFC-0024 §7.1 amendment 1) — empty for every
     // canonical-only subscribe, and stored WITHOUT validation beyond what the resolver
@@ -3769,7 +3781,9 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     r->lane_reliable = v->ring_reliable();
     // A wire subscribe carries no host handle back — discard the slot (unsubscribe is the
     // wire :subscribers[N] clear, not this door's return).
-    if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx, std::nullopt, link_token); !r2)
+    if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx, std::nullopt, link_token,
+                                         nullptr, delivery_link);
+        !r2)
         return std::unexpected(r2.error());
     return {};
 }

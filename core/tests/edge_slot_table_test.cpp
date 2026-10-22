@@ -205,8 +205,8 @@ void test_cleared_under_pressure_stays_cleared() {
 
 /** @brief A link-hold census: the net plane's view of how many edges hold each link. */
 struct holds_t {
-    std::map<std::string, int> held; /**< @brief Holds per link name. */
-    bool negative = false;           /**< @brief Did any link get more releases than holds? */
+    std::map<std::uint32_t, int> held; /**< @brief Holds per link (its `test_link` slot). */
+    bool negative = false;             /**< @brief Did any link get more releases than holds? */
 };
 
 /** @brief (4) Retirement gives each routed hold back once — suspended in, dead entries out. */
@@ -216,9 +216,9 @@ void test_retire_gives_each_hold_back_once() {
     graph_t g{gate};
     holds_t holds;
     auto hooks = g.hooks();
-    hooks.link_hold = {[](void* ctx, std::string_view link, bool held) {
+    hooks.link_hold = {[](void* ctx, tr::graph::link_pair_t link, bool held) {
                            auto& h = *static_cast<holds_t*>(ctx);
-                           int& n = h.held[std::string(link)];
+                           int& n = h.held[link.conn];
                            n += held ? 1 : -1;
                            h.negative |= n < 0;
                        },
@@ -226,11 +226,19 @@ void test_retire_gives_each_hold_back_once() {
     g.set_hooks(hooks);
     const vertex_handle_t v = g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
     const std::vector<std::byte> sub = subscriber_tlv("peer");
-    check(g.subscribe_wire(v, make_value(sub), route_to("a"), "a").has_value() &&
-              g.subscribe_wire(v, make_value(sub), route_to("b"), "b").has_value() &&
-              g.subscribe_wire(v, make_value(sub), route_to("c"), "c").has_value(),
+    check(g.subscribe_wire(v, make_value(sub), route_to("a"), "a", {}, {}, {},
+                           tr::testing::test_link("a"))
+                  .has_value() &&
+              g.subscribe_wire(v, make_value(sub), route_to("b"), "b", {}, {}, {},
+                               tr::testing::test_link("b"))
+                  .has_value() &&
+              g.subscribe_wire(v, make_value(sub), route_to("c"), "c", {}, {}, {},
+                               tr::testing::test_link("c"))
+                  .has_value(),
           "three routed edges over links a, b and c");
-    check(holds.held["a"] == 1 && holds.held["b"] == 1 && holds.held["c"] == 1,
+    check(holds.held[tr::testing::test_link("a").conn] == 1 &&
+              holds.held[tr::testing::test_link("b").conn] == 1 &&
+              holds.held[tr::testing::test_link("c").conn] == 1,
           "each holds its link once");
 
     // Slot 0 cleared with the compaction refused: its dead entry stays published.
@@ -242,7 +250,8 @@ void test_retire_gives_each_hold_back_once() {
     check(g.write(v, slot0->field(), make_value(evict)).has_value(),
           "slot 0 is cleared with no room to compact");
     gate.disarm();
-    check(published(v) == 3 && holds.held["a"] == 0, "... its entry lingers, its hold is back");
+    check(published(v) == 3 && holds.held[tr::testing::test_link("a").conn] == 0,
+          "... its entry lingers, its hold is back");
 
     // Slot 1 suspended: still an edge, still holding its link.
     tr::graph::vertex_t& raw = *std::bit_cast<tr::graph::vertex_t*>(v);
@@ -251,7 +260,9 @@ void test_retire_gives_each_hold_back_once() {
 
     check(g.retire(v).has_value(), "the vertex retires");
     check(!holds.negative, "no link was released more often than it was held");
-    check(holds.held["a"] == 0 && holds.held["b"] == 0 && holds.held["c"] == 0,
+    check(holds.held[tr::testing::test_link("a").conn] == 0 &&
+              holds.held[tr::testing::test_link("b").conn] == 0 &&
+              holds.held[tr::testing::test_link("c").conn] == 0,
           "the suspended edge and the live one gave their holds back, the cleared one not again");
 }
 

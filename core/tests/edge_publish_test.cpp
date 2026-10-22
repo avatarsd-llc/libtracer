@@ -376,8 +376,7 @@ void test_remote_cold_half_under_churn(std::size_t publishers) {
     std::atomic<bool> signalled{false};
     const tr::testing::remote_sink_guard_t sink(
         g, [&](const remote_delivery_t& d, const tr::graph::value_t&) {
-            const bool ok = d.link.size() == 64 && d.caller.size() == 64 &&
-                            d.link.find_first_not_of('L') == std::string_view::npos &&
+            const bool ok = d.link == tr::testing::test_link(link) && d.caller.size() == 64 &&
                             d.caller.find_first_not_of('C') == std::string_view::npos &&
                             !d.return_route.bytes().empty();
             (ok ? remote_hits : remote_torn).fetch_add(1, std::memory_order_relaxed);
@@ -421,7 +420,8 @@ void test_remote_cold_half_under_churn(std::size_t publishers) {
         for (std::size_t round = 0; round < 2000 && !stop.load(std::memory_order_relaxed);
              ++round) {
             if (!g.subscribe_wire(v, make_value({0x04, 0x40, 0x00, 0x00}),
-                                  make_value({0x06, 0x00, 0x00, 0x00}), link, view_t{}, caller))
+                                  make_value({0x06, 0x00, 0x00, 0x00}), link, view_t{}, caller, {},
+                                  tr::testing::test_link(link)))
                 break;
             rounds.fetch_add(1, std::memory_order_relaxed);
             // The wire edge is LIVE from here until the clearing write below. Until one

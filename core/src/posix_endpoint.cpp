@@ -600,6 +600,17 @@ transport_t* slot_server_t::open_endpoint(std::string_view want, Key key) {
     return nullptr;
 }
 
+transport_t* slot_server_t::peer_link_of(peer_handle_t peer) {
+    // `p<slot>~<gen>` names slot `slot` in tenancy `gen` (see `peer_name`), so the slot IS
+    // the lookup and the handle compare IS `peer_link`'s tenancy check: a departed session's
+    // handle equals no open slot's, without the name compare across every slot.
+    if (!peer.valid()) return nullptr;
+    const std::lock_guard lock(peers_m_);
+    if (peer.index >= slots_.size()) return nullptr;
+    const session_base_t& s = *slots_[peer.index];
+    return s.open.load(std::memory_order_relaxed) && s.handle == peer ? s.peer_endpoint : nullptr;
+}
+
 bool slot_server_t::close_peer(std::string_view peer) {
     // Shutdown-only under peers_m_; the poll thread's next pass observes the close and runs
     // the IDENTICAL remote-FIN teardown — no duplicate logic, and no off-thread touch of the

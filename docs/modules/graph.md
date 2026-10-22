@@ -110,7 +110,9 @@ struct graph_hooks_t {        // the graph-wide seams as ONE aggregate (RFC-0028
     graph_hook_t<link_hold_fn_t>        link_hold;              // the transport plane's (#1816)
     graph_hook_t<subject_lookup_fn_t>   subject_lookup;         // caller-storage ACL switch
     graph_hook_t<session_admission_fn_t> session_admission;     // per-session subscribe check
-};                            // + teardown event (#1841); needs config_t::kSessionAdmission
+                              // + teardown event (#1841); needs config_t::kSessionAdmission
+    graph_hook_t<link_name_fn_t>        link_name;              // the router installs it (#1941)
+};
 
 struct vertex_policy_t {      // everything the OWNER declares about one vertex (RFC-0028 D12)
     std::optional<retention_t> retention;          // unset ⇒ the role's default (§5.4)
@@ -884,6 +886,13 @@ session's charge at zero.
 ```
 
 ```{doxygentypedef} tr::graph::session_admission_fn_t
+:project: libtracer
+```
+
+An edge stores its link as a pair, not a name (#1941), so the session seam asks the transport
+plane for the session's name when an edge ends, through `link_name`:
+
+```{doxygentypedef} tr::graph::link_name_fn_t
 :project: libtracer
 ```
 

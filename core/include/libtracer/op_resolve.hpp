@@ -169,7 +169,7 @@ struct inbound_ref_t {
 
 /**
  * @brief The terminus's LINK-TOKEN supplier: `(ctx, the inbound identity) → the link's
- *        interned `%tr::graph::link_id_t`` (#1266 / #1417).
+ *        interned `%tr::graph::link_id_t`` (#1266 / #1417) and its pair (#1941).
  *
  * Declared at namespace scope rather than inside `op_resolver_t` — unlike its three sibling
  * seams — because @ref link_token_seam_t below has to name it, and that struct is what the
@@ -180,11 +180,14 @@ struct inbound_ref_t {
  * instead of a hash. A default-constructed answer means "no token", which the index handles
  * by interning the name exactly as it does today.
  *
+ * The PAIR is the link's `{connection slot, peer}` (#1941) — the session a remote edge
+ * stores instead of the link's name. It is read off the registration, beside the token.
+ *
  * @param ctx     The caller-owned context handed to `op_resolver_t::on_link_id`.
  * @param inbound The request's inbound identity — `peer` is the handle whose link is wanted
  *                and `origin` is the opaque per-link token the installer put there.
  */
-using link_id_fn_t = link_id_t (*)(void* ctx, const inbound_ref_t& inbound);
+using link_id_fn_t = carried_link_t (*)(void* ctx, const inbound_ref_t& inbound);
 
 /**
  * @brief The link-token seam as the resolve walk carries it — the `{fn, ctx}` pair plus the
@@ -212,9 +215,12 @@ struct link_token_seam_t {
      * Called from the subscribe branch alone, so an un-installed seam costs one predictable
      * branch on a path that is already building an owned SUBSCRIBER copy, and an installed
      * one costs an indirect call per remote subscribe and nothing per frame.
+     *
+     * @param wanted False asks nothing, as an uninstalled seam does — how a caller that
+     *               needs an answer only sometimes (a field write, not a value write) asks.
      */
-    [[nodiscard]] link_id_t ask() const {
-        if (fn == nullptr || inbound == nullptr) return {};
+    [[nodiscard]] carried_link_t ask(bool wanted = true) const {
+        if (!wanted || fn == nullptr || inbound == nullptr) return {};
         return fn(ctx, *inbound);
     }
 };

@@ -30,6 +30,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/batch.hpp"
 #include "libtracer/conn_spec.hpp"
 #include "libtracer/frame.hpp"
@@ -265,7 +266,8 @@ void test_graph_arrays() {
     const auto src = g.register_vertex(tr::graph::path_t("/s"), role_t::STORED_VALUE);
     for (const std::string_view link : {"link-a", "link-b"})
         check(g.subscribe_wire(src, tr::testing::make_value({0x04, 0x40, 0x00, 0x00}),
-                               tr::testing::make_value({0x06, 0x00, 0x00, 0x00}), link)
+                               tr::testing::make_value({0x06, 0x00, 0x00, 0x00}), link, {}, {}, {},
+                               tr::testing::test_link(link))
                   .has_value(),
               "a wire edge (the link is passed as a view)");
     const auto legacy = g.read_subscribers(src);
