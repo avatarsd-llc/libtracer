@@ -671,6 +671,6 @@ int main(int argc, char** argv) {
                 report("pair", h, p, n, a);
                 report("pair-norelay", h, p, n, a2);
             }
-    bench::emit_family_rss("chain-vs-compact", start_kb);
+    bench::emit_family_rss("chain-delivery-pair", start_kb);
     return 0;
 }

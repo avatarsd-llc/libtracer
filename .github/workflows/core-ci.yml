@@ -25,7 +25,7 @@
 # than factored out. Because the fallback is automatic, no required check ever waits on
 # hardware a fork cannot use. NEVER route here: a `pull_request_target` job, anything
 # touching secrets (release.yml, publish-npm.yml, docs.yml's deploy), the arm64 leg
-# below, or perf.yml (its interleaved gates are designed for hosted runners).
+# below, or perf.yml (its gate takes the pinned bench-local runner by its own guard).
 #
 # CONTAINER: the self-hosted runners are bare machines, NOT the ubuntu-24.04 image —
 # there is no preinstalled tool set. Every migrated job therefore runs inside the CI

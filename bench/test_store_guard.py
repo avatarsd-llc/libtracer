@@ -73,33 +73,33 @@ class Density(unittest.TestCase):
 
     def test_gap_is_zero_when_head_itself_is_banked(self):
         doc = store([entry(3, 100)])
-        rep = sg.density_report(doc, [sha(3), sha(2), sha(1)], known={})
+        rep = sg.density_report(doc, [sha(3), sha(2), sha(1)])
         self.assertEqual(rep["gap"], 0)
 
     def test_gap_counts_the_commits_ahead_of_the_last_point(self):
         doc = store([entry(1, 100)])
-        rep = sg.density_report(doc, [sha(4), sha(3), sha(2), sha(1)], known={})
+        rep = sg.density_report(doc, [sha(4), sha(3), sha(2), sha(1)])
         self.assertEqual(rep["gap"], 3)
 
     def test_a_store_with_no_matching_point_is_the_full_history(self):
-        rep = sg.density_report(store([entry(9, 100)]), [sha(2), sha(1)], known={})
+        rep = sg.density_report(store([entry(9, 100)]), [sha(2), sha(1)])
         self.assertEqual(rep["gap"], 2)
 
     def test_a_contaminated_point_is_not_coverage(self):
         """The defect this guarantee exists for: a banked point nobody may believe."""
         flagged = f"{HOST} · {hg.contamination_note('A/A bracket 12.0% > 6.0% band')}"
         doc = store([entry(1, 100), entry(3, 100, extra=flagged)])
-        rep = sg.density_report(doc, [sha(3), sha(2), sha(1)], known={})
+        rep = sg.density_report(doc, [sha(3), sha(2), sha(1)])
         self.assertEqual(rep["gap"], 2, "a flagged sample must not close the gap")
 
     def test_the_worst_suite_decides(self):
         """A half-recorded point (one store written, one not) must not read as covered."""
         doc = {"entries": {LATENCY: [entry(3, 100)], THROUGHPUT: [entry(1, 100)]}}
-        rep = sg.density_report(doc, [sha(3), sha(2), sha(1)], known={})
+        rep = sg.density_report(doc, [sha(3), sha(2), sha(1)])
         self.assertEqual(rep["gap"], 2)
 
     def test_empty_store_reports_the_whole_range(self):
-        rep = sg.density_report({"entries": {}}, [sha(2), sha(1)], known={})
+        rep = sg.density_report({"entries": {}}, [sha(2), sha(1)])
         self.assertEqual(rep["gap"], 2)
 
 
@@ -118,7 +118,7 @@ class RollingBaseline(unittest.TestCase):
             vals.append(entry(i, round(v, 3)))
             v *= 1.04
         rep = sg.drift_alerts(vals, bigger_is_better=False, window=20, threshold=15.0,
-                              min_points=5, known={})
+                              min_points=5)
         self.assertEqual(rep["status"], "ok")
         self.assertEqual(len(rep["alerts"]), 1)
         a = rep["alerts"][0]
@@ -134,9 +134,9 @@ class RollingBaseline(unittest.TestCase):
         """
         entries = [entry(i, 100.0 + 20.0 * (i % 2)) for i in range(11)]
         entries.append(entry(11, 119.0))  # +19% on the best, inside the 100..120 range
-        rep = sg.drift_alerts(entries, bigger_is_better=False, known={})
+        rep = sg.drift_alerts(entries, bigger_is_better=False)
         self.assertEqual(rep["alerts"], [])
-        loud = sg.drift_alerts(entries, bigger_is_better=False, known={},
+        loud = sg.drift_alerts(entries, bigger_is_better=False,
                                range_guard=False)
         self.assertEqual(len(loud["alerts"]), 1, "the guard, not the bar, is what "
                                                  "rejects it")
@@ -144,33 +144,31 @@ class RollingBaseline(unittest.TestCase):
     def test_a_move_outside_the_range_still_alerts(self):
         entries = [entry(i, 100.0 + 20.0 * (i % 2)) for i in range(11)]
         entries.append(entry(11, 160.0))
-        rep = sg.drift_alerts(entries, bigger_is_better=False, known={})
+        rep = sg.drift_alerts(entries, bigger_is_better=False)
         self.assertEqual(len(rep["alerts"]), 1)
         self.assertEqual(rep["alerts"][0]["window_worst"], 120.0)
 
     def test_the_range_guard_reads_the_right_end_when_bigger_is_better(self):
         entries = [entry(i, 1000.0 - 200.0 * (i % 2)) for i in range(11)]
         entries.append(entry(11, 820.0))  # -18% on the best, inside 800..1000
-        self.assertEqual(sg.drift_alerts(entries, bigger_is_better=True,
-                                         known={})["alerts"], [])
+        self.assertEqual(sg.drift_alerts(entries, bigger_is_better=True)["alerts"], [])
         entries[-1] = entry(11, 700.0)
-        self.assertEqual(len(sg.drift_alerts(entries, bigger_is_better=True,
-                                             known={})["alerts"]), 1)
+        self.assertEqual(len(sg.drift_alerts(entries, bigger_is_better=True)["alerts"]), 1)
 
     def test_a_flat_series_is_clean(self):
         rep = sg.drift_alerts([entry(i, 100 + (i % 2)) for i in range(12)],
-                              bigger_is_better=False, known={})
+                              bigger_is_better=False)
         self.assertEqual(rep["alerts"], [])
 
     def test_a_contaminated_point_neither_alerts_nor_sets_the_baseline(self):
         flagged = f"{HOST} · {hg.contamination_note('A/A bracket 40.0% > 6.0% band')}"
         entries = [entry(i, 100) for i in range(11)] + [entry(11, 400, extra=flagged)]
-        rep = sg.drift_alerts(entries, bigger_is_better=False, known={})
+        rep = sg.drift_alerts(entries, bigger_is_better=False)
         self.assertEqual(rep["alerts"], [], "a flagged sample cannot raise an alert")
 
     def test_bigger_is_better_alerts_on_a_fall(self):
         entries = [entry(i, 1000.0) for i in range(11)] + [entry(11, 700.0)]
-        rep = sg.drift_alerts(entries, bigger_is_better=True, known={})
+        rep = sg.drift_alerts(entries, bigger_is_better=True)
         self.assertEqual(len(rep["alerts"]), 1)
         self.assertAlmostEqual(rep["alerts"][0]["pct"], 30.0, places=3)
 
@@ -181,12 +179,12 @@ class RollingBaseline(unittest.TestCase):
     def test_a_new_series_is_not_judged_against_a_history_it_lacks(self):
         entries = [entry(i, 100) for i in range(11)]
         entries.append(entry(11, 900, name="brand new metric"))
-        rep = sg.drift_alerts(entries, bigger_is_better=False, known={})
+        rep = sg.drift_alerts(entries, bigger_is_better=False)
         self.assertEqual(rep["alerts"], [])
 
     def test_too_few_trusted_points_declines_to_judge(self):
         rep = sg.drift_alerts([entry(i, 100) for i in range(3)],
-                              bigger_is_better=False, known={})
+                              bigger_is_better=False)
         self.assertEqual(rep["status"], "insufficient")
 
     def test_a_step_change_alerts_once_and_then_stops(self):
@@ -199,18 +197,18 @@ class RollingBaseline(unittest.TestCase):
         """
         flat = [entry(i, 100.0) for i in range(10)]
         first = sg.drift_alerts(flat + [entry(10, 140.0)], bigger_is_better=False,
-                                window=20, known={})
+                                window=20)
         second = sg.drift_alerts(flat + [entry(10, 140.0), entry(11, 140.0)],
-                                 bigger_is_better=False, window=20, known={})
+                                 bigger_is_better=False, window=20)
         self.assertEqual(len(first["alerts"]), 1)
         self.assertEqual(second["alerts"], [])
 
     def test_the_window_bounds_how_far_back_the_baseline_reaches(self):
         aged = [entry(i, 100.0) for i in range(3)] + \
                [entry(3 + i, 140.0 + i) for i in range(9)]
-        wide = sg.drift_alerts(aged, bigger_is_better=False, window=20, known={},
+        wide = sg.drift_alerts(aged, bigger_is_better=False, window=20,
                                range_guard=False)
-        narrow = sg.drift_alerts(aged, bigger_is_better=False, window=6, known={},
+        narrow = sg.drift_alerts(aged, bigger_is_better=False, window=6,
                                  range_guard=False)
         self.assertEqual(len(wide["alerts"]), 1, "the old 100s are still the best")
         self.assertEqual(narrow["alerts"], [], "they have aged out of a short window")
@@ -245,7 +243,7 @@ class ToolchainIdentity(unittest.TestCase):
         gcc, clang = HOST + hg.SEP + "g++ 13.3.0", HOST + hg.SEP + "clang 18.1.3"
         entries = [entry(i, 100.0, extra=gcc) for i in range(10)] + \
                   [entry(10, 130.0, extra=clang)]
-        rep = sg.drift_alerts(entries, bigger_is_better=False, known={})
+        rep = sg.drift_alerts(entries, bigger_is_better=False)
         self.assertEqual(len(rep["alerts"]), 1)
         self.assertTrue(rep["toolchain"],
                         "an alert whose window crosses a bump must say so")

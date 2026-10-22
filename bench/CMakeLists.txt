@@ -129,9 +129,9 @@ target_compile_options(bench_chain_delivery PRIVATE -Wall -Wextra)
 
 # Chain delivery over the RFC-0029 PAIR chain at 1 and 3 hops, with and without the reply
 # relay (#1949). Its COMPACT arm went with COMPACT itself (#1951). A report, not a gate.
-add_executable(bench_chain_vs_compact bench_chain_vs_compact.cpp)
-target_link_libraries(bench_chain_vs_compact PRIVATE libtracer)
-target_compile_options(bench_chain_vs_compact PRIVATE -Wall -Wextra)
+add_executable(bench_chain_delivery_pair bench_chain_delivery_pair.cpp)
+target_link_libraries(bench_chain_delivery_pair PRIVATE libtracer)
+target_compile_options(bench_chain_delivery_pair PRIVATE -Wall -Wextra)
 
 # CAN send + reassembly CPU per frame size, and the receiver's RX-store RAM (#2049).
 add_executable(bench_can_reassembly bench_can_reassembly.cpp)

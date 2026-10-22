@@ -260,21 +260,11 @@ class ContaminationPredicate(unittest.TestCase):
         self.assertFalse(hg.is_contaminated(None))
         self.assertFalse(hg.is_contaminated(""))
 
-    def test_known_list_flags_by_sha_prefix(self):
-        known = {"3b28d15b": "sample 141"}
-        e = {"commit": {"id": "3b28d15bb4b992c9c9682360370ad9b50a000218"}, "benches": []}
-        self.assertEqual(hg.entry_contaminated(e, known), "sample 141")
-
     def test_unlisted_clean_sample_is_trusted(self):
         e = {"commit": {"id": "deadbeef" * 5},
              "benches": [{"name": "x", "value": 1, "extra": "studio · g++ 13.3.0"}]}
-        self.assertIsNone(hg.entry_contaminated(e, {}))
+        self.assertIsNone(hg.entry_contaminated(e))
 
-    def test_shipped_list_contains_sample_141(self):
-        """The acceptance criterion, asserted against the file that ships."""
-        known = hg.load_known_contaminated()
-        self.assertTrue(any(s.startswith("3b28d15b") for s in known),
-                        "sample 141 (3b28d15b) must be listed as contaminated")
 
 
 class RendererIgnoresFlaggedSamples(unittest.TestCase):
@@ -331,7 +321,7 @@ class RendererIgnoresFlaggedSamples(unittest.TestCase):
         note = hg.contamination_note("A/A bracket 12.0% > 6.0% band")
         data = self._store(["h", f"h · {note}", "h"], ["a" * 40, "b" * 40, "c" * 40])
         entries = list(data["entries"].values())[0]
-        self.assertTrue(hg.entry_contaminated(entries[1], {}))
+        self.assertTrue(hg.entry_contaminated(entries[1]))
 
 
 class PerRowBracket(unittest.TestCase):

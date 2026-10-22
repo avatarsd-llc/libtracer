@@ -54,9 +54,10 @@
 #     samples foreign CPU time on the measured CPUs and the host's CPU pressure around it
 #     and re-runs a contended execution. Only a clean run may PASS or FAIL: a gate whose
 #     executions stayed contended prints `PERF: INCONCLUSIVE` (blocking tier: exit 3, re-run
-#     the job; advisory: a warning). These runners are unpinned and cannot be isolated, so
-#     their conditions are read over the whole affinity set; the interleaved A/B remains
-#     their primary defence, and none of them is compared against the pinned-host series.
+#     the job; advisory: a warning). A trusted gate runs on the pinned bench host
+#     (`gate-pr`, below); a fork PR's fallback VM is unpinned, so its conditions are read
+#     over the whole affinity set. The interleaved A/B is the primary defence on both, and
+#     no gate run is compared against the perf-local pinned-host series.
 name: perf
 
 on:
