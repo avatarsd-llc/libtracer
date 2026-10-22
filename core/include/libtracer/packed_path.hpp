@@ -31,10 +31,10 @@
  * Amendment 1: `00 <u8 kind> <u8 len> <len bytes>`, total `3 + len` bytes. It is
  * **admissible in a frame path** — a forwarder steps over one it does not implement
  * by its declared length rather than dropping a frame it is only relaying — and
- * **rejected in canonical / key context**, because a label is not canonical bytes
+ * **rejected in canonical / key context**, because an element is not canonical bytes
  * and the vertex-map key must stay pure-string for `key_view_t`'s
- * byte-prefix-implies-ancestor invariant to hold. `kind = 0x16` is RFC-0027's label
- * element and is spelled in `path_label.hpp`; this header stays KIND-AGNOSTIC — it
+ * byte-prefix-implies-ancestor invariant to hold. `kind = 0x16` is RFC-0029's PAIR
+ * element and is spelled in `path_pair.hpp`; this header stays KIND-AGNOSTIC — it
  * frames, spans and skips a record without knowing what any kind means, which is the
  * property a non-implementing hop relies on.
  *
@@ -60,13 +60,13 @@ inline constexpr std::uint8_t kPackedEscapeLen = 0;
 inline constexpr std::size_t kPackedEscapeOverhead = 3;
 
 /**
- * @brief The escape `kind` of RFC-0027's label element (a `u32`: u16 index, u16 generation).
+ * @brief The escape `kind` of RFC-0029's PAIR element (a `u32` index, a `u32` generation).
  *
  * The kind lives here because the SKIP path is this header's, and skipping is what every hop
- * must do whether or not it implements labels. What the payload MEANS, and how it is spelled
- * and read, is `path_label.hpp`'s; nothing here or there decides WHEN one is minted.
+ * must do whether or not it implements the kind. What the payload MEANS, and how it is spelled
+ * and read, is `path_pair.hpp`'s.
  */
-inline constexpr std::uint8_t kPackedEscapeKindLabel = 0x16;
+inline constexpr std::uint8_t kPackedEscapeKindPair = 0x16;
 
 /**
  * @brief Total bytes of the packed record starting at @p at of @p body — the walk's ONE
@@ -129,9 +129,7 @@ inline constexpr std::uint8_t kPackedEscapeKindLabel = 0x16;
  *         which the record's one-byte length field cannot express.
  *
  * Kind-agnostic on purpose: this writes the FRAMING, and the kind's own body rules belong to
- * whoever owns the kind (RFC-0027's are in `path_label.hpp`). Emitting an escape is not
- * minting one — WHEN a hop replaces its local part with a label is RFC-0027 §6.2's trigger,
- * which lives in the forwarder and not in a grammar header.
+ * whoever owns the kind (RFC-0029's PAIR is in `path_pair.hpp`).
  */
 [[nodiscard]] inline bool emit_path_escape(std::vector<std::byte>& out, std::uint8_t kind,
                                            std::span<const std::byte> payload) {
@@ -148,7 +146,7 @@ inline constexpr std::uint8_t kPackedEscapeKindLabel = 0x16;
  *        the **canonical / key** context rule (RFC-0018 §5.4).
  *
  * An escape record answers false here, and that is the whole asymmetry with
- * `packed_record_span`: a label is not canonical bytes, so a `PATH` carrying one is
+ * `packed_record_span`: an element is not canonical bytes, so a `PATH` carrying one is
  * never a `path_lookup_key` and never a vertex-map key. Keeping canonical keys
  * pure-string is what preserves `key_view_t`'s byte-prefix-implies-ancestor invariant
  * unchanged, which is RFC-0018 falsifier 4.

@@ -448,7 +448,7 @@ std::optional<std::pair<std::size_t, std::uint8_t>> stored_filled(const graph_t&
  */
 tr::net::router_planes_t raw_planes(
     tr::mem::mem_backend_t* flat = &tr::testing::raw_heap_backend()) noexcept {
-    return {.label_src = &tr::mem::heap_source(),
+    return {.link_src = &tr::mem::heap_source(),
             .rx = &tr::mem::heap_source(),
             .flat = flat,
             .egress = &tr::testing::raw_heap_backend()};

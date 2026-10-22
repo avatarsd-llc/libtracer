@@ -28,8 +28,8 @@
  * `kind` is REQUIRED on a REPLY and absent on every other op (RFC-0004 §B: "`kind ∈ {RESULT,
  * ERROR}`"). It was missing from this header until 2026-08-24, so every reply a test built
  * here was an illegal frame — and one of them had been banked as a conformance vector
- * (`fwd/fwd-label-mint-reply`). @ref tr::testing::b_fwd_reply is the only builder that emits
- * a REPLY, so the discriminant cannot be forgotten again by reaching for the general form.
+ * (a since-retired RFC-0027 label vector). @ref tr::testing::b_fwd_reply is the only builder that
+ * emits a REPLY, so the discriminant cannot be forgotten again by reaching for the general form.
  *
  * The deliberately-malformed shapes are parameters here rather than separate hand-rolls:
  * a non-structured envelope (`structured = false`, the missing `.pl` bit) and a zero-length

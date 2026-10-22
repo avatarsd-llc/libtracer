@@ -18,7 +18,7 @@
  * Two `bump_source_t`s of the **same** size over caller slabs, each with `null_source()`
  * upstream so the slab IS the cap and there is no global heap to fall back to:
  *
- *  - the NET plane's store is `fwd_router_t`'s injected `label_src`/`rx` — the `#603` /
+ *  - the NET plane's store is `fwd_router_t`'s injected `link_src`/`rx` — the `#603` /
  *    `fe6adcd6` seam. It is drained by a peer-shaped flood of terminus `FWD{WRITE}` frames fed
  *    through the public `on_frame` door, the pre-ACL, receive-thread path #603 was filed
  *    against: each one's decode arena draws from `rx`, and a bump source never reclaims it.
@@ -148,7 +148,7 @@ struct node_t {
         : net_src(net_slab, tr::mem::null_source()),
           graph_src(graph_slab, tr::mem::null_source()),
           g(folded ? static_cast<tr::mem::block_source_t&>(net_src) : graph_src),
-          router(g, {.label_src = &net_src, .rx = &net_src}) {}
+          router(g, {.link_src = &net_src, .rx = &net_src}) {}
 
     /** @brief The NET plane's slab. */
     alignas(std::max_align_t) std::array<std::byte, kSlabBytes> net_slab{};

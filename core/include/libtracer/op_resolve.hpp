@@ -238,11 +238,10 @@ struct deferred_await_t {
     /** @brief The request's `await_timeout` (or the default): the requester's own deadline,
      *         which a sink MAY ignore (RFC-0004 Amendment 3). */
     std::chrono::nanoseconds timeout;
-    std::string_view subject;          /**< @brief The ACL subject the gate passed. */
-    const inbound_ref_t* inbound;      /**< @brief Where it arrived and who sent it. */
-    std::span<const std::byte> dst;    /**< @brief Reply `dst` (the request's `src`). */
-    std::span<const std::byte> src;    /**< @brief Reply `src` for an ERROR (the timeout). */
-    std::span<const std::byte> ok_src; /**< @brief Reply `src` for the RESULT (may be labelled). */
+    std::string_view subject;                 /**< @brief The ACL subject the gate passed. */
+    const inbound_ref_t* inbound;             /**< @brief Where it arrived and who sent it. */
+    std::span<const std::byte> dst;           /**< @brief Reply `dst` (the request's `src`). */
+    std::span<const std::byte> src;           /**< @brief Reply `src`. */
     std::optional<wire::timestamp_t> echo_ts; /**< @brief The TF=0 stamp to echo, if any. */
     std::span<const std::byte> mint; /**< @brief The RFC-0024 mint the RESULT carries, if any. */
 };
@@ -405,38 +404,22 @@ class op_resolver_t {
      *                     supplier (@ref on_peer_subject) derives the ACL subject from.
      * @param frame_view   The owning frame view when the link delivers views
      *                     (ADR-0042); nullptr on the borrowed-span path.
-     * @param dst_label_target **RFC-0027 §7.2 at a terminus** — the vertex a LABELLED `dst`
-     *                     already dereferenced to, or nullptr, which is every string- and
-     *                     `PATH_REF`-spelled request and therefore every request a host with
-     *                     no injected label table ever sees.
+     * @param dst_target   **RFC-0029 §6 at a terminus** — the vertex reference the last
+     *                     element of an element-spelled `dst` (a PAIR) named, or nullptr, which
+     *                     is every NAME-spelled request.
      *
-     *                     A label REPLACES the string bytes of the part it stands for (§6.1),
-     *                     so a labelled `dst` that reaches its terminus carries no name to
-     *                     look up: `path_lookup_key` refuses an escape record in key context
-     *                     and must, because reading a peer's slot index as UTF-8 is the
-     *                     guessing §7.2 forbids. The address is resolved BEFORE this call, by
-     *                     the transport plane that owns the label table
-     *                     (`%tr::net::path_label_table_t`), and what arrives here is that
-     *                     resolution: this node's own reference to the vertex the label
-     *                     aliases — the identical element RFC-0024's bound spelling carries.
+     *                     A PAIR REPLACES the name bytes of the part it stands for, so such a
+     *                     `dst` carries no name to look up: `path_lookup_key` refuses an escape
+     *                     record in key context and must. The router hands the element over
+     *                     instead, and non-null means **resolve against this element and not
+     *                     against `dst`'s bytes**: one `deref_vertex_slot`, then the
+     *                     operation's own ACL gate inside `graph_t::read` / `write` / `await`
+     *                     at the dereferenced vertex — the string spelling's own gate, reused.
+     *                     A stale element answers `NOT_FOUND` on the error side.
      *
-     *                     Non-null means **resolve against this element and not against
-     *                     `dst`'s bytes**, on the SAME arm the bound spelling takes: one
-     *                     `deref_vertex_slot`, then the operation's own ACL gate inside
-     *                     `graph_t::read` / `write` / `await` at the dereferenced vertex.
-     *                     That reuse is how §8.2's *"exactly as the string form does"*
-     *                     becomes one implementation instead of two kept in agreement. A
-     *                     stale element — the vertex retired between the label's mint and
-     *                     this frame — answers `NOT_FOUND` on the error side, which the
-     *                     router turns into a drop, exactly as a stale `PATH_REF` does.
-     *
-     *                     Two MINTS are suppressed while it is set, and both are §11.2's rule
-     *                     rather than an optimisation: this address is already spelled in one
-     *                     compressed form, so the reply neither mints a second label into it
-     *                     (there is nothing left to replace — the request's `dst`, which the
-     *                     reply echoes as its `src`, IS the label) nor answers an RFC-0024
-     *                     mint request with a `PATH_REF` for it (*"SHOULD NOT bind a
-     *                     `PATH_REF` over a path whose elements are already labelled"*).
+     *                     The RFC-0024 mint is suppressed while it is set: this address is
+     *                     already spelled in compressed form, so the reply does not answer a
+     *                     mint request with a `PATH_REF` for it.
      * @param deferred     Out-flag for a deferred AWAIT (ADR-0084). Non-null with a sink
      *                     installed through @ref on_await_defer, an AWAIT is handed to that
      *                     sink, `*deferred` is set, and the reply is an EMPTY rope that the
@@ -458,7 +441,7 @@ class op_resolver_t {
     [[nodiscard]] result_t<view::rope_t> resolve(
         const wire::tlv_arena_t& fwd, const inbound_ref_t& inbound = {},
         const view::view_t* frame_view = nullptr,
-        const wire::path_ref_element_t* dst_label_target = nullptr, bool* deferred = nullptr,
+        const wire::path_ref_element_t* dst_target = nullptr, bool* deferred = nullptr,
         std::span<std::byte> reply_store = {});
 
     /**
@@ -478,12 +461,9 @@ class op_resolver_t {
      *                     overload documents (@ref inbound_ref_t).
      * @param frame_view   Reserved for the ADR-0042 owning-store seam; the rope
      *                     tier stores its one ownership copy, so pass `nullptr`.
-     * @param dst_label_target The RFC-0027 §7.2 labelled-`dst` resolution, with exactly the
-     *                     meaning and the two suppressed mints the arena overload documents
-     *                     at length. Both tiers take it because a labelled request may
-     *                     arrive fragmented like any other, and the two tiers answering one
-     *                     logical request differently is the drift ADR-0053 §7's single walk
-     *                     exists to make impossible.
+     * @param dst_target   The element-spelled `dst` resolution, with exactly the meaning the
+     *                     arena overload documents. Both tiers take it because such a request
+     *                     may arrive fragmented like any other.
      * @param deferred     The deferred-AWAIT out-flag, as the arena overload documents.
      * @param reply_store  Caller storage for an acknowledgement reply, with the lifetime rule
      *                     the arena overload documents.
@@ -493,7 +473,7 @@ class op_resolver_t {
     [[nodiscard]] result_t<view::rope_t> resolve(
         const wire::tlv_view_t& fwd, const inbound_ref_t& inbound = {},
         const view::view_t* frame_view = nullptr,
-        const wire::path_ref_element_t* dst_label_target = nullptr, bool* deferred = nullptr,
+        const wire::path_ref_element_t* dst_target = nullptr, bool* deferred = nullptr,
         std::span<std::byte> reply_store = {});
 
     /**
@@ -526,7 +506,7 @@ class op_resolver_t {
      * happens. The handle is opaque and the table that gives it meaning belongs to the
      * transport plane, which this graph-layer resolver deliberately cannot name — so the
      * derivation is injected as a bare `{fn, ctx}` pair, the ADR-0047 seam shape
-     * @ref on_reverse_ref and @ref on_path_label already use. `fwd_router_t` installs one
+     * @ref on_reverse_ref already uses. `fwd_router_t` installs one
      * that forwards to `transport_t::peer_subject` on the link the frame arrived over.
      *
      * Called at most ONCE per resolve, before any graph call, and never for a local resolve:
@@ -553,45 +533,6 @@ class op_resolver_t {
     void on_peer_subject(subject_fn_t fn, void* ctx) noexcept {
         subject_fn_ = fn;
         subject_ctx_ = ctx;
-    }
-
-    /**
-     * @brief The TERMINUS's path-label supplier (RFC-0027 §6.1 point 3): asked, on a
-     *        successful operation only, for the label element standing for the residual this
-     *        node just resolved.
-     *
-     * §6.1 point 3 — *"the terminus does the same for the residual it resolved"* — is the
-     * residual half of the rewrite whose forwarding half rides `reply_label`. The reply's
-     * `src` IS the request's `dst` (the residual), so the terminus's rewrite is a
-     * SUBSTITUTION of that one region: the label REPLACES the string bytes and never appends,
-     * exactly as §6.1 requires in both directions, and it lands in the one region that
-     * survives to the origin (erratum 2).
-     *
-     * What is injected and why: a label is minted against a `peer_handle_t` out of a table
-     * the TRANSPORT plane owns (`%tr::net::path_label_table_t`), and this graph-layer resolver
-     * deliberately cannot name either. So the mapping from "the link this request arrived on"
-     * plus "the vertex it resolved to" to "seven encoded bytes" is injected as a bare
-     * `{fn, ctx}` pair — the ADR-0047 seam shape `on_reverse_ref` already uses.
-     *
-     * The contract each side holds:
-     *
-     * - **Post-auth, always** (§8.1). The supplier is called only after the operation's own
-     *   gates have passed — after `graph_t::read` / `write` / `await` / `subscribe_wire`
-     *   answered success — so no label is ever minted for a destination an ancestor ACL
-     *   hides, and a denied operation answers denied and nothing else.
-     * - **An EMPTY answer is the conformant default**, not an error (§6.3): the reply's `src`
-     *   stays the string it is today. Every host with no installed supplier is that case, so
-     *   no shipped reply's bytes move.
-     * - The returned span must be exactly `%tr::wire::kPathLabelRecordBytes` long and must
-     *   outlive the reply assembly; anything else is ignored and the part stays a string.
-     */
-    using path_label_fn_t = std::span<const std::byte> (*)(void* ctx, std::string_view inbound_link,
-                                                           wire::path_ref_element_t target);
-
-    /** @brief Install the terminus path-label supplier (null @p fn uninstalls). */
-    void on_path_label(path_label_fn_t fn, void* ctx) noexcept {
-        path_label_fn_ = fn;
-        path_label_ctx_ = ctx;
     }
 
     /**
@@ -655,8 +596,6 @@ class op_resolver_t {
     }
     reverse_ref_fn_t reverse_ref_fn_ = nullptr;  // responder's reverse-mint seam (amendment 1)
     void* reverse_ref_ctx_ = nullptr;            /**< @brief Its caller-owned context. */
-    path_label_fn_t path_label_fn_ = nullptr;    // RFC-0027 §6.1 point 3 terminus mint seam
-    void* path_label_ctx_ = nullptr;             /**< @brief Its caller-owned context. */
     subject_fn_t subject_fn_ = nullptr;          // #375 Part 2 terminus subject derivation
     void* subject_ctx_ = nullptr;                /**< @brief Its caller-owned context. */
     link_id_fn_t link_id_fn_ = nullptr;          // #1417 terminus link-token carry

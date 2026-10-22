@@ -958,6 +958,11 @@ into it when a `:stats` read names a net-plane class, and L4 still names nothing
 
 The reserved seam classes and the nouns each publishes:
 
+> **Corrected 2026-10-22 by the `:stats.labels` erratum
+> ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22)
+> at the end of this document.** The `:stats.labels.table` row is retired with the RFC-0027
+> label plane (RFC-0029 §11, slice S3); `labels` is no longer a seam class.
+
 | spelling | the seam | nouns |
 | --- | --- | --- |
 | `:stats.router.drops` | this node's `fwd_router_t` counted cold-path drops (`router_stats_t`, #1503 step 3) | `flatten_dropped`, `forward_iov_dropped`, `arena_dropped`, `assemble_dropped`, `reply_iov_dropped`, `delivery_iov_dropped`, `malformed_rx` |
@@ -1358,3 +1363,33 @@ with both serves the `doc` pair, then the unchanged owner part, with each field'
 `access` and possibly empty descriptor bytes. A vertex with neither serves
 the record `tlv-types/point-schema-app` and `settings/schema-enumerates-nothing` pin,
 unchanged.
+
+## Erratum (2026-10-22) — `:stats.labels.table` is retired with the RFC-0027 label plane ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244))
+
+**What the text said.** Amendment 2's §D.4 table, and reference/05's net-plane seam table after
+it, list `:stats.labels.table` as a published seam: the RFC-0027 label plane's dereference tallies
+`label_not_found` and `label_resolves`. reference/05 adds that both "leave with that table in
+RFC-0029 slice S3", and that they are still published until S3 lands.
+
+**What the behaviour is.** [RFC-0029](0029-one-path-primitive.md) (one path primitive, accepted
+2026-09-30) already retired the RFC-0027 label: §1 deletes "RFC-0027's table, ceilings, owner
+stamps and census", §5.3 retires the `kind = 0x16`, `len = 4` element on the wire, and §11 with
+§13.2 S3 lists the table and its plane for deletion. The §Erratum (2026-10-09) above ruled
+which change deletes each noun: S3 for `label_not_found` and `label_resolves`. S3 has now landed
+in the reference implementation (#2244). With no label plane there is nothing to count, so
+the `labels` class is not a seam: `:stats.labels.table`, like any unknown class or a bare
+`:stats.labels`, answers `ERROR{tr::schema::not_found}` (`0x0031`), caller-independently, under
+§D.4.1. The `:stats.router.drops` and `:stats.link.<child>` seams are unchanged, noun for noun.
+
+**Which change made them diverge.** RFC-0029's acceptance, which ruled the deletion but left
+Amendment 2's table and reference/05's row describing the class as published. The retirement
+was decided there; this erratum only brings RFC-0010's text into line.
+
+**The correction.** Amendment 2's §D.4 table carries a note pointing here, and reference/05's
+`:stats.labels.table` row is removed. A monitor written against Amendment 2 already degrades by
+construction: its §Compatibility told it to read `SCHEMA_NOT_FOUND` as "not published here".
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). The one
+wire-readable change, the `labels` class answering `SCHEMA_NOT_FOUND`, is the
+consequence of a retirement RFC-0029 already made normative (§5.3, §11). This erratum changes
+no other seam name, noun, frame, type code, grammar rule or error identity.

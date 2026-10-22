@@ -95,10 +95,10 @@ struct fake_bus_t final : tr::net::transport_t, tr::net::bus_link_t {
 };
 
 /**
- * @brief Sweep the label source's refusal over one `add_child` of @p link until it succeeds.
+ * @brief Sweep the link source's refusal over one `add_child` of @p link until it succeeds.
  *
  * @return How many refusals the sweep met before the first success — the number of
- *         allocations a fresh registration makes on the label plane.
+ *         allocations a fresh registration makes on the link plane.
  */
 template <class Link>
 int sweep_add_child(const char* what, tr::net::link_kind_t kind) {
@@ -109,7 +109,7 @@ int sweep_add_child(const char* what, tr::net::link_kind_t kind) {
         bool added = false;
         {
             tr::graph::graph_t graph{tr::mem::heap_source()};
-            tr::net::fwd_router_t router{graph, {.label_src = &src}};
+            tr::net::fwd_router_t router{graph, {.link_src = &src}};
             Link link;
             added = router.attach_link("net/ws/a", link, nullptr, kind);
             if (src.refused_ == 0) {
@@ -130,7 +130,7 @@ int sweep_add_child(const char* what, tr::net::link_kind_t kind) {
         check(src.blocks_out_ == 0, "every block goes back once the router is gone");
         if (src.refused_ == 0) break;
     }
-    std::printf("  %d allocation(s) on the label plane, each refused once\n", refusals);
+    std::printf("  %d allocation(s) on the link plane, each refused once\n", refusals);
     return refusals;
 }
 
@@ -175,20 +175,6 @@ void test_session_anchor_id_bound() {
           "an id past one segment record is empty — the router anchors nothing for it");
 }
 
-/** @brief The fixed-buffer label record is the bytes the growing-buffer form emits. */
-void test_path_label_record_matches_emit() {
-    std::printf("path_label_record == emit_path_label\n");
-    const tr::wire::path_label_t label{.index = 0x0102u, .generation = 7};
-    std::vector<std::byte> grown;
-    const bool emitted = tr::wire::emit_path_label(grown, label);
-    const auto rec = tr::wire::path_label_record(label);
-    check(emitted && rec.has_value() && grown.size() == rec->size() &&
-              std::equal(grown.begin(), grown.end(), rec->begin()),
-          "the two spellings of a label element are byte-identical");
-    check(!tr::wire::path_label_record(tr::wire::path_label_t{}).has_value(),
-          "the reserved zero label has no record");
-}
-
 /** @brief The span form of a segment record is the bytes the growing-buffer form emits. */
 void test_store_path_segment_matches_emit() {
     std::printf("store_path_segment == emit_path_segment\n");
@@ -208,7 +194,7 @@ void test_store_path_segment_matches_emit() {
 }  // namespace
 
 int main() {
-    check(sweep_add_child<wired_link_t>("add_child (point-to-point) under a refusing label "
+    check(sweep_add_child<wired_link_t>("add_child (point-to-point) under a refusing link "
                                         "source",
                                         {}) >= 3,
           "the registry chunk, the slot text and the receiver ctx are all on the seam");
@@ -216,13 +202,12 @@ int main() {
               4,
           "…and so is the interned link-kind record");
     if constexpr (tr::net::kBusLinks) {
-        check(sweep_add_child<fake_bus_t>("add_child (bus mount) under a refusing label source",
+        check(sweep_add_child<fake_bus_t>("add_child (bus mount) under a refusing link source",
                                           {}) >= 4,
               "…and so is a bus mount's per-peer token cache");
     }
     test_tx_handoff_refused_ring();
     test_session_anchor_id_bound();
-    test_path_label_record_matches_emit();
     test_store_path_segment_matches_emit();
     return tr::testing::summary("net_plane_refusal");
 }

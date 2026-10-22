@@ -236,16 +236,16 @@ edge.
   `bench_forward_heap == 0`), so pressure genuinely lives at the **edges** — RX admission and TX
   egress. A forwarder that appears to be under memory pressure in the middle is a forwarder with
   a mis-sized edge, not a slow router.
-- **Naming the seams**: `label_source()`, `rx_source()`, `flatten_backend()` and
-  `egress_backend()` (`core/include/libtracer/fwd_router.hpp:fwd_router_t::label_source`) reach the four injected
+- **Naming the seams**: `link_source()`, `rx_source()`, `flatten_backend()` and
+  `egress_backend()` (`core/include/libtracer/fwd_router.hpp:fwd_router_t::link_source`) reach the four injected
   objects even when the host took the defaults — which is what makes the §5 loop runnable on a
   gateway at all.
 - **No label space to exhaust**: a forwarder holds no per-link label table since
   [RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md)
   (#1951). Every stream delivery is a `FWD{WRITE}` on the edge's `PAIR` chain, so a deep path
   costs bytes on the wire (11 B per `PAIR` element, RFC-0029 §5.2), not a table that can fill.
-  `label_not_found()` on the receiving side still counts labelled `dst` elements this node
-  refused; it moves after a teardown and is not a fault on its own.
+  The RFC-0027 path-label plane and its `label_not_found()` counter went with RFC-0029 slice
+  S3 (#2244).
 - **Designated pressure point**: the egress TX slots of the busiest link. `rx` is sized so
   `arena_dropped` stays zero — and `arena_dropped` is deliberately split from `malformed_rx` so a
   peer sending garbage never reads as a slab that is too small.
@@ -541,7 +541,6 @@ read <any-vertex>:stats.mem.control        ; capacity / in_use / peak / refused 
 read <any-vertex>:stats.mem.ring           ; the same five, for the default receiver-ring source
 read <any-vertex>:stats.graph.delivery     ; no_target / denied / out_of_memory / fan_out_truncated
 read <any-vertex>:stats.router.drops       ; the forwarder's eight per-cause cold-path drops
-read <any-vertex>:stats.labels.table       ; label_not_found / label_resolves
 read <any-vertex>:stats.link.<child>       ; dropped_rx / malformed_rx / dropped_tx
 ```
 

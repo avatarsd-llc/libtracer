@@ -96,9 +96,9 @@ The 24 verdicts that need a new instrument fold into 12 proposed follow-ups (F1�
 | Element | Codepoint | Status | Shipped use | Stage | Verdict | F |
 | --- | --- | --- | --- | --- | --- | --- |
 | segment record | `[u8 len 1..64][utf8]` | assigned | `path/path-sensor-temp`, `path/path-deep-255-packed` | — | **keep** | |
-| escape record | `00 <kind> <len> <bytes>` | assigned | `path/path-escape-in-key-context`, `path-label/label-foreign-kind` | — | **keep**: the self-delimiting extension point. | |
+| escape record | `00 <kind> <len> <bytes>` | assigned | `path/path-escape-in-key-context` | — | **keep**: the self-delimiting extension point. | |
 | PAIR element | escape `kind=0x16`, `len=8` | normative (RFC-0029) | none on main; PR #1684 (RFC-0029 S1: the PAIR element and its hop arm) is open | 1 (#1939) | **keep**: the one compact address. | |
-| path label | escape `kind=0x16`, `len=4` | retired by RFC-0029 §5.3 | `path_element_kind_t::LABEL`; `path-label/*`, `fwd/fwd-label-*` | RFC-0029 S1–S3 | **delete** | covered |
+| path label | escape `kind=0x16`, `len=4` | retired by RFC-0029 §5.3; deleted by S3 (#2244), now malformed | none; `path/path-escape-in-key-context` carries one as a malformed address | RFC-0029 S3 | **deleted** | covered |
 | `0x15` bare 8-byte array body | RFC-0024 form | retired by RFC-0029 §7.1 | `path-ref/reverse-len-not-multiple-of-8` | RFC-0029 S5 | **delete**: the body becomes a `PATH` body. | covered |
 | empty `PATH` | length 0 | assigned | root `/`, the unacknowledged `src`, the re-headed `dst` | — | **keep** | |
 | segment length cap | 64 B | assigned | `core/src/path.cpp` | — | **keep** | |
@@ -210,7 +210,7 @@ rows here.
 | `:stats.mem.ring` | seam | assigned | the graph-level ring source census | — | **keep** | |
 | `:stats.graph.delivery` | seam | assigned | `settings/stats-seam-block` | — | **keep** | |
 | `:stats.router.drops` | seam | assigned | `settings/stats-seam-net-router` | 3, 6 may drop nouns | **keep**: readers ignore unknown nouns. | |
-| `:stats.labels.table` | seam | assigned, deleted by RFC-0029 S3 | label table on main | RFC-0029 S3 | **delete** | covered |
+| `:stats.labels.table` | seam | deleted by RFC-0029 S3 (#2244; RFC-0010 erratum 2026-10-22) | none | RFC-0029 S3 | **deleted** | covered |
 | `:stats.link.<child>` | seam | assigned | per-link counters | — | **keep** | |
 | `labels_used` noun | `:stats.link.<child>` noun | assigned, deleted by RFC-0029 S3 | label table on main | RFC-0029 S3 | **delete** | covered |
 

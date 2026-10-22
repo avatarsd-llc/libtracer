@@ -187,52 +187,7 @@ target_link_libraries(path_ref_test PRIVATE libtracer)
 libtracer_test_warnings(path_ref_test)
 add_test(NAME path_ref COMMAND path_ref_test)
 
-# RFC-0027's path label (path_label.hpp) and its mint table (path_label_table.cpp, so
-# NET_PLANE-gated like every other net-plane TU's test). Carries §4.3.1's
-# saturate-and-retire test, which nothing else can catch: the rule is invisible on the wire.
-# It also pins the §12.5 `path-label/` vectors byte-exactly against the emitter, so it needs
-# LIBTRACER_VECTORS_DIR.
 if(LIBTRACER_NET_PLANE)
-    add_executable(path_label_test path_label_test.cpp)
-    target_link_libraries(path_label_test PRIVATE libtracer)
-    target_compile_definitions(path_label_test PRIVATE
-        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-    libtracer_test_warnings(path_label_test)
-    add_test(NAME path_label COMMAND path_label_test)
-endif()
-
-# RFC-0027 car 3 — the MIXED-element codec (path_element.hpp) and the origin-side label
-# cache on path_t (§6.1). Deliberately NOT net-plane-gated: both live at L2/L4 and neither
-# links a net-plane TU, so a core built without the transport plane still gets the layering
-# checks of §9 — which is the arm most likely to erode, since it is a rule about what must
-# NOT appear on a surface.
-add_executable(path_label_codec_test path_label_codec_test.cpp)
-target_link_libraries(path_label_codec_test PRIVATE libtracer)
-libtracer_test_warnings(path_label_codec_test)
-add_test(NAME path_label_codec COMMAND path_label_codec_test)
-
-# RFC-0027 car 4 — the FORWARDER: mint on reply, deref on receipt, NOT_FOUND on stale, and
-# §8.2's mandated label-vs-string ACL pair. Every claim here is behavioural, and the
-# conformance harness routes nothing, so this is the only place they can be false — the same
-# reason `bound_forward_test` exists for `fwd/fwd-bound-forward`. NET_PLANE-gated (it drives
-# `fwd_router_t`) and vector-reading (it pins four vectors byte-exact against the router).
-if(LIBTRACER_NET_PLANE)
-    add_executable(path_label_forward_test path_label_forward_test.cpp)
-    target_link_libraries(path_label_forward_test PRIVATE libtracer)
-    target_compile_definitions(path_label_forward_test PRIVATE
-        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-    libtracer_test_warnings(path_label_forward_test)
-    add_test(NAME path_label_forward COMMAND path_label_forward_test)
-
-    # RFC-0027 §6.1 point 3 — the TERMINUS: the residual half of the same reply-leg rewrite,
-    # bound against the production `fwd_router_t` + `op_resolver_t` wiring for the same reason.
-    add_executable(path_label_terminus_test path_label_terminus_test.cpp)
-    target_link_libraries(path_label_terminus_test PRIVATE libtracer)
-    target_compile_definitions(path_label_terminus_test PRIVATE
-        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-    libtracer_test_warnings(path_label_terminus_test)
-    add_test(NAME path_label_terminus COMMAND path_label_terminus_test)
-
     # The shared PAIR header (#1700): sentinels that the vertex slot, the path-ref element and
     # the PAIR element are one type, and that the peer handle stays a distinct one over it.
     add_executable(pair_test pair_test.cpp)
@@ -248,16 +203,6 @@ if(LIBTRACER_NET_PLANE)
         LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     libtracer_test_warnings(path_pair_test)
     add_test(NAME path_pair COMMAND path_pair_test)
-
-    # RFC-0027 origin car — the ORIGIN: adopt the minted `src`, spend it as `dst`, fall back on
-    # `NOT_FOUND`. The two above pin the hop's EMISSION; this one closes the round trip, and it
-    # is where `fwd/fwd-label-stale`'s "the bytes an origin sends" stops being hand-built.
-    add_executable(path_label_origin_test path_label_origin_test.cpp)
-    target_link_libraries(path_label_origin_test PRIVATE libtracer)
-    target_compile_definitions(path_label_origin_test PRIVATE
-        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-    libtracer_test_warnings(path_label_origin_test)
-    add_test(NAME path_label_origin COMMAND path_label_origin_test)
 endif()
 
 # The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at

@@ -494,18 +494,6 @@ add_executable(bench_pin_net bench_pin_net.cpp)
 target_link_libraries(bench_pin_net PRIVATE libtracer)
 target_compile_options(bench_pin_net PRIVATE -Wall -Wextra)
 
-# RFC-0027 §12.4 clauses 1 and 2 — the PATH-LABEL bench gate, which that RFC makes NORMATIVE for
-# acceptance of the implementation. Sweeps HOP COUNT so a per-hop claim is read off a slope
-# rather than off a point (the correction RFC-0024 §8.4 had to make on itself), and sweeps the
-# terminus residual DEPTH beside it — clause 2's own axis, and the one §3.3 nominates as
-# deciding. That sweep became a real A/B only once the terminus both MINTED for the residual it
-# resolved (#1357) and DEREFERENCED the label that came back (#1363); before that the residual
-# was a string in both arms. Diagnostic, not a perf gate: both arms live in one binary and the
-# comparison is between two SPELLINGS, not two builds.
-add_executable(bench_path_label bench_path_label.cpp)
-target_link_libraries(bench_path_label PRIVATE libtracer)
-target_compile_options(bench_path_label PRIVATE -Wall -Wextra)
-
 # #1266 — the subscriber-index interning A/B. Four index arms in ONE binary (sentinel /
 # string-keyed / token-keyed / graph-only re-key) plus the live subscribe_wire path, swept over
 # 4/8/16/32/65 links at two vertex populations, with a counting pmr resource reporting bytes at

@@ -11,7 +11,7 @@
  *   (3) targeted asserts     — the CRC value, the PATH child count, reserved-bit rejection;
  *   (4) negative vectors    — decode(reject.bin) MUST fail with the error named by
  *       expected.json's "reject" field (extracted by a tiny scan, no JSON parser);
- *   (5) input legality       — every input.bin is a legal frame (packed PATH bodies, label
+ *   (5) input legality       — every input.bin is a legal frame (packed PATH bodies, PAIR
  *       elements, the FWD head) unless expected.json declares "malformed_input": true (#1587);
  *   (6) noise transcripts    — on a build with a Noise crypto backend, every
  *       noise/<case>/transcript.json is replayed and each recorded value compared (#2072).
@@ -36,7 +36,6 @@
 
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/packed_path.hpp"
-#include "libtracer/path_label.hpp"
 #include "libtracer/path_pair.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -174,8 +173,8 @@ bool check_reject(const fs::path& reject_bin, std::span<const std::byte> bytes) 
  * @brief The `expected.json` manifest key a deliberately-illegal `input.bin` declares.
  *
  * The round-trip contract is satisfied by ANY well-formed TLV, so a vector can bank a frame
- * no conformant origin emits and still score `ok` on every core (`fwd/fwd-label-mint-reply`
- * did, until a99d362f). The legality pre-pass closes that: every `input.bin` must also be a
+ * no conformant origin emits and still score `ok` on every core (a since-retired RFC-0027 label
+ * vector did, until a99d362f). The legality pre-pass closes that: every `input.bin` must also be a
  * frame the reference would accept as legal, unless its manifest says `"malformed_input":
  * true` — the vectors whose whole point is an address a hop MUST refuse but can still carry.
  */
@@ -204,8 +203,7 @@ bool malformed_input_declared(const fs::path& case_dir) {
  * Frame-path context (RFC-0018 §5.4 Amendment 1), the permissive one: escape records are
  * admissible and a foreign `kind` is stepped over by its declared length. What is NOT
  * admissible anywhere is a body that does not tile into records, and a `kind = 0x16` element
- * that is neither an RFC-0029 PAIR (`len = 8`) nor a label inside RFC-0027 §5.3.2's two
- * structural clauses with a non-reserved generation (§4.1).
+ * that is not an RFC-0029 PAIR (`len = 8`) — RFC-0027's retired `len = 4` label included.
  */
 std::optional<std::string> packed_path_illegal(std::span<const std::byte> body) {
     std::size_t at = 0;
@@ -213,10 +211,8 @@ std::optional<std::string> packed_path_illegal(std::span<const std::byte> body) 
         const std::size_t span = tr::wire::packed_record_span(body, at);
         if (span == 0) return "PATH body does not tile into packed records (RFC-0018)";
         const auto kind = tr::wire::packed_escape_kind(body, at);
-        if (kind == tr::wire::kPackedEscapeKindLabel && !tr::wire::path_label_at(body, at) &&
-            !tr::wire::path_pair_at(body, at))
-            return "PATH carries a malformed `0x16` element: neither a label (RFC-0027 §5.3.2 / "
-                   "§4.1) nor a PAIR (RFC-0029 §5.1)";
+        if (kind == tr::wire::kPackedEscapeKindPair && !tr::wire::path_pair_at(body, at))
+            return "PATH carries a malformed `0x16` element: not a PAIR (RFC-0029 §5.1)";
         at += span;
     }
     return std::nullopt;
@@ -628,8 +624,8 @@ int main(int argc, char** argv) {
     }
     {
         // The gate itself, against a known-bad frame: a FWD{REPLY} with no `kind` — the exact
-        // shape fwd/fwd-label-mint-reply banked before a99d362f. Undeclared it must fail and
-        // the message must name the flag; declared it must pass.
+        // shape a since-retired RFC-0027 label vector banked before a99d362f. Undeclared it must
+        // fail and the message must name the flag; declared it must pass.
         static constexpr std::array no_kind_reply{
             std::byte{0x0F}, std::byte{0x40}, std::byte{0x0D}, std::byte{0x00},  // FWD, PL=1
             std::byte{0x01}, std::byte{0x00}, std::byte{0x01}, std::byte{0x00},

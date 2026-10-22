@@ -378,8 +378,9 @@ A PAIR is an **address, never a capability**: the authorization check at every h
 the dereferenced vertex, the caller and the right, never of how the element was spelled, so a PAIR
 reaches nothing its holder could not reach by name.
 
-*Implementation status:* the reference implementation still ships the RFC-0024 `PATH_REF` form and
-the RFC-0027 4-byte label until RFC-0029's slices S1–S3 land.
+*Implementation status:* the reference implementation refuses `PATH_REF` as an address (S1) and
+treats the RFC-0027 4-byte label as malformed (S3); it still honours the RFC-0024 mint request
+until RFC-0029's slice S2 lands.
 
 ---
 

@@ -2,90 +2,66 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * RFC-0027 §5 — the ELEMENT CODEC of a packed `PATH` body: the one walk that reads a
- * body whose records are a free mixture of literal segments and path labels, and the
- * one splice that replaces a run of literal segments with a single label element.
+ * The ELEMENT CODEC of a packed `PATH` body: the one walk that reads a body whose records
+ * are a free mixture of literal segments and RFC-0029 PAIR elements (RFC-0029 §4.2).
  *
- * Car 2 of #1325 settled how ONE label element is spelled (`path_label.hpp`) and how any
- * record is framed and skipped (`packed_path.hpp`). What was still missing is the surface
- * between them: a reader that answers *what is this element* — segment, label, somebody
- * else's escape kind, or a refusal — for every record of a MIXED body, which RFC-0027 §5.2
- * makes the expected shape rather than an edge case.
+ * How a record is framed and skipped is `packed_path.hpp`'s, and how ONE PAIR is spelled is
+ * `path_pair.hpp`'s. This is the surface between them: a reader that answers *what is this
+ * element* — segment, PAIR, somebody else's escape kind, or a refusal — for every record of a
+ * MIXED body.
  *
- * Two clauses of §5 are load-bearing here and are why this is a type rather than a bool:
+ * Two clauses are load-bearing here and are why this is a type rather than a bool:
  *
- * - **An element self-describes by its kind, never by its position** (§5.1, applying
- *   RFC-0024 amendment 2's ruling unchanged). So the walk classifies each record where it
- *   stands and never counts elements to decide what one is.
- * - **A foreign kind and a malformed label are DIFFERENT answers** (§12.5 erratum 1). A
- *   kind this host does not implement is stepped over by its declared length — that is the
- *   property a non-minting hop relies on — while a `kind = 0x16` record whose payload is not
- *   exactly one label is a malformed ADDRESS and the resolver refuses it (`tr::path::invalid`).
- *   A codec that folded the two into one "not a label" answer would let a length-only check
- *   dereference another kind's payload against the local table, which is a mis-delivery.
+ * - **An element self-describes by its kind, never by its position** (RFC-0024 amendment 2).
+ *   So the walk classifies each record where it stands and never counts elements to decide
+ *   what one is.
+ * - **A foreign kind and a malformed element are DIFFERENT answers.** A kind this host does
+ *   not implement is stepped over by its declared length — that is the property a
+ *   non-implementing hop relies on — while a `kind = 0x16` record whose payload is not exactly
+ *   one PAIR is a malformed ADDRESS and the resolver refuses it (`tr::path::invalid`).
  *
- * **The structural clauses are exactly TWO, and no third is invented here.** §12.5 erratum 1
- * fixes them as the `kind` and the declared `len`, so a record satisfying both IS a label
- * element — including one carrying the reserved zero generation. That value cannot name a slot
- * any host minted, but the refusal it earns is §7.2's `NOT_FOUND`-class one at the deref, with
- * the sender falling back to the full-string path it still holds; classifying it as a malformed
- * address would answer `tr::path::invalid` where the spec answers `tr::path::not_found`, which
- * is a wire-surface divergence and would need an amendment rather than a codec.
+ * **The structural clauses are exactly TWO**: the `kind`, then the declared `len`. `len = 8`
+ * is a PAIR, and every other length is MALFORMED — RFC-0029 §5.1's "refuses the address,
+ * never the frame". That includes `len = 4`, RFC-0027's retired label element (RFC-0029 §5.3).
  *
- * **RFC-0029 adds the fifth answer, the PAIR** (`path_pair.hpp`): the same `kind = 0x16` at
- * `len = 8`, carrying the owner-issued `(index, generation)` itself. The declared length is
- * what tells the two `0x16` spellings apart, so the structural rule stays "kind, then length"
- * and still has no third clause: `len = 4` is a label (until RFC-0029 S3 deletes that form),
- * `len = 8` is a pair, and every other length is MALFORMED — RFC-0029 §5.1's "refuses the
- * address, never the frame".
- *
- * **Nothing here mints.** Emitting a label element says how a local part is SPELLED, never
- * that a mint is due: §6.2's trigger, the reply-leg rewrite, the table deref and the
- * `NOT_FOUND` answer are the forwarder's (car 4 of #1325). This header is `tr::wire` (L2/L3)
- * and knows nothing about a graph, a peer or a table — it turns wire bytes into wire values
- * and back, exactly as `path_label.hpp` and `path_ref.hpp` do.
+ * This header is `tr::wire` (L2/L3) and knows nothing about a graph, a peer or a table — it
+ * turns wire bytes into wire values and back, exactly as `path_pair.hpp` and `path_ref.hpp` do.
  */
 #pragma once
 
 #include <array>
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 #include "libtracer/packed_path.hpp"
-#include "libtracer/path_label.hpp"
 #include "libtracer/path_pair.hpp"
 
 /**
  * @file
- * @brief The RFC-0027 §5 mixed-element codec over a packed `PATH` body: classify, walk, splice.
+ * @brief The mixed-element codec over a packed `PATH` body: classify, walk, emit.
  */
 
 namespace tr::wire {
 
 /**
- * @brief What one record of a packed `PATH` body IS — the five answers a reader needs.
+ * @brief What one record of a packed `PATH` body IS — the four answers a reader needs.
  *
- * The two refusals differ in what a host does next (RFC-0027 §12.5 erratum 1): a @ref FOREIGN
- * record is relayed intact, a @ref MALFORMED one refuses the address. The two `0x16` answers
- * (@ref LABEL, @ref PAIR) differ by declared length and nothing else (RFC-0029 §5.1).
+ * The two refusals differ in what a host does next: a @ref FOREIGN record is relayed intact,
+ * a @ref MALFORMED one refuses the address.
  */
 enum class path_element_kind_t : std::uint8_t {
     /** @brief A literal segment record `[u8 len][utf8]` — the canonical spelling (RFC-0018). */
     SEGMENT,
-    /** @brief RFC-0027's label element — an escape at `kind = 0x16` carrying one valid label. */
-    LABEL,
     /** @brief RFC-0029's PAIR element — an escape at `kind = 0x16`, `len = 8`, carrying the
      *         owner-issued `(index, generation)` (decoded into @ref path_element_t::pair). */
     PAIR,
     /** @brief An escape record of some other kind: skippable by length, never interpreted. */
     FOREIGN,
-    /** @brief Not a readable element: a ragged record, or a `0x16` record that is not a label. */
+    /** @brief Not a readable element: a ragged record, or a `0x16` record that is not a PAIR. */
     MALFORMED,
 };
 
@@ -97,20 +73,17 @@ enum class path_element_kind_t : std::uint8_t {
  * or copy it without asking the cursor anything.
  */
 struct path_element_t {
-    /** @brief Which of the five answers this record is. */
+    /** @brief Which of the four answers this record is. */
     path_element_kind_t kind = path_element_kind_t::MALFORMED;
     /** @brief Byte offset of the record's first byte within the body. */
     std::size_t at = 0;
     /** @brief Total bytes the record occupies, or `0` when the framing itself is ragged. */
     std::size_t bytes = 0;
     /** @brief SEGMENT: the segment's UTF-8 bytes. FOREIGN: the escape's declared payload.
-     *         Empty for every other kind — a label's value is in @ref label, decoded. */
+     *         Empty for every other kind — a PAIR's value is in @ref pair, decoded. */
     std::span<const std::byte> payload{};
-    /** @brief The escape `kind` byte, for @ref LABEL, @ref PAIR and @ref FOREIGN; `0` otherwise. */
+    /** @brief The escape `kind` byte, for @ref PAIR and @ref FOREIGN; `0` otherwise. */
     std::uint8_t escape_kind = 0;
-    /** @brief The decoded label, meaningful only when @ref kind is @ref LABEL — and then still
-     *         possibly not `valid()`, when the record carries the reserved zero generation. */
-    path_label_t label{};
     /** @brief The decoded `(index, generation)`, meaningful only when @ref kind is @ref PAIR.
      *         Every value is structurally a pair; whether it names a live vertex is the
      *         owner's deref to answer (RFC-0029 §6 step 2), never the codec's. */
@@ -130,23 +103,14 @@ struct path_element_t {
 };
 
 /**
- * @brief Classify the record at @p at of packed `PATH` body @p body (RFC-0027 §5.1).
+ * @brief Classify the record at @p at of packed `PATH` body @p body.
  *
  * The kind decides the reading, in this order and no other: ragged framing refuses first,
  * a non-escape record is a literal segment, an escape of a kind this host does not own is
- * @ref path_element_kind_t::FOREIGN, a `kind = 0x16` record whose payload is exactly eight
- * bytes reads as @ref path_element_kind_t::PAIR (RFC-0029 §5.1) and one of exactly four bytes
- * as @ref path_element_kind_t::LABEL. Those are §12.5 erratum 1's two structural clauses —
- * kind, then declared length — and there is no third.
- *
- * @note A `LABEL` element may carry a path label that is not `valid()` — the reserved zero
- *       generation. That is deliberate and it is where this differs from car 2's
- *       `path_label_at`, which answers `nullopt` for it: a single-element reader has one
- *       answer to give, while a body reader must not turn a value-level refusal into a
- *       structural one. The reserved generation names no slot any host minted, so the deref
- *       refuses it with §7.2's `NOT_FOUND`-class answer and the sender falls back to strings —
- *       the same recovery as any stale or unknown path label, and one this codec must not
- *       pre-empt with `tr::path::invalid`.
+ * @ref path_element_kind_t::FOREIGN, and a `kind = 0x16` record reads as
+ * @ref path_element_kind_t::PAIR when its payload is exactly eight bytes (RFC-0029 §5.1) and
+ * as @ref path_element_kind_t::MALFORMED at any other length — kind, then declared length,
+ * and no third clause.
  */
 [[nodiscard]] constexpr path_element_t path_element_at(std::span<const std::byte> body,
                                                        std::size_t at) noexcept {
@@ -161,32 +125,21 @@ struct path_element_t {
     const std::uint8_t kind = static_cast<std::uint8_t>(body[at + 1]);
     const std::span<const std::byte> payload =
         body.subspan(at + kPackedEscapeOverhead, span - kPackedEscapeOverhead);
-    if (kind != kPackedEscapeKindLabel)
+    if (kind != kPackedEscapeKindPair)
         return path_element_t{.kind = path_element_kind_t::FOREIGN,
                               .at = at,
                               .bytes = span,
                               .payload = payload,
                               .escape_kind = kind};
-
-    if (path_pair_record_valid(kind, payload.size()))
-        return path_element_t{.kind = path_element_kind_t::PAIR,
-                              .at = at,
-                              .bytes = span,
-                              .payload = payload,
-                              .escape_kind = kind,
-                              .pair = path_pair_load(payload)};
-    if (!path_label_record_valid(kind, payload.size()))
+    if (!path_pair_record_valid(kind, payload.size()))
         return path_element_t{
             .kind = path_element_kind_t::MALFORMED, .at = at, .bytes = span, .escape_kind = kind};
-    // Structurally a label, whatever the VALUE is: the reserved zero generation is refused at
-    // the deref with a NOT_FOUND-class answer (§7.2), never as a malformed address.
-    const path_label_t label = path_label_load(payload);
-    return path_element_t{.kind = path_element_kind_t::LABEL,
+    return path_element_t{.kind = path_element_kind_t::PAIR,
                           .at = at,
                           .bytes = span,
                           .payload = payload,
                           .escape_kind = kind,
-                          .label = label};
+                          .pair = path_pair_load(payload)};
 }
 
 /**
@@ -228,9 +181,9 @@ class path_element_cursor_t {
 };
 
 /**
- * @brief What a whole packed `PATH` body is made of — one walk, five counts.
+ * @brief What a whole packed `PATH` body is made of — one walk, four counts.
  *
- * The counts are what a caller decides with: `labels + pairs != 0` is "this body is a frame path
+ * The counts are what a caller decides with: `pairs != 0` is "this body is a frame path
  * and not a key" (`packed_path_valid_key` is the rule's other side), and `!well_formed` is the
  * `tr::path::invalid` refusal.
  */
@@ -241,8 +194,6 @@ struct path_element_census_t {
     std::size_t elements = 0;
     /** @brief Literal segment records. */
     std::size_t segments = 0;
-    /** @brief RFC-0027 label elements. */
-    std::size_t labels = 0;
     /** @brief RFC-0029 PAIR elements. */
     std::size_t pairs = 0;
     /** @brief Escape records of a kind this host does not own. */
@@ -268,9 +219,6 @@ struct path_element_census_t {
             case path_element_kind_t::SEGMENT:
                 ++c.segments;
                 break;
-            case path_element_kind_t::LABEL:
-                ++c.labels;
-                break;
             case path_element_kind_t::PAIR:
                 ++c.pairs;
                 break;
@@ -290,47 +238,35 @@ struct path_element_census_t {
  *        @ref path_element_at, and the one emitter a caller holding a `path_element_t` needs.
  *
  * The vocabulary this closes over is the model layer's: **a `PATH` is a list of path elements; an
- * element's kind is NAME or LABEL; a NAME element is encoded as a segment record, a LABEL element
- * as an escape record** (`CONTEXT.md` §Path element, ruled on #1347, 2026-08-16). The two record
- * emitters stay exactly as they are — this switches between them so a caller copying, filtering or
- * re-spelling a walked body does not re-derive the mapping from kind to record at every call site,
- * which is where the two grammars get crossed.
+ * element's kind is NAME or PAIR; a NAME element is encoded as a segment record, a PAIR element
+ * as an escape record** (`CONTEXT.md` §Path element). The record emitters stay exactly as they
+ * are — this switches between them so a caller copying, filtering or re-spelling a walked body
+ * does not re-derive the mapping from kind to record at every call site.
  *
  * It lives HERE and not in `packed_path.hpp` for the reason that header states about itself: that
- * one is **kind-agnostic** — it frames, spans and skips a record without knowing what any kind
- * means, which is the property a non-implementing hop relies on. A switch on
- * @ref path_element_kind_t must know what `0x16` means, so it belongs at the layer that already
- * does, beside the reader whose inverse it is.
+ * one is **kind-agnostic**. A switch on @ref path_element_kind_t must know what `0x16` means, so
+ * it belongs at the layer that already does, beside the reader whose inverse it is.
  *
- * The five kinds map as follows:
+ * The four kinds map as follows:
  *
  * - @ref path_element_kind_t::SEGMENT — one segment record, @ref emit_path_segment.
- * - @ref path_element_kind_t::LABEL — one label element, @ref emit_path_label, which re-derives
- *   the bytes from the DECODED @ref path_element_t::label rather than copying the payload span,
- *   so a value that could not be minted cannot be laundered back onto the wire by round-trip.
  * - @ref path_element_kind_t::PAIR — one PAIR element, @ref emit_path_pair, re-derived from the
- *   decoded @ref path_element_t::pair for the same reason as a label.
+ *   decoded @ref path_element_t::pair rather than copied from the payload span.
  * - @ref path_element_kind_t::FOREIGN — the escape record verbatim, kind and payload,
- *   @ref emit_path_escape. Relaying a kind this host does not own is exactly what §5.2 requires
- *   of a non-implementing hop, so it is an emit and not a refusal.
+ *   @ref emit_path_escape. Relaying a kind this host does not own is what a non-implementing hop
+ *   must do, so it is an emit and not a refusal.
  * - @ref path_element_kind_t::MALFORMED — false, appending nothing. A record with no reading has
  *   no re-spelling either.
  *
  * @return False, appending NOTHING, when the element has no legal spelling: a MALFORMED element,
- *         an empty or over-long SEGMENT payload, a LABEL carrying the reserved zero generation
- *         (§4.1 — @ref emit_path_label's own refusal, inherited unchanged), or a FOREIGN payload
- *         past @ref kPackedSegMaxBytes.
- *
- * @note Emitting is never minting. This says how an element is SPELLED; WHEN a hop replaces its
- *       local part with a label is RFC-0027 §6.2's trigger and lives in the forwarder.
+ *         an empty or over-long SEGMENT payload, or a FOREIGN payload past
+ *         @ref kPackedSegMaxBytes.
  */
 [[nodiscard]] inline bool emit_path_element(std::vector<std::byte>& out,
                                             const path_element_t& element) {
     switch (element.kind) {
         case path_element_kind_t::SEGMENT:
             return emit_path_segment(out, element.payload);
-        case path_element_kind_t::LABEL:
-            return emit_path_label(out, element.label);
         case path_element_kind_t::PAIR: {
             std::array<std::byte, kPathPairRecordBytes> rec{};
             path_pair_store(rec, element.pair);
@@ -345,118 +281,6 @@ struct path_element_census_t {
     return false;
 }
 
-namespace detail_label {
-
-/**
- * @brief The byte range `[first, second)` of @p body that @ref emit_path_labelled replaces with
- *        one label element, or `nullopt` when the splice has no reading (every refusal listed
- *        there). The core-array splice's walk (#1781): the same steps as the `std::vector`
- *        form's, which keeps its own copy on purpose — re-shaping that body onto this one grew
- *        `fwd_router_t::route_fwd_forward` by 37 B on the symbol ratchet. The vector form is
- *        removed by #1781's contract step, and this is then the only walk.
- */
-[[nodiscard]] inline std::optional<std::pair<std::size_t, std::size_t>> labelled_run(
-    std::span<const std::byte> body, std::size_t first, std::size_t count, path_label_t label) {
-    if (!label.valid() || count == 0) return std::nullopt;
-    // The run bound, checked BEFORE any `first + count` is formed. An element is at least two
-    // bytes, so the element count never exceeds the body's byte count and this both rejects
-    // every out-of-range run and makes the additions below unable to wrap. Left unguarded,
-    // `{first = SIZE_MAX, count = 1}` wraps to an empty in-run window and splices a label into
-    // a body it was never meant to touch — a well-formed spelling of a DIFFERENT address, which
-    // is the mis-delivery class this design closes by construction everywhere else.
-    if (count > body.size() || first > body.size() - count) return std::nullopt;
-
-    // Locate the run by walking, so the refusal happens before a single byte is appended.
-    std::size_t index = 0;
-    std::size_t run_begin = body.size();
-    std::size_t run_end = body.size();
-    path_element_cursor_t cur(body);
-    while (const std::optional<path_element_t> el = cur.next()) {
-        if (!el->ok()) return std::nullopt;
-        const bool in_run = index >= first && index < first + count;
-        if (in_run && el->kind != path_element_kind_t::SEGMENT) return std::nullopt;
-        if (index == first) run_begin = el->at;
-        if (index == first + count - 1) run_end = el->at + el->bytes;
-        ++index;
-    }
-    if (first + count > index) return std::nullopt;
-
-    return std::pair{run_begin, run_end};
-}
-
-}  // namespace detail_label
-
-/**
- * @brief Append @p body to @p out with @p count elements from index @p first replaced by one
- *        label element — RFC-0027 amendment 6's multi-segment splice.
- *
- * One label stands for a hop's whole LOCAL PART: its entire mount run, however many segments
- * that is (§5.3.3). The record is the same 7 bytes whether the run it replaces is one segment
- * or five, which is the arithmetic §3.3 assumes and the reason a per-segment label was refused.
- *
- * **This is the spelling, not the mint.** Which run belongs to which hop, and whether a mint is
- * due at all, is the forwarder's (§6.2) — nothing here consults a table or a peer.
- *
- * @return False, appending NOTHING, when the splice has no reading: an unmintable @p label
- *         (the reserved zero generation), an empty or out-of-range run, a body that does not
- *         walk cleanly, or a run holding anything but literal segments. That last refusal is
- *         §5.3.3 with §6.1: what a label stands for is a hop's local part, and a hop's local
- *         part is the mount RUN it strips — a run of names. An element that is already a label
- *         or a foreign escape is not part of any run this hop resolved, so a splice over it
- *         would not be the rewrite §6.1 describes.
- *
- * @warning @p out MUST NOT alias @p body's storage. The appends may reallocate, which would
- *          dangle the span mid-splice. Car 4's reply-leg rewrite is the in-place-shaped caller
- *          and is exactly where that would be reached for, so it is stated here rather than
- *          discovered there: build into a fresh buffer and swap.
- */
-[[nodiscard]] inline bool emit_path_labelled(std::vector<std::byte>& out,
-                                             std::span<const std::byte> body, std::size_t first,
-                                             std::size_t count, path_label_t label) {
-    if (!label.valid() || count == 0) return false;
-    // The run bound, checked BEFORE any `first + count` is formed. An element is at least two
-    // bytes, so the element count never exceeds the body's byte count and this both rejects
-    // every out-of-range run and makes the additions below unable to wrap. Left unguarded,
-    // `{first = SIZE_MAX, count = 1}` wraps to an empty in-run window and splices a label into
-    // a body it was never meant to touch — a well-formed spelling of a DIFFERENT address, which
-    // is the mis-delivery class this design closes by construction everywhere else.
-    if (count > body.size() || first > body.size() - count) return false;
-
-    // Locate the run by walking, so the refusal happens before a single byte is appended.
-    std::size_t index = 0;
-    std::size_t run_begin = body.size();
-    std::size_t run_end = body.size();
-    path_element_cursor_t cur(body);
-    while (const std::optional<path_element_t> el = cur.next()) {
-        if (!el->ok()) return false;
-        const bool in_run = index >= first && index < first + count;
-        if (in_run && el->kind != path_element_kind_t::SEGMENT) return false;
-        if (index == first) run_begin = el->at;
-        if (index == first + count - 1) run_end = el->at + el->bytes;
-        ++index;
-    }
-    if (first + count > index) return false;
-
-    out.insert(out.end(), body.begin(), body.begin() + static_cast<std::ptrdiff_t>(run_begin));
-    const bool spelled = emit_path_label(out, label);  // cannot fail: `label.valid()` above
-    assert(spelled);
-    (void)spelled;
-    out.insert(out.end(), body.begin() + static_cast<std::ptrdiff_t>(run_end), body.end());
-    return true;
-}
-
-/** @brief The splice appended to a core byte array (#1781) — same refusals and the same
- *         no-alias rule as the `std::vector` form above.
- *  @retval false The splice has no reading (nothing appended), or the source refused. */
-[[nodiscard]] inline bool emit_path_labelled(mem::bytes_t& out, std::span<const std::byte> body,
-                                             std::size_t first, std::size_t count,
-                                             path_label_t label) noexcept {
-    const auto run = detail_label::labelled_run(body, first, count, label);
-    if (!run) return false;
-    return out.append(body.data(), run->first) && emit_path_label(out, label) &&
-           out.append(body.data() + run->second, body.size() - run->second);
-}
-
 /** @brief One element appended to a core byte array (#1781) — the `std::vector` form's
  *         spelling rules.
  *  @retval false The element has no legal spelling (nothing appended), or the source
@@ -466,8 +290,6 @@ namespace detail_label {
     switch (element.kind) {
         case path_element_kind_t::SEGMENT:
             return emit_path_segment(out, element.payload);
-        case path_element_kind_t::LABEL:
-            return emit_path_label(out, element.label);
         case path_element_kind_t::PAIR:
             return emit_path_pair(out, element.pair);
         case path_element_kind_t::FOREIGN:

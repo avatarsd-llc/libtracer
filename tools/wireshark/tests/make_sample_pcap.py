@@ -25,11 +25,11 @@ FRAMES = [
     "tlv-types/value-ts-abs",
     "crc/value-ts-abs-crc32c",
     "path/path-sensor-temp",
-    # Beside it on purpose: the same address family spelled with an RFC-0027
-    # path label. `/sensor/temp` and `/sensor/<label:1@2>/temp/<label:258@65535>`
-    # adjacent in the Info column is what makes "a label sits where a segment
-    # would, and is host-scoped" a thing an operator sees rather than reads.
-    "path-label/label-mixed",
+    # Beside it on purpose: an address spelled with an RFC-0029 PAIR element.
+    # `/sensor/temp` and `/net/<pair:3@1>/temp` adjacent in the Info column is what
+    # makes "a PAIR sits where a segment would, and is host-scoped" a thing an
+    # operator sees rather than reads.
+    "path/element-pair-encode",
     "fwd/fwd-read",
     "fwd/fwd-write-value",
     "fwd/fwd-reply-result",

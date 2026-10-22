@@ -10,10 +10,11 @@ A packed `PATH` (RFC-0018) whose second record is the **§5.4 escape**:
 
 The escape is `00 <u8 kind> <u8 len> <len bytes>` — self-delimiting on purpose, so the node
 least likely to implement `kind` is still able to **skip** it by length rather than dropping a
-frame it is only relaying (RFC-0018 §8). `kind = 0x16` is
+frame it is only relaying (RFC-0018 §8). `kind = 0x16` at `len = 4` was
 [RFC-0027](../../../../../docs/spec/rfcs/0027-label-switched-path-compression.md)'s label
-element — the `path-label/` vectors are its own category — and nothing in the reference core
-**mints** one yet, which this vector does not require that it can. What this vector owns is the
+element, which [RFC-0029](../../../../../docs/spec/rfcs/0029-one-path-primitive.md) §5.3 retired:
+a `kind = 0x16` record of any length but 8 is now a malformed address, so `expected.json`
+declares `"malformed_input": true` (the bytes are unchanged). What this vector owns is the
 **key-context refusal**, which is kind-agnostic: *any* escape record makes a `PATH` inadmissible
 as a `path_lookup_key`.
 
@@ -38,7 +39,7 @@ So there are two required behaviours, and a conforming core needs both:
 a strict **ancestor** of it (RFC-0018 §5.1). That holds because every prefix boundary of a
 well-framed key lands on a record boundary and every record is literal text. An escape record is
 neither text nor an address component: admitting one into a key would put a non-string record
-inside the very bytes the invariant is stated over, and two different labels for one address
+inside the very bytes the invariant is stated over, and two different elements for one address
 would be two spellings of one key — the injectivity `docs/reference/02` depends on, lost.
 
 Keeping the refusal at the KEY door rather than at the frame door is what lets both rules hold

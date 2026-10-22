@@ -243,21 +243,15 @@ enum class fwd_dst_kind_t : std::uint8_t {
     PATH,     /**< @brief A canonical `PATH` of NAMEs — the mount descent's address. */
     PATH_REF, /**< @brief A BOUND address (RFC-0024 §4) — a fixed-stride element array. */
     /**
-     * @brief A canonical `PATH` whose FIRST record is an escape — RFC-0027's labelled address.
+     * @brief A canonical `PATH` whose FIRST record is an escape — an element-headed address
+     *        (RFC-0029's PAIR).
      *
      * Told apart from the plain `PATH` answer because the two take different routes and must not be
      * confused: a canonical `PATH` opens with a NAME the mount descent folds a digest over, and
      * this opens with a record that is not a name at all. Descending it would read a peer-supplied
      * slot index as UTF-8.
-     *
-     * A node that does not implement minting treats it exactly as it treated a non-NAME
-     * leading child before RFC-0027 existed — it names no mount here, so the frame falls to
-     * the terminus arm and is refused there. That is why this is a distinct answer rather than
-     * a flag on the plain `PATH` answer: the ONE branch a non-minting node takes on it is the one
-     * it already took, and it takes it without a table, without a lookup, and without reading the
-     * record.
      */
-    PATH_LABEL,
+    PATH_ESCAPE,
     /**
      * @brief A canonical `PATH` with NO records — a fully consumed address.
      *
@@ -282,8 +276,8 @@ enum class fwd_dst_kind_t : std::uint8_t {
  * The arms diverge only at the `dst` header's type code (plus the `EMPTY` answer, a canonical
  * `PATH` with no records):
  *   - `PATH` — the canonical address, a packed record run with `opt.PL = 0` (RFC-0018). The
- *     leading record must be a LITERAL segment (a `dst` whose first record is the label
- *     escape is not an address this node can descend), and @ref fwd_pre_t::strip_at starts at
+ *     leading record must be a LITERAL segment (a `dst` whose first record is an escape is
+ *     not an address this node can descend), and @ref fwd_pre_t::strip_at starts at
  *     the body because only `strip_k` can say how much of it this hop consumes.
  *   - `PATH_REF` — the bound address. The four STRUCTURAL rules (`opt.PL = 0`, `opt.LL = 0`,
  *     `length % 8 == 0`, `length <= 2040`) are checked through `tr::wire::path_ref_body_valid`
@@ -368,15 +362,14 @@ template <class Cursor>
         return fwd_dst_kind_t::EMPTY;
     }
     // Segment 0 is a packed record, and WHICH kind it is decides which arm routes the frame.
-    // A literal record is the canonical address the mount descent walks; an ESCAPE is
-    // RFC-0027's labelled address, which has no name to descend and is answered by the label
-    // branch instead (or, on a node that does not mint, by the terminus arm — the same
-    // fall-through a non-NAME leading child has always taken). Its `seg0_off`/`seg0_len` stay
+    // A literal record is the canonical address the mount descent walks; an ESCAPE heads an
+    // element-spelled address, which has no name to descend and is answered by the PAIR arm
+    // (or, for any other escape, by the terminus arm's refusal). Its `seg0_off`/`seg0_len` stay
     // zero for an escape: a descent that read them would read the escape's payload as a name.
     const auto seg0 = read_packed_seg(cur, dst_h->body_off, dst_end);
     if (!seg0) return refuse();
     accept();
-    if (seg0->escape) return fwd_dst_kind_t::PATH_LABEL;
+    if (seg0->escape) return fwd_dst_kind_t::PATH_ESCAPE;
     pre.seg0_off = seg0->body_off;
     // `total - 1`, not `body_len` (the same value for a literal record: one length byte, then
     // the name). Copying the two adjacent fields made GCC 13 reload them from the stack as one
@@ -694,7 +687,7 @@ class dst_seg_walk_t {
         while (cached_ < kDstSegCacheSlots && pos_ < end_) {
             const auto r = read_packed_seg(*cur_, pos_, end_);
             if (!r) return;
-            if (r->escape) {  // step over a label record this node does not implement
+            if (r->escape) {  // step over an escape record: it is not a name
                 pos_ += r->total;
                 continue;
             }
@@ -1333,24 +1326,6 @@ template <class Cursor, class MintFn>
  *                       @ref no_mint_t, the hop that contributes nothing.
  * @param  reverse_mint_fn The REVERSE-direction twin, invoked at most once and only on a
  *                       mint-flagged request (RFC-0024 §7.1 amendment 1).
- * @param  reply_label   RFC-0027 6.1's minted spelling of THIS hop's own local part, as the
- *                       already-encoded 7-byte label element, or empty to mint nothing.
- *
- *                       This is the one region a REPLY's `src` may grow by, and it exists
- *                       because 6.1 requires the first reply to reach the original sender
- *                       already minted: a hop's local part is stripped from the reply's `dst`
- *                       and echoed nowhere else, so a label that replaced it would otherwise
- *                       have no way home. What is prepended is strictly SHORTER than the
- *                       string run it stands for (7 bytes against a mount run's 10 and up),
- *                       which is 6.1's "replaces, never appends" in the accounting 6.1 itself
- *                       uses — the comparison is against the string spelling of the same
- *                       accumulation, not against a reply that accumulates nothing.
- *
- *                       It narrows RFC-0004 B's "a reply accumulates no return route" to
- *                       NON-MINTING hops, which is a normative tension RFC-0027 6.1 already
- *                       decided at acceptance and which is recorded as an erratum in that
- *                       RFC's log rather than assumed here. Empty is the default and the
- *                       conformant behaviour, so a node that never mints is byte-unchanged.
  * @retval std::nullopt The frame is not a well-formed forwardable FWD (no peeked headers, an
  *         empty op, a strip past the `dst`, an unspellable peer segment, or a `src` that
  *         cannot be relayed) — the caller drops it.
@@ -1374,7 +1349,7 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
 [[gnu::flatten]] [[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(
     const Cursor& cur, const fwd_pre_t& pre, std::span<const std::byte> mount_tlv,
     std::string_view extra_seg, MintFn mint_fn = MintFn{},
-    ReverseMintFn reverse_mint_fn = ReverseMintFn{}, std::span<const std::byte> reply_label = {}) {
+    ReverseMintFn reverse_mint_fn = ReverseMintFn{}) {
     // The peek's rejections are the peek's; these are the ones only a rebuild can make. An
     // EMPTY op is one of them on purpose (see `fwd_pre_t::op_body_len`: the peek accepts it,
     // so the check lives here or a malformed frame would change fate). A strip past the `dst`
@@ -1444,13 +1419,10 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
 
     // What `src` grows by. A REQUEST grows by the inbound mount path — the precomputed run is
     // already-encoded bytes, and a dynamic bus-peer segment adds ONE length byte plus its
-    // bytes. A REPLY grows by RFC-0027 §6.1's minted spelling alone, which is empty for every
-    // hop that does not mint — which is every hop today — so a REPLY's `src` is byte-identical
-    // to what it has always been and no shipped vector moves. The two ride the SAME fields
-    // because they are the same region of the frame: the bytes prepended to `src`. The only
-    // bound on a mount path is the packed record's `u8` length field; beyond that it is limited
-    // solely by the frame fitting the link's `max_frame`/MTU, never by a buffer budget.
-    r.mount_tlv = is_reply ? reply_label : mount_tlv;
+    // bytes. A REPLY grows by nothing (RFC-0004 §B). The only bound on a mount path is the
+    // packed record's `u8` length field; beyond that it is limited solely by the frame fitting
+    // the link's `max_frame`/MTU, never by a buffer budget.
+    r.mount_tlv = is_reply ? std::span<const std::byte>{} : mount_tlv;
     r.extra_seg = is_reply ? std::string_view{} : extra_seg;
     r.extra_hdr[0] = static_cast<std::byte>(r.extra_seg.size());
     const std::size_t grown =

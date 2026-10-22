@@ -99,16 +99,6 @@ of this node is the one hop nobody else sees. `bound_send` hands the egress link
 a callback that sends, inside the router's frame bracket, so a link removed meanwhile is not freed
 under the send; the link is not the app's to keep past the callback.
 
-The **path-label** origin (RFC-0027 §6.1 amendment 8) is the same shape one plane over:
-`adopt_path_label` caches the spelling a minted reply's `src` came back with, `label_send`
-spends it as the next request's `dst`, and `fall_back_on_label_refusal` drops it on
-`tr::path::not_found`. What differs is what the origin contributes for its own first hop. A bound
-route needs an element only this node can mint, so the origin mints one; a labelled route does not
-— the origin stands up **no label table**, prepends its own local part as **literal segments**, and
-therefore holds a spelling that is mixed by construction. Consuming that head is the ordinary
-strip-K mount descent, not a dereference, which is why this dispatch takes no ACL right: the
-authorization of a labelled operation is decided at each hop that dereferences a label (§8.2).
-
 Alongside the routing legs the router installs the graph's **remote-delivery sink**: a write to a
 vertex that carries a remote subscriber fans out as `FWD{WRITE}` addressed by that subscriber's
 stored return route, or over the edge's PAIR chain (RFC-0024 §7.1) with an empty `src`.
@@ -121,7 +111,7 @@ namespace tr::net {
 class fwd_router_t {
     // graph: terminus op resolution. planes: the router's FIVE independent memory planes
     // (router_planes_t), each defaulting to the net sub-pool on its own:
-    //   label_src  the NOTHROW block source the router's long-lived link state draws from
+    //   link_src  the NOTHROW block source the router's long-lived link state draws from
     //              (#603 defect 1 / ADR-0065);
     //   rx         the NOTHROW block source the terminus decode arena draws from (ADR-0065);
     //   flat       the byte backend EVERY rope flatten draws from, forward AND terminus (#730/#766);

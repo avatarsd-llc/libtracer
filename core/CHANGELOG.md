@@ -14,6 +14,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Removed
+
+- **The RFC-0027 path-label plane is deleted (RFC-0029 slice S3, #2244).** RFC-0029 §1 and
+  §5.3 retired it; a node's only address-compression element is now the PAIR. Gone from the
+  public headers: `path_label.hpp` (`path_label_t`, `kPathLabel*`, `emit_path_label`,
+  `path_label_record`, `path_label_at`) and `path_label_table.hpp` (`path_label_table_t`);
+  `path_element_kind_t::LABEL`, `path_element_t::label`, `path_element_census_t::labels` and
+  the run splice `emit_path_labelled`; the origin's `path_t::path_label` /
+  `cache_path_label` / `clear_path_label` and `path_label_cache_t`; and the resolver's
+  terminus mint seam `op_resolver_t::on_path_label` / `path_label_fn_t`. The label tests, the
+  `bench_path_label` bench and the RFC-0027 conformance vectors (`path-label/*`,
+  `fwd/fwd-label-*`, `acl/label-vs-string-*`) go with it.
+- `deferred_await_t::ok_src`: with no terminus label mint it always equalled `src`, so a
+  deferred AWAIT stores its reply `src` once.
+
 ### Changed (breaking)
 
 - **`transport_vertex_t::settings_of` returns a copy of the record, not a pointer into the
@@ -26,6 +41,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - **Migration:** replace `const auto* s = net.settings_of(key)` with
     `const auto s = net.settings_of(key)`, and `s != nullptr` / `s == nullptr` with
     `s.has_value()` / `!s.has_value()`. `s->field` reads unchanged.
+- **`fwd_router_t` loses the label plane's API.** `configure_path_labels`, `path_labels`,
+  `label_not_found`, `label_resolves`, `adopt_path_label`, `label_send` and
+  `fall_back_on_label_refusal` are removed, with the eight per-child label members of the
+  router's receive context. A caller that injected a table or adopted a labelled reply drops
+  the call: the canonical path it already held is the only spelling.
+- **`router_planes_t::label_src` is renamed `link_src`**, and `fwd_router_t::label_source()`
+  `link_source()`. The plane feeds the router's long-lived link state (the registry, receive
+  contexts, bus token caches and bound-path scratch), which is what the name now says.
+- **`:stats.labels.table` is no longer published.** The `labels` seam class answers
+  `ERROR{tr::schema::not_found}` like any class a node does not publish (RFC-0010 erratum
+  2026-10-22). `:stats.router.drops` and `:stats.link.<child>` are unchanged.
+- **A `kind = 0x16`, `len = 4` path element is malformed.** `path_element_at` answers
+  `MALFORMED` for it, and a `dst` carrying one is refused `tr::path::invalid`, as v1.md §3
+  says of every length but 8. Before, a node with an injected label table resolved it.
+- `fwd_dst_kind_t::PATH_LABEL` is renamed `PATH_ESCAPE`: it is the escape-headed `dst` the
+  PAIR arm reads. `kPackedEscapeKindLabel` is renamed `kPackedEscapeKindPair`.
+- `rebuild_fwd_forward` loses its trailing `reply_label` parameter; a forwarded REPLY's `src`
+  grows by nothing.
+- `sizeof(path_t)` falls from 15 to 11 pointer widths; the ratchet in `path.hpp` is re-pinned.
+
 ### Breaking
 
 - **The one-release shims of 0.18.0 and 0.19.0 are removed

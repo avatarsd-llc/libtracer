@@ -292,7 +292,7 @@ Three consequences are worth stating plainly.
 
 ### The router's demux table
 
-The other cold-path channel phase 1 closes is `tr::net::child_registry_t`'s chunked list — the one NAME→link demux table. It grew by `new (std::nothrow) chunk_t()`, so a node that had injected a source at every visible seam still could not bound its own routing table. It now takes a `block_source_t` (defaulting to the net sub-pool, `net_source()`, since #1777) and `fwd_router_t` wires it to **`label_src`** (which once also fed the route-handle tables, since retired), not to `rx`. That split is the point: chunks are long-lived state whose high-water mark is the count of distinct link names ever registered, and a `bump_source_t` — a legitimate choice for the per-frame `rx` store — would fill monotonically under them. Nothing else changed: a refused chunk is still a `nullptr` that `add` reports and `make_connection` rolls back.
+The other cold-path channel phase 1 closes is `tr::net::child_registry_t`'s chunked list — the one NAME→link demux table. It grew by `new (std::nothrow) chunk_t()`, so a node that had injected a source at every visible seam still could not bound its own routing table. It now takes a `block_source_t` (defaulting to the net sub-pool, `net_source()`, since #1777) and `fwd_router_t` wires it to **`link_src`** (which once also fed the route-handle tables, since retired), not to `rx`. That split is the point: chunks are long-lived state whose high-water mark is the count of distinct link names ever registered, and a `bump_source_t` — a legitimate choice for the per-frame `rx` store — would fill monotonically under them. Nothing else changed: a refused chunk is still a `nullptr` that `add` reports and `make_connection` rolls back.
 
 #### The channel ledger, at #873's close
 
@@ -306,7 +306,7 @@ All three phases are terminal: phase 1 landed, phase 2 was measured and **revert
 | Read-back encoder segments — `:point`, `:settings`, `:settings.app`, `:acl`, `:children`, identity, stats, an app field's stored bytes, the subscriber and mount-route records | same `source_backend_t` (**phase 3**; these were on the global heap via the one-argument `view::over_bytes`) | `read_back_backend_test` (one family per migrated site), plus `folded_read_backend_test` for the `:children` fold and `graph_value_backend_test` for the write-path flatten |
 | Every failable `#551` block — vertex registration, the branch-write decode's bump upstream, the composed read's collect stack | the injected source directly (`control_source()`) | `graph_oom_softfail_test`, `bench_failable_census` |
 | Default receiver-ring admissions of a STREAM vertex with no source of its own | the injected source, folded on purpose (`default_ring_source()` is `control_source()`, #1581), overridable per vertex at `vertex_policy_t::ring_source` | `ring_pressure_test` |
-| The router's NAME→link demux chunks | `fwd_router_t`'s `label_src` (its own injection, by design — see below) | `plane_isolation_test`, `conn_add_oom_test` |
+| The router's NAME→link demux chunks | `fwd_router_t`'s `link_src` (its own injection, by design — see below) | `plane_isolation_test`, `conn_add_oom_test` |
 | The router's peer-reachable ownership copies — the host-local subscribe door's route + `SUBSCRIBER` TLVs | `fwd_router_t`'s `flat` (its own injection, by design — see below; these were on the global heap via the one-argument `view::over_bytes` until [#1582](https://github.com/avatarsd-llc/libtracer/issues/1582)) | `router_flat_seam_test` |
 | LKV hazard-slot nodes | the hazard domain's own **node class**: one fixed-size row of 4 KiB slabs the platform heap serves whole, behind each participant's free list ([#1782](https://github.com/avatarsd-llc/libtracer/issues/1782); a global-heap carve-out until then) | `lkv_slot_test` (`node_draws_skip_the_heap`), `bench_hazard_node` |
 | **Plain `std::vector<std::byte>` sites** — the KEY containers and the read-back encoders' staging buffers | **the global heap — the carve-out**, a container-type constraint | — |
@@ -315,7 +315,7 @@ So: **one injected source bounds every byte channel `graph_t` owns except one**,
 
 - **The carve-out — the plain `std::vector<std::byte>` sites.** These look like an allocator swap and are not, because their container type is fixed by the signatures they cross. The KEY containers (`try_build_key`'s out-parameter, `select_sweep`'s output, the branch-write child-key composition, the sweep snapshot's element type) are pinned by member-function signatures and by the `pending_` / `unconditional_` key sets, so moving them is a key-*type* change across the graph. The read-back encoders' staging buffers are pinned by `tr::wire::emit_tlv`'s `std::vector<std::byte>&` sink; phase 3 moved the resulting *segment* onto the injection, but the transient buffer it is copied from is still the global heap's.
 
-**What is deliberately outside this ledger, and is not a carve-out.** `fwd_router_t` and the transports keep their own `block_source_t` / `mem_backend_t` seams (`rx`, `label_src`, `egress_src`, `retained`, a transport's `rx_backend`) rather than sharing the graph's. That is receiver-pays, not an omission: a peer-driven receive path that exhausts must not be able to starve the graph's write path, and [ADR-0060](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-value-copy-draws-from-an-injected-backend.md) erratum 1 measured a *shared* free-list pool collapsing to ~1/15 of its single-thread rate on a 12-core host. A node that genuinely wants one store passes the same object to each.
+**What is deliberately outside this ledger, and is not a carve-out.** `fwd_router_t` and the transports keep their own `block_source_t` / `mem_backend_t` seams (`rx`, `link_src`, `egress_src`, `retained`, a transport's `rx_backend`) rather than sharing the graph's. That is receiver-pays, not an omission: a peer-driven receive path that exhausts must not be able to starve the graph's write path, and [ADR-0060](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-value-copy-draws-from-an-injected-backend.md) erratum 1 measured a *shared* free-list pool collapsing to ~1/15 of its single-thread rate on a 12-core host. A node that genuinely wants one store passes the same object to each.
 
 ### The router's seams are split by LIFETIME, not by tidiness
 
@@ -508,7 +508,7 @@ Saying the reverse wrapper is forbidden is only half an answer, and the missing 
 migrating host actually needed
 ([#1493](https://github.com/avatarsd-llc/libtracer/issues/1493)). A node whose graph and router
 historically shared one pmr arena hits this the moment a seam's parameter changes from
-`std::pmr::memory_resource*` to `block_source_t*` — `fwd_router_t`'s `label_src` is the shipped
+`std::pmr::memory_resource*` to `block_source_t*` — `fwd_router_t`'s `link_src` is the shipped
 example. Passing `get_default_resource()` is a compile error, which is the point; passing *its
 own* resource reaches for the adapter above, and **that one compiles**:
 
@@ -529,7 +529,7 @@ alignas(std::max_align_t) static std::byte g_slab[16 * 1024];   // the arena you
 static tr::mem::size_class_t g_classes[12];
 
 tr::mem::pool_source_t<> pool{g_slab, g_classes};
-tr::net::fwd_router_t router{graph, {.label_src = &pool}};     // label state, bounded, nothrow
+tr::net::fwd_router_t router{graph, {.link_src = &pool}};     // label state, bounded, nothrow
 ```
 
 Size the class span against `classes_used()` and `overflowed()`; the slab against `used()`,

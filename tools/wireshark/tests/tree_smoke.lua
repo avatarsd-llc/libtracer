@@ -140,63 +140,54 @@ if not proto_dissector then
   os.exit(1)
 end
 
--- path-label/label-roundtrip: one label, index 1 at generation 2.
+-- One PAIR element: vertex index 1 at generation 2.
+do
+  local items = dissect("06000B000016080100000002000000")
+  local ix = field(items, "libtracer.path.pair.index")
+  local gn = field(items, "libtracer.path.pair.generation")
+  check(ix ~= nil and ix.value == 1, "PAIR index reads 1 from its own four bytes")
+  check(gn ~= nil and gn.value == 2, "PAIR generation reads 2 from its own four bytes")
+  check(ix ~= nil and ix.range.len == 4 and gn ~= nil and gn.range.len == 4,
+        "each field is added over FOUR bytes")
+  check(ix ~= nil and gn ~= nil and gn.range.off == ix.range.off + 4,
+        "the generation sits immediately after the index (u32, u32, LE)")
+  check(#experts(items) == 0, "a well-formed PAIR raises no expert info")
+end
+
+-- Kind 0x16, declared length 4: RFC-0027's retired label, malformed (RFC-0029 §5.3).
 do
   local items = dissect("0600070000160401000200")
-  local v = field(items, "libtracer.path.label")
-  local ix = field(items, "libtracer.path.label.index")
-  local gn = field(items, "libtracer.path.label.generation")
-  check(v ~= nil and v.value == 0x00020001, "label value is the verbatim LE u32")
-  check(ix ~= nil and ix.value == 1, "label index reads 1 from its own two bytes")
-  check(gn ~= nil and gn.value == 2, "label generation reads 2 from its own two bytes")
-  check(ix ~= nil and ix.range.len == 2 and gn ~= nil and gn.range.len == 2,
-        "each half is added over TWO bytes — a uint16 field cannot take four")
-  check(ix ~= nil and gn ~= nil and gn.range.off == ix.range.off + 2,
-        "the generation sits immediately after the index (16/16 split, LE)")
-  check(#experts(items) == 0, "a well-formed label raises no expert info")
+  check(field(items, "libtracer.path.pair.index") == nil,
+        "a len-4 element adds NO PAIR field — the bytes are not read as one")
+  check(#experts(items) == 1 and experts(items)[1] == "libtracer.path.pair.invalid",
+        "…and raises the malformed-PAIR expert, not the invalid-FRAME one")
 end
 
--- path-label/label-wrong-length: kind 0x16, declared length 3.
+-- A foreign escape kind is not a PAIR, whatever its payload length.
 do
-  local items = dissect("06000D000673656E736F72001603010002")
-  check(field(items, "libtracer.path.label") == nil,
-        "a wrong-length label adds NO label field — the bytes are not read as one")
-  check(#experts(items) == 1 and experts(items)[1] == "libtracer.path.label.invalid",
-        "…and raises the malformed-path-label expert, not the invalid-FRAME one")
-end
-
--- Generation 0: displayed as the label it claims to be, flagged.
-do
-  local items = dissect("0600070000160401000000")
-  local gn = field(items, "libtracer.path.label.generation")
-  check(gn ~= nil and gn.value == 0, "a generation-0 label is still added as a label")
-  check(#experts(items) == 1 and experts(items)[1] == "libtracer.path.label.invalid",
-        "…and is flagged, because it never legitimately reaches the wire")
-end
-
--- A foreign escape kind is not a label, whatever its payload length.
-do
-  local items = dissect("06000E000673656E736F72001704DEADBEEF")
-  check(field(items, "libtracer.path.label") == nil,
-        "a four-byte escape at kind 0x17 adds no label field")
+  local items = dissect("060012000673656E736F72001708DEADBEEFDEADBEEF")
+  check(field(items, "libtracer.path.pair.index") == nil,
+        "an eight-byte escape at kind 0x17 adds no PAIR field")
   check(#experts(items) == 0, "…and is not an error either — a relaying hop steps over it")
 end
 
--- Two labels in one address, both rendered (label-mixed).
+-- Two PAIRs in one address, both rendered.
 do
-  local items = dissect("06001A000673656E736F72001604010002000474656D700016040201FFFF")
+  local items = dissect(
+    "060022000673656E736F7200160801000000020000000474656D7000160802010000FFFF0000")
   local n = 0
-  for _, it in ipairs(items) do if it.abbr == "libtracer.path.label" then n = n + 1 end end
-  check(n == 2, "both labels of a mixed address reach the tree")
+  for _, it in ipairs(items) do if it.abbr == "libtracer.path.pair.index" then n = n + 1 end end
+  check(n == 2, "both PAIRs of a mixed address reach the tree")
   check(field(items, "libtracer.path") ~= nil, "the rendered address is still added")
 end
 
--- A whole FWD frame: the tree walk must reach the PATH children's labels.
+-- A whole FWD frame: the tree walk must reach the PATH children's PAIRs.
 do
   local items = dissect(
-    "0F403100010001000306000900087265706C792D657006001300001604000001000673656E736F720474656D7001000400D2040000")
-  check(field(items, "libtracer.path.label") ~= nil,
-        "a label nested inside FWD > PATH is rendered by the recursive walk")
+    "0F403500010001000306000900087265706C792D6570060017000016080100000001000000"
+    .. "0673656E736F720474656D7001000400D2040000")
+  check(field(items, "libtracer.path.pair.index") ~= nil,
+        "a PAIR nested inside FWD > PATH is rendered by the recursive walk")
   check(field(items, "libtracer.fwd.dst") ~= nil, "…and the FWD fields still render")
 end
 

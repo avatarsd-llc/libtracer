@@ -15,7 +15,7 @@
  *
  * @section arms The four arms, and why the baseline is one of them
  *
- * | arm | graph `mr` | graph `ctl` | router `label_src`/`rx` | transport egress |
+ * | arm | graph `mr` | graph `ctl` | router `link_src`/`rx` | transport egress |
  * | --- | --- | --- | --- | --- |
  * | `H-baseline` | `std::pmr::get_default_resource()` | `heap_source()` | `heap_source()` |
  * `heap_source()` | | `WIDE`   | one slab (via the pmr adapter) | the one slab | the one slab | the
@@ -663,17 +663,17 @@ class node_t {
      * `new_delete_resource()`. Same composition, one knob instead of two. */
     void build_graph() {
         g_ = std::make_unique<graph_t>(*ctl_src_);
-        // `label_src` and the DEFAULT `rx` both take the net-plane store, per ADR-0079's
+        // `link_src` and the DEFAULT `rx` both take the net-plane store, per ADR-0079's
         // composition table. NARROW has no node-wide net store — every child overrides `rx`
         // through `add_child` — so its link state takes the GRAPH store rather than the heap:
         // a NARROW node that fell back to `heap_source()` for its link state would not be
         // the bounded composition the arm is supposed to represent. Deliberately the
         // UNDECORATED store, so wiring-frequency label allocations do not land in the `ctl`
         // channel's per-frame draw count.
-        tr::mem::block_source_t* const label_src = rx_src_ != nullptr ? rx_src_ : plane_fallback_;
-        tr::mem::block_source_t* const rx_default = label_src;
+        tr::mem::block_source_t* const link_src = rx_src_ != nullptr ? rx_src_ : plane_fallback_;
+        tr::mem::block_source_t* const rx_default = link_src;
         router_ = std::make_unique<fwd_router_t>(
-            *g_, tr::net::router_planes_t{.label_src = label_src, .rx = rx_default});
+            *g_, tr::net::router_planes_t{.link_src = link_src, .rx = rx_default});
     }
 
     /** @brief Build each lane's links, frame, vertices and — in NARROW — its own two stores. */

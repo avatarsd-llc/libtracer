@@ -44,8 +44,6 @@ Per [HARNESS.md](../../../../HARNESS.md), a vector gates the **codec** only: the
 `encode(decode(input.bin)) == input.bin`, which every core satisfies. The reader rule above is a
 **behavioural** claim, bound in each core's own suite against these bytes:
 
-- C++ `core/tests/path_label_origin_test.cpp`: `fall_back_on_label_refusal` does not treat it as
-  the `NOT_FOUND` refusal that drops a cached label.
 - Rust `bindings/rust/tests/conformance_vectors.rs`: `reply_error_code` answers 0 and
   `reply_error_path` answers `None`.
 - TypeScript `bindings/typescript/packages/client/test/vectors.test.mjs`: `replyErrorCode`

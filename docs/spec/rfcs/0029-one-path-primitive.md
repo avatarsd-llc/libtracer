@@ -950,3 +950,27 @@ wire surface moves.** No frame, TLV type, escape kind, flag bit, grammar, error 
 conformance vector changes. A node with no connection vertex for a run already answered every
 spelling of it as "no link": since the 2026-10-07 "refuse" ruling a vertex-less mount refused the
 hop under ACL enforcement, and the connection vertex is the only identity a PAIR can name.
+
+## Erratum (2026-10-22) — S3 landed: the origin's path-label cache is deleted, not generalised ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244))
+
+**What the text said.** §11 says `path_t::cache_path_label` "is **generalised** to the 8-byte
+element rather than deleted — it is the origin-side cache §6.2 fills", and §13.2 orders S2
+(learning, which generalises it) before S3 (delete the table).
+
+**What the behaviour is.** S3 landed ahead of S2. Every §11 row for RFC-0027 is deleted from the
+reference implementation: the label table, the `len = 4` element codec, the router's label
+plane (forward arm, terminus mint, origin adoption and send, per-child state and counters) and
+the terminus mint seam on the resolver. A `kind = 0x16`, `len = 4` record is malformed and
+refuses the address (§5.1, §5.3). Because S2 has not landed, nothing fills an origin-side chain
+cache yet, so `path_t`'s RFC-0027 slot (`cache_path_label`, `clear_path_label`, `path_label`)
+had no producer once the label plane was gone. It is **deleted**, and `sizeof(path_t)` falls from
+15 to 11 pointer widths. S2 adds the PAIR-chain cache it fills when it lands, sized for the
+8-byte element, instead of reshaping a label slot.
+
+**Which change made them diverge.** The slice order. S3 was scheduled after S2 and was
+re-sequenced ahead of it (#2244), so the slot §11 meant to generalise had no consumer to keep.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves** beyond what §5.3 already retired. The `:stats.labels.table` seam the label
+plane published is retired by the companion
+[RFC-0010](0010-owner-app-fields-and-schema.md) §Erratum (2026-10-22).

@@ -1,7 +1,8 @@
 /**
  * @file
- * @brief RFC-0010 Amendment 2 (#1503 residual) — the NET-PLANE `:stats` seams: `router`,
- *        `labels` and `link`, sampled through the seam the router registers UP.
+ * @brief RFC-0010 Amendment 2 (#1503 residual) — the NET-PLANE `:stats` seams: `router`
+ *        and `link`, sampled through the seam the router registers UP (`labels` is retired,
+ *        RFC-0010 erratum #2244).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -9,7 +10,7 @@
  * Amendment 1 stopped the census at the graph because L4 cannot reach DOWN into the net
  * plane. Amendment 2 inverts the DIRECTION rather than the dependency: `fwd_router_t`'s
  * constructor installs a sixth `{fn, ctx}` sampler on the graph beside the five it already
- * installs, so the router / label-table / per-link counters become wire-readable and L4
+ * installs, so the router / per-link counters become wire-readable and L4
  * still names nothing below it.
  *
  * What a case here has to prove — the same bar `router_drop_stats_test.cpp` sets:
@@ -199,15 +200,16 @@ void test_router_seam_is_live() {
 }
 
 /**
- * @brief §D.4 — `:stats.labels` and `:stats.link.<child>`, including the per-link identity.
+ * @brief §D.4 — `:stats.link.<child>`, including the per-link identity, and the retired
+ *        `:stats.labels` class.
  *
  * Two links with DIFFERENT counters, so a seam that ignored the sub-key and answered for
- * "the links" would fail. The handle-table nouns (`labels_exhausted`, `refused_bindings`,
- * `labels_used`) are gone with the tables (#1951), and a seam names only the nouns it has
- * (Amendment 1 §D.3).
+ * "the links" would fail. A seam names only the nouns it has (Amendment 1 §D.3): the
+ * handle-table nouns went with the tables (#1951), and the label plane's with the plane
+ * (RFC-0029 S3, #2244).
  */
-void test_link_and_label_seams() {
-    std::printf("RFC-0010 Am.2 §D.4: :stats.link.<child> is PER LINK; :stats.labels.table:\n");
+void test_link_seams() {
+    std::printf("RFC-0010 Am.2 §D.4: :stats.link.<child> is PER LINK; :stats.labels is retired:\n");
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router(g);
@@ -230,26 +232,13 @@ void test_link_and_label_seams() {
     check(up_block && up_block->children.size() == 6,
           "the link block carries its three nouns and nothing else");
 
-    // The label plane. With a mint table installed the per-link occupancy noun appears.
-    check(reads_ok(g, "/sink:stats.labels.table"),
-          "the label-plane seam answers even with switching off (its counters exist)");
-    tr::net::path_label_table_t labels;
-    router.configure_path_labels(&labels);
-    const auto lab_bytes = read_bytes(g, "/sink:stats.labels.table");
-    const auto lab = tr::wire::decode(lab_bytes);
+    // The label plane is deleted (RFC-0029 S3), so its class is no seam at all (RFC-0010
+    // erratum, #2244) — the answer an unknown class gets.
+    check(status_of(g, "/sink:stats.labels.table") == status_t::SCHEMA_NOT_FOUND,
+          ":stats.labels.table answers SCHEMA_NOT_FOUND — the label plane is gone");
     constexpr std::uint64_t kAbsent = static_cast<std::uint64_t>(-1);
-    check(lab && counter(*lab, "label_not_found") == 0 && counter(*lab, "label_resolves") == 0 &&
-              lab->children.size() == 4,
-          "the two label-plane nouns are present, and only those two");
-    check(lab && counter(*lab, "labels_exhausted") == kAbsent &&
-              counter(*lab, "refused_bindings") == kAbsent,
-          "labels_exhausted and refused_bindings are gone with the handle tables (#1951)");
-    // The bytes must OUTLIVE the decode: a `tlv_t`'s children are spans INTO them.
-    const auto relinked = read_bytes(g, "/sink:stats.link.up");
-    const auto with_labels = tr::wire::decode(relinked);
-    check(with_labels && with_labels->children.size() == 6 &&
-              counter(with_labels.value(), "labels_used") == kAbsent,
-          "…and the link block names no labels_used with switching on either (#1951)");
+    check(up_block && counter(*up_block, "labels_used") == kAbsent,
+          "…and the link block names no labels_used (#1951)");
 
     // A link that was never registered is not a seam; nor is one that has been removed.
     check(status_of(g, "/sink:stats.link.nosuch") == status_t::SCHEMA_NOT_FOUND,
@@ -352,7 +341,7 @@ void test_net_seams_are_read_only() {
 
 int main() {
     test_router_seam_is_live();
-    test_link_and_label_seams();
+    test_link_seams();
     test_no_router_publishes_no_net_seam();
     test_net_seams_are_node_scoped();
     test_unserved_net_names_are_caller_independent();

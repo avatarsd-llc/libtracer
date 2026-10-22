@@ -759,9 +759,9 @@ void test_non_canonical_dst() {
     std::vector<std::byte> escaped;
     (void)tr::wire::emit_path_segment(escaped, "sensor");
     (void)tr::wire::emit_path_segment(escaped, "temp");
-    escaped.push_back(std::byte{0});                                              // len == 0
-    escaped.push_back(static_cast<std::byte>(tr::wire::kPackedEscapeKindLabel));  // kind
-    escaped.push_back(std::byte{4});                                              // payload len
+    escaped.push_back(std::byte{0});                                             // len == 0
+    escaped.push_back(static_cast<std::byte>(tr::wire::kPackedEscapeKindPair));  // kind
+    escaped.push_back(std::byte{4});                                             // payload len
     for (int i = 0; i < 4; ++i) escaped.push_back(std::byte{0});
     std::vector<std::byte> esc_dst;
     tr::wire::emit_tlv(esc_dst, type_t::PATH, opt_t{}, escaped);

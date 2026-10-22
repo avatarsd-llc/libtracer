@@ -156,25 +156,6 @@ namespace {
 }
 }  // namespace
 
-/**
- * @brief RFC-0027 §6.1's origin-side cache — validate a minted spelling, then keep it.
- *
- * The walk is `wire::path_element_census`, which is the same reader a forwarder uses, so the
- * origin cannot come to a different conclusion about a body than the hop that wrote it. This
- * validator lives here rather than in the header because it is the only place `path.hpp` would
- * otherwise have to pull the element codec into every translation unit that merely holds a
- * `path_t` — a core that never sees a path label neither includes nor instantiates it.
- */
-bool path_t::cache_path_label(std::span<const std::byte> body) {
-    if (binding_.bound) return false;  // RFC-0027 §11.2 — one compression per address
-    if (body.empty() || body.size() > kMaxPathBytes) return false;
-    const wire::path_element_census_t census = wire::path_element_census(body);
-    if (!census.well_formed || census.labels == 0) return false;
-    labels_.body.assign(body.begin(), body.end());
-    labels_.cached = true;
-    return true;
-}
-
 result_t<path_key_t> path_key_t::try_make(std::span<const std::byte> b,
                                           tr::mem::block_source_t& src) noexcept {
     result_t<path_key_t> k{std::in_place};  // built in place: no move of a half-made key

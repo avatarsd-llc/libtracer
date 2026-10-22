@@ -12,10 +12,9 @@
  * RFC-0024 already carried — and only its spelling is new: one element among others in a `PATH`,
  * read by its kind and length, so NAMEs and PAIRs mix freely (RFC-0029 §4.2).
  *
- * `kind = 0x16` is shared with RFC-0027's 4-byte label until RFC-0029 slice S3 deletes that
- * form (§16 Q4 rules the reuse). The two are told apart by the declared `len`, which is the
- * only structural clause an element has besides its kind: `len = 8` is a PAIR, and any other
- * length is not one. A `kind = 0x16` record of neither ruled length refuses the ADDRESS
+ * `kind = 0x16` was RFC-0027's 4-byte label before RFC-0029 retired that form (§5.3, §16 Q4
+ * rules the reuse). The declared `len` is the only structural clause an element has besides its
+ * kind: `len = 8` is a PAIR, and any other length, `len = 4` included, refuses the ADDRESS
  * (`tr::path::invalid`), never the frame (§5.1).
  *
  * `tr::wire` (L2/L3): wire bytes to wire values and back. Nothing here dereferences a pair,
@@ -50,7 +49,7 @@ namespace tr::wire {
 using path_pair_t = pair_t;
 
 /** @brief The escape `kind` a PAIR element is spelled at (RFC-0029 §5.1, §16 Q4 — reused). */
-inline constexpr std::uint8_t kPathPairKind = kPackedEscapeKindLabel;
+inline constexpr std::uint8_t kPathPairKind = kPackedEscapeKindPair;
 
 /** @brief Payload bytes of a PAIR element — a `u32` index and a `u32` generation. */
 inline constexpr std::size_t kPathPairBodyBytes = kPairBytes;

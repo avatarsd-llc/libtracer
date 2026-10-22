@@ -15,7 +15,7 @@
  *       a synchronised-`pool_t` region for RX segments (ADR-0042 owning
  *       delivery — every
  *       inbound datagram lands in a pool slot, exhaustion is backpressure) and
- *       a `monotonic_buffer_resource` region for the router/label containers
+ *       a `monotonic_buffer_resource` region for the router's containers
  *       (wrapped in a `synchronized_pool_resource` so recv threads share it);
  *     - a sensor vertex `/sensor/temp` (a subscriber that requests durability
  *       latches the current value — RFC-0022 §3.A);
@@ -219,12 +219,11 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_node_t& f) {
  *
  * The middle region exists to KEEP a bound this example already states rather than to add
  * one. The router's long-lived link state (receive contexts, bus token caches) draws from
- * an injected `tr::mem::block_source_t`, `label_src`, because a `std::pmr::memory_resource`
+ * an injected `tr::mem::block_source_t`, `link_src`, because a `std::pmr::memory_resource`
  * cannot report exhaustion by value and a peer reaches this store on a receive thread,
  * pre-ACL — on `-fno-exceptions` that was a peer-triggerable reboot (#603 defect 1).
- * Leaving `label_src` at its default would have quietly moved that state OUT of the slab,
- * which is the opposite of what this example is for. (The name is historical: until #1951
- * the route-handle label tables drew from it too.)
+ * Leaving `link_src` at its default would have quietly moved that state OUT of the slab,
+ * which is the opposite of what this example is for.
  *
  * It is a `pool_source_t` and not a `bump_source_t` for the reason ADR-0067 §1 gives:
  * link state is LONG-LIVED and churns (a link's state is freed on every reconnect), and a bump
@@ -245,17 +244,17 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_node_t& f) {
 constexpr std::size_t kSlabBytes = 24 * 1024;
 constexpr std::size_t kRxRegion = 12 * 1024; /**< @brief Synchronised pool: RX datagram segments. */
 constexpr std::size_t kRxSlotPayload = 1536; /**< @brief One UDP/MTU-sized datagram per slot. */
-constexpr std::size_t kLabelRegion =
+constexpr std::size_t kLinkRegion =
     2 * 1024; /**< @brief Recycling source: the router's link state. */
 /**
- * @brief Free-list slots for the label source — one per distinct `(bytes, align)` shape.
+ * @brief Free-list slots for the link source — one per distinct `(bytes, align)` shape.
  *
  * `pool_source_t` segregates by EXACT size, so the count to size this against is the
- * number of shapes the label plane draws, not the number of blocks. Running out is safe
+ * number of shapes the link plane draws, not the number of blocks. Running out is safe
  * but lossy (a freed block stops being recycled), which is why `overflowed()` is
  * printed at bring-up: a non-zero reading there is the signal to raise this number.
  */
-constexpr std::size_t kLabelClasses = 12;
+constexpr std::size_t kLinkClasses = 12;
 alignas(std::max_align_t) std::byte g_slab[kSlabBytes];
 
 /** @brief The device node: the one-slab substrate, graph, router, and transport vertex. */
@@ -290,24 +289,24 @@ struct device_node_t {
      * the "wiring frequency" case `sync_mutex_t` documents itself for, and it is portable
      * across both of this example's targets, so it needs no platform seam of its own.
      */
-    std::array<tr::mem::size_class_t, kLabelClasses> label_classes{};
-    tr::mem::pool_source_t<tr::mem::sync_mutex_t> label_src{
-        std::span<std::byte>(g_slab + kRxRegion, kLabelRegion), label_classes};
+    std::array<tr::mem::size_class_t, kLinkClasses> link_classes{};
+    tr::mem::pool_source_t<tr::mem::sync_mutex_t> link_src{
+        std::span<std::byte>(g_slab + kRxRegion, kLinkRegion), link_classes};
     /**
      * @brief Container seam: a monotonic arena over the slab's back region.
      *
      * The synchronized pool on top recycles freed blocks and makes the resource safe for
      * the recv threads. Two things are NOT among them: the terminus arena (since #588 it
      * draws from the router's `rx` block source, left at its default net sub-pool, the static
-     * arena, here) and the router's link state (since #603 defect 1 it draws from `label_src`
+     * arena, here) and the router's link state (since #603 defect 1 it draws from `link_src`
      * above — a pmr resource cannot report exhaustion by value, which is the whole defect).
      */
-    std::pmr::monotonic_buffer_resource arena{g_slab + kRxRegion + kLabelRegion,
-                                              kSlabBytes - kRxRegion - kLabelRegion};
+    std::pmr::monotonic_buffer_resource arena{g_slab + kRxRegion + kLinkRegion,
+                                              kSlabBytes - kRxRegion - kLinkRegion};
     std::pmr::synchronized_pool_resource mr{&arena};
 
     graph_t graph;
-    fwd_router_t router{graph, {.label_src = &label_src}};
+    fwd_router_t router{graph, {.link_src = &link_src}};
     /**
      * @brief Owns the config-created sockets; declared LAST so its recv
      *        threads stop before the router/graph they feed are torn down.
@@ -425,7 +424,7 @@ int run_host_probe(device_node_t& dev) {
     //    replay.
     //
     //    Every delivery is a full-route `FWD{WRITE}`; the router's long-lived link state
-    //    (receive contexts and the like) is drawn from the bounded `label_src` region of
+    //    (receive contexts and the like) is drawn from the bounded `link_src` region of
     //    the one slab, which the census printed at the end reports.
     router.on_frame(
         "self",
@@ -479,22 +478,22 @@ extern "C" void app_main(void) {
     }
     std::printf(
         "device node up: /sensor/temp + udp listener /net/udp-server/host (port %u), one-slab "
-        "recipe (pool %u slots x %u B + label source %u B + pmr arena)\n",
+        "recipe (pool %u slots x %u B + link source %u B + pmr arena)\n",
         static_cast<unsigned>(kNodePort), static_cast<unsigned>(rx_backend_slots()),
-        static_cast<unsigned>(kRxSlotPayload), static_cast<unsigned>(kLabelRegion));
+        static_cast<unsigned>(kRxSlotPayload), static_cast<unsigned>(kLinkRegion));
 
     const int failures = run_host_probe(dev);
-    // The label source's own census, AFTER the self-proof has driven real deliveries through
+    // The link source's own census, AFTER the self-proof has driven real deliveries through
     // the router. Both of its bounds are injected, so both are reported:
-    // a `used` near the region size means raise `kLabelRegion`, a non-zero `overflowed`
-    // means raise `kLabelClasses`. Printing them is what makes the sizing above a
+    // a `used` near the region size means raise `kLinkRegion`, a non-zero `overflowed`
+    // means raise `kLinkClasses`. Printing them is what makes the sizing above a
     // measurement rather than a guess, and it is the same discipline `rx_backend_slots()`
     // already applies to the RX region.
-    std::printf("label source: %u/%u B used, %u/%u size classes, %u block(s) overflowed\n",
-                static_cast<unsigned>(dev.label_src.used()), static_cast<unsigned>(kLabelRegion),
-                static_cast<unsigned>(dev.label_src.classes_used()),
-                static_cast<unsigned>(kLabelClasses),
-                static_cast<unsigned>(dev.label_src.overflowed()));
+    std::printf("link source: %u/%u B used, %u/%u size classes, %u block(s) overflowed\n",
+                static_cast<unsigned>(dev.link_src.used()), static_cast<unsigned>(kLinkRegion),
+                static_cast<unsigned>(dev.link_src.classes_used()),
+                static_cast<unsigned>(kLinkClasses),
+                static_cast<unsigned>(dev.link_src.overflowed()));
     std::printf("full_node self-proof: %s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED",
                 failures, failures == 1 ? "" : "s");
 

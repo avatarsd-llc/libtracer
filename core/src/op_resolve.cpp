@@ -13,7 +13,7 @@ namespace tr::graph {
 
 result_t<view::rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, const inbound_ref_t& inbound,
                                               const view::view_t* frame_view,
-                                              const wire::path_ref_element_t* dst_label_target,
+                                              const wire::path_ref_element_t* dst_target,
                                               bool* deferred, std::span<std::byte> reply_store) {
     // The ACL SUBJECT, derived HERE — at the terminus, from the frame's peer handle — and
     // never carried down the routing path as a string (#375 Part 2 ruling). The scratch
@@ -44,8 +44,7 @@ result_t<view::rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, const inbo
     reply_store_t ack(reply_store, egress);
     return resolve_node(graph_, arena_node{&fwd, 0}, inbound.link, subject, frame_view, flat_be,
                         egress, ack, retained_backend(flat_be), reverse_ref_fn_, reverse_ref_ctx_,
-                        path_label_fn_, path_label_ctx_, dst_label_target, link_token_seam(inbound),
-                        await_defer_seam(deferred));
+                        dst_target, link_token_seam(inbound), await_defer_seam(deferred));
 }
 
 }  // namespace tr::graph

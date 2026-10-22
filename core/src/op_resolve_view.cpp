@@ -288,7 +288,7 @@ class view_node {
 result_t<view::rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd,
                                               const inbound_ref_t& inbound,
                                               const view::view_t* frame_view,
-                                              const wire::path_ref_element_t* dst_label_target,
+                                              const wire::path_ref_element_t* dst_target,
                                               bool* deferred, std::span<std::byte> reply_store) {
     // The terminus subject derivation, identical to the arena tier's — one helper, so the
     // two tiers cannot answer one logical request under two different principals.
@@ -315,8 +315,7 @@ result_t<view::rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd,
     reply_store_t ack(reply_store, egress);
     return resolve_node(graph_, root, inbound.link, subject, frame_view, root.backend(), egress,
                         ack, retained_backend(root.backend()), reverse_ref_fn_, reverse_ref_ctx_,
-                        path_label_fn_, path_label_ctx_, dst_label_target, link_token_seam(inbound),
-                        await_defer_seam(deferred));
+                        dst_target, link_token_seam(inbound), await_defer_seam(deferred));
 }
 
 }  // namespace tr::graph
