@@ -302,7 +302,8 @@ void transport_can::peer_endpoint_t::send(std::span<const std::byte> frame) {
     owner_->send_impl(frame, node_.load(std::memory_order_relaxed));
 }
 
-std::optional<std::uint16_t> transport_can::alloc_base(std::size_t slice_count) {
+std::optional<std::uint16_t> transport_can::alloc_base(std::size_t slice_count,
+                                                       std::unique_lock<std::mutex>& lock) {
     // Everything here stays in std::size_t. The u16 this used to narrow to was the
     // silent half of #910: a >65535-slice group wrapped `span` (65536 became 0), the
     // reservation then trivially "fit", and the manifest advertised the same wrapped
@@ -314,6 +315,13 @@ std::optional<std::uint16_t> transport_can::alloc_base(std::size_t slice_count) 
     // here so the caller never advertises a count it cannot deliver.
     if (span > kCanMaxGroupSlices) return std::nullopt;
     if (static_cast<std::size_t>(next_base_) + span - 1u > can::kEndpointMax) {
+        // THE LAP FENCE (#2262). Slices go out without tx_m_, so a group of this lap may
+        // still be on its way. Re-issuing its ids before its last slice is out would let
+        // the new group's advertise retire its binding mid-group, and its tail would weld
+        // onto the new one. So a wrap waits until no group is in flight. It is the only
+        // place a sender waits for another one, at most once per lap of the endpoint window.
+        // The wait releases tx_m_ and is woken by the last group out: no clock, no timer.
+        tx_drained_.wait(lock, [this] { return tx_in_flight_ == 0; });
         next_base_ = kCanFirstDataEndpoint;  // wrap, leaving the control slot free
     }
     const std::uint16_t base = next_base_;
@@ -393,8 +401,6 @@ void transport_can::send(std::span<const std::byte> frame) {
 void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t target) {
     if (frame.empty()) return;
 
-    const std::lock_guard lock(tx_m_);
-
     // Own the bytes so the framing can carve zero-copy subviews out of them.
     const auto payload = tr::view::over_bytes(frame);
     if (!payload) {
@@ -416,19 +422,27 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     // concern (a new control-frame semantic every peer must implement, and one that
     // is itself lossy on the medium that lost the tail slices), where the capacity is
     // a purely local fact the sender already holds.
-    const std::optional<std::uint16_t> base_ep = alloc_base(count);
+    //
+    // tx_m_ covers ONLY the reservation and the advertise (#2262). Those two are what
+    // must not interleave: the advertise is one byte stream on this node's single control
+    // id, and the reservation is the allocator. The data slices below go out WITHOUT the
+    // lock: each group owns a disjoint run of slice ids, so another sender's frames between
+    // two of its slices cannot be mistaken for one of them. Holding tx_m_ across the loop
+    // made every other sender on this transport wait out the whole group's driver
+    // back-pressure, about 2,050 frames for a 16 KiB classic group.
+    std::unique_lock lock(tx_m_);
+    const std::optional<std::uint16_t> base_ep = alloc_base(count, lock);
     if (!base_ep) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // whole group refused, nothing said
         return;
     }
     const can::can_id_fields_t base_fields{cfg_.version, cfg_.node, *base_ep};
-    const std::uint32_t base_id = can::encode_can_id(base_fields);
 
     // The manifest carries the exact total length (so the peer trims FD padding),
     // the slice count (totality opt-in → trailing-drop detection), and — for a
     // per-peer directed send (ADR-0044) — the target node id.
     can::advertise_t adv;
-    adv.can_id = base_id;
+    adv.can_id = can::encode_can_id(base_fields);
     adv.group = count > 1;
     adv.group_total_len = static_cast<std::uint32_t>(frame.size());
     adv.slice_count = static_cast<std::uint16_t>(count);
@@ -436,6 +450,8 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     // `adv.path` stays empty: emit_advertise walks cfg_.path in place. Copying it here
     // would put a std::string allocation back on EVERY send — the very thing #848 removes.
     emit_advertise(adv);
+    ++tx_in_flight_;  // this group's slice run stays reserved until its last slice is out
+    lock.unlock();
 
     const bool fd = cfg_.mode == tr::net::can::can_frame_mode_t::FD;
     for (std::size_t i = 0; i < count; ++i) {
@@ -464,6 +480,8 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
         // group_total_len so the padding never reaches the delivered frame.
         link_->write_raw(out);
     }
+    lock.lock();
+    if (--tx_in_flight_ == 0) tx_drained_.notify_all();
 }
 
 void transport_can::on_rx(const can_frame_data_t& frame) {

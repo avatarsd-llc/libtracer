@@ -18,8 +18,9 @@
  * core/tests/transport_can_test.cpp). The transport itself never touches a socket.
  *
  * Concurrency mirrors transport_ws: the link's receive loop runs on an internal
- * thread and feeds the bridge through the registered receiver; sends are serialized
- * so one group's frames never interleave another's on the bus.
+ * thread and feeds the bridge through the registered receiver. A send holds the TX
+ * lock only to reserve its slot run and emit its advertise; its data slices go out
+ * unlocked on that run, which no other group in flight shares (#2262).
  */
 #pragma once
 
@@ -28,6 +29,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -709,7 +711,9 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // RESERVE the group's run of consecutive endpoint slots (#910). Fallible on
     // purpose: a group over kCanMaxGroupSlices fits at no base, and the caller must
     // learn that BEFORE it advertises a slice_count it cannot deliver.
-    std::optional<std::uint16_t> alloc_base(std::size_t slice_count);  // requires tx_m_ held
+    // At a wrap it waits on `lock` (tx_m_, held) until no group of the lap is in flight (#2262).
+    std::optional<std::uint16_t> alloc_base(std::size_t slice_count,
+                                            std::unique_lock<std::mutex>& lock);
     // Slices adv's 18-byte header and cfg_.path (in place, never copied — this node only
     // ever advertises its OWN path, so adv.path is left empty) into CLASSIC windows.
     void emit_advertise(const can::advertise_t& adv);  // requires tx_m_ held
@@ -726,8 +730,14 @@ class can_transport_t final : public transport_t, public bus_link_t {
     mem::string_t path_;          // this node's advertised path, owned
 
     // egress
-    std::mutex tx_m_;  // serializes whole-group emission
+    // Serializes the reservation and the advertise, never the data slices (#2262).
+    std::mutex tx_m_;
     std::uint16_t next_base_ = kCanFirstDataEndpoint;
+    // Groups advertised whose last slice is not out yet; guarded by tx_m_. A wrap of
+    // next_base_ waits on tx_drained_ for this to reach zero, so no slice id is re-issued
+    // while its group is still being sent.
+    std::size_t tx_in_flight_ = 0;
+    std::condition_variable tx_drained_;
 
     // ingress. A learned binding remembers whether its group is for THIS node —
     // a directed group addressed elsewhere is consumed but never reassembled.
