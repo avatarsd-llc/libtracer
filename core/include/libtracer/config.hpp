@@ -33,18 +33,6 @@
 #include <limits>
 #include <type_traits>
 
-// Removed build switches (#1722). Each one duplicated a trait of the one configuration type
-// (ADR-0068), so a build that still defines it would otherwise compile on with the switch
-// silently ignored. Refuse it, and name the trait that replaced it.
-#if defined(LIBTRACER_NO_ATOMIC)
-#error \
-    "LIBTRACER_NO_ATOMIC was removed (#1722). The segment refcount picks its binding from the target: one atomic read-modify-write where the core has one, else a load and a store inside config_t::guard_t. A single-threaded build binds `using guard_t = tr::no_guard_t;` in libtracer/config_override.hpp."
-#endif
-#if defined(LIBTRACER_PIN_INSTRUMENT)
-#error \
-    "LIBTRACER_PIN_INSTRUMENT was removed (#1722). The RFC-0022 pin/copy counters follow config_t::kInstrumentCounters: bind `static constexpr bool kInstrumentCounters = true;` in libtracer/config_override.hpp (a bench/ build: -DLIBTRACER_INSTRUMENT_COUNTERS=ON)."
-#endif
-
 namespace tr {
 
 template <std::size_t LineBytes, std::size_t Stripes>
@@ -143,18 +131,6 @@ struct size_class_ladder_t {
         return pick(bytes <= kBase, small, pick(bytes <= Top, geometric, past));
     }
 };
-
-/**
- * @brief Deprecated alias of @ref tr::mutex_guard_t, kept for one release (#1703).
- * Deprecated: The guard vocabulary moved to the layer-neutral `tr` namespace; name
- *             `tr::mutex_guard_t`.
- */
-using mutex_guard_t = ::tr::mutex_guard_t;
-/**
- * @brief Deprecated alias of @ref tr::no_guard_t, kept for one release (#1703).
- * Deprecated: Name `tr::no_guard_t`.
- */
-using no_guard_t = ::tr::no_guard_t;
 
 struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile (ADR-0020 subset)
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
@@ -1042,7 +1018,7 @@ struct default_config_t {
      * `graph_t` (`[[no_unique_address]]` over an empty type), the two increment sites compile
      * to nothing, and the accessors answer `0`. It also arms the RFC-0022 §6 pin/copy branch
      * counters of `%pin_instrument.hpp`, which were the `LIBTRACER_PIN_INSTRUMENT` macro until
-     * #1722; that macro is now refused at compile time. A compile-time member rather than a
+     * #1722. A compile-time member rather than a
      * macro for ADR-0068's reason: a macro can differ per TU, and these counters change
      * `graph_t`'s layout.
      *
@@ -1218,51 +1194,14 @@ using config_t = default_config_t;
 template <class C>
 concept defines_reader_guard_member = requires { typename C::reader_guard_t; };
 
-// The rename tripwire (#1703). A fragment written before the rename binds `reader_guard_t`,
-// which nothing reads any more, so the build would silently keep the host `mutex_guard_t` —
-// and on a dual-core chip with a lock-free bool no other assertion catches that. Refuse it.
+// The rename tripwire (#1703), permanent (#2247). A fragment written before the rename binds
+// `reader_guard_t`, which nothing reads any more, so the build would silently keep the host
+// `mutex_guard_t` — and on a dual-core chip with a lock-free bool no other assertion catches that.
+// Refuse it.
 static_assert(!defines_reader_guard_member<config_t>,
               "config_t defines reader_guard_t, which libtracer no longer reads: the member was "
               "renamed to guard_t (#1703). In your libtracer/config_override.hpp, rename "
               "`using reader_guard_t = ...;` to `using guard_t = ...;`.");
-
-/**
- * @brief Whether the configuration @p C still defines `kWeaklyOrdered`, removed by #1717.
- *
- * The removal tripwire's predicate. `default_config_t` no longer defines it, so only a stale
- * override fragment can.
- */
-template <class C>
-concept defines_weakly_ordered_member = requires { C::kWeaklyOrdered; };
-
-// The removal tripwire (#1717). `kWeaklyOrdered = false` let a build that declared itself TSO
-// waive the delivery-skip order assertion in vertex.hpp; nothing in-tree set it, and that
-// assertion is now unconditional. A fragment that still sets it would compile on believing it
-// holds a waiver that no longer exists. Refuse it, so the line is deleted.
-static_assert(!defines_weakly_ordered_member<config_t>,
-              "config_t defines kWeaklyOrdered, which libtracer no longer reads: kWeaklyOrdered "
-              "was removed (#1717). The delivery-skip order is asserted seq_cst on every target, "
-              "so there is nothing left to waive. Delete `static constexpr bool kWeaklyOrdered = "
-              "...;` from your libtracer/config_override.hpp.");
-
-/**
- * @brief Whether the configuration @p C still defines `kSingleWriter`, removed by #1718.
- *
- * The removal tripwire's predicate. `default_config_t` no longer defines it, so only a stale
- * override fragment can.
- */
-template <class C>
-concept defines_single_writer_member = requires { C::kSingleWriter; };
-
-// The removal tripwire (#1718). `kSingleWriter` was an unchecked promise of one publisher per
-// vertex that no code read; the fused guarded publish (#1715) left it nothing to unlock. A
-// fragment that still sets it would compile on believing it states a contract the library
-// honours. Refuse it, so the line is deleted rather than left to mislead.
-static_assert(!defines_single_writer_member<config_t>,
-              "config_t defines kSingleWriter, which libtracer no longer reads: kSingleWriter was "
-              "removed (#1718). Every LKV slot's guard serializes writers as well as readers, so "
-              "the trait unlocked nothing. Delete `static constexpr bool kSingleWriter = ...;` "
-              "from your libtracer/config_override.hpp.");
 
 // ---------------------------------------------------------------------------------------------
 // Derived spellings. These are what the rest of the library and its consumers actually name;
@@ -1358,12 +1297,6 @@ struct sized_guard<C> {
 using guard_t = detail_guard::sized_guard<config_t>::type;
 /** @brief @ref default_config_t::kGuardStripes for this build. */
 inline constexpr std::size_t kGuardStripes = config_t::kGuardStripes;
-/**
- * @brief Deprecated alias of @ref guard_t, kept for one release (#1703).
- * Deprecated: Name `tr::graph::guard_t`. (The config MEMBER of that name is not aliased: a
- *             fragment that defines it is refused, above.)
- */
-using reader_guard_t = guard_t;
 /** @brief @ref default_config_t::lkv_slot_t for this build. */
 using lkv_slot_t = config_t::lkv_slot_t;
 /** @brief @ref default_config_t::reclaim_policy_t for this build. */

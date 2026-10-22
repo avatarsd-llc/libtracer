@@ -273,8 +273,8 @@ void hosted_sync_policy_works() {
 }  // namespace
 
 /** @brief The default policy must cost nothing — the MCU contract for this seam. */
-static_assert(std::is_empty_v<tr::mem::sync_none_t>,
-              "sync_none_t must be empty so [[no_unique_address]] can erase it");
+static_assert(std::is_empty_v<tr::no_guard_t>,
+              "no_guard_t must be empty so [[no_unique_address]] can erase it");
 
 /** @brief Exhaustion is reported by value; nothing here may throw. */
 static_assert(noexcept(std::declval<pool_source_t<>&>().try_alloc(1, 1)),

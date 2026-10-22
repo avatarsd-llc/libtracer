@@ -50,7 +50,7 @@ its `libtracer/config_override.hpp`, which is what the footprint sentinels do
 (`core/tests/footprint/config/libtracer/config_override.hpp`). On a host the substrate test
 drives the guarded binding by naming it, under several threads
 (`core/tests/substrate_test.cpp:test_refcount_bindings_under_threads`). The old
-`LIBTRACER_NO_ATOMIC` macro was removed in #1722 and is refused at compile time.
+`LIBTRACER_NO_ATOMIC` macro was removed in #1722.
 
 ## API reference
 

@@ -165,9 +165,6 @@ The standard-`Allocator` face that used to sit here, `source_allocator_t`, was r
 nothing in core used it once the core containers (`block_array_t` and its siblings) took over
 its sites.
 
-```{doxygentypedef} tr::mem::sync_none_t
-```
-
 ```{doxygenclass} tr::mem::block_array_t
 :members:
 ```
@@ -361,7 +358,6 @@ The guard vocabulary lives in the layer-neutral `tr` namespace (#1703), because 
 layer and the graph layer both bind it: `libtracer/guard.hpp` is freestanding (the
 `tr::lockable` and `tr::guard` concepts, `tr::no_guard_t`, `tr::guard_scope_t` and
 `tr::rmw_counter_t`), and `libtracer/guard_mutex.hpp` holds the hosted `tr::mutex_guard_t`.
-The `tr::graph` spellings and `tr::mem::sync_none_t` are aliases for one release.
 
 The `pool_source_t` seam takes any `tr::lockable`, defaulting to `tr::no_guard_t`, and has one
 deliberate non-answer: `sync_mutex_t` lives in a separate header because the L0 seam is

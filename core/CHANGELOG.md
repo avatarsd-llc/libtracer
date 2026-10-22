@@ -26,6 +26,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - **Migration:** replace `const auto* s = net.settings_of(key)` with
     `const auto s = net.settings_of(key)`, and `s != nullptr` / `s == nullptr` with
     `s.has_value()` / `!s.has_value()`. `s->field` reads unchanged.
+### Breaking
+
+- **The one-release shims of 0.18.0 and 0.19.0 are removed
+  ([#2247](https://github.com/avatarsd-llc/libtracer/issues/2247)).** Their windows, promised in
+  #1703 and #1725, closed three releases ago. Removed:
+  - the headers `libtracer/reader_guard.hpp` (the `tr::graph::reader_guard` concept and
+    `tr::graph::guard_scope_t`) and `libtracer/view_can.hpp` (the `tr::view::can_*` framing
+    names);
+  - the aliases `tr::graph::mutex_guard_t`, `tr::graph::no_guard_t`, `tr::graph::reader_guard_t`
+    and `tr::mem::sync_none_t`;
+  - the removal tripwires whose stale spelling now changes nothing: the `#error` on
+    `LIBTRACER_NO_ATOMIC` (the refcount binding follows the target) and
+    `LIBTRACER_PIN_INSTRUMENT` (counters only), and the `static_assert`s on a fragment that
+    still defines `kWeaklyOrdered` or `kSingleWriter` (nothing read them). Those spellings are
+    now ignored.
+
+  Three refusals STAY, permanently, because the stale spelling would otherwise build a silently
+  different choice: `-DLIBTRACER_ACL_FULL` (it would get the ALLOW-only policy, which refuses
+  every DENY entry), `-DLIBTRACER_LKV_SLOT` (a different LKV slot) and a fragment that still
+  defines `reader_guard_t` (the host mutex guard in place of the target's). The
+  `reclaim_local_t` refusal (0.20.0) stays too.
+
+  **Migration:** include `libtracer/guard.hpp` / `libtracer/guard_mutex.hpp` and name
+  `tr::guard`, `tr::guard_scope_t`, `tr::mutex_guard_t` and `tr::no_guard_t`; name
+  `tr::graph::guard_t` for the build's guard; include `libtracer/can_framing.hpp` and name
+  `tr::net::can::can_*`. A fragment member is `guard_t`, not `reader_guard_t`.
 
 ## [0.21.0] — 2026-10-22
 

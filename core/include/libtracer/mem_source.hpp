@@ -497,25 +497,6 @@ class bump_source_t final : public block_source_t {
 };
 
 /**
- * @brief The no-op synchronization policy — the default, and the one the hot seam wants.
- *
- * A @ref pool_source_t owned by exactly one thread needs no synchronization at all, and
- * that is the intended shape for a per-receiver source: ownership removes the race
- * instead of guarding it. See @ref pool_source_t's threading note for why this matters
- * more than the choice of free-list algorithm.
- *
- * Since #1703 this is the layer-neutral `tr::no_guard_t` (`%guard.hpp`), so the memory layer
- * keeps one lock vocabulary, not two. A policy is any `tr::lockable` (`lock()`/`unlock()`,
- * both `noexcept`); a target supplies its own where it needs one (an interrupt-disable
- * critical section on single-core FreeRTOS, `tr::mem::sync_mutex_t` from
- * `%mem_source_sync.hpp` on a host). This header stays freestanding-clean, so it pulls in no
- * threading facility of its own.
- *
- * Deprecated: Kept as an alias for one release (#1703); name `tr::no_guard_t`.
- */
-using sync_none_t = ::tr::no_guard_t;
-
-/**
  * @brief One recycling free-list, keyed by the exact `(bytes, align)` pair it serves.
  *
  * Caller-supplied storage: a @ref pool_source_t is handed a span of these, so the number

@@ -103,7 +103,6 @@
 #include "libtracer/config.hpp"
 #include "libtracer/guard.hpp"
 #include "libtracer/guard_mutex.hpp"
-#include "libtracer/reader_guard.hpp"  // the deprecated tr::graph guard aliases (#1703), one release
 #include "libtracer/value.hpp"
 
 namespace tr::graph {

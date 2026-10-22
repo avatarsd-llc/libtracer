@@ -740,7 +740,7 @@ class transport_t {
      * @warning A link's egress store is touched by EVERY thread that sends on that link, so
      *          @p src must declare a concurrency contract covering them (`block_source_t`
      *          §"each source declares its own"). `heap_source_t` does; a
-     *          `pool_source_t<sync_none_t>` or a `bump_source_t` does NOT, and belongs to a
+     *          `pool_source_t<tr::no_guard_t>` or a `bump_source_t` does NOT, and belongs to a
      *          link only one thread ever sends on — which is the ADR-0079 NARROW shape, and
      *          the reason it is per-link rather than one node-wide store. None of the six
      *          egress sites holds a transport lock across the allocation, so a locking

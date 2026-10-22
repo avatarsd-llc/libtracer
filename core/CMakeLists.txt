@@ -5,6 +5,8 @@ cmake_minimum_required(VERSION 3.16)
 
 # Removed configure options (#1722, ADR-0068 §Erratum 1). Each duplicated a trait of the one
 # configuration type, which is set in a libtracer/config_override.hpp fragment as plain C++.
+# These two refusals are permanent (#2247): a stale -D would otherwise build a silently
+# different ACL policy or LKV slot, so they are a safety net, not a migration shim.
 # A value that would have changed the build is refused, naming the trait; a value equal to the
 # old default changed nothing, so a build directory that merely cached it is told once and the
 # entry is dropped. Checked before project(), so a refused configure costs no compiler probe.
