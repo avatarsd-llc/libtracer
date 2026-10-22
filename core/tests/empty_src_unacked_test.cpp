@@ -53,6 +53,7 @@
 
 #include "fwd_frame_builder.hpp"
 #include "graph_sinks.hpp"
+#include "libtracer/backend.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/security_acl.hpp"
@@ -390,6 +391,84 @@ void payloadless_write_dropped_silently() {
     check(n.link.count() == 1, "  control: a wired src DOES get the TYPE_MISMATCH reply");
 }
 
+/**
+ * @brief A backend that serves from the heap until armed, then refuses every allocation.
+ */
+class arming_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    arming_backend_t() noexcept : mem_backend_t("test_arming") {}
+
+    [[nodiscard]] tr::view::segment_t* alloc(
+        std::size_t size, tr::mem::alloc_hint_t hint = tr::mem::alloc_hint_t::NONE) override {
+        if (armed_) return nullptr;
+        return tr::mem::heap_backend().alloc(size, hint);
+    }
+    void destroy(tr::view::segment_t* seg) noexcept override {
+        tr::mem::heap_backend().destroy(seg);
+    }
+    /** @brief Refuse every subsequent allocation. */
+    void arm() noexcept { armed_ = true; }
+
+   private:
+    bool armed_ = false;
+};
+
+/** @brief A recording link whose receives arrive as ropes (the rope-tier terminus). */
+class rope_link_t final : public rec_link_t {
+   public:
+    [[nodiscard]] bool delivers_ropes() const override { return true; }
+    /** @brief Push @p frame up as a two-link rope. */
+    void inject(std::span<const std::byte> frame) {
+        tr::view::rope_t r;
+        const std::size_t half = frame.size() / 2;
+        for (const std::span<const std::byte> part : {frame.first(half), frame.subspan(half)}) {
+            tr::view::segment_ptr_t seg = tr::view::heap_alloc(part.size());
+            std::memcpy(seg->bytes.data(), part.data(), part.size());
+            r.append(tr::view::view_t::over(std::move(seg)));
+        }
+        rx_.deliver_rope(std::move(r));
+    }
+};
+
+/**
+ * @brief An unacknowledged delivery is not a drop (#2256): `assemble_dropped` stays 0 across
+ *        a stream of them, at both termini, while a real assembly OOM still counts.
+ *
+ * The resolver used to answer "nothing to send" and "the reply could not be assembled" with
+ * the same empty rope, so every delivered stream sample bumped `assemble_dropped` and ran the
+ * refusal arm. Now an OOM is BACKPRESSURE by value; the control proves the counter is live.
+ */
+void unacked_stream_is_not_a_drop() {
+    std::printf("(#2256) unacknowledged deliveries do not count as drops:\n");
+    constexpr int kSamples = 16;
+    node_t n;
+    rope_link_t roped;
+    (void)n.router.attach_link("roped", roped);
+    for (int i = 0; i < kSamples; ++i) {
+        const auto frame = b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_empty(), {},
+                                 b_value_u32(kQuiet + static_cast<std::uint32_t>(i)));
+        n.router.on_frame("cli", frame);
+        roped.inject(frame);
+    }
+    const tr::net::router_stats_t s = n.router.drop_stats();
+    check(stored_u32(n.graph, n.sink) == kQuiet + kSamples - 1, "  every delivery applied");
+    check(n.link.count() == 0 && roped.count() == 0, "  ZERO frames emitted on either tier");
+    check(s.assemble_dropped == 0, "  assemble_dropped stays 0 across the stream");
+    check(s.malformed_rx == 0, "  and nothing is counted malformed either");
+
+    // Control: a wired READ whose every reply head the egress backend refuses IS a drop.
+    graph_t g;
+    (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
+    arming_backend_t egress;
+    fwd_router_t router(g, {.egress = &egress});
+    rec_link_t link;
+    (void)router.attach_link("cli", link);
+    egress.arm();
+    router.on_frame("cli", b_fwd(fwd_op_t::READ, b_path({"sink"}), b_src_wired()));
+    check(router.drop_stats().assemble_dropped == 1, "  control: an assembly OOM still counts");
+    check(link.count() == 1, "  control: and is answered from the stack");
+}
+
 }  // namespace
 
 int main() {
@@ -402,5 +481,6 @@ int main() {
     derived_empty_src_subscribe_dropped();
     unknown_dst_dropped_silently();
     payloadless_write_dropped_silently();
+    unacked_stream_is_not_a_drop();
     return tr::testing::summary("empty_src_unacked");
 }

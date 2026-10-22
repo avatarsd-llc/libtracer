@@ -97,8 +97,10 @@ struct router_stats_t {
      *         request is still ANSWERED — an addressed `STATUS{BACKPRESSURE}` built on the
      *         stack from its own bytes (#1612) — so this counts work lost, not silence. */
     std::size_t arena_dropped = 0;
-    /** @brief Terminus REPLIES dropped because the resolver assembled an EMPTY rope — an
-     *         allocation refusal inside reply assembly, surfaced as `link_count() == 0`. */
+    /** @brief Terminus REPLIES dropped because reply assembly was refused memory — the
+     *         resolver's BACKPRESSURE by value (#2256). The request is still answered from the
+     *         stack (#1612). An unacknowledged WRITE (empty `src`) has no reply and is never
+     *         counted here. */
     std::size_t assemble_dropped = 0;
     /** @brief Terminus REPLIES dropped because the egress span table could not be drawn
      *         from the per-owner receive source (#1570). The request is lost; the client
