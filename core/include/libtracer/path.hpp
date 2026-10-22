@@ -504,7 +504,7 @@ class path_key_t {
      * `vertex_t` occupy a member subobject's tail padding. The bytes are reachable from
      * inside `path_key_t` and from nowhere else. Measured consequence: this field costs
      * **zero bytes on both targets** — `sizeof(vertex_t)` stays 96 / 72, `offsetof(lkv_)`
-     * stays 0 (the #1285 straddle gate), and both `config_t` ratchets still pass pinned to
+     * stays 0, and both `config_t` ratchets still pass pinned to
      * their measurements.
      *
      * What it buys: `graph_t::vertex_slot` was an O(N) reverse scan of a `std::deque` held
