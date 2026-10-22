@@ -202,12 +202,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   constructed DIAL link installs its receivers and then calls `start_receiving()`. Sending
   needs no arming. The LISTEN constructor is unchanged.
 
-### Added
-
-- **`can_transport_t::tx_fence_waits()` (#2262).** Counts the times a send parked at the lap
-  fence: a reservation that must wrap the endpoint allocator waits until no group is in
-  flight, so no slice id is re-issued while its group is still being sent.
-
 ## [0.21.0] — 2026-10-22
 
 ### Fixed

@@ -55,6 +55,18 @@
 static_assert(!std::is_destructible_v<tr::net::can_link_t>);
 static_assert(std::is_destructible_v<tr::net::can_transport_t>);
 
+namespace tr::net {
+
+/** @brief The test-only door `transport_can.hpp` declares (#2262): reads the lap-fence parks. */
+struct can_transport_test_door_t {
+    /** @brief How many times a send on @p t parked at the lap fence. */
+    static std::size_t fence_waits(const can_transport_t& t) {
+        return t.tx_fence_waits_.load(std::memory_order_relaxed);
+    }
+};
+
+}  // namespace tr::net
+
 namespace {
 
 /** @brief A whole advertise frame in a `std::vector` — the test-side form of
@@ -1610,7 +1622,8 @@ void test_blocked_group_does_not_hold_a_concurrent_sender() {
               "B's last slice reached the driver before A's parked slice did");
     }
     check(tx_b.dropped_rx() == 0 && tx_b.dropped_groups() == 0, "the receiver dropped nothing");
-    check(tx_a.tx_fence_waits() == 0, "no send parked at the lap fence: nothing wrapped");
+    check(tr::net::can_transport_test_door_t::fence_waits(tx_a) == 0,
+          "no send parked at the lap fence: nothing wrapped");
 }
 
 /**
@@ -1656,8 +1669,9 @@ void test_wrap_waits_for_the_group_in_flight() {
         w_done.store(true);
     });
     // Deterministic: the fence counts the park before it waits, under tx_m_.
-    check(wait_until([&] { return tx_a.tx_fence_waits() >= 1; }, 2s),
-          "the wrapping group parked at the lap fence while group A was in flight");
+    check(
+        wait_until([&] { return tr::net::can_transport_test_door_t::fence_waits(tx_a) >= 1; }, 2s),
+        "the wrapping group parked at the lap fence while group A was in flight");
     check(!w_done.load(), "the wrapping group waits while group A is still in flight");
     check(run_of(gate.snapshot(), kFirst, kA).size() == 2,
           "nothing reached A's run while A was parked (only its first two slices)");

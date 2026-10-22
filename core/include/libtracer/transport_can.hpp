@@ -388,6 +388,15 @@ struct transport_can_config_t {
 };
 
 /**
+ * @brief The test-only door @ref can_transport_t befriends (#2262): it reads how often a
+ *        send parked at the lap fence.
+ *
+ * Declared here and never defined by the library: only `core/tests/transport_can_test.cpp`
+ * defines it. It is not part of the API; code outside the test suite must not define it.
+ */
+struct can_transport_test_door_t;
+
+/**
  * @brief A `transport_t` over Linux SocketCAN — header-elided, self-establishing.
  *
  * Wires the increment-1 framing to a live bus. **Egress** (@ref send): the frame
@@ -458,7 +467,8 @@ class can_transport_t final : public transport_t, public bus_link_t {
      * slices follow in index order on a run of slice ids no other group in flight
      * shares. Slices of concurrent sends may interleave on the bus, each on its own run,
      * so the receiver never mixes them; a send never waits out another's driver
-     * back-pressure, except at a wrap of the endpoint allocator (see @ref tx_fence_waits).
+     * back-pressure, except at a wrap of the endpoint allocator, which waits until no group is in
+     * flight.
      * @param frame A complete libtracer frame (a ROUTER-wrapped TLV's bytes).
      */
     void send(std::span<const std::byte> frame) override;
@@ -575,20 +585,6 @@ class can_transport_t final : public transport_t, public bus_link_t {
      */
     [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
         return dropped_tx_.load(std::memory_order_relaxed);
-    }
-
-    /**
-     * @brief Times a send parked at the lap fence (#2262): its reservation had to wrap the
-     *        endpoint allocator while another group was still in flight.
-     *
-     * The only place one sender waits for another. A wrap re-issues slice ids from the
-     * first data slot, so it waits until every group of the ending lap has its last slice
-     * out; otherwise the wrapping advertise would retire a binding mid-group. Counts each
-     * park, so a wake that finds a group still in flight counts again. Not a drop: the
-     * send goes out once the fence opens.
-     */
-    [[nodiscard]] std::uint64_t tx_fence_waits() const noexcept {
-        return tx_fence_waits_.load(std::memory_order_relaxed);
     }
 
     /**
@@ -838,7 +834,9 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // on read; a 32-bit target wraps after 2^32.
     std::atomic<std::size_t> dropped_rx_{0};
     std::atomic<std::size_t> dropped_tx_{0};
+    // Parks at the lap fence; read only by the test door below (#2262), never a metric.
     std::atomic<std::size_t> tx_fence_waits_{0};
+    friend struct can_transport_test_door_t;  // test-only: reads tx_fence_waits_.
     std::atomic<std::size_t> dropped_presink_{0};
     std::atomic<std::size_t> dropped_stale_binding_{0};
     std::atomic<std::size_t> dropped_binding_cap_{0};
