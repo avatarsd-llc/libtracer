@@ -2003,6 +2003,16 @@ if(LIBTRACER_NET_PLANE)
 endif()
 
 if(LIBTRACER_NET_PLANE)
+    # #2239 — each graph seam is installed on its own and cleared by the party that installed
+    # it (a write after the router is destroyed calls nothing), and set_policy changes only the
+    # members it names.
+    add_executable(hook_ownership_test hook_ownership_test.cpp)
+    target_link_libraries(hook_ownership_test PRIVATE libtracer)
+    libtracer_test_warnings(hook_ownership_test)
+    add_test(NAME hook_ownership COMMAND hook_ownership_test)
+endif()
+
+if(LIBTRACER_NET_PLANE)
     # RFC-0010 Amendment 2 (#1503 residual) — the NET-PLANE `:stats` seams: the router
     # registers a sampler UP into the graph, so `router` / `labels` / `link.<child>` are
     # wire-readable; with no router every one of them stays SCHEMA_NOT_FOUND.

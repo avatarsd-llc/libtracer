@@ -213,8 +213,13 @@ struct mixed_fixture_t {
  *
  * Here for the same reason as @ref mixed_fixture_t (#1905): `test_delivery_count` builds a
  * worker over a source it can make refuse and checks that the counted figure falls.
+ *
+ * Cache-line aligned, so its size rounds up to whole lines: the workers are allocated back to
+ * back, and without the padding one worker's hot @ref recv counter can share a line with the
+ * next worker's graph, so the threads falsely share and the measured rate depends on
+ * `sizeof(graph_t)`.
  */
-struct counting_writer_t {
+struct alignas(64) counting_writer_t {
     tr::graph::graph_t g;                        /**< @brief The worker's own graph. */
     std::optional<tr::graph::vertex_handle_t> v; /**< @brief Its one vertex, `/bench/mt`. */
     std::vector<std::byte> buf;                  /**< @brief The bytes @ref view borrows. */

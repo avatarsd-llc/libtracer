@@ -658,7 +658,7 @@ void test_subscribers_field() {
     }
 
     // Reference handles on the stored slot segments (slot order).
-    const auto refsubs = g.read_subscribers(v);
+    const auto refsubs = tr::testing::read_subscribers(g, v);
     check(refsubs.has_value() && refsubs->size() == 2, "two populated subscriber slots");
 
     const auto rfwd =
@@ -884,8 +884,8 @@ void test_share_hint_store() {
         check(copied_inline(rd, big_tlv.size()) && holds(rd, big_tlv),
               "... into one inline block holding the payload TLV");
     }
-    (void)g.set_policy(v, {});
-    check(g.share_hint(v) == share_hint_t::DEFAULT, "a default policy resets the hint");
+    (void)g.set_policy(v, {.share_hint = share_hint_t::DEFAULT});
+    check(g.share_hint(v) == share_hint_t::DEFAULT, "naming the default resets the hint");
 }
 
 /**
@@ -1232,13 +1232,12 @@ void test_denied_creator_draws_nothing() {
     check(g.set_creation_hook(dev, {&create_stored, &seen}).has_value(), "hook on /dev");
     // Enforcement on for a NAMED caller; /dev grants READ (inherited) but not WRITE, the right
     // a creation needs (RFC-0036).
-    auto hooks = g.hooks();
-    hooks.subject_resolver = {
-        [](void*, std::string_view) -> std::expected<tr::graph::subject_token_t, tr::wire::err_t> {
-            return tr::graph::subject_token_t{std::byte{'u'}};
-        },
-        nullptr};
-    g.set_hooks(hooks);
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+               {[](void*, std::string_view,
+                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+                    return tr::testing::subject_into(out, "u");
+                },
+                nullptr});
     std::vector<std::byte> everyone;
     for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
     const std::vector<tr::graph::ace_t> aces{

@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/loopback.hpp"
 #include "libtracer/path_pair.hpp"
@@ -67,7 +68,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::reply_kind_t;
 using tr::graph::role_t;
-using tr::graph::subject_token_t;
 using tr::net::conn_role_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_vertex_t;
@@ -226,9 +226,10 @@ std::vector<std::byte> vector_bytes(std::string_view case_dir) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
-    return subject_token_t(p, p + caller.size());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + caller.size()));
 }
 
 /** @brief An ACL granting @p subject exactly @p mask. */
@@ -305,11 +306,8 @@ int main() {
     transport_vertex_t net_cli(g_cli, r_cli);
 
     graph_t g_a;
-    {
-        auto hooks = g_a.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g_a.set_hooks(hooks);
-    }  // A gates its own relays by inbound link
+    g_a.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+                 {caller_is_subject, nullptr});  // A gates its own relays by inbound link
     fwd_router_t r_a(g_a);
     transport_vertex_t net_a(g_a, r_a);
 
@@ -794,11 +792,7 @@ int main() {
     {
         const auto forward_op = [&](std::uint8_t op_byte) {
             graph_t g;
-            {
-                auto hooks = g.hooks();
-                hooks.subject_resolver = {caller_is_subject, nullptr};
-                g.set_hooks(hooks);
-            }
+            g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
             (void)g.register_vertex(path_t("/up"), role_t::STORED_VALUE);
             (void)g.write(path_t("/up:acl"),
                           owned(allow_acl("cli", static_cast<std::uint32_t>(acl_right_t::READ))));

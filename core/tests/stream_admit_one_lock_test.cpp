@@ -47,6 +47,7 @@
 #include <thread>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -393,7 +394,7 @@ void test_concurrent_writers_exactly_once() {
           "every entry was delivered EXACTLY once — none lost, none duplicated");
     std::vector<tr::graph::value_ref_t> rest;
     std::uint64_t gaps = 1;
-    check(g.drain_unflushed(v, rest, &gaps).has_value() && rest.empty() && gaps == 0,
+    check(tr::testing::drain_unflushed(g, v, rest, &gaps).has_value() && rest.empty() && gaps == 0,
           "nothing was left unflushed, and no shed point was recorded");
 }
 

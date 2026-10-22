@@ -52,6 +52,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/security_acl.hpp"
@@ -68,7 +69,6 @@ using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_t;
@@ -167,8 +167,9 @@ std::optional<std::uint32_t> stored_u32(const graph_t& g, vertex_handle_t v) {
 }
 
 /** @brief The test subject resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 /** @brief An `ACL` TLV granting @p right to @p subject alone (ALLOW-only, ADR-0020). */
@@ -234,11 +235,8 @@ void vector_b_denied_write_dropped_silently() {
     check(n.graph.write(*acl_path, make_value(acl_allowing("peer-z", acl_right_t::WRITE)))
               .has_value(),
           "  an ACL granting WRITE to `peer-z` ALONE is installed");
-    {
-        auto hooks = n.graph.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        n.graph.set_hooks(hooks);
-    }  // enforcement on
+    n.graph.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+                     {caller_is_subject, nullptr});  // enforcement on
     (void)n.link.drain();
 
     n.router.on_frame(

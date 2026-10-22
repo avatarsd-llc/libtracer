@@ -33,6 +33,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -49,7 +50,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::wire::type_t;
 
@@ -68,8 +68,9 @@ std::vector<std::byte> as_bytes(std::string_view s) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 /** @brief A recognisable 32-byte ed25519-shaped key: 0x00,0x01,…,0x1F. */
@@ -184,11 +185,7 @@ void test_every_vertex_answers_identically() {
 void test_read_is_pre_auth() {
     std::printf("RFC-0011 §C.2: :identity is served through a CLOSED acl (pre-auth):\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     check(g.set_identity(0x01, demo_key()).has_value(), "identity installed");
     const auto v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(demo_key()));
@@ -299,11 +296,7 @@ void test_no_write_surface() {
 void test_record_has_no_sub_addressing() {
     std::printf("RFC-0011 §C.4: served whole — no member or indexed addressing:\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     check(g.set_identity(0x01, demo_key()).has_value(), "identity installed");
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
 

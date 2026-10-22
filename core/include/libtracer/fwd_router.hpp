@@ -354,12 +354,14 @@ class fwd_router_t {
         // node is a mount question — the transport plane's, which L4 cannot name. Installed
         // here, through the same captureless {fn, ctx} pair, so a node that HAS a transport
         // plane resolves mount-path targets and one that does not cannot.
-        // The graph's three TRANSPORT-PLANE seams, installed in one `set_hooks` (RFC-0028 §4.12)
-        // that keeps the application's two (subject resolver, subscription observer) as they
-        // were. Each is the captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049),
-        // published through a `sink_slot_t`, so `this` must outlive every write, wire subscribe
-        // and `:stats` read the graph can still serve; constructing a router against a graph
-        // that is ALREADY serving frames is unsupported.
+        // The graph's four TRANSPORT-PLANE seams, each installed in its own slot (#2239), so
+        // the application's seams (subject, subscription observer) are never touched and an
+        // application that installs one later never unplugs these. Each is the captureless
+        // {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049), published through a
+        // `sink_slot_t`; `~fwd_router_t` clears all four if they are still this router's, so
+        // a write after the router is gone finds no sink. `this` must still outlive every
+        // dispatch already in flight; constructing a router against a graph that is ALREADY
+        // serving frames is unsupported.
         //  - remote_delivery (#136): a write to a vertex with a remote subscriber fans out
         //    over the subscriber's link.
         //  - wire_target (RFC-0021, #491): a SUBSCRIBER's PATH child is an address in THIS
@@ -368,32 +370,34 @@ class fwd_router_t {
         //  - stats_sampler (RFC-0010 Amendment 2, #1503): the router / label-table / per-link
         //    counters live on this side of the L4<->net-plane seam, so the router registers a
         //    sampler UP rather than L4 reaching DOWN.
-        graph::graph_hooks_t hooks = graph_.hooks();
-        hooks.remote_delivery = {
-            [](void* ctx, const graph::remote_delivery_t& sub, const graph::value_t& value) {
-                static_cast<fwd_router_t*>(ctx)->deliver_remote(sub, value);
-            },
-            this};
-        hooks.wire_target = {
-            [](void* ctx, std::span<const std::byte> key) -> graph::wire_target_split_t {
-                return static_cast<fwd_router_t*>(ctx)->split_subscriber_target(key);
-            },
-            this};
-        hooks.stats_sampler = {&fwd_router_t::stats_sampler_thunk, this};
+        graph_.set_hook(
+            &graph::graph_hooks_t::remote_delivery,
+            {[](void* ctx, const graph::remote_delivery_t& sub, const graph::value_t& value) {
+                 static_cast<fwd_router_t*>(ctx)->deliver_remote(sub, value);
+             },
+             this});
+        graph_.set_hook(
+            &graph::graph_hooks_t::wire_target,
+            {[](void* ctx, std::span<const std::byte> key) -> graph::wire_target_split_t {
+                 return static_cast<fwd_router_t*>(ctx)->split_subscriber_target(key);
+             },
+             this});
+        graph_.set_hook(&graph::graph_hooks_t::stats_sampler,
+                        {&fwd_router_t::stats_sampler_thunk, this});
         //  - link_name (#1941): an edge stores its link as a pair, and the session seam
         //    (#1841) still names a session. A build without that seam stores nothing for it.
-        hooks.link_name = {[](void* ctx, graph::link_pair_t link, std::span<char> scratch) {
-                               return static_cast<const fwd_router_t*>(ctx)->link_name_of(link,
-                                                                                          scratch);
-                           },
-                           this};
-        graph_.set_hooks(hooks);
+        graph_.set_hook(&graph::graph_hooks_t::link_name,
+                        {[](void* ctx, graph::link_pair_t link, std::span<char> scratch) {
+                             return static_cast<const fwd_router_t*>(ctx)->link_name_of(link,
+                                                                                        scratch);
+                         },
+                         this});
     }
 
     /**
-     * @brief Answer nothing more: cancel every deferred AWAIT (ADR-0084), wait for any reply
-     *        already being sent. Then disarm every @ref origin_t still armed on this router
-     *        (#1645).
+     * @brief Answer nothing more: clear the graph seams this router installed (#2239), cancel
+     *        every deferred AWAIT (ADR-0084), wait for any reply already being sent. Then
+     *        disarm every @ref origin_t still armed on this router (#1645).
      */
     ~fwd_router_t();
 

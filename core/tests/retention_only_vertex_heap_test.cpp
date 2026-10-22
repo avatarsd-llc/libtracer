@@ -158,7 +158,8 @@ void test_stream_none_observables() {
     const auto gaps = g.stream_gaps(v);
     check(gaps.has_value() && *gaps == 0, "its ring has shed nothing");
     // Switching it back to the role default draws the block and retains again.
-    check(g.set_policy(v, {}).has_value(), "the role default applies over NONE");
+    check(g.set_policy(v, {.retention = retention_t::N}).has_value(),
+          "the role default, named, applies over NONE");
     check(g.retention(v) == retention_t::N, "... and the STREAM retains N again");
     check(g.write(path_t("/s"), make_value(value_tlv(one))).has_value(), "... and takes a write");
     const auto held = g.ring_reserved_bytes(v);

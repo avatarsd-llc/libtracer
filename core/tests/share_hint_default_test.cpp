@@ -98,8 +98,8 @@ void test_copy_build_wide() {
     check(g.share_hint(v) == share_hint_t::SHARE, "the declaration takes SHARE");
     check(shares(), "a SHARE vertex keeps its receive block");
 
-    (void)g.set_policy(v, {});
-    check(g.share_hint(v) == share_hint_t::COPY, "a default policy restores the build's COPY");
+    (void)g.set_policy(v, {.share_hint = share_hint_t::DEFAULT});
+    check(g.share_hint(v) == share_hint_t::COPY, "naming DEFAULT restores the build's COPY");
     check(!shares(), "... and the vertex copies again");
 
     // A default policy on a fresh vertex is the build's default already: nothing moves.

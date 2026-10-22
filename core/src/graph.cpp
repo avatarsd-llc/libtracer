@@ -447,6 +447,27 @@ struct branch_node_t {
     return retention_legal(role, policy.retention.value_or(default_retention(role)));
 }
 
+/**
+ * @brief Name every member @p p leaves unset with what @p vx holds now (#2239), so the policy
+ *        `apply_policy` sees is whole and an unset member moves nothing.
+ *
+ * Retention is not named here: unset, `apply_policy` resolves it to the role's default, and
+ * `set_policy` names the vertex's own first. Unset app fields are named as a borrowed view of
+ * the table already installed, which `apply_policy` sees as the same declaration and leaves in
+ * place, values included. A placeholder holds what an undeclared vertex does (RFC-0009 §B.6),
+ * so at registration this names the defaults.
+ */
+void name_unset(vertex_policy_t& p, const vertex_t& vx) noexcept {
+    p.depth = p.depth.value_or(vx.retention_depth());
+    p.share_hint = p.share_hint.value_or(vx.share_hint());
+    p.ring_source = p.ring_source.value_or(vx.ring_source());
+    p.ring_reliable = p.ring_reliable.value_or(vx.ring_reliable());
+    p.delivery_mode = p.delivery_mode.value_or(vx.delivery_mode());
+    p.app_fields =
+        std::move(p.app_fields)
+            .value_or(app_fields_decl_t{borrowed_fields_t::unchecked(vx.app_field_slots())});
+}
+
 /** @brief Whether @p k lies in the subtree whose root key is @p lo: a parent's key is a
  *         byte-prefix of every descendant's (RFC-0008 §B). */
 [[nodiscard]] bool in_subtree(std::span<const std::byte> lo,
@@ -528,7 +549,20 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     // bug (ADR-0056, ADR-0083).
     roots_ = mem::make_block<roots_t>(*tables_, *tables_);
     if (!roots_ || !vertex_slots_.reserve_next()) mem::exhausted_at_init(*tables_, "graph_t");
-    set_hooks(hooks);
+    // Each seam lands in its own slot (#2239), exactly as a later `set_hook` would put it.
+    set_hook(&graph_hooks_t::subject_lookup, hooks.subject_lookup);
+    set_hook(&graph_hooks_t::subscription_observer, hooks.subscription_observer);
+    set_hook(&graph_hooks_t::remote_delivery, hooks.remote_delivery);
+    set_hook(&graph_hooks_t::wire_target, hooks.wire_target);
+    set_hook(&graph_hooks_t::stats_sampler, hooks.stats_sampler);
+    set_hook(&graph_hooks_t::link_hold, hooks.link_hold);
+    // A build without the seam has no `fn` to store (#1841): the member is an empty type there,
+    // so an install does not compile rather than being dropped. The generic lambda is what lets
+    // the discarded arm name a member the closed build does not have.
+    set_hook(&graph_hooks_t::link_name, hooks.link_name);
+    [this](const auto& hook) {
+        if constexpr (requires { hook.fn; }) session_admission_.set(hook.fn, hook.ctx);
+    }(hooks.session_admission);
     // Readers enter their frame bracket with a plain store from here on where the process may
     // use `membarrier` (qsbr.hpp §qsbr_asym); elsewhere this is `false` and changes nothing.
     (void)detail_qsbr::asym_ready();
@@ -543,9 +577,9 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
     // beyond the standard `:settings` field, written separately). Devices add richer
     // types (controllers, transport connections — #83) via register_child_type.
-    register_child_type("stored_value", {[](void*, graph_t& g, std::vector<std::byte> child_key,
+    register_child_type("stored_value", {[](void*, graph_t& g, std::span<const std::byte> child_key,
                                             const tlv_node_t*) -> result_t<vertex_handle_t> {
-                                             return g.register_vertex_key(std::move(child_key),
+                                             return g.register_vertex_key(child_key,
                                                                           role_t::STORED_VALUE);
                                          },
                                          nullptr});
@@ -685,7 +719,8 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // here, through a door that brings no policy (a creation hook's), inherits nothing of the
     // refused one. The sweep lock nests inside the map lock here, and only in this direction:
     // nothing takes the map lock under the sweep lock (ADR-0057).
-    const bool mode_moves = node->delivery_mode() != policy.delivery_mode;
+    name_unset(policy, *node);
+    const bool mode_moves = node->delivery_mode() != *policy.delivery_mode;
     if (!apply_policy(node, role, std::move(policy),
                       mode_moves ? key : std::span<const std::byte>{}) ||
         !declare_schema_catalog(node, schema_catalog) || !declare_admission(node, handlers) ||
@@ -1651,11 +1686,15 @@ retention_t graph_t::retention(vertex_handle_t v) const noexcept { return v.get(
 
 result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
     vertex_t* const vx = v.get();
+    // Only the members the caller names move (#2239): every other one is named with what the
+    // vertex holds, which is legal by construction.
+    policy.retention = policy.retention.value_or(vx->retention());
     if (!policy_legal(vx->role(), policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    name_unset(policy, *vx);
     // The key is rendered only for a mode that moves; it is scratch, so a refusal here leaves
     // nothing either.
     mem::bytes_t key(*tables_);
-    const bool mode_moves = vx->delivery_mode() != policy.delivery_mode;
+    const bool mode_moves = vx->delivery_mode() != *policy.delivery_mode;
     if ((mode_moves && !try_build_key(vx, key)) ||
         !apply_policy(vx, vx->role(), std::move(policy),
                       mode_moves ? mem::as_span(key) : std::span<const std::byte>{}))
@@ -1680,18 +1719,20 @@ result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
 bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
                            std::span<const std::byte> mode_key) {
     const bool ring_moves = std::pair(vx->ring_source(), vx->ring_reliable()) !=
-                            std::pair(policy.ring_source, policy.ring_reliable);
+                            std::pair(*policy.ring_source, *policy.ring_reliable);
     // A HANDLER is NONE by role and carries no bit for it. Only `N` touches the extension
     // block, so `N` is what draws a STREAM's (#2001), and a `NONE` vertex keeps neither slot
     // nor ring — nor, with no other member declared, any extension block at all.
     const retention_t retention = policy.retention.value_or(default_retention(role));
     // Compared as the build reads it, so a policy naming the build's default moves nothing.
-    const bool hint_moves = vx->share_hint() != effective_share_hint(policy.share_hint);
+    const bool hint_moves = vx->share_hint() != effective_share_hint(*policy.share_hint);
     // Owner-facing declaration (RFC-0010 §A.2) — a local host API, so no ACL gate. An owning
     // table is always (re)declared, so its values reset; a borrowed one already installed is
     // the same declaration and keeps its stored values; none declared over a table installed
     // uninstalls it. An empty span is the null one on both sides, so two empties compare equal.
-    const app_fields_decl_t& fields = policy.app_fields;
+    // An unset table arrives named as a view of the installed one (`name_unset`), so it moves
+    // nothing (#2239).
+    const app_fields_decl_t& fields = *policy.app_fields;
     const std::span<const app_field_slot_t> have = vx->app_field_slots();
     const std::span<const app_field_slot_t> want =
         fields.is_borrowed() ? fields.borrowed().slots() : std::span<const app_field_slot_t>{};
@@ -1707,12 +1748,12 @@ bool graph_t::apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy,
     app_field_table_t built(*tables_);
     built.slots = want;  // a borrowed table is viewed in place and allocates nothing
     if (!vertex_t::build_owning_table(fields.owned(), built) ||
-        (!mode_key.empty() && !apply_delivery_mode(vx, policy.delivery_mode, mode_key)))
+        (!mode_key.empty() && !apply_delivery_mode(vx, *policy.delivery_mode, mode_key)))
         return false;
     // Nothing below can be refused: every block is drawn and the mode has landed.
-    if (ring_moves) (void)vx->set_ring_source(policy.ring_source, policy.ring_reliable, *tables_);
-    if (role != role_t::HANDLER) (void)vx->set_retention(retention, policy.depth, *tables_);
-    if (hint_moves) (void)vx->set_share_hint(policy.share_hint, *tables_);
+    if (ring_moves) (void)vx->set_ring_source(*policy.ring_source, *policy.ring_reliable, *tables_);
+    if (role != role_t::HANDLER) (void)vx->set_retention(retention, *policy.depth, *tables_);
+    if (hint_moves) (void)vx->set_share_hint(*policy.share_hint, *tables_);
     if (fields_move) vx->install_app_fields(*e, std::move(built));
     return true;
 }
@@ -1746,9 +1787,9 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // ONE coherent read of the {fn, ctx} pair for the whole gate (#1049) — never a
     // re-read at the call below, which is what let a concurrent install free the
     // std::function predecessor's captures under a gate that was already inside it.
-    // Unset, this is the same single relaxed load the old `if (!subject_resolver_)` was.
+    // Unset, this is one relaxed load.
     if (!subject_lookup_.installed()) return true;  // enforcement disabled — the hot-path check
-    // Installed, the gate reads a SETTLED slot: a reader that overlaps a `set_hooks` republish
+    // Installed, the gate reads a SETTLED slot: a reader that overlaps a `set_hook` republish
     // waits the publish out rather than reading the slot as unset. A slot that does not settle
     // within the bound refuses the caller.
     const auto settled = subject_lookup_.get_settled(kHookSettleReads);
@@ -1774,7 +1815,7 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // The wildcard spelling is RESERVED in the subject-token space (#908): the wire has one
     // spelling for a subject, so a principal that could BE `EVERYONE@` is indistinguishable
     // from the wildcard ACE. Enforced HERE, which is the only site that invokes
-    // `subject_resolver_` at all, rather than left to every integrator to blacklist — and
+    // the subject seam at all, rather than left to every integrator to blacklist — and
     // BEFORE the bearing-ancestor walk,
     // so a misconfigured resolver is refused at an unguarded vertex too. Fail closed, exactly
     // like the resolver's own error arm above.
@@ -3163,22 +3204,14 @@ result_t<std::size_t> graph_t::history(vertex_handle_t vh, std::span<value_ref_t
     return v->history_into(out);  // one refcount share per entry, no allocation
 }
 
-result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh, std::vector<value_ref_t>& out,
+result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh,
+                                               mem::block_array_t<value_ref_t>& out,
                                                std::uint64_t* gap_before) {
     vertex_t* v = vh.get();
     if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // Same gate as `history`, for the same reason: a drain hands back the same ring entries a
     // history read serves, so an ungated drain would be a READ-gate bypass (local-only helper
     // => local (empty) context).
-    if (!acl_allows(v, {}, acl_right_t::READ)) return std::unexpected(status_t::PERMISSION_DENIED);
-    return v->drain_unflushed(out, gap_before);
-}
-
-result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh,
-                                               mem::block_array_t<value_ref_t>& out,
-                                               std::uint64_t* gap_before) {
-    vertex_t* v = vh.get();
-    if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     if (!acl_allows(v, {}, acl_right_t::READ)) return std::unexpected(status_t::PERMISSION_DENIED);
     return v->drain_unflushed(out, gap_before);
 }
@@ -3575,76 +3608,6 @@ graph_t::reclaim_refusals_t graph_t::reclaim_refusals() const noexcept {
     return {.release_refused = refused_release_.load(std::memory_order_relaxed),
             .park_refused = refused_park_.load(std::memory_order_relaxed),
             .retire_refused = refused_retire_.load(std::memory_order_relaxed)};
-}
-
-std::expected<void, wire::err_t> graph_t::lookup_via_resolver(void* ctx, std::string_view caller,
-                                                              mem::bytes_t& out) {
-    // The adapter reads a SETTLED hook slot, as the gate does: a republish in flight is waited
-    // out by re-reading the slot's generation (bounded, no clock, no sleep), and the resolver it
-    // settles on is the one that runs. A slot that does not settle, or settles cleared because
-    // the hooks were being removed, refuses the caller.
-    const auto resolver =
-        static_cast<const graph_t*>(ctx)->subject_resolver_.get_settled(kHookSettleReads);
-    if (!resolver || resolver->fn == nullptr) return std::unexpected(wire::err_t::ACCESS_DENIED);
-    const std::expected<subject_token_t, wire::err_t> token = resolver->fn(resolver->ctx, caller);
-    if (!token) return std::unexpected(token.error());
-    if (!out.append(token->data(), token->size()))
-        return std::unexpected(wire::err_t::ACCESS_DENIED);
-    return {};
-}
-
-void graph_t::set_hooks(const graph_hooks_t& hooks) noexcept {
-    // The returning-form resolver is kept for `lookup_via_resolver`, which stands in for it in
-    // the gate's one slot; a caller-storage `subject_lookup` takes precedence (#1781).
-    subject_resolver_.set(hooks.subject_resolver.fn, hooks.subject_resolver.ctx);
-    if (hooks.subject_lookup.fn != nullptr) {
-        subject_lookup_.set(hooks.subject_lookup.fn, hooks.subject_lookup.ctx);
-    } else if (hooks.subject_resolver.fn != nullptr) {
-        subject_lookup_.set(&graph_t::lookup_via_resolver, this);
-    } else {
-        subject_lookup_.set(nullptr, nullptr);
-    }
-    subscription_observer_.set(hooks.subscription_observer.fn, hooks.subscription_observer.ctx);
-    remote_sink_.set(hooks.remote_delivery.fn, hooks.remote_delivery.ctx);
-    wire_target_.set(hooks.wire_target.fn, hooks.wire_target.ctx);
-    stats_sampler_.set(hooks.stats_sampler.fn, hooks.stats_sampler.ctx);
-    link_hold_.set(hooks.link_hold.fn, hooks.link_hold.ctx);
-    // A build without the seam has no `fn` to store (#1841): the member is an empty type there,
-    // so an install does not compile rather than being dropped. The generic lambda is what lets
-    // the discarded arm name a member the closed build does not have.
-    [this](const auto& hook, const auto& name) {
-        if constexpr (requires { hook.fn; }) {
-            session_admission_.set(hook.fn, hook.ctx);
-            link_name_.set(name.fn, name.ctx);
-        }
-    }(hooks.session_admission, hooks.link_name);
-}
-
-graph_hooks_t graph_t::hooks() const noexcept {
-    const auto sr = subject_resolver_.get();
-    const auto so = subscription_observer_.get();
-    const auto rd = remote_sink_.get();
-    const auto wt = wire_target_.get();
-    const auto ss = stats_sampler_.get();
-    const auto lh = link_hold_.get();
-    auto sl = subject_lookup_.get();
-    if (sl.fn == &graph_t::lookup_via_resolver) sl = {};  // the adapter, not a caller's hook
-    graph_hooks_t out{.subject_resolver = {sr.fn, sr.ctx},
-                      .subscription_observer = {so.fn, so.ctx},
-                      .remote_delivery = {rd.fn, rd.ctx},
-                      .wire_target = {wt.fn, wt.ctx},
-                      .stats_sampler = {ss.fn, ss.ctx},
-                      .link_hold = {lh.fn, lh.ctx},
-                      .subject_lookup = {sl.fn, sl.ctx}};
-    [this](auto& hook, auto& name) {  // the closed build's members have nothing to fill (#1841)
-        if constexpr (requires { hook.fn; }) {
-            const auto sa = session_admission_.get();
-            const auto ln = link_name_.get();
-            hook = {sa.fn, sa.ctx};
-            name = {ln.fn, ln.ctx};
-        }
-    }(out.session_admission, out.link_name);
-    return out;
 }
 
 void graph_t::hold_link(link_pair_t link, bool held, std::size_t n) const {
@@ -4367,14 +4330,6 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, const field_path_t& fiel
     // value nothing published and wraps it once, at the bottom.
     if (field.empty()) return read(vh, caller);
     return read_field_composed(vh, field, caller);
-}
-
-result_t<std::vector<view::view_t>> graph_t::read_subscribers(vertex_handle_t vh,
-                                                              std::string_view caller) const {
-    vertex_t* v = vh.get();
-    if (!acl_allows(v, caller, acl_right_t::READ))  // control-surface read, like ":schema"
-        return std::unexpected(status_t::PERMISSION_DENIED);
-    return v->edge_sources();  // each a clone (refcount bump, no byte copy)
 }
 
 result_t<std::size_t> graph_t::read_subscribers(vertex_handle_t vh,

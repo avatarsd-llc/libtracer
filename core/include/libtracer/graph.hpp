@@ -34,6 +34,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -106,7 +107,7 @@ struct remote_delivery_t {
  *        installs and the producer fan-out calls per remote subscription edge.
  *
  * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049) — see
- *       `subject_resolver_fn_t` for why. This is the one of the three on the WRITE hot
+ *       @ref subject_lookup_fn_t for why. This is the one of the three on the WRITE hot
  *       path, so it is also the one where the `std::function` indirect call and its
  *       destroy-on-assign were most expensive; @p ctx is caller-owned (the
  *       `tr::net::fwd_router_t`) and must outlive every dispatch the graph can still make,
@@ -222,56 +223,38 @@ struct subscription_address_t {
 };
 
 /**
- * @brief An operation's subject token — opaque bytes matched against ACE subjects (ADR-0018).
- */
-using subject_token_t = std::vector<std::byte>;
-
-/**
- * @brief The pluggable subject resolver (ADR-0018, #81): caller context → subject token.
+ * @brief The pluggable subject seam (ADR-0018, #81, #1781): caller context → subject token,
+ *        written into CALLER storage.
  *
  * Maps an operation's caller context — this node's NAME for the inbound link a remote FWD
- * arrived on — to the subject token ACL evaluation matches against ACE subjects. The token
- * is identity-provenance: v1 typically returns the transport-authenticated peer id for a
- * link; a stronger (PKI) token slots in later without changing the ACL model.
+ * arrived on — to the subject token ACL evaluation matches against ACE subjects: opaque bytes,
+ * appended to @p out. The token is identity-provenance: v1 typically writes the
+ * transport-authenticated peer id for a link; a stronger (PKI) token slots in later without
+ * changing the ACL model. @p out is empty on entry and is drawn from a stack-first frame the
+ * ACL gate owns, which spills to the graph's table source only for a token past 64 bytes, so a
+ * gated operation allocates nothing for its subject. No owning container crosses the seam
+ * (ADR-0083 Decision 11).
  *
- * @warning The ERROR arm is a **deny**, not a fallback (#905). A resolver that cannot name
- *          the caller returns `std::unexpected(wire::err_t::ACCESS_DENIED)` and the
- *          operation fails `status_t::PERMISSION_DENIED` at every gate — READ, WRITE, the
- *          `:subscribers[N]` holder test, and remote-edge fan-in delivery. It is
- *          never invoked with an empty caller: the empty (local API) context is the
- *          trusted-by-convention channel and `graph_t::acl_allows` short-circuits it
- *          BEFORE the resolver, so a remote identity — which always carries a non-empty
- *          inbound link NAME — cannot reach the trusted arm. The predecessor of this type
- *          returned `std::optional`, whose `nullopt` meant "fully trusted": an
- *          unresolvable caller was granted everything.
+ * @warning The ERROR arm is a **deny**, not a fallback (#905). A seam that cannot name the
+ *          caller returns `std::unexpected(wire::err_t::ACCESS_DENIED)` and the operation
+ *          fails `status_t::PERMISSION_DENIED` at every gate — READ, WRITE, the
+ *          `:subscribers[N]` holder test, and remote-edge fan-in delivery. A refused append
+ *          (the source is exhausted) should answer the same: an unnamed caller fails closed.
+ *          It is never invoked with an empty caller: the empty (local API) context is the
+ *          trusted-by-convention channel and `graph_t::acl_allows` short-circuits it BEFORE
+ *          the seam, so a remote identity — which always carries a non-empty inbound link
+ *          NAME — cannot reach the trusted arm. A token spelling `EVERYONE@` is refused at
+ *          every gate (#908).
  *
- * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049). The predecessor was
- *       a `std::function` in a plain member that the ACL gate read on every gated read and
- *       write while a public setter could assign it — and assigning a `std::function`
- *       DESTROYS the old target, so a setter racing a gate freed the resolver's captured
- *       state while a reader was inside the call. A bare function pointer is publishable in
- *       one word, so the pair lives in a @ref tr::sink_slot_t and the gate reads a coherent
- *       snapshot for the same single load the null check already cost. Whatever state the
- *       resolver needs travels in @p ctx, which the caller owns and must keep alive across
- *       every possible gated operation.
- */
-using subject_resolver_fn_t =
-    std::expected<subject_token_t, wire::err_t> (*)(void* ctx, std::string_view caller);
-
-/**
- * @brief The subject resolver writing into CALLER storage (#1781): caller context → subject
- *        token, with no owning container crossing the seam.
+ * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049): assigning a
+ *       `std::function` destroys the old target, so a setter racing a gate would free the
+ *       seam's captured state while a reader was inside the call. A bare function pointer is
+ *       publishable in one word, so the pair lives in a @ref tr::sink_slot_t and the gate reads
+ *       a coherent snapshot. Whatever state the seam needs travels in @p ctx, which the caller
+ *       owns and must keep alive across every possible gated operation.
  *
- * The same contract as @ref subject_resolver_fn_t — the error arm is a DENY, it is never
- * invoked with an empty caller, and a token spelling `EVERYONE@` is refused at every gate —
- * but the token is appended to @p out instead of returned. @p out is empty on entry and is
- * drawn from a stack-first frame the ACL gate owns, which spills to the graph's table source
- * only for a token past 64 bytes, so a gated operation allocates nothing for its subject. A
- * refused append (the source is exhausted) should answer `wire::err_t::ACCESS_DENIED`: an
- * unnamed caller fails closed.
- *
- * Install it as @ref graph_hooks_t::subject_lookup. It replaces @ref subject_resolver_fn_t,
- * which is removed once its callers have moved (ADR-0083 Decision 11).
+ * Install it as @ref graph_hooks_t::subject_lookup. It replaced the returning form
+ * (`subject_resolver_fn_t`, a `std::vector` token), deleted by #2239.
  */
 using subject_lookup_fn_t = std::expected<void, wire::err_t> (*)(void* ctx, std::string_view caller,
                                                                  mem::bytes_t& out);
@@ -341,7 +324,7 @@ struct sub_event_t {
  *          APP's job, exactly as it is for @ref graph_hooks_t::remote_delivery.
  *
  * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049) — see
- *       `subject_resolver_fn_t` for why. @p ctx is caller-owned and must outlive every
+ *       @ref subject_lookup_fn_t for why. @p ctx is caller-owned and must outlive every
  *       subscription mutation the graph can still report.
  */
 using sub_observer_fn_t = void (*)(void* ctx, const sub_event_t& event);
@@ -662,9 +645,8 @@ using creation_hook_t =
                           std::string_view subject, const view::rope_t& payload)>;
 
 /**
- * @brief The graph's five wiring seams as ONE aggregate (RFC-0028 §4.12, D12) — what
- *        `graph_t`'s constructor and @ref graph_t::set_hooks take, in place of the five
- *        `configure_*` verbs slice 10 deleted.
+ * @brief The graph's wiring seams as ONE aggregate (RFC-0028 §4.12, D12) — what `graph_t`'s
+ *        constructor takes, and what names each seam for @ref graph_t::set_hook.
  *
  * Every slot is a @ref graph_hook_t, published through a `tr::sink_slot_t`, so a hot-path
  * reader dispatches from one coherent `{fn, ctx}` snapshot — never a new `fn` beside a stale
@@ -672,27 +654,17 @@ using creation_hook_t =
  * `graph_hooks_t{}` is the un-wired graph and a caller names only what it installs:
  *
  * @code
- * tr::graph::graph_t g{pool, {.subject_resolver = {&resolve, &my_acl}}};
+ * tr::graph::graph_t g{pool, {.subject_lookup = {&resolve, &my_acl}}};
  * @endcode
+ *
+ * After construction each seam is installed on its own (#2239, which reverses D12's one
+ * replace-everything verb): `g.set_hook(&graph_hooks_t::remote_delivery, {fn, ctx})` touches
+ * that slot and no other.
  *
  * CONFIGURATION, not runtime knobs (#1049): install at wiring time, from one thread, before
  * frames flow. Each `ctx` must outlive every dispatch that can still reach its seam.
  */
 struct graph_hooks_t {
-    /**
-     * @brief The ACL enforcement switch (ADR-0018): maps a non-empty caller context to a
-     *        subject token.
-     *
-     * Null (the default) DISABLES enforcement: every operation is allowed and the hot path
-     * pays one relaxed load. With a resolver, each gated operation with a NON-EMPTY caller
-     * evaluates the target's *effective* ACL (own ACEs + inherited, ADR-0020); denial returns
-     * `PERMISSION_DENIED`. The EMPTY caller context is the local-API convention and is
-     * trusted without consulting the resolver (#905), so the resolver's error arm is free to
-     * mean DENY. A token equal to `tr::graph::kEveryoneSubject` is refused at every gate
-     * (#908): the wire has one spelling for a subject token.
-     */
-    graph_hook_t<subject_resolver_fn_t> subject_resolver{};
-
     /**
      * @brief The EXTERNAL subscription observer — fired on every `:subscribers[]` mutation
      *        that arrived over a transport (see @ref sub_event_t for what "external" means).
@@ -743,11 +715,14 @@ struct graph_hooks_t {
     graph_hook_t<link_hold_fn_t> link_hold{};
 
     /**
-     * @brief The ACL enforcement switch in its caller-storage form (#1781): the same seam as
-     *        @ref subject_resolver, with the token written into a buffer the gate owns
-     *        (@ref subject_lookup_fn_t). Takes precedence when both are installed.
+     * @brief The ACL enforcement switch (ADR-0018, @ref subject_lookup_fn_t): maps a non-empty
+     *        caller context to a subject token.
      *
-     * Last in the aggregate so every existing designated initializer keeps compiling.
+     * Null (the default) DISABLES enforcement: every operation is allowed and the hot path
+     * pays one relaxed load. With one installed, each gated operation with a NON-EMPTY caller
+     * evaluates the target's *effective* ACL (own ACEs + inherited, ADR-0020); denial returns
+     * `PERMISSION_DENIED`. The EMPTY caller context is the local-API convention and is
+     * trusted without consulting the seam (#905), so its error arm is free to mean DENY.
      */
     graph_hook_t<subject_lookup_fn_t> subject_lookup{};
 
@@ -785,8 +760,9 @@ struct graph_hooks_t {
  *        the per-vertex `set_*` wiring verbs slice 10 deleted.
  *
  * Owner-side, host-only, with no wire surface: no peer can read or write any of it, and
- * nothing is inherited (RFC-0022 §3.F). Every member defaults to what an undeclared vertex
- * does, so `vertex_policy_t{}` is the default vertex and a caller names only what differs:
+ * nothing is inherited (RFC-0022 §3.F). Every member is optional and a caller names only what
+ * it declares: at registration an unnamed member takes what an undeclared vertex does, so
+ * `vertex_policy_t{}` is the default vertex:
  *
  * @code
  * const auto v = g.register_vertex(path, role_t::STREAM, {},
@@ -794,14 +770,16 @@ struct graph_hooks_t {
  *                                   .ring_source = &ring_pool, .ring_reliable = true});
  * @endcode
  *
- * A policy is stated WHOLE: @ref graph_t::set_policy applies every member, so a member left
- * at its default resets that property. Applying a member that already holds costs nothing —
+ * @ref graph_t::set_policy changes ONLY the members it names (#2239): an unnamed member keeps
+ * what the vertex holds, so `g.set_policy(v, {.depth = 64})` moves the depth and nothing else.
+ * To reset a property, name its default (`.ring_source = nullptr`,
+ * `.app_fields = %app_fields_decl_t{}`). Applying a member that already holds costs nothing —
  * in particular a default policy on a fresh vertex allocates no extension block.
  */
 struct vertex_policy_t {
     /**
-     * @brief What the vertex retains after a write is delivered (RFC-0028 §5.4, D4); unset ⇒
-     *        the role's default (`STORED_VALUE` → `LAST`, `STREAM` → `N` at depth 1,
+     * @brief What the vertex retains after a write is delivered (RFC-0028 §5.4, D4); unset at
+     *        registration ⇒ the role's default (`STORED_VALUE` → `LAST`, `STREAM` → `N` at depth 1,
      *        `HANDLER` → `NONE`).
      *
      * Legal pairings: `STORED_VALUE` `NONE`|`LAST`, `STREAM` `NONE`|`N`, `HANDLER` `NONE`. An
@@ -819,8 +797,9 @@ struct vertex_policy_t {
      */
     std::optional<retention_t> retention{};
 
-    /** @brief Ring depth under `retention_t::N` (0 behaves as 1); ignored otherwise. */
-    std::uint32_t depth = 1;
+    /** @brief Ring depth under `retention_t::N` (0 behaves as 1); ignored otherwise. Unset at
+     *         registration ⇒ 1. */
+    std::optional<std::uint32_t> depth{};
 
     /**
      * @brief The copy-or-share hint (RFC-0022 Amendment 3): whether a written value is stored
@@ -833,9 +812,9 @@ struct vertex_policy_t {
      * arena and the heap root share, the slab pool shares on a class fit. `SHARE` shares whenever
      * the block can be shared; `COPY` always copies. What sharing costs on a POOLED RX backend: the
      * shared value BORROWS its receive block until it is displaced, so a long-lived value on a
-     * small pool is the case for `COPY`.
+     * small pool is the case for `COPY`. Unset at registration ⇒ `DEFAULT`.
      */
-    share_hint_t share_hint = share_hint_t::DEFAULT;
+    std::optional<share_hint_t> share_hint{};
 
     /**
      * @brief The receiving STREAM vertex's own ring source (RFC-0025 §4.6.1 clause 3); null ⇒
@@ -845,9 +824,10 @@ struct vertex_policy_t {
      * that party's own source. Each admitted entry reserves its retained width from the
      * source until it retires. Per-injection-point, never a shared pool: one receiver running
      * its source dry must not affect another. Changing it DRAINS the ring (every reservation
-     * goes back to the source that served it). Meaningful only on a `STREAM`.
+     * goes back to the source that served it). Meaningful only on a `STREAM`. Unset at
+     * registration ⇒ null; naming `nullptr` returns the vertex to the graph default.
      */
-    mem::block_source_t* ring_source = nullptr;
+    std::optional<mem::block_source_t*> ring_source{};
 
     /**
      * @brief The §4.4 pressure arm for `ring_source`: `false` (default) BEST-EFFORT — a
@@ -855,13 +835,14 @@ struct vertex_policy_t {
      *        `tr::flow::address_shift_gap`; `true` RELIABLE — the admission is refused,
      *        nothing is shed, and the LOCAL producer's write answers `BACKPRESSURE`.
      */
-    bool ring_reliable = false;
+    std::optional<bool> ring_reliable{};
 
     /**
      * @brief How the vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C);
-     *        default `IF_NEWER`. Maintains the sweep's UNCONDITIONAL membership.
+     *        unset at registration ⇒ `IF_NEWER`. Maintains the sweep's UNCONDITIONAL
+     *        membership.
      */
-    delivery_mode_t delivery_mode = delivery_mode_t::IF_NEWER;
+    std::optional<delivery_mode_t> delivery_mode{};
 
     /**
      * @brief The vertex's application property field table (RFC-0010 §A) — owning, or
@@ -872,9 +853,11 @@ struct vertex_policy_t {
      * operations), unless the declaration is the very one already installed — the same
      * borrowed array, or an owning table while one of the same shape stands, in which case
      * stored field values are kept. A borrowed table AND the bytes it points at must outlive
-     * the vertex.
+     * the vertex. Unset ⇒ the vertex keeps the table it has (none, at registration); naming an
+     * empty declaration (`%app_fields_decl_t{}`, not `{}`, which is the unset optional)
+     * uninstalls it.
      */
-    app_fields_decl_t app_fields{};
+    std::optional<app_fields_decl_t> app_fields{};
 };
 
 /**
@@ -984,7 +967,7 @@ class graph_t {
      * @param hooks The graph's wiring seams (@ref graph_hooks_t), installed before the
      *              constructor returns. Default: none — ACL enforcement off, no observer, no
      *              transport plane. A router constructed later installs its three through
-     *              @ref set_hooks.
+     *              @ref set_hook, one seam at a time.
      * @param src The one nothrow failable block source every allocation above draws from.
      *            Host-owned; it MUST outlive the graph and every value handle obtained
      *            from it. An injected source must be thread-safe on a target where a value
@@ -1500,7 +1483,7 @@ class graph_t {
 
     /**
      * @brief True iff this graph enforces an ACL at all — a subject hook is installed
-     *        (`subject_lookup`, or `subject_resolver` through its adapter).
+     *        (`subject_lookup`).
      *
      * One relaxed load of the slot the ACL gate reads. With no hook every @ref allows answers true
      * for a remote caller, so a hop that would first have to LOCATE the vertex to evaluate at (a
@@ -1982,7 +1965,8 @@ class graph_t {
     /**
      * @brief A child-vertex factory: the device-catalog entry ADR-0017 makes concrete.
      *
-     * Given the composed child key (parent key + the SPEC's `name` NAME) and the optional
+     * Given the composed child key (parent key + the SPEC's `name` NAME; a view BORROWED for
+     * the call) and the optional
      * SPEC `config` SETTINGS (a node read in place over the SPEC's bytes, valid for the call
      * only — #1829), it registers the child vertex(es) and returns the primary
      * handle (or a status — e.g. `PATH_IN_USE`). The graph owns the *addressing* (the key
@@ -1990,7 +1974,7 @@ class graph_t {
      * A @ref hook_t (RFC-0028 D10): its `ctx` must outlive the graph.
      */
     using child_factory_t = hook_t<result_t<vertex_handle_t>(
-        graph_t&, std::vector<std::byte> child_key, const wire::tlv_node_t* config)>;
+        graph_t&, std::span<const std::byte> child_key, const wire::tlv_node_t* config)>;
 
     /**
      * @brief Populate the device creation catalog (ADR-0017): map a SPEC `type` selector
@@ -2146,14 +2130,15 @@ class graph_t {
     [[nodiscard]] retention_t retention(vertex_handle_t v) const noexcept;
 
     /**
-     * @brief Apply @p policy to @p v WHOLE (RFC-0028 §4.12, D12) — the one owner-side wiring
-     *        verb that replaced `set_retention`, `set_share_threshold_bytes`,
+     * @brief Apply the members @p policy NAMES to @p v (RFC-0028 §4.12, D12; #2239) — the one
+     *        owner-side wiring verb that replaced `set_retention`, `set_share_threshold_bytes`,
      *        `set_ring_source`, `set_delivery_mode`, `set_app_fields` and
      *        `set_app_fields_static`.
      *
-     * Every member of @ref vertex_policy_t is applied, so a member left at its default resets
-     * that property; a member that already holds is skipped, so re-applying a policy costs
-     * nothing and a default policy on a fresh vertex allocates nothing. A wiring-time call,
+     * A member left unset keeps what @p v holds, so a caller names only what it changes and
+     * needs nothing to read first; a named member that already holds is skipped, so
+     * re-applying a policy costs nothing. `retention_t::N` named without a `depth` keeps the
+     * current depth. A wiring-time call,
      * like `register_vertex` (the "configure before frames flow" contract): changing the ring
      * source drains the ring, switching retention to `NONE` drops what is held, and
      * re-declaring an owning field table resets its values to the declared ones.
@@ -2235,16 +2220,10 @@ class graph_t {
     [[nodiscard]] result_t<value_ref_t> read(vertex_handle_t v, const field_path_t& field,
                                              std::string_view caller = {}) const;
     /**
-     * @brief Read the `:subscribers[]` array — the populated slot SUBSCRIBER views in slot order.
-     *
-     * Each is a zero-copy refcount clone of the stored source view. The FWD resolver ropes
-     * these under a fresh PL=1 wrapper into the REPLY (RFC-0004 §D, no byte copy).
-     */
-    [[nodiscard]] result_t<std::vector<view::view_t>> read_subscribers(
-        vertex_handle_t v, std::string_view caller = {}) const;
-    /**
-     * @brief @ref read_subscribers into a core array (#1781): @p out is replaced by the populated
-     *        slot SUBSCRIBER views in slot order, each a refcount clone.
+     * @brief Read the `:subscribers[]` array (#1781): @p out is replaced by the populated slot
+     *        SUBSCRIBER views in slot order, each a zero-copy refcount clone of the stored
+     *        source view. The FWD resolver ropes these under a fresh PL=1 wrapper into the
+     *        REPLY (RFC-0004 §D, no byte copy).
      *
      * The table is drawn from @p out's own source (the caller's choice), so nothing here
      * allocates on the graph's account.
@@ -2288,6 +2267,9 @@ class graph_t {
      * Draining ADVANCES the cursor, so a later @ref propagate sweep will not re-deliver what
      * this took — the caller now owns delivering them.
      *
+     * The snapshot is drawn from @p out's own source (#1781); a refused reservation drains
+     * nothing (0) and leaves the entries owed to the next covering flush.
+     *
      * @param v   The STREAM vertex to drain.
      * @param out Caller storage the drained entries are assigned into (overwritten).
      * @param gap_before Optional out: shed points on this ring since the previous drain — the
@@ -2303,14 +2285,6 @@ class graph_t {
      * @retval status_t::PERMISSION_DENIED The local caller lacks READ. A drain hands back the
      *         SAME bytes @ref history serves, so leaving it ungated would be a READ-gate
      *         bypass wearing a different verb's name.
-     */
-    [[nodiscard]] result_t<std::size_t> drain_unflushed(vertex_handle_t v,
-                                                        std::vector<value_ref_t>& out,
-                                                        std::uint64_t* gap_before = nullptr);
-    /**
-     * @brief @ref drain_unflushed into a core array (#1781) — the same contract and the same
-     *        refusals. The snapshot is drawn from @p out's own source; a refused reservation
-     *        drains nothing (0) and leaves the entries owed to the next covering flush.
      */
     [[nodiscard]] result_t<std::size_t> drain_unflushed(vertex_handle_t v,
                                                         mem::block_array_t<value_ref_t>& out,
@@ -2695,26 +2669,51 @@ class graph_t {
     void clear_identity();
 
     /**
-     * @brief Replace the graph's five wiring seams WHOLE (RFC-0028 §4.12, D12) — the one
-     *        verb that replaced the five `configure_*` verbs.
+     * @brief Install ONE wiring seam (#2239), leaving every other seam as it was.
      *
-     * The constructor takes the application's hooks; this verb exists for the party that
-     * can only be built AFTER the graph — `tr::net::fwd_router_t`, whose constructor takes
-     * the graph and installs its three transport-plane seams (`remote_delivery`,
-     * `wire_target`, `stats_sampler`) by reading @ref hooks, filling its slots and handing
-     * the whole struct back, so the application's two stay as they were.
+     * @p seam names the slot by its @ref graph_hooks_t member; @p hook is what goes in it, and
+     * a null `fn` clears it. The application, `tr::net::fwd_router_t` (`remote_delivery`,
+     * `wire_target`, `stats_sampler`, `link_name`) and `tr::net::transport_vertex_t` (`link_hold`)
+     * each install their own seams through this verb, and none can unplug another's: an application
+     * that installs its subject seam after building a router keeps remote delivery.
      *
-     * CONFIGURATION, not a runtime knob (#1049): from one thread, before frames flow. Each
-     * slot is published through its own `tr::sink_slot_t`, so a dispatch racing the install
-     * sees a whole new pair, a whole old one, or none — never a new `fn` beside a stale
-     * `ctx`; what it does NOT do is stop a dispatch already in flight, so every `ctx` must
-     * outlive every dispatch that can still reach its seam.
+     * @code
+     * g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {&lookup, &my_acl});
+     * @endcode
+     *
+     * In a build without `config_t::kSessionAdmission`, naming `session_admission` does not
+     * compile.
+     *
+     * CONFIGURATION, not a runtime knob (#1049): from one thread, before frames flow. The slot
+     * is published through its own `tr::sink_slot_t`, so a dispatch racing the install sees a
+     * whole new pair, a whole old one, or none — never a new `fn` beside a stale `ctx`; what it
+     * does NOT do is stop a dispatch already in flight, so @p hook's `ctx` must outlive every
+     * dispatch that can still reach its seam.
      */
-    void set_hooks(const graph_hooks_t& hooks) noexcept;
+    template <class Fn>
+    void set_hook(graph_hook_t<Fn> graph_hooks_t::* /*seam*/, graph_hook_t<Fn> hook) noexcept {
+        seam_slot<Fn>(*this).set(hook.fn, hook.ctx);
+    }
 
-    /** @brief The five wiring seams as currently installed — the read half of
-     *         @ref set_hooks (one coherent snapshot per slot). */
-    [[nodiscard]] graph_hooks_t hooks() const noexcept;
+    /**
+     * @brief Clear @p seam only if @p owner installed what it holds (#2239) — what a party's
+     *        destructor calls, so a seam someone else installed since is left alone.
+     *
+     * `~fwd_router_t` clears its four this way and `~transport_vertex_t` its one, so a write
+     * that reaches a remote edge after the router is gone finds no sink instead of calling
+     * into freed memory. A dispatch already in flight is not waited for.
+     */
+    template <class Fn>
+    void clear_hook(graph_hook_t<Fn> graph_hooks_t::*seam, const void* owner) noexcept {
+        if (hook(seam).ctx == owner) set_hook(seam, {});
+    }
+
+    /** @brief What @p seam holds now — the read half of @ref set_hook (one coherent snapshot). */
+    template <class Fn>
+    [[nodiscard]] graph_hook_t<Fn> hook(graph_hook_t<Fn> graph_hooks_t::* /*seam*/) const noexcept {
+        const auto h = seam_slot<Fn>(*this).get();
+        return {h.fn, h.ctx};
+    }
 
     /**
      * @brief Ask the installed sampler for one net-plane seam — the read side of
@@ -3457,11 +3456,17 @@ class graph_t {
     // control path only, never on delivery.
     [[nodiscard]] bool may_write_slot(vertex_t* v, std::size_t slot, std::string_view caller,
                                       remote_ptr_t& edge) const;
-    /** @brief The @ref subject_lookup_fn_t that adapts a resolver installed in the returning
-     *         form (@ref graph_hooks_t::subject_resolver): @p ctx is the graph, and the token
-     *         the resolver returns is copied into @p out. */
-    static std::expected<void, wire::err_t> lookup_via_resolver(void* ctx, std::string_view caller,
-                                                                mem::bytes_t& out);
+    /** @brief The `tr::sink_slot_t` behind the seam whose function type is @p Fn — one slot per
+     *         type, so naming a seam names its slot (#2239). A build without
+     *         `config_t::kSessionAdmission` has no slot of that type, so it does not compile. */
+    template <class Fn, class Self>
+    [[nodiscard]] static auto& seam_slot(Self& self) noexcept {
+        using slot_t =
+            std::conditional_t<std::is_const_v<Self>, const seam_slot_t<Fn>, seam_slot_t<Fn>>;
+        return std::get<slot_t&>(std::tie(
+            self.remote_sink_, self.subject_lookup_, self.subscription_observer_, self.wire_target_,
+            self.stats_sampler_, self.link_hold_, self.session_admission_, self.link_name_));
+    }
     // Subtree-precise ADR-0050 cache invalidation: mark `v` and every descendant's
     // cached effective-ACE merge stale (release stores) after a :acl write on `v`,
     // via the ADR-0057 child links — wiring-frequency. Call with map_mutex_ held
@@ -3838,17 +3843,14 @@ class graph_t {
     // The five CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
     // through a sink_slot_t — the mechanism #914 established for fwd_router_t's five, hoisted
     // to the layer-neutral `tr` namespace so L4 can hold one without naming the net plane.
-    // The doctrine is setup-only and `set_hooks` says so; the slot is
+    // The doctrine is setup-only and `set_hook` says so; the slot is
     // what makes a violation DEFINED (a skipped dispatch) rather than the use-after-free the
     // std::function predecessors had, since assigning a std::function destroys the old
     // target — freeing its captures while a reader is inside the call. An unset slot reads as
     // one relaxed load, which is what the null check on the plain member cost.
     tr::sink_slot_t<remote_delivery_fn_t> remote_sink_;  // read on the write hot path
-    // The ACL gate reads ONLY `subject_lookup_` (#1781). A resolver installed in the returning
-    // form is kept in `subject_resolver_` and reached through `lookup_via_resolver`, which
-    // `set_hooks` installs in its place — so the disabled gate stays one relaxed load.
+    // The ACL gate reads `subject_lookup_` (#1781), so the disabled gate is one relaxed load.
     tr::sink_slot_t<subject_lookup_fn_t> subject_lookup_;       // read by the ACL gate
-    tr::sink_slot_t<subject_resolver_fn_t> subject_resolver_;   // the returning form, if set
     tr::sink_slot_t<sub_observer_fn_t> subscription_observer_;  // read on subscribe/clear
     tr::sink_slot_t<wire_target_fn_t> wire_target_;             // read on a wire subscribe only
     // The FIFTH (RFC-0010 Amendment 2): the net plane's `:stats` seam sampler, installed by
@@ -3881,6 +3883,13 @@ class graph_t {
     [[no_unique_address]] std::conditional_t<config_t::kSessionAdmission,
                                              tr::sink_slot_t<link_name_fn_t>,
                                              no_session_slot_t<link_name_fn_t>> link_name_;
+    /** @brief The slot type behind the seam whose function type is @p Fn (#2239): a session-plane
+     *         seam's slot stores nothing in a build without `config_t::kSessionAdmission`. */
+    template <class Fn>
+    using seam_slot_t = std::conditional_t<!config_t::kSessionAdmission &&
+                                               (std::is_same_v<Fn, session_admission_fn_t> ||
+                                                std::is_same_v<Fn, link_name_fn_t>),
+                                           no_session_slot_t<Fn>, tr::sink_slot_t<Fn>>;
     // The NODE's identity record, pre-serialized (#406, RFC-0011 §B): the complete
     // SETTINGS{kind,key} TLV, built once at install so every `:identity` read is a copy
     // of settled bytes rather than a re-emit — the "all vertices return byte-identical

@@ -501,17 +501,13 @@ void run_inproc_remote(std::size_t S, std::size_t F, const char* mode,
         std::size_t link_bytes;
     };
     sink_ctx_t sink_ctx{&recv, 0};
-    {
-        auto hooks = g.hooks();
-        hooks.remote_delivery = {
-            [](void* ctx, const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-                auto* s = static_cast<sink_ctx_t*>(ctx);
-                s->n->fetch_add(1, std::memory_order_relaxed);
-                s->link_bytes += d.link.conn;  // READ the edge's link, don't just count
-            },
-            &sink_ctx};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::remote_delivery,
+               {[](void* ctx, const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
+                    auto* s = static_cast<sink_ctx_t*>(ctx);
+                    s->n->fetch_add(1, std::memory_order_relaxed);
+                    s->link_bytes += d.link.conn;  // READ the edge's link, don't just count
+                },
+                &sink_ctx});
 
     const path_t src_path = *path_t::parse("/bench/remote-src");
     const vertex_handle_t src = g.register_vertex(src_path, role_t::STORED_VALUE);
@@ -957,23 +953,19 @@ namespace acl_bench {
 /** @brief Install a subject lookup writing a non-empty caller's own bytes as its token.
  *
  * The caller-storage form (#1781): the token lands in the gate's stack frame, so a gated op
- * allocates nothing for it. The deprecated returning-form `subject_resolver` still works, through
- * an adapter that copies its vector into the same frame. */
+ * allocates nothing for it. It is the only subject seam (#2239). */
 void install_resolver(graph_t& g) {
-    {
-        auto hooks = g.hooks();
-        hooks.subject_lookup = {
-            [](void*, std::string_view caller,
-               tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
-                // The empty (local) context is settled as trusted before the lookup runs (#905),
-                // so the setup writes never arrive here.
-                if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))
-                    return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
-                return {};
-            },
-            nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(
+        &tr::graph::graph_hooks_t::subject_lookup,
+        {[](void*, std::string_view caller,
+            tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+             // The empty (local) context is settled as trusted before the lookup runs (#905),
+             // so the setup writes never arrive here.
+             if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))
+                 return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+             return {};
+         },
+         nullptr});
 }
 
 /** @brief Write a single INHERIT ALLOW ACE for subject "peer" onto `path`:acl. */

@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
@@ -125,10 +126,10 @@ tr::view::view_t owned(std::span<const std::byte> bytes) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it as
  * trusted before invoking one (#905) — so the error arm here means DENY and nothing else.
  */
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(
-    void*, std::string_view caller) {
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
-    return tr::graph::subject_token_t(p, p + caller.size());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + caller.size()));
 }
 
 /** @brief An ACL granting @p subject exactly @p mask, and nothing else. */
@@ -371,11 +372,7 @@ int main() {
     std::printf("\n4) §8.1: a denied operation answers denied and nothing else\n");
     {
         node_t n(/*mint=*/true);
-        {
-            auto hooks = n.g.hooks();
-            hooks.subject_resolver = {caller_is_subject, nullptr};
-            n.g.set_hooks(hooks);
-        }
+        n.g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
         // The subject IS the caller context, so a frame arriving on `cli` is subject `cli`.
         // WRITE and nothing else, so the READ below is refused AT THE VERTEX.
         (void)n.g.write(
@@ -506,11 +503,8 @@ int main() {
             const auto gate = [&](node_t& n) {
                 // WRITE always, so both arms can MINT through a granted operation; READ only
                 // on the allow arm, so the read under test is refused AT THE VERTEX.
-                {
-                    auto hooks = n.g.hooks();
-                    hooks.subject_resolver = {caller_is_subject, nullptr};
-                    n.g.set_hooks(hooks);
-                }
+                n.g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+                             {caller_is_subject, nullptr});
                 const std::uint32_t mask =
                     static_cast<std::uint32_t>(tr::graph::acl_right_t::WRITE) |
                     (allow ? static_cast<std::uint32_t>(tr::graph::acl_right_t::READ) : 0u);

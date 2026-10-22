@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/packed_path.hpp"
@@ -141,10 +142,10 @@ tr::view::view_t owned(std::span<const std::byte> bytes) {
 }
 
 /** @brief The test subject resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(
-    void*, std::string_view caller) {
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
-    return tr::graph::subject_token_t(p, p + caller.size());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + caller.size()));
 }
 
 /** @brief An ACL granting @p subject exactly @p mask, and nothing else. */
@@ -520,11 +521,7 @@ void refusals() {
 void authorization() {
     std::printf("\n8) §6.4: the hop's verdict is the same whichever way the hop is spelled\n");
     node_t n;
-    {
-        auto hooks = n.g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        n.g.set_hooks(hooks);
-    }
+    n.g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     // READ and nothing else through the egress connection vertex, for the inbound subject.
     (void)n.g.write(path_t("/net/uplink/b:acl"),
                     owned(allow_acl(kInLink, static_cast<std::uint32_t>(acl_right_t::READ))));

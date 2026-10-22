@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
@@ -206,7 +207,7 @@ void run() {
     check(ra.attach_link("srv", server), "A mounts its listener as srv");
     const auto v = gb.register_vertex(*path_t::parse("/ctl/state"), role_t::STORED_VALUE);
     const auto subscribers = [&] {
-        const auto s = gb.read_subscribers(v);
+        const auto s = tr::testing::read_subscribers(gb, v);
         return s ? s->size() : std::size_t{0};
     };
 

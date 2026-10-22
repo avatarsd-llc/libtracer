@@ -47,7 +47,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::view::rope_t;
 using tr::view::view_t;
@@ -339,15 +338,12 @@ void test_write_creates_acl_gate() {
     if (!tr::testing::allow_creation(g, parent)) return;  // no hook slot: every miss refuses
     // Enforcement is on for the ATTRIBUTED caller "peer"; the empty (local) context stays
     // trusted without consulting the resolver (#905), which is what the setup writes use.
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {
-            [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-                return subject_token_t{std::byte{'u'}};
-            },
-            nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+               {[](void*, std::string_view,
+                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+                    return tr::testing::subject_into(out, "u");
+                },
+                nullptr});
     std::vector<std::byte> everyone;
     for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
     // Built via the typed ADR-0050 surface (encode_acl) — no hand-rolled ACE bytes.
@@ -388,15 +384,12 @@ void test_branch_write_acl_admission() {
     vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     vertex_handle_t st = g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
     vertex_handle_t su = g.register_vertex(path_t("/s/u"), role_t::STORED_VALUE);
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {
-            [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-                return subject_token_t{std::byte{'u'}};
-            },
-            nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+               {[](void*, std::string_view,
+                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+                    return tr::testing::subject_into(out, "u");
+                },
+                nullptr});
     // Close /s/u to writes (an ACL granting only READ — any present ACE closes it),
     // built via the typed ADR-0050 surface (encode_acl).
     std::vector<std::byte> everyone;

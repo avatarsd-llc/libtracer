@@ -261,8 +261,8 @@ and do not touch the C++ core via wasi-sdk until the Rust route has proven the C
 
 **What is missing.** `docs/adr/0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md`
 sets the direction: authentication is ordinary graph reads and writes over the existing
-pluggable-subject seam — `subject_token_t` plus the resolver the ADR calls
-`subject_resolver_t` and the header now spells `subject_resolver_fn_t`, both in
+pluggable-subject seam — the resolver the ADR calls `subject_resolver_t`, which the header
+now spells `subject_lookup_fn_t` (the token written into caller storage), in
 `core/include/libtracer/graph.hpp`; **core takes zero crypto**; identity is
 per-hop raw ed25519 with trust-on-first-use; link confidentiality comes from TLS 1.3 on
 QUIC/WebTransport or, for plaintext MCU links, a Noise-pattern channel in the catalog's

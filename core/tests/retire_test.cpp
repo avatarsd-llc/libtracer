@@ -34,6 +34,7 @@
 #include <thread>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -50,7 +51,6 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
@@ -75,8 +75,9 @@ tr::view::view_t val_u8(std::uint8_t b) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 std::vector<std::byte> acl_granting(std::string_view subject, std::uint32_t mask,
@@ -165,11 +166,7 @@ void test_revive_is_fresh() {
 void test_confused_deputy() {
     std::printf("§B.6: revived path inherits the PARENT ACL, not the retired owner's:\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     (void)g.register_vertex(path_t("/net"), role_t::STORED_VALUE);
     vertex_handle_t b = g.register_vertex(path_t("/net/b"), role_t::STORED_VALUE);
 

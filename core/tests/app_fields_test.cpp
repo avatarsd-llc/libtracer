@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -47,7 +48,6 @@ using tr::graph::handlers_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::view::rope_t;
 using tr::wire::opt_t;
@@ -106,8 +106,9 @@ bool fails_with(const tr::graph::result_t<void>& r, status_t s) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 constexpr std::uint32_t bit(acl_right_t r) { return static_cast<std::uint32_t>(r); }
@@ -284,11 +285,7 @@ void test_field_set_is_closed() {
 void test_gating() {
     std::printf("access gating (RFC-0010 sketch 3):\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     const vertex_handle_t v = g.register_vertex(path_t("/dev/y"), role_t::STORED_VALUE);
 
     std::vector<app_field_t> table;
@@ -383,7 +380,7 @@ void test_schema_merge() {
           "wo field is DESCRIBED in :schema (only its value has no read surface)");
 
     // Uninstall (empty table) restores today's shape byte-for-byte.
-    (void)g.set_policy(v, {.app_fields = {}});
+    (void)g.set_policy(v, {.app_fields = tr::graph::app_fields_decl_t{}});
     const std::optional<decoded_t> cleared = decode_read(g.read(path_t("/dev/z:schema")));
     check(cleared.has_value() && tr::wire::encode(cleared->tlv) == tr::wire::encode(before->tlv),
           "empty table uninstalls: schema byte-identical to the pre-install read");
@@ -452,7 +449,8 @@ void test_storage_shape() {
           "declaring+writing 16 fields minted NO child vertices (member listing empty)");
     check(!g.find(path_t("/dev/n/f0").key()).has_value(),
           "an app field name is not an addressable vertex");
-    check(g.read_subscribers(v).has_value() && g.read_subscribers(v)->empty(),
+    check(tr::testing::read_subscribers(g, v).has_value() &&
+              tr::testing::read_subscribers(g, v)->empty(),
           "no subscriber slots appeared");
 }
 
@@ -647,7 +645,7 @@ void test_borrowed_static_install() {
           "borrowed: undeclared sibling stays SCHEMA_NOT_FOUND");
 
     // Empty table uninstalls, reverting to the closed pre-RFC surface.
-    (void)g.set_policy(borrow, {.app_fields = {}});
+    (void)g.set_policy(borrow, {.app_fields = tr::graph::app_fields_decl_t{}});
     check(fails_with(g.read(path_t("/y/pid:settings.app.kp")), status_t::SCHEMA_NOT_FOUND),
           "borrowed: empty table uninstalls (back to SCHEMA_NOT_FOUND)");
 }

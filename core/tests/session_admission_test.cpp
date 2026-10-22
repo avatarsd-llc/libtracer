@@ -167,11 +167,12 @@ void install(graph_t& g, budget_t* b) {
     // The sessions this file's edges name, by the pair each stores (#1941).
     static const std::vector<std::string> kSessions{"s1", "s2", "s3"};
     tr::testing::name_test_links(g, kSessions);
-    auto hooks = g.hooks();
-    [b](auto& hook) {
-        if constexpr (requires { hook.fn; }) hook = {b != nullptr ? &budget_t::hook : nullptr, b};
-    }(hooks.session_admission);
-    g.set_hooks(hooks);
+    [&g, b](const auto& hook) {
+        using hook_t = std::remove_cvref_t<decltype(hook)>;
+        if constexpr (requires { hook.fn; })
+            g.set_hook(&tr::graph::graph_hooks_t::session_admission,
+                       hook_t{b != nullptr ? &budget_t::hook : nullptr, b});
+    }(tr::graph::graph_hooks_t{}.session_admission);
 }
 
 /** @brief An empty `STATUS` — the `:subscribers[N]` clear sentinel. */

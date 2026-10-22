@@ -215,15 +215,14 @@ void test_retire_gives_each_hold_back_once() {
     gate_source_t gate;
     graph_t g{gate};
     holds_t holds;
-    auto hooks = g.hooks();
-    hooks.link_hold = {[](void* ctx, tr::graph::link_pair_t link, bool held) {
-                           auto& h = *static_cast<holds_t*>(ctx);
-                           int& n = h.held[link.conn];
-                           n += held ? 1 : -1;
-                           h.negative |= n < 0;
-                       },
-                       &holds};
-    g.set_hooks(hooks);
+    g.set_hook(&tr::graph::graph_hooks_t::link_hold,
+               {[](void* ctx, tr::graph::link_pair_t link, bool held) {
+                    auto& h = *static_cast<holds_t*>(ctx);
+                    int& n = h.held[link.conn];
+                    n += held ? 1 : -1;
+                    h.negative |= n < 0;
+                },
+                &holds});
     const vertex_handle_t v = g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
     const std::vector<std::byte> sub = subscriber_tlv("peer");
     check(g.subscribe_wire(v, make_value(sub), route_to("a"), "a", {}, {}, {},

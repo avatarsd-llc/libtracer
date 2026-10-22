@@ -128,9 +128,7 @@ void build_graph(graph_t& g, bool enforce = true) {
         nullptr};
     (void)g.register_vertex(*path_t::parse("/knob"), role_t::HANDLER, h);
     if (!enforce) return;
-    auto hooks = g.hooks();
-    hooks.subject_lookup = {identity_lookup, nullptr};
-    g.set_hooks(hooks);
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {identity_lookup, nullptr});
     (void)g.write(*path_t::parse("/knob:acl"), grant_write("role:operator"));
 }
 

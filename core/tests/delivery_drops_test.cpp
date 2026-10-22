@@ -42,6 +42,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -54,7 +55,6 @@ using tr::graph::acl_right_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::wire::opt_t;
 using tr::wire::tlv_t;
@@ -101,8 +101,9 @@ std::vector<std::byte> allow_only(std::string_view subject, acl_right_t right) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 // --- the happy path: nothing drops, and the counters say so ------------------------------
@@ -146,11 +147,7 @@ void test_missing_target_is_counted() {
 void test_denied_fan_in_is_counted() {
     std::printf("\nthe target's :acl denies the edge's caller — counted separately:\n");
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     (void)g.register_vertex(path_t("/sink"), role_t::STORED_VALUE);
     vertex_handle_t src = g.register_vertex(path_t("/src"), role_t::STORED_VALUE);
 

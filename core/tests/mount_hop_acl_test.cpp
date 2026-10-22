@@ -12,9 +12,8 @@
  * that session's peer name, so every case below is a pair: `p1` is refused, and the identical
  * frame from `p0` is admitted — the control that makes each refusal the ACL's.
  *
- * Every case runs twice (#1958): once with only the returning `subject_resolver` installed,
- * which reaches the gate through its adapter, and once with only the caller-storage
- * `subject_lookup` (#1781), which the gate and `acl_enforced()` read directly.
+ * The subject seam is `subject_lookup` (#1781), which the gate and `acl_enforced()` read
+ * directly; the returning form these cases also ran under (#1958) was deleted by #2239.
  *
  * - the NAME spelling through the BUS mount (`net/tcp-server/srv/<peer>`);
  * - the NAME spelling through the POINT-TO-POINT mount (`net/tcp/x/...`).
@@ -53,6 +52,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/conn_spec.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
@@ -75,7 +75,6 @@ using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::net::fwd_router_t;
 using tr::testing::check;
@@ -100,44 +99,10 @@ bool wait_until(Fn f, std::chrono::milliseconds timeout = 3000ms) {
     return f();
 }
 
-/** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    const auto* p = reinterpret_cast<const std::byte*>(caller.data());
-    return subject_token_t(p, p + caller.size());
-}
-
-/** @brief The same resolver in the caller-storage form (#1781): the token goes into @p out. */
-std::expected<void, tr::wire::err_t> caller_is_subject_into(void*, std::string_view caller,
-                                                            tr::mem::bytes_t& out) {
-    if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))
-        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
-    return {};
-}
-
-/** @brief Which one subject hook an enforcing graph installs (#1958). */
-enum class hook_arm_t : std::uint8_t {
-    RESOLVER, /**< @brief Only `subject_resolver`, reached through the adapter. */
-    LOOKUP,   /**< @brief Only `subject_lookup`, read by the gate directly. */
-};
-
-/** @brief The arm the cases run under; `main` runs every case once per arm. */
-hook_arm_t g_arm = hook_arm_t::RESOLVER;
-
-/** @brief Install the current arm's subject hook, and only that one, on @p g. */
+/** @brief Make @p g enforce: the caller context IS the subject token (ADR-0018). */
 void enforce(graph_t& g) {
-    auto hooks = g.hooks();
-    if (g_arm == hook_arm_t::LOOKUP) {
-        hooks.subject_lookup = {caller_is_subject_into, nullptr};
-    } else {
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-    }
-    g.set_hooks(hooks);
-    const auto back = g.hooks();
-    tr::testing::check_quiet(
-        g_arm == hook_arm_t::LOOKUP
-            ? back.subject_lookup.fn != nullptr && back.subject_resolver.fn == nullptr
-            : back.subject_resolver.fn != nullptr && back.subject_lookup.fn == nullptr,
-        "exactly the arm's one subject hook is installed");
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+               {&tr::testing::caller_is_subject_into, nullptr});
 }
 
 /** @brief One inheritable ALLOW ACE for @p subject over @p mask. */
@@ -424,20 +389,11 @@ void upgrade_layout() {
 
 }  // namespace
 
-/** @brief Every case, under the arm in @ref g_arm. */
-static int run_cases() {
+/** @brief Every case. */
+int main() {
     vertexless_mount();
     if constexpr (!tr::net::kBusLinks) return tr::testing::summary("mount_hop_acl");
     name_spelling();
     upgrade_layout();
     return tr::testing::summary("mount_hop_acl");
-}
-
-int main() {
-    std::printf("== arm 1: only subject_resolver installed ==\n");
-    g_arm = hook_arm_t::RESOLVER;
-    (void)run_cases();
-    std::printf("\n== arm 2: only subject_lookup installed ==\n");
-    g_arm = hook_arm_t::LOOKUP;
-    return run_cases();
 }

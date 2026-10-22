@@ -651,10 +651,10 @@ void test_stale_index_entries_are_harmless() {
  * below red — that is the check that this test is not decorative.
  */
 /** @brief A resolver naming every caller as one principal, `fleet`: two links, one holder. */
-std::expected<tr::graph::subject_token_t, tr::wire::err_t> one_principal(void*, std::string_view) {
+std::expected<void, tr::wire::err_t> one_principal(void*, std::string_view, tr::mem::bytes_t& out) {
     constexpr std::string_view kFleet = "fleet";
     const auto* p = reinterpret_cast<const std::byte*>(kFleet.data());
-    return tr::graph::subject_token_t(p, p + kFleet.size());
+    return tr::testing::subject_into(out, std::vector<std::byte>(p, p + kFleet.size()));
 }
 
 void test_field_write_admitted_edge_is_indexed_under_its_caller() {
@@ -662,11 +662,7 @@ void test_field_write_admitted_edge_is_indexed_under_its_caller() {
     graph_t g;
     // 'seed' and 'cli' are one principal, so 'cli' holds the slot 'seed' made and may replace it
     // (RFC-0036 §3.4); with no ACE anywhere the resolver gates nothing else.
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {one_principal, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {one_principal, nullptr});
     fwd_router_t router(g);
     fake_link_t seed_link;
     fake_link_t cli;
@@ -739,7 +735,7 @@ void test_slot_reuse_and_index_stability() {
     check(slot(3) == b_subscriber("F"), "F appended at slot 3 — growth only past reuse");
     check(slot(1) == b_subscriber("B"), "B undisturbed throughout");
 
-    const auto subs = g.read_subscribers(v);
+    const auto subs = tr::testing::read_subscribers(g, v);
     check(subs.has_value() && subs->size() == 4, ":subscribers[] lists exactly the 4 active");
 
     // The reused slots DELIVER (the reclaimed shell became a real edge again).
@@ -1185,7 +1181,7 @@ void test_refused_route_reclaims_the_edge() {
                                 b_field_subscribers_append(), b_subscriber("doomed")));
     bus.inject_peer("q1", b_fwd(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
                                 b_field_subscribers_append(), b_subscriber("alive")));
-    const auto subs0 = gb.read_subscribers(sensor);
+    const auto subs0 = tr::testing::read_subscribers(gb, sensor);
     check(subs0.has_value() && subs0->size() == 2, "B holds two remote edges");
 
     // Positive control FIRST (the #1223 refutation rule: no eviction claim without it).
@@ -1198,7 +1194,7 @@ void test_refused_route_reclaims_the_edge() {
 
     // p0 dies. A knows; B does not — the edge survives, and would forever (#1223).
     bus.peer_kill("p0");
-    const auto subs1 = gb.read_subscribers(sensor);
+    const auto subs1 = tr::testing::read_subscribers(gb, sensor);
     check(subs1.has_value() && subs1->size() == 2, "B still holds p0's edge (the leak shape)");
 
     // Publish 2: p0's delivery bounces off A (its residual names no current peer — the
@@ -1206,7 +1202,7 @@ void test_refused_route_reclaims_the_edge() {
     q1_seen = bus.peer("q1").count();
     check(gb.write(sensor, make_value(b_value_u8(0x22))).has_value(),
           "publish 2 (one delivery bounces)");
-    const auto subs2 = gb.read_subscribers(sensor);
+    const auto subs2 = tr::testing::read_subscribers(gb, sensor);
     check(subs2.has_value() && subs2->size() == 1, "the refused route's edge is reclaimed");
     check(bus.peer("q1").count() == q1_seen + 1, "the live session still received publish 2");
 
@@ -1224,9 +1220,10 @@ void test_refused_route_reclaims_the_edge() {
     // frame was held back by its code, not by a route mismatch.
     const std::vector<std::byte> live_route = b_path({"bus", "q1"});
     b_to_a.inject(refusal_frame(live_route, 0x0041));  // some code that is not 0x0021
-    check(gb.read_subscribers(sensor)->size() == 1, "a non-invalid status evicts nothing");
+    check(tr::testing::read_subscribers(gb, sensor)->size() == 1,
+          "a non-invalid status evicts nothing");
     b_to_a.inject(refusal_frame(live_route, 0x0021));  // tr::path::invalid
-    check(gb.read_subscribers(sensor)->empty(),
+    check(tr::testing::read_subscribers(gb, sensor)->empty(),
           "the same route with tr::path::invalid evicts — the discriminator is the code");
 }
 
@@ -1298,7 +1295,7 @@ void test_reverse_mint_closes_the_disclosure() {
               "the forwarded request's LAST child is a one-element PATH_REF_REVERSE (0x15)");
         check(has_subscriber, "the forwarded request still carries its SUBSCRIBER payload");
     }
-    const auto subs0 = gb.read_subscribers(sensor);
+    const auto subs0 = tr::testing::read_subscribers(gb, sensor);
     check(subs0.has_value() && subs0->size() == 1, "B holds S1's remote edge");
 
     // POSITIVE CONTROL: S1 receives its own publish over the bound delivery leg, and the
@@ -1337,7 +1334,7 @@ void test_reverse_mint_closes_the_disclosure() {
     // The kill retires the anchor (generation bump), the re-arrival revives it one higher.
     bus.peer_kill("p0");
     bus.peer_arrive("p0");
-    const auto subs1 = gb.read_subscribers(sensor);
+    const auto subs1 = tr::testing::read_subscribers(gb, sensor);
     check(subs1.has_value() && subs1->size() == 1, "B still holds the dead session's edge");
 
     // Publish 2 — THE DISCLOSURE PROBE. Pre-amendment, S2 (new socket, same name, no
@@ -1349,7 +1346,7 @@ void test_reverse_mint_closes_the_disclosure() {
           "publish 2 (the dead session's delivery must refuse)");
     check(bus.peer("p0").count() == p0_seen,
           "THE FIX: the recycled session does NOT inherit the dead session's delivery");
-    const auto subs2 = gb.read_subscribers(sensor);
+    const auto subs2 = tr::testing::read_subscribers(gb, sensor);
     check(subs2.has_value() && subs2->empty(),
           "the stale edge is reclaimed by the bound refusal (steps 4+5 compose)");
 
@@ -1386,7 +1383,7 @@ void test_arrival_retenants_a_recycled_name() {
     /** @brief The SUBSCRIBER bytes `:subscribers[]` lists, in slot order. */
     const auto listed = [&] {
         std::vector<std::vector<std::byte>> out;
-        if (const auto subs = g.read_subscribers(s))
+        if (const auto subs = tr::testing::read_subscribers(g, s))
             for (const view_t& e : *subs) out.emplace_back(e.bytes().begin(), e.bytes().end());
         return out;
     };

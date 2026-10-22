@@ -52,6 +52,7 @@
 #include <memory>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_history.hpp"
 #include "test_support.hpp"
@@ -161,7 +162,7 @@ void test_stream_class_no_conflate_at_a_stream_receiver() {
     for (std::uint8_t b = 1; b <= 5; ++b) (void)g.write(producer, make_value({b}));
 
     std::vector<tr::graph::value_ref_t> owed;
-    const auto drained = g.drain_unflushed(rx, owed);
+    const auto drained = tr::testing::drain_unflushed(g, rx, owed);
     check(drained.has_value() && *drained == 5, "the STREAM receiver owes all five, none lost");
     trace_t order;
     for (const tr::graph::value_ref_t& sp : owed) note(order, *sp);
@@ -278,14 +279,14 @@ void test_attach_forward_never_backfills_the_ring() {
           "two class-3 edges admitted at the same instant, differing only in bit 5");
 
     std::vector<tr::graph::value_ref_t> owed;
-    const auto at_attach = g.drain_unflushed(rx, owed);
+    const auto at_attach = tr::testing::drain_unflushed(g, rx, owed);
     check(at_attach.has_value() && *at_attach == 0 && owed.empty(),
           "the plain class-3 receiver owes NOTHING at attach — no backfill of the three "
           "writes that predate its edge (§4.7: the ring is not history replay)");
 
     // The ablation: the same producer, the same class, the same instant — bit 5 set.
     owed.clear();
-    const auto joined = g.drain_unflushed(rx_latched, owed);
+    const auto joined = tr::testing::drain_unflushed(g, rx_latched, owed);
     check(joined.has_value() && *joined == 1,
           "... while the durability-requesting edge owes exactly ONE — so the harness CAN "
           "carry a pre-attach value, and the empty drain above is attach-forward, not inertia");
@@ -297,7 +298,7 @@ void test_attach_forward_never_backfills_the_ring() {
     // The first post-attach fan-out, and it is the FIRST delivery this edge ever sees.
     for (std::uint8_t b = 4; b <= 5; ++b) (void)g.write(producer, make_value({b}));
     owed.clear();
-    const auto after = g.drain_unflushed(rx, owed);
+    const auto after = tr::testing::drain_unflushed(g, rx, owed);
     check(after.has_value() && *after == 2, "two post-attach writes => two deliveries");
     trace_t forward_trace;
     for (const tr::graph::value_ref_t& sp : owed) note(forward_trace, *sp);

@@ -102,13 +102,12 @@ class  subscription_t { /* opaque: producer vertex + :subscribers[] slot index; 
 
 template <class Fn> struct graph_hook_t { Fn fn; void* ctx; };  // one graph-wide seam
 struct graph_hooks_t {        // the graph-wide seams as ONE aggregate (RFC-0028 D9)
-    graph_hook_t<subject_resolver_fn_t> subject_resolver;       // ACL enforcement switch
     graph_hook_t<sub_observer_fn_t>     subscription_observer;
     graph_hook_t<remote_delivery_fn_t>  remote_delivery;        // the router installs it
     graph_hook_t<wire_target_fn_t>      wire_target;            // the router installs it
     graph_hook_t<stats_sampler_fn_t>    stats_sampler;          // the router installs it
     graph_hook_t<link_hold_fn_t>        link_hold;              // the transport plane's (#1816)
-    graph_hook_t<subject_lookup_fn_t>   subject_lookup;         // caller-storage ACL switch
+    graph_hook_t<subject_lookup_fn_t>   subject_lookup;         // ACL enforcement switch
     graph_hook_t<session_admission_fn_t> session_admission;     // per-session subscribe check
                               // + teardown event (#1841); needs config_t::kSessionAdmission
     graph_hook_t<link_name_fn_t>        link_name;              // the router installs it (#1941)
@@ -170,16 +169,17 @@ class graph_t {
     result_t<void>        mark_flushed(vertex_handle_t);
 
     // owner-side declarations (RFC-0022 §3.C) — host API only, NO wire surface. ONE verb:
-    // the policy is stated whole, so a member left at its default resets that property.
+    // only the members the caller names move; an unset member keeps what the vertex holds.
     result_t<void> set_policy(vertex_handle_t, vertex_policy_t);  // SCHEMA_NOT_FOUND if illegal
     retention_t   retention             (vertex_handle_t) const noexcept;
     result_t<std::size_t>   ring_reserved_bytes(vertex_handle_t) const;
     result_t<std::uint64_t> stream_gaps        (vertex_handle_t) const;
     share_hint_t  share_hint            (vertex_handle_t) const noexcept;
 
-    // graph-wide seams — read-modify-write, for a party wired after construction (the router)
-    void          set_hooks(const graph_hooks_t&) noexcept;
-    graph_hooks_t hooks() const noexcept;
+    // graph-wide seams — one at a time, named by their graph_hooks_t member (#2239)
+    void          set_hook  (graph_hook_t<Fn> graph_hooks_t::*, graph_hook_t<Fn>) noexcept;
+    void          clear_hook(graph_hook_t<Fn> graph_hooks_t::*, const void* owner) noexcept;
+    graph_hook_t<Fn> hook   (graph_hook_t<Fn> graph_hooks_t::*) const noexcept;
 
     // composed reads — they build a value, so they return a reference to a fresh block
     result_t<value_ref_t> read_children_folded(vertex_handle_t) const;
@@ -451,9 +451,10 @@ total over a `status_t` that had no member for it.
 Five installers configure a graph before frames flow. Each is set once at wiring time,
 from one thread. That is the **doctrine**, and since #1049 it is stated by the API rather
 than requested in a comment: the callback seams are `{fn, ctx}` slots of one
-`graph_hooks_t` aggregate (RFC-0028 D9) — handed to the constructor, or installed later with
-`set_hooks` (a router wired after its graph reads `hooks()`, sets its three, and writes the
-whole back) — never a `std::function`.
+`graph_hooks_t` aggregate (RFC-0028 D9) — handed to the constructor, or installed later one
+seam at a time with `set_hook` (#2239): a router wired after its graph installs its four and
+touches no other, and its destructor clears them with `clear_hook` if they are still its own —
+never a `std::function`.
 
 The shape is the enforcement. A `std::function` cannot be handed to a racing reader at
 all — assigning one *destroys the old target*, freeing its captures while a reader may be
@@ -480,7 +481,7 @@ the seam: clearing a sink does not stop a dispatch already in flight.
 | `register_child_type(type, factory)` | populates the in-band creation catalog: which `type` selector a `:children[]` `SPEC` write may instantiate. Generic, and still live — but **not** the door to a connection any more: the net plane's `client` / `listener` types were unregistered at RFC-0014 S7, which left `/net/<module>/conn` the only connection-creation surface | only the built-in `stored_value`; an unregistered `type` answers `SCHEMA_NOT_FOUND` |
 | `set_identity(kind, key)` / `clear_identity()` | installs the node-scoped record `read <vertex>:identity` serves, byte-identical from every vertex | absent — `:identity` answers `SCHEMA_NOT_FOUND` |
 | `graph_hooks_t::remote_delivery` | where the producer fan-out hands each **remote** subscriber's delivery (the router installs it) | **null — remote subscriber slots are stored but never deliver** |
-| `graph_hooks_t::subject_resolver` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
+| `graph_hooks_t::subject_lookup` | maps a caller context to a subject token, written into the gate's buffer, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
 | `subscribe_wire(v, source, route, link, reverse, caller)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the durability latch the subscriber requested. `link` is WHERE the edge delivers; `caller` is WHO subscribed (empty ⇒ the same as `link`, every pre-#375-Part-2 caller) | — (called by the FWD resolver, not a default) |
 
 The two defaults in bold are load-bearing and are the two failure modes a node wired by
@@ -855,10 +856,6 @@ a reply already being assembled.
 ```
 
 ```{doxygentypedef} tr::graph::subject_lookup_fn_t
-:project: libtracer
-```
-
-```{doxygentypedef} tr::graph::subject_resolver_fn_t
 :project: libtracer
 ```
 

@@ -48,6 +48,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -63,7 +64,6 @@ using tr::graph::handlers_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::graph::write_ctx_t;
 using tr::wire::opt_t;
@@ -112,8 +112,9 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 }
 
 /** @brief The test resolver: the caller context IS the subject (acl_test's shape). */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return tr::testing::subject_into(out, caller);
 }
 
 /** @brief One ALLOW ACE granting @p subject exactly @p right, as a whole `:acl` payload. */
@@ -198,11 +199,7 @@ void test_reregistration_is_flat_and_current() {
     counting_source_t src;
     {
         graph_t g(src);
-        {
-            auto hooks = g.hooks();
-            hooks.subject_resolver = {caller_is_subject, nullptr};
-            g.set_hooks(hooks);
-        }
+        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
         const path_t path("/ctl");
         const std::span<const std::byte> key = path.key();
         // What `:schema` serves an occupant that declared no catalog: what a BARE cycle must get.

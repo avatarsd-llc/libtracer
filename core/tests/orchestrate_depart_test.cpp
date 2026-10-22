@@ -54,6 +54,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -466,7 +467,7 @@ int main() {
     }
     // The subscription row is B's state: it must have SURVIVED the departure.
     {
-        const auto subs = graph_b.read_subscribers(temp_v, {});
+        const auto subs = tr::testing::read_subscribers(graph_b, temp_v, {});
         check(subs.has_value() && !subs->empty(),
               "B's :subscribers[] row survived the orchestrator's departure");
     }

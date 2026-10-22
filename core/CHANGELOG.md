@@ -86,6 +86,56 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   unchanged, so it behaves as the link it wraps. The link seam suite gains a SAMPLE case and a
   per-vertex STREAM case, run over the fake link and over a self-healing link that wraps it.
   The wait for one dial attempt on a `DORMANT` link is unchanged.
+- **Each graph seam is installed on its own, and its installer clears it
+  ([#2239](https://github.com/avatarsd-llc/libtracer/issues/2239)).** `graph_t::set_hooks` and
+  `graph_t::hooks()` are removed. `graph_t::set_hook(&graph_hooks_t::<seam>, {fn, ctx})`
+  installs one seam and leaves every other one as it was (a null `fn` clears it);
+  `graph_t::hook(&graph_hooks_t::<seam>)` reads one back, and
+  `graph_t::clear_hook(&graph_hooks_t::<seam>, owner)` clears a seam only if `owner` is its
+  `ctx`. Before, `set_hooks` replaced every seam at once, so an application that installed
+  its subject seam after building a router (`g.set_hooks({.subject_lookup = …})`) unplugged
+  remote delivery without any report. `~fwd_router_t` now clears `remote_delivery`,
+  `wire_target`, `stats_sampler` and `link_name`, and `~transport_vertex_t` clears `link_hold`, each only
+  if it is still theirs: a write that reaches a remote edge after its router is destroyed finds
+  no sink, where before it called into freed memory. The constructor still takes the whole
+  `graph_hooks_t`. This partly reverses RFC-0028 §4.12 D12, which had folded the five
+  `configure_*` verbs into the one aggregate verb.
+- **`graph_t::set_policy` changes only the members the caller names (#2239).** Every
+  `vertex_policy_t` member is now a `std::optional`: an unset member keeps what the vertex
+  holds, where before it reset that property to its default. At registration an unset member
+  still takes the default, so `register_vertex` behaves as it did. `retention_t::N` named
+  without a `depth` keeps the current depth.
+- **The returning-form subject resolver is deleted; `subject_lookup` is the one ACL subject
+  seam (ADR-0083 Decision 11, #1781 step 3).** `subject_resolver_fn_t`, `subject_token_t` and
+  `graph_hooks_t::subject_resolver` are removed, with the adapter that stood in for them and the
+  rule that made `subject_lookup` win when both were installed. A gated operation no longer
+  allocates a `std::vector` for its subject. The three owning-`std` twins go with it:
+  `read_subscribers` returning `std::vector<view_t>` and `drain_unflushed(std::vector&)` (the
+  `block_array_t` overloads stay), and `child_factory_t` now takes its child key as a
+  `std::span<const std::byte>`, borrowed for the call. `graph.hpp` names no owning `std` type.
+
+### Upgrading
+
+- `auto h = g.hooks(); h.remote_delivery = {fn, ctx}; g.set_hooks(h);` becomes
+  `g.set_hook(&tr::graph::graph_hooks_t::remote_delivery, {fn, ctx});`, one call per seam.
+  Clear a seam with `g.set_hook(&graph_hooks_t::<seam>, {})`, or, from the destructor of the
+  object that installed it, with `g.clear_hook(&graph_hooks_t::<seam>, this)`. Read one with
+  `g.hook(&graph_hooks_t::<seam>)`.
+- A `set_policy` call that relied on an unnamed member resetting it must now name that
+  member's default: `.ring_source = nullptr`, `.ring_reliable = false`, `.depth = 1`,
+  `.share_hint = share_hint_t::DEFAULT`, `.delivery_mode = delivery_mode_t::IF_NEWER`.
+- `.app_fields = {}` is now the unset optional, which keeps the table. Uninstall a table with
+  `.app_fields = tr::graph::app_fields_decl_t{}`. A braced field list is spelled
+  `.app_fields = app_fields_decl_t{app_field_t{…}}` in a designated initializer; a vector, a
+  borrowed table or a static array converts as before.
+- A subject resolver must return the token through the out buffer: `std::expected<subject_token_t,
+  err_t> f(void* ctx, std::string_view caller)` becomes `std::expected<void, err_t> f(void* ctx,
+  std::string_view caller, tr::mem::bytes_t& out)`, which appends the token to `out` (answer
+  `ACCESS_DENIED` if the append is refused) and is installed as `graph_hooks_t::subject_lookup`.
+- `g.read_subscribers(v)` becomes `g.read_subscribers(v, out)` and `g.drain_unflushed(v, vec)`
+  becomes `g.drain_unflushed(v, out)`, with `out` a `tr::mem::block_array_t` over a source of
+  your choice. A child factory takes `std::span<const std::byte> child_key` and copies the key
+  if it keeps it.
 
 ## [0.21.0] — 2026-10-22
 

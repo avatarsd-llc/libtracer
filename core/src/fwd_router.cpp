@@ -3244,6 +3244,13 @@ struct fwd_router_t::pending_await_t {
 };
 
 fwd_router_t::~fwd_router_t() {
+    // First, the graph seams this router installed (#2239), each only if it is still this
+    // router's: from here on a write that reaches a remote edge, a wire subscribe and a `:stats`
+    // read find no sink rather than calling into a router that is going away.
+    graph_.clear_hook(&graph::graph_hooks_t::remote_delivery, this);
+    graph_.clear_hook(&graph::graph_hooks_t::wire_target, this);
+    graph_.clear_hook(&graph::graph_hooks_t::stats_sampler, this);
+    graph_.clear_hook(&graph::graph_hooks_t::link_name, this);
     std::unique_lock lock(awaits_.m);
     awaits_.stop = true;
     cancel_awaits_locked({}, true);

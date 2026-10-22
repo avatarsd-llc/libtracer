@@ -49,7 +49,6 @@ using tr::graph::kEveryoneSubject;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
-using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 
 /** @brief Report expectation @p what and record a failure on @p ok. */
@@ -65,6 +64,13 @@ std::vector<std::byte> as_bytes(std::string_view s) {
     return out;
 }
 
+/** @brief Append @p subject to the gate's buffer @p out; a refused append fails closed. */
+std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::string_view subject) {
+    if (!out.append(reinterpret_cast<const std::byte*>(subject.data()), subject.size()))
+        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+    return {};
+}
+
 /**
  * @brief The pass-through resolver — the shape #908 exists for.
  *
@@ -73,8 +79,9 @@ std::vector<std::byte> as_bytes(std::string_view s) {
  * to be called `EVERYONE@` resolve to the wildcard, so the core refuses the OUTPUT rather than
  * trusting every such resolver to blacklist the token itself.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
-    return as_bytes(caller);
+std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
+                                                       tr::mem::bytes_t& out) {
+    return put_subject(out, caller);
 }
 
 /** @brief A one-byte VALUE. */
@@ -94,11 +101,7 @@ bool denied(const tr::graph::result_t<T>& r) {
 int main() {
     bool ok = true;
     graph_t g;
-    {
-        auto hooks = g.hooks();
-        hooks.subject_resolver = {caller_is_subject, nullptr};
-        g.set_hooks(hooks);
-    }
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
     const vertex_handle_t guarded = g.register_vertex(path_t("/guarded"), role_t::STORED_VALUE);
     const vertex_handle_t bare = g.register_vertex(path_t("/bare"), role_t::STORED_VALUE);
     (void)g.write(guarded, some_value());  // trusted local seeds, so a refused READ is the
