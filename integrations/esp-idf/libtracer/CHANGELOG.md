@@ -24,6 +24,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   expired squatter holds its `max_peers` slot until the next check. Migration: drop
   `auth_deadline_ms` from the config and call `close_frozen_peers` on the application's own
   tick, with `deadline` set to `now` minus the auth window you want.
+- **`esp_ws_client_link_t`: a read no longer holds a send, and a frame is masked once
+  ([#2265](https://github.com/avatarsd-llc/libtracer/issues/2265)).** The recv thread used to
+  read under the write mutex, so a send waited out a read and a read waited out a send. The
+  read now takes no lock. A send builds the whole frame in the tx scratch, gathering and
+  masking the payload in one pass behind the header, and writes it as one `esp_transport_write`
+  on the TCP parent: 2 lwIP calls per frame (a poll and a send) instead of 5, and no in-place
+  mask and unmask inside IDF's `_ws_write`. A queued frame is stored already masked. PING and
+  CLOSE now come up to the recv loop (`propagate_control_frames = true`), which answers them
+  through the same write. The tx scratch and each queue slot grow by the frame header (6 to 14
+  bytes). `timing().write_timeout_ms` is now a half of the write budget, not a third, since a
+  frame's write spends it on two legs (625 ms at the 5 s watchdog fallback, was 416 ms). With
+  `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS`, `tx_frames` and `tx_bytes` now include the PONG and
+  CLOSE replies.
+
 ### Changed (breaking)
 
 - **`esp_ws_client_config_t::defer_recv` is removed; every `esp_ws_client_link_t` defers its

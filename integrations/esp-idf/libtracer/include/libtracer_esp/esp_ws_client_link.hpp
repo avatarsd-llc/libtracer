@@ -88,18 +88,17 @@
  *     buffer (server→client frames are unmasked per RFC 6455 §5.1, so the read is
  *     a zero-copy fill) — and delivers it borrowed to the router SYNCHRONOUSLY on
  *     that thread, exactly as the raw client delivered on its recv thread. Control
- *     frames are handled inside `esp_transport_ws` (`propagate_control_frames =
- *     false`), so the loop only sees data frames.
+ *     frames come up to the loop (`propagate_control_frames = true`, #2265), which
+ *     answers a PING with a PONG and a CLOSE with a CLOSE through the send path.
  *   - `send()` may be called from ANY task (a subscription push on an io/timer
- *     thread, a reply on the recv thread itself). `esp_transport_ws`'s handle is
- *     NOT thread-safe, so all handle access is serialized by one small mutex held
- *     ONLY for the read/write syscall (the poll runs outside it). The read after a
- *     positive poll is prompt; the WRITE is not — IDF spends the caller's timeout on
- *     up to three legs inside one `esp_transport_write` — so that mutex IS held
- *     blocking, for a bound derived from the task-watchdog period rather than the
- *     4 s literal it used to be (#952: 3 x 4 s against a 5 s watchdog). The reads run
- *     otherwise lock-free on the one recv thread; the graph/router lock-stripes
- *     below are unchanged — this link adds no lock beyond that syscall serializer.
+ *     thread, a reply on the recv thread itself). Writes are serialized by one small
+ *     mutex, `write_m_`, held only for the write. The READ takes no lock (#2265): only
+ *     the recv thread touches `esp_transport_ws`'s handle, a writer writes the TCP parent,
+ *     and lwIP sockets are full-duplex. The write is not prompt — the caller's timeout
+ *     bounds the poll and the `send()` inside one `esp_transport_write` — so that mutex
+ *     IS held blocking, for a bound derived from the task-watchdog period rather than the
+ *     4 s literal it used to be (#952). The graph/router lock-stripes below are
+ *     unchanged — this link adds no lock beyond that write serializer.
  *   - A TEARDOWN THAT LANDS MID-DIAL COSTS NO DIAL (#1058). `esp_transport_connect` takes
  *     no cancellation — that is IDF's documented signature, `(handle, host, port,
  *     timeout_ms)`, and there is no second entry point — so the dial cannot be stopped.
@@ -156,11 +155,13 @@
  *     documents for `esp_http_server`'s own keepalive — the same three the server sibling
  *     applies to accepted sockets — so a vanished peer surfaces as an ordinary poll/read
  *     error within tens of seconds and takes the drop path above.
- *   - `send()` COPIES the frame into a reusable tx scratch before writing, because
- *     `esp_transport_write` masks IN-PLACE (RFC 6455 client rule) and a delivered
- *     frame may be shared with the concurrent server link — so the caller's (const,
- *     possibly shared) bytes must not be transiently mutated. RX is zero-copy; the
- *     one TX copy is the irreducible cost of client masking on shared bytes.
+ *   - `send()` builds the whole frame in a reusable tx scratch (#2265): the header, then
+ *     the payload gathered and masked in ONE pass (RFC 6455 client rule), written as one
+ *     `esp_transport_write` on the TCP parent. A delivered frame may be shared with the
+ *     concurrent server link, so the caller's (const, possibly shared) bytes are only
+ *     read. RX is zero-copy; the one TX pass is the irreducible cost of client masking
+ *     on shared bytes. IDF's `_ws_write`, which masked in place, wrote header and payload
+ *     separately and unmasked back, is no longer on the path.
  *   - NO CALLBACK INTO THE EMBEDDER EVER RUNS UNDER `write_m_` or `st_m_`. Deliveries
  *     are made with both released; the counter bumps and @ref stats only touch this
  *     object's own fields. That is the invariant a host relies on when it holds its
@@ -376,8 +377,8 @@ class esp_ws_client_link_t final : public transport_t {
      * no task ever waits on another task's write (#1619).
      *
      * The writing task itself is BOUNDED: a peer whose TCP window has closed costs it one
-     * write budget (a quarter of the task-watchdog period, split across the three legs
-     * IDF spends the timeout on) and then drops the frame, tearing the connection down
+     * write budget (a quarter of the task-watchdog period, split across the poll and the
+     * `send()` of the frame's one write) and then drops the frame, tearing the connection down
      * for the recv thread to re-dial. It used to cost up to three times a 4 s literal,
      * which is a watchdog panic rather than a dropped frame (#952).
      */
@@ -609,8 +610,8 @@ class esp_ws_client_link_t final : public transport_t {
     struct timing_t {
         int dial_timeout_ms = 0;      /**< @brief DERIVED: half the watchdog window. */
         int write_timeout_ms = 0;     /**< @brief DERIVED: the per-leg share of a quarter
-                                       *          window (`esp_transport_write` spends it
-                                       *          three times per frame). */
+                                       *          window (a frame's one write spends it
+                                       *          twice: the poll and the `send()`). */
         int read_timeout_ms = 0;      /**< @brief Kconfig: read after a positive poll. */
         int poll_ms = 0;              /**< @brief Kconfig: one recv-loop poll turn. */
         int reconnect_backoff_ms = 0; /**< @brief Kconfig: wait before a re-dial. */
@@ -661,10 +662,12 @@ class esp_ws_client_link_t final : public transport_t {
      * `stop_` is set, drops and counts toward a peer that is down, and tears the connection
      * down on an error or a short write.
      *
-     * @param queued A private queued copy, written as it is; empty for the writer's own frame.
-     * @param src    The writer's own (possibly shared) frame, gathered into the write scratch
-     *               only once the connection gate has passed — the scratch exists only while
-     *               a connection stands (#1606). Empty when @p queued is given.
+     * @param queued A whole masked frame (a queued copy or a control reply), written as it
+     *               is; empty for the writer's own frame.
+     * @param src    The writer's own (possibly shared) payload, framed and masked into the
+     *               write scratch only once the connection gate has passed — the scratch
+     *               exists only while a connection stands (#1606). Empty when @p queued is
+     *               given.
      * @param len    The bytes in @p src.
      */
     void write_locked(std::span<std::byte> queued, std::span<const std::span<const std::byte>> src,
@@ -680,9 +683,17 @@ class esp_ws_client_link_t final : public transport_t {
      * @param len The complete message's length in the scratch.
      */
     void deliver_owned(std::size_t len);
-    /** @brief Copy the spans of @p iov, in order, to @p dst (sized by the caller). */
-    static void gather_into(std::byte* dst,
-                            std::span<const std::span<const std::byte>> iov) noexcept;
+    /**
+     * @brief Write one masked BINARY frame to @p dst: the header, then the @p len payload
+     *        bytes of @p iov gathered and masked in one pass (#2265).
+     *
+     * @param dst At least `ws::detail::client_frame_bytes(len)` bytes, sized by the caller.
+     * @param iov The payload's spans, in order.
+     * @param len The bytes in @p iov.
+     * @return The frame's size, `ws::detail::client_frame_bytes(len)`.
+     */
+    static std::size_t frame_into(std::byte* dst, std::span<const std::span<const std::byte>> iov,
+                                  std::size_t len) noexcept;
 
     /**
      * @brief The dial slot (#1058) — drawn from `memory.state` in the ctor, shared with the
@@ -715,8 +726,9 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief The owning-RX source (`memory.rx`, #1661), or null for borrowed delivery.
      *         Written once by the constructor, before the recv thread exists. */
     mem::mem_backend_t* const rx_backend_;
-    /** @brief The TX scratch the writer gathers into and the transport masks in place,
-     *         `tx_bytes_` drawn from @ref tx_src_ with the read scratch and returned with it
+    /** @brief The TX scratch the writer builds its masked frame in, one frame of
+     *         `tx_bytes_` payload drawn from @ref tx_src_ with the read scratch and returned with
+     * it
      *         (#1606). Drawn on the recv thread before the `connected_` release store and
      *         returned under `write_m_` after `connected_` is cleared, so a writer — which
      *         reads it only past the connection gate — never sees it change. */

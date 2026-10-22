@@ -11,10 +11,12 @@
 
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -32,6 +34,7 @@
 #include "libtracer/config.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_string.hpp"
+#include "libtracer/ws.hpp"
 
 namespace tr::net {
 
@@ -91,15 +94,17 @@ constexpr int kWatchdogMs = static_cast<int>((kTaskWdtSeconds != 0 ? kTaskWdtSec
 constexpr int kDialTimeoutMs = kWatchdogMs / 2;
 
 /**
- * @brief How many times IDF spends the write timeout inside ONE `esp_transport_write`.
+ * @brief How many times ONE frame's write can spend the write timeout.
  *
- * `_ws_write` (components/tcp_transport/transport_ws.c) passes the caller's timeout to
- * `esp_transport_poll_write`, then again to the parent's write for the WS header, then
- * again for the payload — so the caller's number is a per-leg bound, never a total. The
- * old 4000 ms literal was therefore a 12 s stall on a peer with a closed TCP window,
- * against a 5 s watchdog (#952).
+ * A frame is one `esp_transport_write` on the TCP parent (#2265): `tcp_write`
+ * (components/tcp_transport/transport_ssl.c) polls for writability with the caller's
+ * timeout, then `send()`s, which `SO_SNDTIMEO` bounds at the same timeout (see
+ * connect_once). So the caller's number is a per-leg bound, never a total. It used to be
+ * three legs, when the frame went through the WS transport's `_ws_write` (a poll, then a
+ * header write, then a payload write); the old 4000 ms literal was a 12 s stall on a peer
+ * with a closed TCP window, against a 5 s watchdog (#952).
  */
-constexpr int kIdfWriteLegs = 3;
+constexpr int kIdfWriteLegs = 2;
 
 /** @brief What ONE `send()` may spend in total, all legs (ms) — a quarter of the watchdog
  *  window, and (with @ref kPollMs) the whole of what a teardown can now cost. */
@@ -250,6 +255,16 @@ class sender_exit_t {
  * failed is harmless; closing one whose handshake landed takes the connection down on the
  * peer's side too. A null handle is skipped, so a half-built pair releases what it has.
  */
+/**
+ * @brief A fresh RFC 6455 masking key for one client frame (#2265), from the source IDF's
+ *        `_ws_write` drew it from. On the chip `getrandom` is the hardware RNG and does not
+ *        fail; a failure elsewhere gives a zero key, which still frames correctly.
+ */
+std::uint32_t mask_key() noexcept {
+    std::uint32_t key = 0;
+    return getrandom(&key, sizeof(key), 0) == static_cast<ssize_t>(sizeof(key)) ? key : 0;
+}
+
 void release_pair(esp_transport_handle_t& ws, esp_transport_handle_t& tcp) noexcept {
     if (ws != nullptr) {
         esp_transport_close(ws);
@@ -495,7 +510,10 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     if (slot->ws != nullptr) {
         esp_transport_ws_config_t cfg = {};
         cfg.ws_path = slot->ws_path.c_str();
-        cfg.propagate_control_frames = false;  // esp_transport_ws answers PING/CLOSE itself
+        // Control frames come up to the recv loop, which answers them through the one write
+        // path (#2265). Left to IDF, a PONG or CLOSE echo would be written from inside a
+        // read, so the read could never run without the write serializer held.
+        cfg.propagate_control_frames = true;
         // Optional handshake auth: extra header lines a peer's admission hook can gate on
         // (a b2b dial carries no browser cookie). esp_transport_ws appends them verbatim;
         // empty leaves the field null so the handshake is byte-for-byte the historical one.
@@ -538,7 +556,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // that refuses is backpressure, not a sizing abort: the fresh connection is released
     // like a failed dial and the next attempt tries again after the backoff.
     const bool up = !orphaned && rc == 0 && rx_buf_.assign(*slot->src, rx_bytes_) &&
-                    tx_buf_.assign(*tx_src_, tx_bytes_);
+                    tx_buf_.assign(*tx_src_, ws::detail::client_frame_bytes(tx_bytes_));
     // Invariant 1 of the #1058 ruling, structural rather than remembered: the pair this dial
     // built is released by EXACTLY ONE owner. A dial that did not come up releases it right
     // here, on the failure path (#1606 ask 2) — an orphan, a failed connect and a refused
@@ -778,13 +796,13 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov)
     // whatever unrelated task published; it must not pay for this peer's socket. A sender
     // that finds every slot taken drops the frame and counts it, as the async server link
     // does on an empty tx pool.
-    // The queued copy is GATHERED straight from the caller's spans — a rope reply or a
-    // delivery's head + value arrives here as several spans, and the base default used to
-    // flatten them into an egress temporary first and then copy that again (#1620 (a)).
+    // The queued copy is the whole masked FRAME, gathered and masked straight from the
+    // caller's spans in one pass (#2265), so the writer that drains it writes the slot as it
+    // stands. A rope reply or a delivery's head + value arrives here as several spans, and
+    // the base default used to flatten them into an egress temporary first (#1620 (a)).
     switch (tx_.admit([&](tr::mem::block_array_t<std::byte>& slot) -> std::size_t {
-        if (!slot.reserve(total)) return 0;
-        gather_into(slot.data(), iov);
-        return total;
+        if (!slot.reserve(ws::detail::client_frame_bytes(total))) return 0;
+        return frame_into(slot.data(), iov, total);
     })) {
         case tr::net::tx_handoff_t::admit_t::REFUSED:
             tx_drops_.fetch_add(1, std::memory_order_relaxed);
@@ -794,27 +812,27 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov)
         case tr::net::tx_handoff_t::admit_t::WRITE:
             break;
     }
-    // This thread is the writer. Its own frame is gathered into the private scratch:
-    // esp_transport_write masks IN-PLACE and unmasks back (RFC 6455 client rule), but a
-    // delivered frame may be shared with the concurrent server link reading the same bytes,
-    // so the caller's bytes must not be transiently mutated — hence the copy, which is also
-    // the ONE copy a gathered frame costs (it used to be two, #1620 (a)). A queued frame is
-    // already a private copy, so it is written from its slot directly. This link never
-    // queues a RETAINED record (it does not override the retained send: a masked frame
-    // cannot be written from a shared block), so every record here is a copy. The scratch
-    // is named only inside write_locked, past the connection gate: it exists only while a
-    // connection stands (#1606).
+    // This thread is the writer. Its own frame is built in the private scratch: the header,
+    // then the payload gathered and masked in the same pass (RFC 6455 client rule, #2265).
+    // A delivered frame may be shared with the concurrent server link reading the same
+    // bytes, so the caller's bytes are only ever read; the masked copy is the ONE pass a
+    // frame costs, where it used to be a copy, a mask in place and an unmask back inside
+    // IDF's `_ws_write`. A queued frame is already masked in its slot, so it is written as it
+    // stands. This link never queues a RETAINED record (it does not override the retained
+    // send: a masked frame cannot be written from a shared block), so every record here is
+    // a copy. The scratch is named only inside write_locked, past the connection gate: it
+    // exists only while a connection stands (#1606).
     write_locked({}, iov, total);
     for (tr::net::tx_handoff_t::record_t rec = tx_.next(); rec; rec = tx_.next())
         write_locked(rec.bytes, {}, 0);
 }
 
-void esp_ws_client_link_t::gather_into(std::byte* dst,
-                                       std::span<const std::span<const std::byte>> iov) noexcept {
-    for (const std::span<const std::byte>& part : iov) {
-        if (!part.empty()) std::memcpy(dst, part.data(), part.size());
-        dst += part.size();
-    }
+std::size_t esp_ws_client_link_t::frame_into(std::byte* dst,
+                                             std::span<const std::span<const std::byte>> iov,
+                                             std::size_t len) noexcept {
+    return ws::detail::put_client_frame(
+        std::span<std::byte>(dst, ws::detail::client_frame_bytes(len)), ws::opcode_t::BINARY, iov,
+        mask_key(), /*fin=*/true);
 }
 
 void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
@@ -848,10 +866,12 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
     }
     // Past the gate, the write scratch is drawn and stays drawn until this lock is released:
     // the departure arm returns it only under `write_m_`, after `connected_` is cleared.
+    // The frame goes out as ONE write on the TCP parent (#2265): header and masked payload
+    // are contiguous, so it is one `send()`, not IDF's poll plus two writes.
     const std::span<std::byte> wire =
-        queued.empty() ? std::span<std::byte>(tx_buf_.data(), len) : queued;
-    if (!src.empty()) gather_into(wire.data(), src);
-    const int n = esp_transport_write(ws_, reinterpret_cast<char*>(wire.data()),
+        queued.empty() ? std::span<std::byte>(tx_buf_.data(), frame_into(tx_buf_.data(), src, len))
+                       : queued;
+    const int n = esp_transport_write(tcp_, reinterpret_cast<char*>(wire.data()),
                                       static_cast<int>(wire.size()), kWriteTimeoutMs);
     if (n < 0 || n < static_cast<int>(wire.size())) {
         // Error or short write (a partial WS frame would desync the peer) — tear the
@@ -865,7 +885,8 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> queued,
     // (#1663). Nesting is write_m_ -> st_m_, never the reverse.
     const std::lock_guard<std::mutex> st_lk(st_m_);
     ++traffic_.tx_frames;
-    traffic_.tx_bytes += static_cast<std::uint32_t>(wire.size());
+    traffic_.tx_bytes += static_cast<std::uint32_t>(
+        ws::detail::decode_header(wire, /*fail_on_violation=*/false, ws::kNoPayloadCap).len);
 #endif
 }
 
@@ -1044,19 +1065,19 @@ void esp_ws_client_link_t::recv_loop() {
         }
         if (pr == 0) continue;  // no data this turn; re-check stop_
 
-        int n = 0;
-        {
-            const std::lock_guard<std::mutex> lk(write_m_);
-            if (!connected_.load(std::memory_order_acquire)) {
-                n = -1;
-            } else {
-                // Server→client frames are unmasked, so this reads the payload directly
-                // into rx_buf_ at `off` — a zero-copy fill. While discarding, `off` is 0
-                // and the whole buffer is offered as a sink for bytes we then throw away.
-                n = esp_transport_read(ws_, reinterpret_cast<char*>(rx_buf_.data()) + off,
-                                       static_cast<int>(rx_buf_.size() - off), kReadTimeoutMs);
-            }
-        }
+        // Server→client frames are unmasked, so this reads the payload directly into rx_buf_
+        // at `off` — a zero-copy fill. While discarding, `off` is 0 and the whole buffer is
+        // offered as a sink for bytes we then throw away.
+        //
+        // NO lock (#2265). The handles and the read scratch are this thread's: it adopts them
+        // at a dial and releases them in the departure arm, and shut_down() releases them only
+        // after joining it. A sender writes the TCP parent and never touches `ws_`, and lwIP
+        // sockets are full-duplex (`LWIP_NETCONN_FULLDUPLEX`), so a send no longer waits out a
+        // read and a read no longer waits out a send. What used to need the serializer here
+        // was IDF's own PONG/CLOSE echo from inside the read; control frames now come up to
+        // this loop and are answered below, through the write path.
+        const int n = esp_transport_read(ws_, reinterpret_cast<char*>(rx_buf_.data()) + off,
+                                         static_cast<int>(rx_buf_.size() - off), kReadTimeoutMs);
         if (n < 0) {
             drop();
             off = 0;
@@ -1065,16 +1086,19 @@ void esp_ws_client_link_t::recv_loop() {
             assembling = false;
             continue;
         }
-        // A control frame (PING/PONG/CLOSE-ack) was consumed internally — keep `off`. IDF
-        // reports a ZERO-PAYLOAD data frame the same way (transport_ws.c returns 0 for
-        // both, and for a poll timeout), so a message ended by an empty final fragment is
-        // invisible here. That is pre-existing and symmetric: such a message never
-        // delivered either, because `off` was likewise left standing.
-        if (n == 0) continue;
-
+        // A PING or CLOSE is answered here, echoing its payload (read whole, at `off`, without
+        // moving it), through the same write as every frame. The opcode is NONE after a
+        // read timeout, so a zero-payload PING (which reads 0, like a timeout) is still seen.
+        // A CLOSE then drops the connection. A PONG falls through to the data-opcode filter.
         const ws_transport_opcodes_t op = esp_transport_ws_get_read_opcode(ws_);
-        const bool fin = esp_transport_ws_get_fin_flag(ws_);
-        if (op == WS_TRANSPORT_OPCODES_CLOSE) {
+        if (op == WS_TRANSPORT_OPCODES_PING || op == WS_TRANSPORT_OPCODES_CLOSE) {
+            std::array<std::byte, ws::kMaxClientControlFrame> reply{};
+            const std::size_t len = ws::encode_client_control(
+                reply, op == WS_TRANSPORT_OPCODES_PING ? ws::opcode_t::PONG : ws::opcode_t::CLOSE,
+                std::span<const std::byte>(rx_buf_.data() + off, static_cast<std::size_t>(n)),
+                mask_key());
+            write_locked(std::span<std::byte>(reply.data(), len), {}, 0);
+            if (op == WS_TRANSPORT_OPCODES_PING) continue;
             drop();
             off = 0;
             frame_left = 0;
@@ -1082,6 +1106,12 @@ void esp_ws_client_link_t::recv_loop() {
             assembling = false;
             continue;
         }
+        // IDF reports a ZERO-PAYLOAD data frame as a 0 read (transport_ws.c returns 0 for it,
+        // and for a poll timeout), so a message ended by an empty final fragment is invisible
+        // here. That is pre-existing and symmetric: such a message never delivered either,
+        // because `off` was likewise left standing.
+        if (n == 0) continue;
+        const bool fin = esp_transport_ws_get_fin_flag(ws_);
         if (op != WS_TRANSPORT_OPCODES_BINARY && op != WS_TRANSPORT_OPCODES_TEXT &&
             op != WS_TRANSPORT_OPCODES_CONT) {
             continue;  // a leaked control/NONE opcode: not a data frame — keep `off`

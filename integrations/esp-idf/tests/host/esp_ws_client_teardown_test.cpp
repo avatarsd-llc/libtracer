@@ -68,6 +68,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -139,9 +140,9 @@ constexpr long long kHostWdtMs = 5000;
 /** @brief Rx/tx buffer size every case here builds its link with. */
 constexpr std::size_t kBufBytes = 256;
 
-/** @brief IDF spends the write timeout on three legs inside ONE esp_transport_write
- *         (poll_write, the WS header write, the payload write — transport_ws.c). */
-constexpr long long kIdfWriteLegs = 3;
+/** @brief A frame's ONE esp_transport_write on the TCP parent spends the write timeout on
+ *         two legs: the poll and the send `SO_SNDTIMEO` bounds (`tcp_write`, #2265). */
+constexpr long long kIdfWriteLegs = 2;
 
 /** @brief A small outbound frame — the size of the control TLVs this link carries. */
 std::vector<std::byte> payload() {
@@ -824,6 +825,123 @@ void test_shut_down_racing_a_resolved_dial_leaves_the_link_down() {
     }
     check(drained_fake(), "it drained");
 }
+/**
+ * @brief #2265: a reader parked inside `esp_transport_read` does not hold a send.
+ *
+ * The recv thread used to take `write_m_` around every read, so a sender queued behind a
+ * read for up to its timeout and a read queued behind a write for up to a write budget.
+ * The fake's read park ignores the timeout, so on the old code the send below waits until
+ * the test releases the reader; now it completes while the reader is still inside.
+ */
+void test_a_parked_read_does_not_hold_a_send() {
+    std::printf("a reader parked in a read does not hold a send:\n");
+    fake_ws::reset();
+    auto link = dialing_link();
+    check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
+    esp_ws_client_link_t* const under_test = link.get();
+
+    fake_ws::hold_reads(true);
+    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, true, 8, 1)});
+    check(wait_until([] { return fake_ws::readers_inside() == 1; }, 2s),
+          "the recv thread is parked INSIDE esp_transport_read");
+
+    const std::vector<std::byte> frame = payload();
+    std::atomic<bool> sent{false};
+    std::thread sender([&] {
+        under_test->send(frame);
+        sent.store(true);
+    });
+    const bool done = wait_until([&] { return sent.load(); }, 1s);
+    const bool reader_still_inside = fake_ws::readers_inside() == 1;
+    check(done, "the send completed without waiting for the read");
+    check(reader_still_inside, "and completed while the reader was still inside");
+    fake_ws::hold_reads(false);
+    sender.join();
+    check(fake_ws::last_write_payload() == frame, "the frame reached the peer, byte for byte");
+    check(fake_ws::handle_misuse() == 0, "with no handle misuse anywhere in the case");
+    link.reset();
+    check(drained_fake(), "and the link drained");
+}
+
+/**
+ * @brief #2265: what one send costs at the transport, at 64 B, 1 KiB, 4 KiB and 16 KiB.
+ *
+ * The counts come from the fake's model of the IDF transport (see
+ * `fake_ws::lwip_calls`). Before, a frame was one `esp_transport_write` on the WS handle:
+ * 5 lwIP calls, and IDF masked the payload in place and unmasked it back (2 extra passes),
+ * after the link's own copy into the scratch. Now the link builds the frame (header plus
+ * the payload gathered and masked in one pass) and writes it once on the TCP parent: 2
+ * lwIP calls, and the transport touches no payload byte. The caller's bytes are only read.
+ */
+void test_one_send_costs_one_write_and_one_mask_pass() {
+    std::printf("one send is one write on the TCP parent, masked once:\n");
+    for (const std::size_t len :
+         {std::size_t{64}, std::size_t{1024}, std::size_t{4096}, std::size_t{16384}}) {
+        fake_ws::reset();
+        auto link = tr::mem::make_poly<esp_ws_client_link_t>(
+            tr::mem::net_source(), "127.0.0.1", 8080,
+            tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = len});
+        check(wait_until([&] { return link->link_up(); }, 2s), "the link came up");
+        std::vector<std::byte> frame(len);
+        for (std::size_t i = 0; i < len; ++i) frame[i] = static_cast<std::byte>(i * 7 + 3);
+        const std::vector<std::byte> original = frame;
+        // Two spans, so the gather is exercised: a head and the rest.
+        const std::span<const std::byte> parts[2] = {std::span<const std::byte>(frame).first(5),
+                                                     std::span<const std::byte>(frame).subspan(5)};
+        link->send(std::span<const std::span<const std::byte>>(parts));
+
+        const int calls = fake_ws::lwip_calls();
+        const std::size_t touched = fake_ws::transport_touched_bytes();
+        const std::size_t wire = fake_ws::wire_bytes();
+        const std::size_t want_wire = len + (len < 126 ? 2 : len <= 0xFFFF ? 4 : 10) + 4;
+        std::printf(
+            "       %5zu B: %d lwIP calls, %zu B on the wire, %zu B re-touched by the "
+            "transport\n",
+            len, calls, wire, touched);
+        check(calls == 2, "2 lwIP calls per send: one poll, one send");
+        check(touched == 0, "the transport touches no payload byte (no mask or unmask pass)");
+        check(wire == want_wire, "the wire carries exactly one frame: header, key, payload");
+        check(fake_ws::last_write_masked() && fake_ws::last_write_op() == 0x2,
+              "a masked BINARY frame");
+        check(fake_ws::last_write_payload() == original, "that unmasks to the payload");
+        check(frame == original, "and the caller's bytes were never written");
+        link.reset();
+        check(drained_fake(), "and the link drained");
+    }
+}
+
+/**
+ * @brief #2265: a PING is answered with a PONG, and a CLOSE with a CLOSE, through the
+ *        write path — IDF no longer writes from inside a read.
+ */
+void test_control_frames_are_answered_through_the_write_path() {
+    std::printf("PING and CLOSE are answered through the write path:\n");
+    fake_ws::reset();
+    auto link = dialing_link();
+    check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
+
+    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_PING, true, 4, 0x40)});
+    check(wait_until([] { return fake_ws::last_write_op() == 0xA; }, 2s), "a PONG went out");
+    const fake_ws::frame_t ping = fake_ws::make_frame(WS_TRANSPORT_OPCODES_PING, true, 4, 0x40);
+    check(fake_ws::last_write_masked() && fake_ws::last_write_payload() == ping.payload,
+          "masked, echoing the PING's payload");
+    check(fake_ws::lwip_calls() == 2, "as one write on the TCP parent");
+
+    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_PING, true, 0, 0)});
+    check(wait_until([] { return fake_ws::lwip_calls() == 4; }, 2s),
+          "an empty PING, which reads as 0 bytes, is answered too");
+    check(fake_ws::last_write_op() == 0xA && fake_ws::last_write_payload().empty(),
+          "with an empty PONG");
+
+    const int dials = fake_ws::connect_count();
+    fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, true, 2, 0x03)});
+    check(wait_until([] { return fake_ws::last_write_op() == 0x8; }, 2s), "a CLOSE went out");
+    check(wait_until([&] { return fake_ws::connect_count() > dials; }, 4s),
+          "and the link dropped the connection and re-dialed");
+    check(fake_ws::handle_misuse() == 0, "with no handle misuse anywhere in the case");
+    link.reset();
+    check(drained_fake(), "and the link drained");
+}
 }  // namespace
 
 int main() {
@@ -842,6 +960,9 @@ int main() {
     test_a_refused_scratch_is_a_failed_dial();
     test_shut_down_stops_now_and_the_destructor_frees();
     test_shut_down_racing_a_resolved_dial_leaves_the_link_down();
+    test_a_parked_read_does_not_hold_a_send();
+    test_one_send_costs_one_write_and_one_mask_pass();
+    test_control_frames_are_answered_through_the_write_path();
     // Nothing detached may still be running here: a condemned dial's recv thread outlives
     // its link by design, and one still inside the transport at process exit is a crash
     // under ASan/TSan and a leak under LSan. Every case drains, and this is the backstop.

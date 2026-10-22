@@ -227,8 +227,43 @@ void hold_writes(bool on);
  */
 [[nodiscard]] int handle_misuse();
 
-/** @brief Payload bytes the last completed write carried, for the ordinary-path control. */
+/** @brief Payload bytes the last completed write carried, for the ordinary-path control —
+ *         unmasked, as the peer would read them. */
 [[nodiscard]] std::vector<std::byte> last_write_payload();
+
+/** @name The per-frame write cost (#2265). */
+/** @{ */
+
+/** @brief The WS opcode of the last completed write's frame, -1 before the first. */
+[[nodiscard]] int last_write_op();
+
+/** @brief Whether that frame carried the MASK bit, as every client frame must. */
+[[nodiscard]] bool last_write_masked();
+
+/**
+ * @brief lwIP calls the writes made since the reset, as the real transport would.
+ *
+ * A write on the WS handle is modelled as IDF's `_ws_write`: a poll, then the header and
+ * the payload as two parent writes, each a poll and a send — 5 calls. A write on the TCP
+ * parent is `tcp_write`: a poll and one send — 2 calls.
+ */
+[[nodiscard]] int lwip_calls();
+
+/** @brief Payload bytes the TRANSPORT touched after the link handed them over: IDF's
+ *         in-place mask and unmask on the WS handle (2 per byte), 0 on the TCP parent. */
+[[nodiscard]] std::size_t transport_touched_bytes();
+
+/** @brief Bytes handed to lwIP's send since the reset: whole frames, header included. */
+[[nodiscard]] std::size_t wire_bytes();
+
+/** @brief Park every `esp_transport_read` until released, NOT bounded by its timeout;
+ *         passing false releases them. */
+void hold_reads(bool on);
+
+/** @brief How many callers are parked inside `esp_transport_read` right now. */
+[[nodiscard]] int readers_inside();
+
+/** @} */
 
 /** @} */
 

@@ -17,12 +17,14 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <thread>
 #include <utility>
 
 #include "esp_pthread.h"
 #include "esp_transport.h"
 #include "esp_transport_tcp.h"
+#include "libtracer/ws.hpp"
 
 namespace {
 
@@ -83,6 +85,14 @@ struct state_t {
     int writes = 0;                     /**< @brief Writes entered since the reset. */
     int write_timeout_ms = 0;           /**< @brief The last write's requested bound. */
     std::vector<std::byte> last_write;  /**< @brief The last completed write's payload. */
+    int last_write_op = -1;             /**< @brief Its WS opcode; -1 = none yet. */
+    bool last_write_masked = false;     /**< @brief Its MASK bit. */
+    int lwip_calls = 0;                /**< @brief lwIP calls the writes made — see lwip_calls. */
+    std::size_t transport_touched = 0; /**< @brief Payload bytes the transport re-touched. */
+    std::size_t wire_bytes = 0;        /**< @brief Bytes handed to lwIP's send. */
+    bool hold_read = false;            /**< @brief Park readers instead of serving them. */
+    std::condition_variable read_cv;   /**< @brief Wakes parked readers. */
+    int readers = 0;                   /**< @brief Readers parked right now. */
     /** @} */
 
     std::size_t armed_stack = 0; /**< @brief Last arming set_cfg's stack_size. */
@@ -151,6 +161,13 @@ void reset() {
     st().writes = 0;
     st().write_timeout_ms = 0;
     st().last_write.clear();
+    st().last_write_op = -1;
+    st().last_write_masked = false;
+    st().lwip_calls = 0;
+    st().transport_touched = 0;
+    st().wire_bytes = 0;
+    st().hold_read = false;
+    st().readers = 0;
     st().frames.clear();
     st().cur = 0;
     st().cur_off = 0;
@@ -302,6 +319,44 @@ std::vector<std::byte> last_write_payload() {
     return st().last_write;
 }
 
+int last_write_op() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().last_write_op;
+}
+
+bool last_write_masked() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().last_write_masked;
+}
+
+int lwip_calls() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().lwip_calls;
+}
+
+std::size_t transport_touched_bytes() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().transport_touched;
+}
+
+std::size_t wire_bytes() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().wire_bytes;
+}
+
+void hold_reads(bool on) {
+    {
+        const std::lock_guard<std::mutex> lk(st().m);
+        st().hold_read = on;
+    }
+    if (!on) st().read_cv.notify_all();
+}
+
+int readers_inside() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().readers;
+}
+
 }  // namespace fake_ws
 
 /** @name The `esp_transport` C surface the chip TU links against. */
@@ -411,9 +466,24 @@ int esp_transport_poll_read(esp_transport_handle_t t, int timeout_ms) {
 
 int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int timeout_ms) {
     (void)timeout_ms;
-    const std::lock_guard<std::mutex> lk(st().m);
+    std::unique_lock<std::mutex> lk(st().m);
     if (!handle_usable(t)) return -1;
-    if (!pending(st())) return 0;  // nothing queued: a timeout, exactly as ws_read reports it
+    if (st().hold_read) {
+        // A read parked inside the transport until the test releases it — NOT bounded by
+        // the caller's timeout, so a sender that waits on this reader waits until the test
+        // gives up, which is what makes "a read holds no send" a measurement (#2265).
+        ++st().readers;
+        st().read_cv.wait(lk, [] { return !st().hold_read; });
+        --st().readers;
+        if (!handle_usable(t)) return -1;
+    }
+    if (!pending(st())) {
+        // Nothing queued: a timeout, exactly as ws_read reports it — and, as there, no
+        // header was received, so the opcode accessor answers NONE (`header_received` is
+        // cleared at the top of ws_read_header).
+        st().last_op = WS_TRANSPORT_OPCODES_NONE;
+        return 0;
+    }
     const fake_ws::frame_t& f = st().frames[st().cur];
     // The header is (re-)reported for as long as this frame is being drained.
     st().last_op = f.op;
@@ -451,8 +521,34 @@ int esp_transport_write(esp_transport_handle_t t, const char* buffer, int len, i
         if (!handle_usable(t)) return -1;
         if (st().hold_write) return -1;  // the wait expired: a torn connection
     }
-    st().last_write.assign(reinterpret_cast<const std::byte*>(buffer),
-                           reinterpret_cast<const std::byte*>(buffer) + (len > 0 ? len : 0));
+    const std::span<const std::byte> bytes(reinterpret_cast<const std::byte*>(buffer),
+                                           static_cast<std::size_t>(len > 0 ? len : 0));
+    if (st().live[t]) {
+        // A write on the WS handle is IDF's `_ws_write` (transport_ws.c): a poll, then the
+        // header and the payload as two parent writes (each a poll and a send) — 5 lwIP
+        // calls — masking the caller's payload in place first and unmasking it after.
+        st().lwip_calls += 5;
+        st().transport_touched += 2 * bytes.size();
+        st().wire_bytes += tr::net::ws::detail::client_frame_bytes(bytes.size());
+        st().last_write.assign(bytes.begin(), bytes.end());
+        st().last_write_op = static_cast<int>(tr::net::ws::opcode_t::BINARY);
+        st().last_write_masked = true;
+        return len;
+    }
+    // A write on the TCP parent is `tcp_write` (transport_ssl.c): a poll, then one send.
+    // The bytes are a whole client frame; decode it as the peer would, unmasking a copy.
+    st().lwip_calls += 2;
+    st().wire_bytes += bytes.size();
+    const tr::net::ws::header_t h = tr::net::ws::detail::decode_header(
+        bytes, /*fail_on_violation=*/false, tr::net::ws::kNoPayloadCap);
+    if (h.size + h.len != bytes.size()) {
+        ++st().misuse;  // not exactly one frame: the peer's stream would desync
+        return -1;
+    }
+    st().last_write.assign(bytes.begin() + static_cast<std::ptrdiff_t>(h.size), bytes.end());
+    if (h.masked) tr::net::ws::detail::xor_mask(st().last_write, h.mask_key);
+    st().last_write_op = static_cast<int>(h.op);
+    st().last_write_masked = h.masked;
     return len;
 }
 
