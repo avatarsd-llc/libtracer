@@ -186,8 +186,8 @@ struct recorder_t : tr::net::transport_t {
 /** @brief A real TCP client session with a counting receiver. */
 struct client_t {
     explicit client_t(std::uint16_t port)
-        : link(std::make_unique<tr::net::tcp_transport_t>(
-              "127.0.0.1", port, tr::net::tcp_config_t{.defer_recv = true})) {
+        : link(std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port,
+                                                          tr::net::tcp_config_t{})) {
         link->set_receiver(sink);
         link->start_receiving();
     }

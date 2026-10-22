@@ -157,7 +157,6 @@ tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_
       backend_(config.memory.rx),
       recv_stack_(config.recv_stack) {
     const std::size_t max_frame = config.max_frame;
-    const bool defer_recv = config.defer_recv;
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
     liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
     max_frame_ = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
@@ -181,18 +180,9 @@ tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_
     set_nodelay(fd);
     conn_fd_.store(fd, std::memory_order_relaxed);
     came_up_ = true;  // the ok() fact (#1059): the dial succeeded; liveness is link_up()
-    // Two-phase bring-up (#1045). Spawning the recv thread HERE is the historical shape and
-    // stays the default, but it makes the base's "install the sinks before frames flow"
-    // contract unsatisfiable: this thread can decode and deliver a frame the peer pushed on
-    // connect before the caller's next statement installs a sink, and the empty slot drops it
-    // silently — no dropped_rx(), no malformed_rx(). `defer_recv` hands that ordering back to
-    // the owner: the socket is up and its bytes are left on it until `start_receiving()`.
-    //
-    // Qualified deliberately (the ws_client_transport_t spelling): dispatching a virtual from a
-    // constructor would reach THIS class's override anyway (the derived part does not exist
-    // yet), so spelling it out is the honest form — a subclass cannot substitute its own
-    // bring-up here, and nothing in this call should look as if it could.
-    if (!defer_recv) tcp_transport_t::start_receiving();
+    // Two-phase bring-up (#1045): the recv thread is spawned by `start_receiving()`, never
+    // here. A thread started here could decode a frame the peer pushed on connect before the
+    // owner installs a sink, and the empty slot would drop it with no counter moving.
 }
 
 void tcp_transport_t::start_receiving() {

@@ -49,11 +49,9 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     //    3) asking for it is REFUSED below, not quietly served as FLAT: the key would
     //    otherwise be accepted and mean nothing, which is the silent mode flip the null
     //    `bus()` contract exists to deny.
-    //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006). Default
-    //    0 no longer means UNBOUNDED (#1295): the transport resolves it through
-    //    derive_max_peers, so an omitted key takes the liveness window's own ceiling and
-    //    an over-ceiling request is clamped to it. The cap is the denominator every send
-    //    bound divides by, so "no cap" would mean "no bound".
+    //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006), enforced
+    //    as given: a newcomer past it is refused, no admitted peer is evicted. An omitted
+    //    key (0) takes kDefaultMaxPeers, never "unbounded".
     // Two more ws-private keys, honored on BOTH halves:
     //  - `liveness_window` (VALUE u32, ms; default 0 = kDefaultLivenessWindowMs) — how long
     //    a peer may fail to take bytes before it is broken. It is the send bound's
@@ -83,8 +81,8 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     // its kind-private keys from the raw config bytes the engine kept a copy of, and
     // constructs a FRESH `transport_ws_client` per run — including a fresh masked-frame
     // buffer bound to `egress_src` at construction, so every healed socket is as bounded as
-    // the first. `defer_recv` stays correct for the same reason it does on `tcp`: the engine
-    // calls `start_receiving()` once it has wired the socket's sinks.
+    // the first. As on `tcp`, the engine calls `start_receiving()` once it has wired the
+    // socket's sinks.
     // The LISTEN arm never reaches the engine (a LISTEN link binds eagerly, RFC-0014 §4),
     // which is also why the `peer_named` bus facet is unaffected by this flip — it exists
     // only on the listener.
@@ -127,7 +125,6 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                         src, s.addr, s.port,
                         ws_client_config_t{.memory = {.rx = rx_backend, .io = egress_src},
                                            .max_frame = s.max_frame,
-                                           .defer_recv = true,
                                            .liveness_window_ms = liveness_window,
                                            .max_handshake = max_handshake});
                 },

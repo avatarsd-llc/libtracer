@@ -149,8 +149,8 @@ void pump(pipe_link_t& a_to_b, pipe_link_t& b_to_a) {
 /** @brief A client session of A's listener that counts FWD{WRITE} deliveries carrying a u32. */
 struct client_t {
     explicit client_t(std::uint16_t port)
-        : link(std::make_unique<tr::net::tcp_transport_t>(
-              "127.0.0.1", port, tr::net::tcp_config_t{.defer_recv = true})) {
+        : link(std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port,
+                                                          tr::net::tcp_config_t{})) {
         link->set_receiver(rx);
         link->start_receiving();
     }

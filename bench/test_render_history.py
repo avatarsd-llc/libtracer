@@ -386,12 +386,6 @@ class PerRowTrust(_NoGit):
         entries[4]["benches"][0]["value"] = 500.0
         self.assertEqual(rh._untrusted_cells(entries), {})
 
-    def test_a_reviewed_sample_stays_hidden_whole(self):
-        entries = self._entries({})
-        known = {entries[4]["commit"]["id"][:8]: "reviewed"}
-        cells = hg.untrusted_cells(entries, known)
-        self.assertEqual(cells, {4: ("reviewed", None)})
-
     def test_payload_counts_the_partly_drawn_run(self):
         entries = self._entries({4: {self.ROWS[2]: 160.0}})
         out = rh.build({"entries": {"bench-local latency": entries}}, colors={})

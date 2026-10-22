@@ -20,8 +20,8 @@ call it is not, so today these verdicts still only guard the store. Hence three
 instruments, in the order the workflow uses them:
 
   * `wait` — hold until the machine goes quiet, and say so if it never does. NOT a
-    bare pre-flight check: the workflow's own `cmake --build -j31` immediately
-    precedes the measurement and pushes the 1-minute load average far above any
+    bare pre-flight check: the workflow's own build step (`--parallel $BUILD_JOBS`)
+    immediately precedes the measurement and pushes the 1-minute load average far above any
     sane bar, so a check would refuse every run and a guard that always refuses is
     a guard that gets deleted. Waiting is what makes the bar enforceable. A host
     that never goes quiet FLAGS the sample (`note`), it no longer skips it: the
@@ -46,8 +46,7 @@ instruments, in the order the workflow uses them:
 Two rules run through all of it. A busy host never fails the job: a red job
 trains the reader to ignore red. And a suspect sample is FLAGGED, never deleted — the raw datum stays in
 the store where it can be re-examined, while the charts and any gating consumer stop
-believing it (`is_contaminated`, and `contaminated_samples.json` for the points that
-predate the guard). Gating consumers keep that whole-sample verdict; the charts read
+believing it (`is_contaminated`). Gating consumers keep that whole-sample verdict; the charts read
 `untrusted_cells` instead, which hides only a flagged sample's untrusted rows (#1890).
 
 Stdlib only, like every other bench tool here.
@@ -303,34 +302,11 @@ def is_contaminated(extra: str | None) -> bool:
     return bool(extra) and CONTAM_TOKEN in extra
 
 
-def load_known_contaminated(path: pathlib.Path | None = None) -> dict[str, str]:
-    """@brief sha -> reason, for samples banked BEFORE the guard existed.
-
-    Kept as a reviewed, checked-in list rather than by rewriting the gh-pages store:
-    the raw datum stays exactly as measured, and the judgement about it lands in git
-    history where it can be argued with. A sha absent here and unflagged in its own
-    `extra` is trusted.
-    """
-    p = path or (HERE / "contaminated_samples.json")
-    try:
-        doc = json.loads(p.read_text())
-    except (OSError, ValueError):
-        return {}
-    return {str(s["commit"]): str(s.get("reason", "")) for s in doc.get("samples", [])
-            if isinstance(s, dict) and s.get("commit")}
-
-
-def entry_contaminated(entry: dict, known: dict[str, str] | None = None) -> str | None:
+def entry_contaminated(entry: dict) -> str | None:
     """@brief The contamination reason for one stored entry, or None if it is trusted.
 
-    Answers from either source — the flag the sample stamped on itself at measure
-    time, or the retroactive list for the samples that predate the guard.
+    Answers from the flag the sample stamped on itself at measure time.
     """
-    known = load_known_contaminated() if known is None else known
-    sha = str((entry.get("commit") or {}).get("id", ""))
-    for prefix, reason in known.items():
-        if sha.startswith(prefix):
-            return reason or "listed in bench/contaminated_samples.json"
     for b in entry.get("benches", []):
         if is_contaminated(b.get("extra")):
             return str(b.get("extra"))
@@ -365,20 +341,17 @@ def _row_outlier(vals: list[float], j: int, band: float) -> bool:
     return abs(vals[j] / ref - 1.0) * 100.0 > max(band, ROW_SPREAD_K * spread)
 
 
-def untrusted_cells(entries: list[dict], known: dict[str, str] | None = None,
-                    band: float = DEFAULT_BAND) -> dict[int, tuple[str, set[str] | None]]:
+def untrusted_cells(entries: list[dict], band: float = DEFAULT_BAND) -> dict[int, tuple[str, set[str] | None]]:
     """@brief entry index -> (reason, hidden row names, or None for the whole run).
 
     The CHARTS' trust rule (#1890); gating consumers keep `entry_contaminated`'s
-    whole-run verdict. An unflagged run is absent (every row drawn). A run on the
-    reviewed list is hidden whole: that list is a human verdict on the whole sample. A
+    whole-run verdict. An unflagged run is absent (every row drawn). A
     flagged run hides the rows that carry `ROW_TOKEN` (they failed their own A/A
     check) and the rows that are outliers against their own neighbours (see
     `ROW_NEIGHBOURS`), or the whole run when more than `ROW_WHOLE_RUN_SHARE` of its rows
     are hidden. Nothing in the store is changed: the rule is re-run on every render.
     """
-    known = load_known_contaminated() if known is None else known
-    flagged = {i: r for i, e in enumerate(entries) if (r := entry_contaminated(e, known))}
+    flagged = {i: r for i, e in enumerate(entries) if (r := entry_contaminated(e))}
     series: dict[str, list[tuple[int, float]]] = {}
     for i, e in enumerate(entries):
         for b in e.get("benches", []):
@@ -395,12 +368,10 @@ def untrusted_cells(entries: list[dict], known: dict[str, str] | None = None,
     out: dict[int, tuple[str, set[str] | None]] = {}
     for i, reason in flagged.items():
         e = entries[i]
-        sha = str((e.get("commit") or {}).get("id", ""))
         rows = hidden[i] | {b.get("name") for b in e.get("benches", [])
                             if ROW_TOKEN in (b.get("extra") or "")}
         n = len(e.get("benches", [])) or 1
-        whole = (any(sha.startswith(p) for p in known)
-                 or len(rows) > ROW_WHOLE_RUN_SHARE * n)
+        whole = len(rows) > ROW_WHOLE_RUN_SHARE * n
         out[i] = (reason, None if whole else rows)
     return out
 
@@ -547,10 +518,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
     """@brief Audit a stored data.js: which samples are flagged, and by which source."""
     text = pathlib.Path(args.data).read_text()
     doc = json.loads(text[text.index("{"):].rstrip().rstrip(";"))
-    known = load_known_contaminated()
     flagged = 0
     for suite, entries in doc.get("entries", {}).items():
-        for i, (reason, rows) in sorted(untrusted_cells(entries, known).items()):
+        for i, (reason, rows) in sorted(untrusted_cells(entries).items()):
             flagged += 1
             sha = entries[i]["commit"]["id"][:8]
             shown = ("hidden whole" if rows is None

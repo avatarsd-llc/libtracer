@@ -171,6 +171,7 @@ void test_seam_over_slot_server() {
     {
         tcp_transport_t dialer("127.0.0.1", port);
         check(dialer.ok(), "the dialer connected");
+        dialer.start_receiving();
         const std::vector<std::byte> frame(4, std::byte{0x5A});
         dialer.send(frame);
         check(sink.wait_count(1, 2000ms), "the frame reached the peer-named sink");
@@ -209,6 +210,7 @@ void test_seam_over_slot_server() {
 
     tcp_transport_t successor("127.0.0.1", port);
     check(successor.ok(), "a second dialer connected onto the freed slot");
+    successor.start_receiving();
     const std::vector<std::byte> frame(4, std::byte{0xA5});
     successor.send(frame);
     check(sink.wait_count(2, 2000ms), "the successor's frame reached the sink");

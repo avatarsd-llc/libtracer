@@ -186,7 +186,7 @@ int main() {
     std::printf("kBusLinks = true — the peer-named tier is present in this build\n");
 
     // max_peers is the injected admission bound. It is resolved once at construction (a
-    // request of 0 takes the liveness window's own ceiling), so the value the server ENFORCES
+    // request of 0 takes kDefaultMaxPeers), so the value the server ENFORCES
     // is read back rather than assumed to be what was asked for.
     constexpr std::size_t kRequestedPeers = 4;
     tr::net::tcp_server_transport_t server(std::uint16_t{0},

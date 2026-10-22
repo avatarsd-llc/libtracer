@@ -26,6 +26,55 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - **Migration:** replace `const auto* s = net.settings_of(key)` with
     `const auto s = net.settings_of(key)`, and `s != nullptr` / `s == nullptr` with
     `s.has_value()` / `!s.has_value()`. `s->field` reads unchanged.
+### Breaking
+
+- **The one-release shims of 0.18.0 and 0.19.0 are removed
+  ([#2247](https://github.com/avatarsd-llc/libtracer/issues/2247)).** Their windows, promised in
+  #1703 and #1725, closed three releases ago. Removed:
+  - the headers `libtracer/reader_guard.hpp` (the `tr::graph::reader_guard` concept and
+    `tr::graph::guard_scope_t`) and `libtracer/view_can.hpp` (the `tr::view::can_*` framing
+    names);
+  - the aliases `tr::graph::mutex_guard_t`, `tr::graph::no_guard_t`, `tr::graph::reader_guard_t`
+    and `tr::mem::sync_none_t`;
+  - the removal tripwires whose stale spelling now changes nothing: the `#error` on
+    `LIBTRACER_NO_ATOMIC` (the refcount binding follows the target) and
+    `LIBTRACER_PIN_INSTRUMENT` (counters only), and the `static_assert`s on a fragment that
+    still defines `kWeaklyOrdered` or `kSingleWriter` (nothing read them). Those spellings are
+    now ignored.
+
+  Three refusals STAY, permanently, because the stale spelling would otherwise build a silently
+  different choice: `-DLIBTRACER_ACL_FULL` (it would get the ALLOW-only policy, which refuses
+  every DENY entry), `-DLIBTRACER_LKV_SLOT` (a different LKV slot) and a fragment that still
+  defines `reader_guard_t` (the host mutex guard in place of the target's). The
+  `reclaim_local_t` refusal (0.20.0) stays too.
+
+  **Migration:** include `libtracer/guard.hpp` / `libtracer/guard_mutex.hpp` and name
+  `tr::guard`, `tr::guard_scope_t`, `tr::mutex_guard_t` and `tr::no_guard_t`; name
+  `tr::graph::guard_t` for the build's guard; include `libtracer/can_framing.hpp` and name
+  `tr::net::can::can_*`. A fragment member is `guard_t`, not `reader_guard_t`.
+- **A stream server's peer cap is the injected `max_peers` alone; the window-derived ceiling is
+  removed ([#2247](https://github.com/avatarsd-llc/libtracer/issues/2247)).** #1295 clamped
+  every tcp/ws server to `liveness_window / 100 ms` (100 peers on the default window), because
+  each admitted peer could cost the node one blocking write. Since #2144 those writes never
+  wait, so the clamp only refused deployments: a request for 4,096 peers silently got 100.
+  `tr::net::max_admissible_peers` and `tr::net::derive_max_peers` are removed. A non-zero
+  `max_peers` is enforced as given (a newcomer past it is refused, no admitted peer is
+  evicted); `0` takes the new `tr::net::kDefaultMaxPeers` (100), whatever the window. The WS
+  `101`, the one blocking write left, keeps its bound of `window / max_peers`, floored at
+  100 ms. **Migration:** a deployment that widened `liveness_window` only to admit more peers
+  sets `max_peers` instead. The other direction changes too: a short window with `max_peers`
+  left at `0` (1 s gave 10 peers) now admits 100, and a non-zero cap above the old ceiling is
+  admitted in full, each session with its own RAM. A deployment that relied on a short window
+  to keep its peer count low sets `max_peers`.
+- **`tcp_config_t::defer_recv` and `ws_client_config_t::defer_recv` are removed; every tcp and
+  ws DIAL link defers its receive start
+  ([#2247](https://github.com/avatarsd-llc/libtracer/issues/2247)).** The default (`false`)
+  spawned the receive thread in the constructor, so a frame the peer pushed on connect could be
+  decoded into an empty sink and dropped with no counter moving. Every production factory
+  already passed `true`. **Migration:** drop `.defer_recv = ...` from the config; a directly
+  constructed DIAL link installs its receivers and then calls `start_receiving()`, as
+  `transport_vertex_t` and the self-heal engine already do. A link that is never armed never
+  receives. LISTEN links are unchanged.
 
 ## [0.21.0] — 2026-10-22
 

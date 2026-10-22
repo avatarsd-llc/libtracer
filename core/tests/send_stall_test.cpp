@@ -31,19 +31,22 @@
  * A third level was added by **#1295**, which found the bound was a per-CALL property
  * rather than a node one: a directed send is a round of ONE, so it took the whole window
  * for itself, and N of them to N stalled peers serialized N windows behind the same write
- * mutex. The residual arms are the cap derivation that makes the denominator real
- * (`derive_max_peers` — `max_peers = 0` is no longer "uncapped") and the concurrent
- * directed batch on a real peer-named server — which since #2144, with the shared write
- * mutex gone and every server write nonblocking, costs the senders no wait at all.
+ * mutex. The residual arm is the concurrent directed batch on a real peer-named server,
+ * which since #2144, with the shared write mutex gone and every server write nonblocking,
+ * costs the senders no wait at all. That also retired #1295's window-derived peer ceiling,
+ * so the admission arm (#2247) admits 4,096 real peers, the injected cap alone.
  */
 
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -328,49 +331,55 @@ void test_bound_derivation() {
 }
 
 /**
- * @brief #1295 — the admission cap is what makes the denominator real, so it is derived
- *        from the window rather than taken on trust.
+ * @brief #2247 — the admission cap is the injected `max_peers` alone: 4,096 real peers are
+ *        admitted, the next is refused, and none of the admitted is evicted for it.
+ *
+ * #1295 clamped every server to `window / kBoundedWaitMs` (100 on the default window), because
+ * each admitted peer could cost the node one blocking write. #2144 made those writes
+ * nonblocking, so the ceiling had no reason left. Each peer is a real loopback connection: the
+ * clients and the server's sessions together need about 8,200 descriptors, so the soft limit is
+ * raised to that first. The server accepts in arrival order, so once the 4,097th client reads
+ * its refusal every earlier one has been admitted.
  */
-void test_max_peers_derivation() {
-    std::printf("the concurrent-peer cap is resolved against the window, never 'unbounded':\n");
-    using tr::net::derive_max_peers;
-    using tr::net::derive_send_bound_ms;
-    using tr::net::max_admissible_peers;
+void test_admits_4096_peers() {
+    std::printf("the admission cap is the injected max_peers, 4,096 real peers:\n");
+    constexpr std::size_t kPeers = 4096;
+    constexpr rlim_t kFds = 2 * kPeers + 256;
+    ::rlimit fds{};
+    ::getrlimit(RLIMIT_NOFILE, &fds);
+    fds.rlim_cur = std::min(kFds, fds.rlim_max);
+    ::setrlimit(RLIMIT_NOFILE, &fds);
+    check(fds.rlim_cur == kFds, "the descriptor limit holds 4,096 peers and their sessions");
 
-    check(max_admissible_peers(10000) == 100,
-          "the ceiling is window / kBoundedWaitMs — past it every peer draws the FLOOR and "
-          "the aggregate stops fitting the window");
-    check(max_admissible_peers(0) == tr::net::kDefaultLivenessWindowMs / tr::net::kBoundedWaitMs,
-          "an unconfigured window resolves its ceiling from the default clamp");
-    check(max_admissible_peers(50) == 1, "a window under one floor still admits ONE peer");
+    tr::net::tcp_server_transport_t server(0, {.max_peers = kPeers, .peer_named = true});
+    check(server.ok(), "the peer-named listener is up");
+    check(server.max_peers() == kPeers,
+          "a cap above the old window ceiling is enforced as given, not clamped to 100");
 
-    check(derive_max_peers(10000, 0) == 100,
-          "0 is no longer UNBOUNDED (#1295): it takes the ceiling, which is a number");
-    check(derive_max_peers(10000, 8) == 8, "a cap inside the ceiling is honoured verbatim");
-    check(derive_max_peers(10000, 4096) == 100,
-          "and one above it is CLAMPED — the extra slots could only be admitted by making "
-          "the node's aggregate blocking claim untrue");
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    to.sin_port = htons(server.local_port());
+    const auto dial = [&to] {
+        const int c = ::socket(AF_INET, SOCK_STREAM, 0);
+        return ::connect(c, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0 ? c : -1;
+    };
+    std::vector<int> clients(kPeers);
+    std::size_t connected = 0;
+    for (int& c : clients) connected += (c = dial()) >= 0 ? 1U : 0U;
+    check(connected == kPeers, "every client connected");
 
-    // The property the whole ruling rests on, stated as arithmetic: whatever window and
-    // requested cap a deployment injects, ONE per-record bound times the peers that can
-    // hold one fits inside one window — so the peers a hostile party can open no longer
-    // multiply the node's blocking. (A window narrower than kBoundedWaitMs is the one
-    // irreducible case: the floor is a quantum, not a divisible budget, and the cap then
-    // collapses to a single peer.)
-    bool aggregate_fits = true;
-    for (const std::uint32_t w : {0U, 50U, 100U, 400U, 1200U, 10000U, 600000U})
-        for (const std::size_t req : {std::size_t{0}, std::size_t{1}, std::size_t{7},
-                                      std::size_t{64}, std::size_t{100000}}) {
-            const std::size_t cap = derive_max_peers(w, req);
-            const std::uint32_t window = w != 0 ? w : tr::net::kDefaultLivenessWindowMs;
-            const std::size_t budget =
-                window > tr::net::kBoundedWaitMs ? window : tr::net::kBoundedWaitMs;
-            if (cap < 1 || static_cast<std::size_t>(derive_send_bound_ms(w, cap)) * cap > budget)
-                aggregate_fits = false;
-        }
-    check(aggregate_fits,
-          "bound x cap <= one window, for every window and every requested cap — the node "
-          "aggregate, not a per-call property a peer multiplies by reconnecting");
+    // The newcomer past the cap is accepted and closed at once: it reads end-of-stream.
+    const int extra = dial();
+    ::pollfd p{extra, POLLIN, 0};
+    char byte = 0;
+    check(::poll(&p, 1, 20000) == 1, "the 4,097th client hears from the server");
+    check(::recv(extra, &byte, 1, 0) == 0, "the 4,097th peer is refused with a clean close");
+    std::size_t admitted = 0;
+    server.bus()->enumerate_peers([&admitted](std::string_view) { ++admitted; });
+    check(admitted == kPeers, "every one of the 4,096 holds a slot; none was evicted");
+    ::close(extra);
+    for (const int c : clients) ::close(c);
 }
 
 /**
@@ -407,6 +416,7 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
     tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port),
                                   {.liveness_window_ms = window});
     check(link.ok(), "the dial succeeded");
+    link.start_receiving();
     check(link.liveness_window_ms() == window, "and the injected window is the one in force");
 
     const int peer = ::accept(listener, nullptr, nullptr);
@@ -572,6 +582,7 @@ void test_second_publisher_never_waits_on_a_stalled_write() {
     tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port),
                                   {.liveness_window_ms = window});
     check(link.ok(), "the dial succeeded");
+    link.start_receiving();
     const int peer = ::accept(listener, nullptr, nullptr);
     check(peer >= 0, "the peer accepted the connection — and now never reads a byte");
 
@@ -629,6 +640,7 @@ struct parked_peer_t {
         link = std::make_unique<tr::net::tcp_transport_t>(
             "127.0.0.1", ntohs(local.sin_port),
             tr::net::tcp_config_t{.liveness_window_ms = window});
+        link->start_receiving();
         peer = ::accept(listener, nullptr, nullptr);
         const timeval tv{.tv_sec = 5, .tv_usec = 0};
         ::setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -809,7 +821,7 @@ int main() {
     test_partial_record_finishes();
     test_completion_resets_the_streak();
     test_bound_derivation();
-    test_max_peers_derivation();
+    test_admits_4096_peers();
     test_tcp_link_sheds_and_drops_a_stalled_peer();
     test_second_publisher_never_waits_on_a_stalled_write();
     test_queued_records_are_all_delivered_in_order();

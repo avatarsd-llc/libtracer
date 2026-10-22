@@ -37,11 +37,9 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     //    target that closed the bus module out (`kBusLinks = false`, #375 deliverable 3)
     //    asking for it is REFUSED below rather than quietly served as FLAT, exactly as the
     //    ws factory refuses it.
-    //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006). Default
-    //    0 no longer means UNBOUNDED (#1295): the transport resolves it through
-    //    derive_max_peers, so an omitted key takes the liveness window's own ceiling and
-    //    an over-ceiling request is clamped to it. The cap is the denominator every send
-    //    bound divides by, so "no cap" would mean "no bound".
+    //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006), enforced
+    //    as given: a newcomer past it is refused, no admitted peer is evicted. An omitted
+    //    key (0) takes kDefaultMaxPeers, never "unbounded".
     // A third tcp-private key, honored on BOTH halves and mirroring ws's verbatim (#838):
     //  - `liveness_window` (VALUE u32, ms; default 0 = kDefaultLivenessWindowMs) — how long
     //    a peer may fail to take bytes before it is broken. It is the send bound's
@@ -59,11 +57,10 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // DORMANT and this thunk runs on the engine's worker, once per dial attempt.
     // RE-RUNNABILITY: the thunk captures two raw pointers that outlive the vertex, re-parses
     // its kind-private keys from the raw config bytes the engine kept a copy of, and
-    // constructs a FRESH `tcp_transport_t` per run — no state survives a run. `defer_recv`
-    // stays true and stays correct: the engine wires the socket's sinks and then calls
-    // `start_receiving()` itself (`self_heal_link_t::wire_socket`), so the deferred-arm
-    // window this argument exists to close is closed by the engine exactly as
-    // `make_connection` closed it. The LISTEN arm never reaches the engine.
+    // constructs a FRESH `tcp_transport_t` per run — no state survives a run. The engine
+    // wires the socket's sinks and then calls `start_receiving()` itself
+    // (`self_heal_link_t::wire_socket`), exactly as `make_connection` does. The LISTEN arm never
+    // reaches the engine.
     vertex.register_transport_type(
         "tcp",
         [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
@@ -93,7 +90,6 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                         src, s.addr, s.port,
                         tcp_config_t{.memory = {.rx = rx_backend},
                                      .max_frame = s.max_frame,
-                                     .defer_recv = true,
                                      .liveness_window_ms = liveness_window});
                 },
                 [&] {

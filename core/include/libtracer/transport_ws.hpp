@@ -135,8 +135,8 @@ struct ws_server_config_t {
     std::size_t max_frame = 0;
     /**
      * @brief Concurrent-peer admission cap (RFC-0006) — a connection beyond it is accepted and
-     *        immediately closed. `0` takes the liveness window's own ceiling
-     *        (`window / kBoundedWaitMs`, #1295), and a larger request is clamped to it.
+     *        immediately closed. `0` takes `%kDefaultMaxPeers`; any other value is enforced as
+     *        given.
      */
     std::size_t max_peers = 0;
     /** @brief Expose the @ref bus_link_t facet (see @ref transport_t::bus): the browser-tabs
@@ -181,13 +181,6 @@ struct ws_client_config_t {
     std::size_t max_frame = 0;
     /** @brief Recv-thread stack size in bytes, 0 = platform default. */
     std::size_t recv_stack = 0;
-    /**
-     * @brief Two-phase bring-up (#1025): the handshake still runs in the constructor (so
-     *        `ok()` answers on return) but the recv thread is NOT spawned until
-     *        `start_receiving`, so a server that pushes the instant the handshake completes
-     *        cannot land a message before the receiver is installed.
-     */
-    bool defer_recv = false;
     /** @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838): it
      *         bounds each egress write turn, and offers past a full lane whose turns moved
      *         nothing, `kMaxConsecutiveStalls` rings of them in a row, close the connection. */
@@ -476,8 +469,8 @@ using transport_ws_server = ws_server_transport_t;
  * (device-to-device, or egress through a NAT). The constructor TCP-connects to
  * @p host:@p port, runs the opening handshake from the client side (sends an
  * HTTP GET Upgrade with a fresh Sec-WebSocket-Key, then verifies the 101
- * response's Sec-WebSocket-Accept against ws::accept_key), and on success spawns
- * a receive loop. Per RFC 6455 §5.1 every client→server frame is MASKED
+ * response's Sec-WebSocket-Accept against ws::accept_key); start_receiving()
+ * then spawns the receive loop. Per RFC 6455 §5.1 every client→server frame is MASKED
  * (ws::encode_client_frame); inbound server frames are unmasked and decode the
  * same way the server's do. ok() confirms the handshake completed.
  */
@@ -487,14 +480,15 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
      * @brief Connect to @p host:@p port and run the client opening handshake.
      *
      * TCP-connects, sends the HTTP Upgrade request, and verifies the server's
-     * 101 Sec-WebSocket-Accept. On success the receive loop thread is spawned;
-     * confirm with ok(). On any failure the connection is closed and ok() is
+     * 101 Sec-WebSocket-Accept; confirm with ok(). The receive loop thread is
+     * spawned by @ref start_receiving, once the owner has installed its receivers
+     * (#1025, #2247). On any failure the connection is closed and ok() is
      * false.
      *
      * @param host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param port TCP port of the peer (host byte order).
      * @param config The link's knobs (@ref ws_client_config_t): memory (receive seam and
-     *             egress store), receive cap, recv-thread stack, deferred receive, liveness
+     *             egress store), receive cap, recv-thread stack, liveness
      *             window, handshake budget.
      */
     ws_client_transport_t(std::string_view host, std::uint16_t port,
@@ -536,18 +530,17 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
               const graph::delivery_lane_t& lane) override;
 
     /**
-     * @brief Spawn the recv thread a `defer_recv` construction held back (#1025).
+     * @brief Spawn the recv thread the constructor held back (#1025).
      *
      * The second phase of the two-phase bring-up: the socket is connected and handshaken,
      * the bytes the server pipelined behind its `101` are held, and NOTHING has been
-     * decoded yet — so a sink installed before this call cannot have missed a frame. From
-     * here the client behaves exactly as a one-phase one: the thread's first act is to
-     * drain what the handshake carried over.
+     * decoded yet — so a sink installed before this call cannot have missed a frame. The
+     * thread's first act is to drain what the handshake carried over.
      *
-     * Idempotent and safe on a one-phase client (the thread is already running → no-op) and
-     * on a failed handshake (`ok()` false → no-op, nothing to serve). A `defer_recv` client
-     * that is never started never receives, never answers a PING and never reports the link
-     * down; it is simply an open socket until it is destroyed.
+     * Idempotent (an armed client's thread is already running → no-op) and safe on a failed
+     * handshake (`ok()` false → no-op, nothing to serve). A client that is never started never
+     * receives, never answers a PING and never reports the link down; it is simply an open socket
+     * until it is destroyed.
      */
     void start_receiving() override;
 
@@ -565,7 +558,7 @@ class ws_client_transport_t final : public transport_t, private stream_endpoint_
     /** @brief Liveness (the @ref transport_t::link_up contract): true from the completed
      *         handshake until the recv loop's teardown — a peer CLOSE, a remote hangup, a
      *         fatal receive error or an RFC 6455 breach all clear it (relaxed atomic; the
-     *         push twin is @ref set_down_notifier). A `defer_recv` client that is never
+     *         push twin is @ref set_down_notifier). A client that is never
      *         started never observes the wire and so never reports down (see
      *         @ref start_receiving). */
     [[nodiscard]] bool link_up() const noexcept override {

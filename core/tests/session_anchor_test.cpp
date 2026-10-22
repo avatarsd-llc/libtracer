@@ -78,8 +78,8 @@ bool wait_until(Fn f, std::chrono::milliseconds timeout = 3000ms) {
 /** @brief A real TCP client session against the node's listener — dial, then hang up. */
 struct client_t {
     explicit client_t(std::uint16_t port)
-        : link(std::make_unique<tr::net::tcp_transport_t>(
-              "127.0.0.1", port, tr::net::tcp_config_t{.defer_recv = true})) {}
+        : link(std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port,
+                                                          tr::net::tcp_config_t{})) {}
     [[nodiscard]] bool ok() const { return link && link->ok(); }
     std::unique_ptr<tr::net::tcp_transport_t> link;
 };

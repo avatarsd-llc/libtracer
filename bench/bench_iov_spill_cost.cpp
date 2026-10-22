@@ -447,6 +447,7 @@ void arm_d2_real_tcp(const std::vector<std::vector<std::byte>>& store) {
     constexpr std::size_t kBatch = 2000;
     tr::net::tcp_transport_t server(std::uint16_t{0});  // ephemeral bind (#1362)
     tr::net::tcp_transport_t client("127.0.0.1", server.local_port());
+    client.start_receiving();
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     std::vector<std::span<const std::byte>> a;

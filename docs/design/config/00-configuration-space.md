@@ -249,10 +249,12 @@ is a knob the fragment does not state at all (#1244).
 
 No knob has a CMake variable. The last two, `-DLIBTRACER_ACL_FULL` and `-DLIBTRACER_LKV_SLOT`,
 were removed after their one transition release (#1722): configuring with a value that would
-change the build is an error naming the trait to bind instead. The two compile definitions that
-duplicated a trait went with them — `LIBTRACER_NO_ATOMIC` (the segment refcount now follows the
-target and `guard_t`) and `LIBTRACER_PIN_INSTRUMENT` (folded into `kInstrumentCounters`) — and
-`config.hpp` refuses either with an `#error`. The five other cache variables this table used to
+change the build is an error naming the trait to bind instead, and that refusal is permanent
+(#2247), because the stale value would otherwise build a different ACL policy or LKV slot without
+a word. The two compile definitions that duplicated a
+trait went with them — `LIBTRACER_NO_ATOMIC` (the segment refcount now follows the target and
+`guard_t`) and `LIBTRACER_PIN_INSTRUMENT` (folded into `kInstrumentCounters`); their refusals
+went in #2247, since a stale one now gets the same answer or only counters. The five other cache variables this table used to
 list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is

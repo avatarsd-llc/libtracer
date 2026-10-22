@@ -25,7 +25,7 @@ BLOB = "https://github.com/avatarsd-llc/libtracer/blob/main/"
 PAGES = {
     "index.md": ["tracer.hpp"],
     "config.md": [
-        "config.hpp", "reclaim.hpp", "guard.hpp", "guard_mutex.hpp", "reader_guard.hpp",
+        "config.hpp", "reclaim.hpp", "guard.hpp", "guard_mutex.hpp",
         "init_fault.hpp",
     ],
     "status.md": ["status.hpp", "error.hpp"],
@@ -75,7 +75,7 @@ PAGES = {
     ],
     "connection-config.md": ["conn_spec.hpp", "config_reader.hpp", "tls_profile.hpp"],
     "can.md": [
-        "can.hpp", "can_framing.hpp", "can_reassembly.hpp", "can_tx_pool.hpp", "view_can.hpp",
+        "can.hpp", "can_framing.hpp", "can_reassembly.hpp", "can_tx_pool.hpp",
         "transport_can.hpp", "inline_fn.hpp",
     ],
 }

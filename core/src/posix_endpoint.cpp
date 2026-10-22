@@ -707,9 +707,8 @@ void slot_server_t::accept_peer(mem::block_array_t<pollfd>& pfds,
                 break;
             }
         if (slot == nullptr) {
-            // max_peers_ is the RESOLVED cap (derive_max_peers), so there is no "0 means
-            // uncapped" arm left to test: an unconfigured server takes the window's own
-            // ceiling rather than infinity (#1295).
+            // max_peers_ is the RESOLVED cap, never 0, so there is no "0 means uncapped" arm
+            // left to test: a newcomer past it is refused and no admitted peer is evicted.
             if (slots_.size() >= max_peers_) {
                 ::close(fd);  // clean refusal at the deployment cap, not a hung SYN
                 return;

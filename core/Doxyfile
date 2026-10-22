@@ -115,7 +115,6 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/lkv_slot.hpp \
                          core/include/libtracer/guard.hpp \
                          core/include/libtracer/guard_mutex.hpp \
-                         core/include/libtracer/reader_guard.hpp \
                          core/include/libtracer/edge_pin.hpp \
                          core/include/libtracer/qsbr.hpp \
                          core/include/libtracer/mem_source_sync.hpp \

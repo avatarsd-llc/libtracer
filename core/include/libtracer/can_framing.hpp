@@ -5,7 +5,7 @@
  * CAN framing (#55): header-elided framing of one logical libtracer payload onto a
  * sequence of CAN data fields. It is transport framing, so it lives in the net plane
  * (`tr::net::can`), beside the ID and advertise codecs (can.hpp); #1725 moved it here
- * from the view layer (`%view_can.hpp`, now a one-release alias header). Classic CAN
+ * from the view layer. Classic CAN
  * carries up to 8 data bytes per frame; CAN-FD up to 64. The TLV header is NOT carried — it is
  * reconstructed host-side from the 29-bit CAN ID scheme (can.hpp / ADR-0022), so
  * the existing CAN frames are byte-unchanged on the bus (zero added overhead).

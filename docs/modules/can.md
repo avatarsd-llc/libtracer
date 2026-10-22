@@ -33,8 +33,7 @@ the enumeration on its own — there is no orchestrator to tell it to.
 
 **The splitter** (`tr::net::can::can_frame_count` / `can_frame_at`, in
 `can_framing.hpp`) is transport framing, so it lives in the net plane beside the ID
-codec (#1725 moved it out of the view layer; `view_can.hpp` keeps the old `tr::view`
-names as aliases for one release). It cuts a view into per-frame windows, each a
+codec (#1725 moved it out of the view layer). It cuts a view into per-frame windows, each a
 subview over the same segment, never a memcpy. It is a pair of free functions, not an object — a window
 is a pure function of the payload length, the mode and the index, so there is no
 table to hold and nothing to allocate. `can_frame_mode_t` selects the classic 8-byte or CAN-FD 64-byte data

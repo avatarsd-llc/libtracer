@@ -201,6 +201,7 @@ void test_tcp_retained_race() {
         auto rx = [&sink](span_t f) { sink.on_frame(f); };
         listener.set_receiver(rx);
         tcp_transport_t dialer("127.0.0.1", listener.local_port());
+        dialer.start_receiving();
 
         // The values, minted up front and held by the test for the whole round, so their
         // reference counts at the end say whether the link let go of each one.

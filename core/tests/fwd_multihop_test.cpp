@@ -185,6 +185,7 @@ int main() {
         return 1;
     }
     transport_ws_client a_to_b("127.0.0.1", srv_b.local_port());
+    a_to_b.start_receiving();
     if (!a_to_b.ok()) {
         std::fprintf(stderr, "node A: ws client to B failed to connect\n");
         return 1;
@@ -206,6 +207,7 @@ int main() {
         },
         &inbox);
     transport_ws_client c_to_a("127.0.0.1", srv_a.local_port());
+    c_to_a.start_receiving();
     if (!c_to_a.ok()) {
         std::fprintf(stderr, "client: ws client to A failed to connect\n");
         return 1;

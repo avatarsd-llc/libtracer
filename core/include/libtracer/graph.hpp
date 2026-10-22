@@ -2389,7 +2389,7 @@ class graph_t {
      *
      * It does NOT rely on `kMaxSegments`, and this comment used to claim it did ("graph depth
      * is `kMaxSegments`-bounded structurally"). That claim is false: `kMaxSegments` is enforced
-     * only in `path_t::parse` (`core/src/path.cpp:110`), the LOCAL string→bytes builder.
+     * only in `path_t::parse` (`%path.cpp`), the LOCAL string→bytes builder.
      * `register_vertex_key` takes raw key bytes and counts nothing, so a vertex can be
      * registered at any depth, and a creation hook may register one at whatever depth the
      * writes it admits reach (RFC-0030 §7). The iterative walk is safe
@@ -3590,11 +3590,11 @@ class graph_t {
     mem::block_array_t<parked_t> park_; /**< @brief The parked entries, oldest first. */
 
     // The node-scoped vertex index (RFC-0024 §6.4) — the ONE new structure a bound path
-    // needs, named honestly. The "vertex map" is a Composite tree of non-moving unique_ptr
-    // allocations with no dense index, so an element's u32 index has no meaning until one
-    // exists. This is it: one slot appended per vertex_t ALLOCATION (slot 0 = roots_,
-    // placeholders included), under the same unique map_mutex_ hold that links the node into
-    // the tree, so slot order is allocation order and the mapping is a bijection forever.
+    // needs, named honestly. The "vertex map" is a Composite tree of pointer-stable vertices
+    // (each parent's `vertex_t::children_t`) with no dense index, so an element's u32 index has no
+    // meaning until one exists. This is it: one slot appended per vertex_t ALLOCATION (slot 0 =
+    // roots_, placeholders included), under the same unique map_mutex_ hold that links the node
+    // into the tree, so slot order is allocation order and the mapping is a bijection forever.
     //
     // It is NOT a route table: its size tracks the graph, not the traffic, so it does not
     // reintroduce the per-flow state a bound path exists to avoid. 4 B/vertex on rv32, 8 on a
@@ -3760,20 +3760,20 @@ class graph_t {
 
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose
-    // children container owns every top-level vertex (each child a non-moving unique_ptr
-    // allocation, recursively). INSERT-ONLY (mutation under a unique map_mutex_ hold):
+    // children container (`vertex_t::children_t`) owns every top-level vertex, each child
+    // its own block, recursively. INSERT-ONLY (mutation under a unique map_mutex_ hold):
     // vertices are added, never erased. find() hands out a raw vertex_t* that callers
     // hold PAST the map lock; that is sound only because each vertex_t is pointer-stable
-    // (owned by its parent's container via unique_ptr, never moved) AND never destroyed
-    // while the graph lives. Implementing vertex retirement (the ADR "retire-LIST") must
-    // NOT be a bare detach-from-parent — that would dangle every outstanding handle (the
-    // dangling-ref class #220 fixed); it needs a vertex
-    // lifetime scheme (refcount / epoch reclamation, or a tombstone) first. Registering
-    // the empty key fills this node in place (the "root vertex" the flat map allowed).
+    // (owned by its parent's container, never moved) AND never destroyed while the graph
+    // lives. Retirement (`retire_subtree`) keeps that: it reverts a vertex to an
+    // unregistered placeholder in place and bumps `retire_gen_`, never detaching it from its
+    // parent, so no outstanding handle dangles (the class #220 fixed). Registering the empty
+    // key fills this node in place (the "root vertex" the flat map allowed).
 
     /** @brief The ADR-0060 byte-buffer seam the write-path copy-store draws its owned
      *         value @ref view::segment_t from (the flatten of a branch/field write,
-     *         `graph.cpp` sites 825/1017), plus both folded READs' POINT headers (#831).
+     *         `graph_t::write_branch` and the field overload of `graph_t::write`), plus
+     *         both folded READs' POINT headers (#831).
      *
      *         Since #873 phase 1 this is no longer injected either — it POINTS at
      *         @ref mem::heap_backend for a process-default graph and at the graph's own
@@ -3787,8 +3787,8 @@ class graph_t {
      *         segment's reclaim self-routes on the last-ref thread. */
     mem::mem_backend_t* value_backend_ = &mem::heap_backend();
     /** @brief The two structural roots in ONE table-source block (#1778): the tree root and the
-     *         session anchors' private root below. One owner keeps the pair at the two words the
-     *         two `unique_ptr`s took, so no member after it moves. */
+     *         session anchors' private root below. One owner keeps the pair at two words
+     *         (its source and the block), so no member after it moves. */
     struct roots_t {
         vertex_t root;   /**< @brief The Composite tree's root. */
         vertex_t anchor; /**< @brief The session anchors' private root (#1223). */

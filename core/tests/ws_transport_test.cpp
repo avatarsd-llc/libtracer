@@ -602,6 +602,7 @@ void test_client_server_roundtrip() {
 
     tr::net::ws_client_transport_t client("127.0.0.1", port);
     check(client.ok(), "client connected + 101 Sec-WebSocket-Accept verified");
+    client.start_receiving();
 
     client.set_receiver(cli_rx);
 
@@ -702,9 +703,11 @@ void test_multi_peer_bus() {
 
     tr::net::ws_client_transport_t a("127.0.0.1", port);
     a.set_receiver(a_sink);
+    a.start_receiving();
     std::optional<tr::net::ws_client_transport_t> b;
     b.emplace("127.0.0.1", port);
     b->set_receiver(b_sink);
+    b->start_receiving();
     check(a.ok() && b->ok(), "TWO clients connected concurrently (listen(fd,1) era over)");
 
     // --- inbound: each client's frame arrives tagged with a DISTINCT peer name ---
@@ -778,6 +781,7 @@ void test_multi_peer_bus() {
     // --- slot recycling: a new session lands in the freed slot under a FRESH name ---
     std::optional<tr::net::ws_client_transport_t> c;
     c.emplace("127.0.0.1", port);
+    c->start_receiving();
     frame_sink_t c_sink;
     c->set_receiver(c_sink);
     check(c->ok(), "third client connected after the departure");
@@ -806,6 +810,7 @@ void test_max_peers_cap() {
     std::optional<tr::net::ws_client_transport_t> a;
     a.emplace("127.0.0.1", port);
     check(a->ok(), "first client admitted");
+    a->start_receiving();
 
     const tr::net::ws_client_transport_t b("127.0.0.1", port);
     check(!b.ok(), "second client refused cleanly at the cap (handshake never completes)");
@@ -839,9 +844,11 @@ void test_close_peer() {
 
     tr::net::ws_client_transport_t a("127.0.0.1", port);
     a.set_receiver(a_sink);
+    a.start_receiving();
     std::optional<tr::net::ws_client_transport_t> b;
     b.emplace("127.0.0.1", port);
     b->set_receiver(b_sink);
+    b->start_receiving();
     check(a.ok() && b->ok(), "two clients connected");
 
     // Drive one frame each so the server learns both peer names.
@@ -1008,6 +1015,7 @@ void test_flat_server_rejects_peer_receiver() {
 
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     check(client.ok(), "client connected + 101 verified");
+    client.start_receiving();
 
     const std::array<std::byte, 3> payload{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
     client.send(payload);
@@ -1049,6 +1057,7 @@ void test_peer_named_server_does_not_downgrade_to_flat() {
 
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     check(client.ok(), "client connected + 101 verified");
+    client.start_receiving();
     const std::array<std::byte, 2> first{std::byte{0x0A}, std::byte{0x0B}};
     client.send(first);
     check(!flat_sink.wait_count(1, 500ms),
@@ -1206,6 +1215,7 @@ void test_frame_pipelined_behind_the_101() {
         tr::net::ws_client_transport_t client("127.0.0.1", ntohs(bound.sin_port));
         check(client.ok(), "the client completed its opening handshake");
         client.set_receiver(sink);
+        client.start_receiving();
         receiver_ready.set_value();
 
         check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
@@ -1228,20 +1238,20 @@ void test_frame_pipelined_behind_the_101() {
 }
 
 /**
- * @brief #1025 — a `defer_recv` client decodes NOTHING until start_receiving(), so a message
+ * @brief #1025 — a client decodes NOTHING until start_receiving(), so a message
  *        the server pushes ON CONNECT cannot be dropped into an empty sink.
  *
- * The one-phase constructor dials, handshakes AND spawns the recv thread before it returns,
- * so `set_receiver` can only ever run afterwards. A server that pushes its state the instant
- * the handshake completes has that message in flight before the constructor returns, and
- * whether it beats the caller's next statement is decided by nothing but scheduling: the
- * recv thread reaching its first drain versus the calling thread performing one store. Lose
+ * A constructor that dials, handshakes AND spawns the recv thread before it returns (the
+ * eager shape #2247 removed) lets `set_receiver` run only afterwards. A server that pushes its
+ * state the instant the handshake completes has that message in flight before the constructor
+ * returns, and whether it beats the caller's next statement is decided by nothing but scheduling:
+ * the recv thread reaching its first drain versus the calling thread performing one store. Lose
  * that race and `receiver_slot_t`'s empty slot drops the message — no counter, no queue, a
  * healthy-looking connection.
  *
  * The guard does not race it. The peer writes the `101`, a PING and a COMPLETE BINARY
  * message in ONE `::send` (so all of it is in the client's first `recv`) and then goes
- * quiet, and the client is constructed with `defer_recv`. Three observables, in order:
+ * quiet, and the client is constructed (unarmed). Three observables, in order:
  *
  *  - SILENCE. For a generous window after the handshake the client sends back NOTHING — the
  *    pipelined PING is not answered, because nothing has been decoded at all. A client that
@@ -1357,8 +1367,7 @@ void test_push_on_connect_waits_for_start_receiving() {
     // The sink outlives the transport that delivers to it (this file's destruction idiom).
     frame_sink_t sink;
     {
-        tr::net::ws_client_transport_t client("127.0.0.1", ntohs(bound.sin_port),
-                                              {.defer_recv = true});
+        tr::net::ws_client_transport_t client("127.0.0.1", ntohs(bound.sin_port));
         check(client.ok(), "the deferred client completed its opening handshake");
         check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
               "the peer put the 101 and a COMPLETE pushed message in ONE write");
@@ -1531,8 +1540,8 @@ struct control_breach_outcome_t {
  * @brief Dial a `%ws_client_transport_t` at a raw socket acting as a HOSTILE SERVER, feed it
  *        @p breach, and collect what the client did about it.
  *
- * `defer_recv` is what makes this deterministic rather than a race: the breach is written
- * while the recv thread is still parked, so every byte of it is queued before the client is
+ * The deferred receive start is what makes this deterministic rather than a race: the breach is
+ * written while the recv thread is still parked, so every byte of it is queued before the client is
  * allowed to look, and the observation window opens only once `start_receiving()` has run.
  * The window uses a predicate that never fires, so it burns its whole budget unless the
  * peer disappears — which is one of the two things being observed.
@@ -1584,7 +1593,7 @@ control_breach_outcome_t drive_control_breach(std::span<const std::byte> breach)
     down_latch_t latch;
     frame_sink_t sink;
     {
-        tr::net::ws_client_transport_t client("127.0.0.1", port, {.defer_recv = true});
+        tr::net::ws_client_transport_t client("127.0.0.1", port);
         out.handshaken = client.ok();
         out.link_up_before = client.link_up();
         out.malformed_before = client.malformed_rx();
@@ -1683,7 +1692,7 @@ void test_client_answers_a_control_frame_at_the_bound_masked() {
     down_latch_t latch;
     frame_sink_t sink;
     {
-        tr::net::ws_client_transport_t client("127.0.0.1", port, {.defer_recv = true});
+        tr::net::ws_client_transport_t client("127.0.0.1", port);
         check(client.ok(), "the client completed its opening handshake");
         client.set_receiver(sink);
         client.set_down_notifier(&down_latch_t::notify, &latch);

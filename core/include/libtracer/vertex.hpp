@@ -944,10 +944,6 @@ using bound_rmw_counter_t =
  */
 using write_seq_counter_t = bound_rmw_counter_t<write_seq_t>;
 
-/** @brief Declared here so @ref vertex_t can befriend the #1285 member-offset gate; defined
- *         just after the type it measures. */
-struct vertex_layout_gate_t;
-
 /**
  * @brief TEST-ONLY door that presets a vertex's write sequence, so a test can drive the real
  *        atomic through the 2^32 wrap (#1621) without 4 x 10^9 publishes.
@@ -1152,7 +1148,6 @@ class vertex_t {
 
    private:
     friend class graph_t;                  // sole caller of the map-lock mutators below (#867).
-    friend struct vertex_layout_gate_t;    // reads the private member offsets the #1285 gate pins.
     friend struct vertex_seq_test_door_t;  // test-only: presets write_seq_ to reach the wrap.
 
     /**
@@ -3176,7 +3171,7 @@ class vertex_t {
      * retaining STREAM already has the extension block, and the whole of the ring's state
      * hangs off the one lazy pointer that block already held — so `sizeof(%vertex_t)` does not
      * move, `sizeof(%vertex_ext_t)` does not move either, and a vertex that never receives
-     * pays nothing. The #1285 ratchet and the RAM census are both untouched.
+     * pays nothing. The RAM census is untouched.
      *
      * REBINDING DRAINS. Reservations are released to the source that served them (sized
      * reclaim), so a rebind first hands every queued entry's block back to the OLD source and
@@ -3801,17 +3796,10 @@ class vertex_t {
     // path touches (LKV slot, subs, ext, seq, counters, mode flags) in the first ~96
     // bytes and the wide Composite child storage at the tail.
     //
-    // WITHIN the leading 8-byte group the LKV slot comes FIRST, and that is load-bearing
-    // rather than cosmetic (#1285). The slot is 16 bytes wide with an alignment of only 8,
-    // so at an offset of 24 — where it sat while `name_` led the group — its two words
-    // straddle a 64-byte cache line for exactly one of the four block alignments glibc can
-    // hand out (`address % 64 == 32`). That placement doubles the coherence footprint of
-    // every publish and was measured at x0.34 throughput with 1.9x the cache misses on the
-    // 8-thread single-vertex write arm. Starting the slot at a 16-byte-aligned offset makes
-    // the straddle unreachable for ANY 16-byte-aligned block, and offset 0 is the one such
-    // offset that needs no padding to reach: the reorder is free, `sizeof(vertex_t)` is
-    // unchanged on both ABIs, and @ref vertex_layout_gate_t pins it. `alignas(16)` on the
-    // member would NOT be free — it leaves an 8-byte hole and spends the #361 ratchet.
+    // The LKV slot is one word under both policies since RFC-0028 slice 3 (`value_t*` /
+    // `node_t*`), and an 8-aligned word cannot straddle a cache line, so its place in the
+    // leading 8-byte group is ordered for padding only. (#1285 pinned it to offset 0 while the
+    // slot was a two-word `std::atomic<std::shared_ptr>`; that slot and its gate are gone.)
 
     // The stored value is one `value_t` block (RFC-0028 §5.1): its refcount and its link
     // chain together, a single-link scalar and a chunked stream alike (ADR-0053 §6).
@@ -4028,46 +4016,6 @@ class vertex_t {
         ++it;
         return it == sorted.end() ? nullptr : *it;
     }
-};
-
-/**
- * @brief The cache-line straddle gate (#1285), enforced beside the type it constrains.
- *
- * `lkv_` is the contended word of the write hot path. The gate was set for the refcount slot
- * `single_writer_slot_t` and `hazard_slot_t` replaced (`std::atomic<std::shared_ptr>`, whose
- * spin lock sat in the LSB of its second word): a 16-byte, 8-aligned slot at an offset that is
- * 8-aligned-but-not-16 lets its two words land on DIFFERENT 64-byte cache lines for one of the
- * four block alignments glibc can return — doubling the coherence footprint of every publish
- * (measured x0.34 throughput, 1.9x cache misses, at `address % 64 == 32` with the slot at
- * offset 24). Since RFC-0028 slice 3 both policies are ONE word (`value_t*` / `node_t*`), so
- * the straddle is unreachable and the gate is free; it stays because it is what keeps a future
- * two-word slot from reintroducing the placement unnoticed.
- *
- * Pinning the offset to a multiple of 16 makes that placement unreachable: any 16-byte-aligned
- * block puts a 16-aligned interior offset back on a 16-byte boundary, and 16 bytes starting on
- * a 16-byte boundary cannot cross a 64-byte one. This is a LAYOUT invariant, not an allocation
- * one — 64-byte-aligning the vertex itself is a separate, RAM-costing decision that belongs to
- * #873 / ADR-0079's placement store. The gate lives in the header for the same reason the size
- * ratchets below do: every translation unit on every target evaluates it under its own binding,
- * so a future member reorder cannot silently reintroduce the straddle.
- *
- * `offsetof` on a non-standard-layout type is conditionally supported; GCC and Clang both
- * accept it and warn under `-Winvalid-offsetof`, which is suppressed narrowly here.
- */
-struct vertex_layout_gate_t {
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
-#endif
-    static_assert(offsetof(vertex_t, lkv_) % 16 == 0,
-                  "vertex_t::lkv_ must start at a 16-byte-aligned offset (#1285) — otherwise "
-                  "a two-word, 8-aligned slot straddles a 64-byte cache line for one "
-                  "malloc placement in four and the contended write path loses ~3x. Reorder "
-                  "the members to restore it; do NOT pad or alignas, that spends the #361 "
-                  "RAM ratchet asserted below");
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 };
 
 /**

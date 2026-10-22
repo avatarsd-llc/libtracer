@@ -29,8 +29,8 @@ The example writes a complete kind in about twenty lines, then drives the shippe
   carries the line and says why.
 - **The sink goes in before frames flow, and that is not advice.** A kind whose receive thread
   starts in its own constructor is draining the wire while the owner is still wiring; a frame
-  landing in an empty slot is dropped with no counter moving. Dialling kinds offer `defer_recv`
-  plus `start_receiving()` for exactly that window (#1025 / #1045).
+  landing in an empty slot is dropped with no counter moving. The built-in dialling kinds start
+  receiving only at `start_receiving()`, which closes that window (#1025 / #1045 / #2247).
 - **Owning delivery is a capability, not an assumption.** `delivers_ropes()` is `false` by
   default and the example's own kind leaves it there. There is deliberately no adapter that
   wraps a borrowed span in a rope whose refcounts would lie

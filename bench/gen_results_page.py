@@ -304,7 +304,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "declaration gate's walk stays flat under churn. A diagnostic, not a gate.",
         "ns/op · ns p50 / p99 · churn bytes"),
     instrument_t(
-        "bench_chain_vs_compact.cpp", "framed", (),
+        "bench_chain_delivery_pair.cpp", "framed", (),
         "Stream delivery over the RFC-0029 PAIR chain at 1 and 3 hops, 64 B to 16 KiB, "
         "unbatched and with BATCH, with the reply leg priced separately. A report, not a gate.",
         "ns p50 per frame · wire bytes per hop"),

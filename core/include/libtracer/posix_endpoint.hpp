@@ -165,49 +165,14 @@ inline constexpr std::uint32_t kBoundedWaitMs = 100;
 inline constexpr std::uint8_t kMaxConsecutiveStalls = 3;
 
 /**
- * @brief The largest concurrent-peer admission cap a liveness window can honestly carry
- *        (#1295).
+ * @brief The concurrent-peer admission cap of a stream server that was given none (RFC-0006).
  *
- * @param window_ms The peer liveness window (0 ⇒ `kDefaultLivenessWindowMs`).
- * @return `window / kBoundedWaitMs`, never 0.
- *
- * A stream server's aggregate blocking claim is "every peer stalled costs the node at most
- * ONE liveness window". Per-peer that is `window / peers`, and `derive_send_bound_ms` floors
- * that quotient at `kBoundedWaitMs` because a zero `SO_SNDTIMEO` means *block forever*
- * (#956). The floor is what breaks the sum: once `peers > window / kBoundedWaitMs` there is
- * nothing left to divide, every peer draws the floor, and the aggregate walks past the
- * window in proportion to how many peers connected. So the number of peers a server admits
- * is not free — it is exactly the quotient above, and admitting more would make the
- * aggregate claim false rather than tight.
+ * A deployment injects its own `max_peers`, and that number alone is the cap: a newcomer past
+ * it is refused, and no admitted peer is ever evicted for it. The cap is a RAM decision, so it
+ * is not derived from the liveness window: since #2144 a server's peer writes never wait, and
+ * the peers it admits no longer add up to blocking. `0` asks for this default instead.
  */
-[[nodiscard]] constexpr std::size_t max_admissible_peers(std::uint32_t window_ms) noexcept {
-    const std::uint32_t window = window_ms != 0 ? window_ms : kDefaultLivenessWindowMs;
-    const std::uint32_t ceiling = window / kBoundedWaitMs;
-    return ceiling != 0 ? static_cast<std::size_t>(ceiling) : 1U;
-}
-
-/**
- * @brief Resolve a stream server's EFFECTIVE concurrent-peer admission cap (#1295).
- *
- * @param window_ms The peer liveness window (0 ⇒ `kDefaultLivenessWindowMs`).
- * @param requested The deployment-injected cap (RFC-0006); 0 = "no number of my own".
- * @return The cap actually enforced on the accept path, never 0 and never above
- *         `max_admissible_peers`.
- *
- * `requested == 0` used to mean UNCAPPED, and that is retired here: an uncapped server has
- * no denominator, so its send bound was a per-call property a peer multiplied simply by
- * opening more connections — the ADR-0079 class of defect, not a node bound (#1295). An
- * unconfigured deployment now gets the ceiling instead of infinity, and a deployment that
- * asks for MORE than the ceiling is clamped to it: past that point the extra slots could
- * only be admitted by making the node's aggregate blocking claim untrue. A deployment that
- * genuinely wants more concurrent peers injects a wider `liveness_window` — the two are one
- * knob, because peers and per-peer patience are the same budget seen from two ends.
- */
-[[nodiscard]] constexpr std::size_t derive_max_peers(std::uint32_t window_ms,
-                                                     std::size_t requested) noexcept {
-    const std::size_t ceiling = max_admissible_peers(window_ms);
-    return (requested == 0 || requested > ceiling) ? ceiling : requested;
-}
+inline constexpr std::size_t kDefaultMaxPeers = 100;
 
 /**
  * @brief How a full-record write to one peer ended (#838).
@@ -260,7 +225,7 @@ struct write_result_t {
  * A directed send on a stream SERVER therefore divides by the server's admission cap
  * (@ref slot_server_t::max_peers), not by 1: the cap is the most peers that can ever be
  * directed at concurrently, so the sum over all of them is one window, the same claim the
- * broadcast round makes. `derive_max_peers` is what makes that denominator real. The
+ * broadcast round makes. The
  * genuinely single-peer endpoints (a dialled client, a one-peer LISTEN) still pass 1 —
  * for them the round of one IS the whole node.
  *
@@ -818,9 +783,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *         the value as configured, `0` meaning `kDefaultLivenessWindowMs` (#838). */
     [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
 
-    /** @brief The concurrent-peer admission cap actually ENFORCED on the accept path — the
-     *         constructor argument resolved through `derive_max_peers`, so never 0 and
-     *         never above the window's ceiling (#1295). Also the denominator of
+    /** @brief The concurrent-peer admission cap ENFORCED on the accept path: the injected
+     *         cap, or `%kDefaultMaxPeers` for `0`, so never 0. Also the denominator of
      *         @ref directed_send_bound_ms. */
     [[nodiscard]] std::size_t max_peers() const noexcept { return max_peers_; }
 
@@ -1037,11 +1001,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *
      * @param max_peers  Requested concurrent-peer admission cap; a deployment-injected
      *                   bound (RFC-0006) — a connection beyond it is accepted and
-     *                   immediately closed (a clean refusal, not a hung SYN). Resolved
-     *                   through `derive_max_peers`, so `0` no longer means UNBOUNDED
-     *                   (#1295): it takes the window's own ceiling, and a request above
-     *                   that ceiling is clamped to it. Read the enforced value back from
-     *                   @ref max_peers.
+     *                   immediately closed (a clean refusal, not a hung SYN). `0` takes
+     *                   `%kDefaultMaxPeers`; any other value is enforced as given. Read
+     *                   the enforced value back from @ref max_peers.
      * @param peer_named Expose the @ref bus_link_t facet (see @ref bus).
      * @param src        The store every session's egress rings, the shared frames and the
      *                   egress gathers are drawn from (the link's `memory.io`). Must outlive
@@ -1057,7 +1019,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
                   mem::block_source_t& state_src = mem::net_source())
         : stream_endpoint_t(src, false),
           slots_(state_src),
-          max_peers_(derive_max_peers(liveness_window_ms, max_peers)),
+          max_peers_(max_peers != 0 ? max_peers : kDefaultMaxPeers),
           peer_named_(peer_named) {
         liveness_window_ms_ = liveness_window_ms;
     }
@@ -1269,8 +1231,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     mem::block_array_t<mem::poly_ptr_t<session_base_t>> slots_;
     int listen_fd_ = -1;           /**< @brief The bound+listening socket (-1 = not bound). */
     std::uint16_t bound_port_ = 0; /**< @brief The resolved bound port (see local_port()). */
-    /** @brief The ENFORCED admission cap (RFC-0006), resolved once by `derive_max_peers`
-     *         at construction — never 0, never above the window's ceiling (#1295). */
+    /** @brief The ENFORCED admission cap (RFC-0006), resolved once at construction — never
+     *         0. */
     std::size_t max_peers_ = 1;
     /** @brief Expose the bus facet — a wiring-time deployment choice. Stored HERE rather
      *         than in the facet arm because @ref ok reads it to refuse a peer-named server

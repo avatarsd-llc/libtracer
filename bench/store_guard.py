@@ -119,15 +119,14 @@ def suite_is_bigger_better(suite: str) -> bool:
     return _BIGGER_IS_BETTER in suite.lower()
 
 
-def trusted(entries: list[dict], known: dict[str, str] | None = None) -> list[dict]:
+def trusted(entries: list[dict]) -> list[dict]:
     """@brief The entries a verdict may be built on, in store order.
 
-    Drops every sample flagged at measure time or listed retroactively. This is the
+    Drops every sample flagged at measure time. This is the
     single place the two guards meet: `host_guard` decides WHAT is suspect, and this
     decides that suspect points are neither coverage nor baseline.
     """
-    known = host_guard.load_known_contaminated() if known is None else known
-    return [e for e in entries if not host_guard.entry_contaminated(e, known)]
+    return [e for e in entries if not host_guard.entry_contaminated(e)]
 
 
 def entry_sha(entry: dict) -> str:
@@ -149,8 +148,7 @@ def merge_gap(banked: set[str], candidates: list[str]) -> tuple[int, str | None]
     return len(candidates), None
 
 
-def density_report(doc: dict, candidates: list[str], suite_substr: str = "",
-                   known: dict[str, str] | None = None) -> dict:
+def density_report(doc: dict, candidates: list[str], suite_substr: str = "") -> dict:
     """@brief The gap between HEAD and the last trusted point, per suite and overall.
 
     The overall gap is the WORST suite's: the latency and throughput stores are banked
@@ -158,12 +156,11 @@ def density_report(doc: dict, candidates: list[str], suite_substr: str = "",
     hiding it behind a healthier sibling is how a half-recorded point reads as
     coverage.
     """
-    known = host_guard.load_known_contaminated() if known is None else known
     per_suite: dict[str, dict] = {}
     for suite, entries in (doc.get("entries") or {}).items():
         if suite_substr and suite_substr.lower() not in suite.lower():
             continue
-        ok = trusted(entries, known)
+        ok = trusted(entries)
         gap, at = merge_gap({entry_sha(e) for e in ok}, candidates)
         per_suite[suite] = {"gap": gap, "at": at, "trusted": len(ok),
                             "banked": len(entries)}
@@ -251,7 +248,6 @@ def _worse_pct(current: float, baseline: float, bigger_is_better: bool) -> float
 def drift_alerts(entries: list[dict], bigger_is_better: bool,
                  window: int = DEFAULT_WINDOW, threshold: float = DEFAULT_THRESHOLD,
                  min_points: int = DEFAULT_MIN_POINTS,
-                 known: dict[str, str] | None = None,
                  range_guard: bool = True) -> dict:
     """@brief Compare the newest trusted point with a rolling best-of-window baseline.
 
@@ -273,7 +269,7 @@ def drift_alerts(entries: list[dict], bigger_is_better: bool,
     bootstrap interval. A staircase still fires (each step is worse than every
     point behind it); spread inside the historical range does not.
     """
-    ok = trusted(entries, known)
+    ok = trusted(entries)
     if len(ok) < min_points + 1:
         return {"status": "insufficient", "trusted": len(ok), "alerts": [],
                 "toolchain": []}

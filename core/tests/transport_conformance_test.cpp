@@ -198,6 +198,9 @@ void run_contract() {
         return;
     }
     check(true, "both endpoints report ok()");
+    // A dialling link spawns its receive thread only when armed (#2247); a no-op elsewhere.
+    pair.a().start_receiving();
+    pair.b().start_receiving();
 
     // 1. A single frame sent a()->b() arrives byte-identical.
     pair.b().set_receiver(to_coll);

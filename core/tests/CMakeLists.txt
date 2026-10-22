@@ -2876,46 +2876,14 @@ endfunction()
 # keep the host mutex guard.
 libtracer_compile_tripwire(guard_rename "renamed to guard_t"
                            -I${CMAKE_CURRENT_SOURCE_DIR}/guard_rename/stale)
-# #1722 — the four build switches that duplicated a config_t trait. Each message names the
-# trait to set instead.
-libtracer_compile_tripwire(no_atomic_removed
-                           "LIBTRACER_NO_ATOMIC was removed.*config_t::guard_t"
-                           -DLIBTRACER_NO_ATOMIC)
-libtracer_compile_tripwire(pin_instrument_removed
-                           "LIBTRACER_PIN_INSTRUMENT was removed.*kInstrumentCounters"
-                           -DLIBTRACER_PIN_INSTRUMENT)
+# #1722 — the two configure options that chose a policy. Each message names the trait to
+# set instead; the refusals are permanent (#2247).
 libtracer_configure_tripwire(acl_full_removed
                              "LIBTRACER_ACL_FULL[ \n]+was[ \n]+removed.*acl_policy_t"
                              -DLIBTRACER_ACL_FULL=ON)
 libtracer_configure_tripwire(lkv_slot_removed
                              "LIBTRACER_LKV_SLOT[ \n]+was[ \n]+removed.*lkv_slot_t"
                              -DLIBTRACER_LKV_SLOT=hazard_slot_t)
-
-# #1717 — kWeaklyOrdered was removed. A fragment that still sets it must fail to compile, by
-# the tripwire's own message, instead of compiling on as if it still waived the delivery-skip
-# order assertion. Same harness shape as guard_rename (one fixture dir per arm).
-add_test(NAME weakly_ordered_removed COMMAND ${CMAKE_COMMAND}
-         -DLT_CXX=${CMAKE_CXX_COMPILER}
-         -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
-         -DLT_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/weakly_ordered_removed
-         -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
-         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/weakly_ordered_removed.cmake)
-
-# #1718 — kSingleWriter was removed. A fragment that still sets it must fail to compile, by the
-# tripwire's own message, instead of compiling on as if the library read it. Same harness shape
-# as guard_rename (one fixture dir per arm, the spin_slot_guard probe).
-add_test(NAME single_writer_removed COMMAND ${CMAKE_COMMAND}
-         -DLT_CXX=${CMAKE_CXX_COMPILER}
-         -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
-         -DLT_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/single_writer_removed
-         -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
-         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/single_writer_removed.cmake)
-
-# #1703 — the one-release alias window: every pre-move guard spelling still names its new type.
-add_executable(guard_alias_test guard_alias_test.cpp)
-target_link_libraries(guard_alias_test PRIVATE libtracer)
-libtracer_test_warnings(guard_alias_test)
-add_test(NAME guard_alias COMMAND guard_alias_test)
 
 # #1716: the host guard sized from kCacheLineBytes and kGuardStripes — the default keeps the
 # 4 KB table, a smaller config shrinks it, and packed stripes still exclude under contention.

@@ -45,9 +45,6 @@
 #include "libtracer/mem_string.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
-// The one-release alias window (#1725): code that reached the old `tr::view::can_*` names
-// through this header keeps compiling. Removed with view_can.hpp in the next release.
-#include "libtracer/view_can.hpp"
 
 /**
  * @file

@@ -333,6 +333,7 @@ void arm_tcp_sizes() {
     rx_probe_t probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &probe);
     tr::net::tcp_transport_t client("127.0.0.1", server.local_port());
+    client.start_receiving();
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
     for (std::size_t sz : kSizes) {
         const payload_t pay(1, sz);
@@ -348,6 +349,7 @@ void arm_tcp_span_sink() {
     rx_probe_t probe;
     server.set_receiver(&rx_probe_t::on_span, &probe);
     tr::net::tcp_transport_t client("127.0.0.1", server.local_port());
+    client.start_receiving();
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
     for (std::size_t sz : kSizes) {
         const payload_t pay(1, sz);
@@ -367,6 +369,7 @@ void arm_tcp_pool_backend() {
     rx_probe_t probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &probe);
     tr::net::tcp_transport_t client("127.0.0.1", server.local_port());
+    client.start_receiving();
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
     for (std::size_t sz : {std::size_t{64}, std::size_t{512}, std::size_t{4096}}) {
         const payload_t pay(1, sz);
@@ -382,6 +385,7 @@ void arm_tcp_widths() {
     rx_probe_t probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &probe);
     tr::net::tcp_transport_t client("127.0.0.1", server.local_port());
+    client.start_receiving();
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
     for (std::size_t w = 1; w <= kMaxWidth; ++w) {
         const payload_t pay(w, 8);
@@ -452,6 +456,7 @@ void arm_tcp_server_widths() {
     rx_probe_t probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &probe);
     tr::net::tcp_transport_t client("127.0.0.1", server.local_port());
+    client.start_receiving();
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
     for (std::size_t w : {std::size_t{1}, std::size_t{8}, std::size_t{16}, std::size_t{17},
                           std::size_t{18}, std::size_t{24}}) {
@@ -493,6 +498,7 @@ void arm_ws() {
     rx_probe_t srv_probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &srv_probe);
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
+    client.start_receiving();
     if (!client.ok()) return;
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
 
@@ -646,6 +652,7 @@ void arm_router_over_wire(const char* label, bool real_egress) {
     tr::net::tcp_transport_t egress_peer(0);
     stub_link_t stub;
     tr::net::tcp_transport_t egress_dial("127.0.0.1", egress_peer.local_port());
+    egress_dial.start_receiving();
     tr::net::transport_t* inner =
         real_egress ? static_cast<tr::net::transport_t*>(&egress_dial) : &stub;
     tap_link_t tap(inner);
@@ -654,6 +661,7 @@ void arm_router_over_wire(const char* label, bool real_egress) {
     router.attach_link("net/ws-server/in", in_link);
 
     tr::net::tcp_transport_t client("127.0.0.1", in_link.local_port());
+    client.start_receiving();
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
 
     const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},

@@ -234,8 +234,10 @@ struct result_t {
         const std::size_t dial = peers > underdial() ? peers - underdial() : 0;
         std::vector<std::unique_ptr<tr::net::tcp_transport_t>> dialers;
         dialers.reserve(dial);
-        for (std::size_t i = 0; i < dial; ++i)
+        for (std::size_t i = 0; i < dial; ++i) {
             dialers.push_back(std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port));
+            dialers.back()->start_receiving();
+        }
 
         // Anti-vacuity: a fan-in point run with fewer peers than requested reports a
         // perfectly plausible-looking number for the wrong topology. Wait for the server to

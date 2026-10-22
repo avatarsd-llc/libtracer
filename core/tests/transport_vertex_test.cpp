@@ -818,9 +818,9 @@ std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst, st
  * The other two guards each hold one end and neither covers the middle. The raw-peer case in
  * `ws_transport_test` constructs `transport_ws_client` DIRECTLY, so the factory's argument list
  * is never read; `test_link_is_armed_after_wiring` above goes in through `provide_link`, which
- * takes the staged-link branch and never calls a factory at all. The `defer_recv` argument the
- * built-in `ws` factory passes (`core/src/builtin_transport_ws.cpp`) sits between them: drop it
- * and the recv thread is spawned inside the constructor, racing whoever installs the receiver —
+ * takes the staged-link branch and never calls a factory at all. The built-in `ws` factory
+ * (`core/src/builtin_transport_ws.cpp`) sits between them: were its link to start receiving
+ * inside the constructor, it would race whoever installs the receiver —
  * silently, because a decode into an empty `receiver_slot_t` moves no counter at all.
  *
  * So this drives the raw-peer harness through the PRODUCTION creation path — a graph write of
@@ -846,8 +846,9 @@ std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst, st
  *   later constructs is wired by `self_heal_link_t::wire_socket`, which installs the sinks and
  *   only THEN calls `start_receiving()`. The span the gate used to stretch (factory returns →
  *   receiver wired) no longer exists on this path; the ordering is a straight line inside the
- *   engine. `defer_recv` is still load-bearing, and for that ordering: without it the socket's
- *   recv thread starts inside its own constructor, before `wire_socket` has installed anything.
+ *   engine. The deferred receive start is still load-bearing, and for that ordering: without it
+ *   the socket's recv thread would start inside its own constructor, before `wire_socket` has
+ *   installed anything.
  */
 void test_factory_built_ws_dial_delivers_push_on_connect() {
     std::printf("a SPEC-created kind=ws DIAL delivers the peer's push-on-connect (#1025):\n");
@@ -1009,9 +1010,9 @@ std::vector<std::byte> tcp_record(std::span<const std::byte> payload) {
  * unchanged: `tcp_test`'s raw-peer case constructs `tcp_transport_t` DIRECTLY, so the
  * factory's argument list is never read, and `test_link_is_armed_after_wiring` goes in through
  * `provide_link`, which takes the staged-link branch and calls no factory at all. The
- * `defer_recv` argument the built-in `tcp` factory passes
- * (`core/src/builtin_transport_tcp.cpp`) sits between them. Drop it and the recv thread is
- * spawned inside the constructor, racing the receiver install — silently, because a decode
+ * built-in `tcp` factory (`core/src/builtin_transport_tcp.cpp`) sits between them. Were its
+ * link to start receiving inside the constructor, the recv thread would be
+ * spawned there, racing the receiver install — silently, because a decode
  * into an empty `receiver_slot_t` moves no counter at all.
  *
  * So this drives a raw-peer harness through the PRODUCTION creation path — a graph write of
@@ -1504,7 +1505,9 @@ void test_ws_peer_named_config() {
     // handshake, so each becomes an audible peer of the bus.
     const std::uint16_t bus_port = srv != nullptr ? srv->local_port() : 0;
     tr::net::transport_ws_client c1("127.0.0.1", bus_port);
+    c1.start_receiving();
     tr::net::transport_ws_client c2("127.0.0.1", bus_port);
+    c2.start_receiving();
     check(c1.ok() && c2.ok(), "both ws clients handshook against the in-band-created listener");
 
     const bool listed = wait_until(

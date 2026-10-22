@@ -116,8 +116,10 @@ struct point_t {
     // handshakes, so the measurement prices steady-state demultiplex and not N connects.
     std::vector<std::unique_ptr<tr::net::tcp_transport_t>> peers_v;
     peers_v.reserve(peers);
-    for (std::size_t i = 0; i < peers; ++i)
+    for (std::size_t i = 0; i < peers; ++i) {
         peers_v.push_back(std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port));
+        peers_v.back()->start_receiving();
+    }
     std::this_thread::sleep_for(300ms);
 
     const std::vector<std::byte> payload(kFrameBytes, std::byte{0x5A});

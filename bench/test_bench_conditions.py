@@ -320,7 +320,7 @@ class LedgerVerdict(unittest.TestCase):
             {"commit": {"id": "a" * 40}, "benches": [{"extra": "box · clean"}]},
             {"commit": {"id": "b" * 40}, "benches": [{"extra": "box · " + led.note()}]},
         ]
-        kept = sg.trusted(entries, known={})
+        kept = sg.trusted(entries)
         self.assertEqual([e["commit"]["id"][0] for e in kept], ["a"])
 
 

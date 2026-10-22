@@ -816,7 +816,7 @@ def _untrusted_cells(entries: list[dict]) -> dict[int, tuple[str, set[str] | Non
     flagged runs are hidden whole, and which rows of the others are hidden per row
     (#1890) — and this is the one place the renderer asks.
     """
-    return host_guard.untrusted_cells(entries, host_guard.load_known_contaminated())
+    return host_guard.untrusted_cells(entries)
 
 
 def _series_by_name(entries: list[dict],

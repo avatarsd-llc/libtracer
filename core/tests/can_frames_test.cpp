@@ -29,7 +29,6 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
-#include "libtracer/view_can.hpp"  // the one-release alias header (#1725)
 #include "test_support.hpp"
 
 namespace {
@@ -44,13 +43,6 @@ namespace {
 }
 
 using tr::testing::check;
-
-// #1725: the old `tr::view` spellings must name the very same entities as the net-plane
-// framing for the alias window, not copies of them.
-static_assert(std::is_same_v<tr::view::can_frame_mode_t, tr::net::can::can_frame_mode_t>);
-static_assert(tr::view::kCanClassicMaxData == tr::net::can::kCanClassicMaxData);
-static_assert(tr::view::kCanFdMaxData == tr::net::can::kCanFdMaxData);
-static_assert(tr::view::can_max_data(tr::view::can_frame_mode_t::FD) == 64);
 
 std::vector<std::byte> bytes_of(std::initializer_list<std::uint8_t> vals) {
     std::vector<std::byte> v;
