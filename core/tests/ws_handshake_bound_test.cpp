@@ -320,6 +320,7 @@ void test_client_refuses_an_endless_server_header_block() {
 
     const std::size_t rss_before = peak_rss_bytes();
     tr::net::ws_client_transport_t client("127.0.0.1", ntohs(bound.sin_port));
+    client.start_receiving();
     const std::size_t growth = peak_rss_bytes() - rss_before;
 
     check(!client.ok(), "the dial failed rather than completing a handshake");
@@ -385,11 +386,9 @@ void test_the_budget_is_the_configured_one() {
 
     // The DIAL half resolves through the SAME `handshake_cap` home. Port 1 refuses the
     // connect, so this asserts the resolution alone, with no listener to stand up.
-    const tr::net::ws_client_transport_t dial_tight("127.0.0.1", 1,
-                                                    {.defer_recv = true, .max_handshake = 2048});
+    const tr::net::ws_client_transport_t dial_tight("127.0.0.1", 1, {.max_handshake = 2048});
     check(dial_tight.effective_max_handshake() == 2048, "the dial half honors its own budget");
-    const tr::net::ws_client_transport_t dial_raised(
-        "127.0.0.1", 1, {.defer_recv = true, .max_handshake = 1u << 20});
+    const tr::net::ws_client_transport_t dial_raised("127.0.0.1", 1, {.max_handshake = 1u << 20});
     check(
         dial_raised.effective_max_handshake() == tr::net::ws_server_transport_t::kMaxHandshakeBytes,
         "and clamps a raised one to the same ceiling the accept side does");

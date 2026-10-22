@@ -416,6 +416,7 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
     tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port),
                                   {.liveness_window_ms = window});
     check(link.ok(), "the dial succeeded");
+    link.start_receiving();
     check(link.liveness_window_ms() == window, "and the injected window is the one in force");
 
     const int peer = ::accept(listener, nullptr, nullptr);
@@ -581,6 +582,7 @@ void test_second_publisher_never_waits_on_a_stalled_write() {
     tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port),
                                   {.liveness_window_ms = window});
     check(link.ok(), "the dial succeeded");
+    link.start_receiving();
     const int peer = ::accept(listener, nullptr, nullptr);
     check(peer >= 0, "the peer accepted the connection — and now never reads a byte");
 
@@ -638,6 +640,7 @@ struct parked_peer_t {
         link = std::make_unique<tr::net::tcp_transport_t>(
             "127.0.0.1", ntohs(local.sin_port),
             tr::net::tcp_config_t{.liveness_window_ms = window});
+        link->start_receiving();
         peer = ::accept(listener, nullptr, nullptr);
         const timeval tv{.tv_sec = 5, .tv_usec = 0};
         ::setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));

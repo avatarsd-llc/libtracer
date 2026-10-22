@@ -128,6 +128,7 @@ int main() {
     sink_t at_dialer;
     tcp_transport_t dialer("127.0.0.1", port);
     dialer.set_receiver(at_dialer);
+    dialer.start_receiving();
     check(ok, dialer.ok(), "DIAL came up — the connect succeeded");
 
     // Past bring-up neither end is privileged: the same call, both ways, through a reference

@@ -642,6 +642,7 @@ void test_ws_client_send_drops_then_recovers() {
     {
         tr::net::ws_client_transport_t probe("127.0.0.1", server.local_port(), kRawWs);
         check(probe.ok(), "ws probe client handshaken");
+        probe.start_receiving();
         n_allocs = count_allocs([&] { probe.send(payload); });
         check(at_server.wait_for(1, 2s), "the unrefused baseline frame arrived");
     }
@@ -658,6 +659,7 @@ void test_ws_client_send_drops_then_recovers() {
     for (std::size_t k = 1; k <= n_allocs; ++k) {
         tr::net::ws_client_transport_t client("127.0.0.1", server.local_port(), kRawWs);
         check(client.ok(), "ws client handshaken");
+        client.start_receiving();
         const bool escaped = escapes_at(k, [&] { client.send(payload); });
         check(!escaped, "send with the frame-buffer growth refused does not throw");
     }
@@ -666,6 +668,7 @@ void test_ws_client_send_drops_then_recovers() {
 
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port(), kRawWs);
     check(client.ok(), "ws client handshaken");
+    client.start_receiving();
     client.send(payload);
     check(at_server.wait_for(2, 2s), "the node is LIVE: the next send arrives");
     check(at_server.bytes() == payload, "and its bytes are intact");
@@ -691,6 +694,7 @@ void test_tcp_send_iov_overflow_drops() {
     tr::net::tcp_transport_t dialer("127.0.0.1", listener.local_port());
     dialer.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(dialer.ok(), "dialer connected");
+    dialer.start_receiving();
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x11});
     const auto iov = wide_gather(storage, kWideSpans);
@@ -728,6 +732,7 @@ void test_tcp_server_broadcast_scratch_drops() {
     peer.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(peer.ok(), "peer connected");
     peer.set_receiver(peer_rx);
+    peer.start_receiving();
     std::this_thread::sleep_for(150ms);  // let the accept complete
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x22});
@@ -939,6 +944,7 @@ void test_tcp_send_iov_uses_injected_egress_source() {
     tr::net::tcp_transport_t dialer("127.0.0.1", listener.local_port());
     dialer.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(dialer.ok(), "dialer connected");
+    dialer.start_receiving();
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x72});
     const auto iov = wide_gather(storage, kWideSpans);
@@ -968,6 +974,7 @@ void test_tcp_server_iov_uses_injected_egress_source() {
     peer.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(peer.ok(), "peer connected");
     peer.set_receiver(peer_rx);
+    peer.start_receiving();
     std::this_thread::sleep_for(150ms);  // let the accept complete
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x73});
@@ -1114,6 +1121,7 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
     {
         tr::net::ws_client_transport_t bare("127.0.0.1", server.local_port(), kRawWs);
         check(bare.ok(), "raw-heap ws client handshaken");
+        bare.start_receiving();
         check(count_allocs([&] { bare.send(payload); }) == 1,
               "on the raw heap, a cold send draws ONE block from the process heap");
         check(at_server.wait_for(1, 2s), "and that baseline frame arrived");
@@ -1125,6 +1133,7 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
         tr::net::ws_client_transport_t wired("127.0.0.1", server.local_port(),
                                              {.memory = {.io = &roomy.store}});
         check(wired.ok(), "store-injected ws client handshaken");
+        wired.start_receiving();
         check(count_allocs([&] { wired.send(payload); }) == 0,
               "wired, the cold send draws NOTHING from the process heap");
         check(roomy.store.used() > 0, "and the INJECTED store is where tx_buf_ came from");
@@ -1139,6 +1148,7 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
         tr::net::ws_client_transport_t bounded("127.0.0.1", server.local_port(),
                                                {.memory = {.io = &tight.store}});
         check(bounded.ok(), "hard-bounded ws client handshaken");
+        bounded.start_receiving();
         check(count_allocs([&] { bounded.send(payload); }) == 0,
               "a refused injected store draws NOTHING from the heap");
         std::this_thread::sleep_for(150ms);

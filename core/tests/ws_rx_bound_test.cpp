@@ -628,6 +628,7 @@ void test_client_refuses_an_oversize_server_frame() {
     tr::net::ws_client_transport_t client("127.0.0.1", ntohs(bound.sin_port),
                                           {.max_frame = kSmallCap});
     check(client.ok(), "the client completed its opening handshake");
+    client.start_receiving();
     check(wait_until([&] { return client.malformed_rx() == 1; }, 5s),
           "the client counted the over-cap frame as malformed");
     check(client.dropped_rx() == 0, "and counted nothing as backpressure");

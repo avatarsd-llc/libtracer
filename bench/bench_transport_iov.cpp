@@ -201,6 +201,7 @@ int main() {
         // settle keeps this measuring the gather rather than a connect retry.
         tr::net::tcp_transport_t server(std::uint16_t{0});  // ephemeral bind (#1362)
         tr::net::tcp_transport_t client("127.0.0.1", server.local_port());
+        client.start_receiving();
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
         for (std::size_t w = 1; w <= kMaxWidth; ++w) tcp_rows.push_back(measure(client, store, w));
     }

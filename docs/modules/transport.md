@@ -327,9 +327,10 @@ flowchart LR
   ([#1025](https://github.com/avatarsd-llc/libtracer/issues/1025)). `start_receiving()`
   is the second phase that opens the window — a no-op default, so an owner calls it
   unconditionally as its last wiring step; `ws_client_transport_t` and `tcp_transport_t`
-  honor it when constructed with `defer_recv`
-  ([#1045](https://github.com/avatarsd-llc/libtracer/issues/1045)), which is how
-  `transport_vertex_t` builds a SPEC-created `ws` or `tcp` dialer. The ESP-IDF-native WS
+  DIAL links always defer to it
+  ([#1045](https://github.com/avatarsd-llc/libtracer/issues/1045),
+  [#2247](https://github.com/avatarsd-llc/libtracer/issues/2247)): the owner installs its
+  receivers, then calls `start_receiving()`. The ESP-IDF-native WS
   client honors it too, in its own shape: its recv thread does the dialling, so
   `defer_recv` holds the **first dial** behind the `start_receiving()` latch (ADR-0081's
   defer-the-dial arm, [#1102](https://github.com/avatarsd-llc/libtracer/issues/1102)) —

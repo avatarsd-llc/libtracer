@@ -1216,8 +1216,8 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
     // is in place — the registry entry is published and `add_child` has installed the
     // receiver and the down-notifier — so this is the first instant at which a decoded frame
     // has somewhere to land. A transport that started its receive thread in its own
-    // constructor takes the base's no-op default; one that can defer it (the built-in `ws`
-    // DIAL, which the factory constructs with `defer_recv`) spawns it here, which is what
+    // constructor takes the base's no-op default; one that defers it (every built-in tcp and
+    // ws DIAL) spawns it here, which is what
     // stops a server's push-on-connect message being decoded into an empty sink and dropped.
     // Unconditional by design: the owner should not have to know which kinds defer.
     link->start_receiving();

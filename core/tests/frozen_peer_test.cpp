@@ -145,6 +145,7 @@ void test_tcp_dialer() {
         listener_t l;
         tr::net::tcp_transport_t link("127.0.0.1", l.port,
                                       {.liveness_window_ms = tr::net::kBoundedWaitMs});
+        link.start_receiving();
         const int peer = ::accept(l.fd, nullptr, nullptr);
         check(link.ok() && peer >= 0, "dialed, and the peer never reads");
         check(link.close_frozen_peers(100, 50) == 0, "an idle peer owes nothing: kept");
@@ -158,6 +159,7 @@ void test_tcp_dialer() {
         listener_t l;
         tr::net::tcp_transport_t link("127.0.0.1", l.port,
                                       {.liveness_window_ms = tr::net::kBoundedWaitMs});
+        link.start_receiving();
         const int peer = ::accept(l.fd, nullptr, nullptr);
         std::atomic<bool> stop{false};
         std::thread reader([&] { drain(peer, stop); });
@@ -240,6 +242,7 @@ void test_ws_server() {
     server.set_receiver(rx);
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port(), {});
     check(client.ok() && wait_peers(server, 1), "the client is open");
+    client.start_receiving();
     const std::array<std::byte, 4> probe{};
     client.send(std::span<const std::byte>(probe));
     for (int i = 0; i < 200 && delivered.load(std::memory_order_acquire) == 0; ++i)
@@ -278,6 +281,7 @@ void test_ws_client() {
     });
     tr::net::ws_client_transport_t client("127.0.0.1", l.port,
                                           {.liveness_window_ms = tr::net::kBoundedWaitMs});
+    client.start_receiving();
     srv.join();
     check(client.ok() && peer >= 0, "the handshake completed, and the server never reads");
     check(client.close_frozen_peers(100, 50) == 0, "an idle peer owes nothing: kept");

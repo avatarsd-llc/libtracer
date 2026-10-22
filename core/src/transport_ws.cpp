@@ -624,7 +624,6 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
       recv_stack_(config.recv_stack) {
     mem::block_source_t* const egress_src = config.memory.io;
     const std::size_t max_frame = config.max_frame;
-    const bool defer_recv = config.defer_recv;
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
     const std::size_t max_handshake = config.max_handshake;
     // Wire the BASE's egress store to the same one, before anything can send: the gather
@@ -677,18 +676,10 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
     came_up_ = true;
     connected_.store(true, std::memory_order_relaxed);
     pipelined_ = std::move(pipelined);
-    // Two-phase bring-up (#1025). Spawning the recv thread HERE is the historical shape and
-    // stays the default, but it makes the base's "install the sinks before frames flow"
-    // contract unsatisfiable: this thread can decode and deliver a message the server pushed
-    // on connect before the caller's next statement installs a sink, and the empty slot drops
-    // it silently. `defer_recv` hands that ordering back to the owner — the socket is up and
-    // the pipelined bytes are parked, but nothing is read until `start_receiving()`.
-    //
-    // Qualified deliberately: dispatching a virtual from a constructor would reach THIS
-    // class's override anyway (the derived part does not exist yet), so spelling it out is
-    // the honest form — a subclass cannot substitute its own bring-up here, and nothing in
-    // this call should look as if it could.
-    if (!defer_recv) ws_client_transport_t::start_receiving();
+    // Two-phase bring-up (#1025): the recv thread is spawned by `start_receiving()`, never
+    // here. A thread started here could decode a message the server pushed on connect before
+    // the owner installs a sink, and the empty slot would drop it silently. The pipelined
+    // bytes stay parked until then.
 }
 
 void ws_client_transport_t::start_receiving() {

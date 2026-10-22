@@ -487,8 +487,10 @@ int peer_main(kind_t in, kind_t out, bool srv_egress, std::size_t payload, int i
     if (srv_egress) {
         c_client = client_of(out, static_cast<std::uint16_t>(c_port));
         c_client->set_rope_receiver(sink);
+        c_client->start_receiving();
     }
     tr::mem::poly_ptr_t<transport_t> a = client_of(in, static_cast<std::uint16_t>(in_port));
+    a->start_receiving();
     std::this_thread::sleep_for(300ms);
     pipe_put(out_fd, "R\n");
     const std::vector<std::byte> frame = fwd_write(value_tlv(payload));
@@ -591,6 +593,7 @@ relay_sample_t run_relay(const char* self, const relay_t& r, std::size_t payload
     const std::string mount = std::string("net/") + kind_name(r.out) + "/c";
     tr::mem::poly_ptr_t<transport_t> in = server_of(r.in);
     if (!rb.attach_link(mount, *to_c) || !rb.attach_link("in", *in)) return out;
+    to_c->start_receiving();  // a DIAL link receives once armed (#2247); a no-op on a server
     (void)gb.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     std::atomic<std::uint64_t> local{0};
     auto on_temp = [&](const tr::graph::value_t&) {
@@ -651,7 +654,10 @@ double run_idle(std::string_view kind, std::size_t peers) {
         s->set_rope_receiver(sink);
         const std::uint16_t port = port_of(k, *s);
         links.push_back(std::move(s));
-        for (std::size_t i = 0; i < peers; ++i) links.push_back(client_of(k, port));
+        for (std::size_t i = 0; i < peers; ++i) {
+            links.push_back(client_of(k, port));
+            links.back()->start_receiving();
+        }
     }
     std::this_thread::sleep_for(500ms);
     const auto s0 = voluntary_switches();

@@ -223,6 +223,7 @@ int main() {
     sink_t at_client;
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     client.set_receiver(at_client);
+    client.start_receiving();
     check(ok, client.ok(), "ok() on a WS client is the HANDSHAKE's verdict, not the socket's");
 
     const auto up = frame_of(6, 0x20);

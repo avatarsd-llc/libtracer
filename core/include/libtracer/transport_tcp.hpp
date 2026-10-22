@@ -86,7 +86,7 @@ inline constexpr std::string_view kTcpServerSuggestedModule = "tcp-server";
  *        after the peer address, in place of positional, defaulted parameters.
  *
  * Every member defaults to the historical default, so `tcp_config_t{}` is the unconfigured
- * link and a caller names only what it sets: `{.memory = {.rx = &pool}, .defer_recv = true}`.
+ * link and a caller names only what it sets: `{.memory = {.rx = &pool}, .max_frame = 4096}`.
  */
 struct tcp_config_t {
     /**
@@ -106,14 +106,6 @@ struct tcp_config_t {
     /** @brief Recv-thread stack size in bytes, 0 = platform default
      *         (`posix_endpoint_t::start`). Non-zero right-sizes the recv thread on an MCU. */
     std::size_t recv_stack = 0;
-    /**
-     * @brief DIAL only — two-phase bring-up (#1045): the connect still runs in the
-     *        constructor (so `ok()` answers for it on return) but the recv thread is NOT
-     *        spawned until @ref tcp_transport_t::start_receiving, so a peer that pushes the
-     *        instant the connect completes cannot land a frame before the receiver is
-     *        installed. The LISTEN constructor ignores it.
-     */
-    bool defer_recv = false;
     /**
      * @brief The app-provided PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs`
      *        (#838): how long the peer may fail to take bytes before it is treated as broken.
@@ -179,15 +171,14 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
      * @brief DIAL mode: connect to @p peer_host:@p peer_port (synchronous).
      *
      * The TCP connect happens in the constructor (the ws_client_transport_t
-     * shape) — confirm with ok(); on failure no thread is spawned. By default
-     * the receive thread starts immediately, so receivers must be installed
-     * before frames flow (the set_receiver contract); @p defer_recv is what
-     * makes that contract satisfiable on this socket at all.
+     * shape) — confirm with ok(); on failure no thread is spawned. The receive
+     * thread is NOT spawned here (#1045, #2247): the owner installs its receivers,
+     * then calls @ref start_receiving, so no frame can land in an empty sink.
      *
      * @param peer_host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param peer_port TCP port of the peer (host byte order).
      * @param config    The link's knobs (@ref tcp_config_t): memory, receive cap, recv-thread
-     *                  stack, deferred receive, liveness window.
+     *                  stack, liveness window.
      */
     tcp_transport_t(std::string_view peer_host, std::uint16_t peer_port,
                     const tcp_config_t& config = {});
@@ -201,8 +192,7 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
      * request resolved) is observable via local_port().
      *
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral).
-     * @param config    The link's knobs (@ref tcp_config_t); `defer_recv` is DIAL-only and
-     *                  ignored here.
+     * @param config    The link's knobs (@ref tcp_config_t).
      */
     explicit tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& config = {});
 
@@ -257,17 +247,16 @@ class tcp_transport_t final : public transport_t, private stream_endpoint_t {
               const graph::delivery_lane_t& lane) override;
 
     /**
-     * @brief Spawn the recv thread a `defer_recv` DIAL construction held back (#1045).
+     * @brief Spawn the recv thread the DIAL constructor held back (#1045).
      *
      * The second phase of the two-phase bring-up: the socket is connected and NOTHING has
      * been read off it, so a sink installed before this call cannot have missed a frame.
-     * From here the link behaves exactly as a one-phase one.
      *
-     * IDEMPOTENT, and a no-op wherever there is nothing to arm — a one-phase DIAL link
+     * IDEMPOTENT, and a no-op wherever there is nothing to arm — an armed DIAL link
      * (its thread is already running), a LISTEN link (its accept loop started in the
      * constructor), and a link whose dial failed (`ok()` false, no socket to serve) — so an
      * owner may call it unconditionally on every link it wires, which is what
-     * `%transport_vertex_t::make_connection` does. A `defer_recv` link that is never armed
+     * `%transport_vertex_t::make_connection` does. A DIAL link that is never armed
      * never receives and never reports the link down; it is simply an open socket until it
      * is destroyed.
      */

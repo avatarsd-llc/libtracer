@@ -154,8 +154,8 @@ int main() {
     // 3. Ingress. The sink is installed before anything is delivered, because that ordering is
     // the contract: a kind whose receive thread starts in its constructor is already draining
     // the wire while the owner is still wiring, and a frame that lands in an empty slot is
-    // dropped with no counter moving. Kinds that dial offer `defer_recv` + `start_receiving()`
-    // for exactly this reason.
+    // dropped with no counter moving. The built-in dialling kinds start receiving only at
+    // `start_receiving()` for exactly this reason.
     sink_t inbound;
     link.set_receiver(inbound);
     const auto f2 = frame_of(5, 0x40);

@@ -96,6 +96,7 @@ void run_sub(std::string_view proto, std::uint16_t port) {
 void run_pub(std::string_view proto, std::uint16_t port) {
     auto ep = make_endpoint(proto, false, port);
     if (!ep) return;
+    ep->start_receiving();               // a DIAL link receives once armed (#2247)
     std::this_thread::sleep_for(400ms);  // let the connection/link establish
 
     std::vector<std::uint8_t> payload;

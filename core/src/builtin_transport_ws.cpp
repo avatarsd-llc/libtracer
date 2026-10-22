@@ -81,8 +81,8 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     // its kind-private keys from the raw config bytes the engine kept a copy of, and
     // constructs a FRESH `transport_ws_client` per run — including a fresh masked-frame
     // buffer bound to `egress_src` at construction, so every healed socket is as bounded as
-    // the first. `defer_recv` stays correct for the same reason it does on `tcp`: the engine
-    // calls `start_receiving()` once it has wired the socket's sinks.
+    // the first. As on `tcp`, the engine calls `start_receiving()` once it has wired the
+    // socket's sinks.
     // The LISTEN arm never reaches the engine (a LISTEN link binds eagerly, RFC-0014 §4),
     // which is also why the `peer_named` bus facet is unaffected by this flip — it exists
     // only on the listener.
@@ -125,7 +125,6 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                         src, s.addr, s.port,
                         ws_client_config_t{.memory = {.rx = rx_backend, .io = egress_src},
                                            .max_frame = s.max_frame,
-                                           .defer_recv = true,
                                            .liveness_window_ms = liveness_window,
                                            .max_handshake = max_handshake});
                 },

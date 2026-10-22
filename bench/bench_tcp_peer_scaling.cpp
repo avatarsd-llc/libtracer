@@ -249,8 +249,10 @@ struct rep_t {
 
     std::vector<std::unique_ptr<tr::net::tcp_transport_t>> dialers;
     dialers.reserve(active);
-    for (std::size_t i = 0; i < active; ++i)
+    for (std::size_t i = 0; i < active; ++i) {
         dialers.push_back(std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port));
+        dialers.back()->start_receiving();
+    }
 
     // WAIT FOR THE FIXTURE, do not sleep for it. The server accepts at most ONE peer per poll
     // pass, so the time to drain a 512-deep backlog is not a constant and is not knowable up

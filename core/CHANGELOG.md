@@ -66,6 +66,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   left at `0` (1 s gave 10 peers) now admits 100, and a non-zero cap above the old ceiling is
   admitted in full, each session with its own RAM. A deployment that relied on a short window
   to keep its peer count low sets `max_peers`.
+- **`tcp_config_t::defer_recv` and `ws_client_config_t::defer_recv` are removed; every tcp and
+  ws DIAL link defers its receive start
+  ([#2247](https://github.com/avatarsd-llc/libtracer/issues/2247)).** The default (`false`)
+  spawned the receive thread in the constructor, so a frame the peer pushed on connect could be
+  decoded into an empty sink and dropped with no counter moving. Every production factory
+  already passed `true`. **Migration:** drop `.defer_recv = ...` from the config; a directly
+  constructed DIAL link installs its receivers and then calls `start_receiving()`, as
+  `transport_vertex_t` and the self-heal engine already do. A link that is never armed never
+  receives. LISTEN links are unchanged.
 
 ## [0.21.0] — 2026-10-22
 

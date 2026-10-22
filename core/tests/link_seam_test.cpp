@@ -211,7 +211,6 @@ class tcp_rig_t final : public link_rig_t {
         : link_("127.0.0.1", peer_.port(),
                 tr::net::tcp_config_t{.memory = {.rx = &rx_},
                                       .max_frame = kMaxFrame,
-                                      .defer_recv = true,
                                       .liveness_window_ms = kLivenessMs}) {
         (void)peer_.accept(kWait);
     }
@@ -318,7 +317,6 @@ class ws_rig_t final : public link_rig_t {
           link_("127.0.0.1", peer_.port(),
                 tr::net::ws_client_config_t{.memory = {.rx = &rx_},
                                             .max_frame = kMaxFrame,
-                                            .defer_recv = true,
                                             .liveness_window_ms = kLivenessMs}) {
         server_.join();
     }

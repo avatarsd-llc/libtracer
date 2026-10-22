@@ -142,6 +142,7 @@ void test_dialer_counts() {
         tr::net::tcp_server_transport_t server(0);
         tr::net::tcp_transport_t dialer("127.0.0.1", server.local_port());
         check(dialer.ok() && wait_until([&] { return dialer.link_up(); }, 2s), "tcp dialed");
+        dialer.start_receiving();
         dialer.send(std::span<const std::byte>(payload));  // warm-up: lazy state settles
         std::this_thread::sleep_for(20ms);
         const unsigned n = locks_in([&] { dialer.send(std::span<const std::byte>(payload)); });
@@ -152,6 +153,7 @@ void test_dialer_counts() {
         tr::net::ws_server_transport_t server(0);
         tr::net::ws_client_transport_t dialer("127.0.0.1", server.local_port());
         check(dialer.ok() && wait_until([&] { return dialer.link_up(); }, 2s), "ws dialed");
+        dialer.start_receiving();
         dialer.send(std::span<const std::byte>(payload));
         std::this_thread::sleep_for(20ms);
         const unsigned n = locks_in([&] { dialer.send(std::span<const std::byte>(payload)); });

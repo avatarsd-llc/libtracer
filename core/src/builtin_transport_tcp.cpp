@@ -57,11 +57,10 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // DORMANT and this thunk runs on the engine's worker, once per dial attempt.
     // RE-RUNNABILITY: the thunk captures two raw pointers that outlive the vertex, re-parses
     // its kind-private keys from the raw config bytes the engine kept a copy of, and
-    // constructs a FRESH `tcp_transport_t` per run — no state survives a run. `defer_recv`
-    // stays true and stays correct: the engine wires the socket's sinks and then calls
-    // `start_receiving()` itself (`self_heal_link_t::wire_socket`), so the deferred-arm
-    // window this argument exists to close is closed by the engine exactly as
-    // `make_connection` closed it. The LISTEN arm never reaches the engine.
+    // constructs a FRESH `tcp_transport_t` per run — no state survives a run. The engine
+    // wires the socket's sinks and then calls `start_receiving()` itself
+    // (`self_heal_link_t::wire_socket`), exactly as `make_connection` does. The LISTEN arm never
+    // reaches the engine.
     vertex.register_transport_type(
         "tcp",
         [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
@@ -91,7 +90,6 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                         src, s.addr, s.port,
                         tcp_config_t{.memory = {.rx = rx_backend},
                                      .max_frame = s.max_frame,
-                                     .defer_recv = true,
                                      .liveness_window_ms = liveness_window});
                 },
                 [&] {

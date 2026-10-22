@@ -304,6 +304,7 @@ void test_client_queue_race() {
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port(),
                                           {.memory = {.io = &egress}});
     check(client.ok(), "client connected");
+    client.start_receiving();
     if (!server.ok() || !client.ok()) return;
 
     std::size_t nested = 0;
@@ -346,6 +347,7 @@ void test_server_two_doors_race() {
     tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     check(client.ok(), "client connected");
     client.set_receiver(sink);
+    client.start_receiving();
     if (!server.ok() || !client.ok()) return;
 
     // The directed door, where the build has one: the one peer's own endpoint.
