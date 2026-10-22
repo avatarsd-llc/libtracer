@@ -107,9 +107,6 @@ tr::net::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint
     return static_cast<std::uint64_t>(ms.count());
 }
 
-// (removed) own_copy — the alloc/copy/over triplet now lives in one audited
-// locus, tr::view::over_bytes (mem_heap.hpp). Call sites use it directly.
-
 }  // namespace
 
 // socketcan_link_t lives in its OWN translation unit (src/socketcan_link.cpp,
@@ -621,10 +618,14 @@ void transport_can::learn_advertise(const can::advertise_t& adv, std::uint32_t c
     node->last_base = base->endpoint;
     bound->adv.path = bound->path.view();
     bound->prior_lap = false;  // the fresh binding is current, whatever the lap test marked
-    // A refused entry leaves the group without its totality: its slices are then refused
-    // at add_slice or aged out by the sweep, and each of those is counted.
+    // Admit the group: ONE segment of the advertised total, drawn from this link's own receive
+    // backend (#2258), so the receiver pays for the size its peer announced. A classic link
+    // takes classic slice widths only, so an FD-sized claim on one is refused like any geometry
+    // that cannot carry its total. A refusal (geometry, backend or table) ticks dropped_groups;
+    // the group's slices then find no group and tick dropped_rx.
     if (deliver)
-        (void)reasm_.set_expected_count(key_of(base->node, base->endpoint), adv.slice_count);
+        (void)reasm_.open_group(key_of(base->node, base->endpoint), adv.slice_count,
+                                adv.group_total_len, can::can_max_data(cfg_.mode), *rx_backend_);
 
     // A data frame may have arrived ahead of its manifest (cross-ID arbitration);
     // re-drive any now-matchable pending slices. Compact in place and lift only the
@@ -827,55 +828,23 @@ void transport_can::process_data(const can_frame_data_t& frame) {
         return;
     }
     const std::uint32_t index = static_cast<std::uint32_t>(fields->endpoint - base_ep);
-    // `over_bytes` has exactly two outcomes and nullopt means ONE thing: the backend
-    // refused (empty input still returns an engaged empty view). The `value_or(view_t{})`
-    // this replaces converted that refusal into a fabricated engaged-EMPTY slice (#911):
-    // the reassembly buffer counts entries without inspecting their length, so the
-    // placeholder satisfied `is_complete`, `assemble` chained it, and the trim below
-    // shortened the rope to whatever did arrive — a byte-wrong, short frame delivered
-    // upstream as valid. A refusal is backpressure, so it drops like backpressure: the
-    // whole group goes (the surviving slices can never be completed into anything true),
-    // the slice ticks dropped_rx, and `discard` ticks dropped_groups. Never fabricate.
-    //
-    // A zero-length data field takes the SAME disposition, and for the same reason.
-    // `over_bytes` returns an ENGAGED empty view for empty input, so a DLC-0 data frame
-    // walks the success path and inserts exactly the placeholder the paragraph above
-    // exists to prevent — the buffer counts it, `is_complete` fires early, and the trim
-    // delivers a short frame. A conforming sender never emits one (every slice of a
-    // group is a fragment of a non-empty frame, and the last is full or partial, never
-    // absent), so this is the non-conforming-peer door onto the identical corruption.
-    // Guarding on the frame rather than on the view's length keeps the check at the
-    // seam where the wire fact lives.
-    if (frame.len == 0) {
+    // The slice is copied into the group's one segment, at its place. A slice the group cannot
+    // take truthfully is refused: no group admitted (a refused or never-sent advertise), an
+    // index past the count, or a data field shorter than its place, which includes the DLC-0
+    // frame a non-conforming peer could send (#911). A refusal drops the WHOLE group, since its
+    // surviving slices can never be completed into anything true: the slice ticks dropped_rx
+    // and `discard` ticks dropped_groups. Never fabricate.
+    if (!reasm_.add_slice(key, index, frame.bytes())) {
         reasm_.discard(key);
         dropped_rx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // The bytes' backend and the reassembly store may each refuse; either way the group
-    // can never complete truthfully, so it takes the same discard-and-count (#1780).
-    std::optional<tr::view::view_t> slice = tr::view::over_bytes(frame.bytes(), *rx_backend_);
-    if (!slice || !reasm_.add_slice(key, index, *std::move(slice))) {
-        reasm_.discard(key);
-        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-
-    if (!reasm_.is_complete(key)) return;
-    const auto rope = reasm_.assemble(key);
-    const std::uint32_t total = binding->adv.group_total_len;
-    reasm_.erase(key);
     // The learned binding is kept: the identity↔path map persists past delivery and is
-    // retired only when a fresh advertise claims its endpoint run (#909). Here only the
-    // per-group slice buffer is freed — `erase`, not `discard`: the bytes reached the
-    // receiver, so nothing was lost and nothing is counted.
-    if (!rope) return;
-
-    // Trim back to the advertised total by SHORTENING the tail link (subrope) —
-    // CAN-FD DLC padding removal is never a flatten (CONTEXT.md: "trimming
-    // transport padding is shortening the last link"). The trimmed rope IS the
-    // delivered frame (ADR-0053 §5); only a span-tier receiver pays a flatten.
-    const std::size_t n = std::min<std::size_t>(total, rope->total_length());
-    deliver(fields->node, rope->subrope(0, n));
+    // retired only when a fresh advertise claims its endpoint run (#909). `take` frees only the
+    // group: the bytes reached the receiver, so nothing was lost and nothing is counted. The
+    // value is already trimmed to the advertised total, so CAN-FD DLC padding never reaches it.
+    std::optional<tr::view::view_t> whole = reasm_.take(key);
+    if (whole) deliver(fields->node, tr::view::rope_t(*std::move(whole)));
 }
 
 /**

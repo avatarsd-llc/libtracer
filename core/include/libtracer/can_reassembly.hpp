@@ -4,10 +4,10 @@
  *
  * can_reassembly (#55): multi-frame CAN payload reassembly via libtracer's own
  * address-shift slicing / advertise+id-match — NOT ISO-TP (ADR-0030). Each CAN
- * frame is a slice; `(origin, ts) + index` chains slices into a rope. The same
- * reassembly model that "spans a 9-byte elided CAN sample → a GB advertised rope
- * group" (CONTEXT.md *Advertise + id-match*), reused so CAN stays uniform with
- * UDP/QUIC scatter-gather.
+ * frame is a slice; `(origin, ts) + index` places it in its group. The advertise names the
+ * group's total length, so the receiver draws one segment of that size when it admits the
+ * group and copies each slice to its offset: one allocation and a one-link value per
+ * message (#2258), whatever the slice count.
  *
  * Lives in `tr::net`, beside `can_transport_t` — the reassembly buffer is a
  * transport-plane concern, and the earlier `tr::mem::mem_can_reassembly_t`
@@ -16,17 +16,18 @@
  * round 2): the reassembly is a `tr::net` component that composes L1 views into a
  * rope, exactly as any transport does.
  *
- * Storage is drawn from an injected `tr::mem::block_source_t` (the one allocation seam,
- * ADR-0083 — #1780) and the group count is bounded by config, so on a constrained node
- * exhaustion is a bounded drop (evict-oldest + a `dropped_groups` counter, or a refused
- * slice the caller discards), never an OOM (the no-synthetic-limits doctrine: bounds are
+ * Structure is drawn from an injected `tr::mem::block_source_t` (the one allocation seam,
+ * ADR-0083 — #1780), each group's bytes from the caller's receive backend, and the group
+ * count is bounded by config, so on a constrained node exhaustion is a bounded drop
+ * (evict-oldest, a refused admission + a `dropped_groups` counter, or a refused slice the
+ * caller discards), never an OOM (the no-synthetic-limits doctrine: bounds are
  * injected resources / config, never a hardcoded magic number). The defaults — the process
  * net sub-pool, unbounded — preserve the pre-rehome behavior; a target injects a bounded
  * source + `max_groups` to bound it (the per-connection `:settings` path).
  *
  * A count bound alone does not reclaim a group that will NEVER complete — the
  * exact residue a lost advertise or a lost data slice leaves behind, since
- * `erase` is reached only after `is_complete` (#912). So the buffer also ages
+ * a group is taken only once it `is_complete` (#912). So the buffer also ages
  * out: the caller stamps it with its own monotonic clock (`set_now`) and sweeps
  * (`sweep_stale`) on a cadence it chooses. The stamp is opaque here — the buffer
  * stays a pure framing primitive with NO clock of its own, exactly as it has no
@@ -38,8 +39,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
+#include <span>
 
+#include "libtracer/can_framing.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
@@ -78,85 +83,133 @@ struct reassembly_key_t {
 };
 
 /**
- * @brief Reassembles multi-frame CAN payloads from out-of-order slices.
+ * @brief Reassembles multi-frame CAN payloads from out-of-order slices into ONE segment.
  *
- * A slice (one CAN data field, as a @ref tr::view::view_t) is added under its
- * group key and index; slices may arrive in any order. Totality is **opt-in**
- * (@ref set_expected_count, the advertise manifest's slice count): with it set, a
- * dropped *interior* slice is detectable (@ref has_interior_gap) and the group is
- * @ref is_complete only when every index `0..count-1` is present; a dropped
- * *trailing* slice is undetectable without it (ADR-0011 totality-opt-in). @ref
- * assemble chains the slices, in index order, into a @ref tr::view::rope_t with
- * zero copies.
+ * A group is admitted by its advertise (@ref open_group), which names its slice count and its
+ * total length; the two name the producer's slice width. Admission draws ONE segment of the total
+ * length from the caller's receive backend, so the receiver pays for the size its peer announced,
+ * out of its own store: a size the backend cannot serve, or one the slice geometry cannot carry, is
+ * refused and counted on @ref dropped_groups. Each slice (@ref add_slice) is then copied to
+ * offset `index` times `width` in that segment; slices may arrive in any order. Totality comes from
+ * the advertise (ADR-0011): a dropped *interior* slice is detectable (@ref has_interior_gap) and
+ * the group is
+ * @ref is_complete only when every index `0..count-1` is present. @ref take hands the segment out
+ * owning, trimmed to the total: one allocation, one copy and a one-link value per message,
+ * where the per-slice buffer it replaces drew one segment and one map entry per slice (#2258).
  *
- * Structure and slices are drawn from the injected block source; when
- * `max_groups` is non-zero and a new group would exceed it, the oldest group
- * is evicted (its buffered slices freed) and @ref dropped_groups is incremented —
- * a bounded drop rather than unbounded growth. Independently of that count bound,
- * @ref sweep_stale reclaims groups that stopped making progress, which is the only
- * thing that frees a group a lost slice left permanently incomplete.
+ * The segment also carries the group's slice-presence bits, `ceil(count / 8)` bytes past the
+ * total length, so a re-sent slice is still counted once without a second draw. The delivered
+ * view stops at the total, so the bits never reach the receiver.
+ *
+ * Structure is drawn from the injected block source; when `max_groups` is non-zero and a new
+ * group would exceed it, the oldest group is evicted (its segment freed) and @ref
+ * dropped_groups is incremented: a bounded drop rather than unbounded growth. Independently of
+ * that count bound, @ref sweep_stale reclaims groups that stopped making progress, which is the
+ * only thing that frees a group a lost slice left permanently incomplete.
  */
 class can_reassembly_t {
    public:
     /**
      * @brief Construct over @p src, bounding the live group count at @p max_groups.
-     * @param src        Where the group/slice structure is drawn from
+     * @param src        Where the group structure is drawn from
      *                   (default: the process net sub-pool).
      * @param max_groups Live-group ceiling; `0` means unbounded (the default, and
      *                   the pre-rehome behavior).
      */
     explicit can_reassembly_t(mem::block_source_t& src = mem::net_source(),
                               std::size_t max_groups = 0) noexcept
-        : max_groups_(max_groups), groups_(src), slices_(src) {}
+        : max_groups_(max_groups), groups_(src) {}
 
     /**
-     * @brief Add (or replace) slice @p index of group @p key.
+     * @brief Admit group @p key: draw its one segment from @p bytes.
+     *
+     * A group already tracked under @p key is replaced, uncounted (its producer re-advertised
+     * the run). Every refusal ticks @ref dropped_groups, since the group is lost before delivery.
+     *
+     * @param key   The `(origin, ts)` group identity.
+     * @param count The advertised slice count.
+     * @param total The advertised total length, in bytes.
+     * @param max_width The widest slice this link carries (8 classic, 64 CAN-FD).
+     * @param bytes The receive backend the segment is drawn from.
+     * @retval false The geometry is impossible (`count` slices of the producer's width cannot
+     *               carry `total`), or the backend or the group table refused: nothing is
+     *               tracked.
+     */
+    [[nodiscard]] bool open_group(const reassembly_key_t& key, std::uint32_t count,
+                                  std::uint32_t total, std::size_t max_width,
+                                  mem::mem_backend_t& bytes) noexcept {
+        if (groups_.contains(key)) drop_group(key);
+        // The producer sliced at its mode's width, and (count, total) names it: a classic group
+        // fits `count * 8`, an FD group of two or more slices never does. Every slice but the
+        // last is `width` bytes, so `count` slices carry exactly the totals in
+        // ((count-1)*width, count*width]. In 64 bits, so no product wraps for a peer's u32.
+        const std::uint64_t classic = std::uint64_t{count} * can::kCanClassicMaxData;
+        const std::uint32_t width =
+            static_cast<std::uint32_t>(total <= classic ? can::kCanClassicMaxData : max_width);
+        const std::uint64_t full = std::uint64_t{count} * width;
+        if (count == 0 || total > full || total + std::uint64_t{width} <= full) {
+            ++dropped_groups_;
+            return false;
+        }
+        if (max_groups_ != 0 && groups_.size() >= max_groups_) evict_oldest();
+        tr::view::segment_ptr_t seg = tr::view::segment_alloc(bytes, total + (count + 7) / 8);
+        group_meta_t* const g = seg ? groups_
+                                          .try_emplace(key, group_meta_t{.seg = std::move(seg),
+                                                                         .total = total,
+                                                                         .width = width,
+                                                                         .expected = count,
+                                                                         .count = 0,
+                                                                         .highest = 0,
+                                                                         .seq = next_seq_++,
+                                                                         .last_touch = now_})
+                                          .value
+                                    : nullptr;
+        if (g == nullptr) {
+            ++dropped_groups_;
+            return false;
+        }
+        std::memset(g->seg->bytes.data() + total, 0, (count + 7) / 8);
+        return true;
+    }
+
+    /**
+     * @brief Copy slice @p index of group @p key into the group's segment.
+     *
+     * A re-sent index overwrites the bytes it repeats and is counted once (#2049). A slice
+     * longer than its place (CAN-FD DLC padding on the last slice) is cut to it.
+     *
      * @param key   The `(origin, ts)` group identity.
      * @param index The zero-based slice position.
-     * @param slice The slice's bytes (one CAN data field), borrowed zero-copy.
-     * @retval false The source refused the group or the slice (BACKPRESSURE): the slice was
-     *               not taken, and the caller abandons the group (@ref discard).
+     * @param slice The slice's bytes (one CAN data field).
+     * @retval false No group is admitted under @p key, @p index is past its count, or the
+     *               slice is shorter than its place: nothing was written, and the caller
+     *               abandons the group (@ref discard).
      */
     [[nodiscard]] bool add_slice(const reassembly_key_t& key, std::uint32_t index,
-                                 tr::view::view_t slice) noexcept {
-        group_meta_t* const g = touch_group(key);
-        if (g == nullptr) return false;
-        const slice_id_t id{key, index};
-        const auto placed = slices_.try_emplace(id, std::move(slice));
-        if (placed.value == nullptr) return false;
-        // A re-sent index replaces the slice it repeats and is counted once (#2049): the group
-        // keeps its slice count and highest index here, so no question about the group walks
-        // its slices.
-        if (!placed.inserted) {
-            *placed.value = std::move(slice);
-            return true;
-        }
+                                 std::span<const std::byte> slice) noexcept {
+        group_meta_t* const g = groups_.find(key);
+        if (g == nullptr || index >= g->expected) return false;
+        const std::size_t off = std::size_t{index} * g->width;
+        const std::size_t len = std::min<std::size_t>(g->width, g->total - off);
+        if (slice.size() < len) return false;
+        std::byte* const base = g->seg->bytes.data();
+        std::memcpy(base + off, slice.data(), len);
+        g->last_touch = now_;
+        std::byte& bits = base[g->total + index / 8];
+        const std::byte bit{static_cast<std::uint8_t>(1u << (index % 8))};
+        if ((bits & bit) != std::byte{0}) return true;
+        bits |= bit;
         ++g->count;
         g->highest = std::max(g->highest, index);
         return true;
     }
 
-    /**
-     * @brief Declare the expected slice count of group @p key (totality opt-in).
-     * @param key   The group identity.
-     * @param count The number of slices the complete group contains.
-     * @retval false The source refused a new group's entry (BACKPRESSURE): nothing was
-     *               recorded.
-     */
-    [[nodiscard]] bool set_expected_count(const reassembly_key_t& key,
-                                          std::uint32_t count) noexcept {
-        group_meta_t* const g = touch_group(key);
-        if (g == nullptr) return false;
-        g->expected = count;
-        return true;
-    }
-
-    /** @brief True when group @p key is being tracked (has a slice or an expected count). */
+    /** @brief True when group @p key is admitted and not yet taken or dropped. */
     [[nodiscard]] bool contains(const reassembly_key_t& key) const noexcept {
         return groups_.contains(key);
     }
 
-    /** @brief Number of slices currently buffered for group @p key (0 if unknown). */
+    /** @brief Number of distinct slices received for group @p key (0 if unknown). */
     [[nodiscard]] std::size_t slice_count(const reassembly_key_t& key) const noexcept {
         const group_meta_t* const g = groups_.find(key);
         return g == nullptr ? 0 : g->count;
@@ -165,8 +218,7 @@ class can_reassembly_t {
     /**
      * @brief True when an interior slice is missing (a hole below the highest index).
      *
-     * Detects a dropped *interior* slice even before the count is known; a missing
-     * *trailing* slice is not an interior gap (ADR-0011).
+     * A missing *trailing* slice is not an interior gap (ADR-0011).
      */
     [[nodiscard]] bool has_interior_gap(const reassembly_key_t& key) const noexcept {
         const group_meta_t* const g = groups_.find(key);
@@ -174,51 +226,41 @@ class can_reassembly_t {
                g->count != static_cast<std::size_t>(g->highest) + 1;
     }
 
-    /**
-     * @brief True when @p key has its expected count set and every index is present.
-     *
-     * Requires @ref set_expected_count (totality opt-in); without it, completeness
-     * is undecidable (a trailing drop is invisible) and this returns false.
-     */
+    /** @brief True when every slice `0..count-1` of group @p key is present. */
     [[nodiscard]] bool is_complete(const reassembly_key_t& key) const noexcept {
-        // Distinct indices, as many as expected, the highest one `expected - 1`: exactly
-        // `0..expected-1`. O(1) — this runs once per arriving slice, and the walk it replaces
-        // made a group's reassembly quadratic in its slice count (#2049).
+        // Each index is counted once and is below the count, so reaching the count is having
+        // all of them. O(1): this runs once per arriving slice (#2049).
         const group_meta_t* const g = groups_.find(key);
-        return g != nullptr && g->expected && g->count == *g->expected &&
-               (g->count == 0 || g->highest == g->count - 1);
+        return g != nullptr && g->count == g->expected;
     }
 
     /**
-     * @brief Chain the complete group's slices, in index order, into one rope.
+     * @brief Hand the complete group's segment out, owning, and stop tracking the group.
      * @param key The group identity.
-     * @return The reassembled @ref tr::view::rope_t, or `std::nullopt` unless the
-     *         group @ref is_complete (totality must be satisfied first).
+     * @return A view of exactly the advertised total length, or `std::nullopt` unless the
+     *         group @ref is_complete (it is then left as it was).
      */
-    [[nodiscard]] std::optional<tr::view::rope_t> assemble(const reassembly_key_t& key) const {
-        if (!is_complete(key)) return std::nullopt;
-        tr::view::rope_t r;
-        const std::size_t lo = first_slice(key);
-        for (std::size_t i = lo; i < lo + slice_count(key); ++i) r.append(slices_.at(i).value);
-        return r;
+    [[nodiscard]] std::optional<tr::view::view_t> take(const reassembly_key_t& key) noexcept {
+        group_meta_t* const g = groups_.find(key);
+        if (g == nullptr || g->count != g->expected) return std::nullopt;
+        const std::size_t total = g->total;
+        tr::view::view_t whole = tr::view::view_t::over(std::move(g->seg));
+        (void)groups_.erase(key);
+        whole.length = total;  // the presence bits past the total stay behind
+        return whole;
     }
 
-    /** @brief Drop all buffered state for group @p key (after assembly or timeout). */
+    /** @brief Drop all buffered state for group @p key, uncounted. */
     void erase(const reassembly_key_t& key) noexcept { drop_group(key); }
 
     /**
      * @brief Abandon group @p key as one that will NEVER complete — erase it AND count it.
      *
-     * The counted twin of @ref erase. `erase` is the post-delivery release: the group's
-     * bytes already reached the receiver, so nothing was lost and nothing is counted.
-     * This is the caller-side abandon — the ingress path could not own a slice's bytes
-     * (allocation refusal), so the group is dead and its buffered slices are reclaimed
-     * BEFORE delivery. That is exactly what @ref dropped_groups counts, whatever forced
-     * it: a `max_groups` eviction, a @ref sweep_stale age-out, or this.
-     *
-     * Silence is the alternative this exists to remove: without it a caller either
-     * fabricates a placeholder slice (delivering a byte-wrong short frame as valid) or
-     * calls @ref erase and loses a whole group with no counter moving (#911).
+     * The counted twin of @ref erase. The ingress path refused a slice, so the group is dead
+     * and its segment is reclaimed BEFORE delivery. That is exactly what @ref dropped_groups
+     * counts, whatever forced it: a refused admission, a `max_groups` eviction, a @ref
+     * sweep_stale age-out, or this. Without it a caller either delivers a byte-wrong short
+     * frame or loses a whole group with no counter moving (#911).
      *
      * @retval false Nothing was tracked under @p key — no group, so no drop to count.
      */
@@ -241,13 +283,11 @@ class can_reassembly_t {
     /**
      * @brief Erase every group untouched for longer than @p max_age (the stale sweep).
      *
-     * A group is "touched" when a slice is added or its expected count is set, so
-     * one that stopped making progress — a lost data slice, or an advertise whose
-     * group never materialized — ages out here. Without this, such a group is never
-     * @ref is_complete, so @ref erase is never reached and its buffered slices are
-     * pinned for the process's life (#912). Each erased group ticks @ref
-     * dropped_groups, exactly as a `max_groups` eviction does: one counter for
-     * "a group's buffered slices were reclaimed before delivery", whatever forced it.
+     * A group is "touched" when it is admitted or a slice is added, so one that stopped
+     * making progress — a lost data slice — ages out here. Without this, such a group is
+     * never @ref is_complete, so it is never taken and its segment is pinned for the
+     * process's life (#912). Each erased group ticks @ref dropped_groups, exactly as a
+     * `max_groups` eviction does.
      *
      * @return How many groups were erased.
      * @note Ages against the stamp last given to @ref set_now; a caller that never
@@ -271,59 +311,26 @@ class can_reassembly_t {
     }
 
     /**
-     * @brief Count of groups reclaimed before delivery — a `max_groups` eviction
-     *        or a @ref sweep_stale age-out (never an OOM).
+     * @brief Count of groups lost before delivery — a refused admission, a `max_groups`
+     *        eviction, a @ref sweep_stale age-out or a @ref discard (never an OOM).
      */
     [[nodiscard]] std::uint64_t dropped_groups() const noexcept { return dropped_groups_; }
 
    private:
-    // A whole-buffer slice identity: `(group, index)`, so a group's slices are a
-    // contiguous, index-ordered run in one flat map (no nested container).
-    struct slice_id_t {
-        reassembly_key_t group{};
-        std::uint32_t index = 0;
-        [[nodiscard]] auto operator<=>(const slice_id_t&) const = default;
-    };
-
     struct group_meta_t {
-        std::optional<std::uint32_t> expected;  // totality opt-in.
-        std::uint32_t count = 0;                // distinct slices buffered (the run's length).
-        std::uint32_t highest = 0;              // highest slice index buffered.
-        std::uint64_t seq = 0;                  // insertion order, for evict-oldest.
-        std::uint64_t last_touch = 0;           // caller's stamp at the last progress.
+        tr::view::segment_ptr_t seg;   // total bytes, then ceil(expected / 8) presence bits.
+        std::uint32_t total = 0;       // advertised total length.
+        std::uint32_t width = 0;       // advertised slice width.
+        std::uint32_t expected = 0;    // advertised slice count.
+        std::uint32_t count = 0;       // distinct slices received.
+        std::uint32_t highest = 0;     // highest slice index received.
+        std::uint64_t seq = 0;         // admission order, for evict-oldest.
+        std::uint64_t last_touch = 0;  // caller's stamp at the last progress.
     };
 
-    // Track a group, creating it (bound-enforced) if new; returns its metadata.
-    // Every touch restamps it, so a group still receiving slices never ages out
-    // and one that stopped making progress does.
-    // Null when the source refused a new group's entry.
-    group_meta_t* touch_group(const reassembly_key_t& key) noexcept {
-        if (group_meta_t* const g = groups_.find(key)) {
-            g->last_touch = now_;
-            return g;
-        }
-        if (max_groups_ != 0 && groups_.size() >= max_groups_) evict_oldest();
-        return groups_
-            .try_emplace(key, group_meta_t{.expected = std::nullopt,
-                                           .count = 0,
-                                           .highest = 0,
-                                           .seq = next_seq_++,
-                                           .last_touch = now_})
-            .value;
-    }
+    void drop_group(const reassembly_key_t& key) noexcept { (void)groups_.erase(key); }
 
-    // The index of the first slice of group @p key (or of the first entry after it).
-    [[nodiscard]] std::size_t first_slice(const reassembly_key_t& key) const noexcept {
-        return slices_.lower_bound(slice_id_t{key, 0});
-    }
-    // Erase a group's slice run, in one range erase (one shift of the entries above it, where
-    // erasing them one at a time shifted those entries once per slice), then its metadata.
-    void drop_group(const reassembly_key_t& key) noexcept {
-        slices_.erase_at(first_slice(key), slice_count(key));
-        (void)groups_.erase(key);
-    }
-
-    // Evict the oldest-inserted group to make room (bounded drop, counted).
+    // Evict the oldest-admitted group to make room (bounded drop, counted).
     void evict_oldest() noexcept {
         if (groups_.empty()) return;
         std::size_t oldest = 0;
@@ -340,7 +347,6 @@ class can_reassembly_t {
     std::uint64_t dropped_groups_ = 0;
     std::uint64_t now_ = 0;  // the caller's latest stamp (set_now); no clock here.
     mem::sorted_map_t<reassembly_key_t, group_meta_t> groups_;
-    mem::sorted_map_t<slice_id_t, tr::view::view_t> slices_;
 };
 
 }  // namespace tr::net

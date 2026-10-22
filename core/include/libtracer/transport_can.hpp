@@ -374,14 +374,15 @@ struct transport_can_config_t {
                                    age-out is the bound that holds under the shipped
                                    default config. */
     mem::mem_backend_t* rx_backend =
-        nullptr; /**< @brief The byte seam an inbound data slice is COPIED into before
-                    it enters the reassembly buffer (`tr::view::over_bytes`'s injected
-                      form, #793). `nullptr` = the process net sub-pool
+        nullptr; /**< @brief The byte seam each reassembled message is drawn from: ONE
+                    segment of the advertised total per group, drawn when the group is
+                    admitted, that every slice is copied into (#2258). `nullptr` = the process net
+                    sub-pool
                       (`mem::net_backend()`; the static arena on an MCU build, not the
                     heap). A constrained node injects a bounded backend (`mem::pool_t`)
                     so ingress exhaustion is a by-value refusal on the RX thread
                     instead of a reach into the global heap; a refusal drops the whole
-                    group and ticks @ref can_transport_t::dropped_rx. Must outlive the
+                    group and ticks @ref can_transport_t::dropped_groups. Must outlive the
                     transport — the segments it hands out are released by it. Companion
                     to @ref reasm_src — that one bounds the reassembly STRUCTURE, this
                     one the slice BYTES. */
@@ -493,9 +494,9 @@ class can_transport_t final : public transport_t, public bus_link_t {
      * Ticks once per parked data slice reclaimed because @ref
      * transport_can_config_t::max_pending was reached or because it aged past
      * `rx_ttl` — a bounded, counted drop instead of the unbounded park this
-     * replaces — and once per inbound slice whose bytes could not be owned
-     * (@ref transport_can_config_t::rx_backend refused, #911). It counts SLICES,
-     * not groups; a group's buffered slices reclaimed as a unit are @ref
+     * replaces — and once per inbound slice its group could not take: no group admitted
+     * (its advertise was refused or lost), or a data field shorter than its place (#911,
+     * #2258). It counts SLICES, not groups; a group reclaimed as a unit is @ref
      * dropped_groups, which the refusal also ticks because the group it belonged
      * to is abandoned rather than completed with a fabricated slice.
      */
@@ -588,8 +589,12 @@ class can_transport_t final : public transport_t, public bus_link_t {
     }
 
     /**
-     * @brief Reassembly groups reclaimed before delivery — a `max_groups` eviction,
-     *        an `rx_ttl` age-out, or a base-endpoint run being re-bound (#909).
+     * @brief Reassembly groups lost before delivery — a refused admission, a `max_groups`
+     *        eviction, an `rx_ttl` age-out, or a base-endpoint run being re-bound (#909).
+     *
+     * A refused admission is an advertise whose total length its slice count cannot carry,
+     * or whose one segment @ref transport_can_config_t::rx_backend refused (#2258): the
+     * receiver pays for what its peer announces, out of its own store, and says so here.
      *
      * The third form is the wraparound one: the 12-bit endpoint space recurs, so a
      * fresh advertise over a run that a stale binding still claims retires that
@@ -823,9 +828,8 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // evict-oldest end are the front.
     mem::block_array_t<pending_slice_t> pending_;
     std::chrono::steady_clock::time_point rx_now_{};  // current frame's arrival stamp
-    // Where an inbound slice's bytes are copied (cfg_.rx_backend, resolved to the
-    // process heap once in the constructor). Resolved rather than branched so the
-    // per-slice path has one indirect call either way.
+    // Where each admitted group's one segment is drawn (cfg_.rx_backend, resolved to the
+    // process net sub-pool once in the constructor).
     mem::mem_backend_t* rx_backend_ = nullptr;
 
     // Drop counters (#912, #1103, #1011). Written on the RX/TX threads, read by anyone.

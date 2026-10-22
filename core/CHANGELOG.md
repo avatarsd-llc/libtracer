@@ -98,6 +98,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - `rebuild_fwd_forward` loses its trailing `reply_label` parameter; a forwarded REPLY's `src`
   grows by nothing.
 - `sizeof(path_t)` falls from 15 to 11 pointer widths; the ratchet in `path.hpp` is re-pinned.
+- **`can_reassembly_t` reassembles a group into ONE segment, drawn when the advertise admits it
+  (#2258).** It drew one segment and one table entry per 8-byte slice and handed up a rope of
+  one link per slice: 128 allocations for a 1 KiB classic message, 2048 at 16 KiB. The
+  advertise names the group's total length, so the receiver now draws one segment of that
+  size from the link's receive backend and copies each slice into place: one allocation and a
+  one-link value per message at every size. A total the slice geometry cannot carry, or a
+  segment the backend refuses, is refused at admission and counted on `dropped_groups`; a
+  slice shorter than its place is refused and counted on `dropped_rx`.
+  - **Migration:** `set_expected_count(key, count)` becomes `open_group(key, count, total,
+    width, backend)`; `add_slice` takes the slice's bytes as a `std::span<const std::byte>`
+    instead of a `view_t`; `assemble(key)` followed by `erase(key)` becomes `take(key)`, which
+    returns the owning `view_t` trimmed to the total. A slice for a group that was never
+    admitted is refused rather than starting one.
+  - `transport_can_config_t::rx_backend` now serves one segment per group rather than one per
+    slice, and its refusal ticks `dropped_groups` (and each of the group's slices
+    `dropped_rx`).
 
 ### Breaking
 

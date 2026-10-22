@@ -270,28 +270,35 @@ int main() {
             tr::net::can::can_frame_count(pv, tr::net::can::can_frame_mode_t::CLASSIC);
         check(n == 3, "a 20-byte payload splits into 3 classic CAN data fields");
 
-        // Out-of-order arrival, then the advertise's slice count, then assembly.
+        // The advertise admits the group, then out-of-order arrival, then assembly. The group's
+        // one segment is the receive backend's (#2258); its table entry is the slab's.
+        const auto admit = [&](std::uint64_t ts) {
+            return reasm.open_group(key_ts(ts), static_cast<std::uint32_t>(n), 20, 8,
+                                    tr::mem::heap_backend());
+        };
         reasm.set_now(1000);
-        (void)reasm.add_slice(key_ts(1), 2, slice(2));
-        (void)reasm.add_slice(key_ts(1), 0, slice(0));
+        check(admit(1), "the advertise admits the group");
+        (void)reasm.add_slice(key_ts(1), 2, slice(2).bytes());
+        (void)reasm.add_slice(key_ts(1), 0, slice(0).bytes());
         check(reasm.has_interior_gap(key_ts(1)), "the missing interior slice is visible");
-        (void)reasm.add_slice(key_ts(1), 1, slice(1));
-        (void)reasm.set_expected_count(key_ts(1), static_cast<std::uint32_t>(n));
+        (void)reasm.add_slice(key_ts(1), 1, slice(1).bytes());
         check(reasm.is_complete(key_ts(1)), "the group completes once every index is present");
-        const auto assembled = reasm.assemble(key_ts(1));
+        const auto assembled = reasm.take(key_ts(1));
         check(assembled.has_value(), "a complete group assembles");
-        check(assembled && rope_bytes(*assembled) == payload,
-              "the rope reproduces the payload byte-for-byte, zero copies");
+        check(assembled && rope_bytes(tr::view::rope_t(*assembled)) == payload,
+              "the segment reproduces the payload byte-for-byte");
         check(pool.used() > 0, "the reassembly structure lives in the injected slab");
         check(pool.overflowed() == 0, "every freed node went back onto its class list");
 
         // The bound still bounds: a third live group evicts the oldest and ticks the
-        // counter. The store's policy is untouched by where its bytes come from.
-        (void)reasm.add_slice(key_ts(2), 0, slice(0));
+        // counter. The store's policy is untouched by where its bytes come from. Group 1 was
+        // taken, so groups 2 and 3 fill the bound and group 4 is the third.
+        (void)admit(2);
+        (void)admit(3);
         check(reasm.dropped_groups() == 0, "no eviction while within the group bound");
-        (void)reasm.add_slice(key_ts(3), 0, slice(0));
+        (void)admit(4);
         check(reasm.dropped_groups() == 1, "a 3rd group evicts one — a bounded drop, not an OOM");
-        check(!reasm.contains(key_ts(1)), "the oldest group was the one evicted");
+        check(!reasm.contains(key_ts(2)), "the oldest group was the one evicted");
 
         // The stale sweep frees a group that stopped making progress, and its blocks go
         // back to the pool rather than being pinned for the process's life (#912).
@@ -299,7 +306,7 @@ int main() {
         check(reasm.sweep_stale(100) == 2, "both idle groups age out");
         const std::size_t plateau = pool.used();
         for (int i = 0; i < 16; ++i) {
-            (void)reasm.add_slice(key_ts(100 + static_cast<std::uint64_t>(i)), 0, slice(0));
+            (void)admit(100 + static_cast<std::uint64_t>(i));
         }
         check(pool.used() == plateau, "the swept groups' blocks were recycled, not re-carved");
     }

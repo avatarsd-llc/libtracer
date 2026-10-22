@@ -8,7 +8,7 @@ instead of shrinking it — **the 29-bit extended CAN ID *is* the address** — 
 data frame on the bus is payload and nothing else. A dynamic identity↔path map
 inside the transport self-establishes through in-band `advertise` frames, a
 splitter cuts one logical payload into id-matched frame windows with no copy, and
-a reassembler chains the windows back into a rope on the far side.
+a reassembler copies the windows back into one segment on the far side.
 ```
 
 ## What it does
@@ -40,10 +40,11 @@ table to hold and nothing to allocate. `can_frame_mode_t` selects the classic 8-
 field, and `can_fd_dlc_round_up` handles CAN-FD's non-contiguous length ladder.
 
 **The reassembler** (`tr::net::can_reassembly_t`) is the far side: `(origin,
-timestamp) + index` chains slices back into a `rope_t` — libtracer's own
-address-shift slicing, not ISO-TP. Its storage comes from an injected
-`std::pmr::memory_resource` and its group count is bounded by configuration, so
-exhaustion on a constrained node is a bounded evict-oldest drop with a counter,
+timestamp) + index` places each slice in one segment of the advertised total, drawn
+from the link's receive backend when the advertise admits the group — libtracer's own
+address-shift slicing, not ISO-TP. Its structure comes from an injected
+`block_source_t` and its group count is bounded by configuration, so exhaustion on a
+constrained node is a bounded, counted drop (evict-oldest, or a refused admission),
 never an allocation failure. The defaults — process heap, unbounded — are what a
 host gets unless it says otherwise. The in-band spelling of those bounds — the
 `can`-private `max_groups` / `max_pending` / `rx_ttl_ms` keys a `:children[]`

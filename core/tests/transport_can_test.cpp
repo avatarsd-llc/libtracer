@@ -302,6 +302,27 @@ void inject_data(fake_link_t& link, std::uint16_t node, std::uint16_t endpoint) 
     link.write_raw(f);
 }
 
+/** @brief A pass-through receive backend that counts the segments it served (thread-safe). */
+class counting_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    counting_backend_t() noexcept : mem_backend_t("counting") {}
+    tr::view::segment_t* alloc(std::size_t size,
+                               tr::mem::alloc_hint_t hint = tr::mem::alloc_hint_t::NONE) override {
+        allocs.fetch_add(1, std::memory_order_relaxed);
+        return tr::mem::heap_backend().alloc(size, hint);
+    }
+    void destroy(tr::view::segment_t* seg) noexcept override {
+        tr::mem::heap_backend().destroy(seg);
+    }
+    std::size_t alignment() const noexcept override { return tr::mem::heap_backend().alignment(); }
+    std::size_t max_segment_size() const noexcept override {
+        return tr::mem::heap_backend().max_segment_size();
+    }
+    tr::mem::mem_space_t space() const noexcept override { return tr::mem::heap_backend().space(); }
+
+    std::atomic<std::size_t> allocs{0}; /**< @brief Segments served. */
+};
+
 /** @brief The shared shape of the RX-bounding tests: node 2 listening, node 1 injecting raw. */
 tr::net::transport_can_config_t rx_test_config() {
     tr::net::transport_can_config_t cfg;
@@ -781,40 +802,26 @@ void test_u16_slice_count_wrap_cannot_advertise_a_hello() {
 }
 
 /**
- * @brief #911 — an inbound slice whose bytes cannot be OWNED drops the whole group and
- *        counts it; it is never fabricated into an empty placeholder and delivered short.
+ * @brief #911, #2258 — a group whose one segment the receive backend refuses is dropped whole
+ *        and counted; nothing short is ever delivered, and the node stays live.
  *
- * `tr::view::over_bytes` has two outcomes and `nullopt` means exactly one thing: the
- * backend refused. `.value_or(view_t{})` turned that into an engaged EMPTY view, which
- * the reassembly buffer counts like any other slice — so `is_complete` was satisfied,
- * `assemble` chained the placeholder, and the `min(total, rope->total_length())` trim
- * quietly shortened the result. A byte-wrong, SHORT frame was delivered upstream as
- * valid data.
- *
- * The refusal here comes from a REAL injected backend, not a stub: a `mem::synchronized_pool_t<>`
- * over a caller-owned slab, drained to exactly as many free slots as the group needs
- * minus one. That is the production backpressure shape (`alloc` answering `nullptr` on a
- * bounded node), reached through the config seam an embedder actually sets.
+ * The receiver draws ONE segment of the advertised total when it admits a group. The refusal
+ * here comes from a REAL injected backend, not a stub: a `mem::synchronized_pool_t<>` over a
+ * caller-owned slab, drained to no free slot. That is the production backpressure shape
+ * (`alloc` answering `nullptr` on a bounded node), reached through the config seam an
+ * embedder actually sets.
  */
-void test_rx_slice_refusal_drops_the_group_and_counts() {
-    std::printf("transport_can ingress slice refusal drops + counts, never fabricates (#911):\n");
+void test_rx_segment_refusal_drops_the_group_and_counts() {
+    std::printf("transport_can ingress segment refusal drops + counts, never fabricates (#911):\n");
 
-    // The injected byte seam. Slots are one CLASSIC data field wide — the exact size an
-    // inbound slice copy asks for.
+    // The injected byte seam: 64-byte slots, room for one small group's segment each.
     alignas(std::max_align_t) std::array<std::byte, 8192> slab{};
-    tr::mem::synchronized_pool_t<> pool(slab, tr::net::can::kCanClassicMaxData);
-
-    // Drain to a KNOWN free-slot count so the refusing slice index is exact rather than
-    // whatever the slab arithmetic happened to yield. The 3-window group below gets two
-    // slots: slices 0 and 1 are owned, slice 2 is refused.
-    constexpr std::size_t kKeepFree = 2;
+    tr::mem::synchronized_pool_t<> pool(slab, 64);
     std::vector<tr::view::segment_ptr_t> held;
-    while (tr::view::segment_ptr_t s =
-               tr::view::segment_alloc(pool, tr::net::can::kCanClassicMaxData)) {
+    while (tr::view::segment_ptr_t s = tr::view::segment_alloc(pool, 64)) {
         held.push_back(std::move(s));
     }
-    check(held.size() > kKeepFree, "the injected pool holds more slots than the group needs");
-    held.resize(held.size() - kKeepFree);  // hand exactly kKeepFree slots back
+    check(!held.empty(), "the injected pool was drained");
 
     fake_can_bus_t bus;
     sink_t sink;
@@ -829,21 +836,17 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
     tr::net::can_transport_t tx_b(std::move(link_b), cfg_b);
     tx_b.set_receiver(rx);
 
-    // 24 bytes => 3 CLASSIC windows against 2 free slots: the third copy is refused.
-    const std::vector<std::byte> three_windows = make_payload(24);
-    tx_a.send(three_windows);
+    // 24 bytes => 3 CLASSIC windows; the admission's one draw is refused.
+    tx_a.send(make_payload(24));
 
-    check(!sink.wait_for_count(1, 500ms),
-          "NOTHING was delivered for the refused group (no short frame)");
-    check(wait_until([&] { return tx_b.dropped_rx() >= 1; }, 2s),
-          "the refused slice ticked dropped_rx()");
-    check(tx_b.dropped_groups() >= 1,
-          "and the dead group was reclaimed, counted on dropped_groups()");
+    check(wait_until([&] { return tx_b.dropped_rx() >= 3; }, 2s),
+          "each slice of the refused group ticked dropped_rx()");
+    check(!sink.wait_for_count(1, 200ms), "NOTHING was delivered for the refused group");
+    check(tx_b.dropped_groups() == 1, "and the refused admission was counted on dropped_groups()");
 
-    // Reclaiming the group returned its slots, so the node is live again. A DIFFERENT
-    // byte pattern on purpose: make_payload is index-derived, so a 16-byte prefix of the
-    // refused group's payload would be indistinguishable from a legitimate 16-byte frame
-    // and the liveness check could pass on the very corruption it is meant to exclude.
+    // One slot back, so the node is live again. A DIFFERENT byte pattern on purpose, so a
+    // remnant of the refused group could not pass for this delivery.
+    held.pop_back();
     const std::vector<std::byte> two_windows(2 * tr::net::can::kCanClassicMaxData, std::byte{0xC3});
     tx_a.send(two_windows);
     check(sink.wait_for_count(1, 2s), "the node is LIVE: the next group is delivered");
@@ -852,15 +855,55 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
 }
 
 /**
+ * @brief #2258 — an advertise whose total its slice count cannot carry is refused at
+ *        admission and counted, so a peer cannot make the receiver draw a size it never sends.
+ *
+ * The receiver pays for what its peer announces. Two classic slices carry at most 16 bytes, so
+ * a claim of 1000 (or of 4 GiB) is refused before any draw; the slices that follow find no
+ * group and are counted too.
+ */
+void test_oversize_advertise_is_refused_and_counted() {
+    std::printf("transport_can oversize advertise is refused + counted (#2258):\n");
+
+    fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    counting_backend_t counting;
+    fake_link_t injector(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    tr::net::transport_can_config_t cfg = rx_test_config();
+    cfg.rx_backend = &counting;
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg);
+    tx_b.set_receiver(rx);
+
+    std::uint16_t base = tr::net::kCanFirstDataEndpoint;
+    for (const std::uint32_t claim : {1000u, 0xFFFFFFFFu}) {
+        can::advertise_t adv;
+        adv.can_id = can::encode_can_id({0, 1, base});
+        adv.group = true;
+        adv.group_total_len = claim;
+        adv.slice_count = 2;
+        adv.path = "sensor/temp";
+        inject_advertise(injector, /*node=*/1, adv);
+        inject_data(injector, /*node=*/1, base);
+        inject_data(injector, /*node=*/1, static_cast<std::uint16_t>(base + 1));
+        base = static_cast<std::uint16_t>(base + 2);
+    }
+    check(wait_until([&] { return tx_b.dropped_rx() >= 4; }, 2s),
+          "every slice of both refused groups ticked dropped_rx()");
+    check(tx_b.dropped_groups() == 2, "both oversize advertises were refused, counted");
+    check(counting.allocs.load() == 0, "and the receive backend was never asked for the size");
+    check(sink.count() == 0, "nothing was delivered");
+}
+
+/**
  * @brief #911, the second door — a DLC-0 data slice reaches the SAME corruption by the
  *        success path, so it takes the same disposition.
  *
- * The refusal guard above turns on `over_bytes` answering `nullopt`. A zero-length data
- * field never gets there: `over_bytes` returns an ENGAGED empty view for empty input, so
- * a DLC-0 frame walks the success path and inserts exactly the placeholder that guard
- * exists to prevent. The buffer counts entries without inspecting length, `is_complete`
- * fires one slice early, and the `min(total, rope->total_length())` trim delivers a
- * SHORT frame as valid — byte-for-byte the #911 outcome, from a different direction.
+ * A zero-length data field once walked the success path and inserted an engaged-empty
+ * placeholder the buffer counted like any slice, so the group completed one slice early and
+ * a SHORT frame was delivered as valid. Since #2258 a slice shorter than its place in the
+ * group's segment is refused, and this pins that the DLC-0 frame is one of them.
  *
  * A conforming sender never emits one, so the vector is a hand-built non-conforming peer:
  * a manifest promising two 8-byte slices, one real slice, and a DLC-0 second.
@@ -1432,7 +1475,7 @@ void test_rope_delivery() {
     tx_b.set_peer_rope_receiver(peer_rope_rx);
 
     // 100 bytes in FD: slices 64 + 36; the 36-byte tail was padded to DLC 48 on
-    // the wire, so the trim must SHORTEN the second link back to 36.
+    // the wire, and the padding must not reach the delivered value.
     const std::vector<std::byte> payload = make_payload(100);
     tx_a.send(payload);
 
@@ -1443,11 +1486,7 @@ void test_rope_delivery() {
 
     check(peer == "n1", "delivered under the SENDER's peer name");
     check(got->total_length() == payload.size(), "rope length == advertised total (trimmed)");
-    check(got->link_count() == 2, "one link per slice (no flatten, no re-chaining)");
-    if (got->link_count() == 2) {
-        check(got->links()[0].length == 64 && got->links()[1].length == 36,
-              "DLC padding removed by shortening the tail link");
-    }
+    check(got->link_count() == 1, "one link: the group's one segment (#2258)");
     std::vector<std::byte> flatbytes;
     got->walk([&](std::span<const std::byte> sp) {
         flatbytes.insert(flatbytes.end(), sp.begin(), sp.end());
@@ -1691,12 +1730,70 @@ void test_wrap_waits_for_the_group_in_flight() {
     check(tx_b.dropped_stale_binding() == 0, "no slice resolved to a retired binding");
 }
 
+/**
+ * @brief #2258 — a reassembled message costs ONE receive-backend allocation and arrives as a
+ *        ONE-link rope, at every size.
+ *
+ * The receiver drew one segment per CAN data field and chained them, so a 1 KiB classic message
+ * was 128 allocations and a 128-link rope. The advertise names the group's total length, so the
+ * receiver now draws one segment of that size when it admits the group and copies each slice
+ * into place. This pins the count, per message, at 64 B, 1 KiB, 4 KiB and 16 KiB, classic (the
+ * worst case: 8 B slices) and FD.
+ */
+void test_one_segment_per_message() {
+    std::printf("transport_can reassembly draws one segment per message (#2258):\n");
+    for (const auto mode :
+         {tr::net::can::can_frame_mode_t::CLASSIC, tr::net::can::can_frame_mode_t::FD}) {
+        fake_can_bus_t bus;
+        std::mutex m;
+        std::condition_variable cv;
+        std::optional<tr::view::rope_t> got;
+        auto rope_rx = [&](tr::net::peer_handle_t, tr::view::rope_t frame) {
+            const std::lock_guard lock(m);
+            got = std::move(frame);
+            cv.notify_all();
+        };
+        counting_backend_t counting;
+        auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+        auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+        tr::net::transport_can_config_t cfg_b{0, 2, mode, "q"};
+        cfg_b.rx_backend = &counting;
+        tr::net::can_transport_t tx_a(std::move(link_a), {0, 1, mode, "p"});
+        tr::net::can_transport_t tx_b(std::move(link_b), cfg_b);
+        tx_b.set_peer_rope_receiver(rope_rx);
+
+        for (const std::size_t size :
+             {std::size_t{64}, std::size_t{1024}, std::size_t{4096}, std::size_t{16384}}) {
+            const std::size_t before = counting.allocs.load();
+            const std::vector<std::byte> payload = make_payload(size);
+            tx_a.send(payload);
+            std::unique_lock lock(m);
+            const bool arrived = cv.wait_for(lock, 5s, [&] { return got.has_value(); });
+            const std::size_t allocs = counting.allocs.load() - before;
+            std::printf("    %s %zu B: %zu receive allocation(s), %zu link(s)\n",
+                        mode == tr::net::can::can_frame_mode_t::FD ? "FD" : "classic", size, allocs,
+                        arrived ? got->link_count() : 0);
+            check(arrived, "  the message was delivered");
+            if (!arrived) return;
+            check(allocs == 1, "  exactly ONE receive-backend allocation for the message");
+            check(got->link_count() == 1, "  delivered as a one-link rope");
+            std::vector<std::byte> flat;
+            got->walk([&](std::span<const std::byte> sp) {
+                flat.insert(flat.end(), sp.begin(), sp.end());
+            });
+            check(equal_bytes(flat, payload), "  byte-exact");
+            got.reset();
+        }
+    }
+}
+
 int main() {
     test_roundtrip(tr::net::can::can_frame_mode_t::CLASSIC, 20, "classic, multi-frame");
     test_roundtrip(tr::net::can::can_frame_mode_t::FD, 150, "CAN-FD, multi-frame");
     test_single_value();
     test_fd_dlc_padding();
     test_rope_delivery();
+    test_one_segment_per_message();
     test_control_stream_resync();
     test_lifecycle();
     test_clean_run_counters_are_zero();
@@ -1708,7 +1805,8 @@ int main() {
     test_max_groups_reaches_the_reassembly_buffer();
     test_oversized_group_is_refused_before_advertising();
     test_u16_slice_count_wrap_cannot_advertise_a_hello();
-    test_rx_slice_refusal_drops_the_group_and_counts();
+    test_rx_segment_refusal_drops_the_group_and_counts();
+    test_oversize_advertise_is_refused_and_counted();
     test_rx_zero_length_slice_drops_the_group_and_counts();
     test_endpoint_wraparound_does_not_alias_stale_state();
     test_stale_lap_binding_is_refused_not_welded();
