@@ -1,16 +1,16 @@
 /**
  * @file
- * @brief #795 — the terminus FWD{REPLY}'s egress-construction segments (the reply HEAD and, on a
- *        mint, the trailing `PATH_REF`) draw from the router's injected `egress` backend, not the
- *        global heap — and a refusal degrades by value, never an abort.
+ * @brief #795 — the terminus FWD{REPLY}'s egress-construction segment (the reply HEAD) draws
+ *        from the router's injected `egress` backend, not the global heap — and a refusal
+ *        degrades by value, never an abort.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * The reply head was the last reply-egress byte source a bounded node could not bound: it was
- * hard-wired to `view::heap_alloc`'s global heap (`op_resolve_walk.hpp` `assemble`, two
- * `heap_alloc` sites — the head and the RFC-0024 mint), reached on EVERY reply and sized by the
- * peer's swapped route bytes. ADR-0074 gives it its own injection, kept separate from `flat`
+ * hard-wired to `view::heap_alloc`'s global heap (`op_resolve_walk.hpp` `assemble`; the
+ * RFC-0024 mint segment beside it retired with the flag in #2245), reached on EVERY reply and sized
+ * by the peer's swapped route bytes. ADR-0074 gives it its own injection, kept separate from `flat`
  * (the flatten seam, sized against payload bytes) so a slab deployment sized for flattens is not
  * silently re-scoped.
  *
@@ -18,8 +18,8 @@
  *
  * "Draws from the seam" is non-vacuous only against the old code: with the head back on
  * `view::heap_alloc` the injected `egress` backend is asked for NOTHING and `served() == 0`. So
- * every armed case asserts `served() > 0` (or the exact mint size) FIRST — re-point `assemble`'s
- * two allocations at `view::heap_alloc` and the first check of every case here reddens.
+ * every armed case asserts `served() > 0` FIRST — re-point `assemble`'s
+ * allocation at `view::heap_alloc` and the first check of every case here reddens.
  *
  * The span (arena) tier is the case that matters for the MCU class: a synchronous CAN/UART child
  * delivers a contiguous SPAN, and for a READ the arena tier borrows every span — so the reply
@@ -146,9 +146,6 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-/** @brief The minted `PATH_REF` reply trailer's byte length (one element): 4-byte header + 8. */
-constexpr std::size_t kMintBytes = tr::wire::path_ref_wire_bytes(1);
-
 using tr::testing::check;
 
 /**
@@ -258,7 +255,6 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
 }
 
 using tr::testing::b_fwd;
-using tr::testing::b_fwd_mint;
 
 /**
  * @brief A rope over @p bytes split into @p links links — the multi-link shape that makes the
@@ -286,7 +282,6 @@ tr::view::rope_t as_rope(std::span<const std::byte> bytes, std::size_t links) {
 struct reply_facts_t {
     bool is_fwd_reply = false;   /**< @brief An `FWD` whose op child is `REPLY`. */
     bool kind_error = false;     /**< @brief Its `kind` child is `ERROR` (vs `RESULT`). */
-    bool has_path_ref = false;   /**< @brief A `PATH_REF` child is present (the mint). */
     std::uint16_t code = 0;      /**< @brief The `STATUS{ERROR{VALUE u16}}` registered code. */
     std::size_t route_bytes = 0; /**< @brief Bytes in the reply's `dst` PATH — 0 ⇒ truncated. */
 };
@@ -303,8 +298,6 @@ reply_facts_t read_reply(std::span<const std::byte> frame) {
     f.is_fwd_reply = true;
     if (dec->children[1].type == type_t::PATH)
         f.route_bytes = dec->children[1].payload.size();  // packed body (RFC-0018)
-    for (const tlv_t& c : dec->children)
-        if (c.type == type_t::PATH_REF) f.has_path_ref = true;
     const tlv_t& kind = dec->children[3];
     if (kind.type != type_t::VALUE || kind.payload.size() != 1) return f;
     f.kind_error = static_cast<reply_kind_t>(std::to_integer<std::uint8_t>(kind.payload[0])) ==
@@ -418,43 +411,8 @@ void test_span_tier_reply_head_draws_from_egress() {
     std::printf(
         "    global new: %zu with egress on a slab, %zu on the heap (head %zu B, %d served)\n",
         pool_allocs, heap_allocs, head_size, egress.served());
-    check(
-        head_size > kMintBytes,
-        "instrument: the head is the largest egress draw — bigger than a mint, so it is the head");
     check(pool_allocs < heap_allocs,
           "and the reply head is STRICTLY fewer global allocations on the slab — it left the heap");
-}
-
-// --- (c) the RFC-0024 mint site draws from egress too --------------------------------
-
-/**
- * @brief A mint-requesting terminus READ draws BOTH its reply head and its trailing `PATH_REF`
- *        from the egress backend — the second `assemble` allocation (`op_resolve_walk.hpp` :589).
- *
- * `served_size(kMintBytes)` is the site-specific instrument: the mint is a fixed 12-byte segment
- * and nothing else on this path asks for that exact size (the head is always larger). Put the
- * mint back on `view::heap_alloc` and this check alone reddens.
- */
-void test_mint_site_draws_from_egress() {
-    std::printf("a mint-requesting terminus READ draws head AND mint from the egress backend:\n");
-    node_t n;
-    (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x5A5A5A5Au))));
-    arming_backend_t egress;
-    fwd_router_t router(n.g, raw_planes(&egress));
-    (void)router.attach_link("in", n.in);
-
-    router.on_frame("in",
-                    b_fwd_mint(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"origin"})));
-
-    check(egress.served() >= 2, "instrument: the egress backend served at least the head and mint");
-    check(egress.served_size(kMintBytes),
-          "instrument: the egress backend served the exact 12-byte mint segment (:589)");
-    check(n.in.sent.size() == 1, "the mint request is answered");
-    if (n.in.sent.size() == 1) {
-        const reply_facts_t f = read_reply(n.in.sent[0]);
-        check(f.is_fwd_reply && !f.kind_error, "with a kind=RESULT reply");
-        check(f.has_path_ref, "carrying the minted PATH_REF trailer (the mint really happened)");
-    }
 }
 
 // --- (b) exhaustion is answered by value, never an abort -----------------------------
@@ -556,11 +514,8 @@ std::vector<std::byte> gathered(const tr::view::rope_t& reply) {
 }
 
 /** @brief An acked `FWD{WRITE}` of a `u32` to `/sensor/temp`, answered back along @p src. */
-std::vector<std::byte> write_frame(std::span<const std::byte> src, bool mint = false) {
-    const std::vector<std::byte> dst = b_path({"sensor", "temp"});
-    const std::vector<std::byte> value = b_value_u32(0x1658u);
-    return mint ? b_fwd_mint(fwd_op_t::WRITE, dst, src, {}, value)
-                : b_fwd(fwd_op_t::WRITE, dst, src, {}, value);
+std::vector<std::byte> write_frame(std::span<const std::byte> src) {
+    return b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), src, {}, b_value_u32(0x1658u));
 }
 
 /**
@@ -621,10 +576,10 @@ void test_ack_is_built_in_the_reply_store() {
 
 /**
  * @brief The store is a fast path, never a limit: an ack whose head does not fit draws it from
- *        egress exactly as before, and a mint rides the store beside the head.
+ *        egress exactly as before.
  */
 void test_reply_store_overflows_to_egress() {
-    std::printf("an ack that does not fit the store draws from egress, a mint rides it:\n");
+    std::printf("an ack that does not fit the store draws from egress:\n");
     {
         // A 300-byte return route: the head alone outgrows the router's 256-byte store.
         const std::string a(200, 'a');
@@ -640,16 +595,6 @@ void test_reply_store_overflows_to_egress() {
                   !read_reply(n.in.sent[0]).kind_error &&
                   read_reply(n.in.sent[0]).route_bytes == src.size() - 4,
               "and the ack carries the whole route");
-    }
-    {
-        node_t n;
-        arming_backend_t egress;
-        fwd_router_t router(n.g, raw_planes(&egress));
-        (void)router.attach_link("in", n.in);
-        router.on_frame("in", write_frame(b_path({"origin"}), /*mint=*/true));
-        check(n.in.sent.size() == 1 && read_reply(n.in.sent[0]).has_path_ref,
-              "instrument: the mint-requesting ack carries its PATH_REF");
-        check(egress.served() == 0, "and neither the head nor the mint was drawn from egress");
     }
 }
 
@@ -693,7 +638,6 @@ int main() {
 
     test_span_tier_reply_head_draws_from_egress();
     std::printf("\n");
-    test_mint_site_draws_from_egress();
     std::printf("\n");
     test_egress_refusal_is_answered_by_value();
     std::printf("\n");

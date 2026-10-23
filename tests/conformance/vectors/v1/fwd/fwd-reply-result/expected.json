@@ -1,12 +1,12 @@
 {
   "name": "fwd-reply-result",
   "category": "fwd",
-  "hex": "0F404F00010001000306002900036E657408646F776E6C696E6B0161036E657408646F776E6C696E6B03636C69087265706C792D657006000C000673656E736F720474656D70010001000001000400D2040000",
-  "total_bytes": 83,
+  "hex": "0F404E00010001000306002900036E657408646F776E6C696E6B0161036E657408646F776E6C696E6B03636C69087265706C792D657006000B000016080300000001000000010001000001000400D2040000",
+  "total_bytes": 82,
   "decoded": {
     "type": "0x0F FWD",
     "structured": true,
-    "meaning": "FWD{ op=REPLY, dst=/net/downlink/a/net/downlink/cli/reply-ep, src=/sensor/temp, kind=RESULT, payload=VALUE u32=1234 } — the reply exactly as the TERMINUS emits it: the request's routes swapped (reply dst = request src, the accumulated return route; reply src = request dst, the responder's own address), source-routed home over both mount runs",
-    "note": "RFC-0004 §B/§C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form). Bytes CHANGED 2026-08-02 by maintainer ruling (c) — the previous dst=/via_board/via_net/reply-ep was pre-S2a and did not compose under mount routing (protocol DRAFT)."
+    "meaning": "FWD{ op=REPLY, dst=/net/downlink/a/net/downlink/cli/reply-ep, src=<pair 3:1>, kind=RESULT, payload=VALUE u32=1234 } - the success reply exactly as the TERMINUS emits it: reply dst = the request's accumulated src (the return route), reply src SEEDED with the PAIR of the vertex that served it (RFC-0029 6.2), so the origin learns a PAIR chain without asking for one.",
+    "note": "Bytes CHANGED 2026-10-23 (#2245): src was the request dst /sensor/temp (12 B body); it is now the served vertex's PAIR (11 B body). dst is untouched (RFC-0029 13.4: the fwd-reply-* vectors keep their dst bytes and gain the 6.2 src)."
   }
 }

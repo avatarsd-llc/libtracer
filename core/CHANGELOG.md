@@ -14,7 +14,35 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **A PAIR chain is learned with no flag (RFC-0029 §6.2/§7.1, #2245) — BREAKING (wire).** A
+  successful terminus reply seeds its `src` with `PATH{<target PAIR>}`, and every relaying hop
+  prepends its PAIR (else its NAME run), so the origin receives its whole chain in `src`. Every
+  forwarding hop of a subscribe prepends its element to the `PATH_REF_REVERSE` (`0x15`)
+  child, creating it seeded with the origin's `src` when absent; the producer stores the
+  chain behind its own PAIR, and deliveries ride it. The `0x15` body is now a `PATH` body
+  (PAIR and NAME records), so `wire::is_path_ref_type` is true for `0x14` only.
+- `path_binding_t` holds the learned chain as bytes (`chain`, a `PATH` body) in place of
+  `elements`, and `path_t::bind` takes `std::span<const std::byte>` (refusing an empty chain,
+  one past a 16-bit body, or one the table source cannot serve). The chain lives in one block
+  drawn from `tr::mem::table_source()`, not a `std::vector`: `path_t::binding()` now returns
+  `path_binding_t` by value, and its `chain` is a `std::span` view into the path, valid until
+  that path is rebound, cleared, assigned or destroyed. Migration: hold the `path_t`, not the
+  binding, across any of those. `sizeof(path_t)` is nine pointer-widths (was eleven). `fwd_router_t::adopt_binding` adopts a RESULT reply's `src`.
+- A set op-byte bit 7 or 6 is an undefined opcode at a terminus (`TYPE_MISMATCH`); a
+  forwarder still masks it.
+- `fwd_dst_kind_t::PATH_REF` is renamed `RETIRED`: a `0x14` `dst` is refused by type code.
+
 ### Removed
+
+- **The RFC-0024 mint mechanism (#2245):** `graph::kFwdOpFlagMintRequest`,
+  `deferred_await_t::mint`, the trailing reply `PATH_REF` and its `assemble_reply` parameter,
+  `peek_fwd_dst_ref`, `read_path_ref_element`, `peek_trailing_mint` / `trailing_mint_t`, the
+  `ref_count` parameter of `peek_fwd_dst_any`, and `wire::emit_path_ref_head`. The library
+  emits no `0x14` frame. Retired vectors: `fwd/fwd-mint-request`, `fwd/fwd-mint-reply`,
+  `fwd/fwd-reverse-mint`, `fwd/fwd-bound-forward`, `fwd/fwd-bound-forwarded`,
+  `path-ref/reverse-len-not-multiple-of-8`, `acl/bound-vs-canonical-allow` and `-deny`.
 
 - **The RFC-0027 path-label plane is deleted (RFC-0029 slice S3, #2244).** RFC-0029 §1 and
   §5.3 retired it; a node's only address-compression element is now the PAIR. Gone from the

@@ -7,6 +7,11 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Changed
+
+- `isPathRefType` (core package) is true for `0x14` only (#2245): a `0x15 PATH_REF_REVERSE`
+  body is a `PATH` body of PAIR and NAME records (RFC-0029 §7.1) and decodes at any length.
+
 ### Fixed
 
 - **`subscribe()` handlers no longer receive other subscriptions' values** (#2240). Every

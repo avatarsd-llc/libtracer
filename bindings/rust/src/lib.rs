@@ -95,27 +95,28 @@ pub mod type_code {
     pub const FWD: u8 = 0x0f;
     /** @brief Control-plane `:field` selector (structured; RFC-0004 §C / ADR-0035). */
     pub const FIELD: u8 = 0x10;
-    /** @brief Bound path: a bare array of 8-byte node-scoped vertex refs (RFC-0024 §4). */
+    /**
+     * @brief The retired RFC-0024 bound path: a bare array of 8-byte node-scoped vertex refs
+     * (RFC-0024 §4), refused as an address since RFC-0029 S1.
+     */
     pub const PATH_REF: u8 = 0x14;
     /**
-     * @brief The REVERSE-direction bound path a mint-flagged request accumulates
-     * (RFC-0024 §7.1 amendment 2) — `PATH_REF`'s body grammar exactly, a different role.
+     * @brief The reverse-direction list every forwarding hop of a subscribe grows
+     * (RFC-0029 §7.1): a `PATH` body of PAIR and NAME records, one per hop.
      *
      * A distinct code rather than "the only trailing child": every other element of this
-     * grammar self-describes by type, and a positional rule mis-reads a mint-flagged WRITE
-     * whose payload is itself a raw `PATH_REF`.
+     * grammar self-describes by type.
      */
     pub const PATH_REF_REVERSE: u8 = 0x15;
 }
 
 /**
- * @brief True for either bound-path code — the two types whose body is a fixed-stride 8-byte
- * element array rather than a self-describing payload (RFC-0024 §4.2).
- *
- * `0x15` sits adjacent to `0x14` so this stays one masked compare on the per-TLV parse path.
+ * @brief True for `0x14 PATH_REF` only — the one type whose body is a fixed-stride 8-byte
+ * element array rather than a self-describing payload (RFC-0024 §4.2). `0x15` carries a
+ * `PATH` body since RFC-0029 §7.1, so no shape rule applies to it here.
  */
 pub const fn is_path_ref_type(type_b: u8) -> bool {
-    type_b & 0xFE == type_code::PATH_REF
+    type_b == type_code::PATH_REF
 }
 
 /**

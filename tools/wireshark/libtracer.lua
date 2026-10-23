@@ -298,11 +298,11 @@ function M.parse(b, off, depth, maxdepth)
   node.header_len = H
   node.length = (node.opt.LL == 1) and u32le(b, off + 2) or u16le(b, off + 2)
 
-  -- PATH_REF (0x14) and PATH_REF_REVERSE (0x15) are the two types whose body shape is not
-  -- derivable from the header: a bare array of fixed 8-byte elements, PL and LL both
-  -- forbidden, at most 255 elements (RFC-0024 §4.2/§4.3, and §7.1 amendment 2 for the
-  -- reverse code, whose body grammar is identical). Anything else is tr::frame::invalid.
-  if t == 0x14 or t == 0x15 then
+  -- PATH_REF (0x14) is the one type whose body shape is not derivable from the header: a
+  -- bare array of fixed 8-byte elements, PL and LL both forbidden, at most 255 elements
+  -- (RFC-0024 §4.2/§4.3). Anything else is tr::frame::invalid. PATH_REF_REVERSE (0x15)
+  -- shared that body until #2245; it is now a PATH body (RFC-0029 §7.1).
+  if t == 0x14 then
     local n = M.TYPE_NAMES[t]
     if node.opt.PL == 1 or node.opt.LL == 1 then
       node.invalid = n .. " with opt.PL/opt.LL set (tr::frame::invalid)"

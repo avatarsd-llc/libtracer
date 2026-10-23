@@ -770,8 +770,8 @@ so the waiver's revert trigger has not fired). The normative content, in full:
   in shape — one is an address, the other the list a mint-flagged request accumulates on its way
   to the responder — so every structural rule stated for `0x14` binds `0x15` identically, and a
   core that applies the shape check to one code alone is **not conformant**. Conformance vector:
-  [`path-ref/reverse-len-not-multiple-of-8`](../../../tests/conformance/vectors/v1/path-ref/reverse-len-not-multiple-of-8/description.md),
-  the `0x15` twin of `path-ref/ref-len-not-multiple-of-8`.
+  `path-ref/reverse-len-not-multiple-of-8`, the `0x15` twin of `path-ref/ref-len-not-multiple-of-8`
+  (retired in #2245, when RFC-0029 §7.1 made the `0x15` body a `PATH` body).
 - **Everything else in amendment 1 stands verbatim**: contributed by forwarding hops only and
   never by the origin; PREPEND, so the list runs responder-first; the responder completes it and
   consumes element 0 locally; a hop that cannot contribute **MUST strip the whole list**; the

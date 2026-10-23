@@ -19,7 +19,6 @@ import {
   encode,
   ERROR,
   TYPE,
-  isPathRefType,
   PATH_REF_ELEMENT_BYTES,
   MAX_PATH_REF_ELEMENTS,
 } from '@avatarsd-llc/libtracer';
@@ -41,7 +40,6 @@ import {
   replyErrorCode,
   replyErrorPath,
   FWD_OP,
-  FWD_OP_FLAG_MINT_REQUEST,
   FWD_KIND,
   FWD_ERROR,
 } from '../dist/index.js';
@@ -374,8 +372,9 @@ function pathSegs(path) {
 
 /**
  * @brief Both reply vectors depict the terminus's own emission (#419 ruling (c)): the
- * request's routes swapped, so `dst` is the accumulated return route built out of whole
- * `net/<module>/<name>` mount runs and `src` is the terminus residual.
+ * request's `src` becomes the reply's `dst`, the accumulated return route built out of whole
+ * `net/<module>/<name>` mount runs. The error's `src` is the terminus residual; the result's
+ * is the target's PAIR (RFC-0029 §6.2).
  */
 const REPLY_DST = ['net', 'downlink', 'a', 'net', 'downlink', 'cli', 'reply-ep'];
 const REPLY_SRC = ['sensor', 'temp'];
@@ -385,7 +384,9 @@ test('decodeFwd parses the fwd-reply-result vector into op=REPLY, kind=RESULT, V
   assert.equal(parsed.op, FWD_OP.REPLY);
   assert.equal(parsed.kind, FWD_KIND.RESULT);
   assert.deepEqual(pathSegs(parsed.dst), REPLY_DST);
-  assert.deepEqual(pathSegs(parsed.src), REPLY_SRC);
+  // A success reply's src is the target's PAIR (RFC-0029 §6.2): one 0x16 escape record.
+  assert.ok(sameBytes(parsed.src.payload,
+    new Uint8Array([0x00, 0x16, 0x08, 3, 0, 0, 0, 1, 0, 0, 0])));
   assert.equal(parsed.payload.type, TYPE.VALUE);
   assert.ok(sameBytes(parsed.payload.payload, new Uint8Array([0xd2, 0x04, 0x00, 0x00])));
 });
@@ -677,167 +678,9 @@ test('the guard does not over-refuse: every well-formed PATH_REF encodes as it a
   }
 });
 
-/* --------------------------------- RFC-0024 §5-§7 — the bound-path routing car --- */
-
-test('fwd-mint-request is fwd-read with ONE bit changed — a mint ask costs no bytes', () => {
-  const mint = vector('fwd/fwd-mint-request');
-  const plain = vector('fwd/fwd-read');
-  assert.equal(mint.length, plain.length, 'a mint request adds no bytes');
-  const differing = [...mint].map((b, i) => (b === plain[i] ? -1 : i)).filter((i) => i >= 0);
-  assert.equal(differing.length, 1, 'exactly one byte differs');
-  assert.equal(plain[differing[0]], 0x00, "fwd-read's op byte is READ");
-  assert.equal(mint[differing[0]], FWD_OP_FLAG_MINT_REQUEST, 'and the mint ask is bit 7 of it');
-
-  // The masking rule (RFC-0024 §9.3): a forwarder switches on `op & 0x3F`, so this frame is
-  // a READ everywhere but at the mint. A core reading the raw byte sees opcode 0x80.
-  const mf = decodeFwd(mint);
-  const pf = decodeFwd(plain);
-  assert.equal(mf.op, FWD_OP.READ);
-  assert.equal(mf.op, pf.op);
-  assert.equal(mf.mintRequest, true);
-  assert.equal(pf.mintRequest, false);
-  // The mint REQUEST is canonically addressed: the canonical path IS the mint key.
-  assert.equal(mf.dstBound, false);
-});
-
-test('fwd-reverse-mint carries the reverse list as a TYPED trailing child (0x15)', () => {
-  const bin = vector('fwd/fwd-reverse-mint');
-  const tlv = decode(bin);
-  assert.equal(tlv.type, TYPE.FWD);
-  const last = tlv.children[tlv.children.length - 1];
-  // The type byte IS the amendment (RFC-0024 §7.1 amendment 2): a positional reading decodes
-  // this frame identically, which is exactly why the code has to be asserted rather than the
-  // shape inferred.
-  assert.equal(last.type, TYPE.PATH_REF_REVERSE, 'the reverse list heads with 0x15');
-  assert.equal(last.payload.length, 8, 'one element');
-  assert.ok(isPathRefType(last.type), 'and the shape rules of a bound-path body apply to it');
-
-  // The origin's own frame carries none — "zero added ORIGIN bytes", after the amendment.
-  const origin = decode(vector('fwd/fwd-mint-request'));
-  assert.ok(
-    origin.children.every((c) => c.type !== TYPE.PATH_REF_REVERSE),
-    'the origin emits no reverse child',
-  );
-
-  const parsed = decodeFwd(bin);
-  assert.equal(parsed.op, FWD_OP.READ);
-  assert.equal(parsed.mintRequest, true);
-  assert.ok(parsed.reverse !== null, 'the reverse list is parsed out');
-  assert.equal(parsed.payload, null, 'a READ has no payload — the child is not mistaken for one');
-});
-
-test('the reverse code carries 0x14\'s body grammar — an unframeable length is invalid', () => {
-  // Paired with path-ref/ref-len-not-multiple-of-8: a core applying the shape rule to 0x14
-  // alone accepts these bytes, and the two codes then disagree about what a body is.
-  const bin = rejectVector('path-ref/reverse-len-not-multiple-of-8');
-  assert.throws(() => decode(bin), (e) => e.code === ERROR.FRAME_INVALID);
-});
-
-test('fwd-mint-reply carries the minted binding as its LAST child', () => {
-  const bin = vector('fwd/fwd-mint-reply');
-  const tlv = decode(bin);
-  assert.equal(tlv.type, TYPE.FWD);
-  // op / dst / src / kind / payload / PATH_REF — appended, nothing displaced. Position is
-  // the pin that matters: anywhere but last and every positional reader of a reply shifts.
-  assert.equal(tlv.children.length, 6);
-  assert.equal(tlv.children[3].payload[0], 0x00, 'kind = RESULT');
-  const mintTlv = tlv.children[5];
-  assert.equal(mintTlv.type, TYPE.PATH_REF);
-  assert.equal(mintTlv.opt.pl, false);
-  assert.equal(mintTlv.children.length, 0);
-  // A terminus answers exactly one element — its own reference to the target vertex.
-  assert.equal(mintTlv.payload.length / PATH_REF_ELEMENT_BYTES, 1);
-  assert.ok(sameBytes(mintTlv.payload, pathRefBody([[2, 0]])), 'index=2 generation=0');
-  // 4 + 8 bytes on the reply, and none anywhere else.
-  assert.equal(hex(bin.subarray(bin.length - 12)), '140008000200000000000000');
-});
-
-test('acl/bound-vs-canonical-allow is the bound spelling, and it is the shorter one', () => {
-  const bound = vector('acl/bound-vs-canonical-allow');
-  const canonical = vector('fwd/fwd-read');
-  assert.equal(
-    hex(bound),
-    '0f401e00010001000014000800020000000000000006000900087265706c792d6570',
-  );
-  // The byte count IS the case for the form, so it is pinned against the twin.
-  assert.ok(bound.length < canonical.length, `${bound.length} < ${canonical.length}`);
-
-  const pf = decodeFwd(bound);
-  assert.equal(pf.op, FWD_OP.READ);
-  assert.equal(pf.dstBound, true);
-  assert.equal(pf.dst.type, TYPE.PATH_REF);
-  assert.ok(sameBytes(pf.dst.payload, pathRefBody([[2, 0]])));
-  // …and the canonical twin's dst is a PACKED PATH (RFC-0018 — records, not children): the
-  // two address forms side by side, and the reason the bound spelling's byte win is narrower
-  // than it was — the canonical one got cheaper too.
-  const cf = decodeFwd(canonical);
-  assert.equal(cf.dstBound, false);
-  assert.equal(cf.dst.type, TYPE.PATH);
-  assert.equal(cf.dst.opt.pl, false);
-  assert.deepEqual(pathSegments(cf.dst), ['sensor', 'temp']);
-});
-
-test('acl/bound-vs-canonical-deny denies, carries no mint, and agrees on the outcome', () => {
-  const bin = vector('acl/bound-vs-canonical-deny');
-  const pf = decodeFwd(bin);
-  assert.equal(pf.op, FWD_OP.REPLY);
-  // `src` echoes the request's dst — the bound form here, and the ONE thing that cannot
-  // agree between two spellings of one address.
-  assert.equal(pf.src.type, TYPE.PATH_REF);
-  assert.equal(pf.kind, FWD_KIND.ERROR);
-  assert.equal(replyErrorCode(pf), FWD_ERROR.PERMISSION_DENIED);
-
-  // Nothing past the STATUS: a denial never hands back a handle to what it refused (§6.1).
-  const tlv = decode(bin);
-  assert.equal(tlv.children.length, 5);
-  assert.ok(!tlv.children.some((c) => c.type === TYPE.PATH_REF && c !== tlv.children[2]));
-
-  // The outcome tail is what the canonical spelling produces byte for byte — §6.3's claim.
-  assert.equal(hex(bin.subarray(bin.length - 19)), '010001000109400a0008400600010002005000');
-});
-
-/* ------------------------------ RFC-0024 §3.4/§5 — the forwarder hop (car 3) --- */
-
-test('fwd-bound-forward / fwd-bound-forwarded are one hop apart, byte for byte', () => {
-  const before = vector('fwd/fwd-bound-forward');
-  const after = vector('fwd/fwd-bound-forwarded');
-  assert.equal(
-    hex(before),
-    '0f402e000100010000140010000100000000000000efbe00000700000006000900087265706c792d65700100040009000000',
-  );
-  assert.equal(
-    hex(after),
-    '0f402a00010001000014000800efbe00000700000006000d0003636c69087265706c792d65700100040009000000',
-  );
-
-  const bf = decodeFwd(before);
-  const af = decodeFwd(after);
-  assert.equal(bf.op, FWD_OP.READ);
-  assert.equal(af.op, bf.op, 'a hop relays the opcode it was given');
-  assert.equal(bf.dstBound, true);
-  assert.equal(af.dstBound, true);
-
-  // The shrink: TWO elements arrive, ONE leaves, and the one that leaves is the NEXT host's
-  // — element 0 was this host's own and is consumed, never rewritten (RFC-0024 §4.1).
-  assert.equal(bf.dst.payload.length / PATH_REF_ELEMENT_BYTES, 2);
-  assert.equal(af.dst.payload.length / PATH_REF_ELEMENT_BYTES, 1);
-  assert.ok(sameBytes(bf.dst.payload, pathRefBody([[1, 0], [0xbeef, 7]])));
-  assert.ok(sameBytes(af.dst.payload, bf.dst.payload.subarray(PATH_REF_ELEMENT_BYTES)));
-  assert.equal(af.dst.opt.pl, false, 'the re-headed PATH_REF keeps PL clear — a record array');
-
-  // The grow: `src` accumulates CANONICALLY on a bound frame, so the return route is the one
-  // every canonical hop builds and a peer that never speaks the bound form still answers.
-  assert.equal(bf.src.type, TYPE.PATH);
-  assert.equal(af.src.type, TYPE.PATH);
-  assert.deepEqual(pathSegments(bf.src), ['reply-ep'], 'src = /reply-ep');
-  assert.deepEqual(pathSegments(af.src), ['cli', 'reply-ep'],
-    'src = /cli/reply-ep — the inbound mount prepended');
-
-  // Exactly 8 bytes of dst left, and the payload rode through untouched.
-  // A packed mount segment costs 1 + len, so 'cli' grows src by 4 where a NAME cost 7.
-  assert.equal(before.length - after.length, PATH_REF_ELEMENT_BYTES - 4 /* src grew by 4 */);
-  assert.equal(hex(before.subarray(before.length - 8)), hex(after.subarray(after.length - 8)));
-});
+/* RFC-0024 §5-§7 (the mint exchange, the 0x14-dst forwarder hop and the 0x14-dst §6.3 pair)
+ * retired with the flagless chain (#2245): their vectors are gone, and a learned chain now rides
+ * every success reply's `src` (RFC-0029 §6.2). */
 
 /* -------------------------------- #877 — the creation SPEC's field value TYPE --- */
 

@@ -185,11 +185,13 @@ void test_read_zero_copy() {
     check(r.children[3].type == type_t::VALUE &&
               value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
           "kind == RESULT");
-    // reply dst == request src (/reply-ep); reply src == responder ep (/sensor/temp).
+    // reply dst == request src (/reply-ep); reply src == the target's PAIR (RFC-0029 §6.2).
     check(tr::wire::equal(r.children[1], *tr::wire::decode(b_path({"reply-ep"}))),
           "reply dst == request src (/reply-ep)");
-    check(tr::wire::equal(r.children[2], *tr::wire::decode(b_path({"sensor", "temp"}))),
-          "reply src == responder endpoint (/sensor/temp)");
+    const auto slot = g.vertex_slot(v);
+    check(slot && tr::wire::equal(r.children[2], *tr::wire::decode(tr::testing::b_path_pair(
+                                                     slot->index, slot->generation))),
+          "reply src == the PAIR for /sensor/temp");
     check(r.children[4].type == type_t::VALUE && r.children[4].payload.size() == 4 &&
               tr::detail::load_le<std::uint32_t>(r.children[4].payload) == 1234,
           "reply payload decodes to the written VALUE u32=1234");
@@ -992,10 +994,10 @@ void test_wildcard_and_not_local() {
  * vertex) got an addressed ERROR; only this one got nothing, and nothing is the single answer
  * an origin cannot act on, being indistinguishable from a dead link.
  *
- * The two CONTROLs are what separate this from "reject anything with a high bit". Bits 7–6 are
- * FLAGS (RFC-0024 §9.3) and MUST still degrade to the plain opcode: `0x80 | READ` is a READ,
- * and a build that rejected the raw byte instead of the masked one would fail them while the
- * two positive cases still passed.
+ * Bits 7–6 are no longer flags at a terminus (#2245): the RFC-0024 mint flag that bit 7 was
+ * retired with the flagless chain, so `0x80 | READ` and `0x40 | READ` are undefined opcodes
+ * and answer the same addressed ERROR. A forwarder still masks (RFC-0024 §9.3), so a stray bit
+ * reaches the terminus that owns the verdict. The CONTROL is a plain defined opcode.
  */
 void test_undefined_opcode_answers_addressed_error() {
     std::printf("#904: an undefined FWD opcode -> ERROR(schema::type_mismatch), never a drop:\n");
@@ -1014,7 +1016,8 @@ void test_undefined_opcode_answers_addressed_error() {
     // 4 is the first undefined opcode; 0x3F is the largest the mask admits. Both are ordinary
     // frames in every other respect — same dst, same src, a registered vertex holding a value —
     // so the only thing under test is the opcode.
-    for (const std::uint8_t op_byte : {std::uint8_t{4}, std::uint8_t{0x3F}}) {
+    for (const std::uint8_t op_byte :
+         {std::uint8_t{4}, std::uint8_t{0x3F}, std::uint8_t{0x80}, std::uint8_t{0x40}}) {
         auto reply = resolve_op(op_byte);
         check(reply.has_value(), "undefined opcode produced a REPLY, not a by-value drop");
         if (!reply) continue;
@@ -1026,18 +1029,7 @@ void test_undefined_opcode_answers_addressed_error() {
               "... and the code is schema::type_mismatch (the format's unknown-code verdict)");
     }
 
-    // CONTROL 1 — the masking rule survives: a mint-flagged READ is still a READ. This fails on
-    // a build that rejects the RAW byte instead of `byte & kFwdOpcodeMask`.
-    {
-        auto reply = resolve_op(static_cast<std::uint8_t>(fwd_op_t::READ) |
-                                tr::graph::kFwdOpFlagMintRequest);
-        check(reply.has_value(), "control: flagged READ resolves");
-        const auto d = decode_reply(*reply);
-        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
-              "control: 0x80|READ is a READ — flags degrade, they do not reject");
-    }
-
-    // CONTROL 2 — a plain defined opcode is untouched.
+    // CONTROL — a plain defined opcode is untouched.
     {
         auto reply = resolve_op(static_cast<std::uint8_t>(fwd_op_t::READ));
         check(reply.has_value(), "control: plain READ resolves");

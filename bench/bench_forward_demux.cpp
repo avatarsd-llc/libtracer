@@ -303,11 +303,10 @@ template <class Cursor>
         pre.strip_at = dst_h->body_off;  // caller overwrites once strip_k is known
         return tr::net::fwd_dst_kind_t::PATH;
     }
-    pre.dst_type = type_t::PATH_REF;  // `pre.dst_ref = true` at 5e7659e3 (renamed by #1794)
     pre.strip_at = dst_h->body_off + tr::wire::kPathRefElementBytes;
     if (pre.strip_at > pre.dst_end) pre.strip_at = pre.dst_end;  // the H = 0 body
     ref_count = tr::wire::path_ref_element_count(dst_h->body_len);
-    return tr::net::fwd_dst_kind_t::PATH_REF;
+    return tr::net::fwd_dst_kind_t::RETIRED;
 }
 
 /**
