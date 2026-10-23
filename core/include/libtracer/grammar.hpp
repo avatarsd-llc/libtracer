@@ -287,9 +287,7 @@ template <class Cursor>
     // a fixed-stride 8-byte record array, so its shape is not derivable from the header alone
     // the way every other type's is. PL/LL forbidden, length a whole number of elements, count
     // at or under the §4.3 bound. Shape only — what an element MEANS is L4's (path_ref.hpp).
-    // BOTH bound-path codes carry that body (§7.1 amendment 2 gave the reverse list its own
-    // type), and `is_path_ref_type` is why this stayed one compare: 0x15 is adjacent to 0x14,
-    // so the pair test is a mask, not a disjunction, on a path every TLV of every frame runs.
+    // Only 0x14 carries that body: the reverse list (0x15) is a PATH body since #2245.
     if (is_path_ref_type(static_cast<type_t>(type_b)) &&
         !path_ref_body_valid(opt.pl, opt.ll, static_cast<std::size_t>(length))) {
         return std::unexpected(err_t::FRAME_INVALID);

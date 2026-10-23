@@ -13,7 +13,8 @@
  * frames the producer discards, and its throughput knee sat exactly at the async TX pool
  * depth the REPLIES travel through.
  *
- * The amendment's six conformance vectors are the six cases below, each asserted as
+ * The amendment's conformance vectors are the cases below (vector (e), the mint-flagged
+ * WRITE, retired with the flag in #2245), each asserted as
  * **zero frames on the wire** rather than as "no reply was parsed": a frame emitted to a
  * zero-length route is unroutable garbage, and counting sends is the only assertion that
  * catches it. Every silent case is paired with a **positive control** on the same router —
@@ -77,7 +78,6 @@ using tr::wire::opt_t;
 using tr::wire::type_t;
 
 using tr::testing::b_fwd;
-using tr::testing::b_fwd_mint;
 using tr::testing::b_path;
 using tr::testing::check;
 using tr::testing::make_value;
@@ -273,28 +273,6 @@ void vectors_c_d_read_await_dropped() {
     // for its default timeout, which a READ on the same resolver already rules out.
     n.router.on_frame("cli", b_fwd(fwd_op_t::READ, b_path({"sink"}), b_src_wired()));
     check(n.link.count() == 1, "  control: a wired-src READ DOES answer");
-}
-
-/**
- * @brief Vector (e) — an empty-src MINT-FLAGGED WRITE is malformed and dropped.
- *
- * A mint answer is a `PATH_REF` that rides the REPLY alone (RFC-0024 §7.5): asking for a
- * bound path over a route that does not exist is a contradiction on one frame. It is dropped
- * rather than downgraded to a plain silent write, because silently ignoring the flag would
- * leave the origin waiting for a handle it will never be told it cannot have.
- */
-void vector_e_mint_flagged_dropped() {
-    std::printf("(e) empty-src MINT-FLAGGED WRITE:\n");
-    node_t n;
-    n.router.on_frame("cli", b_fwd_mint(fwd_op_t::WRITE, b_path({"sink"}), b_src_empty(), {},
-                                        b_value_u32(kQuiet)));
-    check(n.link.count() == 0, "  ZERO frames emitted");
-    check(stored_u32(n.graph, n.sink) == kSeed, "  and the write was NOT applied (malformed)");
-
-    n.router.on_frame("cli", b_fwd_mint(fwd_op_t::WRITE, b_path({"sink"}), b_src_wired(), {},
-                                        b_value_u32(kLoud)));
-    check(n.link.count() == 1, "  control: a wired-src mint request DOES answer");
-    check(stored_u32(n.graph, n.sink) == kLoud, "  control: and applies");
 }
 
 /**
@@ -540,7 +518,6 @@ int main() {
     vector_a_write_applied_silently();
     vector_b_denied_write_dropped_silently();
     vectors_c_d_read_await_dropped();
-    vector_e_mint_flagged_dropped();
     vector_f_delivery_draws_no_reply();
     derived_empty_src_subscribe_dropped();
     unknown_dst_dropped_silently();

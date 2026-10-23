@@ -25,11 +25,11 @@ namespace tr::wire {
  * by the codec. Codes 0x11-0x13 were the route-handle control frames ADVERTISE, COMPACT and
  * HANDLE_NACK (RFC-0004 §E.1), retired with the per-link label tables (#1951): a node no
  * longer names them, and one an older peer still sends is an unknown type like any other.
- * 0x14 PATH_REF is the bound-path address form (RFC-0024 §4) and 0x15
- * PATH_REF_REVERSE the reverse-direction list a mint-flagged request accumulates (§7.1
- * amendment 2): the two types whose body is NOT self-describing — a fixed-stride 8-byte
+ * 0x14 PATH_REF is the retired RFC-0024 bound-path form, refused as an address by type code
+ * (RFC-0029 S1); its body is the one that is NOT self-describing — a fixed-stride 8-byte
  * record array (opt.PL=0), whose shape the grammar therefore checks by type (path_ref.hpp,
- * gated by `is_path_ref_type`).
+ * gated by `is_path_ref_type`). 0x15 PATH_REF_REVERSE is the reverse-direction list every
+ * forwarding hop of a subscribe grows (RFC-0029 §7.1): a `PATH` body of PAIR and NAME records.
  *
  * One code beyond the core range is named here: 0x80 BATCH, the single assignment inside the
  * user range (0x80-0xFF, RFC-0025 §4.1.2 clause 6). It is an ordinary structured TLV to the
@@ -59,18 +59,19 @@ enum class type_t : std::uint8_t {
     SPEC = 0x0E,   /**< @brief In-band vertex-creation spec (structured; ADR-0017). */
     FWD = 0x0F,    /**< @brief Remote-operation forward frame (RFC-0004 §B / ADR-0035). */
     FIELD = 0x10,  /**< @brief Control-plane `:field` selector (RFC-0004 §C / ADR-0035). */
-    /** @brief Bound path: a bare array of 8-byte node-scoped vertex refs (RFC-0024 §4). */
+    /** @brief Retired bound path: a bare array of 8-byte node-scoped vertex refs (RFC-0024 §4),
+     *         refused as an address by type code (RFC-0029 S1). */
     PATH_REF = 0x14,
     /**
-     * @brief The REVERSE-direction bound path a mint-flagged request accumulates
-     *        (RFC-0024 §7.1 amendment 2) — same body grammar as `PATH_REF`, different role.
+     * @brief The REVERSE-direction route a subscribe request accumulates: every forwarding hop
+     *        prepends its PAIR, else its NAME run (RFC-0029 §7.1, unconditional since #2245).
+     *        The body is a `PATH` body — mixed PAIR and NAME records.
      *
-     * A distinct code rather than a positional rule: every other element of this grammar
-     * self-describes by type, and "the only trailing child" would break the moment a future
-     * RFC adds a second trailing child to a mint-flagged request. It also un-forecloses a raw
-     * `PATH_REF`-typed *payload* on such a request. The code costs nothing: a reader already
-     * compares the child's type byte, so a different constant is the same instruction
-     * (`peek_trailing_mint`).
+     * A distinct code rather than a positional rule (RFC-0024 §7.1 amendment 2): every other
+     * element of this grammar self-describes by type, and "the only trailing child" would
+     * break the moment a future RFC adds a second trailing child. It also leaves a raw
+     * `PATH_REF`-typed *payload* writable. A reader already compares the child's type byte, so
+     * a different constant is the same instruction (`peek_trailing_reverse`).
      */
     PATH_REF_REVERSE = 0x15,
     /**
@@ -90,18 +91,17 @@ enum class type_t : std::uint8_t {
 };
 
 /**
- * @brief True for either bound-path type — the two codes whose body is a fixed-stride
- *        8-byte element array rather than a self-describing payload (RFC-0024 §4.2).
+ * @brief True for the one type whose body is a fixed-stride 8-byte element array rather than
+ *        a self-describing payload: `PATH_REF` (`0x14`, RFC-0024 §4.2).
  *
- * The structural rules of `path_ref_body_valid` apply to both, so every site that gates on
- * "is this an element array" asks HERE rather than spelling a two-code disjunction. `0x15`
- * was taken adjacent to `0x14` for exactly this: the test stays ONE masked compare on the
- * grammar's per-TLV path, where a disjunction would have been two.
+ * The structural rules of `path_ref_body_valid` apply to it, so every site that gates on
+ * "is this an element array" asks HERE. `PATH_REF_REVERSE` (`0x15`) used to share the body;
+ * since #2245 its body is a `PATH` body of mixed PAIR and NAME records (RFC-0029 §7.1), parsed
+ * like any `PATH`, and the test is one compare on the grammar's per-TLV path.
  */
 [[nodiscard]] constexpr bool is_path_ref_type(type_t t) noexcept {
     static_assert(static_cast<std::uint8_t>(type_t::PATH_REF) == 0x14);
-    static_assert(static_cast<std::uint8_t>(type_t::PATH_REF_REVERSE) == 0x15);
-    return (static_cast<std::uint8_t>(t) & 0xFEu) == static_cast<std::uint8_t>(type_t::PATH_REF);
+    return t == type_t::PATH_REF;
 }
 
 /**

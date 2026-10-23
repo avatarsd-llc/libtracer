@@ -452,9 +452,10 @@ RFC-0018 — a packed record has no type byte, so a mistyped child is unrepresen
 > bare `PATH_REF` address with **one** element. The reference implementation reaches it slice by
 > slice (RFC-0029 §13.2). S1 (the PAIR, `0x14` refused as a `dst`) and S3 (the RFC-0027 label
 > plane deleted: a `len = 4` element is malformed, and the `path-label/*`, `fwd/fwd-label-*` and
-> `acl/label-vs-string-*` vectors are retired) have landed. Until S2 lands it still honours the
-> `op` bit 7 mint request, and the conformance vectors `path-ref/ref-*`, `fwd/fwd-bound-*` and
-> `fwd/fwd-reverse-mint` still describe that form.
+> `acl/label-vs-string-*` vectors are retired) have landed, and so has the flagless learning of S2
+> and S5 (#2245): the `op` bit 7 mint request is refused as an undefined opcode, and the
+> `fwd/fwd-mint-*`, `fwd/fwd-bound-*` and `fwd/fwd-reverse-mint` vectors are retired. The
+> `path-ref/ref-*` vectors stay as codec vectors for the refused `0x14` form.
 
 The layout above is what a **PAIR** element *is*; this is what a host does with one (RFC-0029 §§4–10).
 A `PATH` carrying PAIR elements is still a `0x06`: a chain is a *frame* path, the canonical string
@@ -527,8 +528,9 @@ dereferenced vertex, for the caller's subject and the operation's right, and the
 function of those three alone: a host **MUST** reach the same verdict whether a hop's element
 arrived as a NAME or a PAIR, and **MUST** evaluate the check on every hop of every spelling. A
 generation match **authorizes nothing**; a peer may present any pair exactly as it may spell any
-string. Conformance carries the paired `acl/bound-vs-canonical-*` vectors, which RFC-0029 §13.4
-re-spells in PAIRs.
+string. The paired `acl/bound-vs-canonical-*` vectors spelled the bound side as `0x14` and are
+retired (#2245); the reference implementation pins the pair on the PAIR spelling
+(`path_pair_test.cpp`) until RFC-0029 §13.4's re-spelled vectors land.
 
 #### Learning — passive, on the reply `src`, never load-bearing
 
@@ -1399,8 +1401,9 @@ carries no meaning: a host **MUST** refuse a frame that presents it as a `dst` (
 With it go the `FWD` `op` bit 7 mint request, the reply's trailing `PATH_REF` mint answer and
 RFC-0024 §7.1 erratum 1's strip-whole-list rule. The code is not reassigned.
 
-*Implementation status:* the reference implementation still emits and honours `0x14` until RFC-0029
-slices S1–S2 land; the `path-ref/ref-*`, `fwd/fwd-bound-*` and bit-7 mint vectors retire with them.
+*Implementation status:* the reference implementation emits no `0x14` and refuses it as a `dst`
+(RFC-0029 S1–S2, #2245); the `fwd/fwd-bound-*` and bit-7 mint vectors are retired, and
+`path-ref/ref-*` stay as codec vectors.
 
 ### Reverse path — `0x15` PATH_REF_REVERSE
 
@@ -1443,10 +1446,11 @@ with no chain. Such an edge learns on its **first fire**: it sends that delivery
 a `REPLY` whose `src` carries the forward chain (§`0x06` §learning). There is one endpoint per node,
 never one per edge. One reply per learn is the whole cost; later deliveries are `src`-empty.
 
-*Implementation status:* until RFC-0029 slice S5 lands, the reference implementation still spells
-`0x15` as RFC-0024's bare 8-byte array, accumulates it only on an `op` bit 7 request and strips it
-when a hop cannot contribute; `path-ref/reverse-len-not-multiple-of-8` and `fwd/fwd-reverse-mint`
-describe that form.
+*Implementation status:* since #2245 the reference implementation spells `0x15` as a `PATH` body
+and every forwarding hop of a subscribe grows it unconditionally, with its PAIR or else its NAME
+run. A hop that finds no `0x15` child creates one seeded with the origin's `src` as it arrived, so
+a chain delivery still names the consumer at its last hop. The first-fire learn for an edge with
+no chain is not implemented: such an edge delivers canonically.
 
 **Optionality.** Optional to emit, optional to accept. A peer that does not accept it treats the
 child per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §handling

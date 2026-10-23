@@ -24,6 +24,7 @@
  * left destroys it.
  */
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
@@ -393,8 +394,9 @@ void bound_send_held_across_collects() {
     const std::optional<tr::wire::path_ref_element_t> e = router.connection_ref("net/q/y");
     check(e.has_value(), "the plane's point-to-point connection is bindable");
     path_t dst("/net/q/y/p0");
-    check(e && dst.bind(std::span<const tr::wire::path_ref_element_t>(&*e, 1)),
-          "an app path binds to it");
+    std::array<std::byte, tr::wire::kPathPairRecordBytes> rec{};
+    if (e) tr::wire::path_pair_store(rec, *e);
+    check(e && dst.bind(rec), "an app path binds to it");
     std::vector<std::byte> frame = tr::testing::b_fwd(
         tr::graph::fwd_op_t::READ, tr::testing::b_path({"p0"}), tr::testing::b_path({"reply"}));
     bool sent = false;

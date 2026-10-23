@@ -3,7 +3,7 @@
   "functions": {
     "tr::graph::apply_op": {
       "ccn": [
-        32
+        31
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },
@@ -33,7 +33,7 @@
     },
     "tr::graph::parse_fwd": {
       "ccn": [
-        20
+        19
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },
@@ -45,7 +45,7 @@
     },
     "tr::graph::resolve_node": {
       "ccn": [
-        18
+        17
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },
@@ -75,7 +75,7 @@
     },
     "tr::net::fwd_router_t::route_fwd_forward": {
       "ccn": [
-        18
+        17
       ],
       "file": "core/src/fwd_router.cpp"
     },

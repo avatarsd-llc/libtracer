@@ -38,6 +38,7 @@
  *     makes "resolves to the new tenancy" mean delivery and not just a matching integer.
  */
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -70,7 +71,9 @@ using tr::wire::type_t;
  *         compared, never sent on: the links are the test's own. */
 tr::net::transport_t* bound_link(const fwd_router_t& r, path_ref_element_t e) {
     path_t p("/bound");
-    (void)p.bind(std::span<const path_ref_element_t>(&e, 1));
+    std::array<std::byte, tr::wire::kPathPairRecordBytes> rec{};
+    tr::wire::path_pair_store(rec, e);
+    (void)p.bind(rec);
     tr::net::transport_t* got = nullptr;
     (void)r.bound_send(
         p, acl_right_t::READ,

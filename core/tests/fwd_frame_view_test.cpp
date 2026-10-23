@@ -211,13 +211,14 @@ int main() {
         check(out == want, "rebuild: shrunk-dst + grown-src bytes == the reference re-encode");
     }
 
-    // 3b. REPLY does not grow src (a reply accumulates no return route, RFC-0004 §B).
+    // 3b. A REPLY grows src by this hop's part of the forward route — its NAME run when it
+    //     has no PAIR to give, never nothing (RFC-0029 §6.2, amending RFC-0004 §B).
     {
         const bytes_t frame =
             b_fwd(fwd_op_t::REPLY, b_path({"back", "home"}), b_path({}), {}, payload);
         const auto out = forward_bytes(span_cursor{frame}, "in");
-        const bytes_t want = b_fwd(fwd_op_t::REPLY, b_path({"home"}), b_path({}), {}, payload);
-        check(out == want, "rebuild: a REPLY shrinks dst but does NOT grow src");
+        const bytes_t want = b_fwd(fwd_op_t::REPLY, b_path({"home"}), b_path({"in"}), {}, payload);
+        check(out == want, "rebuild: a REPLY shrinks dst and grows src by the NAME run");
     }
 
     // 3c. The optional FIELD selector rides through untouched, in position.
