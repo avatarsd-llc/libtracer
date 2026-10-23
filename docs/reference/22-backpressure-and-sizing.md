@@ -106,6 +106,10 @@ memory is still answered `BACKPRESSURE`, from a stack-built frame that echoes th
 ([04 §Exhaustion is a value](04-communication-flows.md), [#1612](https://github.com/avatarsd-llc/libtracer/issues/1612)). The drop is still counted
 (`arena_dropped` / `assemble_dropped` / `reply_iov_dropped`); the reply is what lets the requester
 tell a sizing problem from a dead link.
+A retry is safe only when the operation is: when no reply arrives, the producer cannot tell a
+lost request from a lost reply. How to make each one-shot operation safe to repeat, and how to
+drive its deadline from the application's clock, is
+[18 §Acknowledged one-shot operations and safe retry](18-composition-over-the-network.md#acknowledged-one-shot-operations-and-safe-retry).
 
 **The best-effort arm — shed the oldest, count the loss, raise the gap marker.** Latency stays
 bounded and completeness is sacrificed *knowingly*. This is the arm for streams where freshness

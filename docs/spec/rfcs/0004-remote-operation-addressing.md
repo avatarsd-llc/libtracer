@@ -165,6 +165,11 @@ A `READ` of an **array `:field`** (e.g. `:subscribers[]`) returns its members wr
 
 **A delivery *is* a `FWD WRITE` (load-bearing).** When a producer fans out to a *remote* subscriber, that delivery **is** a `FWD{ op=WRITE, payload=VALUE }` routed to the subscriber's data vertex via the stored return-route. So a **subscription delivery and a one-shot command are the identical wire frame** — the only difference is whether a standing `SUBSCRIBER` produced it or a client issued it once; the target cannot (and per ADR-0026 claim 2 must not) tell them apart. Likewise **keepalive / digest / liveness / async-write-ack are ordinary `VALUE`/`STATUS` writes on the standing channel**, not reply-kinds.
 
+> **Erratum (2026-10-23), below:** the "async-write-ack" in that last sentence never meant the
+> acknowledgement of a one-shot `WRITE`. That acknowledgement is the `REPLY` of the table above,
+> and matching it is the originator's job, not the transport's.
+
+
 ### E. Delivery / fanout is unchanged
 
 > **Amended by [RFC-0021](0021-wire-subscriber-target-frame-of-reference.md) and
@@ -606,3 +611,64 @@ the link I arrive on" spelling retires. Its implementation is
 and `REPLY` retire). Until #1946 lands, the reference core still grows an empty `src`, so this
 erratum governs the reply that growth produces. Once it lands, an empty `src` reaches the terminus
 empty, no `RESULT` is built, and the exact-mount case this erratum corrects no longer arises.
+
+## Erratum (2026-10-23): §D — a one-shot `WRITE` is acknowledged by its `REPLY`, matched at the originator
+
+Follows [#2278](https://github.com/avatarsd-llc/libtracer/issues/2278). Two sentences of §D
+contradict the table above them and the shipped behaviour. reference/05 (the normative annex)
+already agrees with the behaviour, so only this RFC and two informative pages change.
+
+**What the text said.**
+
+1. The closing sentence of §D: "keepalive / digest / liveness / async-write-ack are ordinary
+   `VALUE`/`STATUS` writes on the standing channel, not reply-kinds." Read on its own, the
+   acknowledgement of a `WRITE` is a `STATUS` write on a subscription, and not a `REPLY`.
+2. The correlation paragraph: matching a reply to a specific outstanding request "is the
+   **transport's** concern — a transport-level stream tag for WebSocket, pipelining/ID-matching
+   for CAN".
+
+**What the behaviour is.**
+
+1. The table is right. A `WRITE` whose `src` is non-empty is answered by one `REPLY`:
+   `kind=RESULT` with an empty payload when it was applied, or `kind=ERROR` with `STATUS{ERROR}`
+   when it was refused. A `WRITE` whose `src` is empty is answered by nothing (Amendment 2). The
+   reference core's terminus builds that `RESULT` for every applied `WRITE`. The closing
+   sentence is about the **standing** plane: a producer that wants to tell its consumers it is
+   alive, or that an earlier asynchronous job finished, writes a `VALUE` or `STATUS` to a vertex
+   they subscribe to. That is application data, not the acknowledgement of a request.
+2. No transport tags requests. The WebSocket and CAN links carry `FWD` frames and nothing beside
+   them. The **originator** matches a reply to its request from the reply's own route. The
+   reference core gives every request it originates a reply route of its own: a fresh one-segment
+   token (`fwd_router_t::originate`), or a route the caller names. The TypeScript client matches by
+   `src` suffix: a reply goes to the oldest outstanding request whose `dst` ends with the reply's
+   `src`, falling back to arrival order among requests the suffix cannot tell apart
+   ([#1530](https://github.com/avatarsd-llc/libtracer/issues/1530),
+   [reference/04](../../reference/04-communication-flows.md) §Multi-hop FWD forwarding).
+
+**What stands.** "There is no end-to-end correlation-id" stands word for word. A route is still not
+an id: the reply route the originator seeds is an ordinary `src` `PATH`, readable only by the node
+that minted it, and it holds no state at any forwarder or at the terminus. No receiver keeps
+duplicate-detection state ([ADR-0040](../../adr/0040-net-plane-is-explicit-source-routed-only.md)).
+Telling one request from another stays at the client
+([ADR-0044](../../adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)),
+and retry stays with the caller
+([ADR-0066](../../adr/0066-element-write-is-a-single-attempt-cas.md)).
+
+**Why this is an erratum and not an amendment.** No frame type, field, code or grammar changes, and
+no conforming implementation emits a different byte. The text now says what the table, reference/05
+and the reference core already do.
+
+**The correction.** §D's closing sentence is read as above, and its blockquote points here. The
+correlation paragraph reads "is the **originator's** concern": it seeds a reply route it can
+recognise, never a field in `FWD`. [reference/18](../../reference/18-composition-over-the-network.md)
+restated the transport wording and now states the originator's rule. It also gains
+§Acknowledged one-shot operations and safe retry, which writes the pattern down.
+
+**Scope: the surface implemented today, until RFC-0030 §8–§9 land.**
+[RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md) (accepted 2026-10-07) retires
+`REPLY`. The acknowledgement becomes a reply write to the requester's reply endpoint, an empty
+`STATUS` for an applied `WRITE` and an `ERROR` for a refused one (§8.6). It is matched by the token
+the requester seeded as the last segment of its `src` (§9). The implementation is
+[#1946](https://github.com/avatarsd-llc/libtracer/issues/1946). Until #1946 lands, this erratum
+governs the `REPLY` the reference core emits. Neither form adds a wire field: the token is a `src`
+segment in both.
