@@ -698,6 +698,23 @@ Details that make these trustworthy:
   **Stated blind spot:** at 65584 B (past the last size class) there is no instruction row and the
   time backstop is x3, so a real extra-instructions regression is not guaranteed to fail at
   that size.
+  **Bimodal processes (#2069).** One `cliff-alloc-heap` binary has read its small sizes at
+  ~3.7 ns in one process and ~8 ns in the next, every size of that process together (main
+  included). That is x2.2, past the x1.5 backstop. The verdict on these rows is the instruction
+  count, which does not move with the mode. The timed backstop also needs the fast-mode veto
+  above, and that absorbs the mode only in part: the second-best sample decides, so a session
+  passes with at most 6 of 8 candidate processes slow and fails at 7 or 8, on unchanged code as
+  well. `bench/test_perf_gate.py` pins both sides (6 of 8 slow passes, 8 of 8 fails at every size).
+  The clean record since then does not come from the gate absorbing the mode. It comes from the
+  mode no longer appearing: since `perf.yml` runs each pair on a fresh copy of each binary
+  (#2215), the placement A/A spreads stay at x1.16 or below. The record:
+  `gh run list --workflow perf.yml --created 2026-10-18..2026-10-23T00:38Z` lists 156 runs
+  (122 success, 9 failure, 21 cancelled, 4 in progress). None of the 9 failures has a
+  `cliff-alloc-heap` effect, fail or pullback line; their only such lines are the step warnings
+  main shares (4096 B x2.44-2.45, 65584 B x2.13-2.18) and placement spreads of at most x1.16,
+  and each failed on another family. If the mode came back at the rate #2069 recorded (about one
+  process in two, in both arms), P(7 or more of 8 slow) = 9/256, about 3.5% false fails per
+  session (about 0.7 over 20 sessions); the root-cause fix is the bench host's CPU isolation.
 - **The payload ladder.**
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
   `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `chain-*` arms

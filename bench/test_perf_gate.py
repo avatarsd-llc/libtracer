@@ -2091,6 +2091,29 @@ class LayoutBoundRows(unittest.TestCase):
             fails, _ = pg.gate_cliff(AllocatorCliffFamily._samples({"cand": shifted, "base": rows}))
         self.assertEqual(fails, [])
 
+    # The #2069 shape: one binary reads the heap rows at ~3.7 ns in one process and ~8 ns in
+    # the next, every size of that process together. Sizes and modes are the logged ones.
+    BIMODAL_SIZES = (64, 128, 960, 1040, 2048)  # 1040: the 984-1072 B band #2069 logged
+
+    def _bimodal(self, slow_pairs: int, pairs: int = 8) -> dict[int, list[float]]:
+        return {s: [8.0] * slow_pairs + [3.7] * (pairs - slow_pairs) for s in self.BIMODAL_SIZES}
+
+    def test_a_cliff_heap_session_flipped_to_its_slow_mode_does_not_fail(self):
+        """@brief #2069: six of eight candidate processes in the slow mode read x2.16 at p50,
+        past the backstop; the second-best sample is still fast, so the session passes."""
+        base = self._bimodal(0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_cliff(AllocatorCliffFamily._samples(
+                {"cand": self._bimodal(6), "base": base}))
+        self.assertEqual(fails, [])
+
+    def test_a_cliff_heap_slowdown_that_moves_the_fast_mode_still_fails(self):
+        """@brief Every candidate process slow: the fast mode moved, so the backstop holds."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_cliff(AllocatorCliffFamily._samples(
+                {"cand": self._bimodal(8), "base": self._bimodal(0)}))
+        self.assertEqual(len(fails), len(self.BIMODAL_SIZES), fails)
+
     # --- the instruction ratchet ------------------------------------------------------------
     OUT = "RESULT instr S=64 x100=10300\nRESULT instr S=1024 x100=10300\nRESULT instr S=4096 x100=23000\n"
 
