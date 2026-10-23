@@ -1428,6 +1428,11 @@ positional list.
   connection vertex point-to-point, the accepted session's anchor for a bus arrival — or, when it
   cannot issue one, its inbound mount run as **NAMEs**. **Never nothing**, so the chain is never
   stripped and never skips a hop. **No flag gates this.**
+- A hop that **creates** the child writes its element followed by the request's `src` body exactly
+  as the request arrived at that hop, before the hop grows `src`. The seed is the origin's own
+  residual (its reply endpoint), which no hop could otherwise spell, so a delivery down the chain
+  ends at the origin's endpoint. A created body past a 16-bit length is not created
+  ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) Amendment 1, pending maintainer approval).
 - The responder completes the chain with element 0 — its own element for the egress toward the
   writer — and stores it beside the canonical return route. Each delivery spells `dst` as that
   chain: element 0 is consumed locally, the rest ride the wire, `src` empty.

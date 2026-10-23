@@ -977,6 +977,20 @@ struct fwd_rebuild_t {
         }
     }
 
+    /**
+     * @brief Emit the reverse child's regions (RFC-0029 §7.1): its fresh head and this hop's
+     *        element, then the body already on the wire.
+     *
+     * Out of line because only a relayed subscribe request reaches it: inlined, its second NAME
+     * run and body walk were +493 B of `route_fwd_forward` that no data frame executes.
+     */
+    template <class Cursor, class Push>
+    [[gnu::noinline]] void gather_reverse(const Cursor& cur, Push& push) const {
+        push(own.span());
+        if (!rev_pair) push_run(push);
+        if (rev_body_len > 0) cur.for_each_span(rev_body_off, rev_body_len, push);
+    }
+
     /** @brief True ⇔ every head fits its stack buffer (else the caller drops). */
     [[nodiscard]] bool ok() const { return head1.ok() && head2.ok() && own.ok(); }
 
@@ -1013,11 +1027,7 @@ struct fwd_rebuild_t {
         if (tail_len > 0) cur.for_each_span(tail_off, tail_len, push);
         // A subscribe request's reverse child, re-headed one element longer: `tail` stops
         // short of the old child, so it is never forwarded twice (RFC-0029 §7.1).
-        if (rev) {
-            push(own.span());
-            if (!rev_pair) push_run(push);
-            if (rev_body_len > 0) cur.for_each_span(rev_body_off, rev_body_len, push);
-        }
+        if (rev) gather_reverse(cur, push);
         // The preserved trailer timestamp goes LAST — after the whole body, reverse child
         // included —
         // because that is where the grammar's `total = header + length + ts_size` reads it

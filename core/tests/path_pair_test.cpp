@@ -258,6 +258,14 @@ struct node_t {
 
     /** @brief Drive @p frame in on `cli`. */
     void in(std::span<const std::byte> frame) { r.on_frame(kInLink, frame); }
+    /** @brief Retire the vertex at @p text, so the node can no longer issue a PAIR for it. */
+    void retire(std::string_view text) {
+        const auto v = g.find(path_t(std::string(text)).key());
+        check(v.has_value() && g.retire(*v), "the connection vertex retires");
+    }
+
+    /** @brief Drive @p frame in on `b`. */
+    void in_b(std::span<const std::byte> frame) { r.on_frame(kOutLink, frame); }
 };
 
 /** @brief `/reply-ep` — the return route every request here carries. */
@@ -369,6 +377,107 @@ void vectors() {
     check(at != vec.end(), "the vector echoes pair 3:1 in its src");
     if (at != vec.end()) std::copy(expect_body.begin(), expect_body.end(), at);
     check(m.cli.sent.back() == vec, "fwd/pair-stale-generation-not-found is the router's answer");
+}
+
+/** @brief Hex of @p b, for the message a byte-exact vector compare prints on a mismatch. */
+std::string hex(std::span<const std::byte> b) {
+    std::string out;
+    for (const std::byte x : b) {
+        char buf[3];
+        std::snprintf(buf, sizeof buf, "%02X", static_cast<unsigned>(x));
+        out += buf;
+    }
+    return out;
+}
+
+/** @brief @p got equals vector @p name's bytes; prints both on a mismatch. */
+void check_vector(std::span<const std::byte> got, std::string_view name) {
+    const bytes_t want = vector_bytes(name);
+    const bool same = std::ranges::equal(got, want);
+    if (!same) std::printf("  got  %s\n  want %s\n", hex(got).c_str(), hex(want).c_str());
+    check(same, std::string(name).c_str());
+}
+
+/** @brief Replace every occurrence of @p from's encoding in @p f by @p to's (same length). */
+void repair(bytes_t& f, path_pair_t from, path_pair_t to) {
+    bytes_t a;
+    bytes_t b;
+    tr::testing::emit_path_pair(a, from);
+    tr::testing::emit_path_pair(b, to);
+    for (auto at = std::search(f.begin(), f.end(), a.begin(), a.end()); at != f.end();
+         at = std::search(at + 1, f.end(), a.begin(), a.end()))
+        std::copy(b.begin(), b.end(), at);
+}
+
+void learning_vectors() {
+    std::printf("\n2b) the §13.4 S2 vectors (#2245), byte-exact against the production router\n");
+    // The vectors spell the target as 3:1 and a connection vertex as 7:1; which slots this node
+    // hands out is a fact about registration order, so the router's output is re-spelled with
+    // the vectors' pairs before the compare. The SHAPE is what is pinned.
+    const path_pair_t vec_target{.index = 3, .generation = 1};
+    const path_pair_t vec_conn{.index = 7, .generation = 1};
+
+    // fwd/fwd-reply-result: the terminus seeds a success reply's `src` with its target PAIR.
+    {
+        node_t n;
+        n.in(b_fwd_raw_op(kRead, b_path({"sensor", "temp"}),
+                          b_path({"net", "downlink", "a", "net", "downlink", "cli", "reply-ep"})));
+        check(n.cli.sent.size() == 1, "the READ is answered on the inbound link");
+        bytes_t f = n.cli.sent.empty() ? bytes_t{} : n.cli.sent.back();
+        repair(f, n.pair_of("/sensor/temp"), vec_target);
+        check_vector(f, "fwd/fwd-reply-result");
+    }
+
+    // fwd/reply-src-accumulates-forward-route-*: a relaying hop prepends its element to `src`.
+    const bytes_t reply = tr::testing::b_fwd_reply(tr::graph::reply_kind_t::RESULT,
+                                                   b_path({"net", "downlink", "cli", "reply-ep"}),
+                                                   b_chain({pr(vec_target)}), b_value_u32(1234));
+    {
+        node_t n;  // `b` has a connection vertex: the hop's element is its PAIR
+        n.in_b(reply);
+        bytes_t f = n.cli.sent.empty() ? bytes_t{} : n.cli.sent.back();
+        repair(f, n.pair_of("/net/uplink/b"), vec_conn);
+        check_vector(f, "fwd/reply-src-accumulates-forward-route-pair");
+    }
+    {
+        // No PAIR to give: a link cannot exist without its connection vertex (#1940), so the
+        // hop that cannot issue one is the hop whose vertex has retired under it (§4.4).
+        node_t n;
+        n.retire("/net/uplink/b");
+        n.in_b(reply);
+        check_vector(n.cli.sent.empty() ? bytes_t{} : n.cli.sent.back(),
+                     "fwd/reply-src-accumulates-forward-route-name");
+    }
+
+    // fwd/subscribe-reverse-*: a relayed subscribe with no `0x15` child gets one, created with
+    // the hop's element followed by the request's `src` as it arrived (Amendment 1).
+    bytes_t sel;
+    {
+        bytes_t body;
+        tr::wire::emit_tlv(body, tr::wire::type_t::NAME, tr::wire::opt_t{},
+                           std::as_bytes(std::span<const char>("subscribers", 11)));
+        const std::array<std::byte, 1> element{std::byte{0x01}};
+        tr::wire::emit_tlv(body, tr::wire::type_t::VALUE, tr::wire::opt_t{}, element);
+        tr::wire::emit_tlv(sel, tr::wire::type_t::FIELD, tr::wire::opt_t{.pl = true}, body);
+    }
+    bytes_t sub;
+    tr::wire::emit_tlv(sub, tr::wire::type_t::SUBSCRIBER, tr::wire::opt_t{.pl = true}, reply_ep());
+    const bytes_t subscribe = b_fwd_raw_op(kWrite, b_path({"net", "uplink", "b", "sensor", "temp"}),
+                                           reply_ep(), sel, sub);
+    {
+        node_t n;  // the arrival's connection vertex: the hop's element is its PAIR
+        n.in(subscribe);
+        bytes_t f = n.b.sent.empty() ? bytes_t{} : n.b.sent.back();
+        repair(f, n.pair_of("/net/downlink/cli"), vec_conn);
+        check_vector(f, "fwd/subscribe-reverse-list-unflagged");
+    }
+    {
+        node_t n;  // `cli`'s vertex retired under the link: the hop's NAME run
+        n.retire("/net/downlink/cli");
+        n.in(subscribe);
+        check_vector(n.b.sent.empty() ? bytes_t{} : n.b.sent.back(),
+                     "fwd/subscribe-reverse-path-name-fallback");
+    }
 }
 
 void terminus() {
@@ -574,6 +683,7 @@ void authorization() {
 int main() {
     codec();
     vectors();
+    learning_vectors();
     terminus();
     hop();
     refusals();

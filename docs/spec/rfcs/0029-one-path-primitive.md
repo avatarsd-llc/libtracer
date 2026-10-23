@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0029 |
 | **Title** | One path primitive: the owner-issued `(index, generation)` pair, carried per hop, local = forwarded |
-| **Status** | **accepted** (2026-09-30; proposed 2026-09-29), maintainer-ratified on [PR #1634](https://github.com/avatarsd-llc/libtracer/pull/1634) with all recommendations; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–11 was **ruled** by the maintainer on 2026-09-29 in [#1631](https://github.com/avatarsd-llc/libtracer/issues/1631) (the issue body and its feasibility comment, rulings 1–4); this document is its transcription in normative form, not a proposal seeking a direction. The first-fire learn of §7.2 was confirmed on 2026-09-29, and **§8.2's rule — a same-named re-add MUST bump the generation — stands as written.** **All five §16 questions are RULED at acceptance (2026-09-30)**: `PATH_REF_REVERSE` is spelled as a `PATH` of PAIR/NAME elements (§7.1), the first-fire learn answers to **one node-local endpoint per node** with the edge named in the reply's `dst` tail (§7.2), a **per-boot epoch** complements §8.2 rule 2 on transports that cannot report a session boundary (§8.2 rule 4), `kind = 0x16` is reused with `len = 8` (§5.1), and `vertex_handle_t` is `(u32, u32)` by value with any ISR pointer fast door left to S7's bench as a compile-time option (§4.3). **S3 deletes the RFC-0027 table**, superseding [#1668](https://github.com/avatarsd-llc/libtracer/issues/1668), [#1669](https://github.com/avatarsd-llc/libtracer/issues/1669) and [#1647](https://github.com/avatarsd-llc/libtracer/issues/1647); the RFC ships as **v0.18.0** (§13.3). Spec, reference, `CONTEXT.md` and code edits land slice by slice (§13); S0 is this document plus §12's text. **Amended by [RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md)** (accepted 2026-10-07): §4.3, §6.1, §6.2, §7.1 and §7.2. **Amended by [RFC-0031](0031-bus-session-anchors-are-children-of-their-door.md)** (accepted 2026-10-07): §10 (the shared-mount slice) is replaced. **Amended by [RFC-0032](0032-delete-compact-streams-ride-the-chain.md)** (accepted 2026-10-09): ruling 6 and §9.2 are withdrawn, together with §1's, §5.3's, §11's, §12.4's, §13.2 S3's and the 2026-10-02 erratum's text that kept `COMPACT`. |
+| **Status** | **accepted** (2026-09-30; proposed 2026-09-29), maintainer-ratified on [PR #1634](https://github.com/avatarsd-llc/libtracer/pull/1634) with all recommendations; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–11 was **ruled** by the maintainer on 2026-09-29 in [#1631](https://github.com/avatarsd-llc/libtracer/issues/1631) (the issue body and its feasibility comment, rulings 1–4); this document is its transcription in normative form, not a proposal seeking a direction. The first-fire learn of §7.2 was confirmed on 2026-09-29, and **§8.2's rule — a same-named re-add MUST bump the generation — stands as written.** **All five §16 questions are RULED at acceptance (2026-09-30)**: `PATH_REF_REVERSE` is spelled as a `PATH` of PAIR/NAME elements (§7.1), the first-fire learn answers to **one node-local endpoint per node** with the edge named in the reply's `dst` tail (§7.2), a **per-boot epoch** complements §8.2 rule 2 on transports that cannot report a session boundary (§8.2 rule 4), `kind = 0x16` is reused with `len = 8` (§5.1), and `vertex_handle_t` is `(u32, u32)` by value with any ISR pointer fast door left to S7's bench as a compile-time option (§4.3). **S3 deletes the RFC-0027 table**, superseding [#1668](https://github.com/avatarsd-llc/libtracer/issues/1668), [#1669](https://github.com/avatarsd-llc/libtracer/issues/1669) and [#1647](https://github.com/avatarsd-llc/libtracer/issues/1647); the RFC ships as **v0.18.0** (§13.3). Spec, reference, `CONTEXT.md` and code edits land slice by slice (§13); S0 is this document plus §12's text. **Amended by [RFC-0030](0030-host-api-walks-the-graph-reply-is-a-remote-write.md)** (accepted 2026-10-07): §4.3, §6.1, §6.2, §7.1 and §7.2. **Amended by [RFC-0031](0031-bus-session-anchors-are-children-of-their-door.md)** (accepted 2026-10-07): §10 (the shared-mount slice) is replaced. **Amended by [RFC-0032](0032-delete-compact-streams-ride-the-chain.md)** (accepted 2026-10-09): ruling 6 and §9.2 are withdrawn, together with §1's, §5.3's, §11's, §12.4's, §13.2 S3's and the 2026-10-02 erratum's text that kept `COMPACT`. **Amendment 1** (2026-10-23, **pending maintainer approval**): §7.1's created `PATH_REF_REVERSE` child is seeded with the request's `src`. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-09-29 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified at drafting: `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -986,3 +986,64 @@ re-sequenced ahead of it (#2244), so the slot §11 meant to generalise had no co
 wire surface moves** beyond what §5.3 already retired. The `:stats.labels.table` seam the label
 plane published is retired by the companion
 [RFC-0010](0010-owner-app-fields-and-schema.md) §Erratum (2026-10-22).
+
+## Amendment 1 (2026-10-23, pending maintainer approval) — a created `PATH_REF_REVERSE` child is seeded with the request's `src` ([#2245](https://github.com/avatarsd-llc/libtracer/issues/2245))
+
+**Status:** **pending maintainer approval.** The 14-day window is waived by default while the
+project is solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)); invoke it explicitly
+if outside input is wanted. Drafted with the S2 implementation (#2245) so the text and the
+behaviour land together.
+
+**Scope.** §7.1 only, and the matching clauses of [v1.md §3](../v1.md) and of the
+[05-protocol-tlvs.md](../../reference/05-protocol-tlvs.md) §`0x15` hop rules (a normative annex).
+§6.2, §7.2 and every other section are untouched. **No new type code, frame, flag, field or
+status.**
+
+**Instrument: amendment, not erratum.** §7.1 says a hop creates the child "if the request carries
+none" and is silent on what the created child holds. The shipped reference implementation never
+created one (RFC-0024's list was flag-gated and seeded by the origin), so there is no
+already-agreed behaviour for the text to be corrected towards: what a created child contains is
+new wire content, which GOVERNANCE.md reserves for an amendment.
+
+**The rule.** A forwarding hop that relays a subscribe request carrying **no** `PATH_REF_REVERSE`
+child MUST create one whose body is, in order:
+
+1. the hop's own reverse-direction element (its PAIR for the arrival identity, else its inbound
+   mount run as NAMEs — §7.1 as written), then
+2. the request's `src` body **exactly as the request arrived at this hop**, before this hop grows
+   `src` by its own mount run (§6.1).
+
+A hop that finds a child prepends its element to it and does not re-seed. A created body that a
+16-bit length cannot spell is not created: the request goes on without the child and the
+subscription stays canonical-only (§7.1's documented degrade). The first forwarding hop is the only
+one that can see the origin's `src` unmodified, so it is the only hop that ever creates the child.
+
+**Why the seed.** The chain a responder stores spells the way back to the **origin's reply
+endpoint**, not to the origin node. A node demultiplexes its deliveries by the residual of its own
+`src` (for example a client's `…/sub<n>` tail), and that residual is something only the origin can
+spell: no hop knows it, and it is not a host's part of the route, so §7.1's per-hop rule never adds
+it. Without the seed, the delivery's last hop re-heads an empty `PATH` (RFC-0024 §7.1 erratum 3) and
+the origin receives a frame it cannot route to the subscriber. With it, the last forwarding element
+is followed by the origin's residual, which the origin resolves as its own local path. A request
+that arrives at its terminus over its first link has no forwarding hop and no child; the responder
+stores no chain and delivers canonically, exactly as before.
+
+**Delivery past a session anchor.** The seed puts the origin's residual **after** the element a
+bus hop contributes, which is the accepted session's anchor (§7.1). A delivery therefore presents an
+anchor PAIR that is not the last element. That egress is already normative: a PAIR to a live anchor
+with a non-empty residual egresses to exactly that session ([RFC-0031](0031-bus-session-anchors-are-children-of-their-door.md)
+§5.2, breaking row B1), gated once at the anchor's door (§6.4). v1.md §3's older clause "a PAIR
+followed by more elements on any other vertex is `tr::path::invalid`" is aligned with RFC-0031 here,
+not changed by this amendment.
+
+**Wire cost.** The created child costs its 4-byte header plus the origin's `src` body, once, on the
+subscribe request leg. Deliveries carry the origin's residual in `dst` where they previously carried
+an empty `PATH` at the last hop, which is the residual the canonical delivery already carried.
+
+**Not in this amendment.** §7.2's first-fire learn (slice S5) is unchanged and still normative; the
+reference implementation does not implement it yet (an edge with no chain delivers canonically).
+
+**Vectors (§13.4).** `fwd/subscribe-reverse-list-unflagged` (a created child: element, then the
+arrived `src`), `fwd/subscribe-reverse-path-name-fallback` (the NAME-run element of a hop with no
+PAIR) and `fwd/reply-src-accumulates-forward-route` (§6.2, PAIR and NAME-fallback arms) pin the
+behaviour.

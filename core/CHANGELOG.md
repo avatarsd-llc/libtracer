@@ -24,8 +24,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   chain behind its own PAIR, and deliveries ride it. The `0x15` body is now a `PATH` body
   (PAIR and NAME records), so `wire::is_path_ref_type` is true for `0x14` only.
 - `path_binding_t` holds the learned chain as bytes (`chain`, a `PATH` body) in place of
-  `elements`, and `path_t::bind` takes `std::span<const std::byte>` (refusing an empty chain
-  or one past a 16-bit body). `fwd_router_t::adopt_binding` adopts a RESULT reply's `src`.
+  `elements`, and `path_t::bind` takes `std::span<const std::byte>` (refusing an empty chain,
+  one past a 16-bit body, or one the table source cannot serve). The chain lives in one block
+  drawn from `tr::mem::table_source()`, not a `std::vector`: `path_t::binding()` now returns
+  `path_binding_t` by value, and its `chain` is a `std::span` view into the path, valid until
+  that path is rebound, cleared, assigned or destroyed. Migration: hold the `path_t`, not the
+  binding, across any of those. `sizeof(path_t)` is nine pointer-widths (was eleven). `fwd_router_t::adopt_binding` adopts a RESULT reply's `src`.
 - A set op-byte bit 7 or 6 is an undefined opcode at a terminus (`TYPE_MISMATCH`); a
   forwarder still masks it.
 - `fwd_dst_kind_t::PATH_REF` is renamed `RETIRED`: a `0x14` `dst` is refused by type code.

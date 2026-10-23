@@ -1,0 +1,12 @@
+{
+  "name": "subscribe-reverse-path-name-fallback",
+  "category": "fwd",
+  "hex": "0F407A00010001000106000C000673656E736F720474656D701040140002000B007375627363726962657273010001000106001A00036E657408646F776E6C696E6B03636C69087265706C792D657004400D0006000900087265706C792D657015001A00036E657408646F776E6C696E6B03636C69087265706C792D6570",
+  "total_bytes": 126,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=WRITE, dst=/sensor/temp, src=/net/downlink/cli/reply-ep, FIELD{subscribers, 0x01}, SUBSCRIBER{/reply-ep}, PATH_REF_REVERSE{/net/downlink/cli/reply-ep} } - the same relayed subscribe when the hop can issue no PAIR for the arrival link (its connection vertex retired under it): the created 0x15 child starts with the hop's NAME run instead, then the request's src as it arrived (RFC-0029 Amendment 1).",
+    "note": "NAME-fallback arm of fwd/subscribe-reverse-list-unflagged; the two differ only in the hop's element."
+  }
+}

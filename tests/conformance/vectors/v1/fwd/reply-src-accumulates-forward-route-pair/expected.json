@@ -1,0 +1,12 @@
+{
+  "name": "reply-src-accumulates-forward-route-pair",
+  "category": "fwd",
+  "hex": "0F403900010001000306000900087265706C792D65700600160000160807000000010000000016080300000001000000010001000001000400D2040000",
+  "total_bytes": 61,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/reply-ep, src=<pair 7:1><pair 3:1>, kind=RESULT, payload=VALUE u32=1234 } - the reply as a relaying hop forwards it: dst shrunk by the consumed mount run, src grown at its FRONT by the PAIR of the connection vertex the reply arrived on (7:1), ahead of the terminus's seed (3:1) (RFC-0029 6.2). The src is a complete PAIR chain back to the responder.",
+    "note": "PAIR arm. The hop's element is its own; the elements behind it are relayed as they arrived."
+  }
+}

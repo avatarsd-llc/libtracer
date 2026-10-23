@@ -1251,21 +1251,13 @@ fn fwd_write_subscriber_field() {
 }
 
 /**
- * @brief The terminus's RESULT reply (#419 ruling (c)): its routes are the request's
- * swapped, so `dst` is the accumulated return route `fwd/fwd-src-accumulated` carries as
- * `src`, and `src` is the terminus residual `fwd/fwd-routed-two-mount` ends on.
+ * @brief The terminus's RESULT reply (#419 ruling (c)): its `dst` is the request's `src`, the
+ * accumulated return route `fwd/fwd-src-accumulated` carries, and its `src` is the target's
+ * PAIR (RFC-0029 §6.2), `PATH{ 0x16 escape, index 3, generation 1 }`.
  */
 #[test]
 fn fwd_reply_result() {
     let bin = assert_vector_consistent("fwd/fwd-reply-result");
-    let mut req = FwdRequest::new(
-        fwd_op::REPLY,
-        &["net", "downlink", "a", "net", "downlink", "cli", "reply-ep"],
-        &["sensor", "temp"],
-    );
-    req.kind = Some(fwd_kind::RESULT);
-    req.payload = Some(value_u32(1234));
-    assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
     let f = decode_fwd(&bin).unwrap();
     assert_eq!(f.op, fwd_op::REPLY);
     assert_eq!(f.kind, Some(fwd_kind::RESULT));
@@ -1273,7 +1265,12 @@ fn fwd_reply_result() {
         libtracer::fwd::fwd_dst_path(&f).unwrap(),
         "/net/downlink/a/net/downlink/cli/reply-ep"
     );
-    assert_eq!(libtracer::fwd::fwd_src_path(&f).unwrap(), "/sensor/temp");
+    assert_eq!(f.src.type_code, libtracer::type_code::PATH);
+    assert_eq!(
+        f.src.payload,
+        vec![0x00, 0x16, 0x08, 3, 0, 0, 0, 1, 0, 0, 0],
+        "the src is one PAIR record: the target, index 3 generation 1"
+    );
     assert_eq!(f.payload.unwrap().payload_uint(), 1234);
 }
 

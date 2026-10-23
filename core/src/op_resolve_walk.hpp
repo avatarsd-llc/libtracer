@@ -704,9 +704,13 @@ template <class N, class ReplyError>
     //
     // Written STRAIGHT into a stack buffer of the fixed 15-byte shape (a 4-byte `PATH` header
     // and one record), so nothing on this path can allocate for it.
+    //
+    // An unacknowledged write (empty `src`) emits no reply, so it asks for no slot either: the
+    // lookup takes the graph's shared lock, which a delivery that answers nothing never needs.
     std::array<std::byte, 4 + wire::kPathPairRecordBytes> seed{};
     reply_route_t ok = route;
-    if (const std::optional<vertex_slot_t> slot = graph.vertex_slot(v)) {
+    if (const std::optional<vertex_slot_t> slot =
+            req.no_reply ? std::nullopt : graph.vertex_slot(v)) {
         wire::store_header(seed, type_t::PATH, wire::opt_t{}, wire::kPathPairRecordBytes);
         wire::path_pair_store(
             std::span<std::byte>(seed).subspan<4, wire::kPathPairRecordBytes>(),
@@ -798,7 +802,7 @@ template <class N, class ReplyError>
             // never to an error: the chain is an optimisation plus a liveness check, and a
             // subscribe that cannot store it still subscribes exactly as before.
             view::view_t reverse_route{};
-            if (req.reverse && reverse_ref_fn != nullptr) {
+            if (req.reverse) {
                 // A `PATH` body of path elements, stored VERBATIM behind this node's own
                 // record: every delivery consumes element 0 locally and puts the rest on the
                 // wire as its `dst`, so no delivery re-spells anything. A refused flatten
@@ -970,9 +974,9 @@ template <class N>
     graph_t& graph, const N& root, std::string_view inbound_link, std::string_view subject,
     const view::view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
     mem::mem_backend_t& ack, mem::mem_backend_t& retained,
-    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
-    const wire::path_ref_element_t* dst_target = nullptr, link_token_seam_t link_token = {},
-    await_defer_seam_t await_defer = {}) {
+    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = &op_resolver_t::no_reverse_ref,
+    void* reverse_ref_ctx = nullptr, const wire::path_ref_element_t* dst_target = nullptr,
+    link_token_seam_t link_token = {}, await_defer_seam_t await_defer = {}) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     parsed_fwd_t<N>& req = *parsed;

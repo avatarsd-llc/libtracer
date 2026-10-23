@@ -1526,11 +1526,11 @@ void test_late_departure_leaves_the_successor_anchor() {
 
 /**
  * @brief #2234: a session anchor answers only for the tenancy it holds. A frame still in
- *        flight from a departed session mints no element for its successor's anchor, and the
+ *        flight from a departed session gets no PAIR for its successor's anchor, and the
  *        successor's own frame does.
  */
 void test_a_departed_tenancy_mints_no_successor_element() {
-    std::printf("#2234 — a departed tenancy mints nothing for the slot's successor:\n");
+    std::printf("#2234 — a departed tenancy gets no PAIR for the slot's successor:\n");
     graph_t ga, gb;
     fwd_router_t ra(ga), rb(gb);
     pipe_link_t a_to_b, b_to_a;
@@ -1542,17 +1542,24 @@ void test_a_departed_tenancy_mints_no_successor_element() {
     (void)gb.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     (void)rb.attach_link("a", b_to_a);
     (void)gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
-    /** @brief Whether A's last forwarded request carries a reverse list. */
-    const auto carries_reverse = [&] {
+    /**
+     * @brief Whether A's last forwarded request's reverse list STARTS with a PAIR. Every hop
+     *        builds the list (RFC-0029 §7.1), so it is always there; a hop with no PAIR to give
+     *        starts it with its NAME run instead (§6.2).
+     */
+    const auto reverse_starts_with_pair = [&] {
         const auto& lg = a_to_b.log();
         if (lg.empty()) return false;
         const auto dec = tr::wire::decode(lg.back());
-        return dec.has_value() && !dec->children.empty() &&
-               dec->children.back().type == tr::wire::type_t::PATH_REF_REVERSE;
+        if (!dec.has_value() || dec->children.empty() ||
+            dec->children.back().type != tr::wire::type_t::PATH_REF_REVERSE)
+            return false;
+        const auto& body = dec->children.back().payload;
+        return body.size() >= 2 && body[0] == std::byte{0x00} && body[1] == std::byte{0x16};
     };
     const auto subscribe = [&](std::string_view peer) {
-        bus.inject_peer(peer, b_fwd_mint(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
-                                         b_field_subscribers_append(), b_subscriber("s")));
+        bus.inject_peer(peer, b_fwd(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
+                                    b_field_subscribers_append(), b_subscriber("s")));
     };
 
     bus.peer_arrive("p3~7", 7);
@@ -1560,9 +1567,10 @@ void test_a_departed_tenancy_mints_no_successor_element() {
     const std::size_t before = a_to_b.log().size();
     subscribe("p3~7");
     check(a_to_b.log().size() == before + 1, "A forwarded the departed tenancy's request");
-    check(!carries_reverse(), "and stripped its reverse list: the anchor is gen 8's");
+    check(!reverse_starts_with_pair(),
+          "and its reverse list starts with no PAIR: the anchor is gen 8's");
     subscribe("p3~8");
-    check(carries_reverse(), "positive control: gen 8's own request carries its element");
+    check(reverse_starts_with_pair(), "positive control: gen 8's own request carries its PAIR");
 }
 
 int main() {

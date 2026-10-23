@@ -2315,19 +2315,25 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // Exhaustion drops the frame. That is the correct answer for a forward hop: FWD is not
     // delivery-guaranteed, the sender retries, and emitting a partial iov would put a
     // TRUNCATED frame on the wire — worse than none.
-    mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
-    bool ok = true;
-    rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
-        if (ok && !iov.push_back(s)) ok = false;
-    });
-    // The #986 window-overshoot drop and the resource drop, split into two counters (#1503
-    // step 3): the iov exhaustion is a RESOURCE drop an operator sizes against, while a
-    // poisoned cursor is a frame whose regions left the source window — malformed.
-    if (!ok || cur_src.poisoned()) {
-        count_drop(ok ? malformed_rx_ : forward_iov_dropped_);
-        return;
-    }
-    child.send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
+    //
+    // Out of line (`noinline`): the span instantiation reaches it only on the cold overflow, and
+    // inlined there it was a second copy of the whole gather in the hot hop (+2.6 KB).
+    const auto send_spilled = [&]() __attribute__((noinline)) {
+        mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
+        bool ok = true;
+        rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
+            if (ok && !iov.push_back(s)) ok = false;
+        });
+        // The #986 window-overshoot drop and the resource drop, split into two counters (#1503
+        // step 3): the iov exhaustion is a RESOURCE drop an operator sizes against, while a
+        // poisoned cursor is a frame whose regions left the source window — malformed.
+        if (!ok || cur_src.poisoned()) {
+            count_drop(ok ? malformed_rx_ : forward_iov_dropped_);
+            return;
+        }
+        child.send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
+    };
+    send_spilled();
 }
 
 namespace {

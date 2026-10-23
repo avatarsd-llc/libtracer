@@ -125,10 +125,17 @@ struct field_path_t {
 struct path_binding_t {
     /** @brief True once a chain has been adopted; false is "never bound", not "invalid". */
     bool bound = false;
-    /** @brief The chain's `PATH` body, origin-first. Empty exactly when @ref bound is false. */
-    std::vector<std::byte> chain;
-    /** @brief Value equality over both fields. */
-    bool operator==(const path_binding_t&) const = default;
+    /**
+     * @brief The chain's `PATH` body, origin-first. Empty exactly when @ref bound is false.
+     *
+     * A view into the owning @ref path_t's block (drawn from the injected table source,
+     * ADR-0083): valid until that path is rebound, cleared, assigned or destroyed.
+     */
+    std::span<const std::byte> chain;
+    /** @brief Value equality: both fields, the chain compared by content. */
+    [[nodiscard]] bool operator==(const path_binding_t& o) const noexcept {
+        return bound == o.bound && std::ranges::equal(chain, o.chain);
+    }
 };
 
 /**
@@ -147,6 +154,37 @@ class path_t {
    public:
     /** @brief An empty path (no segments, no field tail). */
     path_t() = default;
+    /** @brief Copies the path and its chain; a chain block the table source refuses aborts. */
+    path_t(const path_t& o) : payload_(o.payload_), field_(o.field_), segments_(o.segments_) {
+        if (o.chain_len_ != 0) copy_chain(o);
+    }
+    /** @brief Takes the path and its chain block; @p o is left unbound. */
+    path_t(path_t&& o) noexcept
+        : payload_(std::move(o.payload_)),
+          field_(std::move(o.field_)),
+          segments_(o.segments_),
+          chain_(std::exchange(o.chain_, nullptr)),
+          chain_len_(std::exchange(o.chain_len_, 0)) {}
+    /** @brief Copy-assign (see the copy constructor). */
+    path_t& operator=(const path_t& o) {
+        if (this != &o) *this = path_t(o);
+        return *this;
+    }
+    /** @brief Move-assign (see the move constructor). */
+    path_t& operator=(path_t&& o) noexcept {
+        if (this == &o) return *this;
+        clear_binding();
+        payload_ = std::move(o.payload_);
+        field_ = std::move(o.field_);
+        segments_ = o.segments_;
+        chain_ = std::exchange(o.chain_, nullptr);
+        chain_len_ = std::exchange(o.chain_len_, 0);
+        return *this;
+    }
+    /** @brief Returns the chain block to the table source. */
+    ~path_t() {
+        if (chain_ != nullptr) clear_binding();
+    }
 
     /**
      * @brief Construct from a compile-site / known-good path LITERAL, parsing ONCE.
@@ -187,7 +225,9 @@ class path_t {
     [[nodiscard]] std::size_t segment_count() const noexcept { return segments_; }
 
     /** @brief This path's learned chain, if one has been adopted (RFC-0029 §6.2). */
-    [[nodiscard]] const path_binding_t& binding() const noexcept { return binding_; }
+    [[nodiscard]] path_binding_t binding() const noexcept {
+        return {chain_len_ != 0, {chain_, chain_len_}};
+    }
 
     /**
      * @brief Record a learned chain — @p chain is a `PATH` body, origin-first.
@@ -196,14 +236,13 @@ class path_t {
      * cannot spell: the canonical path this object still holds is the answer, and refusing
      * beats truncating, which would produce a *valid-looking* chain for a different route.
      *
+     * The chain is copied into one block drawn from `tr::mem::table_source()` (ADR-0083),
+     * so binding takes nothing from the global heap; a block the source refuses also refuses
+     * the bind.
+     *
      * @return true iff the chain was recorded.
      */
-    bool bind(std::span<const std::byte> chain) {
-        if (chain.empty() || chain.size() > 0xFFFFu) return false;
-        binding_.chain.assign(chain.begin(), chain.end());
-        binding_.bound = true;
-        return true;
-    }
+    bool bind(std::span<const std::byte> chain) noexcept;
 
     /**
      * @brief Drop the learned chain and fall back to the canonical path (RFC-0029 §6.3).
@@ -212,34 +251,36 @@ class path_t {
      * holds state for a chain — so forgetting it IS the teardown, and the next operation goes
      * out canonically and re-learns.
      */
-    void clear_binding() noexcept {
-        binding_.chain.clear();
-        binding_.bound = false;
-    }
+    void clear_binding() noexcept;
 
    private:
+    /** @brief Bind a copy of @p o's chain; a block the table source refuses aborts. */
+    void copy_chain(const path_t& o) noexcept;
+
     std::vector<std::byte> payload_;  // canonical PATH-TLV payload (packed segment records)
     field_path_t field_;
     std::size_t segments_ = 0;
-    // The learned-chain slot (RFC-0029 §6.2). Empty for every path that has never adopted a
-    // chain — so an unbound path costs one empty vector and no allocation, and nothing on the
-    // canonical hot path reads it.
-    path_binding_t binding_;
+    // The learned-chain slot (RFC-0029 §6.2): one table-source block, null for every path that
+    // has never adopted a chain — so an unbound path costs a pointer and no allocation, and
+    // nothing on the canonical hot path reads it. `chain_len_ != 0` is "bound".
+    std::byte* chain_ = nullptr;
+    std::uint16_t chain_len_ = 0;
 };
 
 /**
- * @brief A `path_t` is ELEVEN pointer-widths: three owning containers, a flag and a count.
+ * @brief A `path_t` is NINE pointer-widths: two owning containers, a count and a chain slot.
  *
  * Pinned, not observed. A path is a parse-once VALUE the API takes by `const&`, and its opaque
  * slot (RFC-0024's binding) added a container to it — RFC-0027's path-label slot was the second,
- * and went with that plane (RFC-0029 S3, #2244: 15 → 11). That is the
+ * and went with that plane (RFC-0029 S3, #2244: 15 → 11); the chain left `std::vector` for a
+ * table-source block (RFC-0029 S2: 11 → 9). That is the
  * exact growth an unwatched type absorbs one RFC at a time until somebody embeds it in a hot
  * struct and pays for it per vertex. Expressed in `sizeof(void*)` so it holds identically on
  * rv32 and on a 64-bit host, which is the whole point of pinning a shape rather than a number:
  * a change here is a deliberate edit, and it is the moment to ask whether the new member wants
  * to be a slot at all.
  */
-static_assert(sizeof(path_t) == 11 * sizeof(void*),
+static_assert(sizeof(path_t) == 9 * sizeof(void*),
               "a path_t's shape is a ratchet — grow it deliberately or not at all");
 
 inline path_t::path_t(std::string_view text) {

@@ -473,9 +473,16 @@ class op_resolver_t {
     using reverse_ref_fn_t =
         std::optional<wire::path_ref_element_t> (*)(void* ctx, std::string_view inbound_link);
 
+    /** @brief The supplier installed when none is: it never has an element to give. */
+    static std::optional<wire::path_ref_element_t> no_reverse_ref(void*,
+                                                                  std::string_view) noexcept {
+        return std::nullopt;
+    }
+
     /** @brief Install the reverse-element supplier (null @p fn uninstalls). */
     void on_reverse_ref(reverse_ref_fn_t fn, void* ctx) noexcept {
-        reverse_ref_fn_ = fn;
+        // Normalized once here, so the per-subscribe call site never tests for null.
+        reverse_ref_fn_ = fn != nullptr ? fn : &no_reverse_ref;
         reverse_ref_ctx_ = ctx;
     }
 
@@ -576,7 +583,8 @@ class op_resolver_t {
         mem::mem_backend_t& fallback) const noexcept {
         return retained_ != nullptr ? *retained_ : fallback;
     }
-    reverse_ref_fn_t reverse_ref_fn_ = nullptr;  // responder's reverse-mint seam (amendment 1)
+    reverse_ref_fn_t reverse_ref_fn_ =
+        &no_reverse_ref;                         // responder's reverse-mint seam (amendment 1)
     void* reverse_ref_ctx_ = nullptr;            /**< @brief Its caller-owned context. */
     subject_fn_t subject_fn_ = nullptr;          // #375 Part 2 terminus subject derivation
     void* subject_ctx_ = nullptr;                /**< @brief Its caller-owned context. */

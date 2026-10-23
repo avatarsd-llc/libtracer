@@ -66,7 +66,7 @@
     "owner": "RFC-0029 S2 (excepted from #1781): path_t / field_path_t / path_binding_t storage is RFC-0029 S2's to reshape; these hits stay after #1781 closes",
     "counts": {
       "string": 1,
-      "vector": 3
+      "vector": 2
     }
   },
   "core/include/libtracer/path_element.hpp": {

@@ -372,8 +372,9 @@ function pathSegs(path) {
 
 /**
  * @brief Both reply vectors depict the terminus's own emission (#419 ruling (c)): the
- * request's routes swapped, so `dst` is the accumulated return route built out of whole
- * `net/<module>/<name>` mount runs and `src` is the terminus residual.
+ * request's `src` becomes the reply's `dst`, the accumulated return route built out of whole
+ * `net/<module>/<name>` mount runs. The error's `src` is the terminus residual; the result's
+ * is the target's PAIR (RFC-0029 §6.2).
  */
 const REPLY_DST = ['net', 'downlink', 'a', 'net', 'downlink', 'cli', 'reply-ep'];
 const REPLY_SRC = ['sensor', 'temp'];
@@ -383,7 +384,9 @@ test('decodeFwd parses the fwd-reply-result vector into op=REPLY, kind=RESULT, V
   assert.equal(parsed.op, FWD_OP.REPLY);
   assert.equal(parsed.kind, FWD_KIND.RESULT);
   assert.deepEqual(pathSegs(parsed.dst), REPLY_DST);
-  assert.deepEqual(pathSegs(parsed.src), REPLY_SRC);
+  // A success reply's src is the target's PAIR (RFC-0029 §6.2): one 0x16 escape record.
+  assert.ok(sameBytes(parsed.src.payload,
+    new Uint8Array([0x00, 0x16, 0x08, 3, 0, 0, 0, 1, 0, 0, 0])));
   assert.equal(parsed.payload.type, TYPE.VALUE);
   assert.ok(sameBytes(parsed.payload.payload, new Uint8Array([0xd2, 0x04, 0x00, 0x00])));
 });
