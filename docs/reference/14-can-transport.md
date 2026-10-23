@@ -179,7 +179,11 @@ revisit state anywhere in the stack; the key groups slices, nothing else. The ba
 endpoint **recurs** — the 12-bit space wraps — so that key is unambiguous only under the
 binding-lifetime invariant described in *A re-issued endpoint run retires whatever still
 claims it*, which is what stops a reused base from merging two unrelated payloads.
-`assemble()` chains the slices, in index order, into a `rope_t` — zero copies.
+The advertise names the group's slice count and total length, so `open_group()` draws
+**one segment** of that total from the link's receive backend when it admits the group,
+and `add_slice()` copies each slice to `index × width` in it. `take()` hands that segment
+up owning, trimmed to the total: one allocation, one copy and a one-link value per message,
+whatever the slice count (#2258).
 
 This deliberately reuses libtracer's **one reassembly model** rather than bolting
 on **ISO-TP** ([ADR-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)):
@@ -188,15 +192,31 @@ group" serves CAN, UDP scatter-gather, and QUIC alike.
 
 **Out-of-order and missing-fragment handling:**
 
-- **Out of order.** Slices may arrive in any order; they are stored by index and
-  emitted in ascending order at assembly.
+- **Out of order.** Slices may arrive in any order; each is written at its own offset.
+  A re-sent slice overwrites its place and is counted once.
 - **Interior gap.** A missing slice *below* the highest received index is detected
   by `has_interior_gap()` even before the count is known.
-- **Totality is opt-in.** `set_expected_count()` (the advertise manifest's slice
-  count) makes the group `is_complete()` only when every index `0..count-1` is
-  present, and makes a dropped **trailing** slice detectable. Without it, a trailing
-  drop is invisible — exactly [ADR-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0011-address-shift-totality-opt-in.md)
-  totality-opt-in. `assemble()` returns a rope only once the group is complete.
+- **Totality comes from the advertise.** The manifest's slice count makes the group
+  `is_complete()` only when every index `0..count-1` is present, so a dropped
+  **trailing** slice is detectable too ([ADR-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0011-address-shift-totality-opt-in.md)
+  totality-opt-in, opted in by every group). `take()` returns the value only once the
+  group is complete.
+- **The receiver pays for what its peer announces.** The total is peer-supplied, so it
+  is checked against the slice geometry first: `count` slices of the producer's width
+  carry only totals in `((count − 1) × width, count × width]`, and a classic link takes
+  classic widths only. A claim outside that, or a segment the receive backend refuses,
+  is refused at admission and counted on `dropped_groups`; the slices that follow find
+  no group and are counted on `dropped_rx`. A slice shorter than its place is refused
+  the same way, which covers a DLC-0 data frame.
+- **Admission is bounded per link.** A claim over the link's `max_message`, a slice count
+  past the endpoint slots left from its base (a run that can never be filled), or a segment
+  that would take the link's open groups past `rx_inflight_bytes` is refused before any
+  draw and counted on `dropped_groups`. A full budget refuses the newcomer and never evicts
+  an open group. Both caps default at compile time (`config_t::kCanMaxMessageBytes`,
+  64 KiB, and `config_t::kCanRxInflightBytes`, two such messages).
+- **Sizing a receive backend.** The segment holds the message plus one presence bit per
+  slice, `total + ceil(count / 8)` bytes, so a size-class pool sized to exactly the largest
+  message needs the next class up for it.
 
 ```{admonition} Layer placement of the reassembly buffer
 :class: note
@@ -211,15 +231,15 @@ bounded by configuration, and overflow evicts the oldest group and increments a
 rather than by unbounded growth, and no magic number appears anywhere in the buffer.
 
 A count bound alone does not reclaim a group that will **never** complete, which is
-what a lost data slice leaves behind: `erase()` is reached only after `is_complete()`.
+what a lost data slice leaves behind: a group is taken only once it `is_complete()`.
 So the buffer also **ages out**. It holds no clock of its own — the caller stamps it
 (`set_now`) and sweeps on a cadence it chooses (`sweep_stale`), keeping the buffer a
 pure framing primitive exactly as it has no allocator of its own. An age-out ticks the
-same `dropped_groups` counter an eviction does: one counter for "a group's buffered
-slices were reclaimed before delivery", whatever forced it.
+same `dropped_groups` counter an eviction or a refused admission does: one counter for
+"a group was lost before delivery", whatever forced it.
 ```
 
-A reassembled group stays zero-copy only when the transport hands it up through the owning rope seam; delivery through a flat span copies each slice. Advertise plus id-match and the rope seam therefore compose; neither replaces the other.
+A reassembled group is one segment, so it reaches a rope sink and a span sink alike without a further copy. Advertise plus id-match and the rope seam therefore compose; neither replaces the other.
 
 ## The in-band advertise frame and the dynamic map
 
@@ -377,16 +397,16 @@ The steps are:
 The receive thread decodes each frame's CAN ID, discards any frame outside its own
 version band and any frame bearing its own node id (the self-echo guard). A
 **control-slot** frame feeds the per-node advertise byte stream (`decode_advertise`
-pops each complete manifest), which **learns the `id ↔ path` binding** and sets the
-group's expected slice count. A manifest binds only its carrier's own slots: one whose id
+pops each complete manifest), which **learns the `id ↔ path` binding** and admits the
+group: its slice count and its one segment of the advertised total. A manifest binds only its carrier's own slots: one whose id
 names another node or another version than the control frame that carried it binds
 nothing and is counted on `dropped_rx`. The binding table is bounded per link by the build's
 `config_t::kCanLearnedBindings`; a new binding past it is refused and counted on
 `dropped_binding_cap`, and nothing is evicted to make room (#2203). A **data-slot** frame is reassembled by
 `can_reassembly_t`, keyed by `(node, base-endpoint) + (endpoint − base) index` — all
-derived from the CAN ID, so no per-frame origin/ts ever rides the bus. On completion
-the slices are flattened and **trimmed back to the advertised total length**, which
-is what undoes CAN-FD tail padding so the delivered frame is byte-exact. A data
+derived from the CAN ID, so no per-frame origin/ts ever rides the bus. Each slice is
+copied into the group's segment, cut at the **advertised total length**, which is what
+undoes CAN-FD tail padding so the delivered frame is byte-exact. A data
 frame that races ahead of its manifest (cross-ID arbitration) is held pending and
 re-driven when the manifest lands.
 

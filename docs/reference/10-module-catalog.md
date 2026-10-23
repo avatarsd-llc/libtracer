@@ -270,7 +270,7 @@ A **view** is one contiguous window into one segment: an owning handle plus an o
 
 A **rope** is an ordered chain of views forming one logical byte sequence that may span several segments. A view module must guarantee:
 
-- **Appending is chaining, never a memcpy.** Assembly of a scattered frame — a CAN reassembly group, a fragmented WebSocket message — crosses the ingress seam as the rope it already is.
+- **Appending is chaining, never a memcpy.** Assembly of a scattered frame — a fragmented WebSocket message — crosses the ingress seam as the rope it already is.
 - **Order is stable and the total length is queryable** without walking the bytes.
 - **A sub-range yields a rope**, taking references to the links it overlaps rather than copying.
 - **A scatter-gather lowering** produces one span per link, in order, for `writev`/`sendmsg`-style egress. Each transport lowers the rope to its own native form; the rope itself is transport-agnostic.

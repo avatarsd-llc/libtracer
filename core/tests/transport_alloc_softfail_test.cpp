@@ -117,6 +117,9 @@
 
 namespace {
 
+/** @brief The endpoint run a test group may span: the whole CAN data window. */
+constexpr std::uint32_t kRun = 4095;
+
 /** @brief A whole advertise frame in a `std::vector` — the test-side form of
  *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
  *         the advertise is unencodable. */
@@ -1867,26 +1870,26 @@ void test_factory_refusal_is_backpressure() {
 }
 
 /**
- * @brief The CAN reassembler's group and slice tables are failable: a refused entry is
+ * @brief The CAN reassembler's group table is failable: a refused entry is
  *        `false` with nothing half-recorded, and the same reassembler serves once the store
  *        has room again (#1780).
  */
 void test_can_reassembly_refusal_is_reported() {
-    std::printf("can reassembly — a refused group or slice is reported, not thrown (#1780):\n");
+    std::printf("can reassembly — a refused group is reported and counted, not thrown (#1780):\n");
     budget_source_t budget(0);
     tr::net::can_reassembly_t reasm(budget);
     const tr::net::reassembly_key_t key{{}, 7};
     const std::array<std::byte, 8> bytes{};
-    const auto slice = tr::view::over_bytes(std::span<const std::byte>(bytes));
-    check(slice.has_value(), "the slice view was built (outside the seam under test)");
-    if (!slice) return;
-    check(!reasm.add_slice(key, 0, *slice), "a refused group => add_slice reports false");
-    check(!reasm.set_expected_count(key, 2), "a refused group => set_expected_count false");
+    check(!reasm.open_group(key, 1, 8, 8, kRun, tr::mem::heap_backend()),
+          "a refused group entry => open_group reports false");
+    check(!reasm.add_slice(key, 0, bytes), "and a slice for it finds no group");
     check(!reasm.contains(key), "and nothing half-recorded was left behind");
-    check(budget.refused() >= 2, "both refusals were at the injected seam");
+    check(reasm.dropped_groups() == 1, "the refused admission is counted");
+    check(budget.refused() >= 1, "the refusal was at the injected seam");
     budget.lift();
-    check(reasm.add_slice(key, 0, *slice) && reasm.set_expected_count(key, 1),
-          "once the store has room the SAME reassembler takes the slice");
+    check(reasm.open_group(key, 1, 8, 8, kRun, tr::mem::heap_backend()) &&
+              reasm.add_slice(key, 0, bytes),
+          "once the store has room the SAME reassembler takes the group and its slice");
     check(reasm.contains(key), "and tracks the group");
 }
 

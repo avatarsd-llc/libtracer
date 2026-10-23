@@ -729,7 +729,7 @@ Each entry: module-set membership, what it wraps, allocation supported, footprin
 ### `can_reassembly` — not an L0 backend
 
 - **Layer**: `tr::net`, not `tr::mem`. The type was originally named for L0, which was a layer inversion — an L0 type referencing the L1 rope it assembles. It sits beside the CAN transport ([ADR-0048 — one-wire grammar, chunk cursor, rope-aware decode](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md)); see [14-can-transport.md](14-can-transport.md) §Multi-frame reassembly.
-- **Wraps**: a per-group reassembly buffer accumulating multi-frame CAN slices until a complete TLV is present; its structure is drawn from an injected resource with a config-bounded live-group count (evict-oldest plus a dropped-group counter), never OOM.
+- **Wraps**: one segment per group, of the advertised total, that multi-frame CAN slices are copied into until a complete TLV is present; the segment is drawn from the link's receive backend, the structure from an injected source with a config-bounded live-group count (evict-oldest, a refused admission and a dropped-group counter), never OOM.
 - **When to use**: internal to the CAN transport's RX path.
 
 ---

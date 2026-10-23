@@ -153,9 +153,7 @@ truncation, not a diagnostic. This is invisible on a purely local graph, where e
 value is one segment, and appears the moment a real transport is attached: every
 transport whose `transport_t::delivers_ropes()` returns true
 (`core/include/libtracer/transport.hpp:transport_t::delivers_ropes`; TCP, UDP, WS, QUIC, WebTransport and CAN
-all override it) can hand up a chain. A CAN reassembly group chains one link per slice
-(`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:can_reassembly_t::assemble`), and
-a fragmented WebSocket message chains one link per fragment
+all override it) can hand up a chain. A fragmented WebSocket message chains one link per fragment
 (`ws_assembler_t::on_piece`, `core/src/transport_ws.cpp:ws_assembler_t::on_piece`). A consumer that cannot
 promise contiguity calls `materialize()` (`rope.hpp:rope_t::materialize`) instead — zero copy when the
 rope happens to be single-link, one `flatten` copy otherwise. `only()` is the right call
