@@ -698,6 +698,18 @@ Details that make these trustworthy:
   **Stated blind spot:** at 65584 B (past the last size class) there is no instruction row and the
   time backstop is x3, so a real extra-instructions regression is not guaranteed to fail at
   that size.
+  **Bimodal processes (#2069).** One `cliff-alloc-heap` binary also reads its small sizes at
+  ~3.7 ns in one process and ~8 ns in the next, every size of that process together (main
+  included), which is x2.2: past the x1.5 backstop. Three mechanisms keep this from failing
+  a PR while still catching a real regression. The verdict is the instruction count, which does not
+  move with the mode. The timed backstop also needs the fast-mode veto above, so a session whose
+  candidate processes landed on the slow mode passes while the fast mode is unmoved, and a
+  slowdown that moves every process still fails. And `perf.yml` runs each pair on a fresh copy
+  of each binary (#2215). In the perf.yml runs from 2026-10-18 to 2026-10-23, 63 gate sessions carried the
+  allocator-cliff family: none reported a `cliff-alloc-heap` effect or pullback. The only
+  lines were the step warnings that main shares (4096 B x2.45, 65584 B x2.15) and placement
+  A/A spreads of at most x1.16. `bench/test_perf_gate.py` pins both directions: six of eight
+  candidate processes in the slow mode pass, and all eight fail at every size.
 - **The payload ladder.**
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
   `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `chain-*` arms
