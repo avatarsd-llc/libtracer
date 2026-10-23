@@ -435,10 +435,12 @@ and the caller owns the retry ([ADR-0066](https://github.com/avatarsd-llc/libtra
 
 ### The acknowledgement is the reply to a `WRITE` with a non-empty `src`
 
-A `WRITE` whose `src` is non-empty is answered by exactly one `REPLY`: `kind=RESULT` with an empty
+A `WRITE` whose `src` is non-empty is answered by at most one `REPLY`: `kind=RESULT` with an empty
 payload when it was applied, or `kind=ERROR` carrying `STATUS{ERROR}` when it was refused
 (RFC-0004 §D and its erratum of 2026-10-23). A `WRITE` with an empty `src` is answered by nothing,
-whatever happened (RFC-0004 Amendment 2), so it can never be acknowledged. Ask for the
+whatever happened (RFC-0004 Amendment 2), so it can never be acknowledged. A node under memory pressure can also drop a
+reply and count it (`reply_iov_dropped`, [22 §2](22-backpressure-and-sizing.md)), so a missing
+reply means only that no answer arrived. Ask for the
 acknowledgement by seeding a reply route; do not wait for a `STATUS` write on a subscription.
 Those are application data on the standing plane, not acknowledgements.
 
@@ -476,9 +478,9 @@ operation twice leaves the same state as applying it once. Design each operation
 | Operation | Why repeating it is safe |
 | --- | --- |
 | **Link create** | It names the link it creates. A repeated create answers `PATH_IN_USE` and creates no second link ([ADR-0073](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md)). Read `PATH_IN_USE` after a retry as "already done". |
-| **Link clear** and other removals | It names what to remove. Removing something already gone changes nothing ([ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)). |
-| **A `:children` write** | Creating a child is a `SPEC` that names it, so a repeat answers `PATH_IN_USE`, as a link create does, and never makes a second child ([13 — Network formation](13-network-formation.md); [19 — Transports are vertices](19-transports-are-vertices.md)). |
-| **A settings commit** | A `SETTINGS` write replaces the whole value, so the stored state after two commits equals the state after one. |
+| **Link clear** (a `NAME` written to the creator endpoint) | It names the link to remove. A name already gone is a no-op success ([RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §2; `core/src/transport_vertex.cpp:transport_vertex_t::endpoint_remove_locked`), so a retry answers `RESULT`, unlike a repeated create's `PATH_IN_USE`. Do not wait for an error to mean "already done". Other removals, such as retiring an application vertex, carry no such rule: check each one before retrying it. |
+| **A `:children` write** on an application vertex | Creating a child is a `SPEC` that names it, so a repeat answers `PATH_IN_USE`, as a link create does, and never makes a second child (`core/src/graph_fields.cpp:graph_t::create_child`). |
+| **A settings write** | Each settings write sets one field, or one `settings.app.*` leaf, to a whole value, so a repeat stores the same value ([03 §Atomicity of multi-field writes](03-addressing.md#atomicity-of-multi-field-writes)). Knobs that must land together go in one `settings.app.*` leaf. |
 | **An OTA or upload chunk** | Address each chunk by its **offset** (in the path or the payload). A repeat overwrites the same bytes with the same bytes. Do not append. |
 | **A command verb** | A verb that acts ("open the valve", "start the run") is not idempotent by shape. Put the application's own **sequence number** in the payload, and have the handler drop one it has already applied. That state is the application's, in its handler; the library keeps none. |
 

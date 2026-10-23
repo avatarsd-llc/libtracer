@@ -49,6 +49,8 @@ This RFC fills §3 with the smallest design consistent with the accepted model:
 - **`FWD` (`0x0F`)** — a self-describing frame `FWD{ op∈{READ,WRITE,AWAIT,REPLY}, PATH dst, FIELD? selector, PATH src, payload? }`. `dst` (forward route) **shrinks** per hop; `src` (return route) **grows** per hop by a **zero-copy prepend** of the inbound-link `NAME`, so forwarders stay **stateless** and the reply self-routes home via `src`. Loop-free by construction → needs **none** of `ROUTER`'s dedup/`MAX_HOPS`.
 - **`FIELD` (`0x10`)** — encodes the `:field` tail (`:subscribers[]`, `:settings.x`) that `PATH` (NAME-segments only) cannot.
 - **Replies are stateless and source-routed back** — a `FWD{ op=REPLY, kind∈{RESULT,ERROR} }` whose `dst` is the accumulated `src`. **No end-to-end correlation-id** (matching a reply to a specific concurrent request *at* an endpoint is the **transport's** concern); works over unidirectional links; survives a hop reboot.
+  > **Erratum (2026-10-23), below:** matching a reply to its request is the **originator's**
+  > concern, not the transport's; see the erratum at the end of this RFC.
 - **Two planes.** `READ`/`WRITE`/`AWAIT` are the **one-shot** plane (works on data *and* `:field` control). **Streaming never per-sample-remote-writes**: a consumer wires one `SUBSCRIBER`, then the producer **produces locally + flushes**, fanning out. A **delivery *is* a `FWD WRITE`** to the subscriber's data vertex (delivery-is-a-write, [ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)), so a subscription delivery and a one-shot command are the same frame.
 
 `subscribe` remains a `WRITE` to `:subscribers[]` ([ADR-0006](../../adr/0006-read-write-await-api-no-connect.md)/[ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)); `ROUTER` (`0x0D`) is **unchanged** and earns its keep only on the *cyclic/multi-path* delivery side. The consumer-stored `SUBSCRIBER.target` *is* the `src` route its subscribe accumulated — producer-holds and this RFC are one mechanism.
@@ -161,6 +163,9 @@ A `READ` of an **array `:field`** (e.g. `:subscribers[]`) returns its members wr
 
 **There is no end-to-end correlation-id.** The `src` route delivers a reply to the right *endpoint*; matching it to a *specific* outstanding request *at* that endpoint (e.g. a consumer with many concurrent `READ`s) is the **transport's** concern — a transport-level stream tag for WebSocket, pipelining/ID-matching for CAN — never a field in `FWD`. Route = inter-hop; tag = intra-endpoint; a route is not an id.
 
+> **Erratum (2026-10-23), below:** no transport tags requests; the **originator** matches a reply
+> to its request from the reply's own route. "No end-to-end correlation-id" stands.
+
 **Two planes — direct (one-shot) vs standing (streaming).** `FWD` `READ`/`WRITE`/`AWAIT` are the **one-shot/synchronous** plane: read a snapshot, write once, block for one. **Streaming data does *not* per-sample remote-write.** A consumer creates a local receiving endpoint and `WRITE`s one `SUBSCRIBER` into the producer's `:subscribers[]` (a control write, §C); thereafter the **producer produces locally and fans out** — fills its own endpoint's segment memory (rope-chaining slices for large/scatter data) and **flushes**, which delivers to each subscriber. The flush, not a client, drives every delivery.
 
 **A delivery *is* a `FWD WRITE` (load-bearing).** When a producer fans out to a *remote* subscriber, that delivery **is** a `FWD{ op=WRITE, payload=VALUE }` routed to the subscriber's data vertex via the stored return-route. So a **subscription delivery and a one-shot command are the identical wire frame** — the only difference is whether a standing `SUBSCRIBER` produced it or a client issued it once; the target cannot (and per ADR-0026 claim 2 must not) tell them apart. Likewise **keepalive / digest / liveness / async-write-ack are ordinary `VALUE`/`STATUS` writes on the standing channel**, not reply-kinds.
@@ -168,7 +173,6 @@ A `READ` of an **array `:field`** (e.g. `:subscribers[]`) returns its members wr
 > **Erratum (2026-10-23), below:** the "async-write-ack" in that last sentence never meant the
 > acknowledgement of a one-shot `WRITE`. That acknowledgement is the `REPLY` of the table above,
 > and matching it is the originator's job, not the transport's.
-
 
 ### E. Delivery / fanout is unchanged
 
@@ -188,6 +192,9 @@ Producer-holds fan-out ([ADR-0026](../../adr/0026-consumer-initiated-subscriptio
 Taken literally, "a delivery *is* a `FWD WRITE`" (§D) makes *every* streamed sample carry its full return route. For a 1 kHz, 4-byte sensor over a 3-hop path that is **~60 B of route on a 4 B payload (~16×)** — fine for one-shots, prohibitive for streams (and impossible on CAN, which has no room for a route at all). The fix is **not** a new mechanism: it is **header-elided framing ([ADR-0022](../../adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)) generalized to every transport** — a compact **per-link label** that aliases an established delivery route.
 
 - **Per-link label-switching.** A label is meaningful only on the link it was bound for; each forwarding hop **swaps** it (label-in → its own label-out / route), exactly as a CAN-ID is re-resolved against each bus's `identity↔path` map. There is **no** end-to-end handle — "matching is the transport's concern" (§D) applied to delivery.
+  > **Erratum (2026-10-23), below:** this bullet is about delivery labels, a per-link handle that
+  > RFC-0032 removed with §E.1; it says nothing about matching a one-shot reply, which the
+  > erratum below places at the originator.
 - **Advertise-driven binding (generalize [ADR-0030](../../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)).** The upstream **advertises** the `label ↔ route` binding **in-band** when a flow starts; each hop learns `label → (downstream link, out-label)` and swaps. There is no setup handshake. **Re-advertise on (re)connect *is* the self-heal** (it is also what producer-holds already triggers on reconnect, [ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)); a delivery bearing an unknown/stale label is dropped with an error that prompts re-advertise. On a **header-elided** transport this advertise *is* the existing id-assignment (`transport_can`, #55) — no new code.
 - **Framing-mode decides whether labels are used (no global policy):**
   - **Header-elided transports (CAN):** **always** labeled — the ID *is* the path; the `identity↔path` map is mandatory; no threshold.
@@ -654,11 +661,20 @@ Telling one request from another stays at the client
 and retry stays with the caller
 ([ADR-0066](../../adr/0066-element-write-is-a-single-attempt-cas.md)).
 
+**Which change made them diverge.** None: both sentences have stood since the RFC was first
+written (2026-06-28), so the text was wrong from the start. The behaviour that contradicts them is
+originator-side matching, which shipped with the TypeScript client's `src`-suffix matching
+([#1530](https://github.com/avatarsd-llc/libtracer/issues/1530), 2026-08-24) and the core's
+reply token in `fwd_router_t::originate`
+([#1645](https://github.com/avatarsd-llc/libtracer/issues/1645), 2026-10-03).
+
 **Why this is an erratum and not an amendment.** No frame type, field, code or grammar changes, and
 no conforming implementation emits a different byte. The text now says what the table, reference/05
 and the reference core already do.
 
-**The correction.** §D's closing sentence is read as above, and its blockquote points here. The
+**The correction.** §D's closing sentence is read as above. It, the Summary's reply bullet and the
+correlation paragraph each carry a blockquote pointing here, and so does §E.1's label-switching
+bullet, which says only that it is not about one-shot replies. The
 correlation paragraph reads "is the **originator's** concern": it seeds a reply route it can
 recognise, never a field in `FWD`. [reference/18](../../reference/18-composition-over-the-network.md)
 restated the transport wording and now states the originator's rule. It also gains
