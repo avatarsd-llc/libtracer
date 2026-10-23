@@ -1329,9 +1329,11 @@ class flat_slot_server_t : public slot_server_t {
         (void)frame;
     }
     /** @brief No peer tier to deliver an owning rope to. */
-    static void deliver_to_peer_rope(peer_handle_t peer, view::rope_t frame) {
+    static void deliver_to_peer_rope(peer_handle_t peer, view::rope_t frame,
+                                     mem::mem_backend_t& backend) {
         (void)peer;
         (void)frame;
+        (void)backend;
     }
     /** @} */
 };
@@ -1435,9 +1437,10 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
     void deliver_to_peer(peer_handle_t peer, view::view_t frame) {
         peer_rx_.deliver(peer, std::move(frame));
     }
-    /** @brief Deliver an owning rope up the peer-named tier. */
-    void deliver_to_peer_rope(peer_handle_t peer, view::rope_t frame) {
-        peer_rx_.deliver_rope(peer, std::move(frame));
+    /** @brief Deliver an owning rope up the peer-named tier; a span-only sink materializes a
+     *         multi-link one from @p backend, the receiving link's rx source. */
+    void deliver_to_peer_rope(peer_handle_t peer, view::rope_t frame, mem::mem_backend_t& backend) {
+        peer_rx_.deliver_rope(peer, std::move(frame), backend);
     }
     /** @} */
 };

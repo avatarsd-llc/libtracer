@@ -36,8 +36,10 @@ namespace {
 enum class assemble_status_t : std::uint8_t {
     PENDING,  /**< @brief Mid-message (or a stray CONT) — nothing to deliver yet. */
     COMPLETE, /**< @brief @ref assemble_result_t::message holds the finished message. */
-    OVERSIZE, /**< @brief The reassembled message grew past the receive cap — FAIL the
+    OVERSIZE, /**< @brief The message's charged cost grew past the receive cap — FAIL the
                           connection (§7.1.7) and count it as `malformed_rx`. */
+    REFUSED,  /**< @brief A store refused the chain: the message is shed and counted as
+                          `dropped_rx`, the connection lives (receiver pays). */
 };
 
 /** @brief One @ref ws_assembler_t::on_piece outcome: a status, and (on `COMPLETE`) the rope. */
@@ -53,14 +55,32 @@ struct assemble_result_t {
  * Only a fragmented message needs it: either end hands an unfragmented frame up as the one
  * view over the segment it was received into (ADR-0087 §1). One assembler per connection,
  * used only on its receive thread.
+ *
+ * The links are held in a chain drawn from the receiving link's own rx source, not the
+ * process heap, and the receive cap bounds what a message COSTS, not its payload alone:
+ * each fragment is charged its bytes plus @ref kFragmentCost, the segment it was received
+ * into and its chain slot. Without that charge a message of empty or one-byte fragments
+ * held a segment and a link per fragment while its payload total stayed far under the cap.
  */
 struct ws_assembler_t {
-    tr::view::rope_t partial;
-    bool assembling = false;
+    /** @brief What a fragment costs beyond its payload: its segment's header, the receive
+     *         loan room `alloc_rx` may put in front of the bytes, and its chain slot. */
+    static constexpr std::size_t kFragmentCost =
+        sizeof(tr::view::segment_t) + tr::mem::kRxLoanBytes + sizeof(tr::view::view_t);
 
-    void reset() {
-        partial = tr::view::rope_t{};
-        assembling = false;
+    /** @brief An idle assembler whose chain will be drawn from @p rx, the link's rx source. */
+    explicit ws_assembler_t(tr::mem::block_source_t& rx) noexcept : chain(rx) {}
+
+    tr::mem::block_array_t<tr::view::view_t> chain; /**< @brief The message's fragments. */
+    std::size_t charged = 0;                        /**< @brief What they cost against the cap. */
+
+    /** @brief True while a message is open: its first fragment is in the chain. */
+    [[nodiscard]] bool assembling() const noexcept { return !chain.empty(); }
+
+    /** @brief Drop the message being assembled and hand its chain back to the source. */
+    void reset() noexcept {
+        chain = tr::mem::block_array_t<tr::view::view_t>(chain.source());
+        charged = 0;
     }
 
     /**
@@ -72,26 +92,37 @@ struct ws_assembler_t {
      * dropped.
      *
      * @param piece The fragment's bytes, owned.
-     * @param cap   The effective receive cap the REASSEMBLED total may not exceed. The
+     * @param cap   The effective receive cap the message's CHARGED cost may not exceed. The
      *              per-frame header check bounds one fragment; without this one a peer walks
-     *              past the cap 125 bytes at a time across a million CONTs (#872).
+     *              past the cap a few bytes at a time across a million CONTs (#872).
      */
     assemble_result_t on_piece(ws::opcode_t op, bool fin, tr::view::view_t piece, std::size_t cap) {
         if (op == ws::opcode_t::BINARY)
             reset();
-        else if (!assembling)
+        else if (!assembling())
             return {};  // stray
-        // Written as a subtraction because `total_length() + length` can wrap.
-        // `total_length() <= cap` holds by induction (every earlier fragment passed this same
-        // test), so the difference is well-defined.
-        if (piece.length > cap - partial.total_length()) {
+        // Written as a subtraction because `charged + cost` can wrap. `charged <= cap` holds
+        // by induction (every earlier fragment passed this same test), so the difference is
+        // well-defined; the header check holds `piece.length` to the cap, so `cost` cannot
+        // wrap either.
+        const std::size_t cost = piece.length + kFragmentCost;
+        if (cost > cap - charged) {
             reset();
             return {assemble_status_t::OVERSIZE, {}};
         }
-        partial.append(std::move(piece));
-        assembling = true;
+        if (!chain.push_back(std::move(piece))) {
+            reset();
+            return {assemble_status_t::REFUSED, {}};
+        }
+        charged += cost;
         if (!fin) return {};
-        assemble_result_t done{assemble_status_t::COMPLETE, std::move(partial)};
+        // The delivered rope holds the links itself; reserving them first makes a refusal
+        // backpressure instead of an abort.
+        assemble_result_t done{assemble_status_t::REFUSED, {}};
+        if (done.message.try_reserve(chain.size())) {
+            for (tr::view::view_t& link : chain) done.message.append(std::move(link));
+            done.status = assemble_status_t::COMPLETE;
+        }
         reset();
         return done;
     }
@@ -180,6 +211,9 @@ struct ws_framing_t {
             end.malformed();
             return false;
         }
+        // A refused chain is a refused body by another name: shed, counted, and the
+        // connection re-syncs at the next BINARY.
+        if (r.status == assemble_status_t::REFUSED) end.dropped();
         if (r.status == assemble_status_t::COMPLETE) end.hand_up(std::move(r.message));
         return true;
     }
@@ -311,8 +345,10 @@ std::pair<::iovec*, std::size_t> build_server_iov(
  * published NOT-open and opens only once its `101` is on the wire (`read_handshake` below).
  */
 struct ws_server_transport_t::session_t : slot_server_t::session_base_t {
-    /** @brief Draw the handshake buffer from @p src — the server's session store (#1780). */
-    explicit session_t(mem::block_source_t& src) noexcept : hs_buf(src) {}
+    /** @brief Draw the handshake buffer from @p src — the server's session store (#1780) —
+     *         and the fragment chain from @p rx, the server's rx source. */
+    session_t(mem::block_source_t& src, mem::block_source_t& rx) noexcept
+        : hs_buf(src), assembler(rx) {}
     mem::bytes_t hs_buf; /**< @brief HTTP Upgrade request accumulation. */
     /** @brief Frame ingress (ADR-0087 §1): no stream buffer, the body lands in its segment. */
     frame_ingress_t<ws::kMaxClientFrameHeader> ingress;
@@ -364,7 +400,8 @@ struct ws_server_transport_t::framing_t {
      * that flag conjoined with whether this BUILD carries a bus module at all (#375
      * deliverable 3), and the peer-tier call is the STATIC seam of #1438, so the per-frame
      * path gained no dispatch. A single-link rope reaches a span-only sink borrowed, so the
-     * tier needs no choosing here.
+     * tier needs no choosing here; a fragmented one materializes once, from this server's rx
+     * source.
      *
      * The FLAT tier carries no per-frame tag by construction, so the WHO the subject seam
      * needs is stamped here instead (#375 Part 2, ADR-0082): the session's handle, on the
@@ -375,9 +412,9 @@ struct ws_server_transport_t::framing_t {
     void hand_up(tr::view::rope_t message) const {
         link.delivering_ = s.handle;
         if (link.bus_mode())
-            link.deliver_to_peer_rope(s.handle, std::move(message));
+            link.deliver_to_peer_rope(s.handle, std::move(message), *link.backend_);
         else
-            link.rx_.deliver_rope(std::move(message));
+            link.rx_.deliver_rope(std::move(message), *link.backend_);
         link.delivering_ = {};
     }
 };
@@ -403,7 +440,8 @@ ws_server_transport_t::~ws_server_transport_t() {
 void ws_server_transport_t::shut_down() { shut_down_slots(); }
 
 mem::poly_ptr_t<slot_server_t::session_base_t> ws_server_transport_t::make_session() {
-    mem::poly_ptr_t<session_t> slot = mem::make_poly<session_t>(slots_.source(), slots_.source());
+    mem::poly_ptr_t<session_t> slot =
+        mem::make_poly<session_t>(slots_.source(), slots_.source(), *backend_);
     if (!slot) return nullptr;
     slot->endpoint.owner_ = this;
     slot->endpoint.slot_ = slot.get();
@@ -440,7 +478,7 @@ bool ws_server_transport_t::mid_frame(const session_base_t& base) const {
     // A peer owes its opening handshake until the 101 opens the session.
     const session_t& s = static_cast<const session_t&>(base);
     return !s.open.load(std::memory_order_relaxed) || s.ingress.mid_frame() ||
-           s.assembler.assembling;
+           s.assembler.assembling();
 }
 
 void ws_server_transport_t::send(std::span<const std::byte> frame) {
@@ -875,12 +913,15 @@ struct ws_client_transport_t::framing_t {
     }
 
     /** @brief Hand one whole message up: a single-link rope reaches a span-only sink
-     *         borrowed, a fragmented one materializes once, in the slot. */
-    void hand_up(tr::view::rope_t message) const { link.rx_.deliver_rope(std::move(message)); }
+     *         borrowed, a fragmented one materializes once, in the slot, from this link's rx
+     *         source. */
+    void hand_up(tr::view::rope_t message) const {
+        link.rx_.deliver_rope(std::move(message), *link.backend_);
+    }
 };
 
 void ws_client_transport_t::serve(int fd) {
-    framing_t end{*this, {}, {}};
+    framing_t end{*this, {}, ws_assembler_t{*backend_}};
     ws_framing_t<framing_t> framing{end};
     // Stack state, not a member: the header being read and the body's segment while it fills
     // live on this receive thread for the life of the connection (ADR-0087 §1).

@@ -129,6 +129,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `send_to`). It is now counted in `dropped_tx`, and so in `drop_stats()`. It is not retried:
   the UDP link carries no acks, and the next value supersedes a lost frame.
 
+- **WebSocket: the reassembly cap now counts each fragment's segment, not just its payload.**
+  A fragmented message is charged, per fragment, its payload plus the segment it was received
+  into and its chain slot, so `max_frame` (and the rx backend's capacity) bounds what the
+  message holds while it is assembled, however small its fragments. A fragmented message whose
+  payload sits just under the cap can now be refused as malformed; an unfragmented one is
+  judged as before. The fragment chain is drawn from the link's `memory.rx` source instead of
+  the process heap, and a refusal there sheds the message as `dropped_rx` and keeps the
+  connection. A span-only sink materializes a fragmented message from the same source.
+  `bus_slot_server_t::deliver_to_peer_rope` takes that source as a third argument.
 - **A self-healing link keeps each delivery's lane and value** (#2238). `self_heal_link_t` did
   not override the retained send, `send(head, value, lane)`, so every delivery through it took
   the base lowering: flattened into an iov and handed to the inner link's control lane. All
