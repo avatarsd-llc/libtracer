@@ -50,6 +50,7 @@
  *   9. sustained churn neither exhausts the handle pool nor stops resolution.
  */
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -62,6 +63,7 @@
 #include "fake_httpd.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
+#include "libtracer/pair.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -467,6 +469,21 @@ void test_churn_does_not_exhaust_the_handle_pool() {
 
 }  // namespace
 
+/** @brief The router's slot parse (#2234) inverts this link's `p<slot>~<gen>` spelling. */
+void test_the_slot_parse_inverts_the_peer_name() {
+    std::printf("the slot parse against the ESP speller:\n");
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    for (const tr::net::peer_handle_t h :
+         {tr::net::peer_handle_t{0, 1}, tr::net::peer_handle_t{3, 7},
+          tr::net::peer_handle_t{9, 0xFFFF'FFFFu}, tr::net::peer_handle_t{0xFFFF'FFFFu, 1}}) {
+        std::array<char, tr::net::kPeerNameChars> scratch{};
+        check(tr::net::session_slot_index(link->peer_name(h, scratch)) == h.index,
+              "session_slot_index round-trips the ESP p<slot>~<gen> spelling");
+    }
+    reset(link);
+}
+
 int main() {
     std::printf("httpd_ws_link session-identity host suite (#954, #1013):\n");
     test_directed_frame_does_not_follow_the_descriptor();
@@ -478,6 +495,7 @@ int main() {
     test_the_handle_is_per_resolution_not_per_slot();
     test_re_resolving_after_the_reuse_reaches_the_successor();
     test_churn_does_not_exhaust_the_handle_pool();
+    test_the_slot_parse_inverts_the_peer_name();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

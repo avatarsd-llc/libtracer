@@ -45,6 +45,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   message, counted in the session's `rx_drops`. A fragmented message now carries a little
   less than 32 KiB of payload: 2 bytes per fragment go to the charge.
 
+- **`httpd_ws_link_t::slot_link` is removed (#2234).** The router now records which session
+  holds each slot and egresses through `peer_link_of`, so a late departure no longer retires
+  the anchor of a successor still pending authentication (see core's changelog).
+
 ## [0.21.0] — 2026-10-22
 
 ### Fixed

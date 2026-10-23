@@ -567,10 +567,6 @@ class tenancy_bus_t : public transport_t, public bus_link_t {
     transport_t* peer_link(std::string_view peer) override {
         return gen_ != 0 && peer == name_ ? &ep_ : nullptr;
     }
-    /** @brief The slot resolves to whichever tenancy holds it now. */
-    transport_t* slot_link(std::string_view slot) override {
-        return gen_ != 0 && slot == "p0" ? &ep_ : nullptr;
-    }
     /** @brief A pure function of the handle, live or not. */
     [[nodiscard]] std::string_view peer_name(peer_handle_t peer,
                                              std::span<char> scratch) const override {
@@ -609,7 +605,7 @@ class tenancy_bus_t : public transport_t, public bus_link_t {
  * @brief An arrival runs its slot's unannounced predecessor's departure, by that session's
  *        own pair `{conn, prev handle}` (#1941).
  *
- * `bus_peer_up` evicts under `p<slot>~<gen-1>` with the handle `{slot, gen-1}`. The edges
+ * `bus_peer_up` evicts under the name and handle the slot's tenancy word held (#2234). The edges
  * stored that pair, so it is the pair, not the name, that has to match.
  */
 void test_an_arrival_evicts_its_predecessor_by_pair() {
@@ -639,6 +635,34 @@ void test_an_arrival_evicts_its_predecessor_by_pair() {
     check(g.link_edge_candidates("p0~2") == 1, "the successor subscribes on its own");
     check(g.evict_link_edges("p0~2", router_link(g, router, "tcp", second)) == 1,
           "and its edge is evicted by its own pair");
+}
+
+/**
+ * @brief A generation consumed with no arrival leaves nothing behind (#2234).
+ *
+ * The slot's claims can skip a generation (a connection that never upgrades, a claim refused
+ * before it is announced), so the predecessor of tenancy 3 may be tenancy 1. The arrival
+ * reclaims the tenancy the slot's anchor stored, not `gen - 1`, which named nobody.
+ */
+void test_an_arrival_after_a_skipped_generation_evicts_its_predecessor() {
+    std::printf("an arrival after a skipped generation evicts the real predecessor:\n");
+    graph_t g;
+    fwd_router_t router(g);
+    tenancy_bus_t bus;
+    check(router.attach_link("tcp", bus), "the tenancy bus mounts");
+    (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+
+    const peer_handle_t first = bus.arrive(1);
+    bus.inject(b_fwd(fwd_op_t::WRITE, b_path_of({"s"}), b_path_of({"p0~1"}),
+                     b_field_subscribers_append(), b_subscriber_at({"ui"})));
+    check(g.link_edge_candidates("p0~1") == 1, "the first tenancy subscribes");
+
+    // Tenancy 1's departure is lost and generation 2 is consumed without an arrival.
+    (void)bus.arrive(3);
+    check(g.link_edge_candidates("p0~1") == 0,
+          "the arrival at generation 3 evicted tenancy 1's edge, not a generation-2 name");
+    check(g.evict_link_edges("p0~1", router_link(g, router, "tcp", first)) == 0,
+          "nothing is left under tenancy 1's pair");
 }
 
 /**
@@ -734,6 +758,7 @@ int main() {
         test_a_census_bus_peer_is_indexed_and_evicts();
         test_a_field_writing_peer_releases_its_slot_at_departure();
         test_an_arrival_evicts_its_predecessor_by_pair();
+        test_an_arrival_after_a_skipped_generation_evicts_its_predecessor();
     } else {
         // Not a gap in the carry's coverage — the census bus is the ONE case here that needs a
         // module this build compiled out (#375 deliverable 3), and its every assertion is about

@@ -42,6 +42,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -867,7 +868,8 @@ class fwd_router_t {
      * Keyed by the peer's SLOT (`%session_slot_of`: `p<slot>~<gen>` anchors as `p<slot>`), so
      * one slot keeps ONE anchor however many sessions pass through it — the count is the slot
      * count (ADR-0044 amendment) — and the anchor's own retire generation tells its tenancies
-     * apart.
+     * apart. Which tenancy holds it is the mount's tenancy word for that slot
+     * (`session_tenancy_t`): its session's peer handle, whose exact name the bus spells (#2234).
      *
      * Deliberately NOT a spellable address. It is `:<mount>/<slot>`, and both `:` and `/` are
      * among the seven characters `path::valid_segment` rejects, so the anchor's rendered key
@@ -1200,6 +1202,31 @@ class fwd_router_t {
     };
 
     /**
+     * @brief A bus mount's TENANCY WORDS: per session slot, the `peer_handle_t::bits()` of the
+     *        session that holds the slot's anchor, `0` when none does (#2234).
+     *
+     * What a route to an anchor, and the reverse-direction mint, resolve the session by: one
+     * acquire load names the exact tenancy, so a delivery reaches `peer_link_of` for that
+     * handle and never a successor's. Held here rather than as the anchor's value, so an
+     * arrival or a departure touches no `value_t` and allocates nothing once the table covers
+     * the slot. 8 B per slot; the words follow this header in one block from the link plane's
+     * source.
+     *
+     * Grown, never shrunk, under `tenancy_m_`: a table too small for an arriving slot is
+     * replaced by one twice as large and the old one PARKED on `parked`, not freed, so a
+     * lock-free reader still holding it reads a live (if stale-sized) table. The whole chain
+     * goes back in the router's destructor.
+     */
+    struct alignas(std::atomic<std::uint64_t>) session_tenancy_t {
+        std::uint32_t size = 0;              /**< @brief Slots the words cover. */
+        session_tenancy_t* parked = nullptr; /**< @brief The table this one replaced. */
+        /** @brief The word for @p slot; `slot < size`. */
+        [[nodiscard]] std::atomic<std::uint64_t>& word(std::uint32_t slot) noexcept {
+            return std::launder(reinterpret_cast<std::atomic<std::uint64_t>*>(this + 1))[slot];
+        }
+    };
+
+    /**
      * @brief One registered child's receive context: what the frame path reads per inbound
      *        frame without taking `ctl_m_`.
      *
@@ -1282,6 +1309,15 @@ class fwd_router_t {
         bus_token_cache_t* peer_tokens_own = nullptr;
         /** @brief `peer_tokens_own` as the frame path reads it; null ⇒ the FLAT tier. */
         std::atomic<bus_token_cache_t*> peer_tokens{nullptr};
+        /**
+         * @brief A bus mount's tenancy words (#2234); null until its first arrival.
+         *
+         * OWNED with every table it replaced (`session_tenancy_t::parked`) and kept across a
+         * re-add: a slot anchor outlives its mount's registration, and the word is what the
+         * next arrival in that slot finds its predecessor by. `mutable` because the arrival
+         * seam hands the ctx around `const`; written under `tenancy_m_`, read lock-free.
+         */
+        mutable std::atomic<session_tenancy_t*> tenancy{nullptr};
         /**
          * @brief The registry slot this child was registered into — resolved once, here.
          *
@@ -1721,14 +1757,15 @@ class fwd_router_t {
      *        tenancy left, then give the session an identity anchor (#1223 step 2, #1609).
      *
      * An arrival is the RE-TENANT edge: the slot has just changed hands and the new session
-     * has sent nothing, so whatever the slot still holds is a predecessor's whose departure
-     * never reached this router. The arrival runs that departure (`bus_peer_down`) for the
-     * slot-keyed state (the anchor and the cached token), then evicts the edges and pending
-     * awaits filed under the PREDECESSOR's name, which the bus spells from
-     * @p handle one generation down. That makes "edges under a session name belong to that
-     * session" true by construction rather than by a sweeper's care; when the departure
-     * already ran, it finds nothing. Then it registers (or REVIVES, at the same slot, one
-     * generation up) the anchor vertex for `:<mount>/<slot>`.
+     * has sent nothing, so a slot anchor still live is a predecessor's whose departure never
+     * reached this router. The slot's tenancy word holds that session (#2234), so the arrival runs
+     * exactly its departure (`bus_peer_down`), under the handle and name it held: the anchor, the
+     * cached token, and the edges and pending awaits filed under that name. No
+     * generation arithmetic is involved, so a generation the slot consumed without an arrival
+     * changes nothing. That makes "edges under a session name belong to that session" true by
+     * construction rather than by a sweeper's care; when the departure already ran, there is
+     * no live anchor and nothing to do. Then it registers (or REVIVES, at the same slot, one
+     * generation up) the anchor vertex for `:<mount>/<slot>`, after storing @p handle in the word.
      *
      * Fired ONLY by an accepting listener (`slot_server_t` and the ESP httpd link), never by
      * an announce-census bus, so CAN peers keep ADR-0044 §Decision 1 in full force and grow
@@ -1743,9 +1780,9 @@ class fwd_router_t {
      * successor. Eviction (@ref link_down) is unchanged and still keyed by the peer NAME.
      * An anchor that was never created (an announce-census peer, or a session that departed
      * before its arrival was wired) simply resolves to nothing and the eviction runs alone.
-     * A departure that lands after a successor already claimed the slot (the bus resolves
-     * the slot to an endpoint that is not @p peer's) evicts @p peer's name only: the anchor
-     * and the cached token are keyed by slot and belong to the successor by then.
+     * A departure that lands after a successor anchored the slot (the tenancy word holds
+     * another session's handle, #2234) evicts @p peer's name only: the anchor and the cached token
+     * are keyed by slot and belong to the successor by then, pending authentication or not.
      *
      * @p handle is the departing peer's, and it is what the per-peer LINK-TOKEN cache is
      * keyed by (#1417): the eviction below releases the graph's index slot, so the cached
@@ -1755,6 +1792,23 @@ class fwd_router_t {
      * refusing the stale stamp.
      */
     void bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle, std::string_view peer);
+
+    /** @brief The session holding @p slot of @p ctx's mount (#2234); invalid when none does.
+     *         Lock-free: one acquire load of the table and one of the word. */
+    [[nodiscard]] static peer_handle_t session_tenant(const child_rx_ctx_t& ctx,
+                                                      std::uint32_t slot) noexcept;
+    /**
+     * @brief The session holding @p anchor, the anchor of the slot session name @p name
+     *        spells on @p ctx's mount, provided the anchor is still at @p generation (#2234);
+     *        invalid otherwise. The route to an anchor and the reverse mint both ask this.
+     */
+    [[nodiscard]] peer_handle_t anchor_tenant(const child_rx_ctx_t* ctx, std::string_view name,
+                                              graph::vertex_handle_t anchor,
+                                              std::uint32_t generation) const noexcept;
+    /** @brief Store @p bits as @p slot's tenancy word, growing the table to cover it;
+     *         `false` when the link plane refuses the block. Caller holds `tenancy_m_`. */
+    [[nodiscard]] bool set_session_tenant_locked(const child_rx_ctx_t& ctx, std::uint32_t slot,
+                                                 std::uint64_t bits);
     /**
      * @brief The receiver ctx @p name is to be registered through — reuse-or-append (#884).
      *
@@ -2006,6 +2060,15 @@ class fwd_router_t {
      * @{
      */
     mutable std::mutex origin_m_;
+    /**
+     * @brief Serializes the session-slot transitions: an arrival's store and anchor revival,
+     *        a departure's compare, retire and clear, and a tenancy table's growth (#2234).
+     *
+     * Held across the anchor's retire or registration so a departure that read its own
+     * handle cannot retire an anchor a successor has just revived. Cold: only the arrival and
+     * departure seams take it, never a frame. Lock order: this → `graph_t::map_mutex_`.
+     */
+    std::mutex tenancy_m_;
     std::atomic<origin_t*> origins_{nullptr};
     std::atomic<std::uint32_t> origin_seq_{0};
     /** @} */

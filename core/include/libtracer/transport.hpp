@@ -150,20 +150,6 @@ class bus_link_t {
     [[nodiscard]] virtual transport_t* peer_link(std::string_view peer) = 0;
 
     /**
-     * @brief The endpoint of whichever session currently holds @p slot — a session name's
-     *        SLOT part (`%net::session_slot_of`), with no tenancy generation.
-     *
-     * What a session ANCHOR egresses through: the anchor is keyed by slot (so their count
-     * is the slot count, ADR-0044 amendment) and its own generation has already refused a
-     * departed session at the deref, so this answers only "who is in the slot now". A NAME
-     * hop never comes here; it goes through @ref peer_link, which refuses a stale or
-     * generation-less name. The default is @ref peer_link itself, right for every kind
-     * whose names carry no generation (`n<node>`).
-     * @retval nullptr no live session holds @p slot.
-     */
-    [[nodiscard]] virtual transport_t* slot_link(std::string_view slot) { return peer_link(slot); }
-
-    /**
      * @brief Resolve a peer HANDLE to a directed sending endpoint on this bus — the
      *        @ref peer_link a remote subscriber's delivery asks, with the name taken out
      *        (#1941).

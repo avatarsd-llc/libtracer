@@ -26,6 +26,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -158,6 +159,28 @@ inline constexpr char kTenancySeparator = '~';
  */
 [[nodiscard]] constexpr std::string_view session_slot_of(std::string_view name) noexcept {
     return name.substr(0, name.find(kTenancySeparator));
+}
+
+/**
+ * @brief The slot index session name @p name spells, `p<slot>` with or without its `~<gen>`:
+ *        the inverse of the one spelling both slot servers write (`slot_server_t` and the
+ *        ESP httpd link); nullopt for any other name (`n<node>`, a registered name).
+ *
+ * How the router finds a slot's tenancy word from an anchor keyed by its slot name (#2234).
+ * Leading zeros and values past `u32` are refused rather than folded: no speller writes them.
+ */
+[[nodiscard]] constexpr std::optional<std::uint32_t> session_slot_index(
+    std::string_view name) noexcept {
+    name = session_slot_of(name);
+    if (name.size() < 2 || name.front() != 'p' || (name.size() > 2 && name[1] == '0'))
+        return std::nullopt;
+    std::uint64_t slot = 0;
+    for (const char c : name.substr(1)) {
+        if (c < '0' || c > '9') return std::nullopt;
+        slot = slot * 10 + static_cast<std::uint64_t>(c - '0');
+        if (slot > 0xFFFF'FFFFu) return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(slot);
 }
 
 }  // namespace tr::net

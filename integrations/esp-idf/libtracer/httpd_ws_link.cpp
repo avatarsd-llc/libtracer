@@ -4664,17 +4664,8 @@ void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) co
 }
 
 transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
-    return open_resolution(peer, [](std::string_view name) { return name; });
-}
-
-transport_t* httpd_ws_link_t::slot_link(std::string_view slot) {
-    return open_resolution(slot, session_slot_of);
-}
-
-template <class Key>
-transport_t* httpd_ws_link_t::open_resolution(std::string_view want, Key key) {
     const std::lock_guard lock(peers_m_);
-    // The exact compare IS the tenancy check for peer_link: a name carrying a departed
+    // The exact compare IS the tenancy check: a name carrying a departed
     // session's generation, or none at all, equals no live slot's name and is refused.
     // `!dead` for the reason on enumerate_peers (#963): the endpoint this used to hand
     // out for a condemned slot was a guaranteed no-op, so a router lookup succeeded and
@@ -4684,7 +4675,7 @@ transport_t* httpd_ws_link_t::open_resolution(std::string_view want, Key key) {
     // plane a working endpoint for a peer that has presented nothing, which is the whole
     // gate defeated by one lookup — a directed FWD reply does not consult the census.
     for (session_t* const s : slots_)
-        if (s->open && !s->dead && !s->auth_pending && key(s->name.view()) == want)
+        if (s->open && !s->dead && !s->auth_pending && s->name.view() == peer)
             return acquire_resolution(s);
     return nullptr;
 }
