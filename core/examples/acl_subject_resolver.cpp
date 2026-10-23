@@ -57,13 +57,6 @@ void check(bool& ok, bool cond, const char* what) {
     ok = ok && cond;
 }
 
-/** @brief @p s as opaque token bytes. */
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief The resolver's own state — caller-owned, and the reason `ctx` exists. */
 struct link_directory_t {
     /** @brief How many times the gate invoked the resolver — the empty caller never does. */
@@ -95,7 +88,8 @@ std::expected<void, tr::wire::err_t> resolve_link_owner(void* ctx, std::string_v
 
 /** @brief One ALLOW ACE granting @p subject exactly @p right, as a writable `:acl` value. */
 tr::view::view_t one_grant(std::string_view subject, acl_right_t right) {
-    const ace_t ace{.subject = as_bytes(subject), .access_mask = static_cast<std::uint32_t>(right)};
+    const ace_t ace{.subject = tr::graph::subject_of(subject),
+                    .access_mask = static_cast<std::uint32_t>(right)};
     const std::vector<std::byte> acl = tr::graph::encode_acl(std::span<const ace_t>(&ace, 1));
     return *tr::view::over_bytes(acl);
 }

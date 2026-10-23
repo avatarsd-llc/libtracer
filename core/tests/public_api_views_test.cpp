@@ -213,10 +213,10 @@ void test_acl_and_spec() {
     std::printf("encode_acl / parse_acl / conn_spec into core containers:\n");
     using tr::graph::ace_t;
     std::vector<ace_t> aces(2);
-    aces[0].subject.assign(bytes_of("peer-a").begin(), bytes_of("peer-a").end());
+    aces[0].subject = tr::graph::subject_of("peer-a");
     aces[0].access_mask = 0x03;
     aces[0].flags = tr::graph::kAceInherit;
-    aces[1].subject.assign(bytes_of("EVERYONE@").begin(), bytes_of("EVERYONE@").end());
+    aces[1].subject = tr::graph::subject_of("EVERYONE@");
     aces[1].access_mask = 0x01;
     aces[1].expires_ns = 99;
     const std::vector<std::byte> v = tr::graph::encode_acl(aces);
@@ -227,16 +227,18 @@ void test_acl_and_spec() {
 
     const auto node = wire::tlv_node_t::over(std::span<const std::byte>(v));
     check(node.has_value(), "the encoded ACL validates");
-    const auto parsed = tr::graph::parse_acl(*node);
     mem::block_array_t<ace_t> table(mem::heap_source());
-    check(parsed && tr::graph::parse_acl(*node, table).has_value() && table.size() == 2,
+    check(tr::graph::parse_acl(*node, table).has_value() && table.size() == 2,
           "parse_acl into a core array accepted both ACEs");
-    bool eq = parsed && parsed->size() == table.size();
+    bool eq = table.size() == aces.size();
     for (std::size_t i = 0; eq && i < table.size(); ++i)
-        eq = (*parsed)[i].subject == table[i].subject &&
-             (*parsed)[i].access_mask == table[i].access_mask &&
-             (*parsed)[i].expires_ns == table[i].expires_ns && (*parsed)[i].flags == table[i].flags;
-    check(eq, "…and holds what the vector form parses");
+        eq = std::ranges::equal(aces[i].subject, table[i].subject) &&
+             aces[i].access_mask == table[i].access_mask &&
+             aces[i].expires_ns == table[i].expires_ns && aces[i].flags == table[i].flags;
+    check(eq, "…and holds what was encoded");
+    const auto* const lo = v.data();
+    check(eq && table[0].subject.data() > lo && table[1].subject.data() < lo + v.size(),
+          "…with each subject a view into the parsed value, copied nowhere (#2287)");
     mem::block_array_t<ace_t> refused(mem::null_source());
     const auto r = tr::graph::parse_acl(*node, refused);
     check(!r && r.error() == tr::graph::status_t::BACKPRESSURE && refused.empty(),
@@ -314,9 +316,9 @@ void test_subject_lookup() {
     const std::string_view long_name =
         "a-very-long-subject-name-that-does-not-fit-the-gate-stack-frame-of-64-bytes";
     std::vector<tr::graph::ace_t> aces(2);
-    aces[0].subject.assign(bytes_of("peer-a").begin(), bytes_of("peer-a").end());
+    aces[0].subject = tr::graph::subject_of("peer-a");
     aces[0].access_mask = static_cast<std::uint32_t>(acl_right_t::READ);
-    aces[1].subject.assign(bytes_of(long_name).begin(), bytes_of(long_name).end());
+    aces[1].subject = tr::graph::subject_of(long_name);
     aces[1].access_mask = static_cast<std::uint32_t>(acl_right_t::READ);
     const std::vector<std::byte> acl = tr::graph::encode_acl(aces);
 

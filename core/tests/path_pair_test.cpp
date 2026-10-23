@@ -155,7 +155,7 @@ bytes_t allow_acl(std::string_view subject, std::uint32_t mask) {
     const tr::graph::ace_t ace{
         .type = tr::graph::ace_type_t::ALLOW,
         .flags = 0,
-        .subject = bytes_t(p, p + subject.size()),
+        .subject = std::span<const std::byte>(p, subject.size()),
         .access_mask = mask,
         .expires_ns = 0,
     };

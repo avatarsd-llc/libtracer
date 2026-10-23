@@ -85,7 +85,7 @@ std::vector<std::byte> acl_granting(std::string_view subject, std::uint32_t mask
     std::vector<ace_t> a;
     a.push_back(ace_t{.type = ace_type_t::ALLOW,
                       .flags = flags,
-                      .subject = as_bytes(subject),
+                      .subject = tr::graph::subject_of(subject),
                       .access_mask = mask});
     return tr::graph::encode_acl(a);
 }

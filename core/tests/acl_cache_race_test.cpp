@@ -63,6 +63,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -221,7 +222,7 @@ void spin(std::uint32_t n) {
 ace_t grant(std::string_view subject, acl_right_t right, bool inherit) {
     return ace_t{.type = ace_type_t::ALLOW,
                  .flags = inherit ? tr::graph::kAceInherit : std::uint8_t{0},
-                 .subject = as_bytes(subject),
+                 .subject = tr::graph::subject_of(subject),
                  .access_mask = static_cast<std::uint32_t>(right),
                  .expires_ns = 0};
 }
@@ -242,12 +243,14 @@ std::string chain_path(std::size_t depth) {
 
 /** @brief @ref kFillerAces inheritable ACEs naming subjects no caller ever presents. */
 std::vector<std::byte> filler_acl(std::size_t level) {
+    // An ACE views its subject (#2287), so the names outlive the ACEs until they are encoded.
+    std::array<std::array<char, 24>, kFillerAces> names{};
     std::vector<ace_t> aces;
     aces.reserve(kFillerAces);
     for (std::size_t i = 0; i < kFillerAces; ++i) {
-        char subject[24] = {};
-        std::snprintf(subject, sizeof(subject), "filler-%zu-%02zu", level, i);
-        aces.push_back(grant(subject, acl_right_t::READ, true));
+        const int n = std::snprintf(names[i].data(), names[i].size(), "filler-%zu-%02zu", level, i);
+        aces.push_back(grant(std::string_view(names[i].data(), static_cast<std::size_t>(n)),
+                             acl_right_t::READ, true));
     }
     return tr::graph::encode_acl(aces);
 }
@@ -301,9 +304,11 @@ calibration_t calibrate(graph_t& g, vertex_handle_t bearer, std::string_view rew
                              std::max<std::int64_t>(1, (cycle_ns * kSpinCalibration) / spin_ns))};
 }
 
-/** @brief The subject the first ACE of @p merged names, or empty when there is none. */
-std::vector<std::byte> merged_subject(const std::vector<ace_t>& merged) {
-    return merged.empty() ? std::vector<std::byte>{} : merged.front().subject;
+/** @brief The subject the LAST ACE of @p merged names (the one the rebuild appended after the
+ *         bearer's own), or empty when there is none. */
+std::vector<std::byte> merged_subject(std::span<const ace_t> merged) {
+    if (merged.empty()) return {};
+    return {merged.back().subject.begin(), merged.back().subject.end()};
 }
 
 /**
@@ -332,7 +337,8 @@ void test_mark_inside_rebuild_defeats_the_publish() {
     vertex_t v{role_t::STORED_VALUE, path_key_t{as_bytes("bearer")}, {}};
     // Allocates the extension block and leaves the counter ODD, so the next gated evaluation
     // rebuilds — the state a first-ever `acl_allows` on a freshly written vertex is in.
-    (void)v.set_acl({grant(kKeeper, acl_right_t::WRITE, false)}, tr::mem::table_source());
+    const ace_t keeper[] = {grant(kKeeper, acl_right_t::WRITE, false)};
+    (void)v.set_acl(keeper, tr::mem::table_source());
 
     const std::vector<ace_t> pre_mark = {grant(kOther, acl_right_t::READ, true)};
     const std::vector<ace_t> post_mark = {grant(kProbe, acl_right_t::READ, true)};
@@ -341,15 +347,16 @@ void test_mark_inside_rebuild_defeats_the_publish() {
     int rebuilds_at_mark = 0;
     std::vector<std::byte> published;
     (void)v.with_effective_aces(
-        [&](const std::vector<ace_t>&) {
-            if (rebuilds++ != 0) return post_mark;
+        tr::mem::table_source(),
+        [&](tr::graph::ace_table_t& merged) {
+            if (rebuilds++ != 0) return merged.append(post_mark);
             // The ancestor ACEs this walk read are now one `:acl` write out of date, and the
             // mark that write fans out lands HERE — after the read, before the publish.
             rebuilds_at_mark = rebuilds;
             v.mark_acl_cache_dirty();
-            return pre_mark;
+            return merged.append(pre_mark);
         },
-        [&](const std::vector<ace_t>& merged) {
+        [&](std::span<const ace_t> merged) {
             published = merged_subject(merged);
             return 0;
         });
@@ -364,11 +371,12 @@ void test_mark_inside_rebuild_defeats_the_publish() {
     std::vector<std::byte> served;
     int later_rebuilds = 0;
     (void)v.with_effective_aces(
-        [&](const std::vector<ace_t>&) {
+        tr::mem::table_source(),
+        [&](tr::graph::ace_table_t& merged) {
             ++later_rebuilds;
-            return post_mark;
+            return merged.append(post_mark);
         },
-        [&](const std::vector<ace_t>& merged) {
+        [&](std::span<const ace_t> merged) {
             served = merged_subject(merged);
             return 0;
         });

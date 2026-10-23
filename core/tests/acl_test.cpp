@@ -116,7 +116,7 @@ std::vector<std::byte> make_acl(std::initializer_list<ace_spec_t> aces) {
     for (const ace_spec_t& a : aces) {
         typed.push_back(tr::graph::ace_t{.type = static_cast<tr::graph::ace_type_t>(a.type),
                                          .flags = a.flags,
-                                         .subject = as_bytes(a.subject),
+                                         .subject = tr::graph::subject_of(a.subject),
                                          .access_mask = a.mask,
                                          .expires_ns = a.expires_ns});
     }
@@ -408,8 +408,9 @@ void test_outer_acl_shape() {
         bool reparses = false;
         if (back) {
             if (const auto dec = tr::wire::tlv_node_t::over(*back); dec) {
-                const auto aces = tr::graph::parse_acl(*dec);
-                reparses = aces && aces->size() == 1 && (*aces)[0].access_mask == mask;
+                tr::mem::block_array_t<tr::graph::ace_t> aces(tr::mem::heap_source());
+                reparses = tr::graph::parse_acl(*dec, aces).has_value() && aces.size() == 1 &&
+                           aces[0].access_mask == mask;
             }
         }
         check(reparses, "…and re-parsing it yields exactly the ACE list evaluation walks");

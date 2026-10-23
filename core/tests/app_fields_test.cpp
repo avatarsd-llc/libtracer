@@ -116,7 +116,7 @@ constexpr std::uint32_t bit(acl_right_t r) { return static_cast<std::uint32_t>(r
 /** @brief An ALLOW ACE list granting @p mask to @p subject, encoded as `:acl` bytes. */
 std::vector<std::byte> allow_acl(std::string_view subject, std::uint32_t mask) {
     const std::vector<tr::graph::ace_t> aces{
-        tr::graph::ace_t{.subject = as_bytes(subject), .access_mask = mask}};
+        tr::graph::ace_t{.subject = tr::graph::subject_of(subject), .access_mask = mask}};
     return tr::graph::encode_acl(aces);
 }
 

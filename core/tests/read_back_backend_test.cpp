@@ -214,13 +214,6 @@ void pin_op_family(std::string_view what, std::size_t width, setup_t setup, op_t
     }
 }
 
-/** @brief A string's bytes as an ACL subject token. */
-std::vector<std::byte> subject_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief The record count a field or listing read answers (a `value_ref_t`, RFC-0028 D11),
  *         or the status it failed with. */
 result_t<std::size_t> record_width(result_t<tr::graph::value_ref_t> r) {
@@ -327,7 +320,7 @@ int main() {
             const vertex_handle_t v = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
             std::vector<ace_t> aces;
             ace_t grant;
-            grant.subject = subject_bytes("EVERYONE@");
+            grant.subject = tr::graph::subject_of("EVERYONE@");
             grant.access_mask = static_cast<std::uint32_t>(acl_right_t::READ) |
                                 static_cast<std::uint32_t>(acl_right_t::WRITE);
             aces.push_back(std::move(grant));
