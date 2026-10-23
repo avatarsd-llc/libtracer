@@ -359,6 +359,7 @@ void test_tx_bytes_counts_payload() {
     {
         tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
                                            {.rx_bytes = kBufBytes, .tx_bytes = 512});
+        link.start_receiving();
         check(wait_until([&] { return link.link_up(); }, 2s), "the link came up");
         const std::vector<std::byte> small(10, std::byte{0x33});  // 7-bit length, 6 B header
         const std::vector<std::byte> mid(300, std::byte{0x44});   // 16-bit length, 8 B header

@@ -882,6 +882,7 @@ void test_one_send_costs_one_write_and_one_mask_pass() {
         auto link = tr::mem::make_poly<esp_ws_client_link_t>(
             tr::mem::net_source(), "127.0.0.1", 8080,
             tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = len});
+        link->start_receiving();
         check(wait_until([&] { return link->link_up(); }, 2s), "the link came up");
         std::vector<std::byte> frame(len);
         for (std::size_t i = 0; i < len; ++i) frame[i] = static_cast<std::byte>(i * 7 + 3);
@@ -948,6 +949,7 @@ tr::mem::poly_ptr_t<esp_ws_client_link_t> up_link(std::size_t rx_bytes) {
     auto link = tr::mem::make_poly<esp_ws_client_link_t>(
         tr::mem::net_source(), "127.0.0.1", 8080,
         tr::net::esp_ws_client_config_t{.rx_bytes = rx_bytes, .tx_bytes = kBufBytes});
+    link->start_receiving();
     check(wait_until([&] { return link->link_up(); }, 2s), "the link came up");
     return link;
 }
