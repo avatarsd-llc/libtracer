@@ -125,14 +125,14 @@ void run_arm(const char* name) {
  *        its slot entries and its poll entry. Frame ingress put the session 16 B over the
  *        stream-buffer design it replaced; the egress slot, net of the per-session write
  *        state it retired, adds 16 B more; the liveness record (#2198) 8 B more (its three
- *        progress flags sit in padding).
+ *        progress flags sit in padding); the broadcast's lock-free slot chain (#2263) 8 B more.
  *
  * The session's `peer_endpoint_t` is a `transport_t`, whose receiver slot holds a
- * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 728 B plus that
- * mutex, exact on each target: 768 B on x86_64, 776 B on aarch64. Every other byte is
+ * `std::mutex`: 40 B on x86_64 glibc, 48 B on aarch64 glibc. So the pin is 736 B plus that
+ * mutex, exact on each target: 776 B on x86_64, 784 B on aarch64. Every other byte is
  * pointers, sizes and block counts, the same on any 64-bit target.
  */
-constexpr std::size_t kWsPeerBytes64 = 728 + sizeof(std::mutex);
+constexpr std::size_t kWsPeerBytes64 = 736 + sizeof(std::mutex);
 
 /** @brief A receive backend over the platform heap that adds to @p src's live balance. */
 class counting_rx_t final : public tr::mem::mem_backend_t {
