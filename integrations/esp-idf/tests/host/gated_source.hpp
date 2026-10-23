@@ -31,7 +31,13 @@ class gated_source_t final : public tr::mem::block_source_t {
             return nullptr;
         }
         void* const p = tr::mem::heap_source().try_alloc(bytes, align);
-        if (p != nullptr) live.fetch_add(1, std::memory_order_acq_rel);
+        if (p != nullptr) {
+            live.fetch_add(1, std::memory_order_acq_rel);
+            served.fetch_add(1, std::memory_order_relaxed);
+            std::size_t had = largest.load(std::memory_order_relaxed);
+            while (bytes > had && !largest.compare_exchange_weak(had, bytes)) {
+            }
+        }
         return p;
     }
     /** @brief Return a block to the heap. */
@@ -46,4 +52,6 @@ class gated_source_t final : public tr::mem::block_source_t {
     std::atomic<bool> refusing{false};   /**< @brief Refuse every draw while set. */
     std::atomic<std::size_t> refused{0}; /**< @brief Draws refused so far. */
     std::atomic<std::ptrdiff_t> live{0}; /**< @brief Blocks served and not yet returned. */
+    std::atomic<std::size_t> served{0};  /**< @brief Draws served so far. */
+    std::atomic<std::size_t> largest{0}; /**< @brief The largest block served, bytes. */
 };

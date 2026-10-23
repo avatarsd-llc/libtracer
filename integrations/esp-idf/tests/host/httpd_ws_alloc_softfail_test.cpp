@@ -21,6 +21,11 @@
  * Each case then lifts the refusal and shows the same site serving again, so a refusal is
  * never a latched failure. A sixth case checks the stores balance: everything the link drew
  * from them is returned by its destructor.
+ *
+ * Three cases pin the reassembly buffer's growth, counted at the same store: a message cut
+ * into 1-byte fragments doubles its buffer rather than regrowing per fragment, the doubling
+ * stops at the 32 KiB cap, and each fragment is charged a frame header against that cap, so
+ * a run of empty fragments is refused like an oversized message.
  */
 
 #include <cstddef>
@@ -138,6 +143,86 @@ void test_reassembly_refusal_drops_the_message() {
     reset(link);
 }
 
+/** @brief A peer receiver that keeps the last message it was handed. */
+struct last_message_t {
+    int calls = 0;
+    std::vector<std::byte> bytes;
+    void operator()(tr::net::peer_handle_t, std::span<const std::byte> m) {
+        ++calls;
+        bytes.assign(m.begin(), m.end());
+    }
+};
+
+void test_tiny_fragments_regrow_geometrically() {
+    std::printf("a message cut into 1-byte fragments regrows its buffer O(log n) times:\n");
+    gated_source_t state;
+    auto link = make_link(&state, nullptr);
+    check(claim(860) == ESP_OK, "the peer is admitted");
+    last_message_t sink;
+    link->set_peer_receiver(sink);
+
+    constexpr int kFragments = 1000;
+    std::vector<std::byte> want;
+    const std::size_t draws_before = state.served;
+    for (int i = 0; i < kFragments; ++i) {
+        const std::byte b[] = {static_cast<std::byte>(i)};
+        want.push_back(b[0]);
+        (void)fake_httpd::instance().deliver_frame(
+            860, b, /*final=*/i == kFragments - 1,
+            i == 0 ? HTTPD_WS_TYPE_BINARY : HTTPD_WS_TYPE_CONTINUE);
+    }
+    const std::size_t draws = state.served - draws_before;
+    check(sink.calls == 1 && sink.bytes == want, "the message arrives whole and in order");
+    std::printf("    %zu draws for %d fragments\n", draws, kFragments);
+    check(draws <= 8, "the buffer doubled from 8 bytes: 8 draws for 1000 bytes");
+    reset(link);
+}
+
+void test_reassembly_block_stays_under_the_cap() {
+    std::printf("the doubling stops at the reassembly cap:\n");
+    gated_source_t state;
+    auto link = make_link(&state, nullptr);
+    check(claim(870) == ESP_OK, "the peer is admitted");
+    last_message_t sink;
+    link->set_peer_receiver(sink);
+
+    const std::vector<std::byte> head(20000, std::byte{0x5A});
+    const std::byte tail[] = {std::byte{1}, std::byte{2}};
+    (void)fake_httpd::instance().deliver_frame(870, head, /*final=*/false);
+    (void)fake_httpd::instance().deliver_frame(870, tail, /*final=*/true, HTTPD_WS_TYPE_CONTINUE);
+    check(sink.calls == 1 && sink.bytes.size() == head.size() + 2, "the message arrives");
+    check(state.largest <= 32768, "no block past the 32 KiB cap was drawn for it");
+    reset(link);
+}
+
+void test_fragments_are_charged_to_the_cap() {
+    std::printf("each fragment is charged a frame header against the reassembly cap:\n");
+    gated_source_t state;
+    auto link = make_link(&state, nullptr);
+    check(claim(880) == ESP_OK, "the peer is admitted");
+    last_message_t sink;
+    link->set_peer_receiver(sink);
+    const std::uint32_t drops_before = session_rx_drops(*link);
+
+    // 20000 empty fragments carry no bytes but 40000 bytes of headers, past the 32 KiB cap.
+    const std::byte first[] = {std::byte{0x01}};
+    (void)fake_httpd::instance().deliver_frame(880, first, /*final=*/false);
+    for (int i = 0; i < 20000; ++i)
+        (void)fake_httpd::instance().deliver_frame(880, {}, /*final=*/false,
+                                                   HTTPD_WS_TYPE_CONTINUE);
+    (void)fake_httpd::instance().deliver_frame(880, first, /*final=*/true, HTTPD_WS_TYPE_CONTINUE);
+    check(sink.calls == 0, "the message is refused at the charged cap, not delivered");
+    check(session_rx_drops(*link) == drops_before + 1, "the drop is charged to the session");
+    check(open_peers(*link) == 1, "and the session stays open");
+
+    check(fake_httpd::instance().deliver_frame(880, kBody, /*final=*/false) == ESP_OK &&
+              fake_httpd::instance().deliver_frame(880, kBody, /*final=*/true,
+                                                   HTTPD_WS_TYPE_CONTINUE) == ESP_OK,
+          "the next fragmented message is served");
+    check(sink.calls == 1 && sink.bytes.size() == 2 * sizeof(kBody), "and delivered whole");
+    reset(link);
+}
+
 void test_receive_buffer_refusal_is_rx_dropped_alloc() {
     std::printf("#1880 a refused receive buffer past the scratch is rx_dropped_alloc:\n");
     gated_source_t state;
@@ -231,6 +316,9 @@ int main() {
     std::printf("httpd_ws_link allocation-seam soft-fail host suite (#1880):\n");
     test_session_table_refusal_sheds_the_new_peer();
     test_reassembly_refusal_drops_the_message();
+    test_tiny_fragments_regrow_geometrically();
+    test_reassembly_block_stays_under_the_cap();
+    test_fragments_are_charged_to_the_cap();
     test_receive_buffer_refusal_is_rx_dropped_alloc();
     test_resolution_refusal_is_no_such_peer();
     test_tx_payload_refusal_is_an_enqueue_drop();

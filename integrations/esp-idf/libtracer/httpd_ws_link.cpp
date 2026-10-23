@@ -744,29 +744,44 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
 }
 
 /**
- * @brief Failable fragment-reassembly buffer: grows by exact-size reallocation from the
- *        link's `memory.state` (#1880), so a refusal drops the in-flight message instead of
+ * @brief Failable fragment-reassembly buffer: grows geometrically from the link's
+ *        `memory.state` (#1880), so a refusal drops the in-flight message instead of
  *        aborting the node.
  *
  * `std::vector` is unusable here: under `-fno-exceptions` its throwing allocator
  * turns a failed growth into `abort()` via the bad_alloc stub — and the appended
  * chunk is peer-controlled up to kMaxFrameBytes, so reassembly growth MUST be
- * failure-capable (the same backpressure contract as the tx queue). Fragmentation
- * is the rare path (the SPA sends one whole TLV per unfragmented frame) and the
- * total is capped by kMaxFrameBytes, so exact-size regrow-and-copy is the lean
- * choice over capacity doubling.
+ * failure-capable (the same backpressure contract as the tx queue).
+ *
+ * The work per message is linear in its bytes. The block doubles from 8 bytes, clamped at
+ * kMaxFrameBytes, so a message of n bytes regrows O(log n) times and copies under 2n
+ * bytes however it is cut, and never holds a block past the cap. Each fragment is
+ * charged its bytes plus
+ * @ref kFragmentHeaderBytes against kMaxFrameBytes, so the cap bounds the fragment count
+ * as well as the bytes: an empty CONTINUE costs what its header cost on the wire.
  */
 struct asm_buf_t {
+    /** @brief The smallest RFC 6455 frame header (§5.2): what one fragment costs on the wire
+     *         before any payload, charged with it against kMaxFrameBytes. */
+    static constexpr std::size_t kFragmentHeaderBytes = 2;
+
     /** @brief An empty buffer that will draw its storage from @p src (`memory.state`). */
     explicit asm_buf_t(mem::block_source_t& src) noexcept : bytes_(src) {}
     /** @brief True when no reassembly is in progress. */
-    [[nodiscard]] bool empty() const noexcept { return bytes_.empty(); }
-    /** @brief Assembled length so far, bytes. */
-    [[nodiscard]] std::size_t size() const noexcept { return bytes_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return charged_ == 0; }
+    /** @brief What the message has been charged so far: its bytes plus a header per fragment. */
+    [[nodiscard]] std::size_t charged() const noexcept { return charged_; }
+    /** @brief Whether a fragment of @p chunk bytes would take the charge past kMaxFrameBytes. */
+    [[nodiscard]] bool over_cap(std::size_t chunk) const noexcept {
+        return charged_ + chunk + kFragmentHeaderBytes > kMaxFrameBytes;
+    }
     /** @brief The assembled bytes so far (valid until the next append/clear). */
     [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return mem::as_span(bytes_); }
     /** @brief Release the storage (post-deliver / slot-reclaim / drop reset). */
-    void clear() noexcept { bytes_ = mem::bytes_t(bytes_.source()); }
+    void clear() noexcept {
+        bytes_ = mem::bytes_t(bytes_.source());
+        charged_ = 0;
+    }
     /**
      * @brief Move the assembled message OUT, leaving this buffer empty.
      *
@@ -779,21 +794,30 @@ struct asm_buf_t {
     [[nodiscard]] asm_buf_t take() noexcept {
         asm_buf_t out(bytes_.source());
         out.bytes_ = std::move(bytes_);
+        out.charged_ = std::exchange(charged_, 0);
         return out;
     }
     /**
-     * @brief Append @p chunk, nothrow.
+     * @brief Append @p chunk and charge it, nothrow. Precondition: `!over_cap(chunk.size())`.
      * @retval false The store refused — the buffer is cleared (the partial message is
      *               unrecoverable) and the caller drops the message (backpressure).
      */
     [[nodiscard]] bool append(std::span<const std::byte> chunk) noexcept {
-        if (bytes_.append(chunk.data(), chunk.size())) return true;
-        clear();
-        return false;
+        const std::size_t want = bytes_.size() + chunk.size();
+        const std::size_t doubled = std::max({want, std::size_t{8}, 2 * bytes_.capacity()});
+        const bool room =
+            want <= bytes_.capacity() || bytes_.reserve(std::min(doubled, kMaxFrameBytes));
+        if (!room || !bytes_.append(chunk.data(), chunk.size())) {
+            clear();
+            return false;
+        }
+        charged_ += chunk.size() + kFragmentHeaderBytes;
+        return true;
     }
 
    private:
-    mem::bytes_t bytes_; /**< @brief Owned storage, grown to fit exactly. */
+    mem::bytes_t bytes_;      /**< @brief Owned storage, doubled up to kMaxFrameBytes. */
+    std::size_t charged_ = 0; /**< @brief Bytes plus a header per fragment, against the cap. */
 };
 
 }  // namespace
@@ -2772,13 +2796,12 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         return ESP_OK;  // stray CONTINUE with no assembly open — drop
     if (frame.type == HTTPD_WS_TYPE_BINARY)
         slot->asm_buf.clear();  // a BINARY mid-assembly discards the stale partial
-    if (slot->asm_buf.size() + body.size() > kMaxFrameBytes) {
+    if (slot->asm_buf.over_cap(body.size())) {
+        // The peer counter has this; the log is the way to see it without polling (#953),
+        // at the level of its sibling alloc failure just below.
+        note_reassembly_over_cap(slot->asm_buf.charged(), body.size());
         slot->asm_buf.clear();
         note_rx_drop(slot);
-        // The peer counter above already had this; what was missing is any way to see it
-        // without polling (#953). Logged at the same level as its sibling alloc failure
-        // just below, which was the only one of the two that ever said anything.
-        note_reassembly_over_cap(slot->asm_buf.size(), body.size());
         return ESP_OK;  // reassembly would exceed the cap — drop the message
     }
     if (!slot->asm_buf.append(body)) {
@@ -2803,7 +2826,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             // built fragment by fragment in `asm_buf` before its total size was known — so
             // the owning mode pays ONE copy into a pool segment here. That is the price of
             // not starving a rope sink of the one message shape this link cannot hand it
-            // directly, on a path that is already quadratic in its fragment count.
+            // directly.
             deliver_owned_copy(handle, message.bytes());
         else
             deliver(handle, message.bytes());
@@ -3327,8 +3350,8 @@ void httpd_ws_link_t::note_rx_drop(session_t* slot) {
  *         `noinline` for the reason on @ref note_rx_oversize. */
 [[gnu::noinline]] void httpd_ws_link_t::note_reassembly_over_cap(std::size_t had,
                                                                  std::size_t adding) {
-    ESP_LOGW(kTag, "reassembly over the cap (%u + %u > %u) - message dropped", (unsigned)had,
-             (unsigned)adding, (unsigned)kMaxFrameBytes);
+    ESP_LOGW(kTag, "reassembly over the cap (%u charged + %u > %u) - message dropped",
+             (unsigned)had, (unsigned)adding, (unsigned)kMaxFrameBytes);
 }
 
 void httpd_ws_link_t::deliver(peer_handle_t peer, std::span<const std::byte> frame) {

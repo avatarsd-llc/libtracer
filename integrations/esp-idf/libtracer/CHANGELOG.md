@@ -35,6 +35,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   module's `conn` endpoint already does this. A link that is never armed never dials and holds
   no recv thread.
 
+### Fixed
+
+- **`httpd_ws_link_t` grows its reassembly buffer geometrically and charges each fragment to
+  the reassembly cap.** The buffer doubles from 8 bytes up to the 32 KiB cap and never draws
+  a block past it, so a message cut into many small fragments costs O(log n) regrows rather
+  than a block sized past the cap. Each fragment is now charged its payload plus a 2-byte
+  frame header against the cap, so a run of empty fragments is dropped like an oversized
+  message, counted in the session's `rx_drops`. A fragmented message now carries a little
+  less than 32 KiB of payload: 2 bytes per fragment go to the charge.
+
 ## [0.21.0] — 2026-10-22
 
 ### Fixed
