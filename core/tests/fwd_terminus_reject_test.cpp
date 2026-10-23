@@ -223,11 +223,10 @@ int main() {
 
         std::vector<std::byte> escaped;
         (void)tr::wire::emit_path_segment(escaped, "sensor");
-        const std::array<std::byte, 4> label{std::byte{1}, std::byte{0}, std::byte{2},
-                                             std::byte{0}};
-        append_path_escape(escaped, tr::wire::kPackedEscapeKindLabel, label);
-        const std::vector<std::byte> label_path = b_path_body(escaped);
-        check(answered_error(resolve_bytes(r, b_fwd(fwd_op_t::READ, label_path, b_path({"back"}))),
+        const std::array<std::byte, 4> four{std::byte{1}, std::byte{0}, std::byte{2}, std::byte{0}};
+        append_path_escape(escaped, tr::wire::kPackedEscapeKindPair, four);
+        const std::vector<std::byte> esc_path = b_path_body(escaped);
+        check(answered_error(resolve_bytes(r, b_fwd(fwd_op_t::READ, esc_path, b_path({"back"}))),
                              0x0021),
               "a dst PATH carrying the len==0 escape is ANSWERED tr::path::invalid in key "
               "context (RFC-0018 §5.4)");

@@ -279,14 +279,14 @@ bool only_moved(const router_stats_t& a, const router_stats_t& b, std::size_t ro
 void test_seam_accessors_report_the_injected_objects() {
     std::printf("the four injected seams are reachable, and are the objects passed in:\n");
     graph_t g;
-    arming_source_t label_src;
+    arming_source_t link_src;
     arming_source_t rx_src;
     arming_backend_t flat;
     arming_backend_t egress;
     fwd_router_t router(g,
-                        {.label_src = &label_src, .rx = &rx_src, .flat = &flat, .egress = &egress});
+                        {.link_src = &link_src, .rx = &rx_src, .flat = &flat, .egress = &egress});
 
-    check(&router.label_source() == &label_src, "label_source() is the injected label source");
+    check(&router.link_source() == &link_src, "link_source() is the injected link source");
     check(&router.rx_source() == &rx_src, "rx_source() is the injected rx source");
     check(&router.flatten_backend() == &flat, "flatten_backend() is the injected flatten seam");
     check(&router.egress_backend() == &egress, "egress_backend() is the injected egress seam");
@@ -294,9 +294,8 @@ void test_seam_accessors_report_the_injected_objects() {
     // And the DEFAULTED router names the process-wide net sub-pool rather than nothing (#1777,
     // ADR-0083 Q21): a host that injected none of them can still poll all four.
     fwd_router_t plain(g);
-    check(&plain.label_source() == &tr::mem::net_source(),
-          "a defaulted router names the net "
-          "sub-pool for labels");
+    check(&plain.link_source() == &tr::mem::net_source(),
+          "a defaulted router names the net sub-pool for link state");
     check(&plain.rx_source() == &tr::mem::net_source(), "and for rx");
     check(&plain.flatten_backend() == &tr::mem::net_backend(), "and the net backend to flatten");
     check(&plain.egress_backend() == &tr::mem::net_backend(), "and to egress");

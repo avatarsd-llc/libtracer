@@ -245,7 +245,7 @@ class bus_link_t {
      * @ref close_peer — carrying the NAME the peer was audible under (the same NAME inbound
      * frames were tagged with, i.e. the routing plane's inbound link name for that peer).
      * `fwd_router_t::add_child` installs a notifier that evicts the departed peer's
-     * subscriber edges and label state (`fwd_router_t::link_down`). Must be set before
+     * subscriber edges (`fwd_router_t::link_down`). Must be set before
      * frames flow, like the receivers; a kind with no departure concept simply never
      * fires it. The peer's HANDLE rides alongside the name (#1294) so a consumer that keyed
      * per-peer state by handle at arrival can drop it here without a name lookup.
@@ -296,7 +296,7 @@ class bus_link_t {
      * reuses slots (a slot-positional `p<slot>~<gen>`) fires it once per new session, at the
      * claim, and BEFORE delivering any frame of that session, advancing the generation by
      * one per claim. The router's notifier first reclaims what the predecessor tenancy left:
-     * the slot-keyed anchor generation, and the subscriber edges, label state and pending
+     * the slot-keyed anchor generation, and the subscriber edges and pending
      * awaits filed under the predecessor's name, which @ref peer_name spells from the
      * arriving handle one generation down. So a predecessor whose departure was never
      * reported leaves nothing for the successor to inherit and nothing for a later
@@ -973,7 +973,7 @@ class transport_t {
      * The transport invokes it (possibly on an internal transport thread) when its ONE
      * connection dies — remote hangup, protocol CLOSE, or a fatal receive error.
      * `fwd_router_t::add_child` installs a notifier that evicts the child's subscriber
-     * edges and label state under the child's registered NAME (`fwd_router_t::
+     * edges under the child's registered NAME (`fwd_router_t::
      * link_down`). Must be set before frames flow, like the receivers; a connectionless
      * kind (UDP) has no closure concept and never fires it. Fire with no internal
      * transport locks held — the notifier re-enters the routing plane, which takes

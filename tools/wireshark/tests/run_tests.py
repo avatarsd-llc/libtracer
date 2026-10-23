@@ -31,68 +31,44 @@ DEFAULT_VECTORS = REPO / "tests" / "conformance" / "vectors" / "v1"
 
 
 # --------------------------------------------------------------------------- #
-# Rendered-address expectations — RFC-0027 path labels
+# Rendered-address expectations — RFC-0029 PAIR elements
 # --------------------------------------------------------------------------- #
 # The BYTES are the shared corpus's; the RENDERING is this tool's own invention
-# (`<label:1@2>` is a Wireshark spelling, not a wire fact), so it is pinned here
+# (`<pair:3@1>` is a Wireshark spelling, not a wire fact), so it is pinned here
 # rather than added to expected.json, where it would constrain the C++/Rust/TS
 # harnesses to a display decision none of them makes.
 #
 # Each key names a case under tests/conformance/vectors/v1/; the frame asserted
-# is that case's own input.bin. `labels` pins the 16/16 split as NUMBERS as well
-# as the string, so a swapped index and generation cannot hide inside a spelling
-# that still looks plausible.
+# is that case's own input.bin. `pairs` pins the two u32 fields as NUMBERS as
+# well as the string, so a swapped index and generation cannot hide inside a
+# spelling that still looks plausible.
 #
 # Every key MUST match a case that actually ran — main() fails on an unmatched
 # one. A renamed or deleted vector would otherwise take its assertion with it and
 # leave a green run behind, which is the failure mode that makes a suite lie.
 VECTOR_RENDERINGS = {
-    # One label, whole address: the terminus-residual shape.
-    "path-label/label-roundtrip": {
-        "path": "/<label:1@2>",
-        "labels": [{"index": 1, "generation": 2, "bad_len": None}],
+    # NAME, PAIR, NAME: a chain mixing both element kinds.
+    "path/element-pair-encode": {
+        "path": "/net/<pair:3@1>/temp",
+        "pairs": [{"index": 3, "generation": 1, "bad_len": None}],
     },
-    # Name and label in BOTH orders; the second label sits at the §4.3.1
-    # saturation generation, which is legal and must render as an ordinary label.
-    "path-label/label-mixed": {
-        "path": "/sensor/<label:1@2>/temp/<label:258@65535>",
-        "labels": [
-            {"index": 1, "generation": 2, "bad_len": None},
-            {"index": 258, "generation": 65535, "bad_len": None},
-        ],
-    },
-    # Amendment 6: ONE label for a three-segment mount run, residual as strings.
-    "path-label/label-multi-segment": {
-        "path": "/<label:3@1>/sensor/temp",
-        "labels": [{"index": 3, "generation": 1, "bad_len": None}],
-    },
-    # Kind 0x17, not 0x16: NOT a label, and its 2-byte payload must not be read
-    # as one. Rendered by the generic escape arm, and `labels` stays empty — the
-    # half of RFC-0024 §9.4's two-clause split that a length-only check fails.
-    "path-label/label-foreign-kind": {
-        "path": "/sensor/<esc:17=AABB>",
-        "labels": [],
-    },
-    # Kind 0x16 with a 3-byte payload: a malformed ADDRESS, deliberately not
-    # rendered as a label. The frame stays codec-valid — a packed body is opaque
+    # Kind 0x16 with a 7-byte payload: a malformed ADDRESS, deliberately not
+    # rendered as a pair. The frame stays codec-valid — a packed body is opaque
     # to the codec — so `invalid` must remain false.
-    "path-label/label-wrong-length": {
-        "path": "/sensor/<label:bad-len=3>",
-        "labels": [{"index": None, "generation": None, "bad_len": 3}],
+    "path/element-pair-bad-len": {
+        "path": "/sensor/<pair:bad-len=7>",
+        "pairs": [{"index": None, "generation": None, "bad_len": 7}],
         "frame_invalid": False,
     },
-    # A label met in the `path` category, not the `path-label` one: these are the
-    # bytes that are legal in a FRAME path and inadmissible as a lookup key. The
-    # dissector displays frame paths, so it renders them — the key rule is the
-    # resolver's, not the display's.
+    # Kind 0x16 with a 4-byte payload: RFC-0027's retired label (RFC-0029 §5.3),
+    # malformed like any other length but 8.
     "path/path-escape-in-key-context": {
-        "path": "/sensor/<label:1@2>",
-        "labels": [{"index": 1, "generation": 2, "bad_len": None}],
+        "path": "/sensor/<pair:bad-len=4>",
+        "pairs": [{"index": None, "generation": None, "bad_len": 4}],
+        "frame_invalid": False,
     },
-    # Pre-RFC-0027 renderings, pinned so the label arm cannot regress the plain
-    # one on its way past. Without these the new assertion would only ever run on
-    # bytes the same change introduced.
-    "path/path-sensor-temp": {"path": "/sensor/temp", "labels": []},
+    # The plain rendering, pinned so the PAIR arm cannot regress it on its way past.
+    "path/path-sensor-temp": {"path": "/sensor/temp", "pairs": []},
 }
 
 # Frames no conformance vector carries, because they are shapes that never
@@ -100,29 +76,25 @@ VECTOR_RENDERINGS = {
 # will meet them in a hostile or buggy capture, so the rendering is pinned.
 SYNTHETIC_FRAMES = [
     (
-        # PATH whose one element is a label at generation 0 — RFC-0027 §4.1's
-        # reserved "no label". It decodes as a LABEL and is refused at DEREF, not
-        # at decode (the car-3 ruling), so it must render as the label it claims
-        # to be, flagged, and must NOT be rendered as malformed.
-        "path-label-generation-zero",
-        "0600070000160401000000",
+        # A FOREIGN escape kind (0x17) with a two-byte payload: not a pair, and
+        # its payload must not be read as one. Rendered by the generic escape arm.
+        "path-foreign-kind",
+        "06000C000673656E736F72001702AABB",
         {
-            "path": "/<label:1@0 UNMINTED>",
-            "labels": [{"index": 1, "generation": 0, "bad_len": None}],
+            "path": "/sensor/<esc:17=AABB>",
+            "pairs": [],
             "frame_invalid": False,
         },
     ),
     (
-        # A FOREIGN escape kind (0x17) whose payload is FOUR bytes — the length a
-        # label has. `path-label/label-foreign-kind` carries two bytes, so it
-        # cannot catch a dissector that branches on length and skips the kind
-        # clause; this frame can, and that mis-read is a mis-delivery rather than
-        # an error (RFC-0027 §12.5 erratum 1 clause 2).
-        "path-label-foreign-kind-four-bytes",
-        "06000E000673656E736F72001704DEADBEEF",
+        # A FOREIGN escape kind (0x17) whose payload is EIGHT bytes — the length a
+        # pair has. It catches a dissector that branches on length and skips the
+        # kind clause, and that mis-read is a mis-delivery rather than an error.
+        "path-foreign-kind-eight-bytes",
+        "060012000673656E736F72001708DEADBEEFDEADBEEF",
         {
-            "path": "/sensor/<esc:17=DEADBEEF>",
-            "labels": [],
+            "path": "/sensor/<esc:17=DEADBEEFDEADBEEF>",
+            "pairs": [],
             "frame_invalid": False,
         },
     ),
@@ -202,7 +174,7 @@ def first_field_str(node: dict) -> str | None:
 def first_path_node(node: dict) -> dict | None:
     """The first node carrying a reconstructed address, depth-first, or None.
 
-    PATH appears both as a whole vector (the `path` / `path-label` categories)
+    PATH appears both as a whole vector (the `path` category)
     and nested inside FWD, so the search mirrors `first_field_str`.
     """
     if node.get("path_str") is not None:
@@ -215,7 +187,7 @@ def first_path_node(node: dict) -> dict | None:
 
 
 def check_rendering(frame: dict, want: dict) -> list[str]:
-    """Assert the rendered address and the decoded path labels of one frame."""
+    """Assert the rendered address and the decoded PAIR elements of one frame."""
     fails: list[str] = []
 
     node = first_path_node(frame)
@@ -225,18 +197,18 @@ def check_rendering(frame: dict, want: dict) -> list[str]:
     if node.get("path_str") != want["path"]:
         fails.append(f"path {node.get('path_str')!r} != {want['path']!r}")
 
-    got_labels = node.get("path_labels") or []
-    exp_labels = want["labels"]
-    if len(got_labels) != len(exp_labels):
-        fails.append(f"path label count {len(got_labels)} != {len(exp_labels)}")
+    got_pairs = node.get("path_pairs") or []
+    exp_pairs = want["pairs"]
+    if len(got_pairs) != len(exp_pairs):
+        fails.append(f"path PAIR count {len(got_pairs)} != {len(exp_pairs)}")
     else:
-        for i, el in enumerate(exp_labels):
+        for i, el in enumerate(exp_pairs):
             for key in ("index", "generation", "bad_len"):
-                if got_labels[i].get(key) != el[key]:
+                if got_pairs[i].get(key) != el[key]:
                     fails.append(
-                        f"path label[{i}].{key} {got_labels[i].get(key)!r} != {el[key]!r}")
+                        f"path PAIR[{i}].{key} {got_pairs[i].get(key)!r} != {el[key]!r}")
 
-    # A malformed label is a bad ADDRESS, not a bad frame: `frame_invalid` pins
+    # A malformed element is a bad ADDRESS, not a bad frame: `frame_invalid` pins
     # that the dissector did not escalate a resolver-tier refusal to a codec one.
     if "frame_invalid" in want:
         got_invalid = bool(frame.get("invalid"))

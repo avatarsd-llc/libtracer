@@ -306,7 +306,7 @@ void run_link_state(std::size_t links) {
     counting_source_t src;
     {
         graph_t g;
-        fwd_router_t r{g, tr::net::router_planes_t{.label_src = &src}};
+        fwd_router_t r{g, tr::net::router_planes_t{.link_src = &src}};
         transport_vertex_t net{g, r};
         const auto bind = [&](const char* mod, const std::string& name, transport_t& link) {
             net.provide_link(mod, name, link);

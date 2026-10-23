@@ -460,8 +460,7 @@ test('replyErrorCode reads the ERROR at any STATUS child position (fwd-reply-err
  * whose payload is a bare ERROR, with no STATUS wrapper, is not surfaced as an error. Same
  * frame as `fwd/fwd-reply-error` minus the STATUS header.
  *
- * The C++ core (`path_label_origin_test.cpp`) and the Rust binding
- * (`reply_error_bare_ignored`) pin the same bytes.
+ * The Rust binding (`reply_error_bare_ignored`) pins the same bytes.
  */
 test('a bare ERROR reply payload is not surfaced as an error (reply-error-bare-ignored)', () => {
   const bin = vector('fwd/reply-error-bare-ignored');

@@ -257,7 +257,7 @@ constexpr auto kDropBudget = 500ms;
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
 
 /**
- * @brief A heap-backed source a test can CLOSE — the client router's label plane, so the
+ * @brief A heap-backed source a test can CLOSE — the client router's link plane, so the
  *        origin's bind scratch and `dst` block can be refused on cue (#1779).
  */
 class gate_source_t final : public tr::mem::block_source_t {
@@ -300,9 +300,9 @@ int main() {
     std::printf("RFC-0024 car 3: bound forwarder hop + origin bind, client -> A -> B\n");
 
     // ----- three nodes, production wiring ------------------------------------------------
-    gate_source_t cli_label_src;
+    gate_source_t cli_link_src;
     graph_t g_cli;
-    fwd_router_t r_cli(g_cli, {.label_src = &cli_label_src});
+    fwd_router_t r_cli(g_cli, {.link_src = &cli_link_src});
     transport_vertex_t net_cli(g_cli, r_cli);
 
     graph_t g_a;
@@ -417,13 +417,13 @@ int main() {
 
         // The origin's own element is the one no peer can supply (§4.1), and adopt_binding
         // is what puts it on the front.
-        // The bind's element scratch is on the label plane (#1779): refused, it binds nothing.
-        cli_label_src.closed = true;
+        // The bind's element scratch is on the link plane (#1779): refused, it binds nothing.
+        cli_link_src.closed = true;
         check(dec.has_value() && !r_cli.adopt_binding(target, "net/uplink/a",
                                                       *tr::wire::tlv_node_t::over(*minted)),
               "a refused element scratch binds nothing");
         check(!target.binding().bound, "…and the path stays canonical");
-        cli_label_src.closed = false;
+        cli_link_src.closed = false;
         check(dec.has_value() &&
                   r_cli.adopt_binding(target, "net/uplink/a", *tr::wire::tlv_node_t::over(*minted)),
               "the client adopts the binding, stacking its OWN first-hop element under it");
@@ -435,10 +435,10 @@ int main() {
     // ===== 2) the bound write, forwarded by A, applied at B ==============================
     std::printf("A bound WRITE traverses the same two hops (§3.4/§5):\n");
     const std::uint32_t kWritten = 0x12345678u;
-    cli_label_src.closed = true;
+    cli_link_src.closed = true;
     check(!bound_dispatch(r_cli, target, acl_right_t::WRITE).has_value(),
           "a refused `dst` block is no dispatch — the caller falls back to canonical (#1779)");
-    cli_label_src.closed = false;
+    cli_link_src.closed = false;
     const auto dispatch = bound_dispatch(r_cli, target, acl_right_t::WRITE);
     check(dispatch.has_value(), "the origin resolves its OWN element 0 to the link out");
     check(dispatch &&

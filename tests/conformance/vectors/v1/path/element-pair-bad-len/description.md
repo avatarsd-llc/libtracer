@@ -24,9 +24,9 @@ Read short, `03 00 00 00 01 00 00` would be slot 3 at a generation assembled out
 not there — a generation the owner never issued, which is exactly the mis-delivery class the
 generation compare exists to close.
 
-Until RFC-0029 slice S3 deletes it, `len = 4` is still RFC-0027's label element; that is why this
-vector uses 7 and not 4. After S3 a `len = 4` record is malformed too, with no diagnostic
-distinguishing it (§16 Q4).
+The vector uses 7 rather than 4 because it was banked while `len = 4` was still RFC-0027's label
+element. Since RFC-0029 slice S3 a `len = 4` record is malformed too, with no diagnostic
+distinguishing it (§16 Q4); `core/tests/path_pair_test.cpp` pins that case.
 
 ## Why this is an `input.bin` case and not a `reject.bin` one
 
@@ -37,6 +37,7 @@ requirement, as for `path-label/label-wrong-length`.
 ## What this vector gates
 
 The codec. The refusal is bound by `core/tests/path_pair_test.cpp` — `codec` (the element walker
-answers `MALFORMED` for every length but 8 and 4, while `packed_record_span` still steps over the
-record) and `refusals` (a `dst` headed by such a record is answered `tr::path::invalid` through the
-production router).
+answers `MALFORMED` for every length but 8, `len = 4` included, while `packed_record_span` still
+steps over the record) and `refusals` (a `dst` headed by such a record, or by a `len = 4` one, or
+carrying a `len = 4` one after a NAME, is answered `tr::path::invalid` through the production
+router).

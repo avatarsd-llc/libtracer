@@ -9,8 +9,9 @@
  * PAIRs mix per element and one `PATH` is the only address form. This file binds, against the
  * production `fwd_router_t` + `op_resolver_t` wiring (the conformance harness routes nothing):
  *
- * - the CODEC: encode, decode, the length clause that tells a PAIR from a label and from a
- *   malformed record, and the six §13.4 S1 vectors byte-exact against the emitters;
+ * - the CODEC: encode, decode, the length clause that tells a PAIR from a malformed record
+ *   (RFC-0027's retired `len = 4` label included), and the six §13.4 S1 vectors byte-exact against
+ * the emitters;
  * - §6 step 2: a PAIR the owner cannot validate answers `NOT_FOUND`, forwards nothing,
  *   applies nothing;
  * - §6 step 3: a connection vertex WITH a tail is a hop whose egress is byte-identical to the
@@ -286,23 +287,18 @@ void codec() {
     check(path_element_at(zero, 0).kind == path_element_kind_t::PAIR,
           "(0, 0) is a PAIR too — the deref refuses it, the codec does not (§6 step 2)");
 
-    // The length clause: 8 is a PAIR, 4 is RFC-0027's label (until S3), anything else refuses.
-    for (const std::uint8_t len :
-         {std::uint8_t{0}, std::uint8_t{5}, std::uint8_t{7}, std::uint8_t{9}, std::uint8_t{12}}) {
+    // The length clause: 8 is a PAIR, anything else refuses — `len = 4` included, the
+    // RFC-0027 label element RFC-0029 §5.3 retired.
+    for (const std::uint8_t len : {std::uint8_t{0}, std::uint8_t{4}, std::uint8_t{5},
+                                   std::uint8_t{7}, std::uint8_t{9}, std::uint8_t{12}}) {
         bytes_t bad{std::byte{0x00}, std::byte{0x16}, std::byte{len}};
         bad.resize(bad.size() + len, std::byte{0x01});
         check(path_element_at(bad, 0).kind == path_element_kind_t::MALFORMED,
-              "a kind 0x16 record whose len is neither 8 nor 4 is MALFORMED — the address, not "
-              "the frame");
+              "a kind 0x16 record whose len is not 8 is MALFORMED — the address, not the frame");
         check(!tr::wire::path_pair_at(bad, 0).has_value(), "…and path_pair_at reads nothing");
         check(tr::wire::packed_record_span(bad, 0) == 3u + len,
               "…while the record still steps over by its declared length");
     }
-    bytes_t label;
-    (void)tr::wire::emit_path_label(label, tr::wire::path_label_t{.index = 1, .generation = 2});
-    check(path_element_at(label, 0).kind == path_element_kind_t::LABEL,
-          "len 4 is still RFC-0027's label — the kind is shared, the length tells them apart");
-    check(!tr::wire::path_pair_at(label, 0).has_value(), "…and is never read as a pair");
 
     // Mixed chains: walk, census, re-emit.
     bytes_t mixed;
@@ -310,7 +306,7 @@ void codec() {
     tr::testing::emit_path_pair(mixed, p);
     (void)tr::wire::emit_path_segment(mixed, "temp");
     const tr::wire::path_element_census_t c = tr::wire::path_element_census(mixed);
-    check(c.well_formed && c.elements == 3 && c.segments == 2 && c.pairs == 1 && c.labels == 0,
+    check(c.well_formed && c.elements == 3 && c.segments == 2 && c.pairs == 1,
           "a mixed body walks to 2 NAMEs + 1 PAIR");
     check(!tr::wire::packed_path_valid_key(mixed),
           "a chain is a frame path and never a key (§5.1; v1.md §3.1)");
@@ -493,6 +489,27 @@ void refusals() {
         tr::wire::emit_tlv(dst, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
         refused(b_fwd_raw_op(kRead, dst, reply_ep()), kInvalid,
                 "a kind 0x16 len 7 head answers INVALID_PATH");
+    }
+    {
+        // RFC-0029 §5.3 retired RFC-0027's `len = 4` label element, so a `kind = 0x16`,
+        // `len = 4` record is malformed like any other length but 8 (v1.md §3), wherever it
+        // stands: refused at the head and after a NAME, and a WRITE through it applies nothing.
+        const std::array<std::byte, 4> four{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
+                                            std::byte{0x00}};
+        bytes_t head_body;
+        (void)tr::wire::emit_path_escape(head_body, tr::wire::kPathPairKind, four);
+        bytes_t head_dst;
+        tr::wire::emit_tlv(head_dst, tr::wire::type_t::PATH, tr::wire::opt_t{}, head_body);
+        refused(b_fwd_raw_op(kRead, head_dst, reply_ep()), kInvalid,
+                "a kind 0x16 len 4 head (the retired label) answers INVALID_PATH");
+        bytes_t tail_body;
+        (void)tr::wire::emit_path_segment(tail_body, "sensor");
+        (void)tr::wire::emit_path_escape(tail_body, tr::wire::kPathPairKind, four);
+        bytes_t tail_dst;
+        tr::wire::emit_tlv(tail_dst, tr::wire::type_t::PATH, tr::wire::opt_t{}, tail_body);
+        refused(b_fwd_raw_op(kWrite, tail_dst, reply_ep(), {}, b_value_u32(4242)), kInvalid,
+                "a len 4 element after a NAME answers INVALID_PATH");
+        check(held(n.g, "/sensor/temp") == b_value_u32(1234), "…and the WRITE applied nothing");
     }
     {
         const std::array<tr::wire::path_ref_element_t, 2> els{conn, temp};

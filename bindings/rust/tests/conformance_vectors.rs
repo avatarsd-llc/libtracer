@@ -1424,8 +1424,7 @@ fn fwd_reply_error_after_description() {
  * whose payload is a bare ERROR, with no STATUS wrapper, is not surfaced as an error. Same
  * frame as `fwd_reply_error` minus the STATUS header.
  *
- * The C++ core (`path_label_origin_test.cpp`) and the TypeScript binding (`vectors.test.mjs`)
- * pin the same bytes.
+ * The TypeScript binding (`vectors.test.mjs`) pins the same bytes.
  */
 #[test]
 fn reply_error_bare_ignored() {

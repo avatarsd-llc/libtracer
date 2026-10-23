@@ -3,6 +3,7 @@
   "category": "path",
   "hex": "06000E000673656E736F7200160401000200",
   "total_bytes": 18,
+  "malformed_input": true,
   "decoded": {
     "type": "0x06 PATH",
     "opt": {
@@ -22,7 +23,7 @@
       "ts": null,
       "crc": null
     },
-    "meaning": "A PATH whose second record is the RFC-0018 §5.4 escape (`00 <kind=0x16> <len=4> <u32>`). The escape is ADMISSIBLE in a frame path — a forwarder that does not implement `kind` steps over it by its declared length — and REJECTED wherever the path is used as a CANONICAL KEY. A resolver asked to address a vertex with these bytes MUST answer ERROR{tr::path::invalid} (0x0021).",
+    "meaning": "A PATH whose second record is the RFC-0018 §5.4 escape (`00 <kind=0x16> <len=4> <u32>`). The escape is ADMISSIBLE in a frame path — a forwarder that does not implement `kind` steps over it by its declared length — and REJECTED wherever the path is used as a CANONICAL KEY. A resolver asked to address a vertex with these bytes MUST answer ERROR{tr::path::invalid} (0x0021). Since RFC-0029 retired RFC-0027's len = 4 label (5.3), a kind 0x16 record of length 4 is also a malformed address in frame-path context, so the input is declared malformed_input.",
     "note": "Not a reject.bin case: reject.bin means DECODE must fail (HARNESS.md §negative cases), and a packed PATH body is opaque to the codec — there is nothing here for a codec to refuse. See description.md."
   }
 }

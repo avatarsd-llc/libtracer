@@ -10,7 +10,7 @@
  *
  * The only allocation on `add_child`'s registry path that can fail SOFTLY is the registry
  * chunk, which since #873 phase 1 `child_registry_t::append` draws from the router's INJECTED
- * `label_src` (`src_->try_alloc`) rather than from `new (std::nothrow) chunk_t()`. It reads a
+ * `link_src` (`src_->try_alloc`) rather than from `new (std::nothrow) chunk_t()`. It reads a
  * null back rather than throwing either way, so the seam and this test's subject are
  * unchanged; what changed is where the bytes come from.
  *
@@ -104,7 +104,7 @@ void test_refused_registration_reports_failure() {
     // On the raw heap (#1777): the default net sub-pool would serve the registry's chunk from a
     // warm slab, and the refusing `operator new` would never be asked.
     tr::graph::graph_t graph{tr::mem::heap_source()};
-    tr::net::fwd_router_t router{graph, {.label_src = &tr::mem::heap_source()}};
+    tr::net::fwd_router_t router{graph, {.link_src = &tr::mem::heap_source()}};
     counting_link_t link;
 
     g_refuse_nothrow_new = true;  // the FIRST chunk the registry asks for is refused
@@ -127,7 +127,7 @@ void test_open_allocator_still_registers() {
     // On the raw heap (#1777): the default net sub-pool would serve the registry's chunk from a
     // warm slab, and the refusing `operator new` would never be asked.
     tr::graph::graph_t graph{tr::mem::heap_source()};
-    tr::net::fwd_router_t router{graph, {.label_src = &tr::mem::heap_source()}};
+    tr::net::fwd_router_t router{graph, {.link_src = &tr::mem::heap_source()}};
     counting_link_t link;
     const bool added = router.attach_link("net/ws/a", link);
     check(added, "add_child succeeds");

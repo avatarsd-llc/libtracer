@@ -450,10 +450,11 @@ RFC-0018 — a packed record has no type byte, so a mistyped child is unrepresen
 > [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md)
 > (accepted 2026-09-30, ships as v0.18.0), which replaces RFC-0027's 16/16 path label and RFC-0024's
 > bare `PATH_REF` address with **one** element. The reference implementation reaches it slice by
-> slice (RFC-0029 §13.2): until S1–S3 land it still emits and honours the RFC-0027 `len = 4` label,
-> the `0x14` `PATH_REF` address and the `op` bit 7 mint request, and the conformance vectors
-> `path-label/*`, `path-ref/ref-*`, `fwd/fwd-label-*`, `fwd/fwd-bound-*` and `fwd/fwd-reverse-mint`
-> still describe that form. They retire, and the RFC-0029 §13.4 vectors replace them, in S1–S3.
+> slice (RFC-0029 §13.2). S1 (the PAIR, `0x14` refused as a `dst`) and S3 (the RFC-0027 label
+> plane deleted: a `len = 4` element is malformed, and the `path-label/*`, `fwd/fwd-label-*` and
+> `acl/label-vs-string-*` vectors are retired) have landed. Until S2 lands it still honours the
+> `op` bit 7 mint request, and the conformance vectors `path-ref/ref-*`, `fwd/fwd-bound-*` and
+> `fwd/fwd-reverse-mint` still describe that form.
 
 The layout above is what a **PAIR** element *is*; this is what a host does with one (RFC-0029 §§4–10).
 A `PATH` carrying PAIR elements is still a `0x06`: a chain is a *frame* path, the canonical string
@@ -526,8 +527,8 @@ dereferenced vertex, for the caller's subject and the operation's right, and the
 function of those three alone: a host **MUST** reach the same verdict whether a hop's element
 arrived as a NAME or a PAIR, and **MUST** evaluate the check on every hop of every spelling. A
 generation match **authorizes nothing**; a peer may present any pair exactly as it may spell any
-string. Conformance carries the paired `acl/label-vs-string-*` and `acl/bound-vs-canonical-*`
-vectors, which RFC-0029 §13.4 re-spells in PAIRs.
+string. Conformance carries the paired `acl/bound-vs-canonical-*` vectors, which RFC-0029 §13.4
+re-spells in PAIRs.
 
 #### Learning — passive, on the reply `src`, never load-bearing
 
@@ -1139,10 +1140,9 @@ And the NET-PLANE seams ([RFC-0010](https://github.com/avatarsd-llc/libtracer/bl
 | spelling | the seam | nouns |
 | ---- | ---- | ---- |
 | `:stats.router.drops` | the node's forwarder's counted cold-path drops | `flatten_dropped`, `forward_iov_dropped`, `arena_dropped`, `assemble_dropped`, `reply_iov_dropped`, `delivery_iov_dropped`, `malformed_rx`, `retired_rx` (outer frames of a retired type code, RFC-0032 §6.1) |
-| `:stats.labels.table` | the RFC-0027 label plane's dereference tallies: `label_not_found` (labelled `dst` elements this node refused) and `label_resolves` (those it dereferenced, whether it forwarded them or resolved them locally). Both are published today (`core/src/fwd_router.cpp:fwd_router_t::sample_stats`) and leave with that table in [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) slice S3. The handle store's `labels_exhausted` and `refused_bindings` left with the store ([RFC-0032](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0032-delete-compact-streams-ride-the-chain.md) §6.3). Erratum 2026-10-11: this row's "deleted with that table by RFC-0029 slice S3" could be read as already deleted; S3 has not landed, and both are still emitted. Its back-reference to RFC-0010 §Erratum (2026-10-09) is dropped with the three handle-store nouns that erratum concerned. | `label_not_found`, `label_resolves` |
 | `:stats.link.<child>` | ONE registered transport child, by the NAME its `/net/<module>/<name>` connection vertex carries | `dropped_rx`, `malformed_rx`, `dropped_tx`; and, on a Noise link ([RFC-0033](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0033-noise-nnpsk0-datagram-link-binding.md) §5.11), `noise_handshake_failed`, `noise_handshake_replayed`, `noise_pending_superseded`, `noise_pending_expired`, `noise_retransmits`, `noise_decrypt_failed`, `noise_replayed`, `noise_stale`, `noise_expired` and `noise_oversize` ([23](23-noise-link-binding.md) §11) |
 
-A node that constructed no router publishes none of the three, and a `link` sub-key naming no registered child — or a removed one — is not a seam: all of these answer `ERROR{tr::schema::not_found}` (`0x0031`), which a monitor reads as "not published here". A link's `rx_capacity` / `tx_capacity` ceilings are deliberately absent: they are per-kind and in per-kind units (buffer bytes on a WebSocket link, TX-pool slots on CAN), so there is no unit-safe ceiling to publish at the interface.
+A node that constructed no router publishes none of these, and a `link` sub-key naming no registered child — or a removed one — is not a seam. Nor is `labels`: the RFC-0027 label plane's `:stats.labels.table` is retired with that plane ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Erratum (2026-10-22), RFC-0029 slice S3): all of these answer `ERROR{tr::schema::not_found}` (`0x0031`), which a monitor reads as "not published here". A link's `rx_capacity` / `tx_capacity` ceilings are deliberately absent: they are per-kind and in per-kind units (buffer bytes on a WebSocket link, TX-pool slots on CAN), so there is no unit-safe ceiling to publish at the interface.
 
 Worked bytes — the graph-door block on a fresh node, **113 bytes** (the `settings/stats-seam-block` vector):
 

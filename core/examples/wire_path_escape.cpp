@@ -11,14 +11,12 @@
  * §5.4 reserves it for the **escape record** `00 <u8 kind> <u8 len> <len bytes>`. Its whole
  * point is asymmetry (`CONTEXT.md` §Segment / view): a forwarder steps over a `kind` it does
  * not implement **by the record's declared length** rather than dropping a frame it is only
- * relaying, while canonical / key context REFUSES it — a label is not canonical bytes, and
+ * relaying, while canonical / key context REFUSES it — an element is not canonical bytes, and
  * the vertex-map key must stay pure-string.
  *
  * Both halves are checked here, including the skip over a kind this build has never heard
- * of. `kPackedEscapeKindLabel` (`0x16`) is the kind RFC-0027's path-label element uses.
- * **This layer never mints one**: `packed_path.hpp` is kind-agnostic and emitting an escape
- * is not minting a label — that is the forwarder's business, and only on a node given a
- * mint table (RFC-0027 §8.3, off by default). Here the escape is simply bytes that arrived.
+ * of. `kPackedEscapeKindPair` (`0x16`) is the kind RFC-0029's PAIR element uses.
+ * `packed_path.hpp` is kind-agnostic: here the escape is simply bytes that arrived.
  *
  * Runs under ctest as `example_wire_path_escape`; returns non-zero on any failed check.
  */

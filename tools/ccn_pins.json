@@ -3,7 +3,7 @@
   "functions": {
     "tr::graph::apply_op": {
       "ccn": [
-        35
+        32
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },
@@ -70,12 +70,6 @@
     "tr::net::emit_refusal_reply": {
       "ccn": [
         31
-      ],
-      "file": "core/src/fwd_router.cpp"
-    },
-    "tr::net::fwd_router_t::label_send": {
-      "ccn": [
-        16
       ],
       "file": "core/src/fwd_router.cpp"
     },

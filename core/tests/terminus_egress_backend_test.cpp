@@ -340,7 +340,7 @@ reply_facts_t read_reply(std::span<const std::byte> frame) {
  */
 tr::net::router_planes_t raw_planes(
     tr::mem::mem_backend_t* egress = &tr::testing::raw_heap_backend()) noexcept {
-    return {.label_src = &tr::mem::heap_source(),
+    return {.link_src = &tr::mem::heap_source(),
             .rx = &tr::mem::heap_source(),
             .flat = &tr::testing::raw_heap_backend(),
             .egress = egress};

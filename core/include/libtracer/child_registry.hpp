@@ -103,7 +103,7 @@ class child_registry_t {
      * channels #873 named, and the one an injected-everywhere node could still not bound. They
      * are long-lived control state whose high-water mark is the count of DISTINCT link names
      * ever registered, so a bounded node wants them inside its slab like everything else.
-     * `fwd_router_t` points this at its `label_src` for exactly that reason: same lifetime
+     * `fwd_router_t` points this at its `link_src` for exactly that reason: same lifetime
      * class as the rest of its link state, and deliberately NOT the per-frame `rx` store, which a
      * @ref tr::mem::bump_source_t may legitimately be.
      *
@@ -831,8 +831,7 @@ class child_registry_t {
      *
      * One pass serves both halves of @ref add's single allocation (#1779): with @p out null
      * it only measures, otherwise it writes the run there (sized by the measuring call).
-     * Public because it is a pure function of @p name, and the router's origin spells its own
-     * first-hop local part with exactly these bytes (`fwd_router_t::adopt_path_label`).
+     * Public because it is a pure function of @p name.
      *
      * @return The run's byte count; `0` ⇔ the name has no packed spelling.
      */

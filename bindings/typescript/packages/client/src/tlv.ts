@@ -206,8 +206,8 @@ export function pathTlv(segments: string[]): Tlv {
  *
  * An escape is `00 <u8 kind> <u8 len> <len bytes>`. It is **admissible in a frame path** — a
  * forwarder steps over one whose `kind` it does not implement instead of dropping a frame it
- * is only relaying — and **rejected in canonical / key context**, because a label is not
- * canonical bytes. This client never mints one; `kind = 0x16` is reserved for RFC-0027.
+ * is only relaying — and **rejected in canonical / key context**, because an escape is not
+ * canonical bytes. This client never mints one; `kind = 0x16` is the RFC-0029 PAIR element.
  */
 export const PACKED_ESCAPE_LEN = 0;
 

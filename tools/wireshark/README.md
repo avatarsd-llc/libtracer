@@ -8,8 +8,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 A single-file Lua dissector that decodes libtracer frames live in Wireshark:
 the `type`/`opt`/`length` header, the `opt` bitfield, the optional wire-time and
 CRC trailer (**verified**, mismatches raised as expert-info), `opt.PL=1` nested
-recursion, PATH reconstruction to `/a/b/c` — including RFC-0027 **path labels**,
-decoded to their slot index and generation — and the `FWD`/`FIELD` remote-operation
+recursion, PATH reconstruction to `/a/b/c` — including RFC-0029 **PAIR elements**,
+decoded to their vertex index and generation — and the `FWD`/`FIELD` remote-operation
 frames.
 
 > **Wire format is DRAFT** ([docs/spec/v1.md](../../docs/spec/v1.md) line 3). This
@@ -64,45 +64,42 @@ libtracer.type == 0x0f          FWD frames
 libtracer.fwd.op == 1           FWD WRITEs (READ=0 WRITE=1 AWAIT=2 REPLY=3)
 libtracer.fwd.kind == 1         FWD REPLYs carrying an ERROR (RESULT=0 ERROR=1)
 libtracer.path contains "temp"  frames addressing a path with "temp"
-libtracer.path.label            frames whose address carries a path label
-libtracer.path.label.index == 3 frames addressing label slot 3 (on the minting host)
+libtracer.path.pair.index       frames whose address carries a PAIR element
+libtracer.path.pair.index == 3  frames addressing vertex index 3 (on the issuing host)
 libtracer.opt.cr == 1           frames carrying a CRC
 libtracer.crc.bad               frames whose trailer CRC failed to verify
 libtracer.error                 ERROR frames (shows tr::concept::name)
 libtracer.field.selector        the FIELD selector in source spelling
 ```
 
-### Reading a path label
+### Reading a PAIR element
 
-A `PATH` element may be a **path label** ([RFC-0027](../../docs/spec/rfcs/0027-label-switched-path-compression.md)):
-a hop's whole local part, replaced on a reply leg by the 32-bit alias that hop
-minted for it. On the wire it is an RFC-0018 escape record — `00 16 04 <u32 LE>`,
-7 bytes — sitting where a name segment would sit, so the dissector renders it in
-place, inside the address:
+A `PATH` element may be a **PAIR** ([RFC-0029](../../docs/spec/rfcs/0029-one-path-primitive.md)):
+a vertex's owner-issued `(u32 index, u32 generation)`, standing where that hop's name
+would stand. On the wire it is an RFC-0018 escape record — `00 16 08 <u32 LE index>
+<u32 LE generation>`, 11 bytes — so the dissector renders it in place, inside the address:
 
 | Rendering | What it is |
 | --- | --- |
-| `<label:3@7>` | slot index 3 at generation 7 — a well-formed label |
-| `<label:3@0 UNMINTED>` | generation `0`, the reserved "no label"; never legitimately on the wire, refused **where it is dereferenced** with `tr::path::not_found` |
-| `<label:bad-len=3>` | kind `0x16` with a length that is not 4 — a malformed *address* (`tr::path::invalid`), deliberately **not** read as a label |
-| `<esc:17=AABB>` | an escape at some other kind: not a label, whatever its length. A relaying hop steps over it by its declared length |
+| `<pair:3@7>` | vertex index 3 at generation 7 — a well-formed PAIR |
+| `<pair:bad-len=4>` | kind `0x16` with a length that is not 8 — a malformed *address* (`tr::path::invalid`), deliberately **not** read as a pair. `len = 4` is RFC-0027's retired path label (RFC-0029 §5.3) |
+| `<esc:17=AABB>` | an escape at some other kind: not a PAIR, whatever its length. A relaying hop steps over it by its declared length |
 
-Two things about `<label:N@G>` that a capture will not tell you and that change
+Two things about `<pair:N@G>` that a capture will not tell you and that change
 how it must be read:
 
-- **It is host-scoped.** The bytes name a vertex only on the host that minted
-  them. The same `<label:3@7>` in two captures — or in the `dst` and `src` of one
+- **It is host-scoped.** The bytes name a vertex only on the host that issued
+  them. The same `<pair:3@7>` in two captures — or in the `dst` and `src` of one
   frame — is two unrelated things. There is no global name here to correlate on.
-- **The generation is the whole staleness mechanism.** When the vertex behind a
-  slot departs, the minting host bumps that slot's generation; the label the peer
-  still holds then compares unequal and earns a `tr::path::not_found`, with the
-  sender falling back to the string address it never threw away. So a peer sending
-  a *lower* generation than the host's current one is a peer about to be refused —
-  which is what `libtracer.path.label.generation` is for.
+- **The generation is the whole staleness mechanism.** When a vertex retires, or its
+  link departs, the owner bumps its generation; a PAIR the peer still holds then
+  compares unequal and earns a `tr::path::not_found`, with the sender falling back to
+  the string address it never threw away. That is what
+  `libtracer.path.pair.generation` is for.
 
 The frame is codec-valid either way: a packed `PATH` body is `opt.PL = 0` and
-opaque to the codec, so a malformed label raises the *Malformed path label* expert
-info (`libtracer.path.label.invalid`) and never flags the frame itself invalid.
+opaque to the codec, so a malformed element raises the *Malformed path PAIR element*
+expert info (`libtracer.path.pair.invalid`) and never flags the frame itself invalid.
 
 ### Telling the four FIELD forms apart
 
@@ -149,12 +146,12 @@ change under `tools/wireshark/**` or the vectors
 
 Rendered addresses are pinned in `run_tests.py` itself (`VECTOR_RENDERINGS`)
 rather than in `expected.json`: the bytes are the shared corpus's, but
-`<label:1@2>` is a display decision this tool makes and the other cores do not, so
+`<pair:3@1>` is a display decision this tool makes and the other cores do not, so
 it has no business constraining them. Two guards keep those pins honest — an
 expectation naming a vector that no longer exists **fails** the run rather than
 quietly not running, and `SYNTHETIC_FRAMES` carries the shapes no vector does
-(generation `0`; a foreign escape kind whose payload is 4 bytes long, which is the
-frame a length-only check mis-reads as a label).
+(a foreign escape kind whose payload is 8 bytes long, which is the frame a
+length-only check mis-reads as a PAIR).
 
 ## Standalone decode
 

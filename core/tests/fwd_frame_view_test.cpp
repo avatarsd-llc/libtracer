@@ -341,9 +341,8 @@ int main() {
         // and an address that LEADS with one names no transport child here, so the gate
         // must refuse it exactly as it refused a non-NAME leading child.
         bytes_t esc_body;
-        const std::array<std::byte, 4> label{std::byte{1}, std::byte{0}, std::byte{2},
-                                             std::byte{0}};
-        tr::testing::append_path_escape(esc_body, tr::wire::kPackedEscapeKindLabel, label);
+        const std::array<std::byte, 4> four{std::byte{1}, std::byte{0}, std::byte{2}, std::byte{0}};
+        tr::testing::append_path_escape(esc_body, tr::wire::kPackedEscapeKindPair, four);
         (void)tr::wire::emit_path_segment(esc_body, "sensor");
         const bytes_t bad_dst = tr::testing::b_path_body(esc_body);
         const bytes_t frame = b_fwd(fwd_op_t::WRITE, bad_dst, b_path({}), {}, payload);
@@ -364,7 +363,7 @@ int main() {
         // all before anything mints.
         bytes_t skip_body;
         (void)tr::wire::emit_path_segment(skip_body, "in");
-        tr::testing::append_path_escape(skip_body, tr::wire::kPackedEscapeKindLabel, label);
+        tr::testing::append_path_escape(skip_body, tr::wire::kPackedEscapeKindPair, four);
         (void)tr::wire::emit_path_segment(skip_body, "sensor");
         const bytes_t skip_dst = tr::testing::b_path_body(skip_body);
         const bytes_t skip_frame = b_fwd(fwd_op_t::WRITE, skip_dst, b_path({}), {}, payload);

@@ -59,21 +59,21 @@ std::pmr::synchronized_pool_resource shared{&arena};
 // the alternative (both are reached from several threads). They may take a
 // critical_pool_t of their own, sized from what this node actually stores.
 //
-// `label_blocks` is ONE source shared by the whole router (it feeds the NAME->link
+// `link_blocks` is ONE source shared by the whole router (it feeds the NAME->link
 // demux chunks) and therefore takes a locking policy — it is touched only when a
 // link is registered, which is the "wiring frequency" case `sync_mutex_t` is for.
-static tr::mem::size_class_t label_classes[12];
-static tr::mem::pool_source_t<tr::mem::sync_mutex_t> label_blocks{label_region, label_classes};
+static tr::mem::size_class_t link_classes[12];
+static tr::mem::pool_source_t<tr::mem::sync_mutex_t> link_blocks{link_region, link_classes};
 //
 // ... graph_t graph{&shared, /*value_backend=*/&tr::mem::heap_backend(),
 // ...               /*ctl=*/&blocks};
-// ... fwd_router_t router{graph, {.label_src = &label_blocks, .rx = &blocks,
+// ... fwd_router_t router{graph, {.link_src = &link_blocks, .rx = &blocks,
 // ...                             .flat = &tr::mem::heap_backend(),
 // ...                             .egress = &tr::mem::heap_backend()}};
 ```
 
 `integrations/esp-idf/examples/full_node` is this recipe as running code: three slab
-regions (RX pool / label source / pmr arena) and a self-proof that prints the label
+regions (RX pool / link source / pmr arena) and a self-proof that prints the link
 source's own census (bytes used, size classes used, blocks overflowed), so the sizing above
 is a number to check against your own node rather than one to copy.
 
@@ -83,7 +83,7 @@ Those all reach the ONE injection point of `graph_t`'s constructor
 `tr::mem::block_source_t` and builds the pmr resource and the value backend over it internally,
 so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
 **four** of
-`fwd_router_t`: the failable `label_src` source its long-lived link state draws from, the
+`fwd_router_t`: the failable `link_src` source its long-lived link state draws from, the
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
 backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
@@ -93,7 +93,7 @@ Each is its own injection because each one's live set is governed by a different
 quantity — threads inside the router, replies in flight, flattens in flight, and
 the subscription population respectively — and a slab is sized against that
 quantity, so a shared seam silently re-scopes it.
-`label_src` was a `std::pmr::memory_resource` until #603 defect 1 — it could not
+`link_src` was a `std::pmr::memory_resource` until #603 defect 1 — it could not
 stay one, because a peer's frame reached it (the since-retired `ADVERTISE`) and
 pmr reports exhaustion by throwing. The full set of
 build-time and injected bounds is catalogued in
@@ -200,7 +200,7 @@ noisy link cannot starve another's decode:
 ```
 
 A source shared at **wiring** frequency — a graph's `ctl`, or the router's
-`label_src` — is fine with a locking
+`link_src` — is fine with a locking
 `Sync` policy (`tr::mem::sync_mutex_t` from `mem_source_sync.hpp`, or a target's own
 interrupt-disable section). The policy is the `pool_source_t<Sync>` template parameter, defaulting
 to `tr::no_guard_t`, which compiles to nothing.

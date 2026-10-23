@@ -11,8 +11,8 @@
  * test pins the two equal, byte for byte, and then pins the new one's refusal arm over a
  * source that refuses (`null_source()`), which the `std` spelling cannot express:
  *
- * 1. the wire emitters into `mem::bytes_t` (`tlv_emit`, `packed_path`, `path_label`,
- *    `path_element`, `byteorder`, `batch`);
+ * 1. the wire emitters into `mem::bytes_t` (`tlv_emit`, `packed_path`, `path_element`,
+ *    `byteorder`, `batch`);
  * 2. `wire::encode(tlv, bytes_t&)` and `wire::path_key`'s view;
  * 3. `rope_t` / `value_ref_t::to_iovec` into a caller span;
  * 4. `encode_acl` / `parse_acl` into core containers, and `conn_spec_t::bytes(bytes_t&)`;
@@ -77,7 +77,6 @@ void test_emitters_match() {
     check(wire::emit_path_ref(v, refs), "vector PATH_REF emitted");
     check(wire::emit_path_segment(v, std::string_view{"seg"}), "vector segment emitted");
     check(wire::emit_path_escape(v, 0x33, bytes_of("xy")), "vector escape emitted");
-    check(wire::emit_path_label(v, {.index = 5, .generation = 2}), "vector label emitted");
     tr::detail::append_le(v, std::uint16_t{0xBEEF});
 
     check(wire::emit_header(b, type_t::VALUE, opt_t{}, 3) &&
@@ -89,14 +88,12 @@ void test_emitters_match() {
               wire::emit_trailer_ts(b, true, -42) && wire::emit_path_ref(b, refs) &&
               wire::emit_path_segment(b, std::string_view{"seg"}) &&
               wire::emit_path_escape(b, 0x33, bytes_of("xy")) &&
-              wire::emit_path_label(b, {.index = 5, .generation = 2}) &&
               tr::detail::append_le(b, std::uint16_t{0xBEEF}),
           "every bytes_t emitter accepted");
     check(same(b, v), "…and wrote exactly the vector forms' bytes");
 
     // The refusal arms the vector forms share: nothing is appended.
     mem::bytes_t r(mem::heap_source());
-    check(!wire::emit_path_label(r, {}) && r.empty(), "the reserved zero label is refused");
     check(!wire::emit_path_segment(r, std::string_view{}) && r.empty(),
           "an empty segment is refused");
     check(!wire::emit_path_ref(r, refs, type_t::VALUE) && r.empty(),
@@ -104,19 +101,14 @@ void test_emitters_match() {
 }
 
 void test_path_elements_match() {
-    std::printf("path_element splice and element forms match:\n");
-    std::vector<std::byte> body;
-    for (const std::string_view s : {"net", "tcp0", "peer", "x"})
-        check(wire::emit_path_segment(body, s), "body segment");
-    const tr::wire::path_label_t label{.index = 3, .generation = 9};
+    std::printf("path_element forms match:\n");
     std::vector<std::byte> v;
-    mem::bytes_t b(mem::heap_source());
-    check(wire::emit_path_labelled(v, body, 1, 2, label), "vector splice accepted");
-    check(wire::emit_path_labelled(b, body, 1, 2, label), "bytes_t splice accepted");
-    check(same(b, v), "…and they spell the same bytes");
-    mem::bytes_t r(mem::heap_source());
-    check(!wire::emit_path_labelled(r, body, 3, 2, label) && r.empty(),
-          "an out-of-range run is refused, appending nothing");
+    for (const std::string_view s : {"net", "tcp0"})
+        check(wire::emit_path_segment(v, s), "body segment");
+    std::array<std::byte, wire::kPathPairRecordBytes> pair{};
+    wire::path_pair_store(pair, {.index = 3, .generation = 9});
+    v.insert(v.end(), pair.begin(), pair.end());
+    check(wire::emit_path_segment(v, std::string_view{"x"}), "body segment");
 
     std::vector<std::byte> ve;
     mem::bytes_t be(mem::heap_source());
@@ -127,7 +119,7 @@ void test_path_elements_match() {
               "element re-spelled");
         ++n;
     }
-    check(n == 3 && same(be, ve) && ve == v, "every element round-trips through both forms");
+    check(n == 4 && same(be, ve) && ve == v, "every element round-trips through both forms");
 }
 
 void test_batch_match() {

@@ -112,7 +112,7 @@ int main() {
     counting_source_t root;
 
     graph_t g(root);
-    fwd_router_t router(g, {.label_src = &heap, .rx = &heap, .flat = &backend, .egress = &backend});
+    fwd_router_t router(g, {.link_src = &heap, .rx = &heap, .flat = &backend, .egress = &backend});
     transport_vertex_t net(g, router, "/net", &backend, &heap);
 
     // (a) The path_key_t spill: a 34-byte name record, then a copy of the key.

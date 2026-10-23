@@ -852,6 +852,12 @@ samplers with the graph at configure time, the way it already installs its sinks
 [#1503](https://github.com/avatarsd-llc/libtracer/issues/1503). A future amendment that opens
 it adds `<seam-class>` values (`router`, `labels`, `link`) and changes nothing above.
 
+> **Corrected 2026-10-22 by the `:stats.labels` erratum
+> ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22)
+> at the end of this document.** Amendment 2 opened `router`, `labels` and `link`; `labels` is since
+> retired with the RFC-0027 label plane (RFC-0029 slice S3), so the net-plane classes are
+> `router` and `link`.
+
 ### D.5 The VALUE resolves BELOW the READ gate — the gating is INVERTED against `:identity`
 
 A recognised seam's value MUST be gated on `READ` against the addressed vertex's effective
@@ -940,6 +946,11 @@ grammar rule or error identity changes.
 
 This is that amendment, and it opens exactly that door in exactly that way.
 
+> **Corrected 2026-10-22 by the `:stats.labels` erratum
+> ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22)
+> at the end of this document.** The `labels` class this amendment opened is retired with the RFC-0027
+> label plane (RFC-0029 slice S3); the net-plane classes are `router` and `link`.
+
 ### D.4 (extended) — the net-plane seams
 
 The boundary Amendment 1 drew was a **dependency** boundary: the graph is L4, the router is
@@ -957,6 +968,11 @@ into it when a `:stats` read names a net-plane class, and L4 still names nothing
 — it holds one more `{fn, ctx}` word pair whose type mentions no transport concept at all.
 
 The reserved seam classes and the nouns each publishes:
+
+> **Corrected 2026-10-22 by the `:stats.labels` erratum
+> ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22)
+> at the end of this document.** The `:stats.labels.table` row is retired with the RFC-0027
+> label plane (RFC-0029 §11, slice S3); `labels` is no longer a seam class.
 
 | spelling | the seam | nouns |
 | --- | --- | --- |
@@ -983,6 +999,11 @@ is labels on every kind alike.
 > **A seam whose sampler is not registered — a node that constructed no router — and a
 > `link` sub-key that names no registered child, or one whose child has been removed, MUST
 > answer `ERROR{tr::schema::not_found}` (`0x0031`), caller-independently.**
+
+> **Corrected 2026-10-22 by the `:stats.labels` erratum
+> ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244)) — see §Erratum (2026-10-22)
+> at the end of this document.** A node with a router also answers `SCHEMA_NOT_FOUND` for the `labels`
+> class: `:stats.labels.table` is no longer published by any node.
 
 This mints nothing: §Compatibility of Amendment 1 already anticipated exactly this answer
 (":867–876" — *"An implementation that does not serve the census keeps answering
@@ -1358,3 +1379,35 @@ with both serves the `doc` pair, then the unchanged owner part, with each field'
 `access` and possibly empty descriptor bytes. A vertex with neither serves
 the record `tlv-types/point-schema-app` and `settings/schema-enumerates-nothing` pin,
 unchanged.
+
+## Erratum (2026-10-22) — `:stats.labels.table` is retired with the RFC-0027 label plane ([#2244](https://github.com/avatarsd-llc/libtracer/issues/2244))
+
+**What the text said.** Amendment 2's §D.4 table, and reference/05's net-plane seam table after
+it, list `:stats.labels.table` as a published seam: the RFC-0027 label plane's dereference tallies
+`label_not_found` and `label_resolves`. reference/05 adds that both "leave with that table in
+RFC-0029 slice S3", and that they are still published until S3 lands.
+
+**What the behaviour is.** [RFC-0029](0029-one-path-primitive.md) (one path primitive, accepted
+2026-09-30) already retired the RFC-0027 label: §1 deletes "RFC-0027's table, ceilings, owner
+stamps and census", §5.3 retires the `kind = 0x16`, `len = 4` element on the wire, and §11 with
+§13.2 S3 lists the table and its plane for deletion. The §Erratum (2026-10-09) above ruled
+which change deletes each noun: S3 for `label_not_found` and `label_resolves`. S3 has now landed
+in the reference implementation (#2244). With no label plane there is nothing to count, so
+the `labels` class is not a seam: `:stats.labels.table`, like any unknown class or a bare
+`:stats.labels`, answers `ERROR{tr::schema::not_found}` (`0x0031`), caller-independently, under
+§D.4.1. The `:stats.router.drops` and `:stats.link.<child>` seams are unchanged, noun for noun.
+
+**Which change made them diverge.** RFC-0029's acceptance, which ruled the deletion but left
+Amendment 2's table and reference/05's row describing the class as published. The retirement
+was decided there; this erratum only brings RFC-0010's text into line.
+
+**The correction.** Amendment 2's §D.4 table carries a note pointing here, and reference/05's
+`:stats.labels.table` row is removed. A monitor written against Amendment 2 already degrades by
+construction: its §Compatibility told it to read `SCHEMA_NOT_FOUND` as "not published here".
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). The one
+wire-readable change, the `labels` class answering `SCHEMA_NOT_FOUND`, is the
+consequence of a retirement RFC-0029 already made normative (§1, §5.3, §11), whose deletion
+of these nouns by S3 the maintainer-ruled §Erratum (2026-10-09) above assigned and #2244
+executes. This erratum changes
+no other seam name, noun, frame, type code, grammar rule or error identity.

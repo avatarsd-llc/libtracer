@@ -562,14 +562,13 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     // frame answers both questions. TF=1 is not echoed — anchorless at the root, the spec's
     // own MUST-reject case (the terminus resolver applies the identical filter).
     if (dec->opt().ts && !dec->opt().tf) route.echo_ts = dec->trailer()->ts;
-    // The status is the CALLER's, because the two refusals a hop makes on its own are different
+    // The status is the CALLER's, because the refusals a hop makes on its own are different
     // answers to different questions: a bus NAME with a residual is a malformed address
-    // (`tr::path::invalid`), while a path label this node cannot validate is an address that
-    // does not resolve HERE (`tr::path::not_found`, RFC-0027 §7.2 — "an unresolvable address is
-    // exactly what `tr::path::not_found` already means, and a label is an address"). Everything
-    // else about the refusal — the swapped routes, the echoed spelling the sender correlates
-    // on, the wire-time stamp echo, the egress seam and the bus-peer fallback — is identical,
-    // which is why this is one function with a status rather than two that drift.
+    // (`tr::path::invalid`), while a PAIR this node cannot validate is an address that does not
+    // resolve HERE (`tr::path::not_found`, RFC-0029 §6.3). Everything else about the refusal — the
+    // swapped routes, the echoed spelling the sender correlates on, the wire-time stamp echo, the
+    // egress seam and the bus-peer fallback — is identical, which is why this is one function with
+    // a status rather than two that drift.
     const view::rope_t reply = graph::assemble_error_reply(route, status, egress);
     // One link — plus the echo trailer link on a stamped request — by construction: an error
     // reply carries no shared payload and no mint trailer. A zero-link rope is the egress
@@ -926,7 +925,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     // happens before anything is registered. Interned once here, every write the child carries
     // hands the graph a pointer and nothing else; stored on both arms below, before publication.
     //
-    // The router's own state for this registration draws from the label plane's source
+    // The router's own state for this registration draws from the link plane's source
     // (#1779), and every allocation is taken BEFORE anything changes or undone at once: the
     // kind record and a bus mount's token cache up front, the ctx right after the registry
     // slot it views. A refusal is this function's ordinary `false`, with nothing registered.
@@ -942,14 +941,14 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     bus_token_cache_t* tokens = nullptr;
     if (bus != nullptr) {
         void* const raw =
-            label_src_->try_alloc(sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
+            link_src_->try_alloc(sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
         if (raw == nullptr) return false;
         tokens = ::new (raw) bus_token_cache_t();
     }
     const auto drop_tokens = [&] {
         if (tokens == nullptr) return;
         tokens->~bus_token_cache_t();
-        label_src_->release(tokens, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
+        link_src_->release(tokens, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
     };
     // The door (RFC-0029 §13.2 S6): the child's mount run IS its connection vertex's
     // canonical key, so its graph slot is one keyed find of bytes the registry already
@@ -1001,7 +1000,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
         // `src` by the full `net/<module>/<name>/<peer>` path rather than a bare peer
         // segment, which is what keeps two buses' same-named peers distinct on the way back.
         // Departure seam (RFC-0009 §D extended): a bus peer that hangs up carries its
-        // own name, and label state is keyed by that name, so link_down still takes the peer.
+        // own name, and its edges are keyed by that name, so link_down still takes the peer.
         // A bound route never EGRESSES over the bus mount itself: its `send()` broadcasts
         // (ADR-0073 §3, RFC-0020 §3), so `door_egress` refuses a multi-peer door by shape,
         // and an announce-census peer has no vertex an element could name (ADR-0044 as
@@ -1109,7 +1108,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
 bool fwd_router_t::remove_child(std::string_view name) {
     // Stop resolving FIRST: once the entry is tombstoned no forward can reach the link,
     // so the caller is free to destroy the transport as soon as this returns. Then the
-    // ordinary departure eviction reclaims the graph edges and label state — the same
+    // ordinary departure eviction reclaims the graph edges — the same
     // work link_down does, reused rather than duplicated.
     //
     // The eviction runs with `ctl_m_` RELEASED, as it does from every other door (a
@@ -1133,13 +1132,6 @@ bool fwd_router_t::remove_child(std::string_view name) {
         if (child_rx_ctx_t* const ctx = ctl_ctx_by_name(name)) {
             ctx->retired.store(true, std::memory_order_release);
             gone.conn = ctx->entry->conn_slot;
-            // RFC-0027 §7.1's departure bump. The vertex this child's path label resolved to is
-            // gone, so the label the peer still holds must stop validating — and the whole
-            // mechanism for that is the slot's generation, which `release` advances (retiring the
-            // slot permanently when it saturates, §4.3.1). No withdraw frame, no unbind, no lease
-            // and no TTL (§7.3): the peer's next frame answers `NOT_FOUND` and it falls back to the
-            // full-string path it still holds, re-minting from the reply after that.
-            release_child_label(*ctx);
             // The interned link token goes with the tenancy too (#1417): `link_down` below
             // releases the index slot it names, so a copy left here would outlive its stamp.
             ctx->link_token.store(0, std::memory_order_relaxed);
@@ -1278,8 +1270,8 @@ void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle,
     // nothing yet — so whatever the slot still holds is a predecessor's whose departure never
     // reached this router. Run that departure now. Under the arriving name it retires a
     // still-live anchor (the generation bump; the anchor is keyed by slot) and drops the
-    // slot's cached token (keyed by slot index, which the successor shares). The edges, label
-    // state and pending awaits sit under the PREDECESSOR's name, `p<slot>~<gen-1>` for a
+    // slot's cached token (keyed by slot index, which the successor shares). The edges and
+    // pending awaits sit under the PREDECESSOR's name, `p<slot>~<gen-1>` for a
     // transport that advances the generation by one per claim; the bus spells it, and a name
     // it cannot spell (a first tenancy, a transport that does not reuse slots) has none. In
     // the ordinary case the departure already ran and every step finds nothing.
@@ -1332,21 +1324,7 @@ void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle
     if (cache != nullptr) cache->drop(handle);
 }
 
-// --- bound paths (RFC-0024) and path labels (RFC-0027) -----------------------
-
-namespace {
-/**
- * @brief Rebuild a @ref peer_handle_t from the `bits()` a receiver ctx stores it as.
- *
- * The handle is kept as ONE `u64` on the ctx so a frame path loads it with a single relaxed
- * atomic rather than two that could straddle a control-plane rebind and pair one tenancy's
- * index with another's generation — the field-tearing shape #882 fixed one seam out.
- */
-[[nodiscard]] constexpr peer_handle_t peer_handle_from_bits(std::uint64_t bits) noexcept {
-    return peer_handle_t{wire::pair_t{.index = static_cast<std::uint32_t>(bits),
-                                      .generation = static_cast<std::uint32_t>(bits >> 32)}};
-}
-}  // namespace
+// --- bound paths (RFC-0024) -------------------------------------------------
 
 fwd_router_t::child_rx_ctx_t* fwd_router_t::ctl_ctx_by_name(std::string_view name) {
     // The chain read WITHOUT the tombstone test: this is the control plane, it holds `ctl_m_`
@@ -1376,18 +1354,6 @@ fwd_router_t::child_rx_ctx_t* fwd_router_t::acquire_ctx(std::string_view name) {
         // can never validate. Rewound to "not minted yet"; the next subscribe mints afresh.
         hit->link_token.store(0, std::memory_order_relaxed);
         if (hit->peer_tokens_own != nullptr) hit->peer_tokens_own->clear();
-        // RFC-0027 §7.1: the tenancy this ctx's path label stood for is the one just hidden, so
-        // the label goes with it — released (its slot's generation bumps, saturating and
-        // retiring per §4.3.1) and forgotten. Nothing is told: there is no withdraw frame and
-        // no lease (§7.3), and the peer discovers it on its next frame.
-        release_child_label(*hit);
-        // The per-peer identity advances with the tenancy, which is the second, independent
-        // stamp: even inside the window before the slot's own bump is visible, a label minted
-        // for the PREVIOUS tenancy of this name is owned by a handle that no longer compares
-        // equal, so `path_label_table_t::lookup` refuses it on the owner check (§4.1's
-        // node-scope rule). A departed tenancy and a departed vertex are different departures
-        // and each gets its own stamp.
-        hit->label_peer.store(next_label_peer_bits(), std::memory_order_relaxed);
         // `entry` is NOT rewritten, because it cannot have changed: a registry slot is keyed
         // by name and reused for that name forever (`erase` tombstones in place, `add`
         // rebinds the tombstone), and `add_child` has already re-added by the time we run.
@@ -1399,24 +1365,18 @@ fwd_router_t::child_rx_ctx_t* fwd_router_t::acquire_ctx(std::string_view name) {
         // identical anyway — the mount run is a pure function of the name.
         return hit;
     }
-    // A fresh node: one block from the label plane's source (#1779). It VIEWS its registry
+    // A fresh node: one block from the link plane's source (#1779). It VIEWS its registry
     // slot's name and mount run rather than copying them — the slot is keyed by this name for
     // the registry's life and its text never changes, which is the property `entry` relies on.
     const child_registry_t::child_t* const entry = registry_.entry_by_name(name);
-    void* const raw = label_src_->try_alloc(sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
+    void* const raw = link_src_->try_alloc(sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
     if (raw == nullptr || entry == nullptr) {
         if (raw != nullptr)
-            label_src_->release(raw, sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
+            link_src_->release(raw, sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
         return nullptr;
     }
     child_rx_ctx_t& fresh = *::new (raw) child_rx_ctx_t(this, entry->name, entry->mount_tlv);
     fresh.entry = entry;
-    // The §8.3 ceiling needs an identity a single far side cannot spend on everyone else's
-    // behalf, and a point-to-point child has none of its own (#1294 mints handles for a bus
-    // facet only). `kSolePeerHandle` is one constant for the whole node, so every child would
-    // share one budget — precisely the case the ceiling exists to prevent. One handle per
-    // child, minted here, is that doctrine applied at the granularity that makes it true.
-    fresh.label_peer.store(next_label_peer_bits(), std::memory_order_relaxed);
     // Linked NOW, still retired: a reader that reaches it skips it, and `publish_ctx`'s
     // release-clear is its publication edge — the same one a revived tombstone takes.
     fresh.retired.store(true, std::memory_order_relaxed);
@@ -1429,15 +1389,6 @@ fwd_router_t::child_rx_ctx_t* fwd_router_t::acquire_ctx(std::string_view name) {
     return &fresh;
 }
 
-std::uint64_t fwd_router_t::next_label_peer_bits() noexcept {
-    // Control-plane only, under `ctl_m_`. The generation half advances per REGISTRATION and
-    // never returns to a value a peer might still hold a label against — the same
-    // saturate-forward discipline as every other stamp in the doc set, and the reason a
-    // re-added child's predecessor cannot be impersonated.
-    const std::uint32_t gen = label_peer_seq_++;
-    return (static_cast<std::uint64_t>(gen) << 32);
-}
-
 std::optional<const link_kind_t*> fwd_router_t::intern_kind(link_kind_t kind) {
     if (kind.kind.empty()) return nullptr;
     for (const kind_rec_t* r = kinds_; r != nullptr; r = r->next) {
@@ -1447,7 +1398,7 @@ std::optional<const link_kind_t*> fwd_router_t::intern_kind(link_kind_t kind) {
     // `acquire_ctx` makes for a fresh name, and bounded by the catalog, not by traffic. One
     // block: the record, then its `kind` bytes (#1779).
     void* const raw =
-        label_src_->try_alloc(sizeof(kind_rec_t) + kind.kind.size(), alignof(kind_rec_t));
+        link_src_->try_alloc(sizeof(kind_rec_t) + kind.kind.size(), alignof(kind_rec_t));
     if (raw == nullptr) return std::nullopt;
     auto* const text = static_cast<char*>(raw) + sizeof(kind_rec_t);
     std::memcpy(text, kind.kind.data(), kind.kind.size());
@@ -1555,9 +1506,9 @@ bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name
     // origin is the one hop no peer ever sees (§4.1).
     const std::optional<wire::path_ref_element_t> own = connection_ref(link_name);
     if (!own) return false;
-    // Scratch from the label plane's source (#1779): a refusal leaves the path canonical, the
+    // Scratch from the link plane's source (#1779): a refusal leaves the path canonical, the
     // same non-event a reply without a mint is.
-    mem::block_array_t<wire::path_ref_element_t> elements(*label_src_);
+    mem::block_array_t<wire::path_ref_element_t> elements(*link_src_);
     if (!elements.reserve(n + 1)) return false;
     (void)elements.push_back(*own);  // reserved above: cannot grow
     for (std::size_t i = 0; i < n; ++i)
@@ -1579,12 +1530,12 @@ bool fwd_router_t::bound_send(const graph::path_t& path, graph::acl_right_t righ
     if (link == nullptr) return false;
     // The residual as a `PATH` of PAIR elements (RFC-0029 §4.2) — the one address spelling;
     // the bare `PATH_REF` array is refused as a `dst` everywhere (§5.3). Written straight into
-    // a block of exactly its size from the label plane's source (#1779); a refusal is the same
+    // a block of exactly its size from the link plane's source (#1779); a refusal is the same
     // `false` a stale element is. The element cap keeps the body far below a 16-bit length.
     const auto residual = std::span<const wire::path_pair_t>(b.elements).subspan(1);
     if (residual.size() > wire::kMaxPathRefElements) return false;
     static_assert(wire::kMaxPathRefElements * wire::kPathPairRecordBytes <= 0xFFFFu);
-    mem::block_array_t<std::byte> dst(*label_src_);
+    mem::block_array_t<std::byte> dst(*link_src_);
     const std::size_t body = residual.size() * wire::kPathPairRecordBytes;
     const std::size_t bytes = wire::header_bytes(wire::opt_t{}) + body;
     if (!dst.reserve(bytes)) return false;
@@ -1597,155 +1548,6 @@ bool fwd_router_t::bound_send(const graph::path_t& path, graph::acl_right_t righ
                 .first<wire::kPathPairRecordBytes>(),
             residual[i]);
     send(ctx, *link, w);
-    return true;
-}
-
-namespace {
-
-/**
- * @brief The `src` PATH body of a validated `FWD` — the ONE region a hop ever labels (erratum 4).
- *
- * A `FWD`'s two `PATH` children are `dst` then `src` (RFC-0004 §B), so the second one is the
- * answer and there is no third to confuse it with. Read positionally rather than by type alone,
- * because "the first PATH" is the return route and caching THAT would cache the reply endpoint.
- */
-[[nodiscard]] std::span<const std::byte> fwd_src_body(const wire::tlv_node_t& fwd) noexcept {
-    bool seen_dst = false;
-    for (const wire::tlv_node_t c : fwd.children()) {
-        if (c.type() != wire::type_t::PATH) continue;
-        if (!seen_dst) {
-            seen_dst = true;
-            continue;
-        }
-        return c.payload();
-    }
-    return {};
-}
-
-/**
- * @brief The registered error identity a `FWD{REPLY}` carries, or `nullopt` if it carries none.
- *
- * `assemble_error_reply` nests it as `STATUS > ERROR > VALUE(u16 LE)`, and this reads exactly
- * that shape — not a recursive scan for any 2-byte VALUE, which would read a two-byte PAYLOAD as
- * an error identity and clear a live cache on a successful reply.
- */
-[[nodiscard]] std::optional<wire::err_t> reply_error_identity(
-    const wire::tlv_node_t& fwd) noexcept {
-    for (const wire::tlv_node_t status : fwd.children()) {
-        if (status.type() != wire::type_t::STATUS || status.children().empty()) continue;
-        const wire::tlv_node_t err = *status.children().begin();
-        if (err.type() != wire::type_t::ERROR || err.children().empty()) continue;
-        const wire::tlv_node_t id = *err.children().begin();
-        if (id.type() != wire::type_t::VALUE || id.payload().size() != 2) continue;
-        return static_cast<wire::err_t>(detail::load_le<std::uint16_t>(id.payload()));
-    }
-    return std::nullopt;
-}
-
-}  // namespace
-
-[[gnu::cold]] bool fwd_router_t::adopt_path_label(graph::path_t& path, std::string_view link_name,
-                                                  const wire::tlv_node_t& reply) {
-    const std::span<const std::byte> src = fwd_src_body(reply);
-    // A reply whose `src` carries no label is every conformant reply this codebase shipped before
-    // RFC-0027 and every reply from a route that mints nothing (§6.3). It ends here, and the path
-    // stays canonical — the same non-event a failed mint is.
-    if (src.empty()) return false;
-    const wire::path_element_census_t census = wire::path_element_census(src);
-    if (!census.well_formed || census.labels == 0) return false;
-    // Built into a fresh buffer and handed over whole: the cache validates what it is given, and
-    // a half-built body must never be what it validates. The head is this node's own first-hop
-    // local part as LITERAL segment records — the registry's mount-run spelling of the link
-    // name, since an origin with no mint table can spell it no other way (§4.1, ruled
-    // 2026-08-24). Scratch from the label plane's source (#1779); a refusal stays canonical.
-    const std::size_t head = child_registry_t::encode_mount_name(link_name, nullptr);
-    if (head == 0) return false;  // no packed spelling: an empty or over-long segment
-    mem::block_array_t<std::byte> body(*label_src_);
-    if (!body.reserve(head + src.size())) return false;
-    for (std::size_t i = 0; i < head; ++i) (void)body.push_slot();  // reserved: cannot grow
-    (void)child_registry_t::encode_mount_name(link_name, body.data());
-    (void)body.append(src.data(), src.size());
-    return path.cache_path_label(std::span<const std::byte>(body.data(), body.size()));
-}
-
-[[gnu::cold]] bool fwd_router_t::label_send(const graph::path_t& path, egress_fn_t send,
-                                            void* ctx) const {
-    const graph::path_label_cache_t& c = path.path_label();
-    // An empty body needs no test of its own: its head is the sentinel alone, which no mount
-    // matches, so the descent below answers "no mount".
-    if (!c.cached) return false;
-    // Opened before the mount descent reads the link and held until `send` returns, so a link
-    // removed meanwhile outlives the call (see `frame_scope_t`).
-    const frame_scope_t scope;
-    const std::span<const std::byte> body{c.body.data(), c.body.size()};
-
-    // The LITERAL head is the only part this node resolves: everything from the first label
-    // element on belongs to hops downstream, which is the whole point of holding it. It is read
-    // LAZILY, the way `split_subscriber_target` reads a key, so no segment table is built
-    // (#1779). Past the head the descent is told "" once and then "nothing": it asks whether
-    // anything exists BELOW the matched mount, and here the answer is "the labelled residual".
-    // An empty name matches no registered child, so the sentinel cannot lengthen the run it is
-    // only there to prove is non-empty. The bytes are the path's, so retaining is the identity.
-    const auto head_at = [body](std::size_t i) -> std::optional<std::string_view> {
-        wire::path_element_cursor_t walk(body);
-        std::optional<wire::path_element_t> el;
-        for (std::size_t k = 0; k <= i; ++k) {
-            el = walk.next();
-            if (!el || el->kind != wire::path_element_kind_t::SEGMENT)
-                return k == i ? std::optional<std::string_view>(std::string_view{}) : std::nullopt;
-        }
-        return detail::as_string_view(el->payload);
-    };
-    const mount_hit_t hit = resolve_mount_by(
-        registry_, head_at, [&head_at](std::size_t i) { return head_at(i).value_or(""); });
-    // No mount (this node terminates the head — an empty head included), a bus link's own name
-    // with a residual below it, and a bus PEER are the same answer: no directed labelled egress
-    // from here. A bus child is never labelled at all — one label per child would stand for a
-    // different address per peer.
-    if (hit.link == nullptr || hit.rejected || !hit.peer.empty() || hit.strip_k == 0) return false;
-
-    // Where the consumed run ends in the CACHED bytes — walked again rather than remembered,
-    // because the run is a count of elements and the residual is a byte offset. The descent
-    // matched `strip_k` LITERAL segments (the sentinel and everything past it match no slot),
-    // so the first `strip_k` elements are those segments.
-    std::size_t residual_at = 0;
-    std::size_t consumed = 0;
-    wire::path_element_cursor_t cut(body);
-    while (const std::optional<wire::path_element_t> el = cut.next()) {
-        if (!el->ok()) return false;
-        residual_at = el->at + el->bytes;
-        if (++consumed == hit.strip_k) break;
-    }
-    if (consumed != hit.strip_k || residual_at >= body.size()) return false;
-
-    mem::block_array_t<std::byte> dst(*label_src_);
-    // The 4-byte `PATH` header, then the residual bytes, into one block of exactly that size
-    // from the label plane's source (#1779). Spelled as `store_header` + append rather than
-    // `emit_tlv`, and the reason is measured, not stylistic: one more inlinable `emit_tlv` call
-    // in THIS TU re-partitions GCC's inline budget and pushes the hot
-    // `route_fwd_forward<rope_cursor>` back to the shape the symbol ratchet re-pinned away
-    // from — on a hop that executes none of this code. The bytes are identical: `emit_tlv`'s
-    // only extra act is widening the length field past 0xFFFF, and a labelled body is bounded
-    // by `graph::kMaxPathBytes` long before that.
-    const std::span<const std::byte> residual = body.subspan(residual_at);
-    std::array<std::byte, 4> header{};
-    wire::store_header(header, wire::type_t::PATH, wire::opt_t{}, residual.size());
-    if (!dst.reserve(header.size() + residual.size())) return false;
-    (void)dst.append(header.data(), header.size());  // reserved above: cannot grow
-    (void)dst.append(residual.data(), residual.size());
-    send(ctx, *hit.link, std::span<const std::byte>(dst.data(), dst.size()));
-    return true;
-}
-
-[[gnu::cold]] bool fwd_router_t::fall_back_on_label_refusal(graph::path_t& path,
-                                                            const wire::tlv_node_t& reply) {
-    if (!path.path_label().cached) return false;
-    const std::optional<wire::err_t> id = reply_error_identity(reply);
-    // §7.2 names ONE identity, and narrowly: an unresolvable address is what a stale label is.
-    // A different refusal (a denial, a malformed address, backpressure) says nothing about the
-    // spelling, and dropping the cache on it would re-mint a label that was never the problem.
-    if (!id || *id != wire::err_t::PATH_NOT_FOUND) return false;
-    path.clear_path_label();
     return true;
 }
 
@@ -1774,12 +1576,12 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
                                                           wire::path_pair_t& out_target) {
     // The head element, read off the window the peek already opened. Only the HEAD can be this
     // hop's (RFC-0029 §4.2: element k is read by node k and by no other), so nothing past it is
-    // looked at. The peek answered `PATH_LABEL`, so the head IS an escape record (`00` first)
+    // looked at. The peek answered `PATH_ESCAPE`, so the head IS an escape record (`00` first)
     // whose three framing bytes and declared payload all lie inside the `dst` (`read_packed_seg`
     // bounds both): a head that frames as `00 16 08` therefore holds all 11 bytes, and needs no
     // second length check here. A record that is not `00 16 08` is not a PAIR and passes
-    // untouched — the label arm, then the terminus's own refusal of an escape-carrying `dst`,
-    // answer every other shape exactly as they did before this arm existed.
+    // untouched: the terminus's own refusal of an escape-carrying `dst` answers every other
+    // shape (`tr::path::invalid`).
     const std::size_t head = pre.dst_body_off;
     if (!wire::path_pair_record_valid(static_cast<std::uint8_t>(cur.byte_at(head + 1)),
                                       cur.byte_at(head + 2)))
@@ -1872,134 +1674,6 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
     fwd_pre_t hop = pre;
     hop.strip_at = head_end;
     route_fwd_forward(inbound_name, inbound_ctx, from_peer, cur, *egress, hop);
-    return head_dst_t::HANDLED;
-}
-
-template <class Cursor, class Reject>
-fwd_router_t::head_dst_t fwd_router_t::route_label_forward(std::string_view inbound_name,
-                                                           const child_rx_ctx_t* inbound_ctx,
-                                                           bool from_peer, const Cursor& cur,
-                                                           const fwd_pre_t& pre, Reject&& reject,
-                                                           wire::path_ref_element_t& out_target) {
-    // The `dst` body window the peek already opened — no header is re-read to find it.
-    if (pre.dst_body_off >= pre.dst_end) return head_dst_t::PASS;
-    const std::size_t body_len = pre.dst_end - pre.dst_body_off;
-    if (body_len < wire::kPathLabelRecordBytes) return head_dst_t::PASS;  // too short to BE a label
-
-    // Only the FIRST element can be this hop's own local part: a path is read left to right and
-    // every hop reads the element that stands where its mount run stood (§5.2's rule that an
-    // element self-describes by kind and is read by the hop whose part it is — never by
-    // position within somebody else's part). Copy just the record's bytes off the cursor, which
-    // is the one place a rope may straddle a link; seven bytes on the stack, no allocation.
-    std::array<std::byte, wire::kPathLabelRecordBytes> head{};
-    for (std::size_t i = 0; i < head.size(); ++i)
-        head[i] = static_cast<std::byte>(cur.byte_at(pre.dst_body_off + i));
-    const wire::path_element_t el = wire::path_element_at(head, 0);
-    // NOT a label ⇒ this is the overwhelmingly common case and it must cost nothing. A literal
-    // segment, a foreign escape and a ragged record all answer the same way: false, and the
-    // caller runs the canonical mount descent exactly as it did before labels existed. This is
-    // where `dispatch_edge_target`'s fall-through shape lives — the branch a string path takes.
-    if (el.kind != wire::path_element_kind_t::LABEL) return head_dst_t::PASS;
-
-    // From here the address IS labelled, and §7.2 governs every exit. A host with no table
-    // never minted this label, so it cannot validate it and MUST NOT guess: the answer is the
-    // same `NOT_FOUND`-class refusal a stale label gets, which is exactly right — "I did not
-    // mint this" and "I no longer honour this" are one case to the sender, and its recovery
-    // from both is the full-string path it still holds.
-    // The peer a label was minted FOR is the far side of the link it arrived on, and the
-    // identity of that link is its ctx (resolved by name when the frame came in through the
-    // public `on_frame`, exactly as the mint side resolves it). `lookup`'s owner check is half
-    // of §4.1's node-scope rule: a label leaked to a different link buys one `NOT_FOUND`.
-    const child_rx_ctx_t* const ctx =
-        inbound_ctx != nullptr ? inbound_ctx : ctx_by_name(inbound_name);
-    const peer_handle_t peer =
-        ctx != nullptr ? peer_handle_from_bits(ctx->label_peer.load(std::memory_order_relaxed))
-                       : peer_handle_t{};
-    const std::optional<path_label_target_t> target =
-        labels_ != nullptr && peer.valid() ? labels_->lookup(peer, el.label) : std::nullopt;
-    if (!target) {
-        // Counted, per `dispatch_edge_target`'s discipline: a refused deref is a fact about the
-        // route, and a bound that silently discards work is indistinguishable from one never
-        // reached. NO repair of any kind — no re-resolution against a nearest match, no retry
-        // against another slot, no guessing, and no fall-through to the canonical walk, because
-        // the label REPLACED the string bytes and there is nothing left to walk.
-        label_not_found_.fetch_add(1, std::memory_order_relaxed);
-        reject(graph::status_t::NOT_FOUND, pre);
-        return head_dst_t::HANDLED;
-    }
-
-    // The op's own right at the dereferenced vertex — §8.2, and the reading is RFC-0024 §6.2's
-    // unchanged, because it is the same question. A REPLY carries no right of its own and a
-    // labelled REPLY is not a shape a hop emits toward a peer, so it is refused rather than
-    // guessed at; an opcode this build cannot name a right for is refused for the reason
-    // `fwd_op_right` gives — guessing a right is how a write-like future opcode crosses a
-    // READ-only gate. The same mapping the PAIR arm and the NAME hop gate use, so the three
-    // spellings cannot disagree on which right an opcode carries.
-    const std::optional<graph::acl_right_t> op_right =
-        fwd_op_right(static_cast<std::uint8_t>(cur.byte_at(pre.op_body_off)));
-    if (!op_right) {
-        label_not_found_.fetch_add(1, std::memory_order_relaxed);
-        reject(graph::status_t::NOT_FOUND, pre);
-        return head_dst_t::HANDLED;
-    }
-    const graph::acl_right_t right = *op_right;
-
-    // HOP or TERMINUS, decided by the element and by nothing else (§7.2). A label stands for
-    // an already-made resolution, and the two things this node's own reference can name are an
-    // EGRESS connection vertex — a hop, the arm below — and an ordinary vertex, which is a
-    // residual this node resolves itself (§6.1 point 3's own mint, presented back). The
-    // discriminant is the conn-slot lookup `bound_egress` makes anyway, hoisted so the hop arm
-    // repeats no work: a slot that names no live child is not an egress, and a slot that does
-    // belongs wholly to the hop arm — including every way that arm can then refuse (tombstoned
-    // link, bus child, ACL). There is deliberately NO fall-through between the two.
-    const child_registry_t::child_t* const door = registry_.by_conn_slot(target->index);
-    if (door == nullptr || door->egress().multi_peer) {
-        // The deref, here rather than at the terminus, so §7.2's refusal is the ADDRESSED and
-        // COUNTED `NOT_FOUND` this branch gives everywhere else. The label validated against
-        // the table but its vertex retired in between — §7.1's other half — and the resolver's
-        // own by-value refusal would be an uncounted silent drop instead. The resolver still
-        // re-derefs, because a public entry point validates its own input; that second read is
-        // one slot load on a leg that is about to decode and apply a whole frame.
-        if (!graph_.deref_vertex_slot(target->index, target->generation)) {
-            label_not_found_.fetch_add(1, std::memory_order_relaxed);
-            reject(graph::status_t::NOT_FOUND, pre);
-            return head_dst_t::HANDLED;
-        }
-        // §8.2 is NOT evaluated here, and that is the reuse rule rather than an omission: the
-        // terminus's own gate is `graph_t::read` / `write` / `await` at the resolved vertex,
-        // under this link's subject — the identical call the string spelling makes, in the
-        // identical place. A second `allows` here would be a second implementation of one
-        // normative sentence, which is exactly what §8.2's "exactly as the string form does"
-        // forbids; the hop arm reuses `bound_egress` for the same reason one line below.
-        label_resolves_.bump();
-        out_target = *target;
-        return head_dst_t::TERMINUS;
-    }
-
-    // §8.2's re-check runs inside `bound_egress`, and the reuse is the POINT: a labelled
-    // operation evaluates `acl_allows` at the dereferenced vertex, for that operation's own
-    // right, through the identical code the bound form runs — a generation match authorizes
-    // nothing. One implementation is what makes the string and label spellings' outcomes
-    // byte-identical by construction rather than by assertion, which is the property
-    // `acl/label-vs-string-allow` and `acl/label-vs-string-deny` exist to pin.
-    transport_t* const link = bound_egress(*target, inbound_name, right);
-    if (link == nullptr) {
-        label_not_found_.fetch_add(1, std::memory_order_relaxed);
-        reject(graph::status_t::NOT_FOUND, pre);
-        return head_dst_t::HANDLED;
-    }
-    // Consume the label element and forward the residual, through the ONE rebuild locus. One
-    // label covers the hop's WHOLE local part (§5.3.3), so what is stripped is one element
-    // standing for a whole mount run — `strip_at` is where that element ends, and the rebuild
-    // consumes exactly that window, whatever the record is.
-    fwd_pre_t label_pre = pre;
-    label_pre.strip_at = pre.dst_body_off + el.bytes;
-    label_resolves_.bump();
-    // No mint on this leg, and it is not an omission: a labelled `dst` on a REPLY was already
-    // refused by the opcode switch above, and §6.1 mints on the reply and only the reply. A
-    // reply's `dst` is the request's ACCUMULATED `src`, which grows in mount runs on request
-    // legs, so a labelled reply-`dst` is not a shape this design produces.
-    route_fwd_forward(inbound_name, inbound_ctx, from_peer, cur, *link, label_pre);
     return head_dst_t::HANDLED;
 }
 
@@ -2112,15 +1786,6 @@ bool fwd_router_t::sample_stats(std::string_view seam_class, std::string_view se
         out->add("retired_rx", s.retired_rx);
         return true;
     }
-    if (seam_class == "labels") {
-        if (seam_name != "table") return false;
-        if (out == nullptr) return true;
-        // The label PLANE's dereference tallies (RFC-0027 §7.2). The per-link label tables'
-        // `labels_exhausted` and `refused_bindings` went with the tables (#1951).
-        out->add("label_not_found", label_not_found());
-        out->add("label_resolves", label_resolves());
-        return true;
-    }
     if (seam_class != "link") return false;
     // A LIVE registered child, by the same NAME its `/net/<module>/<name>` connection vertex
     // carries. A tombstone (`erase`d link) is deliberately NOT a seam: a removed link's
@@ -2134,8 +1799,7 @@ bool fwd_router_t::sample_stats(std::string_view seam_class, std::string_view se
     out->add("malformed_rx", d.malformed_rx);
     out->add("dropped_tx", d.dropped_tx);
     link->kind_stats(*out);  // the kind's own nouns, if any (RFC-0033 §5.11)
-    // No `labels_used`: it counted the per-link label table's spent space, and the table is
-    // gone (#1951). A seam names only the nouns it HAS (RFC-0010 Am. 1 §D.3).
+    // A seam names only the nouns it HAS (RFC-0010 Am. 1 §D.3).
     return true;
 }
 
@@ -2237,21 +1901,19 @@ template <class Cursor, class Observe, class Reject, class Terminus, class Reply
         reject(graph::status_t::INVALID_PATH, pre);
         return true;
     }
-    // An escape-headed `dst` — the head element is not a NAME. RFC-0029 §6's PAIR arm first,
-    // then RFC-0027 §7.2's label arm (its table is S3's to delete), both BESIDE the mount
-    // descent and ahead of it: folding a digest chain over an escape record would read
-    // somebody's slot index as UTF-8. Gated on the peek's verdict, so a NAME-headed `dst` —
-    // every string route — pays one not-taken compare and reaches `resolve_mount_at` as before.
-    if (kind == fwd_dst_kind_t::PATH_LABEL) {
+    // An escape-headed `dst` — the head element is not a NAME. RFC-0029 §6's PAIR arm, BESIDE
+    // the mount descent and ahead of it: folding a digest chain over an escape record would
+    // read somebody's slot index as UTF-8. Gated on the peek's verdict, so a NAME-headed `dst`
+    // — every string route — pays one not-taken compare and reaches `resolve_mount_at` as
+    // before. Any other escape head (RFC-0027's retired `len = 4` label among them) passes,
+    // and the terminus refuses it as a malformed address (RFC-0029 §5.1, §5.3).
+    if (kind == fwd_dst_kind_t::PATH_ESCAPE) {
         wire::path_pair_t head_target{};
-        head_dst_t d = route_pair_forward(inbound_name, inbound_ctx, from_peer, cur, pre, op_byte,
-                                          reject, head_target);
-        if (d == head_dst_t::PASS && labels_ != nullptr)
-            d = route_label_forward(inbound_name, inbound_ctx, from_peer, cur, pre, reject,
-                                    head_target);
+        const head_dst_t d = route_pair_forward(inbound_name, inbound_ctx, from_peer, cur, pre,
+                                                op_byte, reject, head_target);
         // TERMINUS: the head element dereferenced to a LOCAL vertex and was the last one, so
         // this node is the terminus and the frame stops here. It does NOT pass through the
-        // REPLY test at the bottom of this driver, and must not: both arms already refused a
+        // REPLY test at the bottom of this driver, and must not: the arm already refused a
         // REPLY (a reply's `dst` is canonical, RFC-0029 §6.1), so what reaches here is a
         // request resolved against the element rather than against a name nothing spelled.
         // HANDLED stops here too; only PASS goes on to the canonical path.
@@ -2278,25 +1940,7 @@ template <class Cursor, class Observe, class Reject, class Terminus, class Reply
         else
             hit.refuse_unless(door_allows(hit.mount, inbound_name, fwd_op_right(op_byte)));
         if (hit.link != nullptr) {
-            // §11.2, and §6.1's mint decision, made HERE rather than inside the hop. The
-            // address is a canonical `PATH` and not a `PATH_REF`, so this leg MAY mint — it is
-            // the leg RFC-0027 exists for, the first string-spelled walk of a route whose reply
-            // carries the mint home. Every other call site passes `{}`, so §11.2's mutual
-            // exclusion is structural: a bound leg cannot reach the mint at all.
-            //
-            // It is computed here and not in `route_fwd_forward` for a MEASURED reason. That
-            // hop is `bench/symbol_ratchet.json`-pinned and `rebuild_fwd_forward` is
-            // `[[gnu::flatten]]`, so anything the hop decides is decided three times over in
-            // the flattened body: carrying the decision there cost **+688 B** on
-            // `route_fwd_forward<rope_cursor>`, and carrying it as a lazy closure still cost
-            // +512 B. Reduced to a span the hop only forwards, the pinned symbol stays flat and
-            // the branch lands here, on the driver that was already switching on `kind`.
-            const std::span<const std::byte> reply_label =
-                labels_ != nullptr
-                    ? label_src_prefix(inbound_name, inbound_ctx, cur, pre, hit.link_name)
-                    : std::span<const std::byte>{};
-            route_fwd_forward(inbound_name, inbound_ctx, from_peer, cur, *hit.link, pre,
-                              reply_label);
+            route_fwd_forward(inbound_name, inbound_ctx, from_peer, cur, *hit.link, pre);
             return true;
         }
         // A bus NAME + residual (never broadcast, never terminus), or a hop its mount refuses.
@@ -2305,7 +1949,7 @@ template <class Cursor, class Observe, class Reject, class Terminus, class Reply
             return true;
         }
     }
-    // The `dst` names no mount here and no PAIR or label arm took it ⇒ this node is its
+    // The `dst` names no mount here and the PAIR arm did not take it ⇒ this node is its
     // terminus. The `PATH` arm above is the mount descent's gate, not a frame classifier: it
     // says "this frame has an address this node can descend", and an escape-headed `dst` the
     // arms passed has no NAME to descend on — the terminus refuses it as a malformed address.
@@ -2373,10 +2017,10 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                                         rx_for(inbound_ctx), *egress_, status);
                 },
                 /* terminus */
-                [&](const wire::path_ref_element_t* label_target) {
+                [&](const wire::path_ref_element_t* dst_target) {
                     // A request FWD is resolved straight off the rope (ADR-0053 3c-iii — NO
                     // flatten, verify-at-access §4).
-                    resolve_terminus_rope(inbound_name, std::move(frame), label_target, inbound_ctx,
+                    resolve_terminus_rope(inbound_name, std::move(frame), dst_target, inbound_ctx,
                                           peer);
                 },
                 /* reply */
@@ -2438,8 +2082,8 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
                                 status);
         },
         /* terminus */
-        [&](const wire::path_ref_element_t* label_target) {
-            resolve_terminus(inbound_name, frame, frame_view, inbound_ctx, label_target, peer);
+        [&](const wire::path_ref_element_t* dst_target) {
+            resolve_terminus(inbound_name, frame, frame_view, inbound_ctx, dst_target, peer);
         },
         /* reply */
         [&](const fwd_pre_t& pre) {
@@ -2479,176 +2123,11 @@ void fwd_router_t::refuse_unserved_type(std::byte type, std::string_view inbound
         emit_retired_type_answer(*in);
 }
 
-std::span<const std::byte> fwd_router_t::child_label_record(std::string_view inbound_name,
-                                                            const child_rx_ctx_t& ctx,
-                                                            peer_handle_t peer) {
-    if (!peer.valid()) return {};  // no egress identity to own the label ⇒ stays a string
-    // Already minted, FOR THIS PEER: the steady state, and it never touches the table. Acquire,
-    // so the seven encoded bytes read below are the ones the minting thread finished writing.
-    // A label minted for a different origin is deliberately not reused — see `path_label_for`:
-    // handing it over would shorten a frame on behalf of a peer whose `lookup` must refuse it.
-    if (const std::uint32_t bits = ctx.path_label.load(std::memory_order_acquire); bits != 0)
-        return ctx.path_label_for.load(std::memory_order_relaxed) == peer.bits()
-                   ? std::span<const std::byte>(ctx.path_label_tlv)
-                   : std::span<const std::byte>{};
-
-    // §6.2's trigger fires HERE and nowhere else: the first reply this hop relays over this
-    // child. No use counter, no hit threshold, no hotness estimate, no timer, no aging — the
-    // condition is that the hop is already holding the resolution and has not yet spelled it.
-    // What the label ALIASES is the connection vertex of the link the reply came back over —
-    // the identical element `hop_mint` gives RFC-0024's reverse list, and the identical element
-    // `bound_egress` consumes on the way back in. The two directions compose because they name
-    // the same thing: what this hop mints on a reply is what it dereferences on the next
-    // request. A node with nothing to give answers nullopt and leaves the part a string.
-    const std::optional<wire::path_ref_element_t> target = hop_mint(inbound_name, &ctx);
-    if (!target) return {};
-    // §8.1 is structural at this point and stated so it is not lost: the mint rides an
-    // operation that already ran every gate on its way to the terminus, so no label is ever
-    // minted for a destination an ancestor ACL hides. Probing a labelled route yields what
-    // probing the string form yields — exists + denied, never exists + here is a handle.
-    const std::optional<wire::path_label_t> label = labels_->mint(peer, *target);
-    if (!label) return {};  // §8.3 ceiling/capacity/all-retired ⇒ refuse-new, NOT an error
-
-    // Encode once, into the ctx, so every later reply is the load above. The record cannot
-    // be refused for a label the table minted (a minted label is always `valid()`); it is
-    // built in place, a fixed 7-byte array like the ctx's own storage.
-    const auto rec = wire::path_label_record(*label);
-    if (!rec) {
-        (void)labels_->release(*label);  // spelling refused ⇒ do not strand the slot
-        return {};
-    }
-    auto& ctx_mut = const_cast<child_rx_ctx_t&>(ctx);
-    ctx_mut.path_label_tlv = *rec;
-    ctx_mut.path_label_for.store(peer.bits(), std::memory_order_relaxed);
-    // Release-store LAST: the bytes AND the owning peer are whole before anything can observe
-    // the label as present, so a reader that sees it never pairs it with the wrong owner.
-    ctx_mut.path_label.store(label->bits(), std::memory_order_release);
-    return std::span<const std::byte>(ctx.path_label_tlv);
-}
-
-std::span<const std::byte> fwd_router_t::terminus_label_record(std::string_view inbound_link,
-                                                               path_label_target_t target) {
-    if (labels_ == nullptr) return {};
-    // The reply leaves over the link the request arrived on, so ONE ctx answers both halves of
-    // "who owns this label" and "where is it cached". A frame delivered through the public
-    // `on_frame` carries no ctx down here at all — the terminus is reached through the
-    // resolver, which knows only the link's NAME — so this is always the by-name lookup, which
-    // is `hop_mint`'s own fallback and correct for the same reason: the answer is a property
-    // of the LINK, not of how the frame reached the router.
-    const child_rx_ctx_t* const ctx = ctx_by_name(inbound_link);
-    if (ctx == nullptr || ctx->retired.load(std::memory_order_acquire)) return {};
-    // A BUS arrival is left a string, for the reason `label_src_prefix` gives at length: this
-    // ctx's `label_peer` is one identity for the whole child, so a label cached on it would be
-    // presentable by EVERY peer behind the bus — the owner check that makes §4.1's node-scope
-    // rule bite would be checking the wrong thing. §6.3 makes the refusal free.
-    if (ctx->entry->egress().multi_peer) return {};
-    const peer_handle_t peer =
-        peer_handle_from_bits(ctx->label_peer.load(std::memory_order_relaxed));
-    if (!peer.valid()) return {};  // no identity to own the label ⇒ the residual stays a string
-    // The residual, packed into one word so the steady state is one relaxed load and one
-    // compare. Both halves are load-bearing: an index without the generation current when it
-    // was read names a slot, not a vertex.
-    const std::uint64_t want = (static_cast<std::uint64_t>(target.index) << 32) | target.generation;
-    // Already minted, for THIS peer and THIS residual: the steady state, and it never touches
-    // the table. Acquire, so the seven encoded bytes read below are the ones the minting thread
-    // finished writing.
-    if (const std::uint32_t bits = ctx->terminus_label.load(std::memory_order_acquire); bits != 0)
-        return ctx->terminus_label_for.load(std::memory_order_relaxed) == peer.bits() &&
-                       ctx->terminus_label_target.load(std::memory_order_relaxed) == want
-                   ? std::span<const std::byte>(ctx->terminus_label_tlv)
-                   : std::span<const std::byte>{};  // one label per child — see the ctx field
-
-    // §6.2's trigger fires HERE and nowhere else on this half: the first operation this node
-    // terminates for this child. No use counter, no hit threshold, no hotness estimate, no
-    // timer, no aging — the condition is that the node is already holding the resolution and
-    // has not yet spelled it.
-    const std::optional<wire::path_label_t> label = labels_->mint(peer, target);
-    if (!label) return {};  // §8.3 ceiling/capacity/all-retired ⇒ refuse-new, NOT an error
-    const auto rec = wire::path_label_record(*label);
-    if (!rec) {
-        (void)labels_->release(*label);  // spelling refused ⇒ do not strand the slot
-        return {};
-    }
-    auto& ctx_mut = const_cast<child_rx_ctx_t&>(*ctx);
-    ctx_mut.terminus_label_tlv = *rec;
-    ctx_mut.terminus_label_for.store(peer.bits(), std::memory_order_relaxed);
-    ctx_mut.terminus_label_target.store(want, std::memory_order_relaxed);
-    // Release-store LAST: the bytes, the owning peer and the residual it stands for are all
-    // whole before anything can observe the label as present.
-    ctx_mut.terminus_label.store(label->bits(), std::memory_order_release);
-    return std::span<const std::byte>(ctx->terminus_label_tlv);
-}
-
-void fwd_router_t::release_child_label(child_rx_ctx_t& ctx) noexcept {
-    // BOTH halves of §6.1's rewrite hang off this child and both depart with it — the
-    // forwarding label that aliases the connection vertex behind it, and the terminus label
-    // that aliases the vertex a residual resolved to. Releasing one and not the other would
-    // leave a live slot owned by a peer identity that is about to be re-stamped.
-    const std::uint32_t term_bits = ctx.terminus_label.exchange(0, std::memory_order_acq_rel);
-    const std::uint32_t bits = ctx.path_label.exchange(0, std::memory_order_acq_rel);
-    if (labels_ == nullptr) return;
-    // The generation bump IS the invalidation (§7.1) — there is no withdraw frame, no unbind,
-    // no lease and no TTL (§7.3). The peer's next frame discovers it, answers NOT_FOUND, and
-    // the peer falls back to the string path it still holds. A bump that saturates retires the
-    // slot permanently (§4.3.1); that is the table's rule, not this call site's.
-    if (term_bits != 0) (void)labels_->release(wire::path_label_from_bits(term_bits));
-    if (bits != 0) (void)labels_->release(wire::path_label_from_bits(bits));
-}
-
-template <class Cursor>
-[[gnu::noinline]] std::span<const std::byte> fwd_router_t::label_src_prefix(
-    std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx, const Cursor& cur,
-    const fwd_pre_t& pre, std::string_view outbound_name) {
-    // §11.2's mutual exclusion, at the call site the RFC assigns it to: a host SHOULD NOT mint
-    // a path label into an address already spelled as a `PATH_REF`. `may_mint` is false from
-    // every bound leg, so the two compressions of one address never meet on one frame. See the
-    // header for why this arm refuses unconditionally while RFC-0024's shipped `bind` is left
-    // exactly as it is.
-    if (pre.op_body_len == 0) return {};
-    // §6.1: minting rides the REPLY and only the reply. Not a preference — a request leg has
-    // not yet passed the terminus's gates, so minting there would break §8.1's post-auth rule.
-    // The op byte is read HERE rather than by the caller so a node with no table never reads it
-    // at all; masked, because bits 7-6 are flags (§9.3).
-    if (static_cast<fwd_op_t>(cur.byte_at(pre.op_body_off) & graph::kFwdOpcodeMask) !=
-        fwd_op_t::REPLY)
-        return {};
-    // A frame delivered through the public `on_frame` carries no ctx (tests, SDK hosts, a link
-    // wired outside `add_child`), so it resolves by name — `hop_mint`'s own fallback, for its
-    // reason: the answer is a property of the LINK, not of how the frame reached the router.
-    const child_rx_ctx_t* const ctx =
-        inbound_ctx != nullptr ? inbound_ctx : ctx_by_name(inbound_name);
-    if (ctx == nullptr || ctx->retired.load(std::memory_order_acquire)) return {};
-    // A BUS arrival is deliberately left a string, and it is a scope decision rather than a
-    // limitation of the design. A bus child's local part is its mount run PLUS the peer segment
-    // resolved per frame (`extra_seg`), so one label per child would stand for a different
-    // address for every peer behind the bus — the mis-delivery class this doc set closes by
-    // construction. Labelling it correctly needs one slot per (child, peer), keyed on the
-    // handle the seam already mints (#1294), and that is a table shape this car does not build.
-    // §6.3 makes the refusal free: the part stays a string and nothing on the route notices.
-    //
-    // Read off the CTX rather than the caller's `from_peer` flag, so the answer is a property
-    // of the child and not of one frame: a bus child relaying a frame with no resolvable peer
-    // must still not acquire a label standing for one peer's address.
-    if (ctx->entry->egress().multi_peer) return {};
-    // WHO the label is minted for: the peer this reply is being relayed OUT to, because that
-    // origin is the one that will present the label back. Minting it for the link the reply
-    // ARRIVED on would produce a label whose owner can never present it — a slot spent on
-    // nobody, and a shortened frame the far side must refuse. The two ctxs are different
-    // things and this is the distinction: the inbound ctx is what the label ALIASES, the
-    // outbound one is who OWNS it.
-    const child_rx_ctx_t* const egress =
-        outbound_name.empty() ? nullptr : ctx_by_name(outbound_name);
-    if (egress == nullptr) return {};
-    return child_label_record(
-        inbound_name, *ctx,
-        peer_handle_from_bits(egress->label_peer.load(std::memory_order_relaxed)));
-}
-
 template <class Cursor>
 void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
                                      const child_rx_ctx_t* inbound_ctx, bool from_peer,
                                      const Cursor& cur_src, transport_t& child,
-                                     const fwd_pre_t& pre, std::span<const std::byte> reply_label) {
+                                     const fwd_pre_t& pre) {
     // All offsets, no decoded tree: the shrunk-dst / grown-src head rebuild lives in
     // fwd_frame_view.hpp (rebuild_fwd_forward — unit-tested directly); this hop only
     // resolves the child and scatter-gathers the result. Reads AND the egress go
@@ -2688,17 +2167,6 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
                                : std::span<const std::byte>{};
     const std::string_view peer_seg =
         from_peer || mount.empty() ? inbound_name : std::string_view{};
-    // RFC-0027 §6.1's reply-leg rewrite, and the ONE branch a string-only hop pays for it: a
-    // null `labels_` is the conformant default (§6.3), it is a member already in this router's
-    // first cache line, and the not-taken branch is what every deployment that ships today
-    // takes. Everything the rewrite needs — the op-byte read, the table call, the encode — is
-    // behind it and out of line, so the plain-string forwarding path reads no byte it did not
-    // read before and `fwd_rebuild_t` gains no field (its 256-byte ratchet is MEASURED, #1235).
-    //
-    // The result rides as its OWN parameter rather than by substituting `mount`, so a REQUEST
-    // leg is provably untouched: `reply_label` is consulted only on the `is_reply` arm, which
-    // no request reaches, and `mount_tlv` keeps its exact meaning on the arm that does.
-    //
     // This hop's mint contribution, on a forwarded REPLY that already carries a `PATH_REF`
     // (RFC-0024 §7.1 step 2): this node's own reference to the connection vertex for the link
     // the reply came back over. Handed to the rebuild as a CLOSURE, not a value, and the
@@ -2718,8 +2186,7 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     const auto reverse_fn = [&]() -> std::optional<wire::path_ref_element_t> {
         return reverse_hop_ref(inbound_name, inbound_ctx, from_peer);
     };
-    const auto rebuilt =
-        rebuild_fwd_forward(cur_src, pre, mount, peer_seg, mint_fn, reverse_fn, reply_label);
+    const auto rebuilt = rebuild_fwd_forward(cur_src, pre, mount, peer_seg, mint_fn, reverse_fn);
     // Both arms are the one `malformed_rx` bucket (#1503 Q3): a frame this node cannot
     // parse into a forwardable hop is one operator symptom, and nothing is SIZED against it.
     if (!rebuilt) {  // not a forwardable FWD ⇒ drop (callers pre-peeked)
@@ -2856,7 +2323,7 @@ transport_t* fwd_router_t::reply_link(std::string_view inbound_name,
 
 void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
                                     const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
-                                    const wire::path_ref_element_t* dst_label_target,
+                                    const wire::path_ref_element_t* dst_target,
                                     peer_handle_t peer) {
     // Local request terminus (ADR-0041 §5): arena-decode straight from the
     // node's injected resource (ADR-0039 §1) — the library keeps no buffer of
@@ -2887,9 +2354,9 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
                                graph::status_t::BACKPRESSURE);
         return;
     }
-    // §7.2's terminus deref rides as the fourth argument and nothing else changes: a labelled
-    // `dst` is resolved against the element the label branch already produced, and a `nullptr`
-    // — every frame a non-labelling node terminates — is the shipped call byte for byte.
+    // The terminus deref rides as the fourth argument and nothing else changes: a PAIR-spelled
+    // `dst` is resolved against the element the PAIR arm already produced, and a `nullptr` —
+    // every NAME-spelled frame — is the shipped call byte for byte.
     // WHERE it arrived and WHO sent it, as two claims rather than one string (ADR-0082).
     // The handle is the bus seam's when there is one and the FLAT link's in-flight peer
     // otherwise, so a per-writer subject is reachable at either setting of `peer_named`; the
@@ -2905,7 +2372,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     // goes to the record below, which may keep it past this frame.
     alignas(view::segment_t) std::array<std::byte, kReplyStoreBytes> store;
     auto reply =
-        resolver_.resolve(*arena, inbound, frame_view, dst_label_target, &deferred,
+        resolver_.resolve(*arena, inbound, frame_view, dst_target, &deferred,
                           inbound_name.empty() ? std::span<std::byte>{} : std::span(store));
     if (deferred) return;
     if (!reply) {  // structurally non-request / malformed ⇒ drop
@@ -2948,7 +2415,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
 }
 
 void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame,
-                                         const wire::path_ref_element_t* dst_label_target,
+                                         const wire::path_ref_element_t* dst_target,
                                          const child_rx_ctx_t* inbound_ctx, peer_handle_t peer) {
     // ADR-0053 3c-iii: the multi-link request terminus, resolved straight off the
     // rope — the interim flatten is gone. Adopt the frame as a lazy view: over()
@@ -2981,7 +2448,7 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     // The acknowledgement's storage (#1658), as at the arena terminus: this reply is only ever
     // sent from this frame, so the store is always lent.
     alignas(view::segment_t) std::array<std::byte, kReplyStoreBytes> store;
-    auto reply = resolver_.resolve(*view, inbound, nullptr, dst_label_target, &deferred, store);
+    auto reply = resolver_.resolve(*view, inbound, nullptr, dst_target, &deferred, store);
     if (deferred) return;
     if (!reply) {  // structurally non-request / malformed ⇒ drop
         count_drop(malformed_rx_);
@@ -3212,8 +2679,7 @@ struct fwd_router_t::pending_await_t {
     std::optional<wire::timestamp_t> echo_ts; /**< @brief The request's TF=0 stamp. */
     std::size_t name_len = 0;                 /**< @brief Link name bytes. */
     std::size_t dst_len = 0;                  /**< @brief Reply `dst` bytes. */
-    std::size_t src_len = 0;                  /**< @brief Reply `src` bytes (error form). */
-    std::size_t ok_src_len = 0;               /**< @brief Reply `src` bytes (result form). */
+    std::size_t src_len = 0;                  /**< @brief Reply `src` bytes. */
     std::size_t mint_len = 0;                 /**< @brief RFC-0024 mint bytes. */
     bool sending = false; /**< @brief A reply is being built outside the lock. */
     bool orphan = false;  /**< @brief Cancelled while firing: send nothing. */
@@ -3221,7 +2687,7 @@ struct fwd_router_t::pending_await_t {
     /** @brief A fresh, unarmed waiter block for @p v. */
     explicit pending_await_t(graph::vertex_handle_t v) noexcept : vertex(v) {}
 
-    /** @brief The trailing byte region: name, dst, src, ok_src, mint, in that order. */
+    /** @brief The trailing byte region: name, dst, src, mint, in that order. */
     [[nodiscard]] std::byte* tail() noexcept { return reinterpret_cast<std::byte*>(this + 1); }
     /** @brief The link name the reply goes back over. */
     [[nodiscard]] std::string_view name() noexcept {
@@ -3229,17 +2695,13 @@ struct fwd_router_t::pending_await_t {
     }
     /** @brief Reply `dst`. */
     [[nodiscard]] std::span<const std::byte> dst() noexcept { return {tail() + name_len, dst_len}; }
-    /** @brief Reply `src` for an ERROR. */
+    /** @brief Reply `src`. */
     [[nodiscard]] std::span<const std::byte> src() noexcept {
         return {tail() + name_len + dst_len, src_len};
     }
-    /** @brief Reply `src` for the RESULT. */
-    [[nodiscard]] std::span<const std::byte> ok_src() noexcept {
-        return {tail() + name_len + dst_len + src_len, ok_src_len};
-    }
     /** @brief The mint the RESULT carries. */
     [[nodiscard]] std::span<const std::byte> mint() noexcept {
-        return {tail() + name_len + dst_len + src_len + ok_src_len, mint_len};
+        return {tail() + name_len + dst_len + src_len, mint_len};
     }
 };
 
@@ -3268,24 +2730,24 @@ fwd_router_t::~fwd_router_t() {
         o = next;
     }
     origins_.store(nullptr, std::memory_order_relaxed);
-    // The router's registration state goes back to the label plane's source (#1779): every
+    // The router's registration state goes back to the link plane's source (#1779): every
     // receiver ctx with its bus token cache, then the interned kind records. Nothing reads
     // them any more — the transports outlive no router they are registered with.
     for (child_rx_ctx_t* c = rx_head_.load(std::memory_order_relaxed); c != nullptr;) {
         child_rx_ctx_t* const next = c->next.load(std::memory_order_relaxed);
         if (bus_token_cache_t* const t = c->peer_tokens_own) {
             t->~bus_token_cache_t();
-            label_src_->release(t, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
+            link_src_->release(t, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
         }
         c->~child_rx_ctx_t();
-        label_src_->release(c, sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
+        link_src_->release(c, sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
         c = next;
     }
     for (kind_rec_t* r = kinds_; r != nullptr;) {
         kind_rec_t* const next = r->next;
         const std::size_t bytes = sizeof(kind_rec_t) + r->view.kind.size();
         r->~kind_rec_t();
-        label_src_->release(r, bytes, alignof(kind_rec_t));
+        link_src_->release(r, bytes, alignof(kind_rec_t));
         r = next;
     }
 }
@@ -3321,8 +2783,8 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     if (name.empty()) return std::unexpected(graph::status_t::BACKPRESSURE);
 
     mem::block_source_t& source = rx_for(ctx);
-    const std::size_t bytes = sizeof(pending_await_t) + name.size() + req.dst.size() +
-                              req.src.size() + req.ok_src.size() + req.mint.size();
+    const std::size_t bytes =
+        sizeof(pending_await_t) + name.size() + req.dst.size() + req.src.size() + req.mint.size();
     void* const mem = source.try_alloc(bytes, alignof(pending_await_t));
     // The receiving link's own budget is spent: refuse THIS await, by value. Never a fallback
     // to the blocking wait.
@@ -3340,12 +2802,11 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     p->name_len = name.size();
     p->dst_len = req.dst.size();
     p->src_len = req.src.size();
-    p->ok_src_len = req.ok_src.size();
     p->mint_len = req.mint.size();
     std::byte* out = p->tail();
     std::memcpy(out, name.data(), name.size());
     out += name.size();
-    for (const std::span<const std::byte> part : {req.dst, req.src, req.ok_src, req.mint}) {
+    for (const std::span<const std::byte> part : {req.dst, req.src, req.mint}) {
         if (!part.empty()) std::memcpy(out, part.data(), part.size());
         out += part.size();
     }
@@ -3406,20 +2867,18 @@ void fwd_router_t::answer_await(pending_await_t& p) {
     }
     transport_t* const link = registry_.by_name(p.name());
     if (link == nullptr) return;
-    const graph::reply_route_t err_route{
+    const graph::reply_route_t route{
         .dst_wire = p.dst(), .src_wire = p.src(), .echo_ts = p.echo_ts};
     view::rope_t reply;
     const graph::result_t<graph::value_ref_t> v = graph_.await_value(p.vertex);
     if (v) {
-        const graph::reply_route_t ok{
-            .dst_wire = p.dst(), .src_wire = p.ok_src(), .echo_ts = p.echo_ts};
         const graph::value_t& val = **v;
-        reply = graph::assemble_reply(ok, graph::reply_kind_t::RESULT, {}, val.links(),
+        reply = graph::assemble_reply(route, graph::reply_kind_t::RESULT, {}, val.links(),
                                       val.total_length(), *egress_, p.mint());
         if (reply.link_count() == 0)
-            reply = graph::assemble_error_reply(err_route, graph::status_t::BACKPRESSURE, *egress_);
+            reply = graph::assemble_error_reply(route, graph::status_t::BACKPRESSURE, *egress_);
     } else {
-        reply = graph::assemble_error_reply(err_route, v.error(), *egress_);
+        reply = graph::assemble_error_reply(route, v.error(), *egress_);
     }
     if (reply.link_count() == 0) {
         count_drop(assemble_dropped_);

@@ -117,13 +117,11 @@ find:
   along the `src` route the request accumulated on the way in; a hop may reboot mid-operation
   and the reply still routes. Matching a reply to a *specific* outstanding request *at* an
   endpoint is the transport's concern, never a field in `FWD` (RFC-0004 §D).
-- **The node-scoped aliases are not global names either.** A **vertex ref** (the 8-byte
-  element a bound path is built of) and a **path label** (the 32-bit per-element alias) are
-  each meaningful only on the host that minted them — which is exactly why a bound path is a
-  *stack* of refs rather than one identifier
-  ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md),
-  [RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md);
-  CONTEXT.md §Vertex ref, §Path label).
+- **The node-scoped aliases are not global names either.** A **PAIR** (the 8-byte
+  `(index, generation)` element a chain is built of) is meaningful only on the host that
+  issued it — which is exactly why a chain is a *stack* of elements rather than one identifier
+  ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md);
+  CONTEXT.md §Path element). RFC-0027's path label is retired (RFC-0029 §5.3).
 
 The one identity that *is* node-scoped and byte-stable across every path to a node is the
 `:identity` facet — a pre-serialized record every vertex of a node serves byte-identically,
@@ -241,10 +239,10 @@ space, and each degrading to the canonical string rather than failing:
 | Form | Scope | Degrades to | Where |
 | --- | --- | --- | --- |
 | Bound path (`PATH_REF`) | one 8-byte ref per **host** on the route | dropped and re-minted from the canonical original — never repaired | RFC-0024 |
-| Path label | per **host**, per **element** | the string path the sender still holds, re-minted from the next reply | RFC-0027 |
+| ~~Path label~~ | retired (RFC-0029 §5.3, slice S3) | — | RFC-0027 |
 
 The canonical string `PATH` remains the mint key and the fallback in both, which is what
-keeps one spelling per address (CONTEXT.md §Path label).
+keeps one spelling per address (CONTEXT.md §Path element).
 
 The per-link route handle (`ADVERTISE` / `COMPACT` / `HANDLE_NACK`) is **retired**: delivery is
 the `PAIR` chain, which carries the whole route in the frame and holds no state at any hop. A
@@ -265,10 +263,9 @@ forwarder holding ≥ 2 transports (rung 2, P2), **WIDE** is a full host (rungs 
   [14 — CAN transport](14-can-transport.md)). On full-TLV transports the default is
   **full-route and stateless** for every delivery — a constrained node forwarding 50 cold reads
   holds **zero** per-flow state, and so does one forwarding a running stream (chain delivery).
-- **Per-hop state is a WIDE-only purchase.** A path-label-minting hop knowingly holds per-hop
-  state in exchange for per-element degradation; the tables
-  are injected, per-peer ceilinged, and refuse new mints on exhaustion rather than evicting a
-  live one (RFC-0027; CONTEXT.md §Path label).
+- **No hop holds per-flow state.** RFC-0027's path-label tables were the one per-hop table in
+  the path plane, and RFC-0029 slice S3 deleted them: a PAIR is the owner's own index entry, so
+  a hop validates it against the graph it already has (RFC-0029 §9.1).
 - **Partition detection follows the transport kind, not the rung — and NARROW's usual kinds
   have none.** The link-departure hook fires only on connection-oriented transports, so a
   header-elided bus leaf gets no transport-level signal at all (§Partition, below).
@@ -362,9 +359,9 @@ four instruments, and withholds history.
   write bubbling to the parent's subscribers, so a subtree subscriber learns about vertices
   created after it joined without polling `:children[]` (RFC-0005 §A; RFC-0030 §7.3).
 - **Addressing re-establishes itself in-band.** A chain delivery holds no per-flow state, so
-  there is nothing to re-advertise on (re)connect; a path label the joiner does not know draws a
-  `NOT_FOUND`-class error and the sender falls back to the full string path and re-mints from
-  the next reply, with no withdraw frame, no lease and no TTL (RFC-0027); a CAN transport's
+  there is nothing to re-advertise on (re)connect; a PAIR the joiner does not know draws a
+  `NOT_FOUND`-class error and the sender falls back to the full string path and re-learns from
+  the next reply, with no withdraw frame, no lease and no TTL (RFC-0029 §6.3); a CAN transport's
   `identity↔path` map re-learns from advertise frames
   ([14](14-can-transport.md), [ADR-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)).
 
@@ -406,11 +403,10 @@ node is an event the other nodes are structurally unable to observe.
   what an owner retired; it can only ask the owner, through a surface the owner provides.
 - **Stale aliases cannot deliver to a name's new occupant.** This is what the generation fields
   are for. A vertex ref's generation is compared against the vertex's retirement stamp on every
-  use and **saturates rather than wraps**; a path label's slot generation saturates and the slot
-  then **retires permanently**, never reused. A wrapped generation would let a stale reference
-  validate falsely and deliver to a path's new occupant, which is the mis-route class both
-  designs close by construction rather than by digest width (RFC-0024, RFC-0027;
-  CONTEXT.md §Vertex ref, §Path label).
+  use and **saturates rather than wraps**. A wrapped generation would let a stale reference
+  validate falsely and deliver to a path's new occupant, which is the mis-route class the
+  design closes by construction rather than by digest width (RFC-0024, RFC-0029;
+  CONTEXT.md §Vertex ref).
 
 ```{admonition} Realisation status — retire
 :class: note
@@ -459,4 +455,4 @@ unruled. The gate on the reference implementation's retirement behaviour is
 | Building a cross-node graph: discover → create → bind → depart | [13 — Network formation](13-network-formation.md) |
 | Header-elided framing and the in-transport `identity↔path` map | [14 — CAN transport](14-can-transport.md) |
 | The normative remote-addressing model | [RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) |
-| Canonical vocabulary (path-as-route, vertex ref, path label, peer symmetry) | [CONTEXT.md](../../CONTEXT.md) |
+| Canonical vocabulary (path-as-route, vertex ref, path element, peer symmetry) | [CONTEXT.md](../../CONTEXT.md) |

@@ -80,7 +80,6 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/playout.hpp \
                          core/include/libtracer/subscription_selector.hpp \
                          core/include/libtracer/path_ref.hpp \
-                         core/include/libtracer/path_label.hpp \
                          core/include/libtracer/path_pair.hpp \
                          core/include/libtracer/path_element.hpp \
                          core/include/libtracer/tracer.hpp \
@@ -106,7 +105,6 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/tx_handoff.hpp \
                          core/include/libtracer/fwd_frame_view.hpp \
                          core/include/libtracer/grammar.hpp \
-                         core/include/libtracer/path_label_table.hpp \
                          core/include/libtracer/ws.hpp \
                          core/include/libtracer/frame_ingress.hpp \
                          core/include/libtracer/crc.hpp \

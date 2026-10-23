@@ -596,7 +596,7 @@ struct default_config_t {
 
     /**
      * @brief Force the guarded binding of every `%tr::graph::bound_rmw_counter_t` the library
-     *        owns — the write sequence and the router's labelled-hop count — even where the
+     *        owns — the write sequence — even where the
      *        counter's width is natively lock-free (#1715, #1697).
      *
      * A test knob: it lets a host build exercise the path a target without a native atomic RMW

@@ -11,7 +11,7 @@
  *
  * Same instrument as `mount_add_oom_test`, one layer up. The only allocation on the
  * connection-create path that can fail SOFTLY is the registry chunk, which since #873 phase 1
- * `child_registry_t::append` draws from the router's INJECTED `label_src` (`src_->try_alloc`)
+ * `child_registry_t::append` draws from the router's INJECTED `link_src` (`src_->try_alloc`)
  * rather than from `new (std::nothrow) chunk_t()`. It reads a null back either way, so the
  * subject is unchanged; this router takes the default source, so the seam still bottoms out in
  * the process heap source, and the only way to drive it from a test is still to replace the
@@ -190,7 +190,7 @@ void test_refused_wiring_rolls_back() {
     std::printf("make_connection under a refusing allocator:\n");
     g_links_built = 0;
     graph_t node{tr::mem::heap_source()};  // raw heap: the refusal sees each block (#1777)
-    fwd_router_t router(node, {.label_src = &tr::mem::heap_source()});
+    fwd_router_t router(node, {.link_src = &tr::mem::heap_source()});
     // The transport the factory builds draws from its own store, never the platform heap: on
     // a heap-rooted build (#2090) the default egress store IS the heap, and the armed window
     // would refuse the transport instead of the registry chunk under test.
@@ -238,7 +238,7 @@ void test_open_allocator_creates() {
     std::printf("make_connection with the allocator open:\n");
     g_links_built = 0;
     graph_t node{tr::mem::heap_source()};  // raw heap: the refusal sees each block (#1777)
-    fwd_router_t router(node, {.label_src = &tr::mem::heap_source()});
+    fwd_router_t router(node, {.link_src = &tr::mem::heap_source()});
     transport_vertex_t net(node, router);
     declare_fake_module(net);
 
@@ -270,7 +270,7 @@ void test_open_allocator_creates() {
 void test_refused_wiring_leaves_staged_link_reusable() {
     std::printf("make_connection under a refusing allocator, with a STAGED link:\n");
     graph_t node{tr::mem::heap_source()};  // raw heap: the refusal sees each block (#1777)
-    fwd_router_t router(node, {.label_src = &tr::mem::heap_source()});
+    fwd_router_t router(node, {.link_src = &tr::mem::heap_source()});
     transport_vertex_t net(node, router);
     declare_fake_module(net);
     fake_link_t staged;
