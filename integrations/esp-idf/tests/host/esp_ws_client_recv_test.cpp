@@ -34,7 +34,7 @@
  *      server sibling's rule), and an EXACT-FIT message delivers instead of being swept
  *      into the overflow branch.
  *
- *   4. #1102 — `defer_recv` HOLDS THE FIRST DIAL until `start_receiving()` (ADR-0081's
+ *   4. #1102 — a link HOLDS THE FIRST DIAL until `start_receiving()` (ADR-0081's
  *      defer-the-dial arm). An unarmed link never connects, so a peer's push-on-connect
  *      cannot beat the sink install; the message is delivered — never lost — once the
  *      owner arms the link, and the latch is ONE-SHOT: a peer CLOSE re-dials and keeps
@@ -174,6 +174,7 @@ void test_recv_stack_reaches_the_thread() {
         // (httpd_ws_link_t's recv stack) — the in-call graph delivery is the same one.
         tr::net::esp_ws_client_link_t link(
             "127.0.0.1", 8080, {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288});
+        link.start_receiving();
         check(fake_ws::armed_stack() == 12288, "the requested stack size was armed");
         check(fake_ws::armed_name() == "ws_cli_rx", "the recv thread was named");
         check(fake_ws::cfg_restored(), "the surrounding pthread config was restored");
@@ -183,20 +184,19 @@ void test_recv_stack_reaches_the_thread() {
 }
 
 /**
- * @brief #1606 — a `defer_recv` link spawns NO recv thread until it is armed: the thread
+ * @brief #1606 — a link spawns NO recv thread until it is armed: the thread
  *        stack is the largest thing an unarmed link used to hold for nothing.
  *
  * The observable is #900's: a sized spawn arms the pthread config, so a link that has not
  * armed it has not spawned. Arming spawns it at the configured size; a second arm is a
  * no-op, and an arm after shut_down() spawns nothing.
  */
-void test_defer_recv_spawns_no_thread_until_armed() {
-    std::printf("#1606 an unarmed defer_recv link has no recv thread:\n");
+void test_unarmed_link_spawns_no_thread() {
+    std::printf("#1606 an unarmed link has no recv thread:\n");
     fake_ws::reset();
     {
         tr::net::esp_ws_client_link_t link(
-            "127.0.0.1", 8080,
-            {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288, .defer_recv = true});
+            "127.0.0.1", 8080, {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288});
         check(fake_ws::armed_stack() == 0, "construction spawned no thread");
         link.start_receiving();
         check(fake_ws::armed_stack() == 12288, "arming spawned it, at the configured stack");
@@ -206,8 +206,7 @@ void test_defer_recv_spawns_no_thread_until_armed() {
     fake_ws::reset();
     {
         tr::net::esp_ws_client_link_t link(
-            "127.0.0.1", 8080,
-            {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288, .defer_recv = true});
+            "127.0.0.1", 8080, {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288});
         link.shut_down();
         link.start_receiving();
         check(fake_ws::armed_stack() == 0, "an arm after shut_down() spawns nothing");
@@ -223,6 +222,7 @@ void test_zero_recv_stack_arms_nothing() {
     {
         tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
                                            {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes});
+        link.start_receiving();
         check(fake_ws::armed_stack() == 0, "no pthread config was armed");
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     }
@@ -235,12 +235,13 @@ void test_zero_recv_stack_arms_nothing() {
  * This prologue steps AROUND the pre-sink window by construction: the fake's `poll_read`
  * reports "no data" until `push_frames`, so the receiver is always installed before any
  * frame exists to deliver. The window itself — a peer that pushes before the sink is
- * installed — is what `test_defer_recv_holds_the_dial_until_armed` pins (#1102).
+ * installed — is what `test_unarmed_link_holds_the_dial` pins (#1102).
  */
 tr::mem::poly_ptr_t<tr::net::esp_ws_client_link_t> dialed_link(sink_t& sink) {
     auto link = tr::mem::make_poly<tr::net::esp_ws_client_link_t>(
         tr::mem::net_source(), "127.0.0.1", 8080,
         tr::net::esp_ws_client_config_t{.rx_bytes = kRxBytes, .tx_bytes = kRxBytes});
+    link->start_receiving();
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     link->set_receiver(sink);
     return link;
@@ -354,7 +355,7 @@ void test_fragmented_fitting_message_reassembles() {
 }
 
 /**
- * @brief #1102 — `defer_recv` holds the FIRST dial until `start_receiving()`, and the
+ * @brief #1102 — a link holds the FIRST dial until `start_receiving()`, and the
  *        latch is one-shot across reconnects (ADR-0081's defer-the-dial arm).
  *
  * The scripted window is the documented recipe's: the peer's push-on-connect (a frame
@@ -367,15 +368,15 @@ void test_fragmented_fitting_message_reassembles() {
  * refutation of the original title: a peer CLOSE re-dials (no re-arm — the second dial
  * is the latch NOT re-closing) and the next message is delivered.
  */
-void test_defer_recv_holds_the_dial_until_armed() {
-    std::printf("#1102 defer_recv holds the dial until start_receiving():\n");
+void test_unarmed_link_holds_the_dial() {
+    std::printf("#1102 an unarmed link holds the dial until start_receiving():\n");
     fake_ws::reset();
     sink_t sink;
     // The link lives in a scope of its own so it is DESTROYED before the drain below,
     // rather than at process exit under the fake's dying static state (#1456).
     {
-        tr::net::esp_ws_client_link_t link(
-            "127.0.0.1", 8080, {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .defer_recv = true});
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
+                                           {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes});
         // The peer's push-on-connect, queued while the link is UNARMED and the sink absent.
         const fake_ws::frame_t good = good_message();
         fake_ws::push_frames({good});
@@ -552,6 +553,7 @@ void test_named_rx_source_delivers_owning_ropes() {
                                                .rx_bytes = kCanLoan ? kLoanMsg + 64 : 2048,
                                                .memory = {.rx = &backend},
                                            });
+        link.start_receiving();
         check(link.delivers_ropes(), "delivers_ropes() is true with memory.rx named");
         check(link.rx_backend() == &backend, "and rx_backend() names that source");
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
@@ -603,6 +605,7 @@ void test_named_io_store_backs_the_tx_scratch() {
             "127.0.0.1", 8080,
             tr::net::esp_ws_client_config_t{.tx_bytes = 512,
                                             .memory = {.rx = nullptr, .io = &roomy}});
+        link.start_receiving();
         check(wait_until([&] { return link.ok(); }, 2s), "the link came up");
         check(roomy.served.load() >= 1, "the scratch was drawn from the injected store");
         check(link.tx_bytes() == 512, "at its configured size");
@@ -617,6 +620,7 @@ void test_named_io_store_backs_the_tx_scratch() {
             "127.0.0.1", 8080,
             tr::net::esp_ws_client_config_t{
                 .tx_bytes = 512, .memory = {.rx = nullptr, .io = &refusing, .state = &state}});
+        link.start_receiving();
         const int slot = state.live.load();
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
         check(!wait_until([&] { return link.ok(); }, 300ms),
@@ -632,13 +636,13 @@ int main() {
     std::printf("esp_ws_client_link receive-path host suite (#900, #901, #1102):\n");
     test_recv_stack_reaches_the_thread();
     test_zero_recv_stack_arms_nothing();
-    test_defer_recv_spawns_no_thread_until_armed();
+    test_unarmed_link_spawns_no_thread();
     test_oversized_single_frame_tail_is_not_delivered();
     test_oversized_fragmented_message_tail_is_not_delivered();
     test_exact_fit_message_delivers();
     test_stray_continuation_is_dropped();
     test_fragmented_fitting_message_reassembles();
-    test_defer_recv_holds_the_dial_until_armed();
+    test_unarmed_link_holds_the_dial();
     test_drop_stats_projects_through_the_base_interface();
     test_default_memory_is_borrowed();
     test_named_rx_source_delivers_owning_ropes();

@@ -73,14 +73,6 @@ struct webtransport_config_t {
     /** @brief Per-link RX cap (`:settings max_frame`); 0 = the default. */
     std::size_t max_frame = 0;
     /**
-     * @brief DIAL only — hold inbound FRAMES until `start_receiving` (#1101, ADR-0081 §2).
-     *        The session is established as always, but the frame channel's bytes are left in
-     *        msquic's per-stream flow-control window, so a server that pushes the instant the
-     *        session comes up cannot be decoded into a sink the owner has not installed yet.
-     *        The LISTEN constructor ignores it.
-     */
-    bool defer_rx = false;
-    /**
      * @brief Pre-auth H3 handshake budget; 0 = `kMaxHandshakeBytes`. TIGHTEN-ONLY
      *        (`handshake_cap`). A dial bounds the CONNECT RESPONSE's field section; a listener
      *        bounds per-stream classification/HEADERS accumulation and a HEADERS frame's
@@ -158,10 +150,11 @@ class webtransport_transport_t final : public transport_t {
      *        (synchronous — the constructor waits for the QUIC handshake, the
      *        H3 SETTINGS/CONNECT exchange, and the 200).
      *
-     * Confirm with ok(); on failure the object is inert. On success frames may
-     * flow immediately, so receivers must be installed before the peer sends
-     * (the set_receiver contract) — or the link is constructed with `defer_rx`
-     * and armed with @ref start_receiving once they are.
+     * Confirm with ok(); on failure the object is inert. Inbound frames are
+     * held in msquic's per-stream flow-control window until the owner installs
+     * its receivers and calls @ref start_receiving (#1101, #2249), so a server
+     * that pushes the instant the session comes up cannot be decoded into an
+     * empty sink.
      *
      * @param peer_host Server hostname or dotted-quad IPv4 (the CONNECT
      *                  `:authority` host part).
@@ -172,7 +165,7 @@ class webtransport_transport_t final : public transport_t {
      *                  through the kind-private `path` config key (#1023).
      * @param tls       Server-certificate trust (see @ref webtransport_dial_tls_t).
      * @param config    The link's knobs (@ref webtransport_config_t): memory, receive cap,
-     *                  deferred receive, handshake budget.
+     *                  handshake budget.
      */
     webtransport_transport_t(std::string_view peer_host, std::uint16_t peer_port,
                              std::string_view path = "/", webtransport_dial_tls_t tls = {},
@@ -193,8 +186,7 @@ class webtransport_transport_t final : public transport_t {
      * @param bind_port UDP port to listen on (host byte order; 0 → ephemeral).
      * @param cert_file PEM server-certificate path.
      * @param key_file  PEM private-key path matching @p cert_file.
-     * @param config    The link's knobs (@ref webtransport_config_t); `defer_rx` is
-     *                  DIAL-only and ignored here.
+     * @param config    The link's knobs (@ref webtransport_config_t).
      */
     webtransport_transport_t(std::uint16_t bind_port, std::string_view cert_file,
                              std::string_view key_file, const webtransport_config_t& config = {});
@@ -231,15 +223,14 @@ class webtransport_transport_t final : public transport_t {
     void send(std::span<const std::span<const std::byte>> iov) override;
 
     /**
-     * @brief Open this link's delivery gate — the second phase of a `defer_rx`
-     *        DIAL bring-up (#1101, ADR-0081 §2).
+     * @brief Open this link's delivery gate — the second phase of every DIAL
+     *        bring-up (#1101, #2249, ADR-0081 §2).
      *
      * Re-enables msquic's receive on the WebTransport frame stream, so everything
      * the peer pushed while the owner was installing its sinks is re-indicated and
-     * delivered rather than dropped. IDEMPOTENT and inert on every other link — a
-     * one-phase dialer, a listener, and a dial that never came up all have nothing
-     * to arm — because `%transport_vertex_t::make_connection` calls it on every
-     * link it wires.
+     * delivered rather than dropped. IDEMPOTENT, and inert on an armed dialer, a
+     * listener, and a dial that never came up, which have nothing to arm, because
+     * `%transport_vertex_t::make_connection` calls it on every link it wires.
      */
     void start_receiving() override;
 

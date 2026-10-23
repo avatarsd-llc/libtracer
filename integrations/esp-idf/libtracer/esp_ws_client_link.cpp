@@ -343,26 +343,23 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
         mem::exhausted_at_init(state, "esp_ws_client_link_t dial slot");
     if (config.memory.io != nullptr) set_egress_source(*config.memory.io);
     // Every member the recv thread reads is initialized ABOVE this line, which is the
-    // whole of #959: the thread spawned below dials at once, so a knob delivered after the
-    // spawn is a data race, and for a handshake token it also leaves it undefined whether
+    // whole of #959: the thread start_receiving() spawns dials at once, so a knob delivered
+    // after the spawn is a data race, and for a handshake token it also leaves it undefined whether
     // the first dial carries one — and a dial WITHOUT one is what an admission hook refuses.
     // `handshake_headers_` was that knob; it is a ctor argument and `const` now, so the
     // ordering is a property of the type rather than a request in a doc comment. Nothing
-    // may be added between here and the spawn that the recv thread also reads.
-    //
-    // Without `defer_recv` the recv thread starts here; with it, at the owner's arm.
-    if (!config.defer_recv) start_receiving();
+    // may be added after construction that the recv thread also reads. The thread is
+    // spawned at the owner's arm, never here (#2249).
 }
 
 void esp_ws_client_link_t::start_receiving() {
     // Idempotent, and safe on a link that never connected: `transport_vertex_t::
     // make_connection` arms every link unconditionally once the receiver is installed, so
-    // a second call — or one on a link constructed without `defer_recv`, which the ctor
-    // armed — finds the exchange returning true and does nothing. The latch is never
+    // a second call finds the exchange returning true and does nothing. The latch is never
     // cleared (one-shot): a re-dial only happens on a link that was already armed, so
     // reconnects need no re-gating (ADR-0081, #1102). A link already shut down stays down.
     //
-    // The latch IS the spawn (#1606): a `defer_recv` link used to spawn its thread in the
+    // The latch IS the spawn (#1606): a deferred link used to spawn its thread in the
     // ctor and park it on a condition variable until this call, holding a whole recv stack
     // for a link that could not dial. Now nothing exists to park. The recv thread owns
     // dialing + the read loop; the caller never blocks on the network. recv_stack==0 uses
@@ -941,7 +938,7 @@ void esp_ws_client_link_t::recv_loop() {
     // one backoff later instead of at once. That is the harmless direction — the cost is
     // one interval on a link that was silent anyway, against a spin that reboots the node.
     bool exchanged = false;
-    // No `defer_recv` latch is waited here: an unarmed link has no recv thread at all
+    // No dial latch is waited here: an unarmed link has no recv thread at all
     // (#1606), and this thread only exists once start_receiving() armed the link.
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!connected_.load(std::memory_order_acquire)) {

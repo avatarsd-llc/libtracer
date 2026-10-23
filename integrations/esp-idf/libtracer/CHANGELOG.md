@@ -24,6 +24,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   expired squatter holds its `max_peers` slot until the next check. Migration: drop
   `auth_deadline_ms` from the config and call `close_frozen_peers` on the application's own
   tick, with `deadline` set to `now` minus the auth window you want.
+### Changed (breaking)
+
+- **`esp_ws_client_config_t::defer_recv` is removed; every `esp_ws_client_link_t` defers its
+  first dial ([#2249](https://github.com/avatarsd-llc/libtracer/issues/2249)).** The default
+  (`false`) spawned the recv thread in the constructor, which dialled at once, so a peer's
+  push-on-connect could be decoded into an empty sink and dropped with no counter moving.
+  **Migration:** drop `.defer_recv = ...` from the config. The owner installs its receivers and
+  then calls `start_receiving()`, which spawns the recv thread; the creating write to the
+  module's `conn` endpoint already does this. A link that is never armed never dials and holds
+  no recv thread.
 
 ## [0.21.0] — 2026-10-22
 

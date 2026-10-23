@@ -226,6 +226,7 @@ void test_first_dial_carries_the_headers() {
         tr::net::esp_ws_client_link_t link(
             "127.0.0.1", 8080,
             {.handshake_headers = kToken, .rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+        link.start_receiving();
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
         const auto dials = fake_ws::dial_headers();
         check(!dials.empty(), "a dial was recorded");
@@ -256,6 +257,7 @@ void test_every_dial_carries_the_headers() {
         tr::net::esp_ws_client_link_t link(
             "127.0.0.1", 8080,
             {.handshake_headers = kToken, .rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+        link.start_receiving();
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s),
               "the first dial failed");
         fake_ws::fail_connects(false);
@@ -284,6 +286,7 @@ void test_no_headers_leaves_the_field_null() {
         // The default — the same call every existing embedder writes.
         tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
                                            {.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+        link.start_receiving();
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
         const auto dials = fake_ws::dial_headers();
         check(!dials.empty(), "a dial was recorded");
@@ -309,6 +312,7 @@ void test_oversize_frame_is_refused_and_counted() {
     {
         tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
                                            {.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+        link.start_receiving();
         // `link_up()`, NOT connect_count(): the fake counts the dial on ENTRY to
         // esp_transport_connect, but the link publishes `connected_` only after the
         // socket-option block and the stats latch that follow it. A send in that window
@@ -366,6 +370,7 @@ void test_the_effective_config_is_readable() {
     fake_ws::reset();
     {
         tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, {.rx_bytes = 1024, .tx_bytes = 768});
+        link.start_receiving();
         check(link.rx_bytes() == 1024, "rx_bytes() reports the RX buffer this link was given");
         check(link.tx_bytes() == 768, "tx_bytes() reports the TX scratch this link was given");
     }
@@ -450,6 +455,7 @@ void test_failed_dials_are_released_and_observed_only_on_request() {
             link.emplace(
                 "127.0.0.1", 8080,
                 tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+            link->start_receiving();
             // The fake counts the dial on ENTRY; the failure arm (release, count, log) runs
             // after it returns, so wait for the release before the capture window closes.
             failed = wait_until(

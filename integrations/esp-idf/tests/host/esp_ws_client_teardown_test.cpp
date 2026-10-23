@@ -154,9 +154,11 @@ std::vector<std::byte> payload() {
  *         @ref dialing_link, for the 50-iteration race case whose per-turn verdicts
  *         would otherwise bury the report. */
 tr::mem::poly_ptr_t<esp_ws_client_link_t> quiet_link() {
-    return tr::mem::make_poly<esp_ws_client_link_t>(
+    auto link = tr::mem::make_poly<esp_ws_client_link_t>(
         tr::mem::net_source(), "127.0.0.1", 8080,
         tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+    link->start_receiving();
+    return link;
 }
 
 /** @brief Build a link on the fake and wait for its first dial. */
@@ -621,6 +623,7 @@ void test_the_dial_slot_returns_to_its_store_on_both_arms() {
     {
         auto link =
             tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        link->start_receiving();
         check(wait_until([&] { return link->ok(); }, 2s), "a link on the store came up");
         check(state.live > 0, "its dial slot and read scratch were drawn from the store");
     }
@@ -632,6 +635,7 @@ void test_the_dial_slot_returns_to_its_store_on_both_arms() {
     {
         auto link =
             tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        link->start_receiving();
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "a link dialed");
     }
     check(state.live > 0, "torn down mid-dial, the slot the dial still reads is held");
@@ -664,6 +668,7 @@ void test_an_unconnected_link_holds_no_connection_memory() {
     {
         auto link =
             tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        link->start_receiving();
         const int slot = state.live.load();  // the slot and its string copies
         const int io_table = io.live.load();
         check(wait_until([] { return fake_ws::connect_count() >= 2; }, 5s),
@@ -707,7 +712,6 @@ void test_a_refused_scratch_is_a_failed_dial() {
     const tr::net::esp_ws_client_config_t cfg{
         .rx_bytes = kBufBytes,
         .tx_bytes = kBufBytes,
-        .defer_recv = true,
         .memory = {.rx = nullptr, .io = &io, .state = &state}};
 
     fake_ws::reset();
@@ -746,6 +750,7 @@ void test_shut_down_stops_now_and_the_destructor_frees() {
     {
         auto link =
             tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
+        link->start_receiving();
         check(wait_until([&] { return link->link_up(); }, 2s), "a link came up");
         const int drawn = state.live.load();
         const auto start = std::chrono::steady_clock::now();
@@ -798,10 +803,8 @@ class parking_source_t final : public tr::mem::block_source_t {
 void test_shut_down_racing_a_resolved_dial_leaves_the_link_down() {
     std::printf("#1606 shut_down() racing a resolved dial leaves the link down:\n");
     parking_source_t state;
-    const tr::net::esp_ws_client_config_t cfg{.rx_bytes = kBufBytes,
-                                              .tx_bytes = kBufBytes,
-                                              .defer_recv = true,
-                                              .memory = {.rx = nullptr, .state = &state}};
+    const tr::net::esp_ws_client_config_t cfg{
+        .rx_bytes = kBufBytes, .tx_bytes = kBufBytes, .memory = {.rx = nullptr, .state = &state}};
     fake_ws::reset();
     {
         auto link =

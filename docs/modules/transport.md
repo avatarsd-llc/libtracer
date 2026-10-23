@@ -331,13 +331,13 @@ flowchart LR
   ([#1045](https://github.com/avatarsd-llc/libtracer/issues/1045),
   [#2247](https://github.com/avatarsd-llc/libtracer/issues/2247)): the owner installs its
   receivers, then calls `start_receiving()`. The ESP-IDF-native WS
-  client honors it too, in its own shape: its recv thread does the dialling, so
-  `defer_recv` holds the **first dial** behind the `start_receiving()` latch (ADR-0081's
-  defer-the-dial arm, [#1102](https://github.com/avatarsd-llc/libtracer/issues/1102)) —
-  one-shot, since reconnects happen only on an already-armed link — and the embedder
-  passes the flag itself, there being no `ws` factory on a chip target. `webtransport`'s
-  DIAL side honors it as well, with `defer_rx`
-  ([#1101](https://github.com/avatarsd-llc/libtracer/issues/1101)) — it owns no receive
+  client always defers too, in its own shape: its recv thread does the dialling, so the
+  **first dial** waits behind the `start_receiving()` latch (ADR-0081's defer-the-dial arm,
+  [#1102](https://github.com/avatarsd-llc/libtracer/issues/1102),
+  [#2249](https://github.com/avatarsd-llc/libtracer/issues/2249)) — one-shot, since
+  reconnects happen only on an already-armed link. `webtransport`'s DIAL side always defers
+  as well ([#1101](https://github.com/avatarsd-llc/libtracer/issues/1101),
+  [#2249](https://github.com/avatarsd-llc/libtracer/issues/2249)) — it owns no receive
   thread to withhold, so per
   [ADR-0081](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
   §2 the hold is msquic's **per-stream receive window**: the frame channel's RECEIVE

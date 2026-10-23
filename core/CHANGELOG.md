@@ -182,6 +182,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   second copy. `sizeof(ws_client_transport_t)` shrinks by 32 B on a 64-bit host. The trade is
   one block drawn and returned per send. An exhausted source still drops the frame and counts
   it. No signature changes.
+- **`webtransport_config_t::defer_rx` is removed; every `webtransport` DIAL link holds inbound
+  frames until `start_receiving()`
+  ([#2249](https://github.com/avatarsd-llc/libtracer/issues/2249)).** The default (`false`)
+  delivered from the constructor on, so a frame the server pushed the instant the session came
+  up could be decoded into an empty sink and dropped with no counter moving. The factory
+  already passed `true`. **Migration:** drop `.defer_rx = ...` from the config; a directly
+  constructed DIAL link installs its receivers and then calls `start_receiving()`. Sending
+  needs no arming. The LISTEN constructor is unchanged.
 
 ## [0.21.0] — 2026-10-22
 

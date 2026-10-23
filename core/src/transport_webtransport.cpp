@@ -971,7 +971,6 @@ webtransport_transport_t::webtransport_transport_t(std::string_view peer_host,
                                    config.memory.io_or_default())) {
     if (!impl_) return;  // the link's store refused the endpoint: inert, ok() is false
     const std::size_t max_frame = config.max_frame;
-    const bool defer_rx = config.defer_rx;
     const std::size_t max_handshake = config.max_handshake;
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
@@ -986,7 +985,7 @@ webtransport_transport_t::webtransport_transport_t(std::string_view peer_host,
     // receive thread to withhold, so the hold is msquic's per-stream receive window: the
     // bytes stay in a buffer that is not ours and the peer is flow-controlled. The H3
     // handshake keeps consuming throughout — the gate is on delivery only.
-    i.rx_held.store(defer_rx, std::memory_order_release);
+    i.rx_held.store(true, std::memory_order_release);
     // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
     // connection-down / one-peer replacement harvest to this transport_t's flat
     // link-down notifier. A WebTransport endpoint carries ONE session (one peer
@@ -1274,7 +1273,6 @@ transport_factory_t webtransport_transport_factory(std::span<const tls_profile_t
                     .insecure_no_verify = priv.insecure},
                 webtransport_config_t{.memory = {.rx = rx_backend, .io = &src},
                                       .max_frame = s.max_frame,
-                                      .defer_rx = true,
                                       .max_handshake = priv.max_handshake});
         }
         // `port = 0` on a LISTEN is the EPHEMERAL request (#1362), not a missing key: the
