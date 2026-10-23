@@ -1095,18 +1095,15 @@ void test_ws_server_iov_uses_injected_egress_source() {
  * @brief #873: the WS CLIENT's masked-frame buffer draws from the store handed to its
  *        CONSTRUCTOR — the one egress buffer `set_egress_source` provably cannot reach.
  *
- * `tx_buf_` is a `mem::block_array_t` MEMBER, and a `block_array_t` binds its source in its own
- * constructor. So every sibling case on this page — which wires the store afterwards through
- * `set_egress_source` — is structurally incapable of moving this buffer: before #873 an
- * injected egress store was silently ignored by the one WS client buffer, and a "bounded" node
- * still grew this block on the process heap. The store is therefore a constructor argument
- * here, and this case is what says so.
+ * The client's masked frame is drawn from the egress store per send (#2267; before it, a
+ * `tx_buf_` member bound its source at construction, #873). The store is a constructor
+ * argument, applied before anything can send, and this case says the frame comes from it.
  *
  * Placed with the injected-store family rather than beside
  * `test_ws_client_send_drops_then_recovers` because it needs `bounded_egress_t`, declared above.
  */
-void test_ws_client_tx_buf_uses_injected_egress_source() {
-    std::printf("ws client tx_buf_ — drawn from the CONSTRUCTOR's store (#873):\n");
+void test_ws_client_frame_uses_injected_egress_source() {
+    std::printf("ws client masked frame — drawn from the CONSTRUCTOR's store (#873, #2267):\n");
     sink_t at_server;
     auto srv_rx = [&](std::span<const std::byte> f) { at_server.push(f); };
     tr::net::ws_server_transport_t server(0);
@@ -1136,7 +1133,7 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
         wired.start_receiving();
         check(count_allocs([&] { wired.send(payload); }) == 0,
               "wired, the cold send draws NOTHING from the process heap");
-        check(roomy.store.used() > 0, "and the INJECTED store is where tx_buf_ came from");
+        check(roomy.store.used() > 0, "and the INJECTED store is where the frame came from");
         check(at_server.wait_for(2, 2s), "the wired frame still reaches the peer");
         check(at_server.bytes() == payload, "with its bytes intact");
     }
@@ -1963,7 +1960,7 @@ int main() {
     test_tcp_server_iov_uses_injected_egress_source();
     test_udp_send_iov_uses_injected_egress_source();
     test_ws_server_iov_uses_injected_egress_source();
-    test_ws_client_tx_buf_uses_injected_egress_source();
+    test_ws_client_frame_uses_injected_egress_source();
     test_can_advertise_header_is_allocation_free();
     test_can_over_long_path_refused();
     test_can_emit_advertise_wire_identical();
