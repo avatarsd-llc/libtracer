@@ -190,7 +190,7 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 
 Signature source: `core/include/libtracer/fwd_router.hpp:fwd_router_t::fwd_router_t(graph::graph_t& graph` (constructor; its planes are the `router_planes_t` aggregate at `core/include/libtracer/fwd_router.hpp:router_planes_t`), `core/include/libtracer/fwd_router.hpp:fwd_router_t::add_child`
 (`add_child`), `core/include/libtracer/fwd_router.hpp:fwd_router_t::subscribe_toward` (`subscribe_toward`), `core/include/libtracer/fwd_router.hpp:fwd_router_t::reply_fn_t` (the sink function-pointer types);
-`core/include/libtracer/child_registry.hpp:child_registry_t::add` (`add`), `core/include/libtracer/child_registry.hpp:const child_t& child, std::string_view peer,` (`resolve_peer`), `core/include/libtracer/child_registry.hpp:child_registry_t::erase`
+`core/include/libtracer/child_registry.hpp:child_registry_t::add` (`add`), `core/include/libtracer/child_registry.hpp:resolve_peer(const child_t& child, std::string_view peer)` (`resolve_peer`), `core/include/libtracer/child_registry.hpp:child_registry_t::erase`
 (`erase`), `core/include/libtracer/child_registry.hpp:child_registry_t::entry_by_name` (`entry_by_name`), `core/include/libtracer/child_registry.hpp:child_registry_t::by_name` (`by_name`), `core/include/libtracer/child_registry.hpp:child_registry_t::size`/`core/include/libtracer/child_registry.hpp:child_registry_t::live_size` (`size`/`live_size`).
 
 ## Routing one inbound frame

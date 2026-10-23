@@ -872,16 +872,6 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     [[nodiscard]] transport_t* peer_link(std::string_view peer);
 
     /**
-     * @brief The endpoint of whichever session currently holds slot @p slot (`p<slot>`, no
-     *        generation) — the session anchor's egress (ADR-0044 amendment).
-     *
-     * The anchor is keyed by slot and its own generation says which tenancy it stands for,
-     * so the caller has already refused a departed session; this only finds the live one.
-     * @retval nullptr no open session holds @p slot.
-     */
-    [[nodiscard]] transport_t* slot_link(std::string_view slot);
-
-    /**
      * @brief The endpoint @ref peer_link resolves `p<slot>~<gen>` to, found by the handle's
      *        slot index instead of by comparing names (#1941). Session-scoped like
      *        @ref peer_link, so a departed session's handle names nobody.
@@ -1265,10 +1255,6 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     peer_handle_t delivering_{};
 
    private:
-    /** @brief The endpoint of the first OPEN slot whose `key(name)` equals @p want — the one
-     *         scan @ref peer_link (whole name) and @ref slot_link (slot part) share. */
-    template <class Key>
-    [[nodiscard]] transport_t* open_endpoint(std::string_view want, Key key);
     /**
      * @brief Admit one inbound connection into a free (or newly grown) slot.
      *
@@ -1395,11 +1381,6 @@ class bus_slot_server_t : public slot_server_t, public bus_link_t {
     /** @brief The facet's spelling of @ref slot_server_t::peer_link. */
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override {
         return slot_server_t::peer_link(peer);
-    }
-
-    /** @brief The facet's spelling of @ref slot_server_t::slot_link. */
-    [[nodiscard]] transport_t* slot_link(std::string_view slot) override {
-        return slot_server_t::slot_link(slot);
     }
 
     /** @brief The facet's spelling of @ref slot_server_t::peer_link_of. */

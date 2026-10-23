@@ -29,6 +29,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - `deferred_await_t::ok_src`: with no terminus label mint it always equalled `src`, so a
   deferred AWAIT stores its reply `src` once.
 
+### Added
+
+- **`tr::net::session_slot_index(name)`** (`pair.hpp`) — the slot index a `p<slot>[~<gen>]`
+  session name spells, nullopt for any other name: the inverse of the one spelling both slot
+  servers write, which the router uses to find a slot's tenancy (#2234).
+
 ### Changed (breaking)
 
 - **`can_link_t::write_raw` is called concurrently (#2262).** `can_transport_t` used to
@@ -41,6 +47,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - **Migration:** an application-supplied `can_link_t` must make `write_raw` safe under
     concurrent calls, for example with a mutex around its driver submission. A link that
     blocks on back-pressure needs no change.
+- **A session anchor resolves the exact tenancy that holds it, and `bus_link_t::slot_link` is
+  removed (#2234).** An anchor is keyed by slot, and its route used to reach "whoever holds the
+  slot now" through `slot_link`, so a frame routed through it while the slot changed hands could
+  reach the next session. The arrival also reclaimed its predecessor as generation − 1, which
+  names nobody when a slot consumed a generation without an arrival (a connection that never
+  upgrades), so that predecessor's edges stayed. The router now keeps one tenancy word per
+  session slot on each bus mount: the peer handle of the session that holds the slot's anchor,
+  whose exact name `p<slot>~<gen>` the bus spells. It costs 8 B per slot from the link plane's
+  source and allocates nothing on arrival or departure once the table covers the slot.
+  - The anchor route reads the word and then re-checks that the anchor is still at the
+    generation the element named; it resolves the handle (`bus_link_t::peer_link_of`). The
+    reverse mint refuses a frame from any session but the one the word names.
+  - An arrival reclaims exactly the predecessor the word names. A departure retires the anchor,
+    clears the word and drops the cached token only when the word names that session, so a late
+    departure leaves a successor's anchor alone, including one still pending authentication.
+  - On ESP the handle is per resolution (#1013), so a delivery never reaches a successor. On
+    POSIX `slot_server_t::peer_link_of` still answers with a slot-scoped endpoint, so the change
+    narrows that window rather than closing it.
+  - `bus_link_t::slot_link` has no caller left and is removed, with its `slot_server_t` and
+    `httpd_ws_link_t` overrides and `child_registry_t::resolve_peer`'s `lookup` parameter. A
+    kind that overrode `slot_link` deletes the override.
 
 - **`transport_vertex_t::settings_of` returns a copy of the record, not a pointer into the
   connection table (#2241).** The table is one sorted block, and a connection created or

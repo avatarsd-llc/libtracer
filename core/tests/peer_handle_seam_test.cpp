@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/pair.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "test_support.hpp"
@@ -162,6 +163,13 @@ void test_seam_over_slot_server() {
     check(name_of(*bus, peer_handle_t{3, 7}) == "p3~7",
           "peer_name is the accept edge's own p<slot>~<gen> formatting");
     check(name_of(*bus, peer_handle_t{}).empty(), "an invalid handle names no peer");
+    // #2234: the router's slot parse inverts this speller for every index and generation.
+    for (const peer_handle_t h : {peer_handle_t{0, 1}, peer_handle_t{3, 7},
+                                  peer_handle_t{9, 0xFFFF'FFFFu}, peer_handle_t{0xFFFF'FFFFu, 1}})
+        check(tr::net::session_slot_index(name_of(*bus, h)) == h.index,
+              "session_slot_index round-trips the POSIX p<slot>~<gen> spelling");
+    for (const std::string_view bad : {"", "p", "q1", "p3x", "p03", "n1", "p4294967296"})
+        check(!tr::net::session_slot_index(bad), "session_slot_index refuses a non-slot name");
 
     const std::uint16_t port = server.local_port();
 

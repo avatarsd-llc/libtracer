@@ -588,10 +588,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      *         the peer's slot, pointer-valid for this link's lifetime). */
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
-    /** @brief Resolve whichever live session holds slot @p slot (`p<slot>`, no generation)
-     *         — the session anchor's egress; see `bus_link_t::slot_link`. */
-    [[nodiscard]] transport_t* slot_link(std::string_view slot) override;
-
     /**
      * @brief Resolve an inbound handle back to its `p<slot>~<gen>` peer name (#1294).
      *
@@ -1448,10 +1444,6 @@ class httpd_ws_link_t final : public transport_t, public bus_link_t {
      * outlive its session.
      */
     [[nodiscard]] peer_resolution_t* acquire_resolution(session_t* slot);
-    /** @brief The resolution of the first live slot whose `key(name)` equals @p want — the one
-     *         scan @ref peer_link (whole name) and @ref slot_link (slot part) share. */
-    template <class Key>
-    [[nodiscard]] transport_t* open_resolution(std::string_view want, Key key);
     /**
      * @brief Retire @p slot's resolution handle, if it holds one — the session it named
      *        is over (@ref peers_m_ held).

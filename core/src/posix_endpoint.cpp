@@ -582,20 +582,11 @@ std::string_view slot_server_t::peer_subject(peer_handle_t peer, std::span<char>
  * #1013's resolution is the precedent to point at, not a plan already decided.
  */
 transport_t* slot_server_t::peer_link(std::string_view peer) {
-    return open_endpoint(peer, [](std::string_view name) { return name; });
-}
-
-transport_t* slot_server_t::slot_link(std::string_view slot) {
-    return open_endpoint(slot, session_slot_of);
-}
-
-template <class Key>
-transport_t* slot_server_t::open_endpoint(std::string_view want, Key key) {
-    // The exact compare IS the tenancy check for peer_link: a name carrying a departed
-    // session's generation, or none at all, equals no open slot's name and is refused.
+    // The exact compare IS the tenancy check: a name carrying a departed session's
+    // generation, or none at all, equals no open slot's name and is refused.
     const std::lock_guard lock(peers_m_);
     for (const mem::poly_ptr_t<session_base_t>& s : slots_)
-        if (s->open.load(std::memory_order_relaxed) && key(s->name_view()) == want)
+        if (s->open.load(std::memory_order_relaxed) && s->name_view() == peer)
             return s->peer_endpoint;
     return nullptr;
 }

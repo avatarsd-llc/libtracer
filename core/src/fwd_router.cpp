@@ -1243,6 +1243,67 @@ void fwd_router_t::link_gone(std::string_view link_name, graph::link_pair_t link
     cancel_awaits_locked(link_name, false);
 }
 
+namespace {
+/**
+ * @brief Rebuild a @ref peer_handle_t from the `bits()` a receiver ctx stores it as.
+ *
+ * The handle is kept as ONE `u64` on the ctx so a frame path loads it with a single relaxed
+ * atomic rather than two that could straddle a control-plane rebind and pair one tenancy's
+ * index with another's generation — the field-tearing shape #882 fixed one seam out.
+ */
+[[nodiscard]] constexpr peer_handle_t peer_handle_from_bits(std::uint64_t bits) noexcept {
+    return peer_handle_t{wire::pair_t{.index = static_cast<std::uint32_t>(bits),
+                                      .generation = static_cast<std::uint32_t>(bits >> 32)}};
+}
+
+}  // namespace
+
+peer_handle_t fwd_router_t::session_tenant(const child_rx_ctx_t& ctx, std::uint32_t slot) noexcept {
+    session_tenancy_t* const t = ctx.tenancy.load(std::memory_order_acquire);
+    return t != nullptr && slot < t->size
+               ? peer_handle_from_bits(t->word(slot).load(std::memory_order_acquire))
+               : peer_handle_t{};
+}
+
+peer_handle_t fwd_router_t::anchor_tenant(const child_rx_ctx_t* ctx, std::string_view name,
+                                          graph::vertex_handle_t anchor,
+                                          std::uint32_t generation) const noexcept {
+    // The word FIRST, the generation after: see `bus_peer_up` for the publication order.
+    const std::optional<std::uint32_t> slot = session_slot_index(name);
+    const peer_handle_t tenant =
+        ctx != nullptr && slot ? session_tenant(*ctx, *slot) : peer_handle_t{};
+    const std::optional<graph::vertex_slot_t> now = graph_.vertex_slot(anchor);
+    return now && now->generation == generation ? tenant : peer_handle_t{};
+}
+
+bool fwd_router_t::set_session_tenant_locked(const child_rx_ctx_t& ctx, std::uint32_t slot,
+                                             std::uint64_t bits) {
+    session_tenancy_t* t = ctx.tenancy.load(std::memory_order_relaxed);
+    if (t == nullptr || slot >= t->size) {
+        // Doubled from 8 until it covers the slot; the old words are copied, the old table
+        // parked for any reader still standing on it (see `session_tenancy_t`).
+        std::uint32_t size = t != nullptr ? t->size : 8;
+        while (size <= slot) {
+            if (size > UINT32_MAX / 2) return false;
+            size *= 2;
+        }
+        const std::size_t bytes = sizeof(session_tenancy_t) + size * sizeof(std::uint64_t);
+        void* const raw = link_src_->try_alloc(bytes, alignof(session_tenancy_t));
+        if (raw == nullptr) return false;
+        auto* const grown = ::new (raw) session_tenancy_t{.size = size, .parked = t};
+        auto* const words = reinterpret_cast<std::byte*>(grown + 1);
+        for (std::uint32_t i = 0; i < size; ++i) {
+            const std::uint64_t held =
+                t != nullptr && i < t->size ? t->word(i).load(std::memory_order_relaxed) : 0;
+            ::new (words + i * sizeof(std::uint64_t)) std::atomic<std::uint64_t>(held);
+        }
+        ctx.tenancy.store(grown, std::memory_order_release);
+        t = grown;
+    }
+    t->word(slot).store(bits, std::memory_order_release);
+    return true;
+}
+
 session_anchor_id_t fwd_router_t::session_anchor_id(std::string_view mount,
                                                     std::string_view peer) noexcept {
     session_anchor_id_t id;
@@ -1266,53 +1327,52 @@ void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, peer_handle_t handle,
     // mount was already removed anchors nothing — the same skip every name-keyed consumer
     // makes. Read `retired` the way the frame paths do.
     if (ctx.retired.load(std::memory_order_acquire)) return;
-    // An arrival is the moment the SLOT changes hands (#1609), and the new session has sent
-    // nothing yet — so whatever the slot still holds is a predecessor's whose departure never
-    // reached this router. Run that departure now. Under the arriving name it retires a
-    // still-live anchor (the generation bump; the anchor is keyed by slot) and drops the
-    // slot's cached token (keyed by slot index, which the successor shares). The edges and
-    // pending awaits sit under the PREDECESSOR's name, `p<slot>~<gen-1>` for a
-    // transport that advances the generation by one per claim; the bus spells it, and a name
-    // it cannot spell (a first tenancy, a transport that does not reuse slots) has none. In
-    // the ordinary case the departure already ran and every step finds nothing.
-    // One departure per name, the arriving one first: it holds the slot, so it retires the
-    // anchor and drops the token. The predecessor's does not hold it (the bus resolves the
-    // slot to the arriving endpoint), so its departure evicts that name's state and nothing
-    // slot-keyed. A name the bus cannot spell is skipped. Each departure carries its own
-    // session's handle, which is what that session's edges stored as their pair (#1941).
-    std::array<char, kPeerNameChars> scratch{};
-    const peer_handle_t prev{handle.index, handle.generation - 1};
-    const std::array<std::pair<peer_handle_t, std::string_view>, 2> gone{
-        {{handle, peer}, {prev, resolve_peer_name(*ctx.entry, prev, scratch)}}};
-    for (const auto& [h, name] : gone)
-        if (!name.empty()) bus_peer_down(ctx, h, name);
-    // The anchor is therefore never live here, so PATH_IN_USE cannot answer; discarded by
-    // value. An id too long for one key record anchors nothing, as the departure finds nothing.
     const session_anchor_id_t id = session_anchor_id(ctx.name, peer);
-    if (id.len != 0) (void)graph_.register_session_anchor(id);
+    if (id.len == 0) return;  // too long for one key record: anchors nothing
+    // An arrival is the moment the SLOT changes hands (#1609), and the new session has sent
+    // nothing yet — so a tenancy the slot's word still holds is a predecessor's whose
+    // departure never reached this router. Its departure runs now under exactly the handle
+    // and name it held (#2234): no generation arithmetic, which a slot that consumed a
+    // generation without an arrival would get wrong. That departure retires the anchor,
+    // evicts the edges and awaits filed under the predecessor's name, clears the
+    // word and drops the slot's cached token. An empty word (the departure already ran, or
+    // the slot was never anchored) has nothing to reclaim.
+    if (const peer_handle_t prev = session_tenant(ctx, handle.index); prev.valid()) {
+        std::array<char, kPeerNameChars> scratch{};
+        bus_peer_down(ctx, prev, resolve_peer_name(*ctx.entry, prev, scratch));
+    }
+    // The word is published BEFORE the anchor revives at its new generation, so a reader that
+    // loads it and then finds the anchor at the generation it was minted against has read the
+    // tenancy that generation belongs to. A refused table anchors nothing; the anchor is never
+    // live here, so PATH_IN_USE cannot answer, and a refused block is discarded by value too.
+    const std::lock_guard lock(tenancy_m_);
+    if (set_session_tenant_locked(ctx, handle.index, handle.bits()))
+        (void)graph_.register_session_anchor(id);
 }
 
 void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle,
                                  std::string_view peer) {
-    // A departure that lands after the slot's SUCCESSOR has claimed it must leave the
-    // successor's anchor and cached token alone: both are keyed by slot. The slot still
-    // belongs to this tenancy when the bus resolves it to this name's endpoint (both null
-    // once torn down); a transport that does not reuse slots resolves the two alike.
-    // The bus facet is the link's (#1941): this is only ever a bus mount's ctx, so the
-    // slot's link is that bus, and a build with the bus module closed out answers null.
-    bus_link_t* const bus = bus_of(*ctx.entry->bound().link);
-    const bool holds_slot =
-        bus == nullptr || bus->slot_link(session_slot_of(peer)) == bus->peer_link(peer);
-    // Retire BEFORE the eviction. Retirement is what bumps the saturating generation
-    // (RFC-0024 §4.4 rule 3), and the slot this session sat in can be handed to the next
-    // dialer the moment the poll thread returns from here — so the stamp has to have moved
-    // by then, or the successor revives at a generation an element minted against the DEAD
-    // session still matches. `find_session_anchor` answers nullopt for an announce-census
-    // peer (which was never anchored) and for a double departure, both of which then take
-    // the unchanged eviction-only path.
-    const std::optional<graph::vertex_handle_t> anchor =
-        holds_slot ? graph_.find_session_anchor(session_anchor_id(ctx.name, peer)) : std::nullopt;
-    if (anchor) (void)graph_.retire(*anchor);
+    // A departure leaves the slot's anchor, word and cached token alone when the word holds
+    // ANOTHER session (#2234): a late departure that lands after a successor took the slot,
+    // including one still pending authentication, finds the successor's handle there. An
+    // empty word (never anchored, or already departed) still drops the token.
+    bool holds_slot = true;
+    {
+        const std::lock_guard lock(tenancy_m_);
+        const peer_handle_t tenant = session_tenant(ctx, handle.index);
+        holds_slot = !tenant.valid() || tenant == handle;
+        // Retire BEFORE the eviction, and before the word clears. Retirement is what bumps
+        // the saturating generation (RFC-0024 §4.4 rule 3), and the slot this session sat in
+        // can be handed to the next dialer the moment the poll thread returns from here — so
+        // the stamp has to have moved by then, or the successor revives at a generation an
+        // element minted against the DEAD session still matches.
+        if (tenant.valid() && tenant == handle) {
+            if (const std::optional<graph::vertex_handle_t> anchor =
+                    graph_.find_session_anchor(session_anchor_id(ctx.name, peer)))
+                (void)graph_.retire(*anchor);
+            (void)set_session_tenant_locked(ctx, handle.index, 0);
+        }
+    }
     link_gone(peer, {.conn = ctx.entry->conn_slot, .peer = handle});
     // The eviction inside `link_down` RELEASED this peer's index slot, so the token cached
     // for it names a stamp that can never validate again (#1417). Dropping it is what lets
@@ -1475,6 +1535,15 @@ std::optional<wire::path_ref_element_t> fwd_router_t::reverse_hop_ref(
     if (!anchor) return std::nullopt;
     const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot(*anchor);
     if (!slot) return std::nullopt;  // saturated => permanently unbindable (§4.4 rule 3)
+    // Minted only for the tenancy the slot's word holds (#2234): a frame still in flight
+    // from a departed session must not name its successor's anchor. The word is stored only
+    // after the retire that moved the generation, so a word naming this session means the
+    // generation just read is its.
+    const peer_handle_t tenant =
+        anchor_tenant(inbound_ctx, inbound_name, *anchor, slot->generation);
+    std::array<char, kPeerNameChars> scratch{};
+    if (!tenant.valid() || resolve_peer_name(*inbound_ctx->entry, tenant, scratch) != inbound_name)
+        return std::nullopt;
     return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
 }
 
@@ -1656,11 +1725,16 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
         // closed, enforcing, on a door whose vertex has retired. A denial stays the shipped
         // plain drop (the anti-enumeration rule on the delivery leg); a session gone between
         // the deref and here is `NOT_FOUND`, below.
-        const child_registry_t::child_t* const door = registry_.entry_by_name(ar->mount);
+        const child_rx_ctx_t* const mount = ctx_by_name(ar->mount);
+        const child_registry_t::child_t* const door = mount != nullptr ? mount->entry : nullptr;
         if (!door_allows(door, inbound_name, graph::acl_right_t::WRITE)) return head_dst_t::HANDLED;
-        egress = door != nullptr
-                     ? child_registry_t::resolve_peer(*door, ar->peer, &bus_link_t::slot_link)
-                     : nullptr;
+        // The session is the one the slot's word names, read BEFORE the anchor's generation is
+        // checked again (#2234): a successor's word is published only after the retire that
+        // moved the generation, so a word read here that is not the minted tenancy's fails
+        // the re-check, and so does a session that departed since. The delivery never reaches
+        // a tenancy the element was not minted for.
+        const peer_handle_t tenant = anchor_tenant(mount, ar->peer, *v, pair.generation);
+        egress = tenant.valid() ? child_registry_t::resolve_peer(*door, tenant) : nullptr;
     }
     if (egress == nullptr) {
         reject(graph::status_t::NOT_FOUND, pre);
@@ -2738,6 +2812,12 @@ fwd_router_t::~fwd_router_t() {
         if (bus_token_cache_t* const t = c->peer_tokens_own) {
             t->~bus_token_cache_t();
             link_src_->release(t, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
+        }
+        for (session_tenancy_t* t = c->tenancy.load(std::memory_order_relaxed); t != nullptr;) {
+            session_tenancy_t* const parked = t->parked;
+            link_src_->release(t, sizeof(session_tenancy_t) + t->size * sizeof(std::uint64_t),
+                               alignof(session_tenancy_t));
+            t = parked;
         }
         c->~child_rx_ctx_t();
         link_src_->release(c, sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));

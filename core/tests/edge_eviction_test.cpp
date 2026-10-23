@@ -272,19 +272,12 @@ class fake_bus_t : public transport_t, public bus_link_t {
         return it == peers_.end() ? nullptr : it->second.get();
     }
 
-    /** @brief The slot's endpoint: its latest arrival's, else the slot-named peer's. */
-    transport_t* slot_link(std::string_view slot) override {
-        std::string_view holder = slot;
-        for (const auto& [key, name] : tenancies_)
-            if (tr::net::session_slot_of(name) == slot) holder = name;  // ascending generation
-        return peer_link(holder);
-    }
-
     /** @brief A handle names the session that arrived at it, else its slot's name (#1294). */
     [[nodiscard]] std::string_view peer_name(peer_handle_t peer, std::span<char>) const override {
-        if (!peer.valid() || peer.index >= names_.size()) return {};
+        const auto slot = names_.find(peer.index);
+        if (!peer.valid() || slot == names_.end()) return {};
         const auto it = tenancies_.find({peer.index, peer.generation});
-        return it == tenancies_.end() ? std::string_view(names_[peer.index]) : it->second;
+        return it == tenancies_.end() ? std::string_view(slot->second) : it->second;
     }
 
     /** @brief The (created-on-first-use) endpoint for @p peer. */
@@ -300,10 +293,13 @@ class fake_bus_t : public transport_t, public bus_link_t {
         std::uint32_t gen = 1;
         for (const auto& [key, held] : tenancies_)
             if (held == name) gen = key.second;
-        for (std::size_t i = 0; i < names_.size(); ++i)
-            if (names_[i] == slot) return {static_cast<std::uint32_t>(i), gen};
-        names_.emplace_back(slot);
-        return {static_cast<std::uint32_t>(names_.size() - 1), gen};
+        for (const auto& [i, held] : names_)
+            if (held == slot) return {i, gen};
+        // A `p<n>` slot sits at index n, as a slot server names it; any other name from 1000 up.
+        const std::uint32_t index = tr::net::session_slot_index(slot).value_or(
+            1000 + static_cast<std::uint32_t>(names_.size()));
+        names_.emplace(index, slot);
+        return {index, gen};
     }
     /** @brief Poke one inbound frame tagged with the sending peer's HANDLE (#1294). */
     void inject_peer(std::string_view peer_name, std::span<const std::byte> frame) {
@@ -332,7 +328,7 @@ class fake_bus_t : public transport_t, public bus_link_t {
 
    private:
     std::map<std::string, std::unique_ptr<peer_ep_t>> peers_; /**< @brief name → endpoint. */
-    std::vector<std::string> names_; /**< @brief index → slot name — the handle's meaning. */
+    std::map<std::uint32_t, std::string> names_;              /**< @brief index → slot name. */
     /** @brief {index, generation} → the session name that arrived with that handle. */
     std::map<std::pair<std::uint32_t, std::uint32_t>, std::string> tenancies_;
 };
@@ -1455,6 +1451,47 @@ void test_late_departure_leaves_the_successor_anchor() {
     check(bus.peer("p3~8").count() == 1, "gen 8 still receives its delivery");
 }
 
+/**
+ * @brief #2234: a session anchor answers only for the tenancy it holds. A frame still in
+ *        flight from a departed session mints no element for its successor's anchor, and the
+ *        successor's own frame does.
+ */
+void test_a_departed_tenancy_mints_no_successor_element() {
+    std::printf("#2234 — a departed tenancy mints nothing for the slot's successor:\n");
+    graph_t ga, gb;
+    fwd_router_t ra(ga), rb(gb);
+    pipe_link_t a_to_b, b_to_a;
+    a_to_b.set_peer(b_to_a);
+    b_to_a.set_peer(a_to_b);
+    fake_bus_t bus;
+    (void)ra.attach_link("srv", bus);
+    (void)ra.attach_link("b", a_to_b);
+    (void)gb.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    (void)rb.attach_link("a", b_to_a);
+    (void)gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
+    /** @brief Whether A's last forwarded request carries a reverse list. */
+    const auto carries_reverse = [&] {
+        const auto& lg = a_to_b.log();
+        if (lg.empty()) return false;
+        const auto dec = tr::wire::decode(lg.back());
+        return dec.has_value() && !dec->children.empty() &&
+               dec->children.back().type == tr::wire::type_t::PATH_REF_REVERSE;
+    };
+    const auto subscribe = [&](std::string_view peer) {
+        bus.inject_peer(peer, b_fwd_mint(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
+                                         b_field_subscribers_append(), b_subscriber("s")));
+    };
+
+    bus.peer_arrive("p3~7", 7);
+    bus.peer_arrive("p3~8", 8);
+    const std::size_t before = a_to_b.log().size();
+    subscribe("p3~7");
+    check(a_to_b.log().size() == before + 1, "A forwarded the departed tenancy's request");
+    check(!carries_reverse(), "and stripped its reverse list: the anchor is gen 8's");
+    subscribe("p3~8");
+    check(carries_reverse(), "positive control: gen 8's own request carries its element");
+}
+
 int main() {
     // #1438 — see tcp_test's twin of this guard. This suite's crash was NOT a null `bus()`:
     // with no bus module the router never registers a peer anchor, so the forwarding hop
@@ -1485,6 +1522,7 @@ int main() {
     test_reverse_mint_closes_the_disclosure();
     test_arrival_retenants_a_recycled_name();
     test_late_departure_leaves_the_successor_anchor();
+    test_a_departed_tenancy_mints_no_successor_element();
     test_concurrent_evict_vs_writes();
     return tr::testing::summary("edge_eviction");
 }
