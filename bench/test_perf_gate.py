@@ -2093,14 +2093,14 @@ class LayoutBoundRows(unittest.TestCase):
 
     # The #2069 shape: one binary reads the heap rows at ~3.7 ns in one process and ~8 ns in
     # the next, every size of that process together. Sizes and modes are the logged ones.
-    BIMODAL_SIZES = (64, 128, 960, 2048)
+    BIMODAL_SIZES = (64, 128, 960, 1040, 2048)  # 1040: the 984-1072 B band #2069 logged
 
     def _bimodal(self, slow_pairs: int, pairs: int = 8) -> dict[int, list[float]]:
         return {s: [8.0] * slow_pairs + [3.7] * (pairs - slow_pairs) for s in self.BIMODAL_SIZES}
 
     def test_a_cliff_heap_session_flipped_to_its_slow_mode_does_not_fail(self):
         """@brief #2069: six of eight candidate processes in the slow mode read x2.16 at p50,
-        past the backstop; the fast mode is unmoved, so the session passes."""
+        past the backstop; the second-best sample is still fast, so the session passes."""
         base = self._bimodal(0)
         with contextlib.redirect_stdout(io.StringIO()):
             fails, _ = pg.gate_cliff(AllocatorCliffFamily._samples(
