@@ -346,8 +346,20 @@ identifier, or an error flag, so the ingress rule has nothing to judge.)
 
 ### Egress: advertise-then-data, with CAN-FD DLC padding
 
-`send(frame)` is emitted as one **group** under a single lock (so concurrent sends
-never interleave on the bus):
+`send(frame)` is emitted as one **group**. The transport's TX lock covers only the
+slot reservation and the advertise, never the data slices, so a second sender is not
+held while the driver back-pressures a long group (#2262). Ordering still holds where
+the receiver needs it:
+
+- two advertises never interleave, because each is emitted whole under the lock on the
+  node's one control ID;
+- each group's slices go out in index order on its own run of slice IDs, and runs of
+  groups in flight are disjoint, so another sender's frames between two slices can never
+  be read as part of the group;
+- the endpoint allocator does not wrap while any group is still in flight, so no slice
+  ID is re-issued, and its binding retired, before its group's last slice is out.
+
+The steps are:
 
 1. The frame is split by `can_frame_count` / `can_frame_at` into data-field windows.
 2. An **advertise manifest** is emitted first on the node's **control ID**

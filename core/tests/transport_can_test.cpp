@@ -55,6 +55,18 @@
 static_assert(!std::is_destructible_v<tr::net::can_link_t>);
 static_assert(std::is_destructible_v<tr::net::can_transport_t>);
 
+namespace tr::net {
+
+/** @brief The test-only door `transport_can.hpp` declares (#2262): reads the lap-fence parks. */
+struct can_transport_test_door_t {
+    /** @brief How many times a send on @p t parked at the lap fence. */
+    static std::size_t fence_waits(const can_transport_t& t) {
+        return t.tx_fence_waits_.load(std::memory_order_relaxed);
+    }
+};
+
+}  // namespace tr::net
+
 namespace {
 
 /** @brief A whole advertise frame in a `std::vector` — the test-side form of
@@ -1443,6 +1455,242 @@ void test_rope_delivery() {
     check(equal_bytes(flatbytes, payload), "rope bytes are byte-exact");
 }
 
+/**
+ * @brief The driver's back-pressure gate a test arms on one slice of one group (#2262).
+ *
+ * Shared by the test thread and the sending threads: it records every frame in the order
+ * the transport handed it to the "driver", and parks the writer of the armed frame until
+ * the test releases it, which is what a full TWAI queue does to `write_raw`.
+ */
+struct tx_gate_t {
+    std::mutex m;
+    std::condition_variable cv;
+    std::uint32_t block_id = 0;  // the CAN id whose write parks; 0 = never
+    bool blocked = false;        // a writer is parked on block_id
+    bool released = false;
+    std::vector<tr::net::can_frame_data_t> log;  // the bus order, as the driver saw it
+
+    /** @brief Wait until a writer is parked on the armed frame. */
+    bool wait_blocked(std::chrono::milliseconds budget) {
+        std::unique_lock lock(m);
+        return cv.wait_for(lock, budget, [this] { return blocked; });
+    }
+    void release() {
+        const std::lock_guard lock(m);
+        released = true;
+        cv.notify_all();
+    }
+    [[nodiscard]] std::vector<tr::net::can_frame_data_t> snapshot() {
+        const std::lock_guard lock(m);
+        return log;
+    }
+};
+
+/** @brief A fake link whose driver blocks on the gate's armed frame, then forwards to a bus. */
+class gated_link_t : public tr::net::can_link_t {
+   public:
+    gated_link_t(fake_can_bus_t& bus, tx_gate_t& gate) : out_(bus), gate_(gate) {}
+    void write_raw(const tr::net::can_frame_data_t& f) override {
+        {
+            std::unique_lock lock(gate_.m);
+            if (f.id == gate_.block_id && !gate_.released) {
+                gate_.blocked = true;
+                gate_.cv.notify_all();
+                gate_.cv.wait(lock, [this] { return gate_.released; });
+            }
+            gate_.log.push_back(f);
+        }
+        out_.write_raw(f);
+    }
+    void on_receive(rx_fn_t rx) override { out_.on_receive(std::move(rx)); }
+    void start() override { out_.start(); }
+
+   private:
+    fake_link_t out_;
+    tx_gate_t& gate_;
+};
+
+/** @brief Every payload a receiver delivered, in order. */
+struct all_sink_t {
+    std::mutex m;
+    std::vector<std::vector<std::byte>> got;
+    void on(std::span<const std::byte> f) {
+        const std::lock_guard lock(m);
+        got.emplace_back(f.begin(), f.end());
+    }
+    [[nodiscard]] std::size_t count() {
+        const std::lock_guard lock(m);
+        return got.size();
+    }
+};
+
+/**
+ * @brief The endpoints of node 1's data frames inside `[base, base + n)`, in log order.
+ *
+ * A group's slices are contiguous on its own id run when this is exactly
+ * `base, base + 1, ..., base + n - 1`: every slice once, in index order, and no frame of
+ * any other group on the run.
+ */
+std::vector<std::uint16_t> run_of(const std::vector<tr::net::can_frame_data_t>& log,
+                                  std::uint16_t base, std::size_t n) {
+    std::vector<std::uint16_t> eps;
+    for (const auto& f : log) {
+        const auto fields = can::decode_can_id(f.id);
+        if (fields && fields->node == 1 && fields->endpoint >= base && fields->endpoint < base + n)
+            eps.push_back(fields->endpoint);
+    }
+    return eps;
+}
+
+bool is_run(const std::vector<std::uint16_t>& eps, std::uint16_t base, std::size_t n) {
+    if (eps.size() != n) return false;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (eps[i] != base + i) return false;
+    }
+    return true;
+}
+
+/**
+ * @brief #2262 — a driver that blocks mid-group no longer holds a second sender for the
+ *        whole group, and each group's slices still go out whole and in order on its run.
+ *
+ * Group A (6 slices) parks in the driver on its third slice. Group B (3 slices) is sent
+ * from another thread on the SAME transport and must return while A is still parked:
+ * before the fix tx_m_ was held across A's whole slice loop, so B waited out A's
+ * back-pressure. Both are then delivered byte-exact to a peer, and the driver's log shows
+ * each group's slices as one unbroken, ordered run of its own ids.
+ */
+void test_blocked_group_does_not_hold_a_concurrent_sender() {
+    std::printf(
+        "transport_can driver back-pressure mid-group does not hold another sender "
+        "(#2262):\n");
+
+    fake_can_bus_t bus;
+    all_sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    tx_gate_t gate;
+    constexpr std::uint16_t kFirst = tr::net::kCanFirstDataEndpoint;
+    constexpr std::size_t kA = 6;
+    constexpr std::size_t kB = 3;
+    constexpr std::size_t kWin = tr::net::can::kCanClassicMaxData;
+    gate.block_id = can::encode_can_id({0, 1, static_cast<std::uint16_t>(kFirst + 2)});
+
+    auto link_a = tr::mem::make_poly<gated_link_t>(tr::mem::net_source(), bus, gate);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::can_transport_t tx_b(std::move(link_b), rx_test_config());
+    tx_b.set_receiver(rx);
+
+    const std::vector<std::byte> a_payload(kA * kWin, std::byte{0xA1});
+    const std::vector<std::byte> b_payload(kB * kWin, std::byte{0xB2});
+    std::thread a_thread([&] { tx_a.send(a_payload); });
+    check(gate.wait_blocked(2s), "group A is parked in the driver on its third slice");
+
+    std::atomic<bool> b_done{false};
+    std::thread b_thread([&] {
+        tx_a.send(b_payload);
+        b_done.store(true);
+    });
+    const bool b_free = wait_until([&] { return b_done.load(); }, 2s);
+    check(b_free, "group B's send returned while group A was still parked in the driver");
+
+    gate.release();
+    a_thread.join();
+    b_thread.join();
+
+    check(wait_until([&] { return sink.count() >= 2; }, 5s), "both groups were delivered");
+    {
+        const std::lock_guard lock(sink.m);
+        const bool a_ok = std::find(sink.got.begin(), sink.got.end(), a_payload) != sink.got.end();
+        const bool b_ok = std::find(sink.got.begin(), sink.got.end(), b_payload) != sink.got.end();
+        check(a_ok && b_ok && sink.got.size() == 2,
+              "each group was delivered byte-exact as itself, nothing welded or extra");
+    }
+    const auto log = gate.snapshot();
+    check(is_run(run_of(log, kFirst, kA), kFirst, kA),
+          "group A's slices went out whole and in index order on its own id run");
+    check(is_run(run_of(log, kFirst + kA, kB), kFirst + kA, kB),
+          "group B's slices went out whole and in index order on its own, disjoint run");
+    if (b_free) {
+        // B finished inside A's group: the bus order proves the lock no longer spans it.
+        const auto at = [&](std::uint32_t id) {
+            return std::find_if(log.begin(), log.end(), [&](const auto& f) { return f.id == id; }) -
+                   log.begin();
+        };
+        check(at(can::encode_can_id({0, 1, kFirst + kA + kB - 1})) < at(gate.block_id),
+              "B's last slice reached the driver before A's parked slice did");
+    }
+    check(tx_b.dropped_rx() == 0 && tx_b.dropped_groups() == 0, "the receiver dropped nothing");
+    check(tr::net::can_transport_test_door_t::fence_waits(tx_a) == 0,
+          "no send parked at the lap fence: nothing wrapped");
+}
+
+/**
+ * @brief #2262 — the lap fence: a group that would wrap the endpoint allocator waits until
+ *        no group is in flight, so it never re-issues the ids of a group still being sent.
+ *
+ * With the lock no longer spanning a group, a wrapping reservation could otherwise land
+ * on the very run a parked group is still sending on. Its advertise would retire that
+ * group's binding and the parked tail would weld onto the new group.
+ */
+void test_wrap_waits_for_the_group_in_flight() {
+    std::printf("transport_can allocator wrap waits for the group in flight (#2262):\n");
+
+    fake_can_bus_t bus;
+    all_sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    tx_gate_t gate;
+    constexpr std::uint16_t kFirst = tr::net::kCanFirstDataEndpoint;
+    constexpr std::size_t kA = 6;
+    constexpr std::size_t kWin = tr::net::can::kCanClassicMaxData;
+    // One slot more than the window has left after A, so its reservation must wrap.
+    constexpr std::size_t kWrap = can::kEndpointMax - (kFirst + kA) + 2;
+    static_assert(kWrap <= tr::net::kCanMaxGroupSlices, "the wrapping group must be sendable");
+    gate.block_id = can::encode_can_id({0, 1, static_cast<std::uint16_t>(kFirst + 2)});
+
+    auto link_a = tr::mem::make_poly<gated_link_t>(tr::mem::net_source(), bus, gate);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::transport_can_config_t cfg_b = rx_test_config();
+    cfg_b.rx_ttl = 60s;  // out of reach: only the fence may keep the groups apart
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg_b);
+    tx_b.set_receiver(rx);
+
+    const std::vector<std::byte> a_payload(kA * kWin, std::byte{0xA1});
+    const std::vector<std::byte> w_payload(kWrap * kWin, std::byte{0xC3});
+    std::thread a_thread([&] { tx_a.send(a_payload); });
+    check(gate.wait_blocked(2s), "group A is parked in the driver on its third slice");
+
+    std::atomic<bool> w_done{false};
+    std::thread w_thread([&] {
+        tx_a.send(w_payload);
+        w_done.store(true);
+    });
+    // Deterministic: the fence counts the park before it waits, under tx_m_.
+    check(
+        wait_until([&] { return tr::net::can_transport_test_door_t::fence_waits(tx_a) >= 1; }, 2s),
+        "the wrapping group parked at the lap fence while group A was in flight");
+    check(!w_done.load(), "the wrapping group waits while group A is still in flight");
+    check(run_of(gate.snapshot(), kFirst, kA).size() == 2,
+          "nothing reached A's run while A was parked (only its first two slices)");
+
+    gate.release();
+    a_thread.join();
+    w_thread.join();
+
+    check(wait_until([&] { return sink.count() >= 2; }, 10s), "both groups were delivered");
+    {
+        const std::lock_guard lock(sink.m);
+        const bool a_ok = std::find(sink.got.begin(), sink.got.end(), a_payload) != sink.got.end();
+        const bool w_ok = std::find(sink.got.begin(), sink.got.end(), w_payload) != sink.got.end();
+        check(a_ok && w_ok && sink.got.size() == 2,
+              "A and the wrapping group were each delivered byte-exact, never welded");
+    }
+    check(tx_b.dropped_stale_binding() == 0, "no slice resolved to a retired binding");
+}
+
 int main() {
     test_roundtrip(tr::net::can::can_frame_mode_t::CLASSIC, 20, "classic, multi-frame");
     test_roundtrip(tr::net::can::can_frame_mode_t::FD, 150, "CAN-FD, multi-frame");
@@ -1467,5 +1715,7 @@ int main() {
     test_advertise_must_match_its_carrier();
     test_binding_table_is_capped_per_link();
     test_same_id_reissue_rewrites_in_place();
+    test_blocked_group_does_not_hold_a_concurrent_sender();
+    test_wrap_waits_for_the_group_in_flight();
     return tr::testing::summary("transport_can");
 }

@@ -18,8 +18,9 @@
  * core/tests/transport_can_test.cpp). The transport itself never touches a socket.
  *
  * Concurrency mirrors transport_ws: the link's receive loop runs on an internal
- * thread and feeds the bridge through the registered receiver; sends are serialized
- * so one group's frames never interleave another's on the bus.
+ * thread and feeds the bridge through the registered receiver. A send holds the TX
+ * lock only to reserve its slot run and emit its advertise; its data slices go out
+ * unlocked on that run, which no other group in flight shares (#2262).
  */
 #pragma once
 
@@ -28,6 +29,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -219,6 +221,12 @@ class can_link_t {
      * completion (#383; `%can_tx_pool.hpp` is that storage). A synchronous
      * link (`socketcan_link_t`: the kernel copies inside the write(2) call)
      * may use @p frame directly.
+     *
+     * **Called concurrently (#2262).** @ref can_transport_t calls this from every
+     * thread that sends on it, at the same time, with no lock of its own held; one
+     * thread's calls for one group arrive in order. An implementation must therefore
+     * be safe under concurrent calls (`socketcan_link_t` and `twai_link_t` serialize
+     * their submission internally) and may block on driver back-pressure.
      */
     virtual void write_raw(const can_frame_data_t& frame) = 0;
 
@@ -380,6 +388,15 @@ struct transport_can_config_t {
 };
 
 /**
+ * @brief The test-only door @ref can_transport_t befriends (#2262): it reads how often a
+ *        send parked at the lap fence.
+ *
+ * Declared here and never defined by the library: only `core/tests/transport_can_test.cpp`
+ * defines it. It is not part of the API; code outside the test suite must not define it.
+ */
+struct can_transport_test_door_t;
+
+/**
  * @brief A `transport_t` over Linux SocketCAN — header-elided, self-establishing.
  *
  * Wires the increment-1 framing to a live bus. **Egress** (@ref send): the frame
@@ -445,8 +462,13 @@ class can_transport_t final : public transport_t, public bus_link_t {
     /**
      * @brief Fragment @p frame across CAN frames and emit it (advertise + data).
      *
-     * Empty frames are dropped. Thread-safe: a whole group (its advertise and data
-     * frames) is emitted under one lock so concurrent sends never interleave.
+     * Empty frames are dropped. Thread-safe, with a per-group guarantee rather than a
+     * per-transport one (#2262): the group's advertise is emitted whole, and its data
+     * slices follow in index order on a run of slice ids no other group in flight
+     * shares. Slices of concurrent sends may interleave on the bus, each on its own run,
+     * so the receiver never mixes them; a send never waits out another's driver
+     * back-pressure, except at a wrap of the endpoint allocator, which waits until no group is in
+     * flight.
      * @param frame A complete libtracer frame (a ROUTER-wrapped TLV's bytes).
      */
     void send(std::span<const std::byte> frame) override;
@@ -709,7 +731,9 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // RESERVE the group's run of consecutive endpoint slots (#910). Fallible on
     // purpose: a group over kCanMaxGroupSlices fits at no base, and the caller must
     // learn that BEFORE it advertises a slice_count it cannot deliver.
-    std::optional<std::uint16_t> alloc_base(std::size_t slice_count);  // requires tx_m_ held
+    // At a wrap it waits on `lock` (tx_m_, held) until no group of the lap is in flight (#2262).
+    std::optional<std::uint16_t> alloc_base(std::size_t slice_count,
+                                            std::unique_lock<std::mutex>& lock);
     // Slices adv's 18-byte header and cfg_.path (in place, never copied — this node only
     // ever advertises its OWN path, so adv.path is left empty) into CLASSIC windows.
     void emit_advertise(const can::advertise_t& adv);  // requires tx_m_ held
@@ -726,8 +750,14 @@ class can_transport_t final : public transport_t, public bus_link_t {
     mem::string_t path_;          // this node's advertised path, owned
 
     // egress
-    std::mutex tx_m_;  // serializes whole-group emission
+    // Serializes the reservation and the advertise, never the data slices (#2262).
+    std::mutex tx_m_;
     std::uint16_t next_base_ = kCanFirstDataEndpoint;
+    // Groups advertised whose last slice is not out yet; guarded by tx_m_. A wrap of
+    // next_base_ waits on tx_drained_ for this to reach zero, so no slice id is re-issued
+    // while its group is still being sent.
+    std::size_t tx_in_flight_ = 0;
+    std::condition_variable tx_drained_;
 
     // ingress. A learned binding remembers whether its group is for THIS node —
     // a directed group addressed elsewhere is consumed but never reassembled.
@@ -804,6 +834,9 @@ class can_transport_t final : public transport_t, public bus_link_t {
     // on read; a 32-bit target wraps after 2^32.
     std::atomic<std::size_t> dropped_rx_{0};
     std::atomic<std::size_t> dropped_tx_{0};
+    // Parks at the lap fence; read only by the test door below (#2262), never a metric.
+    std::atomic<std::size_t> tx_fence_waits_{0};
+    friend struct can_transport_test_door_t;  // test-only: reads tx_fence_waits_.
     std::atomic<std::size_t> dropped_presink_{0};
     std::atomic<std::size_t> dropped_stale_binding_{0};
     std::atomic<std::size_t> dropped_binding_cap_{0};
