@@ -463,7 +463,7 @@ classDiagram
   `segment_ptr_t::adopt` owns it. The `tr::view` helpers (`heap_alloc`, `borrow`,
   `borrow_const`) exist so that the common paths cannot get this wrong.
 - **Borrowed bytes must outlive every segment over them.** `borrowed_backend_t::destroy`
-  deletes the control block and nothing else (`core/include/libtracer/mem_borrowed.hpp:borrowed_backend_t::destroy`),
+  returns the control block to its block source and nothing else (`core/include/libtracer/mem_borrowed.hpp:borrowed_backend_t::destroy`),
   so a borrow over a stack buffer or a scratch frame becomes a dangling read the moment
   that storage goes away. Durable storage of a value wants an owning backend.
 - **`bump_source_t` is scope-lifetime only.** Blocks carved from its buffer are never

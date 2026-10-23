@@ -2312,6 +2312,10 @@ add_executable(pool_only_dispatch_test
     pool_only_dispatch_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_set.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_pool.cpp
+    # A borrowed segment's control block comes from the default value source (#2283).
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_heap.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_source.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_source_backend.cpp
 )
 target_include_directories(pool_only_dispatch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_compile_features(pool_only_dispatch_test PRIVATE cxx_std_23)

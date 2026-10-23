@@ -111,7 +111,6 @@ bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noe
 #else
 
 using detail::borrowed_backend_t;
-using detail::borrowed_device_backend_t;
 
 // The multi-member host module set: a switch to a devirtualized (`final`-class,
 // qualified) direct call per linked backend, with the virtual `destroy` as the
@@ -125,11 +124,8 @@ void destroy_dispatch(view::segment_t* seg) noexcept {
             static_cast<pool_t*>(seg->backend)->pool_t::destroy(seg);
             return;
         case backend_tag::BORROWED:
-            static_cast<borrowed_backend_t*>(seg->backend)->borrowed_backend_t::destroy(seg);
-            return;
         case backend_tag::BORROWED_DEVICE:
-            static_cast<borrowed_device_backend_t*>(seg->backend)
-                ->borrowed_device_backend_t::destroy(seg);
+            static_cast<borrowed_backend_t*>(seg->backend)->borrowed_backend_t::destroy(seg);
             return;
         case backend_tag::UNKNOWN:
             break;  // dispatched through the virtual fallback below.
@@ -161,7 +157,7 @@ bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noe
         case backend_tag::BORROWED:
             return transfer_host<borrowed_backend_t>(seg, host, dir);
         case backend_tag::BORROWED_DEVICE:
-            return transfer_host<borrowed_device_backend_t>(seg, host, dir);
+            return transfer_host<borrowed_backend_t>(seg, host, dir);
         case backend_tag::UNKNOWN:
             break;
     }
