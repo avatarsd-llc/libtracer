@@ -55,7 +55,6 @@ export type {
 export {
   FWD_OP,
   FWD_OPCODE_MASK,
-  FWD_OP_FLAG_MINT_REQUEST,
   FWD_KIND,
   FWD_ERROR,
   FWD_ERROR_PATH,
