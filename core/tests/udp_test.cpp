@@ -609,6 +609,40 @@ void test_tx_drop_counted() {
     check(s.dropped_rx == 0 && s.malformed_rx == 0, "and the RX counters are still zero");
 }
 
+/**
+ * @brief #2279 — a datagram the socket REFUSES is counted, on every send path, and not retried.
+ *
+ * A UDP datagram cannot exceed 65,507 payload bytes, so `sendto`/`sendmsg` of a larger one
+ * fails with EMSGSIZE however empty the socket buffer is: a refusal the test can cause every
+ * time. (Filling the buffer is not reproducible on loopback: a blocking UDP socket waits for
+ * room rather than refusing.) After `shut_down` the socket refuses every send, so that is the
+ * second, independent refusal. A datagram that fits is the control: it leaves and counts nothing.
+ */
+void test_refused_sendto_counted() {
+    std::printf("a refused sendto is counted on every send path (#2279):\n");
+    tr::net::udp_transport_t b(0, "", 0);
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
+    check(a.ok() && b.ok(), "both sockets bound");
+
+    const std::vector<std::byte> fits = value_tlv({0x01, 0x02});
+    a.send(std::span<const std::byte>(fits));
+    check(a.dropped_tx() == 0, "control: a datagram that fits is not counted");
+
+    const std::vector<std::byte> huge(70000, std::byte{0x5A});
+    const std::span<const std::byte> one[1] = {huge};
+    a.send(std::span<const std::byte>(huge));
+    check(a.dropped_tx() == 1, "send(span): a refused sendto is counted");
+    a.send(std::span<const std::span<const std::byte>>(one));
+    check(a.dropped_tx() == 2, "send(iov): a refused sendmsg is counted");
+    a.send_to(a.peer_address(), std::span<const std::span<const std::byte>>(one));
+    check(a.dropped_tx() == 3, "send_to: a refused sendmsg is counted");
+
+    a.shut_down();
+    a.send(std::span<const std::byte>(fits));
+    check(a.dropped_tx() == 4, "after shut_down a send the socket refuses is counted too");
+    check(a.drop_stats().dropped_tx == 4, "and drop_stats() carries it across the interface");
+}
+
 }  // namespace
 
 /**
@@ -817,5 +851,6 @@ int main() {
     test_shut_down_frees_the_port();
     test_two_nodes_zero_copy_store();
     test_tx_drop_counted();
+    test_refused_sendto_counted();
     return tr::testing::summary("udp");
 }

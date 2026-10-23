@@ -128,8 +128,11 @@ void udp_transport_t::send(std::span<const std::byte> frame) {
     peer.sin_family = AF_INET;
     peer.sin_addr.s_addr = static_cast<std::uint32_t>(p >> 16);
     peer.sin_port = htons(static_cast<std::uint16_t>(p & 0xFFFF));
-    ::sendto(fd_, frame.data(), frame.size(), MSG_NOSIGNAL, reinterpret_cast<sockaddr*>(&peer),
-             sizeof(peer));
+    // A refused or short datagram (a full socket buffer, EMSGSIZE, a shut socket) is lost and
+    // counted, never retried: the link carries no acks, and the next value supersedes it (#2279).
+    if (::sendto(fd_, frame.data(), frame.size(), MSG_NOSIGNAL, reinterpret_cast<sockaddr*>(&peer),
+                 sizeof(peer)) != static_cast<ssize_t>(frame.size()))
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
@@ -165,8 +168,11 @@ void udp_transport_t::send_to(std::uint64_t address,
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    for (std::size_t i = 0; i < n; ++i)
+    std::size_t total = 0;
+    for (std::size_t i = 0; i < n; ++i) {
         vec[i] = ::iovec{const_cast<std::byte*>(iov[i].data()), iov[i].size()};
+        total += iov[i].size();
+    }
     const std::uint64_t p = address;
     if (p == 0) {  // no peer (learned or configured) => nobody to send to
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
@@ -181,7 +187,8 @@ void udp_transport_t::send_to(std::uint64_t address,
     msg.msg_namelen = sizeof(peer);
     msg.msg_iov = vec;
     msg.msg_iovlen = n;
-    ::sendmsg(fd_, &msg, MSG_NOSIGNAL);
+    if (::sendmsg(fd_, &msg, MSG_NOSIGNAL) != static_cast<ssize_t>(total))  // as in `send` (#2279)
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void udp_transport_t::run() {

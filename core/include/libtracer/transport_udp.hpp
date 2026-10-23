@@ -179,8 +179,8 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
      * link answers a first message at that datagram's source and moves its session's address
      * only on an authenticated message (RFC-0033 §5.4), so it never sends to the peer this
      * link learned from the last datagram. The same best-effort contract as `send`: a
-     * datagram with no socket, no address or no gather store is dropped and counted in
-     * @ref dropped_tx.
+     * datagram with no socket, no address or no gather store, or one the socket refuses, is
+     * dropped and counted in @ref dropped_tx.
      *
      * @param address A packed endpoint, as @ref inbound_source and @ref peer_address give it;
      *                0 is no address.
@@ -226,7 +226,9 @@ class udp_transport_t final : public transport_t, private posix_endpoint_t {
     }
 
     /** @brief Datagrams shed on the way OUT (#932): no peer learned or configured yet,
-     *         no socket, or a refused gather store — each one used to be a bare return. */
+     *         no socket, a refused gather store — each one used to be a bare return — or a
+     *         `sendto`/`sendmsg` the socket refused or cut short (#2279). A shed datagram is
+     *         never retried: the link carries no acks, and the next value supersedes it. */
     [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
         return dropped_tx_.load(std::memory_order_relaxed);
     }
