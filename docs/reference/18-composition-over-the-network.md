@@ -115,8 +115,10 @@ find:
   A path is relative to the caller's root, like a URL or a mount path.
 - **There is no end-to-end correlation-id and no per-hop request state.** A reply routes back
   along the `src` route the request accumulated on the way in; a hop may reboot mid-operation
-  and the reply still routes. Matching a reply to a *specific* outstanding request *at* an
-  endpoint is the transport's concern, never a field in `FWD` (RFC-0004 §D).
+  and the reply still routes. Matching a reply to a *specific* outstanding request is the
+  **originator's** concern, never a field in `FWD`: the originator seeds a reply route it can
+  recognise, or matches by `src` suffix (RFC-0004 §D and its erratum of 2026-10-23;
+  [§Acknowledged one-shot operations and safe retry](#acknowledged-one-shot-operations-and-safe-retry)).
 - **The node-scoped aliases are not global names either.** A **PAIR** (the 8-byte
   `(index, generation)` element a chain is built of) is meaningful only on the host that
   issued it — which is exactly why a chain is a *stack* of elements rather than one identifier
@@ -417,6 +419,92 @@ device-provided surface — and whether the transport plane should expose such a
 unruled. The gate on the reference implementation's retirement behaviour is
 `core/tests/retire_test.cpp`.
 ```
+
+## Acknowledged one-shot operations and safe retry
+
+An application often needs to know that one operation landed: creating or clearing a link, a
+`:children` write, a settings commit, an OTA or upload chunk, a command verb. It also needs to
+retry that operation when it hears nothing back, over any carrier, including a UDP link that
+acknowledges nothing. Both come from what is already on the wire. **There is no operation id, no
+correlation id and no duplicate-detection state at the receiver**
+([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §D;
+[ADR-0040](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0040-net-plane-is-explicit-source-routed-only.md)). Telling attempts apart
+happens at the client
+([ADR-0044](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)),
+and the caller owns the retry ([ADR-0066](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0066-element-write-is-a-single-attempt-cas.md)).
+
+### The acknowledgement is the reply to a `WRITE` with a non-empty `src`
+
+A `WRITE` whose `src` is non-empty is answered by at most one `REPLY`: `kind=RESULT` with an empty
+payload when it was applied, or `kind=ERROR` carrying `STATUS{ERROR}` when it was refused
+(RFC-0004 §D and its erratum of 2026-10-23). A `WRITE` with an empty `src` is answered by nothing,
+whatever happened (RFC-0004 Amendment 2), so it can never be acknowledged. A node under memory pressure can also drop a
+reply and count it (`reply_iov_dropped`, [22 §2](22-backpressure-and-sizing.md)), so a missing
+reply means only that no answer arrived. Ask for the
+acknowledgement by seeding a reply route; do not wait for a `STATUS` write on a subscription.
+Those are application data on the standing plane, not acknowledgements.
+
+The originator matches the reply to its request from the reply's own route:
+
+- The reference core's `fwd_router_t::originate` gives each request a reply route of its own, a
+  fresh one-segment token, unless the caller names one.
+- The TypeScript client matches by **`src` suffix**: a reply goes to the oldest outstanding
+  request whose `dst` ends with the reply's `src`
+  ([#1530](https://github.com/avatarsd-llc/libtracer/issues/1530);
+  [04 §Multi-hop FWD forwarding](04-communication-flows.md#multi-hop-fwd-forwarding)).
+
+**The suffix caveat.** Two outstanding writes to the **same path** have the same suffix, so the
+suffix cannot tell their replies apart, and matching falls back to arrival order. Replies on one
+link carry no ordering promise, so the fallback can hand each caller the other's answer. If it
+matters which attempt was answered, give each attempt a **fresh reply route**: a reply endpoint of
+its own, so the reply's `dst` names the attempt. That is sender-side only. No other node reads the
+route as anything but a path, and nothing changes on the wire.
+
+*Forthcoming:* [RFC-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md)
+§8–§9 (accepted; implementation
+[#1946](https://github.com/avatarsd-llc/libtracer/issues/1946)) turns the reply into an ordinary
+`WRITE` to the requester's reply endpoint, an empty `STATUS` for an applied `WRITE` and an `ERROR`
+for a refused one, matched by the token the requester seeds as the last segment of `src`. A fresh
+token per attempt is then the rule, and a duplicate or late reply is dropped and counted at the
+reply endpoint. The pattern on this page does not change: the token is still a `src` segment, not a
+field.
+
+### A retry is safe because of the operation's shape
+
+When no reply arrives, the application cannot know whether the operation was applied: the request
+or the reply may have been lost (the lost-ack ambiguity). The retry is safe only if applying the
+operation twice leaves the same state as applying it once. Design each operation to be like that:
+
+| Operation | Why repeating it is safe |
+| --- | --- |
+| **Link create** | It names the link it creates. A repeated create answers `PATH_IN_USE` and creates no second link ([ADR-0073](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md)). Read `PATH_IN_USE` after a retry as "already done". |
+| **Link clear** (a `NAME` written to the creator endpoint) | It names the link to remove. A name already gone is a no-op success ([RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §2; `core/src/transport_vertex.cpp:transport_vertex_t::endpoint_remove_locked`), so a retry answers `RESULT`, unlike a repeated create's `PATH_IN_USE`. Do not wait for an error to mean "already done". Other removals, such as retiring an application vertex, carry no such rule: check each one before retrying it. |
+| **A `:children` write** on an application vertex | Creating a child is a `SPEC` that names it, so a repeat answers `PATH_IN_USE`, as a link create does, and never makes a second child (`core/src/graph_fields.cpp:graph_t::create_child`). |
+| **A settings write** | Each settings write sets one field, or one `settings.app.*` leaf, to a whole value, so a repeat stores the same value ([03 §Atomicity of multi-field writes](03-addressing.md#atomicity-of-multi-field-writes)). Knobs that must land together go in one `settings.app.*` leaf. |
+| **An OTA or upload chunk** | Address each chunk by its **offset** (in the path or the payload). A repeat overwrites the same bytes with the same bytes. Do not append. |
+| **A command verb** | A verb that acts ("open the valve", "start the run") is not idempotent by shape. Put the application's own **sequence number** in the payload, and have the handler drop one it has already applied. That state is the application's, in its handler; the library keeps none. |
+
+An operation that is none of these, for example one that increments a value, is made safe the same
+way as a command verb, or by rewriting it as a whole-value write.
+
+### The deadline and the retry belong to the application
+
+The library starts no timer and reads no clock for a one-shot operation, and the link stays
+fire-and-forget. The requester owns the deadline, as it already does for an `AWAIT`
+([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) Amendment 3). The application
+decides how long to wait, on its own clock:
+
+1. Send the `WRITE` with a reply route, and note the attempt's deadline from the application's own
+   `now`.
+2. When the reply arrives, the operation is done: `RESULT` means applied, and `ERROR` carries the
+   reason. A `BACKPRESSURE` error asks for a slower retry, not a different operation
+   ([22 §2](22-backpressure-and-sizing.md#2-the-two-pressure-arms-stated-once), the reliable arm).
+3. When `now` passes the deadline with no reply, cancel the pending request, then retry, with a
+   fresh reply route if attempts must be told apart, and back off between attempts. A reply that
+   arrives after the cancel answers a request that no longer exists, and is ignored.
+4. On a link that acknowledges nothing (UDP, CAN), this loop is the only acknowledgement there is.
+   On every link, a missing reply means "no answer arrived", not "the peer is gone"
+   ([04 §Waiting for a reply that a drop consumed](04-communication-flows.md#waiting-for-a-reply-that-a-drop-consumed)).
 
 ## Pitfalls
 
