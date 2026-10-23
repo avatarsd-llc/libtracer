@@ -8,19 +8,19 @@
  *
  * Same construction as the #958 admission suite next to it: the REAL chip translation unit
  * (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`) compiled against the host fakes of
- * `esp_http_server` (fake_httpd.hpp) and `esp_timer` (fake_idf/esp_timer.h). Two seams make
- * this measurable rather than a code reading:
+ * `esp_http_server` (fake_httpd.hpp). Two seams make this measurable rather than a code
+ * reading:
  *   - the fake records every frame the link puts on the wire WITH ITS TYPE AND PAYLOAD, so a
  *     close CODE is an observable — and the code is the entire difference between "your
  *     credential was refused" and "you were too slow";
- *   - the fake timer never fires on its own. A test calls `fake_esp_timer_fire()` when it
- *     wants a tick, so a deadline test is deterministic instead of a sleep against a
- *     wall clock, and the tick lands on the TEST thread — which is the split the link is
- *     written against (the sweep must marshal itself onto the httpd task, and the fake's
- *     control queue is what proves it did).
+ *   - the deadline is the application's (#2257): a test calls `close_frozen_peers(now,
+ *     deadline)` with numbers it picks, so a deadline test is deterministic instead of a
+ *     sleep against a wall clock, and the check runs on the TEST thread — which is the split
+ *     the link is written against (the sweep must marshal itself onto the httpd task, and
+ *     the fake's control queue is what proves it did).
  *
  * What is pinned here:
- *   1. no hook installed = nothing changes, and no timer is armed;
+ *   1. no hook installed = nothing changes;
  *   2. a session that has not authenticated is invisible to `enumerate_peers`,
  *      unresolvable through `peer_link`, skipped by a broadcast, and its frames reach the
  *      HOOK rather than the graph — the four gates that make "admitted, serving nothing"
@@ -30,10 +30,10 @@
  *      shape a Noise handshake needs from the carrier;
  *   5. REJECT closes it with `kCloseAuthFailed`, code on the wire BEFORE the shutdown;
  *   6. the deadline closes a squatter with `kCloseAuthTimeout`, and only after it expires;
- *   7. an expired squatter cannot consume `max_peers` — the reap at the claim edge runs
- *      whether or not a tick has fired;
+ *   7. an expired squatter's `max_peers` slot goes to the next peer once the application's
+ *      check has reaped it;
  *   8. a session that departs unauthenticated owes the routing plane no departure;
- *   9. the timer is retired by the destructor;
+ *   9. installing a hook arms no timer: the link reads no clock for the deadline (#2257);
  *  10. (#1247) a socket that completes the 101 and sends NOTHING is closed at the deadline
  *      with `kCloseAuthTimeout` — the case a sweep of `slots_` could not see, because such a
  *      peer never reaches the lazy claim and therefore holds no session at all — while a link
@@ -54,7 +54,6 @@
  * verifies correctly, which is the hook's business and belongs to whoever writes one.
  */
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -63,10 +62,8 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
-#include "esp_timer.h"
 #include "fake_httpd.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
@@ -163,10 +160,12 @@ void run_server() {
     }
 }
 
-/** @brief Let the monotonic clock advance past a deadline. The link dates its sessions from
- *         `esp_timer_get_time`, which the host fake maps to `steady_clock` — so a deadline
- *         test waits for real microseconds, briefly, rather than pretending to. */
-void advance_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+/** @brief The application's first liveness check: stamps every unseen auth record with `now`
+ *         = 100 and closes nothing, since no record is older than a `deadline` of 0. */
+std::size_t check_inside(httpd_ws_link_t& link) { return link.close_frozen_peers(100, 0); }
+
+/** @brief A later check whose `deadline` (200) is past the first check's stamp (100). */
+std::size_t check_past(httpd_ws_link_t& link) { return link.close_frozen_peers(300, 200); }
 
 /** @brief Start every test from a known-empty fake. */
 void reset_server() {
@@ -179,7 +178,6 @@ void reset_server() {
 void test_no_hook_serves_immediately() {
     std::printf("#1184 an unconfigured link is unchanged:\n");
     reset_server();
-    const std::size_t timers_before = fake_esp_timer_live();
     auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
                                                     tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
@@ -187,8 +185,9 @@ void test_no_hook_serves_immediately() {
     check(fake_httpd::instance().open_session(kFd), "the handshake was answered");
     check(fake_httpd::instance().deliver_frame(kFd, kBody) == ESP_OK, "its first frame dispatched");
     check(peer_count(*link) == 1, "and it was served at once — no credential asked for");
-    check(fake_esp_timer_live() == timers_before,
-          "no deadline sweep is armed on a link with no hook");
+    check(check_inside(*link) == 0 && check_past(*link) == 0,
+          "and no liveness check expires it on a link with no hook");
+    check(peer_count(*link) == 1, "it is still a peer");
     fake_httpd::instance().close_session(kFd);
     run_server();
 }
@@ -326,11 +325,8 @@ void test_reject_closes_with_its_own_code() {
 void test_deadline_closes_a_squatter() {
     std::printf("#1184 the auth deadline closes a silent session:\n");
     reset_server();
-    // A deadline long enough that the first tick lands INSIDE it, so "not before it expires"
-    // is a real observation rather than a race won by luck.
-    auto link = tr::mem::make_poly<httpd_ws_link_t>(
-        tr::mem::net_source(), handle(), "/ws",
-        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 400});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
     constexpr int kFd = 660;
@@ -340,19 +336,18 @@ void test_deadline_closes_a_squatter() {
           "and the session claimed its slot, unauthenticated");
     fake_httpd::instance().clear_sent_frames();
 
-    // A tick well inside the window must do nothing.
-    check(fake_esp_timer_fire() == 1, "the sweep timer is armed");
+    // A check that stamps the session must do nothing else.
+    check(check_inside(*link) == 0, "the first check stamps the session and finds nothing");
     run_server();
-    check(frames_for(kFd).empty(), "a tick inside the window closes nothing");
+    check(frames_for(kFd).empty(), "a check inside the window closes nothing");
     check(link->stats().auth_expired == 0, "and counts nothing");
 
     // Past the deadline it must close, with its own code.
-    advance_ms(450);
-    check(fake_esp_timer_fire() == 1, "the timer fires again past the deadline");
-    // ONE queued item — the sweep the tick posted — and no reap, so the socket's shut state
+    check(check_past(*link) == 1, "a check whose deadline is past the stamp finds it");
+    // ONE queued item — the sweep the check posted — and no reap, so the socket's shut state
     // is still observable. run_pending() would close and drop the session in the same call,
     // which is httpd's own select arm doing its job and would hide the evidence.
-    check(fake_httpd::instance().run_one(), "the tick marshalled a sweep onto the httpd task");
+    check(fake_httpd::instance().run_one(), "the check marshalled a sweep onto the httpd task");
     const auto sent = frames_for(kFd);
     check(sent.size() == 1 && sent[0].type == HTTPD_WS_TYPE_CLOSE,
           "the expired session was sent a CLOSE");
@@ -365,8 +360,8 @@ void test_deadline_closes_a_squatter() {
     run_server();
 }
 
-/** @brief An expired squatter must not be able to deny a real peer its slot — the whole
- *         reason the deadline exists, and the one defence that must not wait for a tick. */
+/** @brief An expired squatter must not be able to deny a real peer its slot for longer than
+ *         the application's deadline — the whole reason the deadline exists. */
 void test_expired_squatter_cannot_consume_the_cap() {
     std::printf("#1184 an expired squatter does not hold the peer cap:\n");
     reset_server();
@@ -374,7 +369,7 @@ void test_expired_squatter_cannot_consume_the_cap() {
     // when the reap has freed it.
     auto link = tr::mem::make_poly<httpd_ws_link_t>(
         tr::mem::net_source(), handle(), "/ws",
-        tr::net::httpd_ws_config_t{.max_peers = 1, .peer_named = true, .auth_deadline_ms = 200});
+        tr::net::httpd_ws_config_t{.max_peers = 1, .peer_named = true});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
     constexpr int kSquatter = 670;
@@ -390,12 +385,15 @@ void test_expired_squatter_cannot_consume_the_cap() {
     check(fake_httpd::instance().deliver_frame(kReal, kCredential) == ESP_FAIL,
           "but it is refused while the squatter's window is still open");
 
-    advance_ms(250);
-    // NO timer tick here. The reap at the claim edge is what has to run, because a peer
-    // arriving between ticks must not be turned away by a session that is already expired.
+    // The application's check is the one event that reaps it: the link reads no clock, so a
+    // squatter past its deadline holds the slot until the next check (#2257).
+    check(check_inside(*link) == 0, "the first check stamps the squatter");
+    check(check_past(*link) == 1, "the next one finds it past the deadline");
+    check(fake_httpd::instance().run_one(), "and posted the sweep to the httpd task");
+    run_server();
     check(fake_httpd::instance().open_session(kReal + 1), "a later peer's handshake was answered");
     check(fake_httpd::instance().deliver_frame(kReal + 1, kCredential) == ESP_OK,
-          "and past the deadline it is admitted — with no tick, by the claim-edge reap");
+          "and it is admitted to the slot the sweep freed");
     check(link->stats().auth_expired == 1, "the squatter was reaped and counted");
     run_server();
 }
@@ -564,9 +562,8 @@ void test_handshake_authentication_skips_the_frame() {
     reset_server();
     // A SHORT deadline, so "no deadline is armed for this session" is proven by a sweep the
     // session outlives rather than by reading a flag.
-    auto link = tr::mem::make_poly<httpd_ws_link_t>(
-        tr::mem::net_source(), handle(), "/ws",
-        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_admission_verdict_cb(&preauth_admission, nullptr);
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::REJECT});
@@ -604,8 +601,8 @@ void test_handshake_authentication_skips_the_frame() {
     // @ref test_preauthenticated_silence_outlives_the_deadline. Under #1334 the claim happens
     // at the 101 and no deadline is armed, so the statement is now literally true; this arm is
     // kept as the "and it still holds for a peer that DID speak" half.
-    advance_ms(250);
-    check(fake_esp_timer_fire() == 1, "the sweep timer fires past the deadline");
+    check(check_inside(*link) == 0 && check_past(*link) == 0,
+          "a check past the deadline finds nothing");
     run_server();
     check(link->stats().auth_expired == 0, "and expires nothing — no deadline was armed for it");
     check(peer_count(*link) == 1, "the handshake-authenticated session is still a peer");
@@ -631,9 +628,8 @@ void test_preauthenticated_silence_outlives_the_deadline() {
     std::printf("#1334 a pre-authenticated peer that says NOTHING outlives the deadline:\n");
     reset_server();
     // A short deadline, so the silence below is measured against a sweep that really fires.
-    auto link = tr::mem::make_poly<httpd_ws_link_t>(
-        tr::mem::net_source(), handle(), "/ws",
-        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_admission_verdict_cb(&preauth_admission, nullptr);
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::REJECT});
@@ -643,8 +639,8 @@ void test_preauthenticated_silence_outlives_the_deadline() {
     check(fake_httpd::instance().open_session(kSilent), "the handshake was answered");
     check(peer_count(*link) == 1, "and it claimed its slot at the 101, with no frame sent");
     // NO deliver_frame, ever. That is the whole case.
-    advance_ms(250);
-    check(fake_esp_timer_fire() == 1, "the sweep timer fires past the deadline");
+    check(check_inside(*link) == 0 && check_past(*link) == 0,
+          "a check past the deadline finds nothing");
     run_server();
     check(link->stats().auth_expired == 0, "nothing expired — no deadline was armed for it");
     check(frames_for(kSilent).empty(), "no CLOSE was written to it");
@@ -653,8 +649,7 @@ void test_preauthenticated_silence_outlives_the_deadline() {
 
     // A second window, because the reported symptom is a LOOP: the first sweep is the one that
     // used to kill it, and a row re-armed by a reconnect would kill it again on the next.
-    advance_ms(250);
-    check(fake_esp_timer_fire() == 1, "a later tick fires too");
+    check(link->close_frozen_peers(500, 400) == 0, "a later check finds nothing either");
     run_server();
     check(link->stats().auth_expired == 0, "and still expires nothing");
     check(peer_count(*link) == 1, "the idle authenticated link is simply idle");
@@ -686,7 +681,7 @@ void test_preauthenticated_cap_is_charged_at_the_handshake() {
     // max_peers = 1: the first pre-authenticated handshake takes the only slot.
     auto link = tr::mem::make_poly<httpd_ws_link_t>(
         tr::mem::net_source(), handle(), "/ws",
-        tr::net::httpd_ws_config_t{.max_peers = 1, .peer_named = true, .auth_deadline_ms = 200});
+        tr::net::httpd_ws_config_t{.max_peers = 1, .peer_named = true});
     link->set_admission_verdict_cb(&preauth_admission, nullptr);
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::REJECT});
@@ -755,11 +750,8 @@ void test_verdict_refuse_and_overload_exclusivity() {
 void test_silent_upgrade_is_closed_at_the_deadline() {
     std::printf("#1247 a socket that upgrades and says NOTHING is closed at the deadline:\n");
     reset_server();
-    // Long enough that the first tick lands INSIDE the window, so "not before it expires" is
-    // an observation rather than a race won by luck — the same shape as the squatter case.
-    auto link = tr::mem::make_poly<httpd_ws_link_t>(
-        tr::mem::net_source(), handle(), "/ws",
-        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 400});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
     constexpr int kSilent = 700;
@@ -768,14 +760,13 @@ void test_silent_upgrade_is_closed_at_the_deadline() {
     // NO deliver_frame. That is the whole case.
     check(peer_count(*link) == 0, "it holds no session — nothing claimed it");
 
-    check(fake_esp_timer_fire() == 1, "the sweep timer is armed");
+    check(check_inside(*link) == 0, "the first check stamps the socket and finds nothing");
     run_server();
-    check(frames_for(kSilent).empty(), "a tick inside the window closes nothing");
+    check(frames_for(kSilent).empty(), "a check inside the window closes nothing");
     check(link->stats().auth_expired == 0, "and counts nothing");
 
-    advance_ms(450);
-    check(fake_esp_timer_fire() == 1, "the timer fires again past the deadline");
-    check(fake_httpd::instance().run_one(), "the tick marshalled a sweep onto the httpd task");
+    check(check_past(*link) == 1, "a check whose deadline is past the stamp finds it");
+    check(fake_httpd::instance().run_one(), "the check marshalled a sweep onto the httpd task");
     const auto sent = frames_for(kSilent);
     check(sent.size() == 1 && sent[0].type == HTTPD_WS_TYPE_CLOSE,
           "the silent socket was sent a CLOSE — the fourth row of the issue's table");
@@ -786,9 +777,9 @@ void test_silent_upgrade_is_closed_at_the_deadline() {
     check(link->stats().auth_expired == 1, "counted as an expiry");
     check(link->stats().auth_rejected == 0, "and not as a refusal");
 
-    // Once only: the row is retired before its close runs, so a second tick has nothing left.
+    // Once only: the row is retired before its close runs, so a second check has nothing left.
     fake_httpd::instance().clear_sent_frames();
-    check(fake_esp_timer_fire() == 1, "a later tick still fires");
+    check(link->close_frozen_peers(500, 400) == 0, "a later check finds nothing left");
     run_server();
     check(link->stats().auth_expired == 1, "and the same socket is not expired twice");
     run_server();
@@ -799,12 +790,12 @@ void test_silent_upgrade_is_closed_at_the_deadline() {
 void test_no_hook_leaves_a_silent_socket_alone() {
     std::printf("#1247 with no hook a silent socket is nobody's business but httpd's:\n");
     reset_server();
-    auto link = tr::mem::make_poly<httpd_ws_link_t>(
-        tr::mem::net_source(), handle(), "/ws",
-        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     constexpr int kSilent = 710;
     check(fake_httpd::instance().open_session(kSilent), "the handshake was answered");
-    advance_ms(250);
+    check(check_inside(*link) == 0 && check_past(*link) == 0,
+          "a check past the deadline finds nothing");
     run_server();
     check(!fake_httpd::instance().is_shut(kSilent), "past the deadline it is still open");
     check(link->stats().auth_expired == 0, "and nothing was expired");
@@ -825,10 +816,8 @@ void test_no_hook_leaves_a_silent_socket_alone() {
 void test_full_ledger_refuses_the_handshake() {
     std::printf("#1247 a full pending-handshake ledger refuses the next 101:\n");
     reset_server();
-    // A short deadline, so the recovery half below is a sweep rather than a wait.
-    auto link = tr::mem::make_poly<httpd_ws_link_t>(
-        tr::mem::net_source(), handle(), "/ws",
-        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
     constexpr int kBase = 720;
@@ -848,11 +837,12 @@ void test_full_ledger_refuses_the_handshake() {
     check(!fake_httpd::instance().has_session(over), "no session was admitted for it");
     check(link->stats().peers_refused == 1, "and the refusal is counted, not aborted");
 
-    // Self-clearing: the rows are freed by the deadline sweep, and the link takes handshakes
-    // again. A bound that never recovered would be a denial of service of its own.
-    advance_ms(250);
-    check(fake_esp_timer_fire() == 1, "the sweep timer fires past the deadline");
-    check(fake_httpd::instance().run_one(), "the tick marshalled a sweep onto the httpd task");
+    // Self-clearing: the rows are freed by the sweep the application's check posts, and the
+    // link takes handshakes again. A bound that never recovered would be a denial of service
+    // of its own.
+    check(check_inside(*link) == 0, "the first check stamps every row");
+    check(check_past(*link) == kBound, "the next one finds every row past the deadline");
+    check(fake_httpd::instance().run_one(), "and marshalled a sweep onto the httpd task");
     check(link->stats().auth_expired == kBound, "every silent socket was expired");
     check(fake_httpd::instance().open_session(over + 1),
           "and with the ledger drained a handshake is admitted again");
@@ -881,10 +871,8 @@ void test_refusal_after_upgrade_closes_with_a_code() {
     reset_server();
     auto link = tr::mem::make_poly<httpd_ws_link_t>(
         tr::mem::net_source(), handle(), "/ws",
-        tr::net::httpd_ws_config_t{.max_peers = 1,
-                                   .peer_named = true,
-                                   .auth_deadline_ms = 200,
-                                   .refusal_close_reason = "busy"});
+        tr::net::httpd_ws_config_t{
+            .max_peers = 1, .peer_named = true, .refusal_close_reason = "busy"});
     link->set_admission_verdict_cb(&preauth_admission, nullptr);
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::ACCEPT});
@@ -931,9 +919,9 @@ void test_refusal_after_upgrade_closes_with_a_code() {
     check(fake_httpd::instance().deliver_frame(kPlain, kCredential) == ESP_OK,
           "its credential frame dispatched");
     check(peer_count(*link) == 1, "and it claimed the only max_peers slot");
-    // No deadline: past it, the sweep expires nothing.
-    advance_ms(250);
-    check(fake_esp_timer_fire() == 1, "the sweep timer fires past the deadline");
+    // No deadline: past it, the check expires nothing.
+    check(check_inside(*link) == 0 && check_past(*link) == 0,
+          "a check past the deadline finds nothing");
     run_server();
     check(link->stats().auth_expired == 0, "and expires nothing — no refusal armed a deadline");
 
@@ -970,20 +958,22 @@ void test_refusal_after_upgrade_custom_code_and_long_reason() {
     check(!fake_httpd::instance().has_session(kFd), "and the socket was reaped");
 }
 
-/** @brief The destructor retires the sweep timer. */
-void test_teardown_retires_the_timer() {
-    std::printf("#1184 teardown retires the sweep:\n");
+/** @brief Installing a hook arms no timer: the deadline is the application's (#2257). */
+void test_hook_arms_no_timer() {
+    std::printf("#2257 installing a hook arms no timer:\n");
     reset_server();
-    const std::size_t before = fake_esp_timer_live();
-    {
-        auto link = tr::mem::make_poly<httpd_ws_link_t>(
-            tr::mem::net_source(), handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true});
-        link->set_auth_cb(&recording_auth, nullptr);
-        check(fake_esp_timer_live() == before + 1, "installing a hook armed exactly one timer");
-        link->set_auth_cb(&recording_auth, nullptr);
-        check(fake_esp_timer_live() == before + 1, "a second install re-arms nothing");
-    }
-    check(fake_esp_timer_live() == before, "and the destructor deleted it");
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
+    constexpr int kFd = 900;
+    check(fake_httpd::instance().open_session(kFd), "the handshake was answered");
+    check(fake_httpd::instance().deliver_frame(kFd, kCredential) == ESP_OK,
+          "the session claimed its slot, unauthenticated");
+    check(fake_httpd::instance().queue_depth() == 0,
+          "and nothing was queued to the httpd task: no sweep runs without a check");
+    fake_httpd::instance().close_session(kFd);
+    run_server();
 }
 
 }  // namespace
@@ -998,7 +988,7 @@ int main() {
     test_deadline_closes_a_squatter();
     test_expired_squatter_cannot_consume_the_cap();
     test_pending_departure_notifies_nobody();
-    test_teardown_retires_the_timer();
+    test_hook_arms_no_timer();
     test_handshake_authentication_skips_the_frame();
     test_preauthenticated_silence_outlives_the_deadline();
     test_preauthenticated_cap_is_charged_at_the_handshake();

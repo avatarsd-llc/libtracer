@@ -10,6 +10,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: the auth deadline is the application's
+  ([#2257](https://github.com/avatarsd-llc/libtracer/issues/2257)).** `httpd_ws_link_t` no
+  longer reads a clock or runs a timer for it. The per-link `esp_timer` sweep, the reap the
+  link ran on every inbound frame and at every handshake, and
+  `httpd_ws_config_t::auth_deadline_ms` / `httpd_ws_link_t::kDefaultAuthDeadlineMs` are gone.
+  `close_frozen_peers(now, deadline)`, the liveness check the application already makes,
+  now stamps each unauthenticated session and each silent upgraded socket with the first
+  `now` that sees it. A later check whose `deadline` is past that stamp closes it with
+  `kCloseAuthTimeout`, counted in `stats_t::auth_expired` and in the call's return value. An
+  expired squatter holds its `max_peers` slot until the next check. Migration: drop
+  `auth_deadline_ms` from the config and call `close_frozen_peers` on the application's own
+  tick, with `deadline` set to `now` minus the auth window you want.
+
 ## [0.21.0] — 2026-10-22
 
 ### Fixed
