@@ -73,6 +73,16 @@ typed parse/build pair lives with the policy rather than in the codec:
 back into bytes. Keeping them here is why an ACE test needs no hand-rolled byte
 builder.
 
+An `ace_t` views its subject rather than owning it, so an ACE is a plain value
+that copies for free. What owns the bytes depends on where the ACE came from:
+`parse_acl` writes its ACEs into a core array the caller supplies, and their
+subjects point into the parsed value; an application's own ACEs point at its own
+bytes (`subject_of("alice")` views a string's characters); and a vertex keeps
+its `:acl`, and the merge it caches, in an `ace_table_t`: one block from the
+graph's source holding the ACEs and copies of their subjects. A subject view
+cannot be built from a temporary container, so the classic dangling spelling
+(`{.subject = make_bytes("alice")}`) is a compile error.
+
 Parse-time validation is policy-gated: under the ALLOW-only profile a `DENY`
 entry or an unrecognized flag is rejected with `TYPE_MISMATCH` at write time, so
 stored entries never carry a semantic the running policy cannot evaluate.
@@ -149,13 +159,23 @@ peer legitimately sends more than the receiver understands; an ACL is not.
 :project: libtracer
 ```
 
-```{doxygenclass} tr::graph::effective_acl_t
+```{doxygenclass} tr::graph::subject_view_t
 :project: libtracer
 :members:
 ```
 
-```{doxygenfunction} tr::graph::parse_acl(const wire::tlv_node_t&)
+```{doxygenfunction} tr::graph::subject_of
 :project: libtracer
+```
+
+```{doxygenclass} tr::graph::ace_table_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::graph::effective_acl_t
+:project: libtracer
+:members:
 ```
 
 ```{doxygenfunction} tr::graph::parse_acl(const wire::tlv_node_t&, mem::block_array_t<ace_t>&)

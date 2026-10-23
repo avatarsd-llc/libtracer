@@ -78,8 +78,8 @@ int main() {
 
     // The discriminating list: refuse alice, then grant her. Same subject, same bit.
     const ace_t deny_then_allow[] = {
-        {.type = ace_type_t::DENY, .subject = as_bytes("alice"), .access_mask = read},
-        {.type = ace_type_t::ALLOW, .subject = as_bytes("alice"), .access_mask = read},
+        {.type = ace_type_t::DENY, .subject = tr::graph::subject_of("alice"), .access_mask = read},
+        {.type = ace_type_t::ALLOW, .subject = tr::graph::subject_of("alice"), .access_mask = read},
     };
     check(ok, full_acl_policy_t::allows(alice, read, deny_then_allow, kNow) == acl_verdict_t::DENY,
           "full policy: the FIRST applicable ACE decides, and it is a DENY");
@@ -92,9 +92,10 @@ int main() {
     const auto encoded = tr::graph::encode_acl(deny_then_allow);
     const auto decoded = tr::wire::tlv_node_t::over(encoded);
     check(ok, decoded.has_value(), "the ACL TLV itself is well-formed either way");
-    check(ok, tr::graph::parse_acl<full_acl_policy_t>(*decoded).has_value(),
+    tr::mem::block_array_t<ace_t> parsed(tr::mem::default_root());
+    check(ok, tr::graph::parse_acl<full_acl_policy_t>(*decoded, parsed).has_value(),
           "the full profile parses it: it can evaluate what it is about to store");
-    const auto refused = tr::graph::parse_acl<allow_only_policy_t>(*decoded);
+    const auto refused = tr::graph::parse_acl<allow_only_policy_t>(*decoded, parsed);
     check(ok, !refused && refused.error() == tr::graph::status_t::TYPE_MISMATCH,
           "the ALLOW-only profile refuses it with TYPE_MISMATCH, rather than storing a "
           "restriction it would go on to read as a grant");
@@ -110,7 +111,7 @@ int main() {
     // Above the policies, `effective_acl_t` adds the open-by-default rule and is where the
     // policy is chosen. Same merged list, both arms, in one build.
     effective_acl_t merged;
-    merged.append_own(deny_then_allow);
+    check(ok, merged.append_own(deny_then_allow), "the merge copies the list into its table");
     check(ok, !effective_acl_t::allows<full_acl_policy_t>(merged.merged(), alice, read, kNow),
           "through effective_acl_t, the full profile still denies alice");
     check(ok, effective_acl_t::allows<allow_only_policy_t>(merged.merged(), alice, read, kNow),

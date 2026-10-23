@@ -80,11 +80,16 @@ std::vector<std::byte> acl_of(std::span<const std::byte> entry) {
     return out;
 }
 
-/** @brief Decode @p bytes and parse them as an ACL under the target's bound policy. */
-tr::graph::result_t<std::vector<ace_t>> parse(std::span<const std::byte> bytes) {
+/**
+ * @brief Decode @p bytes and parse them as an ACL under the target's bound policy. The ACEs
+ *        land in a core array, and each one's subject views @p bytes, so keep those alive.
+ */
+tr::graph::result_t<tr::mem::block_array_t<ace_t>> parse(std::span<const std::byte> bytes) {
     const auto decoded = tr::wire::tlv_node_t::over(bytes);
     if (!decoded) return std::unexpected(status_t::TYPE_MISMATCH);
-    return tr::graph::parse_acl(*decoded);
+    tr::mem::block_array_t<ace_t> aces(tr::mem::default_root());
+    if (const auto r = tr::graph::parse_acl(*decoded, aces); !r) return std::unexpected(r.error());
+    return aces;
 }
 
 /** @brief True iff @p r was refused as a malformed ACL. */
@@ -110,7 +115,8 @@ int main() {
         put_text(entry, "subject", "alice");
         put_uint(entry, "access_mask", bit(acl_right_t::READ), 4);
         put_uint(entry, "expires_ns", 1'800'000'000'000'000'000ULL, 8);
-        const auto parsed = parse(acl_of(entry));
+        const std::vector<std::byte> acl = acl_of(entry);
+        const auto parsed = parse(acl);
         check(ok, parsed.has_value() && parsed->size() == 1, "the canonical ACE parses");
         check(ok,
               parsed->front().access_mask == bit(acl_right_t::READ) &&
@@ -150,7 +156,8 @@ int main() {
         put_uint(entry, "type", 0, 1);
         put_text(entry, "subject", "alice");
         put_uint(entry, "access_mask", bit(acl_right_t::READ), 2);
-        const auto parsed = parse(acl_of(entry));
+        const std::vector<std::byte> acl = acl_of(entry);
+        const auto parsed = parse(acl);
         check(ok, parsed.has_value() && parsed->front().access_mask == bit(acl_right_t::READ),
               "a NARROWER access_mask is accepted — little-endian zero-extension is exact");
     }

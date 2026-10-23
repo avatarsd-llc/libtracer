@@ -902,16 +902,12 @@ void settled_hook_slot_storm() {
         const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
         (void)g.write(v, make_value({0x42}));
         g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {&resolver_identity, nullptr});
-        const auto as_bytes = [](std::string_view t) {
-            return std::vector<std::byte>(reinterpret_cast<const std::byte*>(t.data()),
-                                          reinterpret_cast<const std::byte*>(t.data()) + t.size());
-        };
         const std::uint32_t read_bit = static_cast<std::uint32_t>(tr::graph::acl_right_t::READ);
         const std::vector<tr::graph::ace_t> aces{{.type = tr::graph::ace_type_t::DENY,
-                                                  .subject = as_bytes("peer-x"),
+                                                  .subject = tr::graph::subject_of("peer-x"),
                                                   .access_mask = read_bit},
                                                  {.type = tr::graph::ace_type_t::ALLOW,
-                                                  .subject = as_bytes("EVERYONE@"),
+                                                  .subject = tr::graph::subject_of("EVERYONE@"),
                                                   .access_mask = read_bit}};
         check(g.write(path_t("/v:acl"), make_value(tr::graph::encode_acl(aces))).has_value(),
               "installed DENY peer-x, then ALLOW EVERYONE@");

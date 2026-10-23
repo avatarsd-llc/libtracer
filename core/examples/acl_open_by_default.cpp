@@ -50,13 +50,6 @@ void check(bool& ok, bool cond, const char* what) {
     ok = ok && cond;
 }
 
-/** @brief @p s as opaque subject-token bytes — a subject is bytes, never a string (ADR-0018). */
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief Append @p subject to the gate's buffer @p out; a refused append fails closed. */
 std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::string_view subject) {
     if (!out.append(reinterpret_cast<const std::byte*>(subject.data()), subject.size()))
@@ -72,7 +65,8 @@ std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view c
 
 /** @brief One ALLOW ACE granting @p subject exactly @p right, as a writable `:acl` value. */
 tr::view::view_t one_grant(std::string_view subject, acl_right_t right) {
-    const ace_t ace{.subject = as_bytes(subject), .access_mask = static_cast<std::uint32_t>(right)};
+    const ace_t ace{.subject = tr::graph::subject_of(subject),
+                    .access_mask = static_cast<std::uint32_t>(right)};
     const std::vector<std::byte> acl = tr::graph::encode_acl(std::span<const ace_t>(&ace, 1));
     return *tr::view::over_bytes(acl);
 }

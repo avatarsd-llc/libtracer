@@ -82,13 +82,6 @@ using tr::testing::b_path;
 using tr::testing::check;
 using tr::testing::make_value;
 
-/** @brief A subject token / ACE subject over @p s — the tests-only string→bytes adapter. */
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    if (!s.empty()) std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief The zero-length `PATH` — the amendment's marker, spelled once. */
 std::vector<std::byte> b_src_empty() { return b_path(std::initializer_list<std::string_view>{}); }
 
@@ -178,7 +171,7 @@ std::vector<std::byte> acl_allowing(std::string_view subject, acl_right_t right)
     const std::vector<tr::graph::ace_t> aces{
         tr::graph::ace_t{.type = tr::graph::ace_type_t::ALLOW,
                          .flags = 0,
-                         .subject = as_bytes(subject),
+                         .subject = tr::graph::subject_of(subject),
                          .access_mask = static_cast<std::uint32_t>(right),
                          .expires_ns = 0}};
     return tr::graph::encode_acl(aces);
