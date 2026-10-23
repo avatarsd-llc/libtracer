@@ -350,6 +350,30 @@ void test_oversize_frame_is_refused_and_counted() {
     check_drained();
 }
 
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
+/** @brief #2265 — `tx_bytes` counts PAYLOAD, as the server link does, never the frame: a
+ *         6 B-header frame and an 8 B-header frame each add exactly their payload. */
+void test_tx_bytes_counts_payload() {
+    std::printf("#2265 tx_bytes counts payload, not frame bytes:\n");
+    fake_ws::reset();
+    {
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
+                                           {.rx_bytes = kBufBytes, .tx_bytes = 512});
+        link.start_receiving();
+        check(wait_until([&] { return link.link_up(); }, 2s), "the link came up");
+        const std::vector<std::byte> small(10, std::byte{0x33});  // 7-bit length, 6 B header
+        const std::vector<std::byte> mid(300, std::byte{0x44});   // 16-bit length, 8 B header
+        link.send(std::span<const std::byte>(small));
+        link.send(std::span<const std::byte>(mid));
+        check(fake_ws::writes_started() == 2, "both frames were written");
+        check(link.stats().c.tx_frames == 2, "counted as two frames");
+        check(link.stats().c.tx_bytes == small.size() + mid.size(),
+              "and tx_bytes is the payload sum, no header counted");
+    }
+    check_drained();
+}
+#endif
+
 /**
  * @brief #1160 — the effective configuration is READABLE: the buffer sizes per link, the
  *        five timing bounds per image.
@@ -498,6 +522,9 @@ int main() {
     test_every_dial_carries_the_headers();
     test_no_headers_leaves_the_field_null();
     test_oversize_frame_is_refused_and_counted();
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
+    test_tx_bytes_counts_payload();
+#endif
     test_the_effective_config_is_readable();
     test_failed_dials_are_released_and_observed_only_on_request();
     // Defensive: `main` must never return under a detached orphan still inside the fake,

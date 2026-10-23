@@ -46,9 +46,10 @@
  *     post-construction dial-configuration
  *     surface: host, port, `ws_path` and the handshake headers are all constructor
  *     arguments and all `const` thereafter — read by the recv thread, written by nobody.
- *     (The rx/tx scratch SIZES are the same rule in a weaker spelling: fixed by the ctor and
- *     never resized. The storage behind them is drawn per connection — see the cost note
- *     at the end of this comment — but no one may make their extent settable either.)
+ *     (The rx/tx SIZES are the same rule in a weaker spelling: fixed by the ctor and
+ *     never resized. The read scratch is drawn per connection and each send's frame per
+ *     send — see the cost note at the end of this comment — but no one may make their
+ *     extent settable either.)
  *     It used to have one such surface — `set_handshake_headers()` assigned an
  *     unsynchronized `std::string` that `connect_once()` was already reading (#959). That
  *     assignment is concurrent with the read, so it is a data race: a reallocating
@@ -88,18 +89,17 @@
  *     buffer (server→client frames are unmasked per RFC 6455 §5.1, so the read is
  *     a zero-copy fill) — and delivers it borrowed to the router SYNCHRONOUSLY on
  *     that thread, exactly as the raw client delivered on its recv thread. Control
- *     frames are handled inside `esp_transport_ws` (`propagate_control_frames =
- *     false`), so the loop only sees data frames.
+ *     frames come up to the loop (`propagate_control_frames = true`, #2265), which
+ *     answers a PING with a PONG and a CLOSE with a CLOSE through the send path.
  *   - `send()` may be called from ANY task (a subscription push on an io/timer
- *     thread, a reply on the recv thread itself). `esp_transport_ws`'s handle is
- *     NOT thread-safe, so all handle access is serialized by one small mutex held
- *     ONLY for the read/write syscall (the poll runs outside it). The read after a
- *     positive poll is prompt; the WRITE is not — IDF spends the caller's timeout on
- *     up to three legs inside one `esp_transport_write` — so that mutex IS held
- *     blocking, for a bound derived from the task-watchdog period rather than the
- *     4 s literal it used to be (#952: 3 x 4 s against a 5 s watchdog). The reads run
- *     otherwise lock-free on the one recv thread; the graph/router lock-stripes
- *     below are unchanged — this link adds no lock beyond that syscall serializer.
+ *     thread, a reply on the recv thread itself). Writes are serialized by one small
+ *     mutex, `write_m_`, held only for the write. The READ takes no lock (#2265): only
+ *     the recv thread touches `esp_transport_ws`'s handle, a writer writes the TCP parent,
+ *     and lwIP sockets are full-duplex. The write is not prompt — the caller's timeout
+ *     bounds the poll and the `send()` inside one `esp_transport_write` — so that mutex
+ *     IS held blocking, for a bound derived from the task-watchdog period rather than the
+ *     4 s literal it used to be (#952). The graph/router lock-stripes below are
+ *     unchanged — this link adds no lock beyond that write serializer.
  *   - A TEARDOWN THAT LANDS MID-DIAL COSTS NO DIAL (#1058). `esp_transport_connect` takes
  *     no cancellation — that is IDF's documented signature, `(handle, host, port,
  *     timeout_ms)`, and there is no second entry point — so the dial cannot be stopped.
@@ -156,11 +156,13 @@
  *     documents for `esp_http_server`'s own keepalive — the same three the server sibling
  *     applies to accepted sockets — so a vanished peer surfaces as an ordinary poll/read
  *     error within tens of seconds and takes the drop path above.
- *   - `send()` COPIES the frame into a reusable tx scratch before writing, because
- *     `esp_transport_write` masks IN-PLACE (RFC 6455 client rule) and a delivered
- *     frame may be shared with the concurrent server link — so the caller's (const,
- *     possibly shared) bytes must not be transiently mutated. RX is zero-copy; the
- *     one TX copy is the irreducible cost of client masking on shared bytes.
+ *   - `send()` builds the whole frame in a block drawn from `memory.io` (#2265): the header,
+ *     then the payload gathered and masked in ONE pass (RFC 6455 client rule), written as one
+ *     `esp_transport_write` on the TCP parent. A delivered frame may be shared with the
+ *     concurrent server link, so the caller's (const, possibly shared) bytes are only
+ *     read. RX is zero-copy; the one TX pass is the irreducible cost of client masking
+ *     on shared bytes. IDF's `_ws_write`, which masked in place, wrote header and payload
+ *     separately and unmasked back, is no longer on the path.
  *   - NO CALLBACK INTO THE EMBEDDER EVER RUNS UNDER `write_m_` or `st_m_`. Deliveries
  *     are made with both released; the counter bumps and @ref stats only touch this
  *     object's own fields. That is the invariant a host relies on when it holds its
@@ -176,14 +178,14 @@
  *     off (the default) there is no `st_m_` at all, and the success path takes no
  *     counter lock.
  *
- * NO per-frame heap, and NOTHING CONNECTION-SIZED WHILE UNCONNECTED (#1606). The read and
- * write scratches are drawn when a handshake lands (the read scratch from `memory.state`,
- * the write scratch from `memory.io`, #1661) and returned when that connection goes down,
- * together with its transport pair; a failed dial returns its pair on the failure path. So
- * a link that is dialling, backing off, or has never reached its peer holds its dial slot,
- * this object and its recv thread — and, only while a dial is in flight, the transport
- * pair being built. Steady-state send/recv touch neither the global heap nor a per-frame
- * allocation. The one per-message draw is opt-in: a link given `memory.rx` takes each
+ * NO per-frame heap, and NOTHING CONNECTION-SIZED WHILE UNCONNECTED (#1606). The read
+ * scratch is drawn from `memory.state` when a handshake lands and returned when that
+ * connection goes down, together with its transport pair; a failed dial returns its pair
+ * on the failure path. So a link that is dialling, backing off, or has never reached its
+ * peer holds its dial slot, this object and its recv thread — and, only while a dial is in
+ * flight, the transport pair being built. Each send draws its frame from `memory.io`
+ * (#1661, #2265) and returns it when the write is done; the global heap is never touched.
+ * The other per-message draw is opt-in: a link given `memory.rx` takes each
  * receive block from that application source. One recv thread per dialed peer (each
  * blocks on its own connection), mirroring `ws_client_transport_t`.
  */
@@ -236,10 +238,11 @@ struct esp_ws_client_config_t {
      */
     std::string_view handshake_headers{};
     /** @brief Reusable receive-buffer size (one inbound message must fit); our control TLVs
-     *         are small, so the default is modest. */
+     *         are small, so the default is modest. The read scratch is drawn 125 B larger,
+     *         so a WS control frame (whose payload IDF reads whole) always fits. */
     std::size_t rx_bytes = 2048;
     /**
-     * @brief Reusable send-scratch size (one outbound frame must fit). A larger outbound frame
+     * @brief Largest outbound payload a send admits (one frame). A larger outbound frame
      *        is DROPPED whole — counted on `stats().c.tx_drops` and LOGGED with both sizes
      *        (#959), since the same counter also moves when the peer is down.
      */
@@ -260,12 +263,11 @@ struct esp_ws_client_config_t {
      * kind's default) keeps borrowed delivery straight out of the scratch, with no per-message
      * allocation — the sibling server link's default and the reason for it.
      *
-     * `io` is the send side's store: the writer's masked-frame scratch (`tx_bytes`, drawn per
-     * connection like the read scratch, with the same refusal rule), the enqueue-then-write
-     * queue's slots and the base class's gather temporary all draw from it. With `nullptr` the
-     * scratch and the queue slots draw from the platform heap
-     * (`mem::heap_source()`) but the gather temporary draws from the process net sub-pool
-     * (`mem::net_source()`, the static arena on this target). Pass a source to put all three on it.
+     * `io` is the send side's store: each send's masked frame (drawn per send and returned
+     * when the write is done; a refusal drops the frame and counts it on `tx_drops`), the
+     * enqueue-then-write queue's slots and the base class's gather temporary all draw from
+     * it. With `nullptr` all three draw from the process net sub-pool (`mem::net_source()`,
+     * the static arena on this target).
      *
      * `state` is the connection-state store (#1880): the dial slot (the copies of the host,
      * URI and handshake headers every dial reads) and the read scratch (`rx_bytes`). The
@@ -376,8 +378,8 @@ class esp_ws_client_link_t final : public transport_t {
      * no task ever waits on another task's write (#1619).
      *
      * The writing task itself is BOUNDED: a peer whose TCP window has closed costs it one
-     * write budget (a quarter of the task-watchdog period, split across the three legs
-     * IDF spends the timeout on) and then drops the frame, tearing the connection down
+     * write budget (a quarter of the task-watchdog period, split across the poll and the
+     * `send()` of the frame's one write) and then drops the frame, tearing the connection down
      * for the recv thread to re-dial. It used to cost up to three times a 4 s literal,
      * which is a watchdog panic rather than a dropped frame (#952).
      */
@@ -385,11 +387,11 @@ class esp_ws_client_link_t final : public transport_t {
 
     /**
      * @brief Scatter-gather send (#1620 (a)): the same masked frame as @ref send, gathered
-     *        straight from @p iov into the writer's scratch or the queue slot.
+     *        straight from @p iov into the writer's frame block or the queue slot.
      *
      * The base default flattened the spans into an egress temporary and then handed that to
-     * @ref send, which copied it again into the scratch — two copies and an allocation per
-     * gathered frame. A masked frame needs ONE private copy (the transport masks in place),
+     * @ref send, which copied it again into the frame — two copies and two allocations per
+     * gathered frame. A masked frame needs ONE private copy (masking writes the bytes),
      * and this is it. The retained send (`transport_t::send(head, value, lane)`) lowers here too:
      * a client frame cannot be written from a shared block, so this link keeps the value by
      * copying it, once.
@@ -422,7 +424,7 @@ class esp_ws_client_link_t final : public transport_t {
      *
      * "Shut down now, free at collect()": an owner that removes this link while a forward
      * may still be on its way into it calls this at removal, and the destructor — at the
-     * graph's next `collect()` — returns the memory (the scratches, the dial slot). A
+     * graph's next `collect()` — returns the memory (the read scratch, the dial slot). A
      * `send()` after this is shed without touching a handle and without counting a drop.
      * Its cost is the destructor's worst case, `kPollMs + kWriteBudgetMs`; a dial in flight
      * is condemned rather than waited out, as there. IDEMPOTENT, and safe to follow with
@@ -546,9 +548,9 @@ class esp_ws_client_link_t final : public transport_t {
      *         produced it instead of quoting a constant from third-party sources (#1160). */
     [[nodiscard]] std::size_t rx_bytes() const noexcept { return rx_bytes_; }
 
-    /** @brief Effective reusable TX scratch capacity, bytes — the ctor's `tx_bytes`, which
-     *         every connection's write scratch is drawn at (#1606). An outbound frame past it
-     *         is dropped whole and charged to `stats().c.tx_drops` (#1160). */
+    /** @brief Effective TX capacity, bytes — the ctor's `tx_bytes`, the largest payload a
+     *         send admits. An outbound frame past it is dropped whole and charged to
+     *         `stats().c.tx_drops` (#1160). */
     [[nodiscard]] std::size_t tx_bytes() const noexcept { return tx_bytes_; }
 
     /** @brief The injected owning-RX source (`memory.rx`), or null for borrowed delivery. */
@@ -609,8 +611,8 @@ class esp_ws_client_link_t final : public transport_t {
     struct timing_t {
         int dial_timeout_ms = 0;      /**< @brief DERIVED: half the watchdog window. */
         int write_timeout_ms = 0;     /**< @brief DERIVED: the per-leg share of a quarter
-                                       *          window (`esp_transport_write` spends it
-                                       *          three times per frame). */
+                                       *          window (a frame's one write spends it
+                                       *          twice: the poll and the `send()`). */
         int read_timeout_ms = 0;      /**< @brief Kconfig: read after a positive poll. */
         int poll_ms = 0;              /**< @brief Kconfig: one recv-loop poll turn. */
         int reconnect_backoff_ms = 0; /**< @brief Kconfig: wait before a re-dial. */
@@ -644,7 +646,7 @@ class esp_ws_client_link_t final : public transport_t {
 
     /** @brief The recv thread body: (re)connect, then poll+read+deliver until stopped. */
     void recv_loop();
-    /** @brief One dial attempt: build the tcp+ws transports, connect, draw the scratches,
+    /** @brief One dial attempt: build the tcp+ws transports, connect, draw the read scratch,
      *         apply the per-socket policy (Nagle off, bounded write, keepalive probes), mark
      *         up — or release all of it on the failure path (#1606).
      *         @return which of the three outcomes it reached (@ref dial_outcome_t). */
@@ -661,14 +663,10 @@ class esp_ws_client_link_t final : public transport_t {
      * `stop_` is set, drops and counts toward a peer that is down, and tears the connection
      * down on an error or a short write.
      *
-     * @param queued A private queued copy, written as it is; empty for the writer's own frame.
-     * @param src    The writer's own (possibly shared) frame, gathered into the write scratch
-     *               only once the connection gate has passed — the scratch exists only while
-     *               a connection stands (#1606). Empty when @p queued is given.
-     * @param len    The bytes in @p src.
+     * @param wire A whole masked frame (the writer's own, a queued copy or a control reply),
+     *             written as it is in one `esp_transport_write`.
      */
-    void write_locked(std::span<std::byte> queued, std::span<const std::span<const std::byte>> src,
-                      std::size_t len);
+    void write_locked(std::span<const std::byte> wire);
     /**
      * @brief Copy the first @p len bytes of the read scratch into a receive block from
      *        @ref rx_backend_ and deliver it owning; count and drop if the source refuses.
@@ -680,9 +678,17 @@ class esp_ws_client_link_t final : public transport_t {
      * @param len The complete message's length in the scratch.
      */
     void deliver_owned(std::size_t len);
-    /** @brief Copy the spans of @p iov, in order, to @p dst (sized by the caller). */
-    static void gather_into(std::byte* dst,
-                            std::span<const std::span<const std::byte>> iov) noexcept;
+    /**
+     * @brief Write one masked BINARY frame to @p dst: the header, then the @p len payload
+     *        bytes of @p iov gathered and masked in one pass (#2265).
+     *
+     * @param dst At least `ws::detail::client_frame_bytes(len)` bytes, sized by the caller.
+     * @param iov The payload's spans, in order.
+     * @param len The bytes in @p iov.
+     * @return The frame's size, `ws::detail::client_frame_bytes(len)`.
+     */
+    static std::size_t frame_into(std::byte* dst, std::span<const std::span<const std::byte>> iov,
+                                  std::size_t len) noexcept;
 
     /**
      * @brief The dial slot (#1058) — drawn from `memory.state` in the ctor, shared with the
@@ -715,18 +721,11 @@ class esp_ws_client_link_t final : public transport_t {
     /** @brief The owning-RX source (`memory.rx`, #1661), or null for borrowed delivery.
      *         Written once by the constructor, before the recv thread exists. */
     mem::mem_backend_t* const rx_backend_;
-    /** @brief The TX scratch the writer gathers into and the transport masks in place,
-     *         `tx_bytes_` drawn from @ref tx_src_ with the read scratch and returned with it
-     *         (#1606). Drawn on the recv thread before the `connected_` release store and
-     *         returned under `write_m_` after `connected_` is cleared, so a writer — which
-     *         reads it only past the connection gate — never sees it change. */
-    fixed_array_t<std::byte> tx_buf_;
-    /** @brief The store the TX scratch is drawn from: `memory.io`, or the platform heap. */
+    /** @brief The store each send's frame is drawn from: `memory.io`, or the net sub-pool. */
     mem::block_source_t* const tx_src_;
     /** @brief The configured read ceiling, `rx_bytes`. */
     const std::size_t rx_bytes_;
-    /** @brief The configured write ceiling, `tx_bytes`: what @ref send admits and what every
-     *         connection's scratch is drawn at, so the size and the storage cannot disagree. */
+    /** @brief The configured write ceiling, `tx_bytes`: the largest payload @ref send admits. */
     const std::size_t tx_bytes_;
     /** @brief The recv thread's stack, kept for a spawn deferred to @ref start_receiving. */
     const std::size_t recv_stack_;
@@ -754,10 +753,11 @@ class esp_ws_client_link_t final : public transport_t {
      *        the application asked for it — see link_stats.hpp.
      */
     struct traffic_t {
-        std::uint32_t rx_frames = 0;  /**< @brief Messages delivered inbound. */
-        std::uint32_t rx_bytes = 0;   /**< @brief Payload bytes delivered inbound. */
-        std::uint32_t tx_frames = 0;  /**< @brief Messages written outbound. */
-        std::uint32_t tx_bytes = 0;   /**< @brief Payload bytes written outbound. */
+        std::uint32_t rx_frames = 0; /**< @brief Messages delivered inbound. */
+        std::uint32_t rx_bytes = 0;  /**< @brief Payload bytes delivered inbound. */
+        std::uint32_t tx_frames = 0; /**< @brief Messages written outbound. */
+        std::uint32_t tx_bytes =
+            0; /**< @brief Payload bytes written outbound, control replies included. */
         std::int64_t last_rx_us = -1; /**< @brief Last delivered message; -1 = never. */
     };
     /**
