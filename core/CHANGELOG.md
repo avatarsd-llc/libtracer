@@ -123,6 +123,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   receives. LISTEN links are unchanged.
 ### Fixed
 
+- **`udp_transport_t::dropped_tx` counts a datagram the socket refuses (#2279).** A `sendto` or
+  `sendmsg` that failed or sent short (a full socket buffer, `EMSGSIZE`, a shut socket) used
+  to lose the frame without counting it, on all three send paths (`send(span)`, `send(iov)`,
+  `send_to`). It is now counted in `dropped_tx`, and so in `drop_stats()`. It is not retried:
+  the UDP link carries no acks, and the next value supersedes a lost frame.
+
 - **A self-healing link keeps each delivery's lane and value** (#2238). `self_heal_link_t` did
   not override the retained send, `send(head, value, lane)`, so every delivery through it took
   the base lowering: flattened into an iov and handed to the inner link's control lane. All
