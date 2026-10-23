@@ -106,7 +106,7 @@ test('write emits exactly a FWD{WRITE} frame and resolves on the RESULT reply', 
   const expected = encodeFwd({
     op: FWD_OP.WRITE,
     dst: ['sensor', 'temp'],
-    src: ['client'],
+    src: ['client', 'q1'], // the reply endpoint plus this request's own reply token
     payload: valueTLV,
   });
   assert.ok(
@@ -125,7 +125,7 @@ test('read emits a FWD{READ} and resolves with the RESULT value', async () => {
 
   const p = client.read('/sensor/temp');
   assert.equal(t.sent.length, 1);
-  assert.ok(sameBytes(t.sent[0], encodeFwd({ op: FWD_OP.READ, dst: ['sensor', 'temp'], src: ['client'] })));
+  assert.ok(sameBytes(t.sent[0], encodeFwd({ op: FWD_OP.READ, dst: ['sensor', 'temp'], src: ['client', 'q1'] })));
 
   const value = encodeValue(new Uint8Array([0xd2, 0x04, 0x00, 0x00]));
   t.inject(resultReply(value));

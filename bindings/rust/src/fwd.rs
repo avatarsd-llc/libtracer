@@ -38,23 +38,12 @@ pub mod fwd_op {
     pub const REPLY: u8 = 3;
 
     /**
-     * @brief The opcode field of the `op` byte — bits 5-0 (RFC-0024 §7.5).
+     * @brief The opcode field of the `op` byte — bits 5-0.
      *
-     * Bits 7-6 are FLAGS. A forwarder MUST mask before switching (RFC-0024 §9.3): an
-     * unrecognised flag then degrades to the plain opcode instead of an unknown-opcode
-     * reject, which is what makes a flag additive at all.
+     * Bits 7-6 are reserved: no binding sets them, a forwarder routes on the masked opcode,
+     * and the terminus refuses a set bit (#2245).
      */
     pub const OPCODE_MASK: u8 = 0x3F;
-
-    /**
-     * @brief `op` bit 7 — the bound-path MINT REQUEST (RFC-0024 §7.5).
-     *
-     * Set by an origin asking each host on the route to answer with its own vertex ref. It
-     * costs ZERO request bytes: there is no free TLV `opt` bit, and a dedicated presence
-     * child would spend a 4-byte header to express one. The request is a hint, never an
-     * obligation — a host that will not mint answers the ordinary reply.
-     */
-    pub const FLAG_MINT_REQUEST: u8 = 0x80;
 }
 
 /** @brief FWD{REPLY} `kind` discriminant (RFC-0004 §D — a VALUE u8 after `src`). */
@@ -204,11 +193,15 @@ pub fn encode_fwd_bytes(req: &FwdRequest) -> Result<Vec<u8>, BuildError> {
 pub struct ParsedFwd {
     /** @brief The operation (a [`fwd_op`] value). */
     pub op: u8,
-    /** @brief The `dst` route child — a `PATH`, or a `PATH_REF` when [`Self::dst_bound`]. */
+    /** @brief The `dst` route child — a `PATH` (a `0x14 PATH_REF` is refused, RFC-0029 S1). */
     pub dst: Tlv,
     /** @brief The optional FIELD selector child. */
     pub field: Option<Tlv>,
-    /** @brief The `src` route child — a `PATH`, or a `PATH_REF` on a reply to a bound op. */
+    /**
+     * @brief The `src` route child — a `PATH`. On a REPLY it is the learned chain: the
+     * target's PAIR plus one element per relaying hop (RFC-0029 §6.2), PAIRs being escape
+     * records the codec carries without interpreting.
+     */
     pub src: Tlv,
     /** @brief The reply [`fwd_kind`] (REPLY frames only). */
     pub kind: Option<u8>,
@@ -216,17 +209,14 @@ pub struct ParsedFwd {
     pub payload: Option<Tlv>,
     /** @brief The AWAIT `await_timeout` ns, if present. */
     pub await_timeout_ns: Option<u64>,
-    /** @brief `op` bit 7 was set — the origin asked for a bound-path mint (RFC-0024 §7.5). */
-    pub mint_request: bool,
-    /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
-    pub dst_bound: bool,
     /**
-     * @brief The trailing reverse-direction list a mint-flagged FORWARDED request carries —
-     * a `PATH_REF_REVERSE` (`0x15`), RFC-0024 §7.1 amendments 1 and 2.
+     * @brief The reverse-direction list a FORWARDED subscribe carries — a `PATH_REF_REVERSE`
+     * (`0x15`) whose body is a `PATH` body of PAIR and NAME records, one per hop, grown by
+     * every forwarder with no flag (RFC-0029 §7.1).
      *
      * Identified by its TYPE, never by its position: a `WRITE`'s payload is whatever stands
-     * in the payload slot as long as it is not this code, INCLUDING a raw `PATH_REF`. The
-     * origin never emits the child, so this is `None` on every frame a client builds.
+     * in the payload slot as long as it is not this code. The origin never emits the child,
+     * so this is `None` on every frame a client builds.
      */
     pub reverse: Option<Tlv>,
 }
@@ -251,17 +241,12 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
     if ch.get(i).map(|c| c.type_code) != Some(type_code::VALUE) {
         return Err(BuildError::TypeMismatch);
     }
-    // The opcode is `op & 0x3F`; bits 7-6 are flags (RFC-0024 §7.5, normative in §9.3).
-    // Switching on the raw byte would make a mint-flagged READ an unknown opcode here.
-    let op_byte = u8_of(&ch[i]);
-    let op = op_byte & fwd_op::OPCODE_MASK;
-    let mint_request = op_byte & fwd_op::FLAG_MINT_REQUEST != 0;
+    // The opcode is `op & 0x3F`, read the way a forwarder reads it (bits 7-6 reserved).
+    let op = u8_of(&ch[i]) & fwd_op::OPCODE_MASK;
     i += 1;
-    // Two address forms (RFC-0024 §4): a canonical PATH, or a bound PATH_REF whose body
-    // shape the grammar has already checked. What an element MEANS is node-scoped, so a
-    // binding core carries one and never interprets it.
-    let dst_bound = ch.get(i).map(|c| c.type_code) == Some(type_code::PATH_REF);
-    if !dst_bound && ch.get(i).map(|c| c.type_code) != Some(type_code::PATH) {
+    // One address form: a PATH, whose PAIR records a binding carries and never interprets.
+    // A retired `0x14 PATH_REF` is not a PATH, so it is refused here like any other type.
+    if ch.get(i).map(|c| c.type_code) != Some(type_code::PATH) {
         return Err(BuildError::TypeMismatch);
     }
     let dst = ch[i].clone();
@@ -271,9 +256,7 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
         field = Some(ch[i].clone());
         i += 1;
     }
-    // `src` takes either form too: a reply to a bound operation echoes the request's `dst`.
-    let src_kind = ch.get(i).map(|c| c.type_code);
-    if src_kind != Some(type_code::PATH) && src_kind != Some(type_code::PATH_REF) {
+    if ch.get(i).map(|c| c.type_code) != Some(type_code::PATH) {
         return Err(BuildError::TypeMismatch);
     }
     let src = ch[i].clone();
@@ -291,8 +274,7 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
             payload = Some(ch[i].clone());
         }
     } else if op == fwd_op::WRITE {
-        // The reverse list is told from the payload by its TYPE (RFC-0024 §7.1 amendment 2),
-        // so a raw `PATH_REF` payload is a payload and only `0x15` is the list.
+        // The reverse list is told from the payload by its TYPE: only `0x15` is the list.
         if ch
             .get(i)
             .is_some_and(|c| c.type_code != type_code::PATH_REF_REVERSE)
@@ -309,15 +291,11 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
         }
     }
 
-    // Licensed only on a mint-flagged request (§7.1 amendment 1): on an unflagged frame a
-    // trailing `0x15` binds no route and stays unparsed.
-    let reverse = if mint_request {
-        ch.get(i)
-            .filter(|c| c.type_code == type_code::PATH_REF_REVERSE)
-            .cloned()
-    } else {
-        None
-    };
+    // Every forwarded subscribe carries it, with no flag (RFC-0029 §7.1).
+    let reverse = ch
+        .get(i)
+        .filter(|c| c.type_code == type_code::PATH_REF_REVERSE)
+        .cloned();
 
     Ok(ParsedFwd {
         op,
@@ -327,8 +305,6 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
         kind,
         payload,
         await_timeout_ns,
-        mint_request,
-        dst_bound,
         reverse,
     })
 }

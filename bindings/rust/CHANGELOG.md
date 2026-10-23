@@ -12,6 +12,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `is_path_ref_type` is true for `0x14 PATH_REF` only (#2245): a `0x15 PATH_REF_REVERSE` body is a `PATH` body of PAIR and NAME records (RFC-0029 §7.1) and decodes at any length; before, an 11-byte PAIR record was refused as `FrameInvalid`.
 
+### Changed (breaking)
+
+- The codec parses a learned PAIR chain (RFC-0029 §6.2 / §7.1, #2245): `parse_fwd_tlv` reads a trailing `0x15` on any `WRITE`, with no flag.
+
+### Removed (breaking)
+
+- `fwd_op::FLAG_MINT_REQUEST` and the `ParsedFwd::mint_request` / `ParsedFwd::dst_bound` fields (RFC-0024 bound-path mint, retired by #2245). `parse_fwd_tlv` refuses a `0x14 PATH_REF` as `dst` or `src` with `BuildError::TypeMismatch`. The crate never set bit 7.
+
 ## [0.21.0] — 2026-10-22
 
 ### Changed (breaking)
