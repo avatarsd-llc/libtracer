@@ -267,6 +267,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   constructed DIAL link installs its receivers and then calls `start_receiving()`. Sending
   needs no arming. The LISTEN constructor is unchanged.
 
+### Fixed
+
+- **An unacknowledged delivery is no longer counted as a dropped reply (#2256).** The terminus
+  resolver answered "nothing to send" (an empty-`src` WRITE, as every stream delivery is) and
+  "the reply could not be assembled" with the same empty rope, so each delivered sample bumped
+  `router_stats_t::assemble_dropped` and ran the stack refusal path. A refused reply assembly
+  is now `BACKPRESSURE` by value, and only that counts. A refused flatten of the request's own
+  `src` is answered `BACKPRESSURE` from the request's bytes and counted the same way, where it
+  was a silent `malformed_rx` drop.
+
 ## [0.21.0] — 2026-10-22
 
 ### Fixed

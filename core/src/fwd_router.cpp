@@ -2448,20 +2448,23 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     auto reply =
         resolver_.resolve(*arena, inbound, frame_view, dst_target, &deferred,
                           inbound_name.empty() ? std::span<std::byte>{} : std::span(store));
-    if (deferred) return;
-    if (!reply) {  // structurally non-request / malformed ⇒ drop
-        count_drop(malformed_rx_);
-        return;
-    }
-    if (reply->link_count() == 0) {  // assemble OOM ⇒ empty rope ⇒ no garbage frame
-        // The resolver's own `or_backpressure` already tried to answer this by value and the
-        // egress backend refused THAT head too; the stack emitter needs neither (#1612).
+    if (!reply) {
+        if (reply.error() != graph::status_t::BACKPRESSURE) {  // non-request / malformed ⇒ drop
+            count_drop(malformed_rx_);
+            return;
+        }
+        // Assembly OOM, by value (#2256): the resolver's own `or_backpressure` already tried
+        // an addressed answer and the egress backend refused THAT head too; the stack emitter
+        // needs neither (#1612).
         count_drop(assemble_dropped_);
         if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
             emit_refusal_reply(wire::grammar::span_cursor{frame}, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
+    // Nothing to send: an unacknowledged WRITE, or a deferred AWAIT (ADR-0084) that the
+    // writer's thread answers later.
+    if (reply->link_count() == 0) return;
     if (transport_t* const in = reply_link(inbound_name, inbound_ctx)) {
         // Nothrow scatter-gather egress on the failable seam (#1570, see `gather_reply_iov`),
         // drawn from the SAME source this frame's own decode drew from two calls up: the
@@ -2523,20 +2526,22 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     // sent from this frame, so the store is always lent.
     alignas(view::segment_t) std::array<std::byte, kReplyStoreBytes> store;
     auto reply = resolver_.resolve(*view, inbound, nullptr, dst_target, &deferred, store);
-    if (deferred) return;
-    if (!reply) {  // structurally non-request / malformed ⇒ drop
-        count_drop(malformed_rx_);
-        return;
-    }
-    if (reply->link_count() == 0) {  // assemble OOM ⇒ empty rope ⇒ no garbage frame
-        // Answered from the request's own links (#1612), as at the arena terminus: the rope
-        // cursor hands the emitter the same offsets the contiguous one does.
+    if (!reply) {
+        if (reply.error() != graph::status_t::BACKPRESSURE) {  // non-request / malformed ⇒ drop
+            count_drop(malformed_rx_);
+            return;
+        }
+        // Assembly OOM (#2256), answered from the request's own links (#1612) as at the arena
+        // terminus: the rope cursor hands the emitter the same offsets the contiguous one does.
         count_drop(assemble_dropped_);
         if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
             emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
+    // Nothing to send: an unacknowledged WRITE, or a deferred AWAIT (ADR-0084) that the
+    // writer's thread answers later.
+    if (reply->link_count() == 0) return;
     if (transport_t* const in = reply_link(inbound_name, inbound_ctx)) {
         // Nothrow scatter-gather egress (see `resolve_terminus`): the same failable-seam
         // table, from the same per-owner receive source, dropping rather than aborting on a

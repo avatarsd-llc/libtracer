@@ -53,6 +53,7 @@
 
 #include "fwd_frame_builder.hpp"
 #include "graph_sinks.hpp"
+#include "libtracer/backend.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/security_acl.hpp"
@@ -390,6 +391,148 @@ void payloadless_write_dropped_silently() {
     check(n.link.count() == 1, "  control: a wired src DOES get the TYPE_MISMATCH reply");
 }
 
+/**
+ * @brief A backend that serves from the heap until armed, then refuses every allocation.
+ */
+class arming_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    arming_backend_t() noexcept : mem_backend_t("test_arming") {}
+
+    [[nodiscard]] tr::view::segment_t* alloc(
+        std::size_t size, tr::mem::alloc_hint_t hint = tr::mem::alloc_hint_t::NONE) override {
+        if (armed_) return nullptr;
+        return tr::mem::heap_backend().alloc(size, hint);
+    }
+    void destroy(tr::view::segment_t* seg) noexcept override {
+        tr::mem::heap_backend().destroy(seg);
+    }
+    /** @brief Refuse every subsequent allocation. */
+    void arm() noexcept { armed_ = true; }
+
+   private:
+    bool armed_ = false;
+};
+
+/** @brief A recording link whose receives arrive as ropes (the rope-tier terminus). */
+class rope_link_t final : public rec_link_t {
+   public:
+    [[nodiscard]] bool delivers_ropes() const override { return true; }
+    /** @brief Push @p frame up as a two-link rope. */
+    void inject(std::span<const std::byte> frame) {
+        tr::view::rope_t r;
+        const std::size_t half = frame.size() / 2;
+        for (const std::span<const std::byte> part : {frame.first(half), frame.subspan(half)}) {
+            tr::view::segment_ptr_t seg = tr::view::heap_alloc(part.size());
+            std::memcpy(seg->bytes.data(), part.data(), part.size());
+            r.append(tr::view::view_t::over(std::move(seg)));
+        }
+        rx_.deliver_rope(std::move(r));
+    }
+};
+
+/**
+ * @brief A server-style bus with one peer session, `p0`, that counts every peer resolution.
+ *
+ * A reply to a bus peer resolves the peer's endpoint by name (`reply_link` → `by_name` →
+ * @ref peer_link): on a TCP or WS server that is a lock and a scan of every session. Counting
+ * the calls is how the test sees that an unacknowledged delivery never asks.
+ */
+class counting_bus_t : public transport_t, public tr::net::bus_link_t {
+   public:
+    /** @brief Undirected sends are not part of this test; drop. */
+    void send(std::span<const std::byte>) override {}
+    /** @brief Expose the bus facet. */
+    tr::net::bus_link_t* bus() override { return this; }
+    /** @brief The one session. */
+    void enumerate_peers(const peer_visitor_t& visit) const override { visit("p0"); }
+    /** @brief Resolve the one session by name, and count the resolution. */
+    transport_t* peer_link(std::string_view peer) override {
+        ++peer_lookups;
+        return peer == "p0" ? &session : nullptr;
+    }
+    /** @brief Resolve the one session by handle, and count the resolution. */
+    transport_t* peer_link_of(tr::net::peer_handle_t peer) override {
+        ++peer_lookups;
+        return peer.valid() ? &session : nullptr;
+    }
+    /** @brief The session's name, from its handle. */
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t peer,
+                                             std::span<char>) const override {
+        return peer.valid() ? std::string_view("p0") : std::string_view{};
+    }
+    /** @brief One inbound frame from the session. */
+    void inject(std::span<const std::byte> frame) {
+        peer_rx_.deliver_borrowed(tr::net::peer_handle_t{0, 1}, frame);
+    }
+
+    rec_link_t session;           /**< @brief The session's directed endpoint. */
+    std::size_t peer_lookups = 0; /**< @brief Peer resolutions asked of this bus. */
+};
+
+/**
+ * @brief An unacknowledged delivery is not a drop (#2256): `assemble_dropped` stays 0 across
+ *        a stream of them, at both termini, while a real assembly OOM still counts.
+ *
+ * The resolver used to answer "nothing to send" and "the reply could not be assembled" with
+ * the same empty rope, so every delivered stream sample bumped `assemble_dropped` and ran the
+ * refusal arm. Now an OOM is BACKPRESSURE by value; the control proves the counter is live.
+ */
+void unacked_stream_is_not_a_drop() {
+    std::printf("(#2256) unacknowledged deliveries do not count as drops:\n");
+    constexpr int kSamples = 16;
+    node_t n;
+    rope_link_t roped;
+    (void)n.router.attach_link("roped", roped);
+    for (int i = 0; i < kSamples; ++i) {
+        const auto frame = b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_empty(), {},
+                                 b_value_u32(kQuiet + static_cast<std::uint32_t>(i)));
+        n.router.on_frame("cli", frame);
+        roped.inject(frame);
+    }
+    const tr::net::router_stats_t s = n.router.drop_stats();
+    check(stored_u32(n.graph, n.sink) == kQuiet + kSamples - 1, "  every delivery applied");
+    check(n.link.count() == 0 && roped.count() == 0, "  ZERO frames emitted on either tier");
+    check(s.assemble_dropped == 0, "  assemble_dropped stays 0 across the stream");
+    check(s.malformed_rx == 0, "  and nothing is counted malformed either");
+
+    if constexpr (tr::net::kBusLinks) {
+        // Through a bus peer, as from a TCP or WS server session: no reply-link resolution at all.
+        counting_bus_t srv;
+        (void)n.router.attach_link("srv", srv);
+        const std::size_t lookups_before = n.router.reply_name_lookups();
+        for (int i = 0; i < kSamples; ++i)
+            srv.inject(b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_empty(), {},
+                             b_value_u32(kLoud + static_cast<std::uint32_t>(i))));
+        check(stored_u32(n.graph, n.sink) == kLoud + kSamples - 1, "  bus: every delivery applied");
+        check(n.router.reply_name_lookups() == lookups_before,
+              "  bus: reply_link never resolved a name");
+        check(srv.peer_lookups == 0, "  bus: by_name never asked the bus for a peer");
+        check(srv.session.count() == 0, "  bus: ZERO frames to the session");
+        check(n.router.drop_stats().assemble_dropped == 0, "  bus: assemble_dropped still 0");
+        // Control: the same write with a wired src does resolve the session, and is answered.
+        srv.inject(b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_src_wired(), {}, b_value_u32(kSeed)));
+        check(n.router.reply_name_lookups() == lookups_before + 1 && srv.peer_lookups > 0,
+              "  bus control: a wired src DOES resolve the session's link");
+        check(srv.session.count() == 1, "  bus control: and the session gets exactly one reply");
+    } else {
+        // A bus-closed build mounts the bus as a point-to-point child, so no peer frame
+        // reaches the terminus; the flat and rope cases above cover what it runs.
+        std::printf("  bus peer case SKIPPED: this build closed the ADR-0044 bus module out\n");
+    }
+
+    // Control: a wired READ whose every reply head the egress backend refuses IS a drop.
+    graph_t g;
+    (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
+    arming_backend_t egress;
+    fwd_router_t router(g, {.egress = &egress});
+    rec_link_t link;
+    (void)router.attach_link("cli", link);
+    egress.arm();
+    router.on_frame("cli", b_fwd(fwd_op_t::READ, b_path({"sink"}), b_src_wired()));
+    check(router.drop_stats().assemble_dropped == 1, "  control: an assembly OOM still counts");
+    check(link.count() == 1, "  control: and is answered from the stack");
+}
+
 }  // namespace
 
 int main() {
@@ -402,5 +545,6 @@ int main() {
     derived_empty_src_subscribe_dropped();
     unknown_dst_dropped_silently();
     payloadless_write_dropped_silently();
+    unacked_stream_is_not_a_drop();
     return tr::testing::summary("empty_src_unacked");
 }

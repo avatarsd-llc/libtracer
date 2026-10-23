@@ -614,10 +614,26 @@ template <class N>
 }
 
 /**
+ * @brief An addressed ERROR reply, or BACKPRESSURE by value when its head cannot be drawn.
+ *
+ * The resolver's ONE out-of-memory signal (#2256). An empty rope from the walk means only
+ * "nothing to send" (an unacknowledged WRITE, a deferred AWAIT); a reply that could not be
+ * assembled is `unexpected(BACKPRESSURE)`, which the router counts as `assemble_dropped` and
+ * answers from the stack. Before, both were the empty rope, so every unacknowledged stream
+ * delivery was counted as a drop and ran the refusal arm.
+ */
+[[nodiscard]] result_t<view::rope_t> error_reply(const reply_route_t& route, status_t status,
+                                                 mem::mem_backend_t& egress) {
+    view::rope_t reply = assemble_error_reply(route, status, egress);
+    if (reply.link_count() == 0) return std::unexpected(status_t::BACKPRESSURE);
+    return reply;
+}
+
+/**
  * @brief Guard a built SUCCESS reply against a silent drop: an empty rope means the reply
  *        assembly hit OOM (the link-table reserve or the head segment) — turn it into an
- *        ADDRESSED kind=ERROR BACKPRESSURE reply instead of letting the send site drop a
- *        `link_count() == 0` rope with no reply at all.
+ *        ADDRESSED kind=ERROR BACKPRESSURE reply instead, and into BACKPRESSURE by value when
+ *        even that head is refused (@ref error_reply).
  *
  * The silent drop looked to a WS client like a dead session (no reply within its deadline)
  * and drove a teardown+redial churn — each redial re-primes the same large composed-root
@@ -627,9 +643,9 @@ template <class N>
  * is the inline fast path), so it succeeds on exactly the fragmented heap that could not
  * reserve the large snapshot's link table.
  */
-[[nodiscard]] view::rope_t or_backpressure(view::rope_t reply, const reply_route_t& route,
-                                           mem::mem_backend_t& egress) {
-    if (reply.link_count() == 0) return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
+[[nodiscard]] result_t<view::rope_t> or_backpressure(view::rope_t reply, const reply_route_t& route,
+                                                     mem::mem_backend_t& egress) {
+    if (reply.link_count() == 0) return error_reply(route, status_t::BACKPRESSURE, egress);
     return reply;
 }
 
@@ -742,7 +758,7 @@ template <class N, class ReplyError>
             mem::bump_source_t table_frame(table_bytes, graph.table_source());
             mem::block_array_t<view::view_t> subs(table_frame);
             if (const result_t<std::size_t> n = graph.read_subscribers(v, subs, subject); !n)
-                return assemble_error_reply(route, n.error(), egress);
+                return error_reply(route, n.error(), egress);
             std::size_t sub_len = 0;
             for (const view::view_t& s : subs) sub_len += s.length;
             // PL=1 wrapper (POINT) whose children are the slot SUBSCRIBER views,
@@ -762,7 +778,7 @@ template <class N, class ReplyError>
         // read hands back a REFERENCE to the published one, and both arrive as a
         // `value_ref_t` the reply assembly reads without copying.
         result_t<value_ref_t> r = graph.read(v, field, subject);  // empty field: the value
-        if (!r) return assemble_error_reply(route, r.error(), egress);
+        if (!r) return error_reply(route, r.error(), egress);
         // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
         // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
         // or_backpressure keeps that from becoming a silent drop (the dead-web-ui bug).
@@ -803,13 +819,11 @@ template <class N, class ReplyError>
             // and takes the same terminus drop.
             if (req.no_reply) return std::unexpected(status_t::INVALID_PATH);
             const view::view_t sub_value = own_tlv(payload_node, retained);
-            if (sub_value.empty())
-                return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
+            if (sub_value.empty()) return error_reply(route, status_t::BACKPRESSURE, egress);
             // The ONE route copy of the subscription's life (ADR-0041 §2), into a
             // refcounted segment — every later delivery clones the refcount.
             const view::view_t return_route = own_tlv(req.src, retained);
-            if (return_route.empty())
-                return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
+            if (return_route.empty()) return error_reply(route, status_t::BACKPRESSURE, egress);
             // The responder's COMPLETION of the reverse-direction list (RFC-0024 §7.1
             // amendment 1): the list arrives one element short — the hop into this node
             // is the one no peer can mint for it — so element 0 becomes this node's own
@@ -885,7 +899,7 @@ template <class N, class ReplyError>
             result_t<void> w = graph.subscribe_wire(v, sub_value, return_route, inbound_link,
                                                     std::move(reverse_route), subject,
                                                     carried.token, carried.link);
-            if (!w) return assemble_error_reply(route, w.error(), egress);
+            if (!w) return error_reply(route, w.error(), egress);
             return or_backpressure(
                 assemble_reply(route, reply_kind_t::RESULT, {}, {}, 0, ack, mint), route,
                 egress);  // OK, empty payload: the ack (#1658)
@@ -916,7 +930,7 @@ template <class N, class ReplyError>
         // this path — which is inherent to an unacknowledged flow and opt-in by wiring an
         // empty `src`; the application's own sequence counter is its loss detector.
         if (req.no_reply) return view::rope_t{};
-        if (!w) return assemble_error_reply(route, w.error(), egress);
+        if (!w) return error_reply(route, w.error(), egress);
         // The acknowledgement is built through `ack` (#1658): the caller's reply store when it
         // passed one, so an acked write allocates no reply head; `egress` otherwise.
         return or_backpressure(assemble_reply(route, reply_kind_t::RESULT, {}, {}, 0, ack, mint),
@@ -944,8 +958,7 @@ template <class N, class ReplyError>
     // The test is the selector's PRESENCE, not `field.empty()`: a zero-level `FIELD`
     // decodes to an empty path, and answering that as a plain await would be a change
     // of behaviour this refactor does not make.
-    if (req.selector.has_value())
-        return assemble_error_reply(route, status_t::SCHEMA_NOT_FOUND, egress);
+    if (req.selector.has_value()) return error_reply(route, status_t::SCHEMA_NOT_FOUND, egress);
     const std::chrono::nanoseconds timeout(req.await_timeout);
     // ADR-0084: with a deferral sink and a caller that can send a later reply, the
     // wait leaves this thread. Blocking here for `timeout` held the receive context of
@@ -953,7 +966,7 @@ template <class N, class ReplyError>
     // answers first, as on the synchronous arm below.
     if (await_defer.fn != nullptr && await_defer.deferred != nullptr) {
         if (!graph.allows(v, subject, acl_right_t::READ))
-            return assemble_error_reply(route, status_t::PERMISSION_DENIED, egress);
+            return error_reply(route, status_t::PERMISSION_DENIED, egress);
         const deferred_await_t d{.vertex = v,
                                  .timeout = timeout,
                                  .subject = subject,
@@ -963,13 +976,13 @@ template <class N, class ReplyError>
                                  .echo_ts = route.echo_ts,
                                  .mint = mint};
         const result_t<void> taken = await_defer.fn(await_defer.ctx, d);
-        if (!taken) return assemble_error_reply(route, taken.error(), egress);
+        if (!taken) return error_reply(route, taken.error(), egress);
         *await_defer.deferred = true;
         return rope_t{};
     }
     result_t<value_ref_t> r = graph.await(v, timeout, subject);
-    if (!r) return assemble_error_reply(route, r.error(),
-                                        egress);  // TIMEOUT => tr::flow::timeout
+    if (!r) return error_reply(route, r.error(),
+                               egress);  // TIMEOUT => tr::flow::timeout
     return or_backpressure(assemble_result_rope(route, **r, egress, mint), route, egress);
 }
 
@@ -1044,10 +1057,12 @@ template <class N>
         route.echo_ts = root.trailer_ts();
     // #766, guard 1 of 2 — the reply's OWN route bytes. On the rope tier these two spans are
     // materialized (a multi-link PATH pays one flatten from the injected backend), so a
-    // refusal here leaves no trustworthy address to answer TO: an assemble_error built on a
-    // short `src` would put a truncated route on the wire. Answer on the ERROR side instead —
-    // by value, which the router turns into a drop. This is also the only guard that can fire
-    // before `parse_fwd`'s op byte is acted on, so it comes first.
+    // refusal here leaves the walk no route to build on: an assemble_error over a short `src`
+    // would put a truncated route on the wire. Answer BACKPRESSURE by value instead. The router
+    // answers it from the stack, reading `src` from the request's own bytes rather than from
+    // the refused flatten, so the requester still gets an intact route back (#2256). This is
+    // also the only guard that can fire before `parse_fwd`'s op byte is acted on, so it comes
+    // first.
     if (!req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);
 
     // RFC-0004 Amendment 2 (#1502, ruling on #1491) — THE EMPTY RETURN ROUTE. A `src` whose
@@ -1078,12 +1093,12 @@ template <class N>
     // state (#766).
     //
     // An unacknowledged request (@ref parsed_fwd_t::no_reply) short-circuits it to the empty
-    // rope the router drops (RFC-0004 Amendment 2's drop policy): the alternative — an
+    // rope the router does not send (RFC-0004 Amendment 2's drop policy): the alternative — an
     // addressed error on a zero-length route — is precisely the garbage frame the amendment
     // exists to stop.
-    const auto reply_error = [&](status_t s) -> rope_t {
+    const auto reply_error = [&](status_t s) -> result_t<rope_t> {
         if (req.no_reply) return view::rope_t{};
-        return assemble_error_reply(route, s, egress);
+        return error_reply(route, s, egress);
     };
 
     // An opcode outside the four defined values gets an ADDRESSED error, not a drop (#904).

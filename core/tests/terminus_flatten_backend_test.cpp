@@ -40,9 +40,9 @@
  * byte, a lookup key or a field name silently changes the answer. The walk therefore carries
  * a sticky per-resolve flag (`spans_intact()`) and answers:
  *
- *   - a refusal on the reply's OWN route bytes ⇒ `BACKPRESSURE` on the error side, which the
- *     router drops — there is no trustworthy address to answer to, and a reply built on a
- *     short `src` would be a truncated route on the wire;
+ *   - a refusal on the reply's OWN route bytes ⇒ `BACKPRESSURE` by value: the walk cannot
+ *     build a reply on a short `src`, so the router counts it in `assemble_dropped` and answers
+ *     `STATUS{BACKPRESSURE}` from the request's own bytes (#2256), never a truncated route;
  *   - a refusal anywhere else before dispatch ⇒ an ADDRESSED `kind=ERROR STATUS{BACKPRESSURE}`
  *     reply, the same answer an OOM'd reply assembly gives (the client falls back on the same
  *     link rather than presuming the node dead).
@@ -679,6 +679,44 @@ void test_terminus_refusal_sweep() {
     check(drops + addressed > 0, "instrument: the sweep actually hit refusals");
 }
 
+/**
+ * @brief A `src` the terminus cannot flatten is answered BACKPRESSURE from the request's own
+ *        bytes and counted in `assemble_dropped`, never dropped silently as malformed (#2256).
+ *
+ * The split lands inside `src`, the last child, so `src` is the one multi-link node and its
+ * flatten is the one the armed seam refuses. The walk has no route to build on, answers
+ * BACKPRESSURE by value, and the router's stack emitter reads `src` off the request's links:
+ * the reply's `dst` is the request's whole `src`.
+ */
+void test_unflattenable_src_is_answered() {
+    std::printf("a src the terminus cannot flatten is answered BACKPRESSURE:\n");
+    node_t n;
+    arming_backend_t seam;
+    fwd_router_t router(n.g, raw_planes(&seam));
+    (void)router.attach_link("in", n.in);
+    const std::vector<std::byte> src = b_path({"origin", "way", "home"});
+    const std::vector<std::byte> frame = b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), src);
+
+    seam.arm();
+    n.in.inject(as_split_rope(frame, frame.size() - 3));
+    const tr::net::router_stats_t s = router.drop_stats();
+    check(seam.refusals() > 0, "instrument: the src flatten was ASKED and refused");
+    check(s.assemble_dropped == 1, "counted in assemble_dropped");
+    check(s.malformed_rx == 0, "and NOT as a malformed frame");
+    check(n.in.sent.size() == 1, "exactly one frame is answered");
+    if (n.in.sent.size() != 1) return;
+    const reply_facts_t f = read_reply(n.in.sent[0]);
+    check(f.is_fwd_reply && f.kind_error && f.code == backpressure_code(),
+          "the answer is kind=ERROR STATUS{BACKPRESSURE}");
+    const auto reply = tr::wire::decode(n.in.sent[0]);
+    const auto want = tr::wire::decode(src);
+    check(reply && want && reply->children.size() > 1 &&
+              reply->children[1].payload.size() == want->payload.size() &&
+              std::equal(want->payload.begin(), want->payload.end(),
+                         reply->children[1].payload.begin()),
+          "and its dst is the request's whole src, read across both links");
+}
+
 // --- #793 / #801, after RFC-0028 slice 5: the ownership copy IS the value's block ------------
 //
 // #793 moved the rope tier's single-link ownership copy, and #801 the span tier's, off
@@ -1063,6 +1101,8 @@ int main() {
     test_terminus_write_refusal_stores_nothing();
     std::printf("\n");
     test_terminus_refusal_sweep();
+    std::printf("\n");
+    test_unflattenable_src_is_answered();
     std::printf("\n");
     for (const tier_t t : {tier_t::ROPE, tier_t::SPAN}) {
         test_ownership_copy_draws_from_the_graph_source(t);
