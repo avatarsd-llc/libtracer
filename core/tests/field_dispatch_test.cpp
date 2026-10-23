@@ -53,14 +53,6 @@ using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::graph::vertex_handle_t;
 
-/** @brief `s`'s bytes — the subject-token spelling the test resolver hands back. */
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out;
-    out.reserve(s.size());
-    for (char c : s) out.push_back(static_cast<std::byte>(static_cast<unsigned char>(c)));
-    return out;
-}
-
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
                                                        tr::mem::bytes_t& out) {
@@ -399,7 +391,7 @@ void test_field_wildcard_divergence() {
     // unrestricted, so the ACE has to exist and name someone else).
     std::vector<tr::graph::ace_t> closed;
     closed.push_back(
-        tr::graph::ace_t{.subject = as_bytes("peer-z"),
+        tr::graph::ace_t{.subject = tr::graph::subject_of("peer-z"),
                          .access_mask = static_cast<std::uint32_t>(acl_right_t::READ)});
     (void)gated.write(gv, fp("acl", sel_t::BARE),
                       tr::view::rope_t{make_value(tr::graph::encode_acl(closed))}, {});

@@ -1247,9 +1247,13 @@ void test_denied_creator_draws_nothing() {
     check(g.write(path_t("/dev:acl"), make_value(tr::graph::encode_acl(aces))).has_value(),
           "/dev grants READ, not WRITE");
 
-    const std::size_t before = src.draws;
     const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"dev", "ota"}), b_path({"reply-ep"}), {},
                            b_value({0x5A, 0x5A, 0x5A, 0x5A}));
+    // The first gate after an `:acl` write builds /dev's cached ACE merge, and that table is
+    // drawn from the graph's source (#2287). Build it here, so the count below is the denied
+    // write's own.
+    (void)resolve_bytes(resolver, fwd, "peer");
+    const std::size_t before = src.draws;
     auto reply = resolve_bytes(resolver, fwd, "peer");
     const std::size_t drawn = src.draws - before;
     check(reply.has_value(), "the denied WRITE is answered");

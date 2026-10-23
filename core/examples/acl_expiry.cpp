@@ -98,11 +98,11 @@ int main() {
 
     // The pure surface: build one effective-ACE list ONCE, then ask it about several `now`s.
     // Nothing below rebuilds or invalidates it — that is the property being shown.
-    const ace_t issued[] = {{.subject = as_bytes("visitor"),
+    const ace_t issued[] = {{.subject = tr::graph::subject_of("visitor"),
                              .access_mask = bit(acl_right_t::READ),
                              .expires_ns = kDeadline}};
     effective_acl_t merged;
-    merged.append_own(issued);
+    check(ok, merged.append_own(issued), "the merge copies the list into its table");
     const std::span<const std::byte> visitor_bytes = issued[0].subject;
     const std::vector<std::byte> other = as_bytes("resident");
 
@@ -124,9 +124,9 @@ int main() {
 
     // `0` is not a deadline in the distant past; it means the ACE never expires.
     const ace_t permanent[] = {
-        {.subject = as_bytes("resident"), .access_mask = bit(acl_right_t::READ)}};
+        {.subject = tr::graph::subject_of("resident"), .access_mask = bit(acl_right_t::READ)}};
     effective_acl_t forever;
-    forever.append_own(permanent);
+    check(ok, forever.append_own(permanent), "the merge copies the list into its table");
     check(ok, forever.allows(other, bit(acl_right_t::READ), kDeadline + 1),
           "expires_ns == 0 means never expires, not expired at the epoch");
 
@@ -136,10 +136,12 @@ int main() {
     const vertex_handle_t v = g.register_vertex(path_t("/room"), role_t::STORED_VALUE);
     (void)g.write(v, some_value());
     const ace_t both[] = {
-        {.subject = as_bytes("live"),
+        {.subject = tr::graph::subject_of("live"),
          .access_mask = bit(acl_right_t::READ),
          .expires_ns = ~0ULL >> 1},
-        {.subject = as_bytes("stale"), .access_mask = bit(acl_right_t::READ), .expires_ns = 1},
+        {.subject = tr::graph::subject_of("stale"),
+         .access_mask = bit(acl_right_t::READ),
+         .expires_ns = 1},
     };
     (void)g.write(path_t("/room:acl"), *tr::view::over_bytes(tr::graph::encode_acl(both)));
     check(ok, g.read(v, "live").has_value(), "a grant expiring in the year 2262 still reads");

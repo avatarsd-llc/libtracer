@@ -54,13 +54,6 @@ void check(bool& ok, bool cond, const char* what) {
     ok = ok && cond;
 }
 
-/** @brief @p s as opaque subject-token bytes. */
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief Append @p subject to the gate's buffer @p out; a refused append fails closed. */
 std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::string_view subject) {
     if (!out.append(reinterpret_cast<const std::byte*>(subject.data()), subject.size()))
@@ -124,9 +117,9 @@ int main() {
 
     // One ACE per right, one subject per ACE, and one subject holding both.
     const ace_t aces[] = {
-        {.subject = as_bytes("reader"), .access_mask = bit(acl_right_t::READ)},
-        {.subject = as_bytes("writer"), .access_mask = bit(acl_right_t::WRITE)},
-        {.subject = as_bytes("both"),
+        {.subject = tr::graph::subject_of("reader"), .access_mask = bit(acl_right_t::READ)},
+        {.subject = tr::graph::subject_of("writer"), .access_mask = bit(acl_right_t::WRITE)},
+        {.subject = tr::graph::subject_of("both"),
          .access_mask = bit(acl_right_t::READ) | bit(acl_right_t::WRITE)},
     };
     (void)g.write(path_t("/x:acl"), *tr::view::over_bytes(tr::graph::encode_acl(aces)));
@@ -154,14 +147,15 @@ int main() {
           "WRITE: the reader may not create a child");
 
     // `:acl` writes are the owner's: no ACE grants them, both bits included.
-    const ace_t next[] = {{.subject = as_bytes("both"), .access_mask = bit(acl_right_t::READ)}};
+    const ace_t next[] = {
+        {.subject = tr::graph::subject_of("both"), .access_mask = bit(acl_right_t::READ)}};
     const tr::view::view_t next_acl = *tr::view::over_bytes(tr::graph::encode_acl(next));
     check(ok, denied(g.write(v, acl_field->field(), next_acl, "both")),
           ":acl: a remote subject holding READ|WRITE cannot rewrite the policy");
     check(ok, g.write(*acl_field, next_acl).has_value(), ":acl: the owner can");
 
     // A retired right is refused at install, and nothing is stored.
-    const ace_t retired[] = {{.subject = as_bytes("watcher"), .access_mask = 0x04}};
+    const ace_t retired[] = {{.subject = tr::graph::subject_of("watcher"), .access_mask = 0x04}};
     const auto refused = g.write(*acl_field, *tr::view::over_bytes(tr::graph::encode_acl(retired)));
     check(ok, !refused.has_value() && refused.error() == status_t::TYPE_MISMATCH,
           "a mask bit outside READ|WRITE is refused with TYPE_MISMATCH");

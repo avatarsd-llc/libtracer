@@ -67,7 +67,7 @@ ace_t ace(std::string_view subject, std::uint32_t mask, ace_type_t type = ace_ty
           std::uint8_t flags = 0, std::uint64_t expires_ns = 0) {
     return ace_t{.type = type,
                  .flags = flags,
-                 .subject = as_bytes(subject),
+                 .subject = tr::graph::subject_of(subject),
                  .access_mask = mask,
                  .expires_ns = expires_ns};
 }
@@ -90,7 +90,7 @@ void test_open_default_and_closing() {
     {  // a non-matching ACE closes: present but granting someone else
         effective_acl_t eff;
         const std::vector<ace_t> own{ace("bob", bit(acl_right_t::READ))};
-        eff.append_own(own);
+        check(eff.append_own(own), "the merge table fits");
         check(!eff.allows<allow_only_policy_t>(alice, bit(acl_right_t::READ), kNow),
               "one non-matching own ACE closes the vertex");
     }
@@ -98,7 +98,7 @@ void test_open_default_and_closing() {
         effective_acl_t eff;
         const std::vector<ace_t> own{
             ace("alice", bit(acl_right_t::READ), ace_type_t::ALLOW, 0, /*expires=*/kNow - 1)};
-        eff.append_own(own);
+        check(eff.append_own(own), "the merge table fits");
         check(!eff.allows<allow_only_policy_t>(alice, bit(acl_right_t::READ), kNow),
               "an expired ACE grants nothing AND still closes (denied)");
         check(eff.allows<allow_only_policy_t>(alice, bit(acl_right_t::READ), kNow - 2),
@@ -115,7 +115,7 @@ void test_inherit_gating() {
         ace("alice", bit(acl_right_t::READ)),  // no INHERIT — that vertex only
         ace("alice", bit(acl_right_t::WRITE), ace_type_t::ALLOW, kAceInherit)};
     effective_acl_t eff;
-    eff.append_ancestor(ancestor);
+    check(eff.append_ancestor(ancestor), "the merge table fits");
     check(eff.merged().size() == 1 && eff.merged()[0].access_mask == bit(acl_right_t::WRITE),
           "append_ancestor keeps only the INHERIT-flagged ACE");
     check(!eff.allows<allow_only_policy_t>(alice, bit(acl_right_t::READ), kNow),
@@ -126,7 +126,7 @@ void test_inherit_gating() {
 
     effective_acl_t none;
     const std::vector<ace_t> only_local{ace("alice", bit(acl_right_t::READ))};
-    none.append_ancestor(only_local);
+    check(none.append_ancestor(only_local), "the merge table fits");
     check(none.merged().empty() &&
               none.allows<allow_only_policy_t>(alice, bit(acl_right_t::READ), kNow),
           "an ancestor with ONLY non-INHERIT ACEs contributes nothing — stays open");
@@ -144,8 +144,8 @@ void test_ordering() {
         const std::vector<ace_t> own{ace("alice", bit(acl_right_t::WRITE))};
         const std::vector<ace_t> parent{
             ace("alice", bit(acl_right_t::WRITE), ace_type_t::DENY, kAceInherit)};
-        eff.append_own(own);
-        eff.append_ancestor(parent);
+        check(eff.append_own(own), "the merge table fits");
+        check(eff.append_ancestor(parent), "the merge table fits");
         check(eff.allows<full_acl_policy_t>(alice, bit(acl_right_t::WRITE), kNow),
               "full: own ALLOW evaluates before an inherited DENY");
     }
@@ -154,8 +154,8 @@ void test_ordering() {
         const std::vector<ace_t> own{ace("alice", bit(acl_right_t::WRITE), ace_type_t::DENY)};
         const std::vector<ace_t> parent{
             ace("alice", bit(acl_right_t::WRITE), ace_type_t::ALLOW, kAceInherit)};
-        eff.append_own(own);
-        eff.append_ancestor(parent);
+        check(eff.append_own(own), "the merge table fits");
+        check(eff.append_ancestor(parent), "the merge table fits");
         check(!eff.allows<full_acl_policy_t>(alice, bit(acl_right_t::WRITE), kNow),
               "full: own DENY evaluates before an inherited ALLOW");
     }
@@ -165,8 +165,8 @@ void test_ordering() {
             ace("alice", bit(acl_right_t::WRITE), ace_type_t::DENY, kAceInherit)};
         const std::vector<ace_t> grandparent{
             ace("alice", bit(acl_right_t::WRITE), ace_type_t::ALLOW, kAceInherit)};
-        eff.append_ancestor(parent);       // nearest first
-        eff.append_ancestor(grandparent);  // then farther
+        check(eff.append_ancestor(parent), "the merge table fits");       // nearest first
+        check(eff.append_ancestor(grandparent), "the merge table fits");  // then farther
         check(!eff.allows<full_acl_policy_t>(alice, bit(acl_right_t::WRITE), kNow),
               "full: the NEARER ancestor's DENY wins over a farther ALLOW");
     }
@@ -176,8 +176,8 @@ void test_ordering() {
         const std::vector<ace_t> parent{ace("EVERYONE@",
                                             bit(acl_right_t::READ) | bit(acl_right_t::WRITE),
                                             ace_type_t::ALLOW, kAceInherit)};
-        eff.append_own(own);
-        eff.append_ancestor(parent);
+        check(eff.append_own(own), "the merge table fits");
+        check(eff.append_ancestor(parent), "the merge table fits");
         check(eff.allows<full_acl_policy_t>(alice, bit(acl_right_t::READ), kNow),
               "full: first-match-per-BIT — the WRITE DENY does not decide READ");
         check(!eff.allows<full_acl_policy_t>(alice, bit(acl_right_t::WRITE), kNow),
@@ -188,8 +188,8 @@ void test_ordering() {
         const std::vector<ace_t> own{ace("bob", bit(acl_right_t::READ))};
         const std::vector<ace_t> parent{
             ace("alice", bit(acl_right_t::READ), ace_type_t::ALLOW, kAceInherit)};
-        eff.append_own(own);
-        eff.append_ancestor(parent);
+        check(eff.append_own(own), "the merge table fits");
+        check(eff.append_ancestor(parent), "the merge table fits");
         check(eff.allows<allow_only_policy_t>(as_bytes("alice"), bit(acl_right_t::READ), kNow),
               "allow_only: an inherited grant applies regardless of position");
     }

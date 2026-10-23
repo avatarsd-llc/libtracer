@@ -973,8 +973,7 @@ void install_acl(graph_t& g, const char* path, std::uint32_t mask) {
     const std::vector<tr::graph::ace_t> aces{
         tr::graph::ace_t{.type = tr::graph::ace_type_t::ALLOW,
                          .flags = tr::graph::kAceInherit,
-                         .subject = {reinterpret_cast<const std::byte*>("peer"),
-                                     reinterpret_cast<const std::byte*>("peer") + 4},
+                         .subject = tr::graph::subject_of("peer"),
                          .access_mask = mask,
                          .expires_ns = 0}};
     (void)g.write(*path_t::parse(path), owned_view(tr::graph::encode_acl(aces)));

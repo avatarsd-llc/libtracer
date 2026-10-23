@@ -63,12 +63,6 @@ using tr::wire::type_t;
 using tr::testing::check;
 using tr::testing::make_value;
 
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief A VALUE TLV carrying one byte, as an owned view. */
 tr::view::view_t value_u8(std::uint8_t x) {
     std::vector<std::byte> out;
@@ -90,8 +84,9 @@ tr::view::view_t subscriber_tlv(std::string_view target_segment) {
 
 /** @brief ALLOW @p subject exactly @p mask, as ACL bytes. */
 std::vector<std::byte> allow_only(std::string_view subject, acl_right_t right) {
-    const std::vector<tr::graph::ace_t> aces{tr::graph::ace_t{
-        .subject = as_bytes(subject), .access_mask = static_cast<std::uint32_t>(right)}};
+    const std::vector<tr::graph::ace_t> aces{
+        tr::graph::ace_t{.subject = tr::graph::subject_of(subject),
+                         .access_mask = static_cast<std::uint32_t>(right)}};
     return tr::graph::encode_acl(aces);
 }
 

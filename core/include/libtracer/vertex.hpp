@@ -757,19 +757,22 @@ struct ring_state_t {
  * without a pin. The ADR-0078 protocol is unchanged; only the word's home moved.
  */
 struct acl_state_t {
+    /** @brief Empty ACE tables drawn from @p src — the extension block's own source. */
+    explicit acl_state_t(tr::mem::block_source_t& src) noexcept : aces(src), eff_aces(src) {}
+
     /** @brief The `:acl` parsed into core-subset ACEs at write time (#81) — the ONLY stored
      *         ACL state (#907); guarded by the vertex mutex. `graph_t::acl_allows` evaluates
      *         this list and `graph_t::read_acl` RE-ENCODES it, so read-back is canonical by
      *         construction and cannot describe something other than what is enforced. The
      *         retired verbatim byte copy could: a shape that parsed to no ACEs cleared
      *         enforcement while still reading back as a payload — ACEs apparently present
-     *         (⇒ closed) on an open vertex. */
-    std::vector<ace_t> aces;
+     *         (⇒ closed) on an open vertex. One table block, subjects included (#2287). */
+    ace_table_t aces;
     /** @brief The ADR-0050 cached effective-ACE merge (own + INHERIT-flagged ancestor ACEs,
      *         pre-merged in evaluation order); guarded by the vertex mutex, rebuilt lazily
      *         whenever `acl_gen` turns ODD. Only the MERGE is cached, never a verdict —
      *         expiry evaluates at check time against the caller's now. */
-    std::vector<ace_t> eff_aces;
+    ace_table_t eff_aces;
     /** @brief `:acl`-invalidation counter AND cache-validity stamp in ONE word (ADR-0078):
      *         ODD ⇒ `eff_aces` is stale, EVEN ⇒ it is the merge published for exactly this
      *         value. Every invalidator (@ref vertex_t::set_acl, the placeholder revert,
@@ -2770,15 +2773,24 @@ class vertex_t {
      * not as the NOT_FOUND of a vertex that never had one. Takes no raw bytes, because
      * there is no second copy to fall out of step with the list evaluation walks — an
      * `:acl` read re-encodes from here.
+     *
+     * @p aces is copied, subjects included, into a table drawn from the extension block's
+     * source (#2287), so it may view bytes the caller is about to drop (a parsed `:acl`
+     * value). The copy is built before the stripe lock and the replaced table is given back
+     * after it, so nothing allocates or frees under the lock.
+     * @retval false The extension block, the `:acl` state or the table was refused; the
+     *               stored ACL is unchanged.
      */
-    [[nodiscard]] bool set_acl(std::vector<ace_t> aces, tr::mem::block_source_t& tables) {
+    [[nodiscard]] bool set_acl(std::span<const ace_t> aces, tr::mem::block_source_t& tables) {
         vertex_ext_t* const ext = ensure_ext(tables);
         if (ext == nullptr) return false;
         acl_state_t* const state = ensure_acl(*ext);
         if (state == nullptr) return false;
         acl_state_t& e = *state;
+        ace_table_t next(*ext->src);
+        if (!next.append(aces)) return false;
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e.aces = std::move(aces);
+        std::swap(e.aces, next);
         e.acl_present = true;
         // Lock-free bearing flag (#361 §3): the graph's nearest-bearing-ancestor walk
         // reads it without touching any stripe. Publish under the lock, before the
@@ -2808,12 +2820,11 @@ class vertex_t {
      * @return Whatever @p f returns.
      */
     template <typename F>
-    auto with_acl(F&& f) -> decltype(f(false, std::declval<const std::vector<ace_t>&>())) {
-        static const std::vector<ace_t> kNoAces{};
+    auto with_acl(F&& f) -> decltype(f(false, std::span<const ace_t>{})) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const acl_state_t* a = acl_state();
-        if (a == nullptr) return f(false, kNoAces);
-        return f(a->acl_present, a->aces);
+        if (a == nullptr) return f(false, std::span<const ace_t>{});
+        return f(a->acl_present, std::span<const ace_t>(a->aces));
     }
 
     /**
@@ -2826,11 +2837,10 @@ class vertex_t {
      * @return Whatever @p f returns.
      */
     template <typename F>
-    auto with_aces(F&& f) -> decltype(f(std::declval<const std::vector<ace_t>&>())) {
-        static const std::vector<ace_t> kNoAces{};
+    auto with_aces(F&& f) -> decltype(f(std::span<const ace_t>{})) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const acl_state_t* a = acl_state();
-        return f(a != nullptr ? a->aces : kNoAces);
+        return f(a != nullptr ? std::span<const ace_t>(a->aces) : std::span<const ace_t>{});
     }
 
     /**
@@ -2888,7 +2898,7 @@ class vertex_t {
     [[nodiscard]] static acl_state_t* ensure_acl(vertex_ext_t& e) noexcept {
         acl_state_t* a = e.acl.load(std::memory_order_acquire);
         if (a != nullptr) return a;
-        acl_state_t* const fresh = tr::mem::make_in<acl_state_t>(*e.src);
+        acl_state_t* const fresh = tr::mem::make_in<acl_state_t>(*e.src, *e.src);
         if (fresh == nullptr) return nullptr;
         if (e.acl.compare_exchange_strong(a, fresh, std::memory_order_acq_rel,
                                           std::memory_order_acquire))
@@ -2921,28 +2931,33 @@ class vertex_t {
      * that may be TORN across the write rather than answering from it. The one premise left is
      * that the counter does not WRAP onto a stale-but-even value (`%vertex_ext_t::acl_gen`).
      *
-     * @param rebuild `std::vector<ace_t>(const std::vector<ace_t>& own)` — the
-     *                fresh merge over a snapshot of this vertex's own ACEs; runs
-     *                UNLOCKED (it may take other vertices' stripes freely).
+     * @param src     Draws the one merge that is not cached: a vertex with no `:acl` state
+     *                (never a bearer) is merged afresh on every call.
+     * @param rebuild `bool(ace_table_t& merged)` — completes the fresh merge, which arrives
+     *                seeded with a copy of this vertex's own ACEs taken under the lock, so the
+     *                snapshot IS the merge's first part and costs no second copy; runs
+     *                UNLOCKED (it may take other vertices' stripes freely). False when a
+     *                source refused the table (#2287).
      * @param eval    Pure evaluation over the cached merge. A BARE descendant evaluates
      *                the merge's `kAceInherit` **subsequence**, which `eval` selects with
      *                `effective_acl_t::allows`'s `required_flags` rather than receiving a
      *                second, pre-projected list — filtering in place is order-identical
      *                and costs no storage. ADR-0050 policy contract: no locks/clock/graph
      *                inside.
-     * @return Whatever @p eval returns.
+     * @return Whatever @p eval returns, or nullopt when the merge could not be built — the
+     *         cache stays stale, so the next call tries again, and the caller fails closed.
      */
     template <typename Rebuild, typename Eval>
-    auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
-        -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
+    auto with_effective_aces(tr::mem::block_source_t& src, Rebuild&& rebuild, Eval&& eval)
+        -> std::optional<decltype(eval(std::span<const ace_t>{}))> {
         // The merge is cached in the `:acl` state. A BEARER — the only vertex the graph
         // evaluates here — always has one (its own ACEs live there), so this never allocates
         // (#1778); a vertex without one evaluates a fresh merge over no own ACEs, uncached.
         acl_state_t* const state = acl_state();
         if (state == nullptr) {
-            static const std::vector<ace_t> kNoAces{};
-            const std::vector<ace_t> merged = rebuild(kNoAces);
-            return eval(merged);
+            ace_table_t merged(src);
+            if (!rebuild(merged)) return std::nullopt;
+            return eval(std::span<const ace_t>(merged));
         }
         acl_state_t& e = *state;
         std::unique_lock lock(vertex_stripe_of(this).m);
@@ -2951,10 +2966,11 @@ class vertex_t {
             // flag cost, which is why the published stamp lives in this word rather than
             // beside it (a second load measured ~1% on the acl-inherit-d4 gate bench).
             const std::uint32_t gen = e.acl_gen.load(std::memory_order_acquire);
-            if ((gen & 1u) == 0) break;             // even ⇒ the cached merge is current
-            const std::vector<ace_t> own = e.aces;  // snapshot; rebuild runs unlocked
+            if ((gen & 1u) == 0) break;  // even ⇒ the cached merge is current
+            ace_table_t merged(e.aces.source());
+            if (!merged.append(e.aces)) return std::nullopt;  // snapshot; rebuild runs unlocked
             lock.unlock();
-            std::vector<ace_t> merged = rebuild(static_cast<const std::vector<ace_t>&>(own));
+            if (!rebuild(merged)) return std::nullopt;
             lock.lock();
             std::uint32_t expected = gen;
             if (!e.acl_gen.compare_exchange_strong(expected, gen + 1, std::memory_order_release,
@@ -2962,10 +2978,10 @@ class vertex_t {
                 continue;  // an :acl write raced the walk — drop the possibly-torn merge
             // The word says FRESH before the merge lands, but the stripe lock spans both and
             // every reader of eff_aces holds it, so no one can observe the gap.
-            e.eff_aces = std::move(merged);
+            std::swap(e.eff_aces, merged);
             break;
         }
-        return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces));
+        return eval(std::span<const ace_t>(e.eff_aces));
     }
 
     // -- application property fields (RFC-0010) ------------------------------------------

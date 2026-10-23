@@ -102,7 +102,7 @@ void grant_hop(graph_t& g, std::string_view path, std::string_view subject) {
     const tr::graph::ace_t ace{
         .type = tr::graph::ace_type_t::ALLOW,
         .flags = 0,
-        .subject = std::vector<std::byte>(sp, sp + subject.size()),
+        .subject = std::span<const std::byte>(sp, subject.size()),
         .access_mask = static_cast<std::uint32_t>(tr::graph::acl_right_t::READ) |
                        static_cast<std::uint32_t>(tr::graph::acl_right_t::WRITE),
         .expires_ns = 0,

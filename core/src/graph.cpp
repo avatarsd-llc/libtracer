@@ -1845,34 +1845,42 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
         // ancestor's stripe one at a time. Root excluded (the flat-map walk never evaluated
         // the empty key); placeholder intermediates hold empty ACE lists, so merging them is
         // the no-op the old walk's skip was.
-        allowed = bearer->with_effective_aces(
-            [&](const std::vector<ace_t>& own) {
-                effective_acl_t eff;
-                eff.append_own(own);
-                // `ancestor` is never null: it starts at the bearer's parent, non-null in this
-                // arm, and steps only to a non-null parent (#1685).
-                for (vertex_t* ancestor = bearer->parent(); ancestor->parent() != nullptr;
-                     ancestor = ancestor->parent()) {
-                    ancestor->with_aces(
-                        [&](const std::vector<ace_t>& aces) { eff.append_ancestor(aces); });
-                }
-                return std::move(eff).release();
-            },
-            // Inlined by attribute: with the expiry test below, GCC 13.3 would otherwise emit
-            // the evaluation out of line — one more call on every gate.
-            [&] [[gnu::always_inline]] (const std::vector<ace_t>& merged) {
-                // The ACE-expiry reference clock is read only when an ACE in the list can
-                // expire (#1685; the unguarded arm above never reads it, #1665):
-                // `expires_ns == 0` never compares against `now`, so a list of standing grants
-                // (every gated forward hop that carries no lease) is evaluated without a
-                // `system_clock::now()`, and `0` stands in for the clock it never asks.
-                const bool leased = std::ranges::any_of(merged, &ace_t::expires_ns);
-                // A bare descendant evaluates the INHERITABLE SUBSEQUENCE of the bearer's
-                // merge. Filtered in place (order-identical) rather than against a second,
-                // projected vector — see effective_acl_t::allows.
-                return effective_acl_t::allows(merged, subject, bit, leased ? now_ns() : 0,
-                                               self ? std::uint8_t{0} : kAceInherit);
-            });
+        // The merge arrives seeded with the bearer's own ACEs; each ancestor adds its
+        // INHERIT-flagged ones, nearest first. A refused table answers DENY (#2287): the
+        // cache stays stale and the next check rebuilds.
+        allowed =
+            bearer
+                ->with_effective_aces(
+                    *tables_,
+                    [&](ace_table_t& merged) {
+                        bool ok = true;
+                        // `ancestor` is never null: it starts at the bearer's parent, non-null in
+                        // this arm, and steps only to a non-null parent (#1685).
+                        for (vertex_t* ancestor = bearer->parent(); ancestor->parent() != nullptr;
+                             ancestor = ancestor->parent()) {
+                            ok &= ancestor->with_aces([&merged](std::span<const ace_t> aces) {
+                                return merged.append(aces, kAceInherit);
+                            });
+                        }
+                        return ok;
+                    },
+                    // Inlined by attribute: with the expiry test below, GCC 13.3 would otherwise
+                    // emit the evaluation out of line — one more call on every gate.
+                    [&] [[gnu::always_inline]] (std::span<const ace_t> merged) {
+                        // The ACE-expiry reference clock is read only when an ACE in the list can
+                        // expire (#1685; the unguarded arm above never reads it, #1665):
+                        // `expires_ns == 0` never compares against `now`, so a list of standing
+                        // grants (every gated forward hop that carries no lease) is evaluated
+                        // without a `system_clock::now()`, and `0` stands in for the clock it never
+                        // asks.
+                        const bool leased = std::ranges::any_of(merged, &ace_t::expires_ns);
+                        // A bare descendant evaluates the INHERITABLE SUBSEQUENCE of the bearer's
+                        // merge. Filtered in place (order-identical) rather than against a second,
+                        // projected vector — see effective_acl_t::allows.
+                        return effective_acl_t::allows(merged, subject, bit, leased ? now_ns() : 0,
+                                                       self ? std::uint8_t{0} : kAceInherit);
+                    })
+                .value_or(false);
     }
     // Recheck the vertex's registration after the gate, on the vertex in hand (vertices are
     // insert-only, so the pointer is still the caller's). Every operation found `v` registered
