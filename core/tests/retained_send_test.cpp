@@ -7,11 +7,9 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * Pinned here:
- * 1. `tx_handoff_t` with a retained record: the slot holds one reference to the value while
- *    the record is queued, hands it to the writer, and drops it at the writer's next step.
- * 2. `transport_t::send(head, value)`'s default lowering is byte-exact: `head ++ links` as
+ * 1. `transport_t::send(head, value)`'s default lowering is byte-exact: `head ++ links` as
  *    one gathered frame, for a link that overrides nothing but the gather.
- * 3. The TCP dial link under two concurrent senders and a slow reader. Every frame arrives
+ * 2. The TCP dial link under two concurrent senders and a slow reader. Every frame arrives
  *    whole, in per-thread order, and accounted for. The retained path is proven taken (a send
  *    returned with the queue still holding its value). Once the link drains, every value is
  *    back to its caller's one reference.
@@ -31,7 +29,6 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
-#include "libtracer/tx_handoff.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -40,7 +37,6 @@ using namespace std::chrono_literals;
 using tr::graph::value_ref_t;
 using tr::graph::value_t;
 using tr::net::tcp_transport_t;
-using tr::net::tx_handoff_t;
 using tr::testing::check;
 using span_t = std::span<const std::byte>;
 
@@ -54,41 +50,6 @@ using span_t = std::span<const std::byte>;
     std::vector<std::byte> v(n);
     for (std::size_t i = 0; i < n; ++i) v[i] = std::byte(static_cast<std::uint8_t>(seed + i * 13u));
     return v;
-}
-
-/** @brief Vector 1: the handoff queue holds a retained record's value exactly while queued. */
-void test_handoff_retains() {
-    std::printf("tx_handoff_t keeps a retained record's value while it is queued:\n");
-    tx_handoff_t q(4, tr::mem::heap_source(), 64);
-    const std::vector<std::byte> body = pattern(9000, 3);
-    const value_ref_t v = published(body);
-    const std::array<std::byte, 3> head{std::byte{0xA1}, std::byte{0xA2}, std::byte{0xA3}};
-    const auto fill = [&head](tr::mem::block_array_t<std::byte>& slot) -> std::size_t {
-        if (!slot.reserve(head.size())) return 0;
-        std::memcpy(slot.data(), head.data(), head.size());
-        return head.size();
-    };
-
-    check(q.admit(fill, v.get()) == tx_handoff_t::admit_t::WRITE,
-          "no writer in flight: the caller becomes the writer (nothing kept)");
-    check(v->use_count() == 1, "the writer's own record is not retained");
-    check(q.admit(fill, v.get()) == tx_handoff_t::admit_t::QUEUED, "a second record queues");
-    check(v->use_count() == 2, "the queued record holds one reference");
-
-    const tx_handoff_t::record_t rec = q.next();
-    check(static_cast<bool>(rec) && rec.value == v.get(), "the writer gets the value back");
-    check(rec.bytes.size() == head.size() && rec.size() == head.size() + body.size(),
-          "the record is the copied head plus the retained value's length");
-    check(v->use_count() == 2, "the value stays held while the writer is on it");
-    check(!q.next(), "the drain ends");
-    check(v->use_count() == 1, "the writer's next step released it");
-
-    // A record whose head fill refuses is refused whole, and keeps nothing.
-    check(q.admit(fill, v.get()) == tx_handoff_t::admit_t::WRITE, "writer again");
-    const auto refuse = [](tr::mem::block_array_t<std::byte>&) -> std::size_t { return 0; };
-    check(q.admit(refuse, v.get()) == tx_handoff_t::admit_t::REFUSED && v->use_count() == 1,
-          "a refused fill keeps no reference");
-    check(!q.next(), "and nothing was queued");
 }
 
 /** @brief A link that overrides only the gather: records what the default lowering hands it. */
@@ -263,7 +224,6 @@ void test_tcp_retained_race() {
 }  // namespace
 
 int main() {
-    test_handoff_retains();
     test_default_lowering();
     test_tcp_retained_race();
     return tr::testing::summary("retained_send");

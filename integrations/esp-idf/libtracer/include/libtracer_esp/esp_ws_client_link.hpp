@@ -205,8 +205,8 @@
 #endif
 
 #include "esp_transport.h"
+#include "libtracer/egress.hpp"
 #include "libtracer/transport.hpp"
-#include "libtracer/tx_handoff.hpp"
 #include "libtracer_esp/fixed_array.hpp"
 #include "libtracer_esp/link_stats.hpp"
 
@@ -265,7 +265,7 @@ struct esp_ws_client_config_t {
      *
      * `io` is the send side's store: each send's masked frame (drawn per send and returned
      * when the write is done; a refusal drops the frame and counts it on `tx_drops`), the
-     * enqueue-then-write queue's slots and the base class's gather temporary all draw from
+     * egress rings frames wait in and the base class's gather temporary all draw from
      * it. With `nullptr` all three draw from the process net sub-pool (`mem::net_source()`,
      * the static arena on this target).
      *
@@ -371,11 +371,12 @@ class esp_ws_client_link_t final : public transport_t {
      * @brief Send @p frame as one masked BINARY WebSocket message to the peer. Drops
      *        (best-effort, like the UDP path) when not currently connected.
      *
-     * Enqueue-then-write (RFC 0028 §4.7): only ONE task writes at a time. A task that
-     * finds a write in flight copies its frame into one of
-     * `CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH` slots and returns at once — the writing
-     * task sends it next — or, past the depth, drops it and counts it in `tx_drops`. So
-     * no task ever waits on another task's write (#1619).
+     * The shared egress module (ADR-0087 §2): only ONE task writes at a time. A task that
+     * finds a write in flight builds its masked frame once and leaves a reference in the
+     * peer's ring for its lane (the control lane for this plain send; a vertex's own ring for
+     * a delivery) and returns at once — the writing task sends it next. A full ring sheds by
+     * the lane's arm and counts it in `tx_drops`. So no task ever waits on another task's
+     * write (#1619).
      *
      * The writing task itself is BOUNDED: a peer whose TCP window has closed costs it one
      * write budget (a quarter of the task-watchdog period, split across the poll and the
@@ -387,18 +388,28 @@ class esp_ws_client_link_t final : public transport_t {
 
     /**
      * @brief Scatter-gather send (#1620 (a)): the same masked frame as @ref send, gathered
-     *        straight from @p iov into the writer's frame block or the queue slot.
+     *        straight from @p iov into one egress frame, on the control lane.
      *
      * The base default flattened the spans into an egress temporary and then handed that to
      * @ref send, which copied it again into the frame — two copies and two allocations per
      * gathered frame. A masked frame needs ONE private copy (masking writes the bytes),
-     * and this is it. The retained send (`transport_t::send(head, value, lane)`) lowers here too:
-     * a client frame cannot be written from a shared block, so this link keeps the value by
-     * copying it, once.
+     * and this is it.
      *
      * @param iov The frame's spans, concatenated as one message.
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
+
+    /**
+     * @brief Retained send (RFC-0028 §6.9): @p head then @p value as one masked frame, waiting
+     *        (when it has to) in @p lane's ring toward the peer (ADR-0087 §2).
+     *
+     * A client frame cannot be written from a shared block, because masking writes the
+     * bytes, so the value is copied once into the frame, as @ref send copies its spans. What
+     * this adds over the base lowering is the lane: a vertex's frames wait in that vertex's
+     * ring, at the depth and arm it declared, never in the control lane.
+     */
+    void send(std::span<const std::span<const std::byte>> head, const graph::value_t& value,
+              const graph::delivery_lane_t& lane) override;
     using transport_t::send;
 
     /**
@@ -656,14 +667,20 @@ class esp_ws_client_link_t final : public transport_t {
      *         syscall serializer, and the notifier re-enters the routing plane. */
     void drop();
     /**
+     * @brief The one send path: frame @p iov, then put it on the wire or in @p lane's ring
+     *        through the egress module. Drops oversize and empty frames, counted.
+     */
+    void send_on(std::span<const std::span<const std::byte>> iov,
+                 const graph::delivery_lane_t& lane);
+    /**
      * @brief Write ONE record to the peer under the syscall serializer — the writer's step.
      *
-     * Called only by the sender holding the enqueue-then-write writer role (#1619), once for
-     * its own frame and once per frame it drains. Leaves without touching a handle once
-     * `stop_` is set, drops and counts toward a peer that is down, and tears the connection
-     * down on an error or a short write.
+     * Called by the sender holding the egress writer role (#1619), once for its own frame
+     * and once per frame it drains, and by the recv thread for a control reply. Leaves without
+     * touching a handle once `stop_` is set, drops and counts toward a peer that is down, and tears
+     * the connection down on an error or a short write.
      *
-     * @param wire A whole masked frame (the writer's own, a queued copy or a control reply),
+     * @param wire A whole masked frame (the writer's own, a waiting one or a control reply),
      *             written as it is in one `esp_transport_write`.
      */
     void write_locked(std::span<const std::byte> wire);
@@ -729,9 +746,14 @@ class esp_ws_client_link_t final : public transport_t {
     const std::size_t tx_bytes_;
     /** @brief The recv thread's stack, kept for a spawn deferred to @ref start_receiving. */
     const std::size_t recv_stack_;
-    /** @brief Enqueue-then-write (RFC 0028 §4.7, #1619): frames other senders queued while
-     *         a write was in flight, drained by the sender holding the writer role. */
-    tr::net::tx_handoff_t tx_;
+    /** @brief The shared egress module (ADR-0087 §2, #1619): the writer role, and the rings
+     *         frames wait in while a write is in flight, drawn from @ref tx_src_. Every write
+     *         step reports its frame moved (a failed write tears the connection down here,
+     *         not through a strike), so the strike cap never comes into play. */
+    tr::net::egress_t egress_;
+    /** @brief The one peer's egress state, opened by the constructor and closed by the
+     *         destructor once every sender has left. */
+    tr::net::egress_peer_t peer_;
 
     // Serializes the esp_transport read/write SYSCALLS (the write is bounded). It does
     // NOT cover the re-dial's rebuild of the handles above — assuming it did is the

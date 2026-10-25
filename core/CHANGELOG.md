@@ -103,6 +103,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   *Migration:* observe frames at the link instead. A test that wants what a hop put on the wire
   wraps the sending link (the test suite's `send_tap_t` in `core/tests/send_tap.hpp`), or
   decodes the frame where it injects it, before calling `fwd_router_t::on_frame`.
+- **`net::tx_handoff_t` and `libtracer/tx_handoff.hpp` (#2277).** Its last user, the ESP-IDF
+  WebSocket client, now runs on `net::egress_t` like every stream link. The `egress-queued` and
+  `egress-queued-copy` rows of `bench_lean_value_path` go with it.
+  *Migration:* a link that must serialize its writes adapts `net::egress_t` (`libtracer/egress.hpp`):
+  open the peer once, hand each send its `delivery_lane_t`, and write through the `direct` and
+  `write` steps; a frame that meets a write in flight waits in its lane's ring instead of a slot.
 
 ### Added
 

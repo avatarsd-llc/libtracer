@@ -565,9 +565,9 @@ void test_the_blocking_bounds_are_derived_from_the_watchdog() {
  * Sender A is parked inside `esp_transport_write` on a peer whose window has closed. Before
  * enqueue-then-write, sender B queued on `write_m_` behind it for the rest of A's write — up
  * to a whole write budget — and delivery is in-call, so B is whatever unrelated task
- * published. Now B copies its frame into the link's queue and returns at once, and A, still
- * the writer, sends it as soon as its own write completes. The bound asserted is a small
- * fraction of one write leg, so it does not depend on the write budget.
+ * published. Now B leaves its frame in its lane's egress ring and returns at once, and A,
+ * still the writer, sends it as soon as its own write completes (#2277). The bound asserted is a
+ * small fraction of one write leg, so it does not depend on the write budget.
  */
 void test_a_second_sender_does_not_wait_on_a_parked_write() {
     std::printf("a second sender returns at once while the first is parked in a write:\n");
@@ -650,11 +650,11 @@ void test_the_dial_slot_returns_to_its_store_on_both_arms() {
  *        its transport pair only while a connection stands.
  *
  * The stores' live counts are the oracle. Dialling an unreachable peer, the link holds its
- * dial slot and nothing else from `memory.state`, nothing from `memory.io` beyond its queue
- * table, and no transport pair across the backoff. When a handshake lands it draws one read
- * scratch and nothing from `memory.io` (each send draws its own frame, #2265); when the peer
- * closes, the scratch goes back, with the pair, before the re-dial — the link is back to
- * what a never-connected one holds.
+ * dial slot and nothing else from `memory.state`, nothing from `memory.io` (an egress ring is
+ * drawn only when a frame has to wait, #2277), and no transport pair across the backoff. When a
+ * handshake lands it draws one read scratch and nothing from `memory.io` (each send draws its own
+ * frame, #2265); when the peer closes, the scratch goes back, with the pair, before the re-dial —
+ * the link is back to what a never-connected one holds.
  */
 void test_an_unconnected_link_holds_no_connection_memory() {
     std::printf("#1606 an unconnected link holds no scratch and no transport pair:\n");
@@ -672,24 +672,24 @@ void test_an_unconnected_link_holds_no_connection_memory() {
             tr::mem::make_poly<esp_ws_client_link_t>(tr::mem::net_source(), "127.0.0.1", 8080, cfg);
         link->start_receiving();
         const int slot = state.live.load();  // the slot and its string copies
-        const int io_table = io.live.load();
+        check(io.live == 0, "an idle link draws nothing from memory.io");
         check(wait_until([] { return fake_ws::connect_count() >= 2; }, 5s),
               "the link dialed an unreachable peer twice");
         check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
               "and holds no transport pair across the backoff");
         check(state.live == slot, "from memory.state it holds the dial slot only");
-        check(io.live == io_table, "and from memory.io nothing beyond its queue table");
+        check(io.live == 0, "and from memory.io nothing at all");
 
         fake_ws::fail_connects(false);
         check(wait_until([&] { return link->link_up(); }, 5s), "the peer came back");
         check(state.live == slot + 1, "a standing connection holds its read scratch");
-        check(io.live == io_table, "and no write scratch: a send draws its own frame (#2265)");
+        check(io.live == 0, "and no write scratch: a send draws its own frame (#2265)");
 
         fake_ws::fail_connects(true);
         fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, /*fin=*/true,
                                                   /*len=*/2, /*seed=*/0x11)});
         check(wait_until([&] { return !link->link_up(); }, 5s), "the peer closed");
-        check(wait_until([&] { return state.live == slot && io.live == io_table; }, 2s),
+        check(wait_until([&] { return state.live == slot && io.live == 0; }, 2s),
               "the read scratch went back with the connection");
         check(wait_until([] { return fake_ws::live_handles() == 0; }, 2s),
               "and so did its transport pair, ahead of the re-dial");

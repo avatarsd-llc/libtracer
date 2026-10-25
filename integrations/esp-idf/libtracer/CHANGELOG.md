@@ -45,6 +45,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed (breaking)
 
+- **`esp_ws_client_link_t` sends through the shared egress module; the
+  `CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH` Kconfig is removed
+  ([#2277](https://github.com/avatarsd-llc/libtracer/issues/2277)).** A sender that finds a
+  write in flight still returns at once, but its frame now waits in its vertex's lane ring
+  (shaped by the vertex's retention depth, as on every POSIX stream link) or, for a frame from
+  no vertex, in the control lane (8 frames, best-effort: the oldest is shed and counted in
+  `tx_drops`). The frame is built once and shared, so a waiting frame costs a reference, not a
+  slot that grows to the largest frame and keeps that memory. The retained send
+  (`send(head, value, lane)`) now carries its lane instead of lowering to the control lane.
+  **Migration:** drop `CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH` from `sdkconfig` /
+  `sdkconfig.defaults`; depth now follows each vertex's retention, and nothing else changes.
 - **`esp_ws_client_config_t::defer_recv` is removed; every `esp_ws_client_link_t` defers its
   first dial ([#2249](https://github.com/avatarsd-llc/libtracer/issues/2249)).** The default
   (`false`) spawned the recv thread in the constructor, which dialled at once, so a peer's

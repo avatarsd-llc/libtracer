@@ -2078,8 +2078,8 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
-    # RFC-0028 slice 9 (#1620): the retained send. tx_handoff_t keeps a queued record's value,
-    # the base lowering is head ++ links byte-exact, and two senders race retained frames onto
+    # RFC-0028 slice 9 (#1620): the retained send. The base lowering is head ++ links
+    # byte-exact, and two senders race retained frames onto
     # one TCP dial link (whole, ordered, accounted, every value released once drained).
     add_executable(retained_send_test retained_send_test.cpp)
     target_link_libraries(retained_send_test PRIVATE libtracer)
