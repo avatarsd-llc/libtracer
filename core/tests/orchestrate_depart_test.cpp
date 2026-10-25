@@ -388,6 +388,11 @@ int main() {
         tr::net::transport_t* const c_to_b = tr::testing::link_of(net_c, "net/ws-client/b");
         check(c_to_b != nullptr, "C: the dialed link to B is live");
         if (c_to_b == nullptr) return 1;
+        // An engine-managed dial is DORMANT at creation, and a frame sent into it is a counted
+        // drop that kicks the dial (RFC-0014 Amendment 5). Kick it with an empty send, which
+        // never reaches the wire, and wait for UP before the recipe sends anything.
+        if (!c_to_b->link_up()) c_to_b->send(std::span<const std::byte>{});
+        check(poll_until([&] { return c_to_b->link_up(); }, kBudget), "C: the link to B is UP");
 
         // ----- negative control: BEFORE the subscription, nothing reaches A ---------
         std::printf("\nNegative control (before the subscription write):\n");
@@ -426,6 +431,17 @@ int main() {
             check(r && reply_kind(*r) == static_cast<int>(reply_kind_t::RESULT),
                   "subscription write answered kind == RESULT");
         }
+
+        // The subscription is a standing binding on B's link toward A, which kicks its dial
+        // without waiting; a delivery into it before UP would be a counted drop (Amendment 5).
+        check(poll_until(
+                  [&] {
+                      tr::net::transport_t* const l =
+                          tr::testing::link_of(net_b, "net/ws-client/a-link");
+                      return l != nullptr && l->link_up();
+                  },
+                  kBudget),
+              "B: the subscription brought its link toward A UP");
 
         // ----- diagnostic: where does a PRE-departure delivery go? ------------------
         std::printf("\nDiagnostic — a pre-departure producer write:\n");

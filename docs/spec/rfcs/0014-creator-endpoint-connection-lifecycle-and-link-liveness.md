@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0014 |
 | **Title** | Creator endpoint: connection lifecycle and link liveness |
-| **Status** | **accepted** (2026-07-24 — maintainer ruling; comment window waived on this solo-maintained spec, per the RFC-0009 precedent). **Amendment 1 (2026-08-21, §4.1)** replaces §4's literal "refcount → 0 → close socket" steady-state reading with MAY-shape wording: an op-woken socket with no standing binding **MAY** remain up until loss (the reference implementation does) or be closed eagerly, and only three MUSTs bind — no background retry at refcount 0, re-dormant with no retry on loss or a failed wake-dial at refcount 0, and close-plus-re-dormant on the last **standing** release. Ruled on the divergence flagged in [PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455). **Amendment 2 (2026-08-24, §5.1)** generalizes §5: the demanded right is a **payload-type → required-ACL-right table the vertex declares**, keyed on the written TLV's type only, consulted by the one write gate, which does not move — absent declaration is plain `WRITE`. The creator endpoint declares §5's own mapping and §5 is discharged. **Amendment 2 is retired by [RFC-0036](0036-two-rights-fields-are-paths-under-their-vertex.md)** (accepted 2026-10-10): the registry keeps READ and WRITE only, the payload-right table is deleted, and both a `SPEC` and a `NAME` written to the creator endpoint demand `WRITE`. **Amendment 3 (2026-08-24, §2.1)** pins the `conn:schema` catalog envelope as the ordinary `POINT{NAME, SETTINGS{…}}` record, with an **empty `SETTINGS`** — never `SCHEMA_NOT_FOUND` — for a module that declares no catalog. **Amendment 4 (2026-08-26, §Compatibility)** EXECUTES the supersession: the `:children[]` `client`/`listener` creation registrations are removed, so the creator endpoint is the only wire creation path and the `role` config key is retired with the catalog type it overrode; and, the conformance vectors having landed, every `proposed pending` byte clause is promoted to **normative**. BREAKING for an orchestrator still using the old spelling. **Amended by [RFC-0033](0033-noise-nnpsk0-datagram-link-binding.md)** (accepted 2026-10-10), **for a Noise link only**: §4 as amended by Amendment 1 (§4.1). An operation on a dormant Noise link fails at once with link-down and starts an attempt, instead of waiting one `connect_timeout`, and an attempt an operation started on an unheld link stops at its attempt deadline. The rule lives in [reference/23](../../reference/23-noise-link-binding.md) §1 and §7. Every other link is unaffected. |
+| **Status** | **accepted** (2026-07-24 — maintainer ruling; comment window waived on this solo-maintained spec, per the RFC-0009 precedent). **Amendment 1 (2026-08-21, §4.1)** replaces §4's literal "refcount → 0 → close socket" steady-state reading with MAY-shape wording: an op-woken socket with no standing binding **MAY** remain up until loss (the reference implementation does) or be closed eagerly, and only three MUSTs bind — no background retry at refcount 0, re-dormant with no retry on loss or a failed wake-dial at refcount 0, and close-plus-re-dormant on the last **standing** release. Ruled on the divergence flagged in [PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455). **Amendment 2 (2026-08-24, §5.1)** generalizes §5: the demanded right is a **payload-type → required-ACL-right table the vertex declares**, keyed on the written TLV's type only, consulted by the one write gate, which does not move — absent declaration is plain `WRITE`. The creator endpoint declares §5's own mapping and §5 is discharged. **Amendment 2 is retired by [RFC-0036](0036-two-rights-fields-are-paths-under-their-vertex.md)** (accepted 2026-10-10): the registry keeps READ and WRITE only, the payload-right table is deleted, and both a `SPEC` and a `NAME` written to the creator endpoint demand `WRITE`. **Amendment 3 (2026-08-24, §2.1)** pins the `conn:schema` catalog envelope as the ordinary `POINT{NAME, SETTINGS{…}}` record, with an **empty `SETTINGS`** — never `SCHEMA_NOT_FOUND` — for a module that declares no catalog. **Amendment 4 (2026-08-26, §Compatibility)** EXECUTES the supersession: the `:children[]` `client`/`listener` creation registrations are removed, so the creator endpoint is the only wire creation path and the `role` config key is retired with the catalog type it overrode; and, the conformance vectors having landed, every `proposed pending` byte clause is promoted to **normative**. BREAKING for an orchestrator still using the old spelling. **Amended by [RFC-0033](0033-noise-nnpsk0-datagram-link-binding.md)** (accepted 2026-10-10), **for a Noise link only**: §4 as amended by Amendment 1 (§4.1). An operation on a dormant Noise link fails at once with link-down and starts an attempt, instead of waiting one `connect_timeout`, and an attempt an operation started on an unheld link stops at its attempt deadline. The rule lives in [reference/23](../../reference/23-noise-link-binding.md) §1 and §7. **Amendment 5 (2026-10-24, §4.2)** extends the fail-at-once half of that rule to every `DIAL` link: an operation on a `dormant` or `dialing` link fails at once with `link-down`, its frame is a counted drop, and on a `dormant` link it starts one dial attempt. No operation waits for a dial; a caller that wants the link up awaits `up` on the connection vertex. Ruled by the maintainer ([#2303](https://github.com/avatarsd-llc/libtracer/issues/2303)); comment window waived. |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-24 |
 | **Comment window closes** | waived |
@@ -273,15 +273,17 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
 > Noise link only.** An operation on a dormant Noise link does not wait for a connect attempt: it
 > fails at once with `link-down` and starts one, and the caller awaits `up` before it sends. An
 > attempt an operation started on an unheld link stops at its attempt deadline, checked against
-> the application's `now` ([reference/23](../../reference/23-noise-link-binding.md) §1, §7). The
-> bullets below hold unchanged for every other link.
+> the application's `now` ([reference/23](../../reference/23-noise-link-binding.md) §1, §7).
+> **Amendment 5 (§4.2)** makes the fail-at-once half of this rule the rule for every `DIAL` link,
+> and the first bullet below states it; the attempt-deadline half stays Noise-only.
 
-- **Any op auto-wakes a dormant `DIAL` link.** The op triggers a dial, waits for **one connect
-  attempt** (bounded by `connect_timeout`), then serves or returns `link-down`. A `write` may
-  therefore stall on a dial; `await /net/<module>/<name>` (which resolves specifically when
-  liveness reaches `up`, and returns `link-down` on terminal failure — not a generic
-  await-next-transition) is the explicit "bring it up and wait" verb for callers that will not
-  tolerate a data op blocking.
+- **An op never waits for a dial** (**Amendment 5, §4.2**, which replaces this bullet's original
+  "any op auto-wakes … waits for one connect attempt" text). An op on a `dormant` or `dialing`
+  `DIAL` link fails at once with `link-down`, and its frame is a counted drop; on a `dormant`
+  link it also starts **one** dial attempt. `await /net/<module>/<name>` (which resolves
+  specifically when liveness reaches `up`, and returns `link-down` on terminal failure — not a
+  generic await-next-transition) is the "bring it up and wait" verb: a caller that needs its
+  frame delivered awaits `up`, then sends.
 - **A one-shot op's transient hold is released BEFORE self-heal is evaluated**, so a lone one-shot
   whose dial fails drops refcount to 0 and the link re-dormants with **no** background retry; only a
   standing binding (refcount > 0 after the op returns) triggers self-heal.
@@ -374,6 +376,42 @@ apart except by when the next connection arrives.
 > implementation's own test suite (`core/tests/link_liveness_test.cpp`), not on the conformance
 > surface. §Discussion's `refcount-0→dormant` vector is to be read as the MUST-2/MUST-3
 > re-dormant, never as an assertion about *when* an op-woken socket closes.
+
+#### 4.2 Amendment 5 (2026-10-24, ruled) — an op on a link that is not up is a counted drop that starts the dial, and never waits
+
+**Instrument.** Amendment, not erratum: §4's first bullet sanctioned a stall — an op on a dormant
+`DIAL` link waited for one connect attempt, bounded by `connect_timeout`, and was then served or
+answered `link-down`. This withdraws that permission, so the normative surface changes even though
+no wire byte, frame shape, type code, error identity or conformance vector moves. Ruled by the
+maintainer on 2026-10-24 ([#2303](https://github.com/avatarsd-llc/libtracer/issues/2303), Q3). The
+comment window is **waived by default** under [GOVERNANCE.md](../../../.github/GOVERNANCE.md)'s
+solo-maintainer clause and is not invoked.
+
+**Why.** The stall blocked the producer's own thread — a fan-out, a forward hop, a reply — for up
+to `connect_timeout`, and bounding it took a clock inside the library. [RFC-0033](0033-noise-nnpsk0-datagram-link-binding.md)
+had already ruled the non-waiting shape for a Noise link; nothing about the other links needs the
+wait, because §4 already names the verb for a caller that wants the link up: `await` `up` on the
+connection vertex.
+
+**The rule.** For every `DIAL` link:
+
+1. An op on a link whose liveness is `dormant`, `dialing` or `reconnecting` **MUST** fail at once
+   with `link-down`. It **MUST NOT** wait for a connect attempt, a backoff interval, or any other
+   transition. Its frame is dropped and **counted** in the link's dropped-tx count.
+2. An op on a `dormant` link **MUST** also start **one** dial attempt (`dormant` → `dialing`). An
+   op on a `dialing` or `reconnecting` link starts nothing more: an attempt is already driving the
+   link toward `up`.
+3. The op's transient hold (§4) is released when the op returns, before the attempt it started
+   concludes. So a failed op-woken attempt is a failed wake-dial at refcount 0, and §4.1 MUST 2
+   applies: the link re-dormants with no retry. A successful one leaves the socket `up`, and §4.1's
+   keep-up MAY applies.
+4. A caller that needs its frame delivered **awaits `up`** on `/net/<module>/<name>` and sends after
+   it. The first frame sent into a `dormant` link is **not** delivered; before this amendment it
+   was, after the stall.
+
+`connect_timeout` stays a config key: it is the deadline one dial attempt is given, and no op waits
+on it. A [reference/23](../../reference/23-noise-link-binding.md) Noise link keeps its own §7 rule
+that an attempt an operation started on an unheld link stops at its attempt deadline.
 
 ### 5. Gating
 

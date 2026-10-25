@@ -40,8 +40,8 @@ namespace tr::net {
 inline constexpr std::uint32_t kDefaultBackoffMs = 1000;
 
 /** @brief The engine's own dial-attempt deadline when the SPEC's `connect_timeout` is
- *         0/absent — how long an auto-woken op waits for ONE connect attempt before it
- *         answers link-down (RFC-0014 §4). */
+ *         0/absent, handed to the kind's factory in `conn_settings_t` (RFC-0014 §4). No op
+ *         waits on it: an op on a link that is not `UP` is dropped at once (Amendment 5). */
 inline constexpr std::uint32_t kDefaultConnectTimeoutMs = 5000;
 
 /**
@@ -60,9 +60,9 @@ inline constexpr std::uint32_t kDefaultConnectTimeoutMs = 5000;
  * vertex through the installed liveness publisher — the engine is the sole writer of
  * these transitions):
  *
- * - `DORMANT` → `DIALING`: any op auto-wakes the link (@ref send blocks for ONE connect
- *   attempt, bounded by `connect_timeout`, then serves or drops — the §4 stall-on-dial),
- *   and @ref acquire kicks the same wake without blocking.
+ * - `DORMANT` → `DIALING`: any op kicks the dial and is itself a counted drop (@ref send
+ *   never waits — RFC-0014 Amendment 5), and @ref acquire kicks the same wake. A caller
+ *   that must bring the link up and wait awaits `up` on the connection vertex.
  * - `DIALING` → `UP` on a successful construct; → `RECONNECTING` (a standing binding
  *   holds) or back to `DORMANT` (none does — a lone one-shot's failed dial triggers NO
  *   background retry, §4's transient-hold rule) on a failed one.
@@ -76,7 +76,7 @@ inline constexpr std::uint32_t kDefaultConnectTimeoutMs = 5000;
  * **The refcount** counts STANDING bindings (@ref acquire / @ref release — the seam the
  * routing plane's subscription/await integration drives; S6 wires the callers). A
  * one-shot op's transient hold is implicit in @ref send itself: it wakes a dormant link
- * and rides the attempt, and its release is invisible at this seam (send is
+ * and is dropped, and its release is invisible at this seam (send is
  * fire-and-forget), so an op-woken socket with no standing binding stays up until loss
  * rather than being torn down per-op. That keep-up is the MAY of §4.1 (Amendment 1,
  * 2026-08-21): the amendment leaves the close-on-transient-release question to the
@@ -184,9 +184,9 @@ class self_heal_link_t final : public transport_t {
     [[nodiscard]] link_state_t state() const;
 
     /**
-     * @brief Emit one frame — the §4 op door. `UP` sends on the inner socket; `DORMANT`
-     *        auto-wakes (blocks for ONE attempt, bounded by `connect_timeout`) then sends
-     *        or drops; `RECONNECTING` fails fast. Every drop counts in @ref drop_stats.
+     * @brief Emit one frame — the §4 op door. `UP` sends on the inner socket; any other
+     *        state drops the frame at once, never waiting, and a `DORMANT` link is kicked
+     *        toward `UP` (RFC-0014 Amendment 5). Every drop counts in @ref drop_stats.
      */
     void send(std::span<const std::byte> frame) override;
 
@@ -313,7 +313,7 @@ class self_heal_link_t final : public transport_t {
     static void* worker_entry(void* self);
 
     /** @brief The op-side gate: the §4 transient hold. Returns the socket to send on, or
-     *         nullptr = drop (fail-fast, or the one bounded auto-wake attempt failed). */
+     *         nullptr = drop (any state but `UP`; a `DORMANT` link is kicked first). */
     [[nodiscard]] sock_ref_t ready_socket();
 
     /** @brief Park @p dead on the corpse list (it adopts the hold); caller holds `m_`. */
@@ -326,7 +326,7 @@ class self_heal_link_t final : public transport_t {
      *         owner's control mutex (acquire/release under `ctl_m_`) and never before it;
      *         nothing under `m_` calls back into `transport_vertex_t` or the router. */
     mutable std::mutex m_;
-    std::condition_variable cv_; /**< @brief Worker wake + op-waiter rendezvous. */
+    std::condition_variable cv_; /**< @brief Worker wake. */
 
     const transport_factory_t factory_;           /**< @brief Re-run per dial. */
     const conn_settings_t settings_;              /**< @brief Universal keys, defaults resolved. */
@@ -338,13 +338,11 @@ class self_heal_link_t final : public transport_t {
 
     link_state_t state_ = link_state_t::DORMANT; /**< @brief The machine (DIAL subset). */
     std::uint32_t refs_ = 0;                     /**< @brief Standing bindings (§4). */
-    std::uint64_t attempt_seq_ = 0; /**< @brief Concluded dial attempts — the op-waiter's
-                                                "my attempt finished" edge. */
-    std::uint64_t live_gen_ = 0;    /**< @brief Generation of `inner_` (0 = none). */
-    bool wake_requested_ = false;   /**< @brief A dormant link was demanded. */
-    bool publish_pending_ = false;  /**< @brief A non-worker thread changed `state_`;
-                                                the worker owes the publish. */
-    bool stop_ = false;             /**< @brief Terminal; set by @ref stop. */
+    std::uint64_t live_gen_ = 0;                 /**< @brief Generation of `inner_` (0 = none). */
+    bool wake_requested_ = false;                /**< @brief A dormant link was demanded. */
+    bool publish_pending_ = false;               /**< @brief A non-worker thread changed `state_`;
+                                                             the worker owes the publish. */
+    bool stop_ = false;                          /**< @brief Terminal; set by @ref stop. */
 
     sock_ref_t inner_;          /**< @brief The live socket (UP only). */
     sock_t* corpses_ = nullptr; /**< @brief Dead sockets awaiting reap — an intrusive list
@@ -360,8 +358,8 @@ class self_heal_link_t final : public transport_t {
     pthread_t worker_{};              /**< @brief Valid only while `%worker_started_` is set. */
     bool worker_started_ = false;     /**< @brief Lazy; joined by @ref stop. */
     detail::thread_id_t worker_id_{}; /**< @brief Re-entrancy guard: the worker's own
-                                                  publish fan-out must not block on the
-                                                  worker (see `ready_socket`). */
+                                                  publish fan-out must not kick a dial
+                                                  (see `ready_socket`). */
     /**
      * @brief Dial-generation mint. 64-bit ON PURPOSE (#1697): a generation is an identity a
      *        stale socket is compared against, so it must never alias, and the one bump per

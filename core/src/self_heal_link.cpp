@@ -198,30 +198,21 @@ void self_heal_link_t::send(std::span<const std::span<const std::byte>> head,
 }
 
 self_heal_link_t::sock_ref_t self_heal_link_t::ready_socket() {
-    std::unique_lock l(m_);
+    const std::lock_guard l(m_);
     if (stop_) return {};
     if (state_ == link_state_t::UP && inner_) return inner_;
-    // Ops on a down/RECONNECTING link fail fast with link-down (§4) — the self-heal loop
-    // is already driving toward UP; blocking here would stall the forward path on a dead
-    // peer for up to backoff × forever.
-    if (state_ == link_state_t::RECONNECTING) return {};
-    // DORMANT / DIALING: any op auto-wakes the link and waits for ONE connect attempt,
-    // bounded by connect_timeout (§4's sanctioned stall-on-dial) — except the worker's
-    // own publish fan-out, which must not block on the worker (a subscriber of this
-    // link's own liveness routed through this link would otherwise self-deadlock).
-    if (detail::this_thread_id() == worker_id_) return {};
-    if (state_ == link_state_t::DORMANT) {
+    // Every other state is link-down, answered at once (RFC-0014 Amendment 5): the op never
+    // waits, its frame is the caller's counted drop, and a DORMANT link is kicked toward UP on
+    // the worker. DIALING and RECONNECTING are already driving there. A caller that must
+    // bring the link up and wait awaits `up` on the connection vertex. The worker's own
+    // publish fan-out never kicks: a subscriber of this link's liveness routed through this
+    // link would otherwise re-dial the link it just put to rest.
+    if (state_ == link_state_t::DORMANT && detail::this_thread_id() != worker_id_) {
         wake_requested_ = true;
         ensure_worker_locked();
         cv_.notify_all();
     }
-    const std::uint64_t before = attempt_seq_;
-    const bool concluded = cv_.wait_for(
-        l, std::chrono::milliseconds(settings_.connect_timeout_ms),
-        [&] { return stop_ || (state_ == link_state_t::UP && inner_) || attempt_seq_ > before; });
-    if (!concluded || stop_) return {};  // deadline: the attempt is still in flight
-    if (state_ == link_state_t::UP && inner_) return inner_;
-    return {};  // the one attempt concluded not-up: link-down
+    return {};
 }
 
 void* self_heal_link_t::worker_entry(void* self) {
@@ -338,7 +329,6 @@ bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
         wire_socket(*sock.get());
     }
     l.lock();
-    ++attempt_seq_;
     if (stop_) {
         // Torn down concurrently: the just-built socket is a corpse (destroyed by stop()
         // outside m_), never adopted.
@@ -387,7 +377,6 @@ void self_heal_link_t::worker_main() {
                 state_ = refs_ > 0 ? link_state_t::RECONNECTING : link_state_t::DORMANT;
                 publish_unlocked(l, state_);
             }
-            cv_.notify_all();
             continue;
         }
         // state_ == RECONNECTING: one self-heal tick. Runs iff refcount > 0 (§4);
@@ -395,7 +384,6 @@ void self_heal_link_t::worker_main() {
         if (refs_ == 0) {
             state_ = link_state_t::DORMANT;
             publish_unlocked(l, link_state_t::DORMANT);
-            cv_.notify_all();
             continue;
         }
         const bool up = attempt_locked(l);
@@ -403,10 +391,8 @@ void self_heal_link_t::worker_main() {
         if (up) {
             state_ = link_state_t::UP;
             publish_unlocked(l, link_state_t::UP);
-            cv_.notify_all();
             continue;
         }
-        cv_.notify_all();  // op-waiters observe the concluded attempt (fail-fast)
         // The backoff wait between attempts — interruptible by stop and by the last
         // standing release (which dormants at the top of the next iteration).
         cv_.wait_for(l, std::chrono::milliseconds(settings_.backoff_ms),

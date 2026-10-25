@@ -347,12 +347,11 @@ machine managed automatically (RFC-0014).
 - **A `LISTEN` link ignores refcount.** Its listen socket stays bound and accepting
   until the vertex is retired — reachability is its purpose. Bindings routed through its
   accepted peers do not gate it.
-- **Any op auto-wakes a dormant `DIAL` link.** The op triggers a dial, waits for one
-  connect attempt bounded by `connect_timeout`, then serves or returns `link-down`. A
-  `write` may therefore stall on a dial; `await` on the connection vertex — which
-  resolves specifically when liveness reaches `up` and returns `link-down` on terminal
-  failure — is the explicit "bring it up and wait" verb for callers that will not
-  tolerate a data op blocking.
+- **An op never waits for a dial (RFC-0014 Amendment 5).** An op on a `dormant` or
+  `dialing` `DIAL` link fails at once with `link-down` and its frame is a counted drop; on a
+  `dormant` link it also starts one dial attempt. A caller that wants "bring it up and
+  wait" awaits `up` on the connection vertex — which resolves specifically when liveness
+  reaches `up` and returns `link-down` on terminal failure — and sends after it.
 - **Self-healing is the retry loop toward that target, and runs only while refcount >
   0.** Loss while in use re-dials with `backoff`. A one-shot op's transient hold is
   released **before** self-heal is evaluated, so a lone one-shot whose dial fails drops
