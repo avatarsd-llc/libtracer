@@ -51,11 +51,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   write in flight still returns at once, but its frame now waits in its vertex's lane ring
   (shaped by the vertex's retention depth, as on every POSIX stream link) or, for a frame from
   no vertex, in the control lane (8 frames, best-effort: the oldest is shed and counted in
-  `tx_drops`). The frame is built once and shared, so a waiting frame costs a reference, not a
-  slot that grows to the largest frame and keeps that memory. The retained send
+  `tx_drops`). **The RAM cost moves and can grow.** The client masks each frame, so a waiting
+  frame is its own private block from `memory.io` of up to `tx_bytes` + 14 B (the masked
+  header, plus the frame's small bookkeeping header), not a shared reference. A peer can hold
+  up to 8 control frames plus, per vertex lane, that vertex's retention depth, and each lane
+  that holds a frame also draws one ring block (16 B + 4 B per entry on rv32). With the default
+  `tx_bytes` of 2048, the control lane alone can hold about 16.5 KiB while a write is stalled.
+  Before, the link held 2 slots by default (`0` meant none at all), each growing to at most
+  `tx_bytes` and keeping that memory: 4 KiB at the defaults, held for the link's life. Now
+  nothing is held while no write is in flight: each block goes back as soon as its frame is
+  written or shed. The retained send
   (`send(head, value, lane)`) now carries its lane instead of lowering to the control lane.
   **Migration:** drop `CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH` from `sdkconfig` /
-  `sdkconfig.defaults`; depth now follows each vertex's retention, and nothing else changes.
+  `sdkconfig.defaults`. Depth now follows each vertex's retention. Size `memory.io` for the
+  stalled-peer worst case above, or lower `tx_bytes` or the retention depths of the vertices
+  this link carries.
 - **`esp_ws_client_config_t::defer_recv` is removed; every `esp_ws_client_link_t` defers its
   first dial ([#2249](https://github.com/avatarsd-llc/libtracer/issues/2249)).** The default
   (`false`) spawned the recv thread in the constructor, which dialled at once, so a peer's
