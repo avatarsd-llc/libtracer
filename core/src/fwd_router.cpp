@@ -20,6 +20,7 @@
 #include "libtracer/error.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/grammar.hpp"
+#include "libtracer/iov_table.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
@@ -2280,16 +2281,17 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // regions (remaining dst, selector, original src bytes, payload) — no payload copy. The
     // gather is written ONCE over the cursor seam (fwd_rebuild_t::gather); each region is
     // emitted via `for_each_span`, which yields exactly one sub-span for a contiguous source
-    // and one per straddled link for a rope. So the container is the only thing that varies:
-    // a stack `std::array` for the span path (ZERO heap, ADR-0038 inv. #2) vs a
-    // `mem::block_array_t` over the failable byte seam (#596) for the rope path (a link
-    // count is only known at run time).
-    if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>) {
-        // Contiguous source: each region is a single sub-span — a stack array sized by
+    // and one per straddled link for a rope. Both gather into one stack `std::array` first
+    // (ZERO heap, ADR-0038 inv. #2), and only a gather that overflows it is taken again into
+    // a `mem::block_array_t` over the failable byte seam (#596): a rope frame whose regions
+    // straddle a few links fits the stack as a contiguous one does (#2264).
+    {
+        // Each region is one sub-span per link it straddles — a stack array sized by
         // kFwdMaxIov, which is COUNTED from gather's emit sequence (see its docs), not a chosen
-        // budget. Every frame but one fits it: a relayed SUBSCRIBE request's reverse child
-        // (RFC-0029 §7.1) can emit up to 15 regions, and that cold frame is gathered again
-        // into the growable table below rather than sizing the hot arm's array for it.
+        // budget. Every contiguous frame but one fits it: a relayed SUBSCRIBE request's reverse
+        // child (RFC-0029 §7.1) can emit up to 15 regions, and that cold frame, like a rope
+        // frame split across many links, is gathered again into the growable table below
+        // rather than sizing the hot arm's array for it.
         std::array<std::span<const std::byte>, kFwdMaxIov> iov;
         std::size_t n = 0;
         rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
@@ -2307,10 +2309,10 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
             return;
         }
     }
-    // Rope source (or the span arm's overflow): a region may cross several links, so the
-    // sub-span count is only known at run time — gather into a NOTHROW block array drawn from
-    // the failable seam (#596). A `std::pmr::vector` here was a peer-reachable abort(): the
-    // element count is chosen by the sender (link count x region count), the growth is
+    // The stack array's overflow (a rope's regions across many links, or the cold relayed
+    // subscribe): the sub-span count is only known at run time — gather into a NOTHROW block
+    // array drawn from the failable seam (#596). A `std::pmr::vector` here was a peer-reachable
+    // abort(): the element count is chosen by the sender (link count x region count), the growth is
     // `operator new`, and on -fno-exceptions the throw is a reboot. This is the FORWARD path —
     // it sits behind no ACL, exactly like the RX decode (#588). Both TERMINUS REPLY tables took
     // the same migration in #1570 — see `gather_reply_iov` and its two call sites — so no
@@ -2342,9 +2344,13 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
 
 namespace {
 
+/** @brief A terminus reply's scatter-gather table: the caller's stack entries first (#2264). */
+using reply_iov_t = iov_table_t<std::span<const std::byte>>;
+
 /**
  * @brief Gather a terminus reply's links into @p iov — the reply egress's scatter-gather
- *        table, on the ADR-0065 failable seam (#1570).
+ *        table: the caller's stack entries while the reply has at most @ref kMaxInlineIov
+ *        links, a block on the ADR-0065 failable seam past that (#1570, #2264).
  *
  * The LAST migratable `-fno-exceptions` probe window on the reply path. Both termini used to
  * build this table as a `std::vector` through `rope_t::try_to_iovec`, whose growth goes
@@ -2356,17 +2362,19 @@ namespace {
  * and took the router's own EGRESS tables there; this is the reply path catching up.
  *
  * Sized to the rope, with no synthetic cap: a composed-root reply has as many links as the
- * read produced, so a fixed-size array would either drop every composed read's reply or need
- * a heap arm behind it anyway. One refusable `try_alloc` per gather, no window.
- * @retval false The table could not be grown — the caller drops the reply and the client
- *               retries. Never an abort, at any reply size.
+ * read produced, so the stack entries serve the common 1-3 link reply with no draw and a
+ * larger one takes one refusable `try_alloc`, no window.
+ * @return The filled table, or empty when it could not be grown — the caller drops the reply
+ *         and the client retries. Never an abort, at any reply size. A reply here has at least
+ *         one link, so empty means refused.
  */
-[[nodiscard]] bool gather_reply_iov(const view::rope_t& reply,
-                                    mem::block_array_t<std::span<const std::byte>>& iov) {
-    if (!iov.reserve(reply.link_count())) return false;
-    for (const view_t& l : reply.links())
-        if (!iov.push_back(l.bytes())) return false;
-    return true;
+[[nodiscard]] std::span<const std::span<const std::byte>> gather_reply_iov(
+    const view::rope_t& reply, reply_iov_t& iov) {
+    std::span<const std::byte>* const out = iov.acquire(reply.link_count());
+    if (out == nullptr) return {};
+    std::size_t n = 0;
+    for (const view_t& l : reply.links()) out[n++] = l.bytes();
+    return {out, n};
 }
 
 }  // namespace
@@ -2466,8 +2474,10 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // is a transient cost of THIS peer's request, charged on the receive thread, so it
         // belongs where the arena is charged — one peer's replies cannot then exhaust the
         // control budget the whole node's mutations share.
-        mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
-        if (!gather_reply_iov(*reply, iov)) {
+        std::array<std::span<const std::byte>, kMaxInlineIov> inline_iov;
+        reply_iov_t iov(inline_iov, rx_for(inbound_ctx));
+        const auto table = gather_reply_iov(*reply, iov);
+        if (table.empty()) {
             // The rx source refused the table — the same source the reply head would need,
             // so the answer is the stack-built one (#1612). `reply` is released with the
             // arena; the requester gets BACKPRESSURE and retries.
@@ -2476,7 +2486,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
                                graph::status_t::BACKPRESSURE);
             return;
         }
-        in->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
+        in->send(table);
     } else if (inbound_name.empty()) {
         // This node originated the request (`originate`) and terminates it: there is no link
         // to send the reply over, so it goes where a reply arriving home would — the record.
@@ -2542,14 +2552,16 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         // growth failure. This tier is where the unbounded case actually lives — a rope-tier
         // terminus resolves composed reads straight off the rope — so the absence of a fixed
         // bound here is load-bearing, not defensive.
-        mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
-        if (!gather_reply_iov(*reply, iov)) {
+        std::array<std::span<const std::byte>, kMaxInlineIov> inline_iov;
+        reply_iov_t iov(inline_iov, rx_for(inbound_ctx));
+        const auto table = gather_reply_iov(*reply, iov);
+        if (table.empty()) {
             count_drop(reply_iov_dropped_);
             emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, *in,
                                graph::status_t::BACKPRESSURE);
             return;
         }
-        in->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
+        in->send(table);
     }
 }
 
@@ -2958,12 +2970,14 @@ void fwd_router_t::answer_await(pending_await_t& p) {
     }
     // The waiter's own source, not its link's: the fire may land after the link it arrived
     // over was removed, when nothing may be read through that link any more (#1941).
-    mem::block_array_t<std::span<const std::byte>> iov{*p.source};
-    if (!gather_reply_iov(reply, iov)) {
+    std::array<std::span<const std::byte>, kMaxInlineIov> inline_iov;
+    reply_iov_t iov(inline_iov, *p.source);
+    const auto table = gather_reply_iov(reply, iov);
+    if (table.empty()) {
         count_drop(reply_iov_dropped_);
         return;
     }
-    link->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
+    link->send(table);
 }
 
 }  // namespace tr::net

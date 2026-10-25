@@ -16,6 +16,10 @@
  * NOT every POSIX transport in the tree: quic and webtransport override send(iov)
  * and gather into one owned msquic send buffer instead (msquic_endpoint.hpp), so
  * they never build an ::iovec table and never reach this store.
+ *
+ * The router's terminus reply gather uses it too (#2264): a reply of up to
+ * kMaxInlineIov links is gathered on the stack, and only a wider one (a
+ * composed-root read) draws its table from the receiving link's source.
  */
 #pragma once
 
@@ -28,7 +32,7 @@
 /**
  * @file
  * @brief @ref tr::net::iov_table_t — the nothrow scatter-gather entry table shared by the
- *        WS, TCP and UDP egress paths (#848).
+ *        WS, TCP and UDP egress paths (#848) and the router's terminus reply (#2264).
  */
 
 namespace tr::net {
