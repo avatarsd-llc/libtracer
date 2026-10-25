@@ -26,9 +26,9 @@ namespace tr::graph {
 
 /**
  * @brief The chain cache's capacity in bytes for this build: @ref default_config_t::kPathChainBytes
- *        rounded up to whole 8-byte words, the unit the cache is copied in.
+ *        rounded up to whole 4-byte words, the unit the cache is copied in.
  */
-inline constexpr std::size_t kPathChainCapacity = (config_t::kPathChainBytes + 7) / 8 * 8;
+inline constexpr std::size_t kPathChainCapacity = (config_t::kPathChainBytes + 3) / 4 * 4;
 
 /**
  * @brief A graph-owned path object (RFC-0030 §5): what the host API addresses a vertex through.
@@ -121,20 +121,30 @@ class path_object_t {
    private:
     friend class graph_t;
 
-    /** @brief Element 0 as one word: index in the low half, generation in the high half. */
-    static constexpr std::uint64_t kNoElement0 = ~std::uint64_t{0};
-    static constexpr std::size_t kChainWords = kPathChainCapacity / 8;
+    static constexpr std::size_t kChainWords = kPathChainCapacity / 4;
 
+    // Every shared field is a 32-bit atomic, lock-free on every target (a 64-bit atomic is a
+    // libcall critical section on a 32-bit MCU, which an ISR door could deadlock on). Element 0
+    // and the chain are written under `seq`, so a reader takes both words of the pair from one
+    // write.
     struct body_t {
-        mem::block_source_t* src;        // who serves this block
-        std::size_t block_bytes;         // its size, for the sized release
-        const std::byte* key;            // the canonical bytes: this block's tail, or borrowed ROM
-        std::uint32_t key_len;           // at most kMaxPathBytes
-        std::atomic<std::uint32_t> seq;  // even: stable; odd: a learn is writing
-        std::atomic<std::uint64_t> element0;   // kNoElement0 until a door resolves
+        mem::block_source_t* src;              // who serves this block
+        std::size_t block_bytes;               // its size, for the sized release
+        const std::byte* key;                  // the canonical bytes: this block's tail, or ROM
+        std::uint32_t key_len;                 // at most kMaxPathBytes
+        std::atomic<std::uint32_t> seq;        // even: stable; odd: a writer holds it
+        std::atomic<std::uint32_t> e0_index;   // element 0's slot index
+        std::atomic<std::uint32_t> e0_gen;     // its generation; kGenerationSaturated: none
         std::atomic<std::uint32_t> chain_len;  // 0: no chain
-        std::array<std::atomic<std::uint64_t>, kChainWords> chain;  // inline chain cache
+        std::array<std::atomic<std::uint32_t>, kChainWords> chain;  // inline chain cache
     };
+    static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
+                  "a path object's door reads only lock-free atomics");
+
+    // The writer half of the seqlock: take `seq` odd, or answer false when another writer holds
+    // it (the cache is soft, so the losing write is dropped). `end_write` publishes.
+    [[nodiscard]] bool begin_write(std::uint32_t& s) const noexcept;
+    void end_write(std::uint32_t s) const noexcept;
 
     explicit path_object_t(body_t* b) noexcept : b_(b) {}
     void set_element0(std::optional<vertex_slot_t> e) const noexcept;
