@@ -533,7 +533,8 @@ void test_subscribers_indexed_write_discriminates() {
     // index_mode=WILDCARD, so `path_t::parse("…[*]")` rejects it and only a decoded wire
     // FIELD produces this shape. Build it the way the decoder does — `indexed` set,
     // `wildcard` set, `index` left at 0 — which is exactly #579's defect.
-    auto star_fp = path_t::parse("/sensor/temp:subscribers[0]")->field();
+    const path_t star_path("/sensor/temp:subscribers[0]");  // the field's names view this path
+    auto star_fp = star_path.field();
     star_fp.steps[0].wildcard = true;
     const auto star = g.write(src, star_fp, subscriber_tlv("sink_a"));
     check(!star && star.error() == status_t::INVALID_PATH, "[*] on a WRITE is INVALID_PATH");

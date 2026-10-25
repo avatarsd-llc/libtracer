@@ -268,7 +268,12 @@ class path_t {
     [[nodiscard]] std::span<const std::byte> key() const noexcept {
         return {block_ + payload_off(), key_len_};
     }
-    /** @brief The parsed `:field` tail (empty when the path addresses the vertex value). */
+    /**
+     * @brief The parsed `:field` tail (empty when the path addresses the vertex value).
+     *
+     * Its step names view this path's block, and so does a copy of it: hold the path for as
+     * long as the field path is used (`auto f = path_t::parse(t)->field();` dangles).
+     */
     [[nodiscard]] const field_path_t& field() const noexcept;
     /** @brief The number of segments in the path. */
     [[nodiscard]] std::size_t segment_count() const noexcept { return segments_; }
