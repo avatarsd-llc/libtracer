@@ -768,6 +768,23 @@ class child_registry_t {
     }
 
     /**
+     * @brief True when @p name was registered and @ref erase has since removed it — a TOMBSTONE,
+     *        not a name this table never held (#2302).
+     *
+     * Cold for the reason @ref entry_by_name is: the router asks it only for a frame that
+     * carries no receive context, which is the public by-name door.
+     */
+    [[nodiscard, gnu::cold, gnu::noinline]] bool tombstoned(std::string_view name) const {
+        bool dead = false;
+        for_each([&](const child_t& c) {
+            if (c.name != name) return false;
+            dead = !c.live();
+            return true;
+        });
+        return dead;
+    }
+
+    /**
      * @brief The live slot whose connection vertex is graph slot @p index (nullptr if none) —
      *        the door a PAIR names (RFC-0029 §6 step 3).
      *
