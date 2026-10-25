@@ -15,6 +15,7 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -122,6 +123,39 @@ void check_exclusion(const char* label) {
           "every guarded bump counted exactly once");
 }
 
+/**
+ * @brief Contenders that spin out BLOCK, and the release wakes them (#2307).
+ *
+ * The main thread holds the one lock long enough for every contender to spend its spin budget
+ * and block in the wait; then it releases. Each contender must get through and bump the
+ * counter under the lock. A release that failed to wake a blocked contender hangs here, and
+ * the test's timeout reports it. The sleep is the TEST's, never the guard's.
+ */
+template <class G>
+void check_blocked_contenders_wake(const char* label) {
+    constexpr int kContenders = 3;
+    std::uint64_t counter = 0;
+    std::atomic<int> started{0};
+    G& lock = G::for_address(&counter);
+    lock.lock();
+    std::vector<std::thread> ts;
+    for (int t = 0; t < kContenders; ++t) {
+        ts.emplace_back([&] {
+            started.fetch_add(1);
+            const tr::guard_scope_t<G> section(&counter);
+            counter = counter + 1;
+        });
+    }
+    while (started.load() < kContenders) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    check(counter == 0, "no contender entered while the window was held");
+    lock.unlock();
+    for (auto& t : ts) t.join();
+    std::printf("  %s: %llu of %d blocked contenders got through\n", label,
+                static_cast<unsigned long long>(counter), kContenders);
+    check(counter == kContenders, "every blocked contender was woken and entered once");
+}
+
 }  // namespace
 
 int main() {
@@ -132,5 +166,7 @@ int main() {
     check_exclusion<tr::mutex_guard_t>("64 x 64 B (default)");
     check_exclusion<tr::basic_mutex_guard_t<0, 16>>("16 x 1 B, packed");
     check_exclusion<tr::basic_mutex_guard_t<0, 1>>("1 x 1 B, one lock");
+    check_blocked_contenders_wake<tr::mutex_guard_t>("64 x 64 B (default)");
+    check_blocked_contenders_wake<tr::basic_mutex_guard_t<0, 1>>("1 x 1 B, one lock");
     return tr::testing::summary("guard_sizing");
 }

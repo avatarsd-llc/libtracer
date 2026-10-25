@@ -222,6 +222,9 @@ int main() {
     (void)no_livelock<tr::graph::basic_single_writer_slot_t<test_mutex_guard_t>>(
         "single_writer_slot_t", work, watch);
     (void)no_livelock<tr::graph::hazard_slot_t>("hazard_slot_t", work, watch);
+    // The real host guard (#2307): its contender must give the CPU back to a preempted holder.
+    (void)no_livelock<tr::graph::basic_single_writer_slot_t<tr::mutex_guard_t>>(
+        "single_writer_slot_t<mutex_guard_t>", work, watch);
 
     return tr::testing::summary("lkv_slot_inversion");
 }
