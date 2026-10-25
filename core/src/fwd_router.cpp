@@ -1949,6 +1949,17 @@ template <class Cursor, class Observe, class Reject, class Terminus, class Reply
     // contiguously and vanished when the same bytes arrived as a multi-link rope. The span
     // arm's disposition is the one kept: FWD-classified ⇒ terminus, never control.
     if (static_cast<type_t>(cur.byte_at(0)) != type_t::FWD) return false;
+    // A frame from a REMOVED child is dropped here, before any arm can forward or apply it
+    // (#2302). Two doors reach a removed child: its transport may still deliver through the
+    // receive ctx `add_child` installed, which `remove_child` tombstoned (#884), and an SDK host
+    // may still call the by-name door with its name. Left alone, the first went out with the
+    // dead child's mount run in `src`, and the second fell into the fallback for a name never
+    // registered, growing `src` by the whole name packed as ONE segment. The reply side already
+    // answers a tombstoned ctx "not at all" (`reply_link`); this is the request side catching
+    // up. A frame with a ctx pays one acquire load; only the ctx-less door asks the registry.
+    if (inbound_ctx != nullptr ? inbound_ctx->retired.load(std::memory_order_acquire)
+                               : registry_.tombstoned(inbound_name))
+        return true;
     // Read-only observer (tests/ACL seam) — wants the tree. Span-only: no rope caller has
     // a contiguous frame to decode here, so its instantiation of this driver passes a no-op.
     observe();

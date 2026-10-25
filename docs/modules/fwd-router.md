@@ -176,6 +176,7 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
                      bool live() const noexcept; };
     bool add(std::string name, transport_t& link);        // rebinds; false = no slot
     bool erase(std::string_view name);                    // tombstones in place
+    bool tombstoned(std::string_view name) const;         // erased, not never-held (#2302)
     // ONE pass, each slot matched against the prefix of its OWN seg_count (#523) — so a
     // mount of any width resolves and there is no per-width retry. Longest match wins.
     template <class SegAt> const child_t* longest_prefix(SegAt&& at) const;  // the demux
@@ -446,6 +447,11 @@ Inside the process a link is addressed by its connection vertex's handle (the ro
   create/remove churn on a stable name set neither leaks a context nor lengthens the chain the
   bound hop walks. `receiver_ctx_count()` is the assertable form of the second, the twin of
   `child_registry_t::size()` — which has had this rule since #494/#521.
+- **A removed child's frames stop at the ingress (#2302).** A FWD frame that still arrives
+  through a tombstoned receiver context, or through `on_frame` under a removed name
+  (`child_registry_t::tombstoned`), is dropped before any arm can forward or apply it. Only a
+  name the registry never held takes the by-name fallback, where `src` grows by the bare
+  inbound name.
 - **A sink's `ctx` must outlive every possible delivery.** Sinks fire on transport receive threads,
   possibly several concurrently, and clearing a sink is the only thing that stops future calls.
 - **`materialize()` returns an owner, not a span.** Holding `reply.materialize().bytes()` past the

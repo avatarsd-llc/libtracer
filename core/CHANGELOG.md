@@ -201,6 +201,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   receives. LISTEN links are unchanged.
 ### Fixed
 
+- **`fwd_router_t` drops a frame from a removed child (#2302).** After `remove_child`, a FWD
+  frame still delivered through the receiver `add_child` installed, or pushed through
+  `on_frame` under the removed name, was forwarded (by name with `src` grown by the whole
+  mount name as ONE segment, a route no reply resolves) or applied at the terminus. It is now
+  dropped at the ingress, uncounted, the way the reply side already treats a removed child. A
+  name the registry never held keeps the by-name fallback. New
+  `child_registry_t::tombstoned(name)` tells the two apart.
 - **`udp_transport_t::dropped_tx` counts a datagram the socket refuses (#2279).** A `sendto` or
   `sendmsg` that failed or sent short (a full socket buffer, `EMSGSIZE`, a shut socket) used
   to lose the frame without counting it, on all three send paths (`send(span)`, `send(iov)`,
