@@ -1143,15 +1143,18 @@ class WholeBinaryModeReplay(unittest.TestCase):
     `paired_samples` and the row's own verdict. Each file a run executes draws one placement
     when it is first run, slow (x1.20) with probability 1/4; a placement is the file's, not
     the bytes'. Run from the build files, a slow candidate file fails; run from a fresh copy
-    per run (#2215), byte-identical arms pass ten sessions of ten."""
+    per run (#2215), byte-identical arms pass ten sessions of ten. The twin, a candidate whose
+    code is x1.20 slower on every run, is an expected failure on main's flat rule (#2205)."""
 
     KEY = "chain-terminus/64/1/1"
     SLOW, P_SLOW = 1.20, 0.25
 
-    def session(self, seed: int, copies: bool, slow_build: str | None = None) -> list[str]:
-        """@brief One gate session of the chain step over byte-identical arms: the failing
-        legs of @ref KEY. @p slow_build names the arm whose build file is on the slow
-        placement (else it draws like any other file)."""
+    def session(self, seed: int, copies: bool, slow_build: str | None = None,
+                cand_code: float = 1.0) -> list[str]:
+        """@brief One gate session of the chain step: the failing legs of @ref KEY. The arms
+        are byte-identical unless @p cand_code slows every candidate run by that factor (a real
+        regression, on top of its placement). @p slow_build names the arm whose build file is
+        on the slow placement (else it draws like any other file)."""
         placement: dict[pathlib.Path, float] = {}
 
         def fake(argv, timeout, score_pressure=True, cpus=None):
@@ -1161,7 +1164,7 @@ class WholeBinaryModeReplay(unittest.TestCase):
                 rng = random.Random(f"{seed}:{exe.relative_to(root)}")
                 placement[exe] = (self.SLOW if arm == slow_build and arm
                                   else self.SLOW if rng.random() < self.P_SLOW else 1.0)
-            x = placement[exe]
+            x = placement[exe] * (cand_code if root / "c" in exe.parents else 1.0)
             line = "\t".join(["RESULT", "libtracer", "chain-terminus", "64", "1", "1",
                               "1000000", f"{2_800_000 / x:.0f}", "0", f"{350 * x:.1f}", "400",
                               f"{360 * x:.1f}"])
@@ -1197,6 +1200,18 @@ class WholeBinaryModeReplay(unittest.TestCase):
     def test_byte_identical_arms_pass_ten_of_ten_from_fresh_copies(self):
         for seed in range(10):
             self.assertEqual(self.session(seed, copies=True, slow_build="c"), [], f"session {seed}")
+
+    # EXPECTED FAILURE until #2205 is ruled: a flat or capped leg asks for disjoint [min..max]
+    # ranges and an effect on the arms' medians, and one slow copy in either arm defeats them,
+    # so this uniform x1.20 regression passes in 9 of these 10 sessions. The fix changes the
+    # rule the ruling on #1874 keeps for those legs, so it waits for the maintainer.
+    @unittest.expectedFailure
+    def test_a_real_x120_regression_still_fails_from_fresh_copies(self):
+        """The twin: copies and placement noise do not hide a candidate whose code is x1.20
+        slower on every run; it fails p50 in all ten sessions."""
+        for seed in range(10):
+            self.assertIn("p50_ns", self.session(seed, copies=True, cand_code=self.SLOW),
+                          f"session {seed}")
 
 
 class MissingGatedKeysFail(unittest.TestCase):
