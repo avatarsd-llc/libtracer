@@ -177,7 +177,6 @@ std::vector<std::byte> b_field_subscribers_index(std::uint32_t n) {
 }
 
 using tr::testing::b_fwd;
-using tr::testing::b_fwd_mint;
 
 /** @brief Bind one wire subscriber at @p v arriving over @p link, tagged @p marker. */
 bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_view marker) {
@@ -1228,7 +1227,7 @@ void test_refused_route_reclaims_the_edge() {
  *        DISCLOSURE — a recycled session name no longer inherits the dead session's stream.
  *
  * Two nodes, real frames on one call stack. A holds the accepting bus (sessions get #1254
- * identity anchors via the arrival notifier); B is the producer. A mint-flagged subscribe
+ * identity anchors via the arrival notifier); B is the producer. A subscribe
  * from session p0 makes the forwarding hop (A) contribute p0's anchor element, and B
  * completes + stores the reverse list with the edge. Every claim follows the #1223
  * refutation rule: the POSITIVE control (the legitimate session receives its own publish,
@@ -1253,14 +1252,15 @@ void test_reverse_mint_closes_the_disclosure() {
     vertex_handle_t sensor = gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
 
     // S1 arrives as p0 — the accepting listener fires the arrival notifier, so p0 holds a
-    // #1254 identity anchor on A — and subscribes with the MINT flag set. A (the forwarding
-    // hop) creates the reverse list with p0's anchor element; B completes it with its own
-    // connection-vertex element and stores both with the edge.
+    // #1254 identity anchor on A — and subscribes, with no flag (RFC-0029 §7.1: every hop
+    // grows the list unconditionally, #2245). A (the forwarding hop) creates the reverse list
+    // with p0's anchor element; B completes it with its own connection-vertex element and
+    // stores both with the edge.
     bus.peer_arrive("p0");
     check(ga.find_session_anchor(fwd_router_t::session_anchor_id("srv", "p0")).has_value(),
           "p0's identity anchor exists on A");
-    bus.inject_peer("p0", b_fwd_mint(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
-                                     b_field_subscribers_append(), b_subscriber("s1")));
+    bus.inject_peer("p0", b_fwd(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
+                                b_field_subscribers_append(), b_subscriber("s1")));
     // RFC-0024 §7.1 amendment 2, on the wire: A's forwarded request carries the reverse list
     // as a TRAILING CHILD OF ITS OWN TYPE — `PATH_REF_REVERSE` (0x15), not a positionally
     // identified `PATH_REF`. Asserted here rather than only through the behaviour below,
@@ -1269,7 +1269,7 @@ void test_reverse_mint_closes_the_disclosure() {
     {
         const auto& lg = a_to_b.log();
         const bool forwarded = !lg.empty();
-        check(forwarded, "A forwarded the mint-flagged subscribe to B");
+        check(forwarded, "A forwarded the subscribe to B");
         // GUARDED, not assumed (#1438): every read below is off `lg.back()`, so on the one
         // build where the forward does not happen this block used to run straight off an
         // empty vector and SEGFAULT one line after the check that had already reported the
@@ -1282,13 +1282,13 @@ void test_reverse_mint_closes_the_disclosure() {
             const auto dec = tr::wire::decode(lg.back());
             reverse_is_last = dec.has_value() && !dec->children.empty() &&
                               dec->children.back().type == tr::wire::type_t::PATH_REF_REVERSE &&
-                              dec->children.back().payload.size() == 8;
+                              dec->children.back().payload.size() == tr::wire::kPathPairRecordBytes;
             if (dec.has_value())
                 for (const auto& c : dec->children)
                     if (c.type == tr::wire::type_t::SUBSCRIBER) has_subscriber = true;
         }
         check(reverse_is_last,
-              "the forwarded request's LAST child is a one-element PATH_REF_REVERSE (0x15)");
+              "the forwarded request's LAST child is a one-PAIR PATH_REF_REVERSE (0x15)");
         check(has_subscriber, "the forwarded request still carries its SUBSCRIBER payload");
     }
     const auto subs0 = tr::testing::read_subscribers(gb, sensor);
@@ -1346,14 +1346,87 @@ void test_reverse_mint_closes_the_disclosure() {
     check(subs2.has_value() && subs2->empty(),
           "the stale edge is reclaimed by the bound refusal (steps 4+5 compose)");
 
-    // And the recycled session is a fully working session: its own mint-flagged subscribe
+    // And the recycled session is a fully working session: its own subscribe
     // binds at the REVIVED generation and deliveries flow to it.
-    bus.inject_peer("p0", b_fwd_mint(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
-                                     b_field_subscribers_append(), b_subscriber("s2")));
+    bus.inject_peer("p0", b_fwd(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
+                                b_field_subscribers_append(), b_subscriber("s2")));
     p0_seen = bus.peer("p0").count();
     check(gb.write(sensor, make_value(b_value_u8(0x33))).has_value(), "publish 3");
     check(bus.peer("p0").count() == p0_seen + 1,
           "the successor's OWN subscription delivers at the revived generation");
+}
+
+/**
+ * @brief #2245: a TWO-hop subscribe learns its PAIR chain with no flag, and the next delivery
+ *        is sent by PAIR at every hop — no NAME descent anywhere on the way back.
+ *
+ * Origin session p0 on A's bus, A — M — B, B the producer. The subscribe is canonical and
+ * flagless: A prepends p0's anchor PAIR to the reverse list it creates (seeded with p0's
+ * empty `src`), M prepends its PAIR for the link the request arrived on, and B stores the
+ * chain behind its own PAIR. The descent count is the number of delivery hops whose `dst`
+ * leads with a NAME record: each of those is a mount descent, and the claim is that there
+ * are none. The positive control is p0 receiving the publish.
+ */
+void test_two_hop_subscribe_learns_its_chain() {
+    std::printf("a two-hop subscribe learns its PAIR chain with no flag (#2245):\n");
+    graph_t ga, gm, gb;
+    fwd_router_t ra(ga), rm(gm), rb(gb);
+    pipe_link_t a_to_m, m_to_a, m_to_b, b_to_m;
+    a_to_m.set_peer(m_to_a);
+    m_to_a.set_peer(a_to_m);
+    m_to_b.set_peer(b_to_m);
+    b_to_m.set_peer(m_to_b);
+    fake_bus_t bus;
+    // Each connection vertex exists before its link attaches (see the case above).
+    (void)ga.register_vertex(path_t("/m"), role_t::STORED_VALUE);
+    (void)gm.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    (void)gm.register_vertex(path_t("/b"), role_t::STORED_VALUE);
+    (void)gb.register_vertex(path_t("/m"), role_t::STORED_VALUE);
+    (void)ra.attach_link("srv", bus);
+    (void)ra.attach_link("m", a_to_m);
+    (void)rm.attach_link("a", m_to_a);
+    (void)rm.attach_link("b", m_to_b);
+    (void)rb.attach_link("m", b_to_m);
+    const vertex_handle_t sensor = gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
+
+    bus.peer_arrive("p0");
+    bus.inject_peer("p0", b_fwd(fwd_op_t::WRITE, b_path({"m", "b", "sensor"}), b_path({}),
+                                b_field_subscribers_append(), b_subscriber("s1")));
+    // On the wire M -> B: the reverse list holds TWO PAIRs (M's, then A's), +3 B per element
+    // over the RFC-0024 8-byte form (RFC-0029 §7.1).
+    {
+        const auto& lg = m_to_b.log();
+        // An empty log decodes nothing, so the checks below fail rather than read past it.
+        const auto dec =
+            tr::wire::decode(lg.empty() ? std::span<const std::byte>{} : std::span(lg.back()));
+        check(dec.has_value() && !dec->children.empty() &&
+                  dec->children.back().type == tr::wire::type_t::PATH_REF_REVERSE &&
+                  dec->children.back().payload.size() == 2 * tr::wire::kPathPairRecordBytes,
+              "M forwards a two-PAIR reverse list, with no flag on the request");
+        check(dec.has_value() && !dec->children.empty() &&
+                  std::to_integer<std::uint8_t>(dec->children[0].payload[0]) ==
+                      static_cast<std::uint8_t>(fwd_op_t::WRITE),
+              "and the op byte is a bare WRITE — no bit 7 anywhere");
+    }
+    const auto subs = tr::testing::read_subscribers(gb, sensor);
+    check(subs.has_value() && subs->size() == 1, "B holds the remote edge");
+
+    const std::size_t p0_seen = bus.peer("p0").count();
+    const std::size_t bm = b_to_m.log().size();
+    const std::size_t ma = m_to_a.log().size();
+    check(gb.write(sensor, make_value(b_value_u8(0x5A))).has_value(), "publish");
+    check(bus.peer("p0").count() == p0_seen + 1, "positive control: p0 receives the publish");
+    const auto pair_headed = [](const std::vector<std::byte>& frame, std::size_t pairs) {
+        const auto dec = tr::wire::decode(frame);
+        return dec.has_value() && dec->children.size() >= 2 &&
+               dec->children[1].type == tr::wire::type_t::PATH &&
+               dec->children[1].payload.size() == pairs * tr::wire::kPathPairRecordBytes &&
+               tr::wire::path_pair_at(dec->children[1].payload, 0).has_value();
+    };
+    std::size_t descents = 0;
+    if (b_to_m.log().size() != bm + 1 || !pair_headed(b_to_m.log().back(), 2)) ++descents;
+    if (m_to_a.log().size() != ma + 1 || !pair_headed(m_to_a.log().back(), 1)) ++descents;
+    check(descents == 0, "B -> M rides two PAIRs and M -> A one: zero NAME descents");
 }
 
 /**
@@ -1453,11 +1526,11 @@ void test_late_departure_leaves_the_successor_anchor() {
 
 /**
  * @brief #2234: a session anchor answers only for the tenancy it holds. A frame still in
- *        flight from a departed session mints no element for its successor's anchor, and the
+ *        flight from a departed session gets no PAIR for its successor's anchor, and the
  *        successor's own frame does.
  */
 void test_a_departed_tenancy_mints_no_successor_element() {
-    std::printf("#2234 — a departed tenancy mints nothing for the slot's successor:\n");
+    std::printf("#2234 — a departed tenancy gets no PAIR for the slot's successor:\n");
     graph_t ga, gb;
     fwd_router_t ra(ga), rb(gb);
     pipe_link_t a_to_b, b_to_a;
@@ -1469,17 +1542,24 @@ void test_a_departed_tenancy_mints_no_successor_element() {
     (void)gb.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     (void)rb.attach_link("a", b_to_a);
     (void)gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
-    /** @brief Whether A's last forwarded request carries a reverse list. */
-    const auto carries_reverse = [&] {
+    /**
+     * @brief Whether A's last forwarded request's reverse list STARTS with a PAIR. Every hop
+     *        builds the list (RFC-0029 §7.1), so it is always there; a hop with no PAIR to give
+     *        starts it with its NAME run instead (§6.2).
+     */
+    const auto reverse_starts_with_pair = [&] {
         const auto& lg = a_to_b.log();
         if (lg.empty()) return false;
         const auto dec = tr::wire::decode(lg.back());
-        return dec.has_value() && !dec->children.empty() &&
-               dec->children.back().type == tr::wire::type_t::PATH_REF_REVERSE;
+        if (!dec.has_value() || dec->children.empty() ||
+            dec->children.back().type != tr::wire::type_t::PATH_REF_REVERSE)
+            return false;
+        const auto& body = dec->children.back().payload;
+        return body.size() >= 2 && body[0] == std::byte{0x00} && body[1] == std::byte{0x16};
     };
     const auto subscribe = [&](std::string_view peer) {
-        bus.inject_peer(peer, b_fwd_mint(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
-                                         b_field_subscribers_append(), b_subscriber("s")));
+        bus.inject_peer(peer, b_fwd(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
+                                    b_field_subscribers_append(), b_subscriber("s")));
     };
 
     bus.peer_arrive("p3~7", 7);
@@ -1487,9 +1567,10 @@ void test_a_departed_tenancy_mints_no_successor_element() {
     const std::size_t before = a_to_b.log().size();
     subscribe("p3~7");
     check(a_to_b.log().size() == before + 1, "A forwarded the departed tenancy's request");
-    check(!carries_reverse(), "and stripped its reverse list: the anchor is gen 8's");
+    check(!reverse_starts_with_pair(),
+          "and its reverse list starts with no PAIR: the anchor is gen 8's");
     subscribe("p3~8");
-    check(carries_reverse(), "positive control: gen 8's own request carries its element");
+    check(reverse_starts_with_pair(), "positive control: gen 8's own request carries its PAIR");
 }
 
 int main() {
@@ -1520,6 +1601,7 @@ int main() {
     test_departure_notifier_seam();
     test_refused_route_reclaims_the_edge();
     test_reverse_mint_closes_the_disclosure();
+    test_two_hop_subscribe_learns_its_chain();
     test_arrival_retenants_a_recycled_name();
     test_late_departure_leaves_the_successor_anchor();
     test_a_departed_tenancy_mints_no_successor_element();

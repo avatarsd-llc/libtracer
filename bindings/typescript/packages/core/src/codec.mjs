@@ -24,10 +24,11 @@
  * 0x0E SPEC is the in-band vertex-creation spec. 0x0F FWD and 0x10 FIELD are the
  * remote-operation frames (RFC-0004 / ADR-0035, the v1 fast-track range
  * 0x0F-0x1F). All are structured (opt.PL=1) and handled generically by the codec.
- * 0x14 PATH_REF is the bound-path address form (RFC-0024 §4) and 0x15
- * PATH_REF_REVERSE the reverse-direction list a mint-flagged request accumulates
- * (§7.1 amendment 2) — the two exceptions: their body is a bare fixed-stride
- * 8-byte record array (opt.PL=0), so the decoder checks their shape by type.
+ * 0x14 PATH_REF is the retired RFC-0024 bound-path form, refused as an address
+ * (RFC-0029 S1); it is the one exception: its body is a bare fixed-stride 8-byte
+ * record array (opt.PL=0), so the decoder checks its shape by type. 0x15
+ * PATH_REF_REVERSE is the reverse-direction list every forwarding hop of a
+ * subscribe grows (RFC-0029 §7.1): a `PATH` body of PAIR and NAME records.
  *
  * @readonly
  * @enum {number}
@@ -53,16 +54,15 @@ export const TYPE = Object.freeze({
 });
 
 /**
- * @brief True for either bound-path code — the two types whose body is a fixed-stride 8-byte
- * element array rather than a self-describing payload (RFC-0024 §4.2, §7.1 amendment 2).
- *
- * `0x15` sits adjacent to `0x14` so this stays one masked compare on the per-TLV parse path.
+ * @brief True for `0x14 PATH_REF` only — the one type whose body is a fixed-stride 8-byte
+ * element array rather than a self-describing payload (RFC-0024 §4.2). `0x15` carries a
+ * `PATH` body since RFC-0029 §7.1, so no shape rule applies to it here.
  *
  * @param {number} typeB  the TLV's type byte
  * @returns {boolean} true when the bound-path body shape rules apply (RFC-0024 §4.2/§4.3)
  */
 export function isPathRefType(typeB) {
-  return (typeB & 0xfe) === TYPE.PATH_REF;
+  return typeB === TYPE.PATH_REF;
 }
 
 /** @brief The `PATH_REF` element stride — 8 bytes, `(u32 index, u32 generation)` LE (RFC-0024 §4.4). */

@@ -1,0 +1,12 @@
+{
+  "name": "reply-src-accumulates-forward-route-name",
+  "category": "fwd",
+  "hex": "0F403B00010001000306000900087265706C792D657006001800036E65740675706C696E6B01620016080300000001000000010001000001000400D2040000",
+  "total_bytes": 63,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/reply-ep, src=/net/uplink/b<pair 3:1>, kind=RESULT, payload=VALUE u32=1234 } - the same relay when the hop can issue no PAIR for the link the reply came back on (its connection vertex retired under it): src grows by the hop's NAME run instead, so the chain is a full route, mixed, never one hop short (RFC-0029 6.2).",
+    "note": "NAME-fallback arm of fwd/reply-src-accumulates-forward-route-pair; the two differ only in the hop's element."
+  }
+}

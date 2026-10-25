@@ -178,4 +178,27 @@ std::size_t path_key_hash_t::operator()(std::span<const std::byte> k) const noex
     return fnv1a_key(k);
 }
 
+// ---- the learned-chain slot (RFC-0029 §6.2): one table-source block (ADR-0083) ----
+
+void path_t::copy_chain(const path_t& o) noexcept {
+    if (!bind({o.chain_, o.chain_len_})) mem::exhausted_at_init(mem::table_source(), "path_t");
+}
+
+bool path_t::bind(std::span<const std::byte> chain) noexcept {
+    if (chain.empty() || chain.size() > 0xFFFFu) return false;
+    auto* const block = static_cast<std::byte*>(mem::table_source().try_alloc(chain.size(), 1));
+    if (block == nullptr) return false;
+    std::memcpy(block, chain.data(), chain.size());
+    clear_binding();
+    chain_ = block;
+    chain_len_ = static_cast<std::uint16_t>(chain.size());
+    return true;
+}
+
+void path_t::clear_binding() noexcept {
+    if (chain_ != nullptr) mem::table_source().release(chain_, chain_len_, 1);
+    chain_ = nullptr;
+    chain_len_ = 0;
+}
+
 }  // namespace tr::graph

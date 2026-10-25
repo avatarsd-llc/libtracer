@@ -522,10 +522,9 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     // refusal of a bound delivery echoes the refused `PATH_REF` exactly as the canonical
     // reject echoes the refused route, and the producer's step-5 reclaim correlates either
     // (`evict_route_edges` classifies the echo's type byte). The `src` is the first `PATH`
-    // after it, and `PATH` only: a request's return route is always canonical
-    // (`05-protocol-tlvs.md` hop rules). The scan stops at `src`, so a mint-flagged request's
-    // TRAILING reverse list (which sits after `src`, and is `PATH_REF_REVERSE` since §7.1
-    // amendment 2) can never be mistaken for either route.
+    // after it, and `PATH` only (`05-protocol-tlvs.md` hop rules). The scan stops at `src`, so
+    // a subscribe request's TRAILING reverse list (which sits after `src`, typed
+    // `PATH_REF_REVERSE`) can never be mistaken for either route.
     std::optional<wire::tlv_node_t> src;
     std::size_t child = 0;
     for (const wire::tlv_node_t c : dec->children()) {
@@ -571,7 +570,7 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     // a status rather than two that drift.
     const view::rope_t reply = graph::assemble_error_reply(route, status, egress);
     // One link — plus the echo trailer link on a stamped request — by construction: an error
-    // reply carries no shared payload and no mint trailer. A zero-link rope is the egress
+    // reply carries no shared payload. A zero-link rope is the egress
     // refusal; drop rather than emit a headerless frame. The echoed shape is two links, so
     // this COLD path materializes rather than growing a scatter-gather send it never needed.
     if (reply.link_count() == 0) return;
@@ -613,7 +612,7 @@ constexpr std::size_t kRefusalReplySpans = 12;
  *        `egress`, so acking a remote write allocates nothing.
  *
  * Sized like @ref kRefusalReplyInlineBytes: one segment header plus a head over two ordinary
- * routes, with room left for a mint and an echo. A strategy selector, not a limit: a head that
+ * routes, with room left for a PAIR seed and an echo. A strategy selector, not a limit: a head that
  * does not fit draws from `egress` as every reply did before.
  */
 constexpr std::size_t kReplyStoreBytes = 256;
@@ -1563,59 +1562,65 @@ transport_t* fwd_router_t::bound_egress(wire::path_ref_element_t e, std::string_
 
 bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name,
                                  const wire::tlv_node_t& reply) {
-    // The mint answer is the reply's LAST child (RFC-0024 §7.1), so a reply that carries none
-    // ends here and the path stays canonical — a request is a hint, never an obligation.
-    std::optional<wire::tlv_node_t> last;
-    for (const wire::tlv_node_t c : reply.children()) last = c;
-    if (!last || last->type() != type_t::PATH_REF) return false;
-    const std::span<const std::byte> refs = last->payload();
-    const std::size_t n = wire::path_ref_element_count(refs.size());
-    if (n == 0) return false;
+    // The reply's `src` IS the forward route from the first link onward (RFC-0029 §6.2): one
+    // element per host, each prepended by the host that relayed or issued the reply. Children
+    // in order: op, dst, src, kind, so the third child is `src` and the fourth says whether
+    // the operation succeeded — a refusal is not a route worth caching.
+    std::optional<wire::tlv_node_t> src;
+    bool result = false;
+    std::size_t at = 0;
+    for (const wire::tlv_node_t c : reply.children()) {
+        if (at == 2) src = c;
+        if (at == 3)
+            result = c.payload().size() == 1 &&
+                     c.payload()[0] ==
+                         static_cast<std::byte>(std::to_underlying(graph::reply_kind_t::RESULT));
+        ++at;
+    }
+    if (!src || !result || src->type() != type_t::PATH || src->payload().empty()) return false;
     // Element 0 is this node's own, and nobody else could have written it: the hop out of the
-    // origin is the one hop no peer ever sees (§4.1).
+    // origin is the one hop no peer ever sees.
     const std::optional<wire::path_ref_element_t> own = connection_ref(link_name);
     if (!own) return false;
     // Scratch from the link plane's source (#1779): a refusal leaves the path canonical, the
-    // same non-event a reply without a mint is.
-    mem::block_array_t<wire::path_ref_element_t> elements(*link_src_);
-    if (!elements.reserve(n + 1)) return false;
-    (void)elements.push_back(*own);  // reserved above: cannot grow
-    for (std::size_t i = 0; i < n; ++i)
-        (void)elements.push_back(wire::path_ref_element_at(refs, i));
-    return path.bind(std::span<const wire::path_ref_element_t>(elements.data(), elements.size()));
+    // same non-event a reply without a usable `src` is.
+    const std::span<const std::byte> rest = src->payload();
+    mem::block_array_t<std::byte> chain(*link_src_);
+    if (!chain.reserve(wire::kPathPairRecordBytes + rest.size())) return false;
+    for (std::size_t i = 0; i < wire::kPathPairRecordBytes; ++i) (void)chain.push_slot();
+    wire::path_pair_store(std::span<std::byte>(chain.data(), wire::kPathPairRecordBytes)
+                              .first<wire::kPathPairRecordBytes>(),
+                          *own);
+    for (const std::byte b : rest) (void)chain.push_back(b);  // reserved above: cannot grow
+    return path.bind(std::span<const std::byte>(chain.data(), chain.size()));
 }
 
 bool fwd_router_t::bound_send(const graph::path_t& path, graph::acl_right_t right, egress_fn_t send,
                               void* ctx) const {
     const graph::path_binding_t& b = path.binding();
-    if (!b.bound || b.elements.empty()) return false;
+    const std::optional<wire::path_pair_t> e0 =
+        b.bound ? wire::path_pair_at(b.chain, 0) : std::nullopt;
+    if (!e0) return false;
     // Opened before the link is looked up and held until `send` returns, so a link removed
     // meanwhile outlives the call (see `frame_scope_t`).
     const frame_scope_t scope;
     // The origin's caller is local, so the subject context is empty — the trusted-caller
     // convention every other local API here uses. The check still runs: it is the same one
     // line a forwarder runs, and having ONE of them is what keeps the two from drifting.
-    transport_t* const link = bound_egress(b.elements.front(), {}, right);
+    transport_t* const link = bound_egress(*e0, {}, right);
     if (link == nullptr) return false;
-    // The residual as a `PATH` of PAIR elements (RFC-0029 §4.2) — the one address spelling;
-    // the bare `PATH_REF` array is refused as a `dst` everywhere (§5.3). Written straight into
-    // a block of exactly its size from the link plane's source (#1779); a refusal is the same
-    // `false` a stale element is. The element cap keeps the body far below a 16-bit length.
-    const auto residual = std::span<const wire::path_pair_t>(b.elements).subspan(1);
-    if (residual.size() > wire::kMaxPathRefElements) return false;
-    static_assert(wire::kMaxPathRefElements * wire::kPathPairRecordBytes <= 0xFFFFu);
+    // The residual — every element after the origin's own — as the `dst` `PATH` (RFC-0029
+    // §4.2), written straight into a block of exactly its size from the link plane's source
+    // (#1779); a refusal is the same `false` a stale element is. `bind` capped the chain at a
+    // 16-bit body, so the short header always fits.
+    const auto residual = std::span<const std::byte>(b.chain).subspan(wire::kPathPairRecordBytes);
     mem::block_array_t<std::byte> dst(*link_src_);
-    const std::size_t body = residual.size() * wire::kPathPairRecordBytes;
-    const std::size_t bytes = wire::header_bytes(wire::opt_t{}) + body;
+    const std::size_t bytes = wire::header_bytes(wire::opt_t{}) + residual.size();
     if (!dst.reserve(bytes)) return false;
     for (std::size_t i = 0; i < bytes; ++i) (void)dst.push_slot();  // reserved: cannot grow
     const std::span<std::byte> w(dst.data(), bytes);
-    wire::store_header(w, wire::type_t::PATH, wire::opt_t{}, body);
-    for (std::size_t i = 0; i < residual.size(); ++i)
-        wire::path_pair_store(
-            w.subspan(wire::header_bytes(wire::opt_t{}) + i * wire::kPathPairRecordBytes)
-                .first<wire::kPathPairRecordBytes>(),
-            residual[i]);
+    wire::store_header(w, wire::type_t::PATH, wire::opt_t{}, residual.size());
+    std::memcpy(w.data() + wire::header_bytes(wire::opt_t{}), residual.data(), residual.size());
     send(ctx, *link, w);
     return true;
 }
@@ -1692,8 +1697,32 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
     // §6 step 3 — WHAT the vertex is decides what happens next, and nothing else does. Both
     // forwarding outcomes end in one EGRESS: the link the hop leaves on, or the session the
     // delivery's last element names. Every way either can refuse is `NOT_FOUND`.
+    //
+    // A WRITE that names an accepted session's ANCHOR is a chain delivery's hop into that
+    // session (RFC-0029 §7.1), wherever the element sits: last when the origin's own `src` was
+    // empty, followed by that `src`'s residual NAMEs otherwise (the reverse list a hop creates
+    // starts with it, #2245). The disclosure fix is the deref above — a dead session's element
+    // carries the retired generation and refuses. An anchor lives OUTSIDE the path tree and has
+    // no `:acl` ancestry of its own; the delivery crosses the mount exactly as the NAME spelling
+    // `<mount>/<peer>` does, so it is gated by the ONE `door_allows` at the same door — failing
+    // closed on a door whose vertex has retired. A denial stays the shipped plain drop (the
+    // anti-enumeration rule on the delivery leg); a session gone between the deref and here is
+    // `NOT_FOUND`, below.
+    const std::optional<graph::graph_t::session_anchor_route_t> ar =
+        op == fwd_op_t::WRITE ? graph_.session_anchor_route(*v) : std::nullopt;
     transport_t* egress = nullptr;
-    if (!last) {
+    if (ar) {
+        const child_rx_ctx_t* const mount = ctx_by_name(ar->mount);
+        const child_registry_t::child_t* const door = mount != nullptr ? mount->entry : nullptr;
+        if (!door_allows(door, inbound_name, graph::acl_right_t::WRITE)) return head_dst_t::HANDLED;
+        // The session is the one the slot's word names, read BEFORE the anchor's generation is
+        // checked again (#2234): a successor's word is published only after the retire that
+        // moved the generation, so a word read here that is not the minted tenancy's fails
+        // the re-check, and so does a session that departed since. The delivery never reaches
+        // a tenancy the element was not minted for.
+        const peer_handle_t tenant = anchor_tenant(mount, ar->peer, *v, pair.generation);
+        egress = tenant.valid() ? child_registry_t::resolve_peer(*door, tenant) : nullptr;
+    } else if (!last) {
         // A door is a HOP: `bound_egress` runs the ONE gate the NAME spelling runs
         // (`door_allows`, §6.4) and refuses a shared (bus) mount's door as an egress,
         // `NOT_FOUND` (§10). A tail below a vertex that is no door names nothing below itself,
@@ -1705,36 +1734,12 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
             return head_dst_t::HANDLED;
         }
     } else {
-        // The LAST element. A WRITE that names an accepted session's ANCHOR is the reverse-list
-        // delivery's last hop (RFC-0024 §7.1 amendment 1, #1223 step 4), carried into the PAIR
-        // spelling unchanged; the disclosure fix is the deref above — a dead session's element
-        // carries the retired generation and refuses. Anything else is the TERMINUS: an
-        // ordinary vertex, or a point-to-point connection vertex named last, which addresses
-        // its own `:`-facets (RFC-0004 §A's dual nature), gets the op applied by the same
-        // `apply_op` the NAME spelling reaches — the op's gate is the resolver's `graph_t` call
-        // at that vertex, reused, not restated.
-        const std::optional<graph::graph_t::session_anchor_route_t> ar =
-            op == fwd_op_t::WRITE ? graph_.session_anchor_route(*v) : std::nullopt;
-        if (!ar) {
-            out_target = pair;
-            return head_dst_t::TERMINUS;
-        }
-        // An anchor lives OUTSIDE the path tree and has no `:acl` ancestry of its own. The
-        // delivery crosses the mount exactly as the NAME spelling `<mount>/<peer>` does, so it
-        // enters the same step at the same door and is gated by the ONE `door_allows` — failing
-        // closed, enforcing, on a door whose vertex has retired. A denial stays the shipped
-        // plain drop (the anti-enumeration rule on the delivery leg); a session gone between
-        // the deref and here is `NOT_FOUND`, below.
-        const child_rx_ctx_t* const mount = ctx_by_name(ar->mount);
-        const child_registry_t::child_t* const door = mount != nullptr ? mount->entry : nullptr;
-        if (!door_allows(door, inbound_name, graph::acl_right_t::WRITE)) return head_dst_t::HANDLED;
-        // The session is the one the slot's word names, read BEFORE the anchor's generation is
-        // checked again (#2234): a successor's word is published only after the retire that
-        // moved the generation, so a word read here that is not the minted tenancy's fails
-        // the re-check, and so does a session that departed since. The delivery never reaches
-        // a tenancy the element was not minted for.
-        const peer_handle_t tenant = anchor_tenant(mount, ar->peer, *v, pair.generation);
-        egress = tenant.valid() ? child_registry_t::resolve_peer(*door, tenant) : nullptr;
+        // The TERMINUS: an ordinary vertex, or a point-to-point connection vertex named last,
+        // which addresses its own `:`-facets (RFC-0004 §A's dual nature), gets the op applied
+        // by the same `apply_op` the NAME spelling reaches — the op's gate is the resolver's
+        // `graph_t` call at that vertex, reused, not restated.
+        out_target = pair;
+        return head_dst_t::TERMINUS;
     }
     if (egress == nullptr) {
         reject(graph::status_t::NOT_FOUND, pre);
@@ -1742,9 +1747,9 @@ fwd_router_t::head_dst_t fwd_router_t::route_pair_forward(std::string_view inbou
     }
     // Consume exactly the one element and forward the tail through the ONE rebuild locus, `src`
     // grown canonically by the inbound mount run (RFC-0029 §6.1): the rebuild consumes
-    // `[dst_body_off, strip_at)`, the head record and nothing else. For the session it was the
-    // last element, so the peer receives an EMPTY `PATH` `dst` — the canonical delivery an
-    // origin always got.
+    // `[dst_body_off, strip_at)`, the head record and nothing else. When the session was the
+    // last element, the peer receives an EMPTY `PATH` `dst` — the canonical delivery an origin
+    // always got — and otherwise the origin's own `src` residual.
     fwd_pre_t hop = pre;
     hop.strip_at = head_end;
     route_fwd_forward(inbound_name, inbound_ctx, from_peer, cur, *egress, hop);
@@ -1958,8 +1963,7 @@ template <class Cursor, class Observe, class Reject, class Terminus, class Reply
     // the same TLV headers again, and on a multi-link rope those headers may straddle links,
     // so the second walk was the expensive kind.
     fwd_pre_t pre;
-    std::size_t ref_count = 0;
-    const fwd_dst_kind_t kind = peek_fwd_dst_any(cur, pre, ref_count);
+    const fwd_dst_kind_t kind = peek_fwd_dst_any(cur, pre);
     // The op the peek located, read once for every arm: an EMPTY op VALUE reads as the masked
     // opcode 63, which no build defines (#870). It is located for every `dst` form, including
     // the ones the peek refused (it fills the op fields first), which is what lets the REPLY
@@ -1971,7 +1975,7 @@ template <class Cursor, class Observe, class Reject, class Terminus, class Reply
     // RFC-0029 §5.3: `PATH_REF` (`0x14`) is retired as an address form. Its element survives
     // as the PAIR inside `PATH` (below); the bare fixed-stride array is refused as a `dst`,
     // addressed, exactly as a malformed address is — never routed, never applied.
-    if (kind == fwd_dst_kind_t::PATH_REF) {
+    if (kind == fwd_dst_kind_t::RETIRED) {
         reject(graph::status_t::INVALID_PATH, pre);
         return true;
     }
@@ -2241,22 +2245,18 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
                                : std::span<const std::byte>{};
     const std::string_view peer_seg =
         from_peer || mount.empty() ? inbound_name : std::string_view{};
-    // This hop's mint contribution, on a forwarded REPLY that already carries a `PATH_REF`
-    // (RFC-0024 §7.1 step 2): this node's own reference to the connection vertex for the link
-    // the reply came back over. Handed to the rebuild as a CLOSURE, not a value, and the
-    // laziness is the measurement: deciding here whether to mint means asking whether the
-    // frame is a REPLY, and the rebuild is about to read that same op byte anyway. Asking
-    // twice put a second `byte_at` on every forwarded frame — on a multi-link rope a cursor
-    // walk, not a load — which is exactly the shape `bench_forward_rope` measures. The rebuild
-    // calls this at most once, and only after it knows the frame carries a mint answer it can
-    // extend; a node with nothing to give answers `nullopt` and the rebuild then STRIPS the
-    // answer rather than relaying a list that skips a hop (§7.1 erratum 1).
+    // This hop's PAIR on a relayed REPLY (RFC-0029 §6.2): this node's own reference to the
+    // connection vertex for the link the reply came back over. Handed to the rebuild as a
+    // CLOSURE, not a value, and the laziness is the measurement: deciding here means asking
+    // whether the frame is a REPLY, and the rebuild is about to read that same op byte anyway.
+    // Asking twice put a second `byte_at` on every forwarded frame — on a multi-link rope a
+    // cursor walk, not a load — which is exactly the shape `bench_forward_rope` measures. A
+    // node with no PAIR to give answers `nullopt` and the reply grows by the NAME run instead.
     const auto mint_fn = [&]() -> std::optional<wire::path_ref_element_t> {
         return hop_mint(inbound_name, inbound_ctx);
     };
-    // The REVERSE-direction twin (§7.1 amendment 1), equally lazy: called at most once, and
-    // only after the rebuild has read the op byte it was going to read anyway and found the
-    // mint flag set on a request. An unflagged frame never evaluates it.
+    // The REVERSE-direction twin (§7.1), equally lazy: called at most once, and only on a
+    // relayed subscribe request.
     const auto reverse_fn = [&]() -> std::optional<wire::path_ref_element_t> {
         return reverse_hop_ref(inbound_name, inbound_ctx, from_peer);
     };
@@ -2283,67 +2283,57 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>) {
         // Contiguous source: each region is a single sub-span — a stack array sized by
         // kFwdMaxIov, which is COUNTED from gather's emit sequence (see its docs), not a chosen
-        // budget. The write is bounds-guarded regardless: this array was previously a bare 6
-        // with an unchecked `iov[n++]`, so any growth in the region count was a silent overrun.
-        //
-        // Overflow DROPS the frame, matching the rope arm below rather than diverging from it.
-        // This guard used to truncate — it filled what fitted and sent `n` spans — which put a
-        // TRUNCATED frame on the wire, the precise outcome the rope arm's own comment calls
-        // "worse than none" two branches down. Two arms of one hop disagreeing on a drop policy
-        // is the shape of #673 (the arms disagreed on CRC verification) and of #516, so the
-        // policy is now stated once and implemented identically on both sides.
-        //
-        // Unreachable today: gather emits at most kFwdMaxIov regions for a contiguous source by
-        // construction. It is a guard against a future region being added without the count
-        // moving, and in that event a counted drop is recoverable where a corrupt frame is not.
+        // budget. Every frame but one fits it: a relayed SUBSCRIBE request's reverse child
+        // (RFC-0029 §7.1) can emit up to 15 regions, and that cold frame is gathered again
+        // into the growable table below rather than sizing the hot arm's array for it.
         std::array<std::span<const std::byte>, kFwdMaxIov> iov;
         std::size_t n = 0;
-        bool ok = true;
         rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
-            if (n < iov.size()) {
-                iov[n++] = s;
-            } else {
-                ok = false;
-            }
+            if (n < iov.size()) iov[n] = s;
+            ++n;
         });
-        // ... and the same drop for a region that overshot the source window (#986): a
-        // clamped feed emits FEWER bytes than the rebuilt head declares, which is the
-        // truncated-frame-on-the-wire outcome this arm already refuses one line up.
-        //
-        // Two causes, two counters (#1503 step 3): the iov overrun is a RESOURCE drop an
-        // operator sizes `kFwdMaxIov` against, while a poisoned cursor is a frame whose
-        // regions left the source window — malformed, and fused into that bucket.
-        if (!ok || cur_src.poisoned()) {
-            count_drop(ok ? malformed_rx_ : forward_iov_dropped_);
+        // A region that overshot the source window (#986) is malformed: a clamped feed emits
+        // FEWER bytes than the rebuilt head declares — a truncated frame on the wire.
+        if (cur_src.poisoned()) {
+            count_drop(malformed_rx_);
             return;
         }
-        child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
-    } else {
-        // Rope source: a region may cross several links, so the sub-span count is only known
-        // at run time — gather into a NOTHROW block array drawn from the failable seam (#596).
-        // A `std::pmr::vector` here was a peer-reachable abort(): the element count is chosen
-        // by the sender (link count x region count), the growth is `operator new`, and on
-        // -fno-exceptions the throw is a reboot. This is the FORWARD path — it sits behind no
-        // ACL, exactly like the RX decode (#588). Both TERMINUS REPLY tables took the same
-        // migration in #1570 — see `gather_reply_iov` and its two call sites — so no egress
-        // iov in this file is on the throwing `reserve` any more.
-        //
-        // Exhaustion drops the frame. That is the correct answer for a forward hop: FWD is
-        // not delivery-guaranteed, the sender retries, and emitting a partial iov would put a
-        // TRUNCATED frame on the wire — worse than none.
+        if (n <= iov.size()) {
+            child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
+            return;
+        }
+    }
+    // Rope source (or the span arm's overflow): a region may cross several links, so the
+    // sub-span count is only known at run time — gather into a NOTHROW block array drawn from
+    // the failable seam (#596). A `std::pmr::vector` here was a peer-reachable abort(): the
+    // element count is chosen by the sender (link count x region count), the growth is
+    // `operator new`, and on -fno-exceptions the throw is a reboot. This is the FORWARD path —
+    // it sits behind no ACL, exactly like the RX decode (#588). Both TERMINUS REPLY tables took
+    // the same migration in #1570 — see `gather_reply_iov` and its two call sites — so no
+    // egress iov in this file is on the throwing `reserve` any more.
+    //
+    // Exhaustion drops the frame. That is the correct answer for a forward hop: FWD is not
+    // delivery-guaranteed, the sender retries, and emitting a partial iov would put a
+    // TRUNCATED frame on the wire — worse than none.
+    //
+    // Out of line (`noinline`): the span instantiation reaches it only on the cold overflow, and
+    // inlined there it was a second copy of the whole gather in the hot hop (+2.6 KB).
+    const auto send_spilled = [&]() __attribute__((noinline)) {
         mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
         bool ok = true;
         rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
             if (ok && !iov.push_back(s)) ok = false;
         });
-        // Same #986 window-overshoot drop as the span arm: both arms state one policy, and
-        // the same two counters split it the same way.
+        // The #986 window-overshoot drop and the resource drop, split into two counters (#1503
+        // step 3): the iov exhaustion is a RESOURCE drop an operator sizes against, while a
+        // poisoned cursor is a frame whose regions left the source window — malformed.
         if (!ok || cur_src.poisoned()) {
             count_drop(ok ? malformed_rx_ : forward_iov_dropped_);
             return;
         }
         child.send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
-    }
+    };
+    send_spilled();
 }
 
 namespace {
@@ -2678,28 +2668,27 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
     transport_t* out = link;
     std::span<const std::byte> dst = route;
     stack_writer<6> ref_head;  // the PAIR-chain form's PATH header; empty for the full route
-    // The reverse-list delivery (RFC-0024 §7.1 amendment 1, #1223 step 4): consume the
+    // The chain delivery (RFC-0029 §7.1, learned with no flag since #2245): consume the
     // stored chain's element 0 — this node's OWN pair for the connection vertex the
     // subscribe arrived on — by validating it against this node's vertex map (§5.1 bounds +
     // generation, then §6.2's ACL at the dereferenced vertex under the edge's stored
-    // subject) and egressing through the vertex it names. Elements 1.. go on the wire
-    // verbatim as the delivery's `dst` body: a `PATH` of PAIR elements, stored pre-spelled at
-    // subscribe (RFC-0029 §4.2 / §7.1), so this leg re-spells nothing and writes only the
-    // shrunk `PATH` header. ANY refusal — the link re-dialled (generation moved), the child
-    // gone, the ACL revoked — keeps the canonical route above, which is stored alongside
-    // precisely so this binding is an optimisation plus a liveness check and never the only
-    // way home.
+    // subject) and egressing through the vertex it names. The rest goes on the wire verbatim
+    // as the delivery's `dst` body: a `PATH` body of each hop's PAIR (else its NAME run) and
+    // the origin's own `src`, stored pre-spelled at subscribe, so this leg re-spells nothing
+    // and writes only the shrunk `PATH` header. ANY refusal — the link re-dialled (generation
+    // moved), the child gone, the ACL revoked — keeps the canonical route above, which is stored
+    // alongside precisely so this binding is an optimisation plus a liveness check and never the
+    // only way home.
     const std::span<const std::byte> rev = sub.reverse_route.bytes();
-    const std::optional<wire::path_pair_t> e0 = rev.size() >= 4u + 2u * wire::kPathPairRecordBytes
+    const std::optional<wire::path_pair_t> e0 = rev.size() > 4u + wire::kPathPairRecordBytes
                                                     ? wire::path_pair_at(rev.subspan(4), 0)
                                                     : std::nullopt;
     if (e0) {
         if (transport_t* const bound = bound_egress(*e0, sub.caller, graph::acl_right_t::WRITE)) {
             out = bound;
             dst = rev.subspan(4u + wire::kPathPairRecordBytes);
-            // Cannot overflow: the responder stored at most `kMaxPathRefElements` elements
-            // (`op_resolve_walk.hpp`), so the body never needs the widened length.
-            static_assert(wire::kMaxPathRefElements * wire::kPathPairRecordBytes <= 0xFFFFu);
+            // Six bytes hold either header width: a hop leaves off a list past 0xFFFF
+            // (`fwd_frame_view.hpp`), and a peer's own oversized child widens to `LL`.
             ref_head.header_route(type_t::PATH, dst.size());
         }
     }
@@ -2759,14 +2748,13 @@ struct fwd_router_t::pending_await_t {
     std::size_t name_len = 0;                 /**< @brief Link name bytes. */
     std::size_t dst_len = 0;                  /**< @brief Reply `dst` bytes. */
     std::size_t src_len = 0;                  /**< @brief Reply `src` bytes. */
-    std::size_t mint_len = 0;                 /**< @brief RFC-0024 mint bytes. */
     bool sending = false; /**< @brief A reply is being built outside the lock. */
     bool orphan = false;  /**< @brief Cancelled while firing: send nothing. */
 
     /** @brief A fresh, unarmed waiter block for @p v. */
     explicit pending_await_t(graph::vertex_handle_t v) noexcept : vertex(v) {}
 
-    /** @brief The trailing byte region: name, dst, src, mint, in that order. */
+    /** @brief The trailing byte region: name, dst, src, in that order. */
     [[nodiscard]] std::byte* tail() noexcept { return reinterpret_cast<std::byte*>(this + 1); }
     /** @brief The link name the reply goes back over. */
     [[nodiscard]] std::string_view name() noexcept {
@@ -2777,10 +2765,6 @@ struct fwd_router_t::pending_await_t {
     /** @brief Reply `src`. */
     [[nodiscard]] std::span<const std::byte> src() noexcept {
         return {tail() + name_len + dst_len, src_len};
-    }
-    /** @brief The mint the RESULT carries. */
-    [[nodiscard]] std::span<const std::byte> mint() noexcept {
-        return {tail() + name_len + dst_len + src_len, mint_len};
     }
 };
 
@@ -2869,7 +2853,7 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
 
     mem::block_source_t& source = rx_for(ctx);
     const std::size_t bytes =
-        sizeof(pending_await_t) + name.size() + req.dst.size() + req.src.size() + req.mint.size();
+        sizeof(pending_await_t) + name.size() + req.dst.size() + req.src.size();
     void* const mem = source.try_alloc(bytes, alignof(pending_await_t));
     // The receiving link's own budget is spent: refuse THIS await, by value. Never a fallback
     // to the blocking wait.
@@ -2887,11 +2871,10 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     p->name_len = name.size();
     p->dst_len = req.dst.size();
     p->src_len = req.src.size();
-    p->mint_len = req.mint.size();
     std::byte* out = p->tail();
     std::memcpy(out, name.data(), name.size());
     out += name.size();
-    for (const std::span<const std::byte> part : {req.dst, req.src, req.mint}) {
+    for (const std::span<const std::byte> part : {req.dst, req.src}) {
         if (!part.empty()) std::memcpy(out, part.data(), part.size());
         out += part.size();
     }
@@ -2959,7 +2942,7 @@ void fwd_router_t::answer_await(pending_await_t& p) {
     if (v) {
         const graph::value_t& val = **v;
         reply = graph::assemble_reply(route, graph::reply_kind_t::RESULT, {}, val.links(),
-                                      val.total_length(), *egress_, p.mint());
+                                      val.total_length(), *egress_);
         if (reply.link_count() == 0)
             reply = graph::assemble_error_reply(route, graph::status_t::BACKPRESSURE, *egress_);
     } else {

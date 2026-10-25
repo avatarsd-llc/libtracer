@@ -57,28 +57,14 @@ enum class fwd_op_t : std::uint8_t {
 };
 
 /**
- * @brief The opcode field of the `FWD` `op` byte — bits 5-0 (RFC-0024 §7.5).
+ * @brief The opcode field of the `FWD` `op` byte — bits 5-0 (RFC-0024 §9.3).
  *
- * Bits 7-6 are FLAGS. A forwarder MUST mask before switching (RFC-0024 §9.3): an
- * unrecognised flag then degrades to the plain opcode instead of an unknown-opcode reject,
- * which is what makes a flag additive at all. Four of the 64 opcode values are in use.
+ * Bits 7-6 are reserved and MUST be zero (RFC-0029 §5.3 retired RFC-0024's bit-7 mint
+ * flag). A forwarder masks before classifying a frame, so it stays opcode-agnostic; the
+ * terminus refuses a byte with either bit set as an undefined opcode. Four of the 64 opcode
+ * values are in use.
  */
 inline constexpr std::uint8_t kFwdOpcodeMask = 0x3F;
-
-/**
- * @brief `op` bit 7 — the bound-path MINT REQUEST (RFC-0024 §7.5).
- *
- * Set by an origin asking each host on the route to answer with its own vertex ref, so the
- * origin can address the same target in the bound form next time. It costs **zero request
- * bytes**: there is no free TLV `opt` bit (all six defined bits are assigned and the two
- * reserved ones make a frame invalid if set), and a dedicated presence child would spend a
- * 4-byte TLV header to express one bit.
- *
- * The request is a HINT, never an obligation: a host that will not or cannot mint (its
- * generation has saturated, it does not implement the amendment) answers the ordinary reply
- * and the origin stays on the canonical form, which always works.
- */
-inline constexpr std::uint8_t kFwdOpFlagMintRequest = 0x80;
 
 /** @brief The reply discriminant carried by a `FWD{REPLY}` (RFC-0004 §D). */
 enum class reply_kind_t : std::uint8_t {
@@ -238,12 +224,11 @@ struct deferred_await_t {
     /** @brief The request's `await_timeout` (or the default): the requester's own deadline,
      *         which a sink MAY ignore (RFC-0004 Amendment 3). */
     std::chrono::nanoseconds timeout;
-    std::string_view subject;                 /**< @brief The ACL subject the gate passed. */
-    const inbound_ref_t* inbound;             /**< @brief Where it arrived and who sent it. */
-    std::span<const std::byte> dst;           /**< @brief Reply `dst` (the request's `src`). */
-    std::span<const std::byte> src;           /**< @brief Reply `src`. */
+    std::string_view subject;       /**< @brief The ACL subject the gate passed. */
+    const inbound_ref_t* inbound;   /**< @brief Where it arrived and who sent it. */
+    std::span<const std::byte> dst; /**< @brief Reply `dst` (the request's `src`). */
+    std::span<const std::byte> src; /**< @brief Reply `src` (the RESULT's, PAIR-seeded). */
     std::optional<wire::timestamp_t> echo_ts; /**< @brief The TF=0 stamp to echo, if any. */
-    std::span<const std::byte> mint; /**< @brief The RFC-0024 mint the RESULT carries, if any. */
 };
 
 /**
@@ -322,7 +307,7 @@ class op_resolver_t {
      *              resolver.
      * @param egress The byte backend the FWD{REPLY}'s EGRESS-construction segments draw from
      *              (#795, ADR-0074) — the reply head (peer-driven size: the swapped route bytes
-     *              plus the inline tail) and, on a mint, the trailing 12-byte `PATH_REF`. It is
+     *              plus the inline tail). It is
      *              the last reply-egress byte source a bounded node could not previously bound
      *              (both folded READs' POINT-header framing — composed-root and `":children"` —
      *              is payload framing and draws from the graph's value seam instead: #831,
@@ -357,7 +342,7 @@ class op_resolver_t {
      * Amendment 2, #1502): the return route is also the acknowledgement request, and
      * the empty route is the request not made. A `WRITE` is applied and answers with
      * an **empty rope** — success, refusal and ACL denial alike, since none of them
-     * has anywhere to go. A `READ`, an `AWAIT`, a mint-flagged frame or a
+     * has anywhere to go. A `READ`, an `AWAIT` or a
      * `:subscribers[]` subscribe is MALFORMED on that route and refuses on the error
      * side. The empty rope is therefore no longer only the egress-exhaustion signal
      * it was; callers already treat it as "nothing to send" (`fwd_router_t`'s two
@@ -416,10 +401,7 @@ class op_resolver_t {
      *                     operation's own ACL gate inside `graph_t::read` / `write` / `await`
      *                     at the dereferenced vertex — the string spelling's own gate, reused.
      *                     A stale element answers `NOT_FOUND` on the error side.
-     *
-     *                     The RFC-0024 mint is suppressed while it is set: this address is
-     *                     already spelled in compressed form, so the reply does not answer a
-     *                     mint request with a `PATH_REF` for it.
+
      * @param deferred     Out-flag for a deferred AWAIT (ADR-0084). Non-null with a sink
      *                     installed through @ref on_await_defer, an AWAIT is handed to that
      *                     sink, `*deferred` is set, and the reply is an EMPTY rope that the
@@ -427,7 +409,7 @@ class op_resolver_t {
      *                     synchronous AWAIT.
      * @param reply_store  Caller storage an ACKNOWLEDGEMENT reply (`kind=RESULT`, no payload:
      *                     a WRITE or a subscribe that succeeded) is built in, so acking costs
-     *                     no allocation (#1658). The head segment, and on a mint or an echo
+     *                     no allocation (#1658). The head segment, and on an echo
      *                     the segments beside it, are placed here while they fit; whatever
      *                     does not fit draws from the `egress` backend as before, so the
      *                     reply bytes never depend on the size. Every other reply ignores it.
@@ -477,9 +459,9 @@ class op_resolver_t {
         std::span<std::byte> reply_store = {});
 
     /**
-     * @brief The responder's own reverse-direction element supplier (RFC-0024 §7.1
-     *        amendment 1): asked, at most once per mint-flagged remote subscribe, for THIS
-     *        node's reference to the connection vertex @p inbound_link arrived on.
+     * @brief The responder's own reverse-direction element supplier (RFC-0029 §7.1): asked,
+     *        at most once per remote subscribe that carries a reverse list, for THIS node's
+     *        reference to the identity @p inbound_link arrived on.
      *
      * The mapping from a link NAME to its connection vertex is the transport plane's
      * (`fwd_router_t`'s receiver contexts), which this graph-layer resolver deliberately
@@ -491,9 +473,16 @@ class op_resolver_t {
     using reverse_ref_fn_t =
         std::optional<wire::path_ref_element_t> (*)(void* ctx, std::string_view inbound_link);
 
+    /** @brief The supplier installed when none is: it never has an element to give. */
+    static std::optional<wire::path_ref_element_t> no_reverse_ref(void*,
+                                                                  std::string_view) noexcept {
+        return std::nullopt;
+    }
+
     /** @brief Install the reverse-element supplier (null @p fn uninstalls). */
     void on_reverse_ref(reverse_ref_fn_t fn, void* ctx) noexcept {
-        reverse_ref_fn_ = fn;
+        // Normalized once here, so the per-subscribe call site never tests for null.
+        reverse_ref_fn_ = fn != nullptr ? fn : &no_reverse_ref;
         reverse_ref_ctx_ = ctx;
     }
 
@@ -594,7 +583,8 @@ class op_resolver_t {
         mem::mem_backend_t& fallback) const noexcept {
         return retained_ != nullptr ? *retained_ : fallback;
     }
-    reverse_ref_fn_t reverse_ref_fn_ = nullptr;  // responder's reverse-mint seam (amendment 1)
+    reverse_ref_fn_t reverse_ref_fn_ =
+        &no_reverse_ref;                         // responder's reverse-mint seam (amendment 1)
     void* reverse_ref_ctx_ = nullptr;            /**< @brief Its caller-owned context. */
     subject_fn_t subject_fn_ = nullptr;          // #375 Part 2 terminus subject derivation
     void* subject_ctx_ = nullptr;                /**< @brief Its caller-owned context. */

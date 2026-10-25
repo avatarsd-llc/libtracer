@@ -605,15 +605,7 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::peek_fwd_dst_ref
-:project: libtracer
-```
-
-```{doxygenfunction} tr::net::read_path_ref_element
-:project: libtracer
-```
-
-```{doxygenstruct} tr::net::trailing_mint_t
+```{doxygenstruct} tr::net::trailing_reverse_t
 :project: libtracer
 :members:
 ```
@@ -623,15 +615,19 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 :members:
 ```
 
-```{doxygenfunction} tr::net::peek_trailing_mint
+```{doxygenfunction} tr::net::peek_trailing_reverse
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::rebuild_reply_mint
+```{doxygenfunction} tr::net::rebuild_reply_own
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::rebuild_request_reverse_mint
+```{doxygenfunction} tr::net::rebuild_request_reverse
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::is_subscribe_request
 :project: libtracer
 ```
 

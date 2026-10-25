@@ -603,65 +603,6 @@ fn path_ref_len_not_multiple_of_8() {
     assert_eq!(hex(&bin), "14000c000700000003000000aabbccdd");
 }
 
-/**
- * @brief The reverse list's own code carries the SAME body grammar (RFC-0024 §7.1
- * amendment 2), so an unframeable length is `tr::frame::invalid` under `0x15` too.
- *
- * The pairing with `path_ref_len_not_multiple_of_8` is the point: a core that applied the
- * shape rule to `0x14` alone would accept these bytes, and the two codes would then disagree
- * about what a bound-path body is.
- */
-#[test]
-fn path_ref_reverse_len_not_multiple_of_8() {
-    let bin = assert_vector_rejected("path-ref/reverse-len-not-multiple-of-8");
-    assert_eq!(hex(&bin), "15000c000700000003000000aabbccdd");
-}
-
-/**
- * @brief `fwd/fwd-reverse-mint` — the forwarded leg's reverse list is a TYPED trailing child.
- *
- * Pinned against `fwd/fwd-mint-request` in the direction that matters: the origin's frame is
- * the one WITHOUT the child, so the reverse list's bytes are proven to ride the forwarded leg
- * only. The child's own type byte is asserted, because a positional reading decodes this
- * frame identically and is exactly what amendment 2 ruled out.
- */
-#[test]
-fn fwd_reverse_mint_is_a_typed_trailing_child() {
-    let bin = assert_vector_consistent("fwd/fwd-reverse-mint");
-    let fwd = decode(&bin).expect("fwd-reverse-mint decodes");
-    let last = fwd.children.last().expect("the FWD has children");
-    assert_eq!(
-        last.type_code,
-        libtracer::type_code::PATH_REF_REVERSE,
-        "the reverse list heads with 0x15, not 0x14"
-    );
-    assert_eq!(last.payload.len(), 8, "one element");
-    assert!(
-        libtracer::is_path_ref_type(last.type_code),
-        "and it is a bound-path body for the shape rule's purposes"
-    );
-    // The origin's own frame carries no such child — that is what "zero added ORIGIN bytes"
-    // means after the amendment.
-    let origin = decode(&assert_vector_consistent("fwd/fwd-mint-request")).unwrap();
-    assert!(
-        origin
-            .children
-            .iter()
-            .all(|c| c.type_code != libtracer::type_code::PATH_REF_REVERSE),
-        "the origin emits no reverse child"
-    );
-    let parsed = libtracer::fwd::parse_fwd_tlv(&fwd).expect("parse_fwd accepts the forwarded leg");
-    assert!(parsed.mint_request, "the op byte is mint-flagged");
-    assert!(
-        parsed.reverse.is_some(),
-        "and the reverse list is parsed out"
-    );
-    assert!(
-        parsed.payload.is_none(),
-        "a READ has no payload — the reverse child is not mistaken for one"
-    );
-}
-
 /** @brief One element over the §4.3 bound: 256 elements / 2048 bytes ⇒ `tr::frame::invalid`. */
 #[test]
 fn path_ref_256_elements() {
@@ -1310,21 +1251,13 @@ fn fwd_write_subscriber_field() {
 }
 
 /**
- * @brief The terminus's RESULT reply (#419 ruling (c)): its routes are the request's
- * swapped, so `dst` is the accumulated return route `fwd/fwd-src-accumulated` carries as
- * `src`, and `src` is the terminus residual `fwd/fwd-routed-two-mount` ends on.
+ * @brief The terminus's RESULT reply (#419 ruling (c)): its `dst` is the request's `src`, the
+ * accumulated return route `fwd/fwd-src-accumulated` carries, and its `src` is the target's
+ * PAIR (RFC-0029 §6.2), `PATH{ 0x16 escape, index 3, generation 1 }`.
  */
 #[test]
 fn fwd_reply_result() {
     let bin = assert_vector_consistent("fwd/fwd-reply-result");
-    let mut req = FwdRequest::new(
-        fwd_op::REPLY,
-        &["net", "downlink", "a", "net", "downlink", "cli", "reply-ep"],
-        &["sensor", "temp"],
-    );
-    req.kind = Some(fwd_kind::RESULT);
-    req.payload = Some(value_u32(1234));
-    assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
     let f = decode_fwd(&bin).unwrap();
     assert_eq!(f.op, fwd_op::REPLY);
     assert_eq!(f.kind, Some(fwd_kind::RESULT));
@@ -1332,7 +1265,12 @@ fn fwd_reply_result() {
         libtracer::fwd::fwd_dst_path(&f).unwrap(),
         "/net/downlink/a/net/downlink/cli/reply-ep"
     );
-    assert_eq!(libtracer::fwd::fwd_src_path(&f).unwrap(), "/sensor/temp");
+    assert_eq!(f.src.type_code, libtracer::type_code::PATH);
+    assert_eq!(
+        f.src.payload,
+        vec![0x00, 0x16, 0x08, 3, 0, 0, 0, 1, 0, 0, 0],
+        "the src is one PAIR record: the target, index 3 generation 1"
+    );
     assert_eq!(f.payload.unwrap().payload_uint(), 1234);
 }
 
@@ -1992,228 +1930,9 @@ fn ace_reject_family_structural_refusals() {
     );
 }
 
-/* ------------------------------- RFC-0024 §5-§7 — the bound-path routing car --- */
-
-/**
- * @brief `fwd/fwd-mint-request` — the mint ask is one BIT of an `op` byte that already
- * existed.
- *
- * Pinned against `fwd/fwd-read` rather than only against its own hex, because the whole
- * claim of the request side is that a mint request costs ZERO added bytes. If the two frames
- * ever differ by more than that byte, the claim is gone and this fails.
- */
-#[test]
-fn fwd_mint_request_is_one_bit() {
-    let mint = assert_vector_consistent("fwd/fwd-mint-request");
-    let plain = assert_vector_consistent("fwd/fwd-read");
-    assert_eq!(mint.len(), plain.len(), "a mint request adds no bytes");
-    let differing: Vec<usize> = (0..mint.len()).filter(|&i| mint[i] != plain[i]).collect();
-    assert_eq!(differing.len(), 1, "exactly one byte differs");
-    let i = differing[0];
-    assert_eq!(plain[i], 0x00, "fwd-read's op byte is READ");
-    assert_eq!(mint[i], 0x80, "and the mint request is bit 7 of it");
-    // The masking rule (RFC-0024 §9.3): a forwarder switches on `op & 0x3F`, so this frame
-    // is a READ everywhere but at the mint. A core that reads the raw byte sees opcode 0x80.
-    assert_eq!(mint[i] & 0x3F, 0x00, "the opcode is still READ");
-    // And the parser does mask, so both frames read as the same operation.
-    let pf = libtracer::fwd::decode_fwd(&plain).unwrap();
-    let mf = libtracer::fwd::decode_fwd(&mint).unwrap();
-    assert_eq!(mf.op, libtracer::fwd::fwd_op::READ);
-    assert_eq!(mf.op, pf.op);
-    assert!(mf.mint_request && !pf.mint_request);
-    assert!(
-        !mf.dst_bound,
-        "the mint REQUEST is canonically addressed — it is the key"
-    );
-}
-
-/**
- * @brief `fwd/fwd-mint-reply` — the minted binding is the reply's LAST child.
- *
- * Position is the pin that matters here. Anywhere but last and every existing positional
- * reader of a reply shifts by one, mint or no mint.
- */
-#[test]
-fn fwd_mint_reply_carries_the_binding_last() {
-    let bin = assert_vector_consistent("fwd/fwd-mint-reply");
-    let t = decode(&bin).unwrap();
-    assert_eq!(t.type_code, libtracer::type_code::FWD);
-    // op / dst / src / kind / payload / PATH_REF — the mint appended, nothing displaced.
-    assert_eq!(t.children.len(), 6);
-    assert_eq!(t.children[0].payload, vec![0x03], "op = REPLY");
-    assert_eq!(t.children[3].payload, vec![0x00], "kind = RESULT");
-    assert_eq!(t.children[4].payload, vec![0xD2, 0x04, 0x00, 0x00]);
-    let mint = &t.children[5];
-    assert_eq!(mint.type_code, libtracer::type_code::PATH_REF);
-    assert!(!mint.opt.pl && mint.children.is_empty());
-    assert_eq!(
-        mint.payload.len() / libtracer::PATH_REF_ELEMENT_BYTES,
-        1,
-        "a terminus answers exactly one element — its own reference to the target"
-    );
-    assert_eq!(
-        path_ref_element(&mint.payload, 0),
-        Some(PathRefElement {
-            index: 2,
-            generation: 0
-        })
-    );
-    // 4 + 8 bytes of mint, and nothing else changed.
-    let plain_reply_len = bin.len() - 12;
-    assert!(plain_reply_len > 0);
-}
-
-/**
- * @brief `acl/bound-vs-canonical-allow` — a `PATH_REF` in `dst` position, and it is shorter.
- *
- * The §6.3 pair's allow half. The byte count IS the case for the form, so it is pinned
- * against the canonical twin rather than asserted in isolation.
- */
-#[test]
-fn acl_bound_vs_canonical_allow() {
-    let bound = assert_vector_consistent("acl/bound-vs-canonical-allow");
-    let canonical = assert_vector_consistent("fwd/fwd-read");
-    assert_eq!(
-        hex(&bound),
-        "0f401e00010001000014000800020000000000000006000900087265706c792d6570"
-    );
-    assert!(
-        bound.len() < canonical.len(),
-        "the bound spelling is the shorter one — {} vs {}",
-        bound.len(),
-        canonical.len()
-    );
-    let t = decode(&bound).unwrap();
-    assert_eq!(t.children[0].payload, vec![0x00], "op = READ");
-    let dst = &t.children[1];
-    assert_eq!(dst.type_code, libtracer::type_code::PATH_REF);
-    assert_eq!(
-        path_ref_element(&dst.payload, 0),
-        Some(PathRefElement {
-            index: 2,
-            generation: 0
-        })
-    );
-    // The canonical twin's dst is a PACKED PATH (RFC-0018 — `opt.PL = 0`, records not
-    // children) — the two address forms, side by side, and the reason the byte comparison
-    // above is now a narrower win than it was: the canonical spelling got cheaper too.
-    let c = decode(&canonical).unwrap();
-    assert_eq!(c.children[1].type_code, libtracer::type_code::PATH);
-    assert!(!c.children[1].opt.pl && c.children[1].children.is_empty());
-    // The FWD parser accepts both spellings in `dst` and says which it got.
-    let pf = libtracer::fwd::decode_fwd(&bound).unwrap();
-    assert!(pf.dst_bound && !pf.mint_request);
-    assert!(!libtracer::fwd::decode_fwd(&canonical).unwrap().dst_bound);
-}
-
-/**
- * @brief `acl/bound-vs-canonical-deny` — denied, and carrying no binding.
- *
- * Two things are pinned. The outcome tail is the `ERROR{tr::access::denied}` the canonical
- * spelling produces byte for byte — that agreement IS §6.3's claim. And there is no
- * `PATH_REF` after the `STATUS`: a denial never hands back a handle to what it refused.
- */
-#[test]
-fn acl_bound_vs_canonical_deny() {
-    let bin = assert_vector_consistent("acl/bound-vs-canonical-deny");
-    let t = decode(&bin).unwrap();
-    assert_eq!(t.children[0].payload, vec![0x03], "op = REPLY");
-    // `src` echoes the request's dst, which is the bound form — the one thing that cannot
-    // agree between two spellings of one address.
-    assert_eq!(t.children[2].type_code, libtracer::type_code::PATH_REF);
-    assert_eq!(t.children[3].payload, vec![0x01], "kind = ERROR");
-    let f = libtracer::fwd::decode_fwd(&bin).unwrap();
-    assert_eq!(reply_error_code(&f), 0x0050, "tr::access::denied");
-    // Nothing past the STATUS: no mint on a denial (RFC-0024 §6.1).
-    assert_eq!(t.children.len(), 5);
-    // The outcome tail, byte for byte — kind VALUE (5 B) + STATUS{ERROR{VALUE u16}} (14 B).
-    assert_eq!(
-        hex(&bin[bin.len() - 19..]),
-        "010001000109400a0008400600010002005000"
-    );
-}
-
-/* --------------------------- RFC-0024 §3.4/§5 — the forwarder hop (car 3) --- */
-
-/**
- * @brief `fwd/fwd-bound-forward` -> `fwd/fwd-bound-forwarded` — one bound hop, byte for byte.
- *
- * The pair is the whole of what a forwarder does to a bound frame: the `dst` loses exactly
- * one element — its own, consumed, never rewritten — and `src` grows by the inbound mount
- * run, canonically. A binding that grew or reordered the residual would still route and
- * would no longer be this protocol, which is why the residual is pinned as the tail of the
- * inbound body rather than re-derived.
- */
-#[test]
-fn fwd_bound_forward_is_one_hop_from_forwarded() {
-    let before = assert_vector_consistent("fwd/fwd-bound-forward");
-    let after = assert_vector_consistent("fwd/fwd-bound-forwarded");
-    assert_eq!(
-        hex(&before),
-        "0f402e000100010000140010000100000000000000efbe00000700000006000900087265706c792d65700100040009000000"
-    );
-    assert_eq!(
-        hex(&after),
-        "0f402a00010001000014000800efbe00000700000006000d0003636c69087265706c792d65700100040009000000"
-    );
-
-    let bf = libtracer::fwd::decode_fwd(&before).unwrap();
-    let af = libtracer::fwd::decode_fwd(&after).unwrap();
-    assert_eq!(bf.op, libtracer::fwd::fwd_op::READ);
-    assert_eq!(af.op, bf.op, "a hop relays the opcode it was given");
-    assert!(bf.dst_bound && af.dst_bound);
-
-    // Two elements in, one out, and the survivor is the NEXT host's — element 0 is this
-    // host's own and is consumed (RFC-0024 §4.1).
-    let bt = decode(&before).unwrap();
-    let at = decode(&after).unwrap();
-    let bin_dst = &bt.children[1];
-    let out_dst = &at.children[1];
-    assert_eq!(bin_dst.type_code, libtracer::type_code::PATH_REF);
-    assert!(
-        !out_dst.opt.pl,
-        "the re-headed PATH_REF keeps PL clear — a record array"
-    );
-    assert_eq!(bin_dst.payload.len() / libtracer::PATH_REF_ELEMENT_BYTES, 2);
-    assert_eq!(out_dst.payload.len() / libtracer::PATH_REF_ELEMENT_BYTES, 1);
-    assert_eq!(
-        path_ref_element(&bin_dst.payload, 0),
-        Some(PathRefElement {
-            index: 1,
-            generation: 0
-        })
-    );
-    assert_eq!(
-        path_ref_element(&out_dst.payload, 0),
-        path_ref_element(&bin_dst.payload, 1),
-        "the residual is the inbound element array minus its head"
-    );
-
-    // `src` accumulates CANONICALLY on a bound frame: the return route is the one every
-    // canonical hop builds, so a peer that never speaks the bound form still answers.
-    assert_eq!(bt.children[2].type_code, libtracer::type_code::PATH);
-    assert_eq!(at.children[2].type_code, libtracer::type_code::PATH);
-    assert_eq!(
-        libtracer::tlv_builders::packed_segments(&bt.children[2].payload)
-            .unwrap()
-            .len(),
-        1,
-        "src = /reply-ep"
-    );
-    assert_eq!(
-        libtracer::tlv_builders::packed_segments(&at.children[2].payload)
-            .unwrap()
-            .len(),
-        2,
-        "src = /cli/reply-ep"
-    );
-
-    // The payload rode through untouched.
-    assert_eq!(
-        hex(&before[before.len() - 8..]),
-        hex(&after[after.len() - 8..])
-    );
-}
+/* RFC-0024 §5-§7 (the mint exchange, the 0x14-dst forwarder hop and the 0x14-dst §6.3 pair)
+ * retired with the flagless chain (#2245): their vectors are gone, and a learned chain now rides
+ * every success reply's `src` (RFC-0029 §6.2). */
 
 /**
  * @brief `path/path-reserved-brackets` (#996) — the reserved-character set is

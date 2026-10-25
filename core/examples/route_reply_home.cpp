@@ -27,6 +27,7 @@
  * Runs under ctest as `example_route_reply_home`; returns non-zero on any failed check.
  */
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -37,6 +38,7 @@
 #include <vector>
 
 #include "libtracer/fwd_router.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -165,8 +167,16 @@ int main() {
     if (b_to_o.sent.size() != 1) return 1;
     check(ok, path_child(b_to_o.sent[0], 1) == path_tlv({"app"}),
           "the REPLY's dst IS the request's accumulated src — no correlation table was consulted");
-    check(ok, path_child(b_to_o.sent[0], 2) == path_tlv({"sensor", "temp"}),
-          "and its src names the responder, which is how the answer carries its provenance");
+    // Its src is the terminus's PAIR for /sensor/temp (RFC-0029 §6.2): the responder's address
+    // from the origin's vantage, which the origin can adopt and spell as its next `dst`.
+    std::vector<std::byte> want_src;
+    if (const auto slot = graph_b.vertex_slot(v)) {
+        std::array<std::byte, tr::wire::kPathPairRecordBytes> rec{};
+        tr::wire::path_pair_store(rec, {.index = slot->index, .generation = slot->generation});
+        tr::wire::emit_tlv(want_src, tr::wire::type_t::PATH, tr::wire::opt_t{}, rec);
+    }
+    check(ok, path_child(b_to_o.sent[0], 2) == want_src,
+          "and its src is the responder's PAIR, which is how the answer carries its provenance");
 
     // Back at the origin, "app" names no child, so the route is spent and the reply terminates.
     router_o.on_frame("a", b_to_o.sent[0]);

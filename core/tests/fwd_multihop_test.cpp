@@ -231,9 +231,15 @@ int main() {
         check(r.children[1].type == type_t::PATH &&
                   tr::wire::equal(r.children[1], *tr::wire::decode(b_path({"reply-ep"}))),
               "REPLY dst fully consumed to /reply-ep at the client");
-        check(r.children[2].type == type_t::PATH &&
-                  tr::wire::equal(r.children[2], *tr::wire::decode(b_path({"sensor"}))),
-              "REPLY src == /sensor (B's responder endpoint — provenance)");
+        // RFC-0029 §6.2: B seeds src with its PAIR for /sensor and A prepends its own part,
+        // so the route the origin learns ENDS with B's PAIR (provenance from its vantage).
+        const auto slot_b = graph_b.vertex_slot(vB);
+        const auto b_pair = slot_b ? tr::testing::b_path_pair(slot_b->index, slot_b->generation)
+                                   : std::vector<std::byte>{};
+        const auto& sp = r.children[2].payload;
+        check(r.children[2].type == type_t::PATH && b_pair.size() == 15 && sp.size() > 11 &&
+                  std::equal(b_pair.begin() + 4, b_pair.end(), sp.end() - 11),
+              "REPLY src ends with B's PAIR for /sensor, A's part in front of it");
         check(r.children[4].type == type_t::VALUE && r.children[4].payload.size() == 4 &&
                   tr::detail::load_le<std::uint32_t>(r.children[4].payload) == kStored,
               "REPLY payload == the exact stored VALUE u32=0xDEADBEEF (byte-exact end to end)");

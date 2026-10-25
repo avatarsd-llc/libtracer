@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief RFC-0024 — bound-path routing and minting, at the terminus.
+ * @brief RFC-0024 — bound-path routing, and the RFC-0029 §6.2 PAIR a terminus answers with.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -17,8 +17,12 @@
  *   than delivering into the new tenant;
  * - an out-of-range index drops, against an in-range one that lands;
  * - a residual that is not exactly one element drops, at both ends of the range;
- * - a mint is refused wherever the operation is, so a denied caller learns nothing;
+ * - the PAIR a success reply's `src` carries is withheld wherever the operation is refused,
+ *   so a denied caller learns nothing;
  * - and the bound and canonical spellings of one operation produce byte-identical replies.
+ *
+ * Since #2245 nothing asks for the PAIR: every successful terminus reply seeds its `src` with
+ * it, and the RFC-0024 op-byte flag that used to ask is an undefined opcode bit, refused.
  */
 
 #include <algorithm>
@@ -137,7 +141,7 @@ std::vector<std::byte> reply_bytes(const tr::view::rope_t& reply) {
     return std::vector<std::byte>(b.begin(), b.end());
 }
 
-/** @brief What a decoded reply says: its kind, its error identity, and any minted binding. */
+/** @brief What a decoded reply says: its kind, its error identity, and the PAIR its `src` holds. */
 struct reply_facts_t {
     bool decoded = false;
     reply_kind_t kind = reply_kind_t::RESULT;
@@ -156,17 +160,14 @@ reply_facts_t reply_facts(const tr::view::rope_t& reply) {
     out.child_count = dec->children.size();
     out.kind =
         static_cast<reply_kind_t>(tr::detail::load_le<std::uint8_t>(dec->children[3].payload));
-    // The mint is a trailing child, PAST `kind` (index 3). Scanning the whole child list
-    // would count the reply's own `src` — which is the request's `dst` echoed back, and is
-    // itself a PATH_REF whenever the request was bound. That false positive is exactly the
-    // shape a denied bound READ has, so a test asserting "no mint on a denial" would pass
-    // while measuring the echo.
-    for (std::size_t i = 4; i < dec->children.size(); ++i) {
-        const tlv_t& c = dec->children[i];
-        if (c.type != type_t::PATH_REF) continue;
-        if (tr::wire::path_ref_element_count(c.payload.size()) != 1) continue;
-        out.has_mint = true;
-        out.mint = tr::wire::path_ref_element_at(c.payload, 0);
+    // The terminus's PAIR is the reply's `src` (index 2), seeded on success (RFC-0029 §6.2):
+    // a PATH of exactly one PAIR record. An error keeps the residual NAMEs instead.
+    const tlv_t& src = dec->children[2];
+    if (src.type == type_t::PATH && src.payload.size() == tr::wire::kPathPairRecordBytes) {
+        if (const auto pair = tr::wire::path_pair_at(src.payload, 0)) {
+            out.has_mint = true;
+            out.mint = path_ref_element_t{.index = pair->index, .generation = pair->generation};
+        }
     }
     if (out.kind == reply_kind_t::ERROR && dec->children.size() >= 5) {
         const tlv_t& status = dec->children[4];
@@ -204,7 +205,8 @@ std::vector<std::byte> allow_acl(std::string_view subject, std::uint32_t mask) {
 
 /** @brief The mask bit of one right — `acl_right_t`'s enumerators ARE the bits. */
 constexpr std::uint32_t bit(acl_right_t r) { return static_cast<std::uint32_t>(r); }
-constexpr std::uint8_t kMint = tr::graph::kFwdOpFlagMintRequest;
+/** @brief The retired RFC-0024 mint flag's bit — an undefined opcode bit since #2245. */
+constexpr std::uint8_t kBit7 = 0x80;
 constexpr std::uint8_t kRead = static_cast<std::uint8_t>(fwd_op_t::READ);
 constexpr std::uint8_t kWrite = static_cast<std::uint8_t>(fwd_op_t::WRITE);
 
@@ -219,11 +221,6 @@ std::vector<std::byte> vector_bytes(std::string_view case_dir) {
     for (std::size_t i = 0; i < raw.size(); ++i)
         out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
     return out;
-}
-
-/** @brief Byte equality over two spans. */
-bool same(std::span<const std::byte> a, std::span<const std::byte> b) {
-    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
 }
 
 // ---------------------------------------------------------------------------
@@ -384,9 +381,8 @@ void test_bound_read_matches_canonical() {
     const reply_facts_t bf = reply_facts(*bound);
     check(cf.kind == reply_kind_t::RESULT && bf.kind == reply_kind_t::RESULT,
           "both spellings answer kind=RESULT");
-    // Not byte-identical whole frames: the reply's `src` echoes the request's `dst`, which is
-    // the one thing that differs BY CONSTRUCTION between the two spellings. The payload — the
-    // answer itself — is what must agree, and it is the same stored segment either way.
+    // Byte-identical whole frames: a success reply's `src` is the target's PAIR whichever way
+    // the request spelled its `dst` (RFC-0029 §6.2), and the payload is the same stored segment.
     const auto cb = reply_bytes(*canonical);
     const auto bb = reply_bytes(*bound);
     const std::vector<std::byte> val = b_value({0xD2, 0x04, 0x00, 0x00});
@@ -395,11 +391,11 @@ void test_bound_read_matches_canonical() {
                std::equal(val.begin(), val.end(), frame.end() - static_cast<long>(val.size()));
     };
     check(ends_with(cb) && ends_with(bb), "both replies carry the same stored value verbatim");
-    check(bb.size() < cb.size(), "the bound reply is the shorter of the two (the whole point)");
+    check(bb == cb, "and the two replies are byte-identical — both answer with the PAIR");
 }
 
-void test_mint_round_trip() {
-    std::printf("the mint exchange (§7.5) — request in the op byte, answer in the reply:\n");
+void test_success_reply_carries_the_pair() {
+    std::printf("every success reply's src is the target's PAIR, unasked (RFC-0029 §6.2):\n");
     graph_t g;
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
@@ -407,35 +403,33 @@ void test_mint_round_trip() {
 
     const auto plain =
         resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path({"sensor", "temp"}), b_path({"back"})));
-    check(plain.has_value() && !reply_facts(*plain).has_mint,
-          "an UNFLAGGED read mints nothing — the request side really is opt-in");
-
-    const auto minted = resolve_bytes(
-        resolver, b_fwd_raw_op(kRead | kMint, b_path({"sensor", "temp"}), b_path({"back"})));
-    const reply_facts_t mf = reply_facts(*minted);
-    check(minted.has_value() && mf.kind == reply_kind_t::RESULT,
-          "a mint-flagged READ is still a READ — the opcode is `op & 0x3F` (§9.3)");
-    check(mf.has_mint, "the reply carries the minted PATH_REF");
+    const reply_facts_t mf = plain ? reply_facts(*plain) : reply_facts_t{};
+    check(plain.has_value() && mf.kind == reply_kind_t::RESULT, "a plain READ answers RESULT");
+    check(mf.has_mint, "and its src is a PATH of one PAIR — no flag asked for it");
     check(
         g.vertex_slot(v) == vertex_slot_t{.index = mf.mint.index, .generation = mf.mint.generation},
-        "the minted element is this node's own index + generation for the target");
-    check(reply_bytes(*minted).size() == reply_bytes(*plain).size() + 12,
-          "the mint costs exactly 4 + 8 bytes on the reply and zero on the request");
+        "the PAIR is this node's own index + generation for the target");
 
     // Round trip: the element the terminus answered with addresses the same vertex.
     const auto reused = resolve_bytes(
         resolver,
         b_fwd_raw_op(kRead, b_path_ref_one(mf.mint.index, mf.mint.generation), b_path({"back"})));
     check(reused.has_value() && reply_facts(*reused).kind == reply_kind_t::RESULT,
-          "the minted binding addresses the same vertex on the next operation");
+          "the learned PAIR addresses the same vertex on the next operation");
 
-    // A WRITE mints too — the flag is on the op byte, not on any one opcode.
-    const auto wrote =
-        resolve_bytes(resolver, b_fwd_raw_op(kWrite | kMint, b_path({"sensor", "temp"}),
-                                             b_path({"back"}), {}, b_value({0x09})));
+    // A WRITE's acknowledgement carries it too — the seed is the reply's, not one opcode's.
+    const auto wrote = resolve_bytes(resolver, b_fwd_raw_op(kWrite, b_path({"sensor", "temp"}),
+                                                            b_path({"back"}), {}, b_value({0x09})));
     check(wrote.has_value() && reply_facts(*wrote).kind == reply_kind_t::RESULT &&
               reply_facts(*wrote).has_mint,
-          "a mint-flagged WRITE writes AND mints");
+          "a WRITE writes AND answers with the PAIR");
+
+    // An error keeps the residual NAMEs: a route that does not resolve has no PAIR to give.
+    const auto missing =
+        resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path({"sensor", "nope"}), b_path({"back"})));
+    check(missing.has_value() && reply_facts(*missing).kind == reply_kind_t::ERROR &&
+              !reply_facts(*missing).has_mint,
+          "a NOT_FOUND carries no PAIR");
 }
 
 void test_generation_mismatch_drops() {
@@ -540,17 +534,17 @@ void test_mint_denied_by_acl() {
     (void)g.write(v, make_value(b_value({0x05})));
     (void)g.write(path_t("/x:acl"), make_value(allow_acl("link-ok", bit(acl_right_t::READ))));
 
-    const auto denied = resolve_bytes(
-        resolver, b_fwd_raw_op(kRead | kMint, b_path({"x"}), b_path({"back"})), "link-bad");
+    const auto denied =
+        resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path({"x"}), b_path({"back"})), "link-bad");
     const reply_facts_t df = reply_facts(*denied);
     check(denied.has_value() && df.kind == reply_kind_t::ERROR && df.code == 0x0050,
           "the denied caller gets ERROR{tr::access::denied}");
     check(!df.has_mint,
-          "and NO minted binding — never 'denied, and here is a handle to it' (the ablation "
+          "and NO PAIR in its src — never 'denied, and here is a handle to it' (the ablation "
           "below proves the same frame does mint when allowed)");
 
-    const auto allowed = resolve_bytes(
-        resolver, b_fwd_raw_op(kRead | kMint, b_path({"x"}), b_path({"back"})), "link-ok");
+    const auto allowed =
+        resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path({"x"}), b_path({"back"})), "link-ok");
     const reply_facts_t af = reply_facts(*allowed);
     check(allowed.has_value() && af.kind == reply_kind_t::RESULT && af.has_mint,
           "the granted caller gets the value AND the binding");
@@ -575,8 +569,8 @@ void test_revocation_is_immediate() {
     (void)g.write(v, make_value(b_value({0x05})));
     (void)g.write(path_t("/x:acl"), make_value(allow_acl("link-ok", bit(acl_right_t::READ))));
 
-    const auto minted = resolve_bytes(
-        resolver, b_fwd_raw_op(kRead | kMint, b_path({"x"}), b_path({"back"})), "link-ok");
+    const auto minted =
+        resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path({"x"}), b_path({"back"})), "link-ok");
     const reply_facts_t mf = reply_facts(*minted);
     check(mf.has_mint, "the granted caller holds a binding");
 
@@ -594,22 +588,26 @@ void test_revocation_is_immediate() {
           "the very next op over the SAME binding is denied — no ACL state is cached in it");
 }
 
-void test_unmasked_op_byte_still_routes() {
-    std::printf("a forwarder masks the op byte rather than switching on it (§9.3):\n");
-    // peek_fwd_op is the router's terminus split (REPLY -> originator sink, request ->
-    // resolve). Before the masking rule a mint-flagged READ peeked as opcode 0x80 and was
-    // rejected as an unknown op at every hop — a clean error, but an error.
-    const auto flagged = b_fwd_raw_op(kRead | kMint, b_path({"x"}), b_path({"back"}));
+void test_bit7_is_refused() {
+    std::printf("a set op-byte bit 7 is an undefined opcode at the terminus (#2245):\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const vertex_handle_t x = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    (void)g.write(x, make_value(b_value({0x01})));
+    // A forwarder masks the op byte rather than switching on it (§9.3), so a peer's stray bit
+    // still routes to the terminus that owns the decision...
+    const auto flagged = b_fwd_raw_op(kRead | kBit7, b_path({"x"}), b_path({"back"}));
     const tr::wire::grammar::span_cursor cur{flagged};
     const std::optional<fwd_op_t> peeked = tr::net::peek_fwd_op(cur);
-    check(peeked.has_value() && *peeked == fwd_op_t::READ,
-          "a mint-flagged READ peeks as READ, not as an unknown opcode");
-
-    const auto plain_reply_op = b_fwd_raw_op(static_cast<std::uint8_t>(fwd_op_t::REPLY) | kMint,
-                                             b_path({"x"}), b_path({"back"}));
-    const tr::wire::grammar::span_cursor rcur{plain_reply_op};
-    const std::optional<fwd_op_t> rpeek = tr::net::peek_fwd_op(rcur);
-    check(rpeek.has_value() && *rpeek == fwd_op_t::REPLY, "and a flagged REPLY peeks as REPLY");
+    check(peeked.has_value() && *peeked == fwd_op_t::READ, "a bit-7 READ peeks as READ at a hop");
+    // ...and the terminus refuses it: the RFC-0024 mint flag is retired, not ignored.
+    const auto r = resolve_bytes(resolver, flagged);
+    check(r.has_value() && reply_facts(*r).kind == reply_kind_t::ERROR && !reply_facts(*r).has_mint,
+          "the terminus answers kind=ERROR, and with no PAIR");
+    // The ablation: the same frame without the bit answers.
+    const auto ok = resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path({"x"}), b_path({"back"})));
+    check(ok.has_value() && reply_facts(*ok).kind == reply_kind_t::RESULT,
+          "the same READ without the bit answers RESULT");
 }
 
 /**
@@ -617,7 +615,7 @@ void test_unmasked_op_byte_still_routes() {
  *        (`PATH_REF_REVERSE`, `0x15`), never by its position.
  *
  * Two claims, and the first is the one amendment 1's positional rule got wrong. Under that
- * rule a mint-flagged WRITE whose stored value happened to be a raw `PATH_REF` TLV was read
+ * rule a WRITE whose stored value happened to be a raw `PATH_REF` TLV was read
  * as a reverse list and the write lost its payload — a shape with no in-tree producer, which
  * is exactly why the foreclosure was cheap to take and is now cheap to give back. The second
  * claim is the one the rule got right and the type keeps: a genuine trailing reverse list is
@@ -640,23 +638,22 @@ void test_reverse_list_is_typed_not_positional() {
         return r.has_value() ? reply_bytes(*r) : std::vector<std::byte>{};
     };
 
-    // (1) A mint-flagged WRITE whose PAYLOAD is a raw `PATH_REF` TLV — un-foreclosed.
+    // (1) A WRITE whose PAYLOAD is a raw `PATH_REF` TLV — un-foreclosed.
     const std::vector<std::byte> ref_payload = b_path_ref_one(7u, 3u);
-    const auto wrote_ref =
-        resolve_bytes(resolver, b_fwd_raw_op(kWrite | kMint, b_path({"sensor", "temp"}),
-                                             b_path({"back"}), {}, ref_payload));
+    const auto wrote_ref = resolve_bytes(resolver, b_fwd_raw_op(kWrite, b_path({"sensor", "temp"}),
+                                                                b_path({"back"}), {}, ref_payload));
     check(wrote_ref.has_value() && reply_facts(*wrote_ref).kind == reply_kind_t::RESULT,
-          "a mint-flagged WRITE whose payload is a raw PATH_REF still writes");
+          "a WRITE whose payload is a raw PATH_REF still writes");
     check(ends_with(read_back(), ref_payload),
           "and the raw PATH_REF is what got STORED — the payload is no longer eaten by a "
           "positional reverse-list rule");
 
-    // (2) A mint-flagged WRITE carrying BOTH a payload and a genuine reverse list.
-    const path_ref_element_t rev_el{.index = 11u, .generation = 2u};
+    // (2) A WRITE carrying BOTH a payload and a genuine reverse list — a PATH body of one PAIR
+    // record (RFC-0029 §7.1).
+    std::vector<std::byte> rev_body;
+    tr::testing::emit_path_pair(rev_body, tr::wire::path_pair_t{.index = 11u, .generation = 2u});
     std::vector<std::byte> reverse_child;
-    check(tr::wire::emit_path_ref(reverse_child, std::span<const path_ref_element_t>(&rev_el, 1),
-                                  type_t::PATH_REF_REVERSE),
-          "a PATH_REF_REVERSE emits through the same guarded emitter as a PATH_REF");
+    tr::wire::emit_tlv(reverse_child, type_t::PATH_REF_REVERSE, opt_t{}, rev_body);
     check(
         !reverse_child.empty() && static_cast<type_t>(reverse_child[0]) == type_t::PATH_REF_REVERSE,
         "and it heads with 0x15, not 0x14");
@@ -664,10 +661,9 @@ void test_reverse_list_is_typed_not_positional() {
     std::vector<std::byte> tail = value_payload;
     tail.insert(tail.end(), reverse_child.begin(), reverse_child.end());
     const auto wrote_both = resolve_bytes(
-        resolver,
-        b_fwd_raw_op(kWrite | kMint, b_path({"sensor", "temp"}), b_path({"back"}), {}, tail));
+        resolver, b_fwd_raw_op(kWrite, b_path({"sensor", "temp"}), b_path({"back"}), {}, tail));
     check(wrote_both.has_value() && reply_facts(*wrote_both).kind == reply_kind_t::RESULT,
-          "a mint-flagged WRITE carrying payload AND reverse list writes");
+          "a WRITE carrying payload AND reverse list writes");
     const std::vector<std::byte> stored = read_back();
     check(ends_with(stored, value_payload),
           "the VALUE is what got stored — the reverse child is not the payload");
@@ -679,37 +675,38 @@ void test_path_binding_slot() {
     path_t p("/sensor/temp");
     check(!p.binding().bound, "a freshly parsed path is unbound");
 
-    const path_ref_element_t els[2] = {{.index = 3, .generation = 1},
-                                       {.index = 9, .generation = 4}};
-    check(p.bind(els), "a two-host route binds");
-    check(p.binding().bound && p.binding().elements.size() == 2, "and the elements are kept");
+    std::vector<std::byte> chain;
+    tr::testing::emit_path_pair(chain, tr::wire::path_pair_t{.index = 3, .generation = 1});
+    tr::testing::emit_path_pair(chain, tr::wire::path_pair_t{.index = 9, .generation = 4});
+    check(p.bind(chain), "a two-host chain binds");
+    check(p.binding().bound && p.binding().chain.size() == 2 * tr::wire::kPathPairRecordBytes,
+          "and the chain is kept verbatim");
 
     // Value semantics: a copy carries the binding, and the canonical bytes survive both.
     const path_t copy = p;
     check(copy.binding() == p.binding(), "copying a path copies its binding");
     check(copy.key().size() == p.key().size(),
-          "and its canonical bytes — the mint key and the "
-          "fallback are never discarded");
+          "and its canonical bytes — the fallback is never discarded");
 
     p.clear_binding();
-    check(!p.binding().bound && p.binding().elements.empty(),
+    check(!p.binding().bound && p.binding().chain.empty(),
           "clearing the binding is the whole of the teardown — no hop holds anything");
     check(copy.binding().bound, "and it did not reach through to the copy");
 
-    // Refuses past the normative bound rather than truncating: a truncated element list is a
+    // Refuses past a 16-bit PATH body rather than truncating: a truncated chain is a
     // valid-LOOKING binding for a different route.
-    const std::vector<path_ref_element_t> too_many(tr::wire::kMaxPathRefElements + 1);
-    check(!p.bind(too_many) && !p.binding().bound, "a route past the element cap does not bind");
+    const std::vector<std::byte> too_long(0x10000);
+    check(!p.bind(too_long) && !p.binding().bound, "a chain past a 16-bit body does not bind");
     check(!p.bind({}) && !p.binding().bound, "and neither does an empty one");
 }
 
 /**
- * @brief The four RFC-0024 behavioural vectors, as BYTES, against the reference impl.
+ * @brief The RFC-0024 behavioural vectors still standing, as BYTES, against the reference impl.
  *
  * A vector gates the codec and only the codec (HARNESS.md §"What a vector gates"), so every
  * behavioural claim a `description.md` makes has to be made somewhere it can be false. This
- * is that place for the mint exchange and the §6.3 pair: each vector's bytes are fed to — or
- * compared against — the resolver, so a vector that drifts from the code fails here rather
+ * is that place for the PAIR a read answers with and the §6.3 pair: each vector's bytes are fed to
+ * — or compared against — the resolver, so a vector that drifts from the code fails here rather
  * than sitting on disk describing a protocol nobody implements.
  *
  * The graph is the one the vectors were taken from: `/sensor/temp` in an empty node, which
@@ -725,26 +722,14 @@ void test_conformance_vectors() {
     check(g.vertex_slot(v) == vertex_slot_t{.index = 2u, .generation = 0u},
           "the vectors' index=2 generation=0 is what this graph really hands out");
 
-    // fwd/fwd-mint-request differs from fwd/fwd-read in exactly one byte.
-    const std::vector<std::byte> mint_req = vector_bytes("fwd/fwd-mint-request");
+    // The RFC-0024 mint vectors and the 0x14-dst §6.3 pair retired with the flag (#2245): the
+    // PAIR now rides every success reply's `src`, and the pair is re-bound on the PAIR spelling
+    // in path_pair_test.
     const std::vector<std::byte> plain_req = vector_bytes("fwd/fwd-read");
-    std::size_t differing = 0;
-    for (std::size_t i = 0; i < mint_req.size() && i < plain_req.size(); ++i)
-        if (mint_req[i] != plain_req[i]) ++differing;
-    check(mint_req.size() == plain_req.size() && differing == 1,
-          "fwd-mint-request is fwd-read with ONE byte changed — the request costs zero bytes");
-
-    // ...and the reply to it is fwd/fwd-mint-reply, byte for byte.
-    const auto minted = resolve_bytes(resolver, mint_req);
-    check(minted.has_value() && same(reply_bytes(*minted), vector_bytes("fwd/fwd-mint-reply")),
-          "fwd-mint-reply is byte-exact what the resolver emits for fwd-mint-request");
-
-    // The §6.3 pair was spelled with a PATH_REF dst. RFC-0029 S1 retires that spelling as an
-    // address: the vector stays a codec vector, and the terminus refuses it INVALID_PATH. The
-    // allow/deny equivalence it carried is re-bound on the PAIR spelling in path_pair_test.
-    const auto retired = resolve_bytes(resolver, vector_bytes("acl/bound-vs-canonical-allow"));
-    check(!retired.has_value() && retired.error() == tr::graph::status_t::INVALID_PATH,
-          "acl/bound-vs-canonical-allow (a 0x14 dst) is refused INVALID_PATH");
+    const auto learned = resolve_bytes(resolver, plain_req);
+    const reply_facts_t lf = learned ? reply_facts(*learned) : reply_facts_t{};
+    check(lf.has_mint && lf.mint.index == 2u && lf.mint.generation == 0u,
+          "fwd-read's reply src is the PAIR index=2 generation=0");
     const auto bound =
         resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path_ref_one(2u, 0u), b_path({"reply-ep"})));
     const auto canonical = resolve_bytes(resolver, plain_req);
@@ -764,13 +749,13 @@ int main() {
     test_slot_memo_agrees_with_the_scan();
     test_generation_saturates();
     test_bound_read_matches_canonical();
-    test_mint_round_trip();
+    test_success_reply_carries_the_pair();
     test_generation_mismatch_drops();
     test_out_of_range_index_drops();
     test_residual_length_drops();
     test_mint_denied_by_acl();
     test_revocation_is_immediate();
-    test_unmasked_op_byte_still_routes();
+    test_bit7_is_refused();
     test_reverse_list_is_typed_not_positional();
     test_path_binding_slot();
     test_conformance_vectors();

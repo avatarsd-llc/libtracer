@@ -1,0 +1,12 @@
+{
+  "name": "subscribe-reverse-list-unflagged",
+  "category": "fwd",
+  "hex": "0F407400010001000106000C000673656E736F720474656D701040140002000B007375627363726962657273010001000106001A00036E657408646F776E6C696E6B03636C69087265706C792D657004400D0006000900087265706C792D6570150014000016080700000001000000087265706C792D6570",
+  "total_bytes": 120,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=WRITE, dst=/sensor/temp, src=/net/downlink/cli/reply-ep, FIELD{subscribers, 0x01}, SUBSCRIBER{/reply-ep}, PATH_REF_REVERSE{<pair 7:1>, reply-ep} } - a relayed subscribe, sent with no flag and no 0x15 child, as the hop forwards it: the hop CREATES the 0x15 child, seeded with its own element (the PAIR of the connection vertex the request arrived on) followed by the request's src as it arrived (RFC-0029 Amendment 1).",
+    "note": "PAIR arm. No flag asks for the list: every relaying hop builds it (RFC-0029 6.3)."
+  }
+}

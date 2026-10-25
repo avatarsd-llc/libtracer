@@ -219,6 +219,13 @@ struct node_t {
  * @brief The acceptance case: an AWAIT leaves the receive context at once, and a READ sent
  *        after it on the same link is answered before the AWAIT resolves.
  */
+/** @brief The one-PAIR `src` a successful reply carries for @p v (RFC-0029 §6.2). */
+std::vector<std::byte> pair_of(const graph_t& g, vertex_handle_t v) {
+    const auto slot = g.vertex_slot(v);
+    return slot ? tr::testing::b_path_pair(slot->index, slot->generation)
+                : std::vector<std::byte>{};
+}
+
 void read_after_pending_await_is_answered_first() {
     std::printf("a READ behind a pending AWAIT on the same link is answered first:\n");
     node_t n;
@@ -236,7 +243,7 @@ void read_after_pending_await_is_answered_first() {
     check(n.link.count() == 1, "  the READ behind it was answered on the same link");
     const auto first = parse_reply(n.link.frames().at(0));
     check(first && first->kind == reply_kind_t::RESULT && first->value == kOther &&
-              first->src == b_path({"other"}),
+              first->src == pair_of(n.graph, n.other),
           "  and that first reply is the READ's RESULT, not the AWAIT's");
     check(n.router->pending_awaits() == 1, "  the AWAIT is still pending");
 
@@ -244,8 +251,8 @@ void read_after_pending_await_is_answered_first() {
     check(n.link.wait_for(2, 2s), "  a write to /sink sends the AWAIT's reply");
     const auto second = parse_reply(n.link.frames().at(1));
     check(second && second->kind == reply_kind_t::RESULT && second->value == kChanged &&
-              second->src == b_path({"sink"}),
-          "  the AWAIT's RESULT carries the new value, addressed from /sink");
+              second->src == pair_of(n.graph, n.sink),
+          "  the AWAIT's RESULT carries the new value, and /sink's PAIR as its src");
     check(n.router->pending_awaits() == 0, "  nothing is pending afterwards");
     check(n.rx.live() == base, "  and the waiter's block went back to the link's source");
 }

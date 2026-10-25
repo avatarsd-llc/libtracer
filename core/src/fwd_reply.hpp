@@ -157,13 +157,13 @@ struct reply_route_t {
  * and where ⑤'s scatter-gather reply emission will hook). Both MUST be non-empty: an
  * empty route span would emit a header whose length counts bytes no address occupies.
  *
- * @p egress is the byte backend the head segment — and, on a mint, the trailing `PATH_REF`
- * segment — draw from (#795, ADR-0074). It is the reply's EGRESS-construction seam,
- * distinct from the flatten seam: its size tracks the swapped ROUTE bytes plus the inline tail,
- * not the payload bytes `flat` is sized against. A bounded node points it at its own slab so
- * this reply-egress allocation stays inside the node's memory bound; the default is the global
- * heap. A refusal returns an EMPTY rope, which `resolve_node`'s `or_backpressure` turns into an
- * addressed `kind=ERROR STATUS{BACKPRESSURE}` — exhaustion answered by value, never an abort.
+ * @p egress is the byte backend the head segment draws from (#795, ADR-0074). It is the reply's
+ * EGRESS-construction seam, distinct from the flatten seam: its size tracks the swapped ROUTE bytes
+ * plus the inline tail, not the payload bytes `flat` is sized against. A bounded node points it at
+ * its own slab so this reply-egress allocation stays inside the node's memory bound; the default is
+ * the global heap. A refusal returns an EMPTY rope, which `resolve_node`'s `or_backpressure` turns
+ * into an addressed `kind=ERROR STATUS{BACKPRESSURE}` — exhaustion answered by value, never an
+ * abort.
  *
  * When @p route carries an @ref reply_route_t::echo_ts, the reply's outer header sets
  * `opt.TS` and the stamp's bytes ride a trailing segment AFTER the body (#1109) — the
@@ -177,15 +177,13 @@ struct reply_route_t {
  * @param inline_tail    Bytes emitted into the head after `kind` (the ERROR status tail).
  * @param shared         Payload views roped on after the head — never copied.
  * @param shared_len     Total byte length of @p shared (the header's length field needs it).
- * @param egress         The byte backend the head (and mint / echo) segments draw from.
- * @param trailing       An optional minted `PATH_REF` emitted as the reply's LAST child.
+ * @param egress         The byte backend the head (and echo) segments draw from.
  * @return The reply rope, or an EMPTY rope when @p egress refuses.
  */
 [[nodiscard]] view::rope_t assemble_reply(const reply_route_t& route, reply_kind_t kind,
                                           std::span<const std::byte> inline_tail,
                                           std::span<const view::view_t> shared,
-                                          std::size_t shared_len, mem::mem_backend_t& egress,
-                                          std::span<const std::byte> trailing = {});
+                                          std::size_t shared_len, mem::mem_backend_t& egress);
 
 /**
  * @brief A kind=ERROR reply carrying STATUS{ ERROR{ VALUE u16 LE code } } (RFC-0004 §D with the
@@ -214,7 +212,7 @@ struct reply_route_t {
  * the head can live in that frame: @ref alloc places the segment header and its bytes in the
  * storage the caller passed to `op_resolver_t::resolve`, the head is written through the same
  * span-form cursor (@ref emit_cursor_t), and no allocator is reached. A request that does not
- * fit (a long route, a mint and an echo beside the head) draws the rest from @p overflow,
+ * fit (a long route and an echo beside the head) draws the rest from @p overflow,
  * exactly as before, so the store is a fast path and never a limit.
  *
  * Lives on the resolve's own stack frame and is used only during it. The segments it places

@@ -187,24 +187,20 @@ inline void emit_value_le(std::vector<std::byte>& out, T value, std::size_t widt
  * §4.2) followed by the bare 8-byte element array, in route order, with no per-element
  * framing and no count field: the count IS `length / 8`.
  *
- * This is the form the reply path uses. A `PATH_REF`'s size is a pure function of its element
- * count, so the buffer can be a caller's stack array and the emit cannot fail for want of
- * memory — which matters because the mint rides a reply that has ALREADY succeeded: under
- * `-fno-exceptions` a growing container would abort the node on a fragmented heap instead of
- * degrading to the plain reply the design promises (#748's precedent, same function).
+ * A `PATH_REF`'s size is a pure function of its element count, so the buffer can be a caller's
+ * stack array and the emit cannot fail for want of memory. The library itself emits no
+ * `PATH_REF` since #2245; this is the codec's spelling of the retired form, for a peer or test
+ * that must produce one to see it refused.
  *
  * @param out      Destination buffer, at least `path_ref_wire_bytes(elements.size())` bytes.
  * @param elements The route, in route order.
- * @param type     Which bound-path code to head it with — `type_t::PATH_REF` (the default,
- *                 an address) or `type_t::PATH_REF_REVERSE` (the reverse list a
- *                 mint-flagged request accumulates, RFC-0024 §7.1 amendment 2). The body
- *                 grammar is identical; only the role differs, which is the whole reason the
- *                 role is spelled in the type byte rather than in a position.
+ * @param type     `type_t::PATH_REF`, the only code with this body since the reverse list
+ *                 became a `PATH` body (#2245); kept as a parameter so a caller names it.
  *
  * @return False — writing nothing — when @p elements exceeds @ref kMaxPathRefElements (the
  *         §4.3 bound; such a caller has no bound spelling and falls back to the canonical
  *         `PATH`), when @p out is smaller than `path_ref_wire_bytes`, or when @p type is
- *         neither bound-path code.
+ *         not `PATH_REF`.
  */
 [[nodiscard]] inline bool emit_path_ref_into(std::span<std::byte> out,
                                              std::span<const path_ref_element_t> elements,
@@ -231,7 +227,7 @@ inline void emit_value_le(std::vector<std::byte>& out, T value, std::size_t widt
  * drift. For the reply path use the span form: it does not allocate.
  *
  * @return False — emitting nothing — when @p elements exceeds @ref kMaxPathRefElements (the
- *         §4.3 bound) or @p type is neither bound-path code.
+ *         §4.3 bound) or @p type is not `PATH_REF`.
  */
 [[nodiscard]] inline bool emit_path_ref(std::vector<std::byte>& out,
                                         std::span<const path_ref_element_t> elements,
@@ -241,32 +237,6 @@ inline void emit_value_le(std::vector<std::byte>& out, T value, std::size_t widt
     const std::size_t base = out.size();
     out.resize(base + path_ref_wire_bytes(elements.size()));
     return emit_path_ref_into(std::span<std::byte>(out).subspan(base), elements, type);
-}
-
-/**
- * @brief Write the head of a bound list that grows by ONE element at its front: the 4-byte
- *        header and @p first, with the length covering @p rest_body_len more bytes.
- *
- * The terminus's two RFC-0024 §7.1 prepends: its one-element mint answer (@p rest_body_len
- * 0), and the reverse route it completes and stores, whose hop elements the caller copies in
- * straight after the 12 bytes. The forwarding hop's own prepends (the reply mint and the
- * request's reverse mint in `fwd_frame_view.hpp`) still write the same bytes through their
- * stack writer: moving them here re-partitions the router's translation unit and grows its
- * rope forward hop by 333 B on the symbol-size ratchet.
- *
- * It cannot fail, so it reports nothing: the span is exactly one element's wire size, and
- * every caller holds a list under @ref kMaxPathRefElements, whose body never needs `LL`.
- *
- * @param out           The 12 bytes the head occupies.
- * @param type          `type_t::PATH_REF` or `type_t::PATH_REF_REVERSE`.
- * @param first         The element that leads the list.
- * @param rest_body_len Body bytes of the elements that follow it.
- */
-inline void emit_path_ref_head(std::span<std::byte, path_ref_wire_bytes(1)> out, type_t type,
-                               const path_ref_element_t& first,
-                               std::size_t rest_body_len) noexcept {
-    store_header(out, type, opt_t{}, kPathRefElementBytes + rest_body_len);
-    path_ref_store_element(out.subspan<4>(), first);
 }
 
 /** @brief Append a NAME TLV over a text segment (no temporary buffer). */
@@ -351,8 +321,8 @@ template <std::unsigned_integral T>
 
 /**
  * @brief Append a `PATH_REF` TLV over @p elements — the core-array form of @ref emit_path_ref.
- * @retval false @p elements exceeds @ref kMaxPathRefElements, @p type is neither bound-path
- *         code, or the source refused — @p out is unchanged on all three.
+ * @retval false @p elements exceeds @ref kMaxPathRefElements, @p type is not `PATH_REF`,
+ *         or the source refused — @p out is unchanged on all three.
  */
 [[nodiscard]] inline bool emit_path_ref(mem::bytes_t& out,
                                         std::span<const path_ref_element_t> elements,

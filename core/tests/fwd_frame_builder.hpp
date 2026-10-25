@@ -127,6 +127,17 @@ inline bytes_t b_path_body(std::span<const std::byte> body) {
 }
 
 /**
+ * @brief A `PATH` of ONE PAIR record (`00 16 08 <index> <generation>`, RFC-0029 §4) — the
+ *        `src` a successful terminus reply carries for its target (RFC-0029 §6.2, #2245).
+ */
+inline bytes_t b_path_pair(std::uint32_t index, std::uint32_t generation) {
+    bytes_t body{std::byte{0x00}, std::byte{0x16}, std::byte{0x08}};
+    for (const std::uint32_t v : {index, generation})
+        for (int i = 0; i < 4; ++i) body.push_back(static_cast<std::byte>((v >> (8 * i)) & 0xFFu));
+    return b_path_body(body);
+}
+
+/**
  * @brief One RFC-0018 §5.4 escape record — `00 <kind> <len> <payload>` — appended to @p out.
  *
  * Nothing in the core mints one; this exists so a test can put one on the wire and check
@@ -182,7 +193,7 @@ inline bytes_t fwd_frame(std::span<const std::byte> op_child, std::span<const st
 /**
  * @brief A FWD frame from a RAW op byte — the form that can set flag bits (RFC-0024 §7.5).
  *
- * @param op_byte   opcode bits 5-0, optionally OR'd with a flag (`kFwdOpFlagMintRequest`).
+ * @param op_byte   the raw op byte; a set bit 7 or 6 is an undefined opcode (#2245).
  * @param dst       the destination `PATH` TLV bytes.
  * @param src       the reply-route `PATH` TLV bytes.
  * @param selector  optional `FIELD` selector, emitted BETWEEN `dst` and `src`.
@@ -208,19 +219,6 @@ inline bytes_t b_fwd(tr::graph::fwd_op_t op, std::span<const std::byte> dst,
                      std::span<const std::byte> src, std::span<const std::byte> selector = {},
                      std::span<const std::byte> payload = {}) {
     return b_fwd_raw_op(static_cast<std::uint8_t>(op), dst, src, selector, payload);
-}
-
-/**
- * @brief A FWD frame carrying the bound-path MINT REQUEST flag (RFC-0024 §7.5).
- *
- * Named rather than left to callers to OR by hand: the flag lives in the op byte, which is
- * exactly the layout knowledge this header exists to hold in one place.
- */
-inline bytes_t b_fwd_mint(tr::graph::fwd_op_t op, std::span<const std::byte> dst,
-                          std::span<const std::byte> src, std::span<const std::byte> selector = {},
-                          std::span<const std::byte> payload = {}) {
-    return b_fwd_raw_op(static_cast<std::uint8_t>(op) | tr::graph::kFwdOpFlagMintRequest, dst, src,
-                        selector, payload);
 }
 
 /**
