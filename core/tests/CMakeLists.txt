@@ -1242,6 +1242,12 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(child_rx_churn_test PRIVATE libtracer)
     libtracer_test_warnings(child_rx_churn_test)
     add_test(NAME child_rx_churn COMMAND child_rx_churn_test)
+    # #2302 — a frame from a REMOVED child, through its still-installed receiver or by its
+    # tombstoned name, is dropped at the ingress: never forwarded, never applied.
+    add_executable(removed_child_ingress_test removed_child_ingress_test.cpp)
+    target_link_libraries(removed_child_ingress_test PRIVATE libtracer)
+    libtracer_test_warnings(removed_child_ingress_test)
+    add_test(NAME removed_child_ingress COMMAND removed_child_ingress_test)
 endif()
 
 add_executable(retire_test retire_test.cpp)
