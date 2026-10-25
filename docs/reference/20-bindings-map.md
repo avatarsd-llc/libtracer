@@ -39,7 +39,6 @@ Native cores are the deliberate choice of [ADR-0028](https://github.com/avatarsd
 | **ESP-IDF component** | [`integrations/esp-idf/`](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/esp-idf/) | port | the full C++ node on ESP32 silicon, plus four platform-native translation units |
 | **PlatformIO library** | [`integrations/platformio/`](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/platformio/) | port | the default C++ source set to any PlatformIO board, plus an ESP32 TWAI build hook |
 | **ESPHome component** | [`integrations/esphome/`](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/esphome/) | port (stub) | nothing yet — one empty Python module |
-| **Arduino metadata** | [`integrations/arduino/`](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/arduino/) | packaging (not planned) | nothing — metadata only |
 | **`rmw_tracer`** | [`bindings/ros2/`](https://github.com/avatarsd-llc/libtracer/tree/main/bindings/ros2/) | adapter | ROS 2 nodes over the C++ graph, when it is finished |
 
 There are no in-tree *bridges* — the `integrations/bridges/<protocol>/` slot that [CONTRIBUTING.md](https://github.com/avatarsd-llc/libtracer/blob/main/.github/CONTRIBUTING.md) reserves for foreign-protocol translators (Modbus, Z-Wave, vendor RPC) is empty.
@@ -93,7 +92,7 @@ The split is load-bearing, not cosmetic: the core package ships **no transport**
 
 ### One version, one tag
 
-Every publishable artifact is stamped in lockstep from the repo-root `VERSION` file by [`tools/sync-version.py`](https://github.com/avatarsd-llc/libtracer/blob/main/tools/sync-version.py) — the crate, the four npm packages and the lockfile, the PlatformIO manifest, the Arduino metadata and the ESP component manifest. One `vX.Y.Z` tag therefore means the same number everywhere, a CI gate fails on drift, and the ROS 2 package is deliberately left unstamped because it is unreleased.
+Every publishable artifact is stamped in lockstep from the repo-root `VERSION` file by [`tools/sync-version.py`](https://github.com/avatarsd-llc/libtracer/blob/main/tools/sync-version.py) — the crate, the four npm packages and the lockfile, the PlatformIO manifest and the ESP component manifest. One `vX.Y.Z` tag therefore means the same number everywhere, a CI gate fails on drift, and the ROS 2 package is deliberately left unstamped because it is unreleased.
 
 The practical consequence for a reader: **treat a version number written into prose as stale until proven otherwise.** The authorities are `VERSION` and the registries, and a release needs no doc edit to happen.
 
@@ -123,7 +122,7 @@ What the green amounts to today, as the driver prints it: **92 vectors × 3 core
 
 ### ESP-IDF — the only port that is not thin
 
-[`integrations/README.md`](https://github.com/avatarsd-llc/libtracer/blob/main/integrations/README.md) opens by calling the integrations thin — "they configure build files, register the library with the host's package format, and provide a minimal example." **That is accurate for PlatformIO, ESPHome and Arduino, and not accurate for ESP-IDF**, which is worth stating plainly rather than leaving the reader to discover it. The ESP-IDF component carries four platform-native translation units of its own (an IDF-native WebSocket server link over `esp_http_server`, an IDF-native WebSocket client link, a TWAI CAN link, and a critical-section pool), five public headers, a Kconfig, a `poll.h` compatibility shim, four example projects and a host-test suite of twenty-one test translation units run against faked IDF headers.
+[`integrations/README.md`](https://github.com/avatarsd-llc/libtracer/blob/main/integrations/README.md) opens by calling the integrations thin — "they configure build files, register the library with the host's package format, and provide a minimal example." **That is accurate for PlatformIO and ESPHome, and not accurate for ESP-IDF**, which is worth stating plainly rather than leaving the reader to discover it. The ESP-IDF component carries four platform-native translation units of its own (an IDF-native WebSocket server link over `esp_http_server`, an IDF-native WebSocket client link, a TWAI CAN link, and a critical-section pool), five public headers, a Kconfig, a `poll.h` compatibility shim, four example projects and a host-test suite of twenty-one test translation units run against faked IDF headers.
 
 The reason it is not thin is a correctness ruling, not scope creep: ESP-IDF's WebSocket plane must never use POSIX sockets, because lwIP's `sendmsg` refuses the flag the portable scatter-gather egress asks for — on silicon the portable server completed handshakes and answered pings while silently discarding every data frame ([#947](https://github.com/avatarsd-llc/libtracer/issues/947), [#948](https://github.com/avatarsd-llc/libtracer/issues/948)). Platform-native links are the fix, and they can only live in the platform's tree. Translation-unit selection carries the difference; there are no feature macros in shared sources.
 
@@ -134,10 +133,6 @@ Ships and compiles the default C++ source set, with an ESP32 build hook that com
 ### ESPHome — a stub, and the README says so
 
 One empty Python module under `components/libtracer/`. The README documents an intended conformance profile and module set; none of it is implemented.
-
-### Arduino — metadata, deliberately not planned
-
-A `library.properties` and nothing else. It is not on the Arduino Library Manager and has never been submitted, and the layout would not satisfy the registry anyway — Arduino requires the manifest in the repository root. The README states the reason it is not planned (the Arduino toolchain and its AVR/no-STL targets are a poor fit for a C++23 core) and routes readers to PlatformIO or ESP-IDF.
 
 ### `rmw_tracer` — an adapter with a plan and one translation unit
 

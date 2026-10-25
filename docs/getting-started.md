@@ -98,9 +98,8 @@ target_link_libraries(app PRIVATE libtracer::libtracer)   # same target either w
 
 **Embedded / platform:** consume a prebuilt integration rather than building the core
 directly — the [ESP-IDF managed component](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/esp-idf)
-(`REQUIRES libtracer`),
-[PlatformIO](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/platformio),
-or [Arduino](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/arduino).
+(`REQUIRES libtracer`)
+or [PlatformIO](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/platformio).
 
 ## 3. A first node — register, write, read
 

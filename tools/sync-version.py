@@ -9,7 +9,6 @@ everywhere and no registry ever sees a version collision:
 
   Core packaging (static manifests that cannot read git):
     - library.json                                     (PlatformIO)
-    - integrations/arduino/library.properties          (Arduino)
     - integrations/esp-idf/libtracer/idf_component.yml (ESP Component Registry)
   TypeScript packages (version + internal @avatarsd-llc/* dep ranges):
     - bindings/typescript/packages/{core,client,transport-ws,transport-webtransport}
@@ -53,7 +52,6 @@ SEMVER = re.compile(r"^\d+\.\d+\.\d+([-+.][0-9A-Za-z.-]+)?$")
 # --- static core manifests: replace the named-group `ver` span ----------------
 CORE_MANIFESTS = [
     (ROOT / "library.json", re.compile(r'"version"\s*:\s*"(?P<ver>[^"]*)"'), "library.json (PlatformIO)"),
-    (ROOT / "integrations/arduino/library.properties", re.compile(r"(?m)^version=(?P<ver>.*)$"), "arduino library.properties"),
     (ROOT / "integrations/esp-idf/libtracer/idf_component.yml", re.compile(r'(?m)^version:\s*"(?P<ver>[^"]*)"'), "esp-idf idf_component.yml"),
 ]
 

@@ -4,7 +4,7 @@
 # Guards the single source of truth for the release version. The repo-root
 # `VERSION` file is the sole hand-edited version; every publishable artifact is
 # versioned in lockstep from it via `tools/sync-version.py` — the PlatformIO /
-# Arduino / ESP manifests, the four TypeScript packages (version + internal dep
+# ESP manifests, the four TypeScript packages (version + internal dep
 # ranges), the npm lockfile that mirrors them, and the Rust crate. This job runs
 # the stamper in --check mode and fails if anything has drifted from `VERSION`, so
 # a version bump can never land half-applied. (The ROS 2 stub is unreleased and
@@ -26,7 +26,6 @@ on:
     paths:
       - VERSION
       - library.json
-      - integrations/arduino/library.properties
       - integrations/esp-idf/libtracer/idf_component.yml
       - bindings/typescript/packages/**/package.json
       - bindings/typescript/package-lock.json
@@ -42,7 +41,6 @@ on:
     paths:
       - VERSION
       - library.json
-      - integrations/arduino/library.properties
       - integrations/esp-idf/libtracer/idf_component.yml
       - bindings/typescript/packages/**/package.json
       - bindings/typescript/package-lock.json
