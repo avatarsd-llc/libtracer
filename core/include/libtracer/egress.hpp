@@ -83,7 +83,6 @@
 #include <cstring>
 #include <new>
 #include <span>
-#include <thread>
 #include <utility>
 
 #include "libtracer/function_ref.hpp"
@@ -329,9 +328,10 @@ class egress_peer_t {
    private:
     friend class egress_t;
 
-    static constexpr std::uint8_t kWriter = 1; /**< @brief A sender holds the writer role. */
-    static constexpr std::uint8_t kClosed = 2; /**< @brief Closed: nobody may claim the role. */
-    static constexpr std::uint8_t kLanes = 4;  /**< @brief A lane step holds this peer's lanes. */
+    static constexpr std::uint8_t kWriter = 1;   /**< @brief A sender holds the writer role. */
+    static constexpr std::uint8_t kClosed = 2;   /**< @brief Closed: nobody may claim the role. */
+    static constexpr std::uint8_t kLanes = 4;    /**< @brief A lane step holds this peer's lanes. */
+    static constexpr std::uint8_t kLaneWait = 8; /**< @brief A sender sleeps for `kLanes`. */
 
     /**
      * @brief One vertex's ring toward this peer: FIFO inside, one block from the link's
@@ -358,7 +358,8 @@ class egress_peer_t {
     std::uint32_t off_ = 0;          /**< @brief Bytes of `wire_` on the wire (writer only). */
     std::uint16_t strikes_ = 0;      /**< @brief Consecutive strikes: full-lane offers that
                                                  moved nothing (writer only, saturating). */
-    std::atomic<std::uint8_t> role_{kClosed}; /**< @brief `kWriter` | `kClosed` | `kLanes`. */
+    std::atomic<std::uint8_t> role_{kClosed}; /**< @brief `kWriter` | `kClosed` | `kLanes` |
+                                                           `kLaneWait`. */
     std::atomic<bool> held_{false};           /**< @brief @ref wants_write. */
 };
 
@@ -372,8 +373,10 @@ static_assert(sizeof(void*) != 8 || sizeof(egress_peer_t) <= 24,
  * lock (#2310), a bit of its role byte. The lock is held only for a lane step — an index step,
  * and the lane block drawn or returned with it — never across a write, a frame build or a
  * frame release, and never by a send that finds the peer idle (#2145): it guards the lanes,
- * not the writer election and not the write. A sender that finds it held spins, then yields;
- * nothing sleeps.
+ * not the writer election and not the write. A sender that finds it held sleeps on the role
+ * byte (`std::atomic::wait`, a futex on Linux, no clock) until the holder lets it go, so a
+ * holder preempted inside its step gets the CPU back from a higher-priority sender (the #1618
+ * hang a spinner would bring back).
  *
  * @note Thread-safe: any number of senders, plus the link's own receive or wait context.
  */
@@ -548,7 +551,8 @@ class egress_t {
         p.held_.store(first != nullptr, std::memory_order_relaxed);
         // Clears `kClosed` only: a late sender may still hold the lane lock to read the peer
         // closed, and its unlock must not land on a lock somebody took after this store.
-        p.role_.fetch_and(egress_peer_t::kLanes, std::memory_order_release);
+        p.role_.fetch_and(egress_peer_t::kLanes | egress_peer_t::kLaneWait,
+                          std::memory_order_release);
     }
 
    private:
@@ -569,25 +573,37 @@ class egress_t {
     /**
      * @brief @p p's lane lock for one lane step (#2310): the `kLanes` bit of its role byte.
      *
-     * Spins, and yields every 64th try so a preempted holder can finish its step; no sleep,
-     * no clock. `role` is the role byte the lock was taken over, so a pusher reads `kClosed`
-     * in the same read-modify-write that orders it against @ref close.
+     * A sender that finds it held marks `kLaneWait` and sleeps on the byte
+     * (`std::atomic::wait`): it never spins against a holder that may be preempted, so a
+     * higher-priority sender on the holder's CPU hands that CPU back (#1618, ruling (a) of
+     * #2307). The unlock is the one `fetch_and` it always was, and wakes only when somebody
+     * marked that it sleeps. No clock. `role` is the role byte the lock was taken over, so a
+     * pusher reads `kClosed` in the same read-modify-write that orders it against
+     * @ref close.
      */
     struct lanes_guard_t {
         explicit lanes_guard_t(egress_peer_t& peer) noexcept : p(peer) {
             role = p.role_.load(std::memory_order_relaxed);
-            for (unsigned i = 1;; ++i) {
-                if ((role & egress_peer_t::kLanes) == 0 &&
-                    p.role_.compare_exchange_weak(role, role | egress_peer_t::kLanes,
-                                                  std::memory_order_seq_cst))
-                    return;
-                if ((i & 63U) == 0U) std::this_thread::yield();  // let a preempted holder run
-                role = p.role_.load(std::memory_order_relaxed);
+            for (;;) {
+                if ((role & egress_peer_t::kLanes) == 0) {
+                    if (p.role_.compare_exchange_weak(role, role | egress_peer_t::kLanes,
+                                                      std::memory_order_seq_cst))
+                        return;
+                } else if ((role & egress_peer_t::kLaneWait) != 0 ||
+                           p.role_.compare_exchange_weak(role, role | egress_peer_t::kLaneWait,
+                                                         std::memory_order_relaxed)) {
+                    role |= egress_peer_t::kLaneWait;
+                    p.role_.wait(role, std::memory_order_relaxed);  // until the unlock wakes us
+                    role = p.role_.load(std::memory_order_relaxed);
+                }
             }
         }
         ~lanes_guard_t() {
-            p.role_.fetch_and(static_cast<std::uint8_t>(~egress_peer_t::kLanes),
-                              std::memory_order_release);
+            constexpr auto kHeld =
+                static_cast<std::uint8_t>(egress_peer_t::kLanes | egress_peer_t::kLaneWait);
+            const std::uint8_t was =
+                p.role_.fetch_and(static_cast<std::uint8_t>(~kHeld), std::memory_order_release);
+            if ((was & egress_peer_t::kLaneWait) != 0) p.role_.notify_all();
         }
         lanes_guard_t(const lanes_guard_t&) = delete;
         lanes_guard_t& operator=(const lanes_guard_t&) = delete;

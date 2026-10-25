@@ -2227,6 +2227,13 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(egress_test)
     add_test(NAME egress COMMAND egress_test)
     set_tests_properties(egress PROPERTIES TIMEOUT 120)
+    # #2310 — a peer's lane lock never livelocks a higher-priority sender against a
+    # preempted lower-priority holder on one CPU (#1618). SKIPS (77) without SCHED_FIFO.
+    add_executable(egress_inversion_test egress_inversion_test.cpp)
+    target_link_libraries(egress_inversion_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(egress_inversion_test)
+    add_test(NAME egress_inversion COMMAND egress_inversion_test)
+    set_tests_properties(egress_inversion PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
 
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)

@@ -758,9 +758,22 @@ void test_lane_lock_is_per_peer() {
     while (!b_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
         std::this_thread::yield();
     check(b_done.load(), "B's push returned while A's lane step was held");
+    // The positive control: a second push into A DOES wait for A's held step, so the leg
+    // above shows the lock is per peer, not that pushes take no lock at all.
+    std::atomic<bool> a2_done{false};
+    std::thread second([&] {
+        push(a);
+        a2_done.store(true, std::memory_order_release);
+    });
+    const auto settle = std::chrono::steady_clock::now() + 200ms;
+    while (!a2_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < settle)
+        std::this_thread::yield();
+    check(!a2_done.load(), "a second push into A waits while A's lane step is held");
     src.open.store(true, std::memory_order_release);
     held.join();
     other.join();
+    second.join();
+    check(a2_done.load(), "and returns once A's step lets the lane lock go");
     eg.close(a);
     eg.close(b);
     check(src.live.load() == 0, "nothing leaked");
