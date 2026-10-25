@@ -147,7 +147,7 @@ void test_target_key_on_the_seam() {
         tr::wire::emit_tlv(rec, tr::wire::type_t::SUBSCRIBER, tr::wire::opt_t{.pl = true}, body);
         const auto record = make_value(rec);
         tr::graph::field_path_t field;
-        field.steps.push_back(
+        (void)field.steps.push_back(
             tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
         const vertex_handle_t v = *g.find(from.key());
 

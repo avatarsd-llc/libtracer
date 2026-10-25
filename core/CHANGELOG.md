@@ -30,6 +30,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `path_binding_t` by value, and its `chain` is a `std::span` view into the path, valid until
   that path is rebound, cleared, assigned or destroyed. Migration: hold the `path_t`, not the
   binding, across any of those. `sizeof(path_t)` is nine pointer-widths (was eleven). `fwd_router_t::adopt_binding` adopts a RESULT reply's `src`.
+- **`path_t` holds no standard container (#2286, ADR-0083) — BREAKING.** The canonical key,
+  the field steps and their names live in one exact block, and a learned chain in a second,
+  both drawn from a `tr::mem::block_source_t`: the one passed to the new
+  `path_t::parse(text, src)`, else `tr::mem::table_source()` (the literal constructor and
+  `parse(text)`). The root path with no field tail draws nothing. `parse` answers
+  `BACKPRESSURE` when the source refuses; a copy aborts with a sizing message when the source
+  cannot serve the path block (as `path_key_t`'s does) and is left unbound when it cannot serve
+  the chain. `field_step_t::name` is a `std::string_view` (it views the path's block, the
+  request frame, or a literal; assigning a temporary `std::string` to it dangles), and
+  `field_path_t::steps` is `field_steps_t`, at most `kMaxFieldDepth` steps in place, whose
+  `push_back` returns false past the bound instead of growing. `sizeof(path_t)` is 40 B on a
+  64-bit host and 24 B on rv32 (was nine pointer-widths). Migration: build a step's name from
+  storage that outlives the field path; pass the graph's `table_source()` to `parse` where a
+  path must not draw on the default root.
 - A set op-byte bit 7 or 6 is an undefined opcode at a terminus (`TYPE_MISMATCH`); a
   forwarder still masks it.
 - `fwd_dst_kind_t::PATH_REF` is renamed `RETIRED`: a `0x14` `dst` is refused by type code.

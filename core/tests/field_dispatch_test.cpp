@@ -122,7 +122,7 @@ enum class sel_t : std::uint8_t { BARE, APPEND, SLOT, WILDCARD };
 field_path_t fp(std::string_view head, sel_t sel, std::initializer_list<const char*> tail = {}) {
     field_path_t f;
     field_step_t s;
-    s.name = std::string(head);
+    s.name = head;  // a view: every caller passes a literal
     switch (sel) {
         case sel_t::BARE:
             break;
@@ -139,11 +139,11 @@ field_path_t fp(std::string_view head, sel_t sel, std::initializer_list<const ch
             s.wildcard = true;
             break;
     }
-    f.steps.push_back(std::move(s));
+    (void)f.steps.push_back(std::move(s));
     for (const char* t : tail) {
         field_step_t ts;
         ts.name = t;
-        f.steps.push_back(std::move(ts));
+        (void)f.steps.push_back(std::move(ts));
     }
     return f;
 }

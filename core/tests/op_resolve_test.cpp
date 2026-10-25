@@ -1583,7 +1583,7 @@ void test_routed_append_needs_no_target() {
 
     // The ablation: the local field door delivers to a local target, and the record names none.
     tr::graph::field_path_t append;
-    append.steps.push_back(
+    (void)append.steps.push_back(
         tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
     const auto local = g.write(v, append, make_value(record));
     check(!local && local.error() == status_t::TYPE_MISMATCH,

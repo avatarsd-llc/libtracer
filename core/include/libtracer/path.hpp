@@ -129,9 +129,7 @@ class field_steps_t {
         return true;
     }
     /** @brief Equality over the held steps (unused slots never compare). */
-    bool operator==(const field_steps_t& o) const noexcept {
-        return std::ranges::equal(*this, o);
-    }
+    bool operator==(const field_steps_t& o) const noexcept { return std::ranges::equal(*this, o); }
 
    private:
     std::array<field_step_t, kMaxFieldDepth> s_{};
@@ -205,8 +203,8 @@ struct path_binding_t {
  * block at all. A copy draws its blocks from the source of the path it copies and, like
  * `path_key_t`'s, stops with a sizing message if that source cannot serve the path block; a
  * chain block it cannot serve leaves the copy unbound instead (the canonical bytes are a
- * complete answer, RFC-0029 §6.3). A move takes the blocks. Nothing here grows after the parse except the chain slot, and that is one exact
- * block per adopted chain.
+ * complete answer, RFC-0029 §6.3). A move takes the blocks. Nothing here grows after the parse
+ * except the chain slot, and that is one exact block per adopted chain.
  */
 class path_t {
    public:
@@ -327,8 +325,8 @@ class path_t {
  * Pinned, not observed. A path is a parse-once VALUE the API takes by `const&`, and an origin
  * holds them per subscription and per vertex, so its size is multiplied RAM. #2286 moved its three
  * remaining owning standard containers into source-drawn blocks: 9 pointer-widths → 3 plus the
- * lengths (72 → 40 B on a 64-bit host, 36 → 24 B on rv32). A change here is a deliberate edit, and it
- * is the moment to ask whether the new member wants to be a slot at all.
+ * lengths (72 → 40 B on a 64-bit host, 36 → 24 B on rv32). A change here is a deliberate edit, and
+ * it is the moment to ask whether the new member wants to be a slot at all.
  */
 static_assert(sizeof(path_t) == (sizeof(void*) == 8 ? 40 : 24),
               "a path_t's shape is a ratchet — grow it deliberately or not at all");
