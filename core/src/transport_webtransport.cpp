@@ -68,11 +68,11 @@
  *     emit reserved GREASE types precisely to catch endpoints that don't.
  *     Pinning who may speak and ignoring what you don't understand are not
  *     in tension: the first is authentication, the second is extensibility.
- *   - DIAL (the self-contained e2e counterpart, and a native client): after
- *     the QUIC handshake it sends its control/QPACK streams, performs the
- *     extended CONNECT, waits for the 200, then opens the frame stream
- *     (0x41 + the CONNECT stream's id) — the browser
- *     `createBidirectionalStream()` shape.
+ *   - DIAL (the self-contained e2e counterpart, and a native client): the
+ *     constructor only starts the QUIC handshake (#2306). On CONNECTED it
+ *     sends its control/QPACK streams and the extended CONNECT; the 200 opens
+ *     the frame stream (0x41 + the CONNECT stream's id) — the browser
+ *     `createBidirectionalStream()` shape. Nothing waits.
  *
  * Callbacks never close handles (they only flip flags and adopt streams); the
  * destructor and the listener's one-peer replacement path own every close,
@@ -209,28 +209,8 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
      */
     std::atomic<std::uint64_t> refused_sessions{0};
 
-    /**
-     * @name DIAL rendezvous stage 2: session established (stage 1, the QUIC
-     *       handshake, lives in the base).
-     * @{
-     */
-    bool session_done = false; /**< @brief Session stage resolved. */
-    bool session_ok = false;   /**< @brief Session stage outcome. */
-    /** @} */
-
     /** @brief Teardown-first destructor (the msquic_endpoint_t contract). */
     ~impl_t() { teardown(); }
-
-    /** @brief Resolve the session rendezvous stage (idempotent). */
-    void signal_session(bool ok) {
-        {
-            const std::lock_guard lock(wait_m);
-            if (session_done) return;
-            session_done = true;
-            session_ok = ok;
-        }
-        wait_cv.notify_all();
-    }
 
     /**
      * @brief Open ONE locally-initiated stream on the live connection, write
@@ -260,7 +240,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
      * @param expect   The connection the caller means — a callback's event
      *                 handle, refusing the open if the peer has since been
      *                 replaced. Null means "whatever connection is live now"
-     *                 (the dial constructor, which holds no event handle).
+     *                 (the dial's frame channel, opened from a stream callback).
      * @return The started stream handle, or null when nothing was opened (or when
      *         its preamble could not be written — see the body).
      */
@@ -318,14 +298,14 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     /** @brief The endpoint's H3 face on @p on_conn: the control stream
      *         (SETTINGS) plus the two mandatory QPACK streams (RFC 9204 §4.2 —
      *         empty beyond their type byte, since the dynamic table stays at
-     *         capacity 0). Null @p on_conn = the live connection (the dial
-     *         constructor); the LISTEN side passes its CONNECTED event handle.
+     *         capacity 0). @p on_conn is the CONNECTED event's handle, on both
+     *         sides.
      *
      * All three preambles are protocol CONSTANTS, so since #934 they are `constexpr`
      * views of static storage: the LISTEN side runs this from a connection callback the
      * instant an unauthenticated peer completes the QUIC handshake, and it now builds no
      * container at all to do it. */
-    void open_h3_face(HQUIC on_conn = nullptr) {
+    void open_h3_face(HQUIC on_conn) {
         using kind_t = stream_ctx_t::kind_t;
         (void)open_stream(QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, kind_t::LOCAL,
                           wt_h3::control_stream_bytes(), on_conn);
@@ -631,7 +611,6 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         const auto t = wt_h3::read_varint(in);
         if (!t) return;
         if (t->value != wt_h3::kFrameHeaders) {
-            signal_session(false);
             shutdown_conn(kAppErrBadRequest);
             return;
         }
@@ -639,7 +618,6 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         const auto len = wt_h3::read_varint(rest);
         if (!len) return;
         if (len->value > max_handshake) {
-            signal_session(false);
             shutdown_conn(kAppErrBadRequest);
             return;
         }
@@ -660,13 +638,61 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         const bool accepted = status == "200";
         c.kind = stream_ctx_t::kind_t::SESSION;
         c.drop_acc();
-        if (accepted) {
-            session.store(true, std::memory_order_relaxed);
-            signal_session(true);
-        } else {
-            signal_session(false);
+        if (!accepted) {
             shutdown_conn(kAppErrBadRequest);
+            return;
         }
+        // Open THE frame channel: a bidirectional WebTransport stream announcing itself with
+        // 0x41 + the CONNECT stream's id (the browser createBidirectionalStream() wire
+        // shape), then length-prefixed records. Two varints: at most 16 bytes, on the stack.
+        // Refused, the session cannot carry a frame, so the connection goes down.
+        wt_h3::fixed_bytes_t<16> preamble;
+        wt_h3::append_varint(preamble, wt_h3::kFrameWtStream);
+        wt_h3::append_varint(preamble, connect_stream_id);
+        if (open_stream(QUIC_STREAM_OPEN_FLAG_NONE, stream_ctx_t::kind_t::FRAME,
+                        preamble.bytes()) == nullptr) {
+            shutdown_conn(kAppErrBadRequest);
+            return;
+        }
+        // Last, so a session_up() reader finds the frame channel in place.
+        session.store(true, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief CONNECTED, DIAL side: our H3 face, then the extended CONNECT, every open
+     *        through @ref open_stream (which rechecks @p c under conn_m). The 200 that
+     *        answers it opens the frame channel (@ref parse_connect_response).
+     *
+     * The DIAL request is the one handshake buffer whose length is NOT a protocol constant
+     * (it carries the configured `:authority` and `:path`), so it is built in blocks from
+     * the link's store, failably (#1780); `open_stream` only borrows it (#934). A request
+     * that cannot be built or sent shuts the connection down: the dial has failed.
+     */
+    void start_session(HQUIC c) {
+        open_h3_face(c);
+        mem::block_array_t<std::uint8_t> section(*tx_src);
+        wt_h3::failable_sink_t section_sink{section};
+        wt_h3::encode_connect_field_section(section_sink, authority.view(), path.view());
+        mem::block_array_t<std::uint8_t> req(*tx_src);
+        wt_h3::failable_sink_t req_sink{req};
+        wt_h3::append_h3_frame(req_sink, wt_h3::kFrameHeaders,
+                               std::span<const std::uint8_t>(section.data(), section.size()));
+        HQUIC connect_stream =
+            section_sink.ok && req_sink.ok
+                ? open_stream(QUIC_STREAM_OPEN_FLAG_NONE, stream_ctx_t::kind_t::CONNECT_CLIENT,
+                              std::span<const std::uint8_t>(req.data(), req.size()), c)
+                : nullptr;
+        if (connect_stream == nullptr) {
+            shutdown_conn(kAppErrBadRequest);
+            return;
+        }
+        // The id is read AFTER the request is queued (the request never carries it); the
+        // 0x41 frame-channel header needs it. The response cannot be parsed before this
+        // returns: msquic serializes this connection's callbacks.
+        std::uint64_t sid = 0;
+        std::uint32_t sz = sizeof(sid);
+        if (QUIC_SUCCEEDED(api->GetParam(connect_stream, QUIC_PARAM_STREAM_ID, &sz, &sid)))
+            connect_stream_id = sid;
     }
 
     /**
@@ -840,17 +866,16 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
 
     /** @brief CONNECTED hook: the server presents its H3 face as soon as QUIC
      *         is up — the browser waits for SETTINGS before sending extended
-     *         CONNECT. (The dial side sends its face from the constructor
-     *         thread.) */
+     *         CONNECT — and the dial side starts its session. */
     void on_connected(HQUIC c) override {
-        if (listen) open_h3_face(c);
+        if (listen)
+            open_h3_face(c);
+        else
+            start_session(c);
     }
 
     /** @brief Connection-down hook: the session falls with the connection. */
-    void on_conn_down() override {
-        session.store(false, std::memory_order_relaxed);
-        signal_session(false);
-    }
+    void on_conn_down() override { session.store(false, std::memory_order_relaxed); }
 
     /**
      * @brief A peer stream arrived: classify lazily from its first bytes; the
@@ -1003,49 +1028,12 @@ webtransport_transport_t::webtransport_transport_t(std::string_view peer_host,
         !i.path.assign(path.empty() ? std::string_view("/") : path))
         return;  // the link's store refused the request text: the dial does not come up
 
-    // Stage 1: the QUIC handshake (the transport_quic.cpp dial shape — base).
+    // Non-blocking dial (base, #2306): returns once the QUIC handshake is started. The H3
+    // face and the extended CONNECT go out on CONNECTED, and the 200 opens the frame channel
+    // (impl_t::start_session, impl_t::parse_connect_response); until then a send is a
+    // counted drop.
     if (!i.dial("libtracer_wt", kAlpnH3, impl_t::session_settings(), tls.ca_file,
                 tls.insecure_no_verify, peer_host, peer_port))
-        return;
-
-    // Our H3 face (control + QPACK streams), then the extended CONNECT — every
-    // open through impl_t::open_stream, which rechecks the connection under
-    // conn_m and publishes the ctx before dropping it.
-    i.open_h3_face();
-    // The DIAL request is the one handshake buffer whose length is NOT a protocol
-    // constant (it carries the configured `:authority` and `:path`), so it is built in
-    // blocks from the link's store, failably (#1780). `open_stream` only borrows it (#934).
-    mem::block_array_t<std::uint8_t> section(*i.tx_src);
-    wt_h3::failable_sink_t section_sink{section};
-    wt_h3::encode_connect_field_section(section_sink, i.authority.view(), i.path.view());
-    mem::block_array_t<std::uint8_t> req(*i.tx_src);
-    wt_h3::failable_sink_t req_sink{req};
-    wt_h3::append_h3_frame(req_sink, wt_h3::kFrameHeaders,
-                           std::span<const std::uint8_t>(section.data(), section.size()));
-    if (!section_sink.ok || !req_sink.ok) return;  // the store refused: the dial fails
-    HQUIC connect_stream =
-        i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::CONNECT_CLIENT,
-                      std::span<const std::uint8_t>(req.data(), req.size()));
-    if (connect_stream == nullptr) return;
-    // The id is read AFTER the request is queued (the request never carries it);
-    // the 0x41 frame-channel header below is what needs it.
-    std::uint64_t sid = 0;
-    std::uint32_t sz = sizeof(sid);
-    if (QUIC_SUCCEEDED(i.api->GetParam(connect_stream, QUIC_PARAM_STREAM_ID, &sz, &sid)))
-        i.connect_stream_id = sid;
-
-    // Stage 2: the 200 (the session).
-    if (!i.wait_stage(i.session_done, i.session_ok)) return;
-
-    // Open THE frame channel: a bidirectional WebTransport stream announcing
-    // itself with 0x41 + the CONNECT stream's id (the browser
-    // createBidirectionalStream() wire shape), then length-prefixed records.
-    // Two varints: at most 16 bytes, on the stack.
-    wt_h3::fixed_bytes_t<16> preamble;
-    wt_h3::append_varint(preamble, wt_h3::kFrameWtStream);
-    wt_h3::append_varint(preamble, i.connect_stream_id);
-    if (i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::FRAME,
-                      preamble.bytes()) == nullptr)
         return;
     i.open_ok = true;
 }
