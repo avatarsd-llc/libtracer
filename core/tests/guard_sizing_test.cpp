@@ -124,15 +124,16 @@ void check_exclusion(const char* label) {
 }
 
 /**
- * @brief Contenders that spin out BLOCK, and the release wakes them (#2307).
+ * @brief Contenders that spin out NAP and re-read, and all get through once released (#2307).
  *
  * The main thread holds the one lock long enough for every contender to spend its spin budget
- * and block in the wait; then it releases. Each contender must get through and bump the
- * counter under the lock. A release that failed to wake a blocked contender hangs here, and
- * the test's timeout reports it. The sleep is the TEST's, never the guard's.
+ * and fall into the nap-and-re-read loop; then it releases. Each contender must see the clear
+ * flag on a later look and bump the counter under the lock. A contender that never got
+ * through would hang here, and the test's timeout reports it. The 50 ms hold is the
+ * test's own sleep, not the guard's nap.
  */
 template <class G>
-void check_blocked_contenders_wake(const char* label) {
+void check_queued_contenders_get_through(const char* label) {
     constexpr int kContenders = 3;
     std::uint64_t counter = 0;
     std::atomic<int> started{0};
@@ -151,9 +152,9 @@ void check_blocked_contenders_wake(const char* label) {
     check(counter == 0, "no contender entered while the window was held");
     lock.unlock();
     for (auto& t : ts) t.join();
-    std::printf("  %s: %llu of %d blocked contenders got through\n", label,
+    std::printf("  %s: %llu of %d queued contenders got through\n", label,
                 static_cast<unsigned long long>(counter), kContenders);
-    check(counter == kContenders, "every blocked contender was woken and entered once");
+    check(counter == kContenders, "every queued contender got through exactly once");
 }
 
 }  // namespace
@@ -166,7 +167,7 @@ int main() {
     check_exclusion<tr::mutex_guard_t>("64 x 64 B (default)");
     check_exclusion<tr::basic_mutex_guard_t<0, 16>>("16 x 1 B, packed");
     check_exclusion<tr::basic_mutex_guard_t<0, 1>>("1 x 1 B, one lock");
-    check_blocked_contenders_wake<tr::mutex_guard_t>("64 x 64 B (default)");
-    check_blocked_contenders_wake<tr::basic_mutex_guard_t<0, 1>>("1 x 1 B, one lock");
+    check_queued_contenders_get_through<tr::mutex_guard_t>("64 x 64 B (default)");
+    check_queued_contenders_get_through<tr::basic_mutex_guard_t<0, 1>>("1 x 1 B, one lock");
     return tr::testing::summary("guard_sizing");
 }
