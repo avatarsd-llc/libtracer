@@ -409,8 +409,9 @@ connection vertex.
    it. The first frame sent into a `dormant` link is **not** delivered; before this amendment it
    was, after the stall.
 
-`connect_timeout` stays a config key: it is the deadline one dial attempt is given, and no op waits
-on it. A [reference/23](../../reference/23-noise-link-binding.md) Noise link keeps its own §7 rule
+`connect_timeout` stays a config key. It is parsed and handed to the kind's factory in its parsed
+settings, and no built-in consumer uses it: no op and no dial attempt waits on it. Whether the key
+stays is a separate ruling. A [reference/23](../../reference/23-noise-link-binding.md) Noise link keeps its own §7 rule
 that an attempt an operation started on an unheld link stops at its attempt deadline.
 
 ### 5. Gating

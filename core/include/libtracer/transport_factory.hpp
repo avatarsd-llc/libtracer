@@ -125,9 +125,9 @@ struct conn_settings_t {
                                                       consumed by the S5 liveness engine
                                                       (`self_heal_link.hpp`), 0 = the engine's
                                                       default (`kDefaultBackoffMs`). */
-    std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):
-                                                      how long one dial waits for `UP` before it
-                                                      counts as failed; consumed by the S5 engine.
+    std::uint32_t connect_timeout_ms = 0; /**< @brief `connect_timeout` (RFC-0014 §4), parsed
+                                                      and handed to the factory; no built-in
+                                                      consumer uses it (Amendment 5).
                                                       0 = `kDefaultConnectTimeoutMs`. */
 };
 

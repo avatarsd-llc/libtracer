@@ -196,8 +196,8 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which does tear down the
   routes under it, because `remove_connection` un-routes and retires the identity vertex.
   Routing that makes `/net/<module>/<name>` addressable is [ADR-0061 — Per-module mount routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md).
-- **All four of those keys are consumed today.** (A `keepalive` pair is still accepted
-  but ignored — it had no consumer, so #1666 removed the field that stored it.) `backoff` / `connect_timeout` feed the §4 liveness engine
+- **Three of those four keys are consumed today.** (A `keepalive` pair is still accepted
+  but ignored — it had no consumer, so #1666 removed the field that stored it.) `backoff` feeds the §4 liveness engine, and `connect_timeout` is handed to the factory with no built-in consumer
   ([#492](https://github.com/avatarsd-llc/libtracer/issues/492) S5, `self_heal_link_t`)
   on a kind registered `self_heal_dial` — since
   [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) every built-in

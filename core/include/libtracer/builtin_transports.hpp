@@ -42,8 +42,8 @@ namespace tr::net {
  *
  * `udp`, `tcp` and `ws` are point-to-point, connection-oriented dial kinds, so their DIAL
  * connections are driven by the liveness engine (@ref tr::net::self_heal_link_t): creation
- * mints the vertex `DORMANT` and constructs NO socket, the engine dials on demand bounded
- * by `connect_timeout`, self-heals with `backoff` while a standing binding holds, and
+ * mints the vertex `DORMANT` and constructs NO socket, the engine dials on demand,
+ * self-heals with `backoff` while a standing binding holds, and
  * closes back to dormant on the last release. LISTEN connections of the same kinds are
  * untouched — a LISTEN link ignores refcount and binds eagerly at creation, exactly as
  * before.

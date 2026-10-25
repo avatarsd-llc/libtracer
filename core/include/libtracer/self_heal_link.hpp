@@ -39,9 +39,9 @@ namespace tr::net {
  *         limit; the retry itself runs forever while a standing binding holds). */
 inline constexpr std::uint32_t kDefaultBackoffMs = 1000;
 
-/** @brief The engine's own dial-attempt deadline when the SPEC's `connect_timeout` is
- *         0/absent, handed to the kind's factory in `conn_settings_t` (RFC-0014 §4). No op
- *         waits on it: an op on a link that is not `UP` is dropped at once (Amendment 5). */
+/** @brief The value handed to the kind's factory in `conn_settings_t` when the SPEC's
+ *         `connect_timeout` is 0/absent (RFC-0014 §4). No built-in consumer uses it: no op
+ *         and no dial attempt waits on it (Amendment 5). */
 inline constexpr std::uint32_t kDefaultConnectTimeoutMs = 5000;
 
 /**
