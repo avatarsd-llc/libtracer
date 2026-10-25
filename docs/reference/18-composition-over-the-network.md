@@ -511,7 +511,10 @@ decides how long to wait, on its own clock:
 A stream needs a different answer from a one-shot operation. **The library adds no acknowledgement
 for a stream or a batch, and none is forced on any flow.** Confirmation is always the application's
 choice. A subscriber delivery never replies: its `src` is empty, so nothing answers it, whatever
-happened (RFC-0004 Amendment 2). When a stream's sender needs to know what arrived, the receiving
+happened (RFC-0004 Amendment 2). The one exception confirms nothing. An edge that holds no chain
+learns it on its first fire, which carries a non-empty `src`, and the library answers that one
+delivery with a `REPLY` that carries the forward chain, not a confirmation
+([04 §How a remote delivery learns its chain](04-communication-flows.md); RFC-0029 §7). When a stream's sender needs to know what arrived, the receiving
 application tells it, at application level, with one small write that covers a whole batch.
 
 ### Pick one of three
@@ -521,7 +524,7 @@ application tells it, at application level, with one small write that covers a w
 | **Use it for** | latest-value fields and streams where freshness beats completeness | one-shot operations ([above](#acknowledged-one-shot-operations-and-safe-retry)) | a stream whose sender must release or re-send what did not arrive |
 | **Round trips** | none | one per operation, and the sender waits for it | none waited on; one small write per batch, travelling the other way |
 | **Sender RAM** | nothing | one pending request per outstanding operation | the frames it chooses to keep until they are confirmed: its own buffer, which it sizes |
-| **Receiver RAM** | nothing | one reply frame per operation, drawn from egress, and droppable under pressure (`reply_iov_dropped`, [22 §2](22-backpressure-and-sizing.md#2-the-two-pressure-arms-stated-once)) | one sequence number in its handler |
+| **Receiver RAM** | nothing | one reply frame per operation, drawn from egress, and droppable under pressure (`reply_iov_dropped`, [22 §2](22-backpressure-and-sizing.md#2-the-two-pressure-arms-stated-once)) | one sequence number in its handler, and one egress frame per batch for the watermark write |
 | **How a loss shows** | a counted drop, or a gap marker on a STREAM ring ([22 §2](22-backpressure-and-sizing.md#2-the-two-pressure-arms-stated-once)) | no reply before the application's deadline | the watermark stops advancing |
 
 **A stream never uses ping-pong per frame.** Waiting for a reply to each frame before sending the
@@ -539,12 +542,13 @@ stalls the stream on every lost reply. A per-op `REPLY` is for operations, not f
    one value carrying `N` to a vertex the sender owns for the purpose (for example
    `/app/cam/confirmed`), through the mount that reaches the sender. The write has an empty `src`,
    so nobody waits for it and nothing answers it.
-4. **The sender acts on it when it arrives.** It releases the frames it kept up to `N`, and it may
-   re-send from `N + 1`. Both are application decisions; the library keeps no window and starts no
+4. **The sender acts on it when it arrives.** It keeps the largest `N` it has seen, because there
+   is no cross-node order and an older watermark can arrive after a newer one. It releases the
+   frames it kept up to that `N`, and it may re-send from `N + 1`. Both are application decisions; the library keeps no window and starts no
    timer.
 
-A lost watermark costs nothing: the next one carries a larger `N` and replaces it, because it is a
-whole-value write, and repeating it stores the same state ([§A retry is safe because of the
+A lost watermark costs nothing: the next one carries a larger `N` and supersedes it, and repeating
+one stores the same state ([§A retry is safe because of the
 operation's shape](#a-retry-is-safe-because-of-the-operations-shape)). The receiver chooses K, and
 with it the trade: a smaller K frees the sender's buffer sooner and costs more writes on the return
 path; a larger K costs the sender more buffer.
