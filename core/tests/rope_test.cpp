@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <new>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -52,7 +53,7 @@ view_t byte_view(std::byte& b) {
 
 /**
  * @brief True iff the rope keeps its links in inline small-buffer storage: the chain's data() lies
- *        within the rope object itself, so there is no heap chain allocation.
+ *        within the rope object itself, so there is no chain allocation.
  */
 bool links_inline(const rope_t& r) {
     const auto* obj = reinterpret_cast<const std::byte*>(&r);
@@ -99,10 +100,10 @@ void test_sbo_gate() {
  * @brief `r.concat(r)` — the self-aliasing gate (#915), in BOTH storage modes.
  *
  * `concat` walks `other`'s links while `append` mutates that same storage when
- * `&other == this`. In INLINE mode the spill blanks every inline slot and zeroes
- * `inline_n_` mid-walk, so a naive range-for produced `[a,b,a,{}]` — a zero-length
- * link where `b` should be, i.e. wrong bytes on the wire. In HEAP mode `push_back`
- * can reallocate the vector the walk points into (a dangling span, UB — the leg an
+ * `&other == this`. In INLINE mode the spill moves the links out and blanks every
+ * inline slot mid-walk, so a naive range-for produced `[a,b,a,{}]` — a zero-length
+ * link where `b` should be, i.e. wrong bytes on the wire. In SPILLED mode a growth
+ * can move the block the walk points into (a dangling span, UB — the leg an
  * ASan build reddens on). Both are checked here by the resulting link bytes, so the
  * inline corruption is caught with no sanitizer at all.
  */
@@ -112,7 +113,7 @@ void test_self_concat() {
                                  std::byte{0xC3}, std::byte{0xC4}, std::byte{0xC5},
                                  std::byte{0xC6}, std::byte{0xC7}};
 
-    // INLINE mode, inline_n_ == 2: the first append of the walk spills.
+    // INLINE mode, two links held: the first append of the walk spills.
     rope_t inl(byte_view(buf[0]));
     inl.append(byte_view(buf[1]));
     check(links_inline(inl), "precondition: the source chain is INLINE with two links");
@@ -325,9 +326,8 @@ void test_nothrow_growth() {
     check(part.links().data() == part_anchor,
           "appends after a partially-filled-rope reservation do not reallocate");
 
-    // (b) ALREADY-SPILLED chain: `inline_n_` is back to 0 once the chain lives on the heap,
-    // so a count that would fit the small buffer must still reach the allocator — the links
-    // are not in the small buffer any more.
+    // (b) ALREADY-SPILLED chain: once the chain lives in a block, a count that would fit the small
+    // buffer must still reach the allocator — the links are not in the small buffer any more.
     rope_t sp;
     for (std::size_t i = 0; i < 3; ++i) sp.append(byte_view(buf[i]));
     check(!links_inline(sp), "three appends spill the chain (precondition)");
@@ -339,10 +339,10 @@ void test_nothrow_growth() {
     check(sp.links().data() == sp_anchor,
           "appends after a spilled-rope reservation do not reallocate the chain");
 
-    // A normal reservation: the reserved appends never reallocate the heap chain.
+    // A normal reservation: the reserved appends never reallocate the chain.
     rope_t r;
     check(r.try_reserve(buf.size()), "try_reserve(normal count) returns true");
-    for (std::size_t i = 0; i < 3; ++i) r.append(byte_view(buf[i]));  // spill to the heap chain
+    for (std::size_t i = 0; i < 3; ++i) r.append(byte_view(buf[i]));  // spill the chain
     const view_t* anchor = r.links().data();
     for (std::size_t i = 3; i < buf.size(); ++i) r.append(byte_view(buf[i]));
     check(r.link_count() == buf.size(), "every reserved append lands");
@@ -375,6 +375,63 @@ void test_nothrow_growth() {
     check(vorder, "detail::try_push_back preserves order across the growth");
 }
 
+/** @brief A source that counts its blocks and can refuse every request. */
+struct counting_source_t final : tr::mem::block_source_t {
+    counting_source_t() noexcept : block_source_t("rope-test") {}
+    void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (refuse) return nullptr;
+        ++live;
+        ++taken;
+        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        --live;
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+    bool refuse = false;
+    int live = 0;
+    int taken = 0;
+};
+
+void test_link_table_source() {
+    std::printf("rope_t link table drawn from the caller's source (#2284):\n");
+    std::array<std::byte, 8> buf{};
+    counting_source_t src;
+    {
+        rope_t r(src);
+        r.append(byte_view(buf[0]));
+        r.append(byte_view(buf[1]));
+        check(src.taken == 0 && links_inline(r),
+              "two links stay inline: the source is not touched");
+        r.append(byte_view(buf[2]));
+        check(src.live == 1 && !links_inline(r),
+              "the third link spills into the rope's own source");
+        for (std::size_t i = 3; i < buf.size(); ++i) r.append(byte_view(buf[i]));
+        check(src.live == 1 && r.link_count() == buf.size(), "growth hands the old block back");
+        bool order_ok = true;
+        for (std::size_t i = 0; i < buf.size(); ++i)
+            if (r.links()[i].bytes().data() != &buf[i]) order_ok = false;
+        check(order_ok, "growth keeps the links in order");
+
+        const rope_t copy(r);
+        check(src.live == 2 && copy.link_count() == r.link_count(),
+              "a copy draws its own chain from the same source");
+        rope_t moved(std::move(r));
+        check(src.live == 2 && r.link_count() == 0 && moved.link_count() == buf.size(),
+              "a move hands the chain over and draws nothing");
+    }
+    check(src.live == 0, "every block went back to the source");
+
+    rope_t r(src);
+    r.append(byte_view(buf[0]));
+    src.refuse = true;
+    check(!r.try_reserve(4), "a refusing source makes try_reserve answer false");
+    check(r.link_count() == 1 && links_inline(r), "... and leaves the rope as it was");
+    src.refuse = false;
+    check(r.try_reserve(4) && !links_inline(r) && src.live == 1,
+          "once the source has room the same reservation spills into it");
+}
+
 }  // namespace
 
 int main() {
@@ -383,5 +440,6 @@ int main() {
     test_accessors();
     test_flatten_verdicts();
     test_nothrow_growth();
+    test_link_table_source();
     return tr::testing::summary("rope");
 }

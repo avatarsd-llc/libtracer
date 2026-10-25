@@ -116,9 +116,10 @@ struct ws_assembler_t {
         }
         charged += cost;
         if (!fin) return {};
-        // The delivered rope holds the links itself; reserving them first makes a refusal
-        // backpressure instead of an abort.
-        assemble_result_t done{assemble_status_t::REFUSED, {}};
+        // The delivered rope holds the links itself, in a chain from the same rx source
+        // (the receiver pays); reserving them first makes a refusal backpressure instead
+        // of an abort.
+        assemble_result_t done{assemble_status_t::REFUSED, tr::view::rope_t(chain.source())};
         if (done.message.try_reserve(chain.size())) {
             for (tr::view::view_t& link : chain) done.message.append(std::move(link));
             done.status = assemble_status_t::COMPLETE;

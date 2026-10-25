@@ -724,6 +724,72 @@ void test_backend_exhaustion_is_counted_backpressure() {
     ::close(cfd);
 }
 
+/** @brief A source over @p upstream that refuses, while armed, every block of exactly
+ *         @ref refused_bytes: one request shape, so the refusal lands on one draw. */
+struct refuse_size_source_t final : tr::mem::block_source_t {
+    explicit refuse_size_source_t(tr::mem::block_source_t& upstream) noexcept
+        : block_source_t("refuse-size"), up(&upstream) {}
+    void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (armed.load() && bytes == refused_bytes) {
+            refusals.fetch_add(1);
+            return nullptr;
+        }
+        return up->try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        up->release(p, bytes, align);
+    }
+    tr::mem::block_source_t* up;          /**< @brief Where the granted blocks come from. */
+    std::size_t refused_bytes = 0;        /**< @brief The one request size refused. */
+    std::atomic<bool> armed{false};       /**< @brief Whether the refusal is live. */
+    std::atomic<std::size_t> refusals{0}; /**< @brief Requests refused so far. */
+};
+
+/**
+ * @brief The delivered rope's link table comes from the rx source (#2284), and its refusal
+ *        there is backpressure: the message is shed as `dropped_rx`, the link survives.
+ *
+ * A three-fragment message is delivered as a three-link rope, whose table is one block of
+ * exactly three views. The fragment chain grows in blocks of eight or more, and every
+ * segment is far larger, so refusing that one size refuses only the rope's table.
+ */
+void test_delivered_rope_table_comes_from_the_rx_source() {
+    std::printf("ws server — the delivered rope's link table is drawn from the rx source:\n");
+    std::vector<std::byte> slab(1u << 20);
+    tr::mem::bump_source_t bump(slab, tr::mem::null_source());
+    refuse_size_source_t gate(bump);
+    gate.refused_bytes = 3 * sizeof(tr::view::view_t);
+    tr::mem::source_backend_t rx(gate);
+    counting_sink_t sink;
+    tr::net::ws_server_transport_t server(0, {.memory = {.rx = &rx}});
+    server.set_receiver(sink);
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
+
+    const std::vector<std::byte> piece(512, std::byte{0x44});
+    std::vector<std::byte> wire = masked_client_frame(ws::opcode_t::BINARY, piece, false);
+    for (std::size_t i = 1; i < 3; ++i) {
+        const std::vector<std::byte> f =
+            masked_client_frame(ws::opcode_t::CONT, piece, /*fin=*/i + 1 == 3);
+        wire.insert(wire.end(), f.begin(), f.end());
+    }
+
+    gate.armed.store(true);
+    check(write_bytes(cfd, wire), "a three-fragment message written");
+    check(wait_until([&] { return server.dropped_rx() == 1; }, 2s),
+          "the refused link table shed the message as dropped_rx");
+    check(gate.refusals.load() >= 1, "... and the refusal came through the rx source");
+    check(sink.messages.load() == 0 && server.malformed_rx() == 0,
+          "nothing was delivered, and nothing is malformed");
+
+    gate.armed.store(false);
+    check(write_bytes(cfd, wire), "the same message written again");
+    check(wait_until([&] { return sink.messages.load() == 1; }, 2s),
+          "the link survived: with room, the message is delivered");
+    check(sink.bytes.load() == 3 * piece.size(), "... whole");
+    ::close(cfd);
+}
+
 // ---------------------------------------------------------------------------
 // The DIAL half — a server we chose to dial is no more trusted than one that dialled us
 // ---------------------------------------------------------------------------
@@ -825,6 +891,7 @@ int main() {
     test_assembly_draws_no_heap_per_fragment();
     test_effective_cap_is_the_min_of_the_two_seams();
     test_backend_exhaustion_is_counted_backpressure();
+    test_delivered_rope_table_comes_from_the_rx_source();
     test_client_refuses_an_oversize_server_frame();
     return tr::testing::summary("ws_rx_bound");
 }

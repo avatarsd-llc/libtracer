@@ -231,6 +231,11 @@ void test_composition_does_not_pay_for_the_payload() {
     cost_t emit_at_bottom{};
     cost_t emit_at_top{};
 
+    // The rope's link table draws from the table pool (#2284), whose first draw carves a slab
+    // from the heap. One untimed composition takes that refill, so the ladder measures what a
+    // composition costs, not when the pool was first touched.
+    static_cast<void>(compose_cost(kLadder[0]));
+
     for (const std::size_t payload : kLadder) {
         const cost_t c = compose_cost(payload);
         const cost_t e = emit_cost(payload);

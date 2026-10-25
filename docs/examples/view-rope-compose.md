@@ -18,7 +18,8 @@ composition itself.
   A consumer that cannot promise contiguity asks for `materialize()` instead, which is the
   visible choice between a refcount bump and one flatten copy.
 - **The first two links live in inline storage.** A one- or two-link chain allocates nothing at
-  all; the third link spills the chain to the heap. That threshold is a **cost tuning knob, not
+  all; the third link spills the chain into a block from the rope's block source (the table
+  pool unless the rope was built with one). That threshold is a **cost tuning knob, not
   a limit** — nothing refuses a longer rope, and a caller that knows its final count can
   `try_reserve` it up front.
 - **`operator+` takes its left operand by value.** The example checks that the original rope

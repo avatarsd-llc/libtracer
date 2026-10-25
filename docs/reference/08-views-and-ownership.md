@@ -49,7 +49,9 @@ Keeping the chain out of the view keeps the single-link hot path allocation-free
 a plain `view_t` allocates nothing. How the rope stores its chain is an
 implementation choice, and short chains need not allocate at all — the reference
 implementation holds the first two links in inline storage and spills the whole
-chain to a heap vector on the third append
+chain on the third append into a block from a `tr::mem::block_source_t`: the one
+the rope was built with, or the table pool by default, never the process heap
+directly
 ([core/include/libtracer/rope.hpp](https://github.com/avatarsd-llc/libtracer/blob/main/core/include/libtracer/rope.hpp)).
 
 Invariants:
