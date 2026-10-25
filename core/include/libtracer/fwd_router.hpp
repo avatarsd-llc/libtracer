@@ -225,8 +225,8 @@ struct router_planes_t {
 
     /**
      * @brief The byte backend the terminus REPLY's egress-construction segments draw from (#795,
-     * ADR-0074): the reply head (peer-driven size — the swapped route bytes plus the inline tail)
-     * and, on a mint, the trailing 12-byte `PATH_REF`. It is the last *reply-egress* byte source
+     * ADR-0074): the reply head (peer-driven size — the swapped route bytes plus the inline tail).
+     * It is the last *reply-egress* byte source
      * that escaped a bounded node's slab (both folded READs' POINT headers — the composed root's
      * and the `":children"` listing's — are payload framing and draw from the graph's own
      * `value_backend` seam instead: #831, closed) — the head was hard-wired to
@@ -327,9 +327,9 @@ class fwd_router_t {
         // so `this` must outlive every write that can still reach the producer fan-out;
         // constructing a router against a graph that is ALREADY serving frames is
         // unsupported, which is what `configure_` in the verb's name says.
-        // The responder's reverse-mint seam (RFC-0024 §7.1 amendment 1): the resolver's
+        // The responder's reverse-element seam (RFC-0029 §7.1): the resolver's
         // remote-subscribe arm asks for THIS node's reference to the connection vertex a
-        // mint-flagged subscribe arrived on — the transport plane's mapping, so it is
+        // subscribe arrived on — the transport plane's mapping, so it is
         // injected here as the captureless {fn, ctx} pair the ADR-0047 doctrine prescribes.
         resolver_.on_reverse_ref(
             [](void* ctx,
@@ -469,8 +469,7 @@ class fwd_router_t {
     [[nodiscard]] mem::block_source_t& rx_source() const noexcept { return *rx_; }
     /** @brief The byte backend every rope flatten this router performs draws from (#730). */
     [[nodiscard]] mem::mem_backend_t& flatten_backend() const noexcept { return *flat_; }
-    /** @brief The byte backend the terminus REPLY head and the mint egress bytes draw from
-     *         (#795). */
+    /** @brief The byte backend the terminus REPLY head draws from (#795). */
     [[nodiscard]] mem::mem_backend_t& egress_backend() const noexcept { return *egress_; }
     /** @} */
 
@@ -684,9 +683,9 @@ class fwd_router_t {
      * @brief This node's own vertex ref for the connection vertex of child @p link_name —
      *        element 0 of a route that leaves through it (RFC-0024 §4.1).
      *
-     * The origin mints its OWN first element, because no one else can: an element is
-     * node-scoped, and the hop out of this node is the one hop no peer ever sees. A mint
-     * reply therefore comes back one element short of the route, and this is the element
+     * The origin supplies its OWN first element, because no one else can: an element is
+     * node-scoped, and the hop out of this node is the one hop no peer ever sees. A reply's
+     * learned `src` therefore comes back one element short of the route, and this is the element
      * that completes it (which @ref adopt_binding does for the caller).
      *
      * @retval std::nullopt @p link_name names no registered child, the child has no
@@ -698,17 +697,17 @@ class fwd_router_t {
         std::string_view link_name) const;
 
     /**
-     * @brief Install the bound form on @p path from the mint answer on a reply (RFC-0024 §7.4).
+     * @brief Install the learned chain on @p path from a reply's `src` (RFC-0029 §6.2).
      *
-     * The origin's side of the exchange, and the reason `path_t::bind` had no production
-     * caller until now. @p reply is a validated `FWD{REPLY}` node (read in place, #1829); its
-     * LAST child is the accumulated
-     * `PATH_REF` — the terminus's element, with one prepended by every hop that forwarded the
-     * reply. This prepends THIS node's own element for @p link_name (§4.1: element 0 is the
-     * origin's reference to its first-hop connection vertex) and records the whole stack.
+     * The origin's side of the exchange. @p reply is a validated `FWD{REPLY}` node (read in
+     * place, #1829); a `RESULT` reply's `src` is the accumulated chain — the terminus's PAIR,
+     * with one PAIR or NAME run prepended by every hop that relayed the reply. This prepends
+     * THIS node's own element for @p link_name (element 0 is the origin's reference to its
+     * first-hop connection vertex) and records the whole chain.
      *
-     * Nothing is installed unless the complete route is spellable: a reply with no mint, a
-     * link with no bindable connection vertex, or a stack past the normative element cap all
+     * Nothing is installed unless the complete route is spellable: a refused reply or one with
+     * no `PATH` `src`, a link with no bindable connection vertex, or a chain past the
+     * normative element cap all
      * leave @p path exactly as it was — bound to nothing, and therefore canonical. A binding
      * is an optimisation with a fallback that always works, so a partial one is never worth
      * having.
@@ -747,7 +746,7 @@ class fwd_router_t {
      *         validates — a link removed, a connection vertex retired, an ACL revoked — or the
      *         link plane's source refused the `dst` bytes. The caller's recovery is the one
      *         that always works: `clear_binding()` and send the canonical path it still holds,
-     *         which may then re-mint (§5.3).
+     *         whose reply may then teach a fresh chain (RFC-0029 §6.2).
      */
     [[nodiscard]] bool bound_send(const graph::path_t& path, graph::acl_right_t right,
                                   egress_fn_t send, void* ctx) const;
@@ -1718,8 +1717,8 @@ class fwd_router_t {
     [[nodiscard]] bool door_allows(const child_registry_t::child_t* door, std::string_view caller,
                                    std::optional<graph::acl_right_t> right) const;
     /**
-     * @brief This hop's REVERSE-direction mint element (RFC-0024 §7.1 amendment 1): a
-     *        reference for the identity a mint-flagged request ARRIVED on.
+     * @brief This hop's REVERSE-direction element (RFC-0029 §7.1): a reference for the
+     *        identity a subscribe ARRIVED on, prepended to its `PATH_REF_REVERSE` child.
      *
      * Point-to-point, the arrival link's connection vertex (`hop_mint` — one identity,
      * two directions, one supplier). Bus-session arrival, the accepted session's identity
@@ -1831,8 +1830,9 @@ class fwd_router_t {
      *         direction. Tombstoned nodes are skipped: a removed child resolves to nothing,
      *         and a re-added one resolves to its CURRENT tenancy (#884). */
     [[nodiscard]] const child_rx_ctx_t* ctx_by_name(std::string_view link_name) const;
-    /** @brief This node's element for the link a REPLY arrived on — the forwarder's mint
-     *         contribution (RFC-0024 §7.1 step 2); nullopt when it has none to give. */
+    /** @brief This node's element for the link a REPLY arrived on — what the forwarder
+     *         prepends to the reply's `src` (RFC-0029 §6.2); nullopt when it has none to give,
+     *         and the hop contributes its NAME run instead. */
     [[nodiscard]] std::optional<wire::path_ref_element_t> hop_mint(
         std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx) const;
     /**
@@ -1927,7 +1927,7 @@ class fwd_router_t {
                                   // a child may carry its own (ADR-0067 §3)
     mem::mem_backend_t* flat_;    // every rope flatten the router performs (#730);
                                   // a null result is answered by value, never stored
-    mem::mem_backend_t* egress_;  // terminus REPLY head + mint egress bytes (#795);
+    mem::mem_backend_t* egress_;  // terminus REPLY head bytes (#795);
                                   // a refusal degrades to addressed BACKPRESSURE
     child_registry_t registry_;   // the one NAME→link demux table (Brick 3a, ADR-0037);
                                   // its chunks draw from `link_src` (#873 phase 1)

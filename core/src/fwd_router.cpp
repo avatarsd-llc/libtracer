@@ -517,13 +517,12 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     if (!dec) return;  // malformed ⇒ drop by value
     // A one-byte op, or nowhere trustworthy to reply to ⇒ drop by value.
     if (pre.op_body_len != 1) return;
-    // The `dst` is child 1 in either routable form (RFC-0024 §4): a canonical `PATH`, or the
-    // BOUND `PATH_REF` a reverse-list delivery is addressed by (§7.1 amendment 1) — the
-    // refusal of a bound delivery echoes the refused `PATH_REF` exactly as the canonical
-    // reject echoes the refused route, and the producer's step-5 reclaim correlates either
-    // (`evict_route_edges` classifies the echo's type byte). The `src` is the first `PATH`
-    // after it, and `PATH` only (`05-protocol-tlvs.md` hop rules). The scan stops at `src`, so
-    // a subscribe request's TRAILING reverse list (which sits after `src`, typed
+    // The `dst` is child 1, echoed as the refused route whatever its type, and the producer's
+    // step-5 reclaim correlates the echo (`evict_route_edges` classifies its type byte). Every
+    // route is a `PATH` of NAME and PAIR elements (RFC-0029 §5); a `PATH_REF` one is refused as
+    // a `dst` (§5.3), so nothing the library sends is addressed by one. The `src` is the first
+    // `PATH` after it, and `PATH` only (`05-protocol-tlvs.md` hop rules). The scan stops at `src`,
+    // so a subscribe request's TRAILING reverse list (which sits after `src`, typed
     // `PATH_REF_REVERSE`) can never be mistaken for either route.
     std::optional<wire::tlv_node_t> src;
     std::size_t child = 0;
@@ -1526,9 +1525,9 @@ std::optional<wire::path_ref_element_t> fwd_router_t::hop_mint(
 std::optional<wire::path_ref_element_t> fwd_router_t::reverse_hop_ref(
     std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx, bool from_peer) const {
     /*
-     * This hop's REVERSE-direction element (RFC-0024 §7.1 amendment 1): a reference for the
+     * This hop's REVERSE-direction element (RFC-0029 §7.1): a reference for the
      * identity the request ARRIVED on. Point-to-point, that is the same connection vertex
-     * the reply-direction mint answers with — one identity, two directions, one supplier.
+     * the reply direction answers with — one identity, two directions, one supplier.
      */
     if (!from_peer) return hop_mint(inbound_name, inbound_ctx);
     /*
