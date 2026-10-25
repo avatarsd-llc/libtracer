@@ -1233,6 +1233,20 @@ void fwd_router_t::link_down(std::string_view link_name) {
     link_gone(link_name, inbound_pair(nullptr, link_name, {}));
 }
 
+bool fwd_router_t::link_down(std::string_view link_name, peer_handle_t peer) {
+    // The published walk, as a frame path reads it: a removed mount has no peers to evict.
+    const child_rx_ctx_t* const ctx = ctx_by_name(link_name);
+    bus_link_t* const bus =
+        ctx != nullptr && peer.valid() ? bus_of(*ctx->entry->bound().link) : nullptr;
+    std::array<char, kPeerNameChars> scratch{};
+    const std::string_view name =
+        bus != nullptr ? bus->peer_name(peer, scratch) : std::string_view{};
+    if (name.empty()) return false;
+    const frame_scope_t scope;
+    bus_peer_down(*ctx, peer, name);
+    return true;
+}
+
 void fwd_router_t::link_gone(std::string_view link_name, graph::link_pair_t link) {
     const frame_scope_t scope;
     graph_.evict_link_edges(link_name, link);

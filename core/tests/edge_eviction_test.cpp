@@ -815,6 +815,60 @@ void test_departure_notifier_seam() {
 }
 
 /**
+ * @brief #2237 — the application's by-handle door evicts ONE bus peer's edges.
+ *
+ * Edges name their link by pair (#1941), so `link_down(name)` reaches a registered child's
+ * edges and never a bus peer's. A bus that cannot see its peers leave (an announce-census CAN
+ * bus fires no peer-down at all) needs the application to say so: `link_down(mount, handle)`
+ * runs the same departure the bus's own peer-down seam runs. The door refuses an unknown
+ * mount, a flat link and an invalid handle, and evicts nothing for any of them.
+ */
+void test_public_peer_door() {
+    std::printf("#2237 public by-handle peer door:\n");
+    graph_t g;
+    fwd_router_t router(g);
+    fake_link_t p2p;
+    fake_bus_t bus;
+    (void)router.attach_link("p2p", p2p);
+    (void)router.attach_link("bus", bus);
+
+    (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    p2p.inject(b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"p2p"}), b_field_subscribers_append(),
+                     b_subscriber("p")));
+    bus.inject_peer("n7", b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"n7"}),
+                                b_field_subscribers_append(), b_subscriber("q")));
+    bus.inject_peer("n8", b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"n8"}),
+                                b_field_subscribers_append(), b_subscriber("r")));
+    p2p.drain();
+    bus.peer("n7").drain();
+    bus.peer("n8").drain();
+
+    const auto deliveries = [&](std::uint8_t v) {
+        (void)g.write(path_t("/s"), rope_t{make_value(b_value_u8(v))});
+        const std::size_t n[3] = {p2p.count(), bus.peer("n7").count(), bus.peer("n8").count()};
+        p2p.drain();
+        bus.peer("n7").drain();
+        bus.peer("n8").drain();
+        return std::array<std::size_t, 3>{n[0], n[1], n[2]};
+    };
+    check(deliveries(0x41) == std::array<std::size_t, 3>{1, 1, 1},
+          "all three sessions deliver before any departure");
+
+    const peer_handle_t n7 = bus.mint("n7");
+    check(!router.link_down("nope", n7), "an unknown mount is refused");
+    check(!router.link_down("bus", peer_handle_t{}), "an invalid handle is refused");
+    check(!router.link_down("p2p", n7), "a flat link has no peers to evict by handle");
+    check(deliveries(0x42) == std::array<std::size_t, 3>{1, 1, 1},
+          "and none of those refusals evicted anything");
+
+    check(router.link_down("bus", n7), "the bus mount accepts its peer's handle");
+    check(deliveries(0x43) == std::array<std::size_t, 3>{1, 0, 1},
+          "only n7's edge left; the other peer and the flat child still deliver");
+    check(router.link_down("bus", n7), "a second departure of the same peer is a no-op");
+    check(deliveries(0x44) == std::array<std::size_t, 3>{1, 0, 1}, "and changes nothing");
+}
+
+/**
  * @brief #943 — a FIELD-WRITE-admitted subscriber edge is reclaimed by its link's teardown.
  *
  * `graph_t::field_write`'s `:subscribers[N]` arm (RFC-0009 §D.1 replace) admits an edge whose
@@ -1600,6 +1654,7 @@ int main() {
     test_evict_reaches_field_write_admitted_edges();
     test_empty_link_name_evicts_nothing();
     test_departure_notifier_seam();
+    test_public_peer_door();
     test_refused_route_reclaims_the_edge();
     test_reverse_mint_closes_the_disclosure();
     test_two_hop_subscribe_learns_its_chain();

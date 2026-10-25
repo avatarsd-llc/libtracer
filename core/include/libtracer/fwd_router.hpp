@@ -841,7 +841,7 @@ class fwd_router_t {
      * directly; calling it for a live or unknown link is safe (eviction of nothing is a
      * no-op). Edges name their link by PAIR (#1941), so this by-name door evicts the edges of
      * the registered child @p link_name names; a bus PEER's edges leave through the bus's
-     * own peer-down seam, which holds the peer's handle.
+     * own peer-down seam, which holds the peer's handle, or through the by-handle overload.
      *
      * Runs on the calling thread (typically a transport receive/close thread) and takes
      * graph locks — callers must hold no transport-internal locks (the
@@ -849,6 +849,27 @@ class fwd_router_t {
      * @param link_name The routing plane's inbound NAME for the departed link/peer.
      */
     void link_down(std::string_view link_name);
+
+    /**
+     * @brief The by-HANDLE door for one bus peer's departure (#2237): what the bus's own
+     *        peer-down seam runs, for an application that learned of it some other way.
+     *
+     * An announce-census bus (the CAN binding) never sees a peer leave, so it never fires
+     * `bus_link_t::set_peer_down_notifier`, and @ref link_down by name reaches only a
+     * registered child's edges. Here the application names the bus mount @p link_name and
+     * the peer's @p peer handle, and the router runs that peer's departure: it evicts every
+     * edge and pending AWAIT filed under the peer, retires the peer's session anchor if the
+     * peer still holds its slot, and drops its cached link token. A CAN peer's handle is
+     * `{node id, transport_can::kAnnouncedPeerGeneration}`, the one its frames arrive under.
+     *
+     * Calling it for a peer that already left, or never subscribed, evicts nothing and is
+     * safe. The calling discipline is @ref link_down's: callers hold no transport-internal
+     * locks.
+     * @retval true  @p link_name is a live bus mount and @p peer names one of its peers.
+     * @retval false no live child is named @p link_name, it has no bus facet, or @p peer is
+     *               invalid or names no peer of it. Nothing was evicted.
+     */
+    bool link_down(std::string_view link_name, peer_handle_t peer);
 
     /**
      * @brief This node's NAME for the link @p link names (#1941): its registry slot's name,

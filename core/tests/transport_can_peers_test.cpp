@@ -465,11 +465,24 @@ void test_resolved_endpoint_is_identity_scoped() {
     tr::net::transport_t* const cached = observer.peer_link("n9");
     check(cached != nullptr, "n9 resolves to a directed endpoint");
 
+    // #2237: the delivery path resolves by HANDLE, and answers what the name answers.
+    const tr::net::peer_handle_t h9{9, tr::net::transport_can::kAnnouncedPeerGeneration};
+    check(observer.peer_link_of(h9) == cached, "peer_link_of(n9's handle) is that endpoint");
+    check(observer.peer_link_of(tr::net::peer_handle_t{}) == nullptr,
+          "an invalid handle resolves to nothing");
+    check(observer.peer_link_of(tr::net::peer_handle_t{can::kNodeMax + 1u, 1}) == nullptr,
+          "a handle past the node-id space resolves to nothing");
+    check(observer.peer_link_of(tr::net::peer_handle_t{9, 2}) == nullptr,
+          "a handle at any other generation names no CAN peer");
+    check(observer.peer_link_of(tr::net::peer_handle_t{3, 1}) == nullptr,
+          "a node never heard resolves to nothing");
+
     // --- n9 falls silent: it stops RESOLVING, but the entry is never freed. ---
     peer9.reset();
     check(wait_until([&] { return names().count("n9") == 0; }, kBudget),
           "after peer_ttl of silence n9 leaves the enumeration");
     check(observer.peer_link("n9") == nullptr, "and a FRESH resolution of n9 now fails");
+    check(observer.peer_link_of(h9) == nullptr, "and so does its handle (#2237)");
 
     // --- a different peer arrives while n9 is gone. It cannot inherit the name.
     std::atomic<int> n7_deliveries{0};
@@ -489,6 +502,8 @@ void test_resolved_endpoint_is_identity_scoped() {
                                                   "n9-returned"});
     peer9->set_receiver(n9_rx);
     check(wait_until([&] { return names().count("n9") == 1; }, kBudget), "n9 returns to the bus");
+    check(observer.peer_link_of(h9) == cached,
+          "the returned n9's handle resolves to the same endpoint (#2237)");
 
     const std::vector<std::byte> directed(18, std::byte{0x5A});
     cached->send(directed);
