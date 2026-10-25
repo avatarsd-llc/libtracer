@@ -296,8 +296,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   targets and is unchanged on 32-bit ones. A fragmented WebSocket message is delivered as a rope
   whose chain is drawn from the link's `memory.rx` source; a refusal there sheds the message as
   `dropped_rx`, as a refused fragment chain already did. On esp32c6 the no-heap census drops from
-  1834 to 1554 references and from 593 to 545 functions; the Cortex-M0 required-module flash
-  drops from 15,544 B to 15,176 B.
+  1834 to 1598 references and from 593 to 556 functions; the Cortex-M0 required-module flash
+  drops from 15,544 B to 15,220 B.
 
 ### Fixed
 

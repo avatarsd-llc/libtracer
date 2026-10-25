@@ -208,6 +208,10 @@ struct segment_t {
  */
 class segment_ptr_t {
    public:
+    /** @brief One pointer, into no object of its own: its bytes at a new address are the same
+     *         reference, so a container relocates it by `memcpy` (`%mem::bitwise_relocatable`). */
+    using bitwise_relocatable_t = void;
+
     segment_ptr_t() noexcept = default;
 
     /** @brief Adopt an existing reference (e.g. from `alloc`, refcount = 1) WITHOUT bumping. */

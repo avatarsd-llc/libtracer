@@ -485,12 +485,16 @@ class rope_t {
      *        destructor runs, which keeps relocation off the segment release path.
      */
     static void relocate(view_t* to, view_t* from, std::size_t n) noexcept {
+        static_assert(mem::bitwise_relocatable<view_t> && mem::bitwise_relocatable<segment_ptr_t>,
+                      "rope_t relocates its links by memcpy");
         if (n != 0)
             std::memcpy(static_cast<void*>(to), static_cast<const void*>(from), n * sizeof(view_t));
     }
 
     /** @brief Adopt @p o's links (@p o is left empty and inline); this rope holds none. */
     void take(rope_t& o) noexcept {
+        static_assert(mem::bitwise_relocatable<view_t>,
+                      "rope_t hands its links over by memcpy (relocate) or by the block pointer");
         if (o.spill_ != nullptr) {
             spill_ = o.spill_;
             cap_ = o.cap_;
@@ -503,13 +507,28 @@ class rope_t {
         o.cap_ = kInline;
     }
 
-    /** @brief Drop every link and return a spilled chain's block; the rope is then empty.
-     *  Always inlined: it is the destructor's body, and a function of its own would put one
-     *  more function on the segment release path for the no-heap census to count. */
+    /**
+     * @brief Drop every link and return a spilled chain's block; the rope is then empty.
+     *
+     * Always inlined (it is the destructor's body, and a function of its own would put one
+     * more function on the segment release path for the no-heap census to count), so it
+     * holds only the inline arm: at most `kInline` links, unrolled. A spilled chain is
+     * the case that allocated, and its release is the cold `drop_spilled`.
+     */
     [[gnu::always_inline]] void clear() noexcept {
-        view_t* at = data();
-        for (std::uint32_t i = 0; i < n_; ++i) at[i].~view_t();
-        if (spill_ != nullptr) src_->release(spill_, cap_ * sizeof(view_t), alignof(view_t));
+        if (spill_ != nullptr) [[unlikely]] {
+            drop_spilled();
+            return;
+        }
+        for (std::size_t i = 0; i < kInline; ++i)
+            if (i < n_) inline_[i].~view_t();
+        n_ = 0;
+    }
+
+    /** @brief `clear` for a spilled chain: drop its links and return its block. */
+    [[gnu::cold]] [[gnu::noinline]] void drop_spilled() noexcept {
+        for (std::uint32_t i = 0; i < n_; ++i) spill_[i].~view_t();
+        src_->release(spill_, cap_ * sizeof(view_t), alignof(view_t));
         spill_ = nullptr;
         n_ = 0;
         cap_ = kInline;

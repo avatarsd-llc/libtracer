@@ -33,6 +33,10 @@ namespace tr::view {
  * @note Invariant: `offset + length <= owner->bytes.size()`.
  */
 struct view_t {
+    /** @brief A view is a segment reference and two sizes: its bytes at a new address are the
+     *         same view, so a container relocates it by `memcpy` (`%mem::bitwise_relocatable`). */
+    using bitwise_relocatable_t = void;
+
     segment_ptr_t owner;    /**< @brief The segment whose bytes this view borrows. */
     std::size_t offset = 0; /**< @brief Byte offset of the window within the segment. */
     std::size_t length = 0; /**< @brief Window length in bytes. */
