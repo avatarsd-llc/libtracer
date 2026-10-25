@@ -47,3 +47,7 @@ jobs:
         # when a `Proto` global exists, so without this it was covered by `luac5.4
         # -p` alone — blind to a uint16 field added from a four-byte slice.
         run: lua5.4 tools/wireshark/tests/tree_smoke.lua
+
+concurrency:
+  group: wireshark-dissector-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

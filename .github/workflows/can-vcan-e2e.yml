@@ -64,3 +64,7 @@ jobs:
       - name: Run the real-vcan transport_can E2E smoke test
         run: |
           ctest --test-dir core/build --output-on-failure -R '^transport_can_vcan$'
+
+concurrency:
+  group: can-vcan-e2e-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
