@@ -2199,6 +2199,13 @@ if(LIBTRACER_TRANSPORT_WS)
     target_link_libraries(ws_handshake_bound_test PRIVATE libtracer)
     libtracer_test_warnings(ws_handshake_bound_test)
     add_test(NAME ws_handshake_bound COMMAND ws_handshake_bound_test)
+
+    # #2305 — the client's masking-key stream is seeded from one getrandom read per dial, never
+    # from a clock: two dials from one stack frame get different first masking keys.
+    add_executable(ws_mask_seed_test ws_mask_seed_test.cpp)
+    target_link_libraries(ws_mask_seed_test PRIVATE libtracer)
+    libtracer_test_warnings(ws_mask_seed_test)
+    add_test(NAME ws_mask_seed COMMAND ws_mask_seed_test)
 endif()
 
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)
