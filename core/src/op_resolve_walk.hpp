@@ -410,8 +410,11 @@ template <class N>
     std::optional<N> cur = ch.next();
     while (cur) {  // one level per NAME + its 0/1/2 trailing VALUEs
         if (cur->type() != type_t::NAME) return std::unexpected(status_t::INVALID_PATH);
-        field_step_t& step = fp.steps.emplace_back();
-        step.name.assign(detail::as_string_view(cur->body()));
+        // The name views the request's own bytes, which outlive the resolve this serves. A
+        // level past kMaxFieldDepth is refused here, by the in-place bound itself.
+        if (!fp.steps.push_back(field_step_t{.name = detail::as_string_view(cur->body())}))
+            return std::unexpected(status_t::INVALID_PATH);
+        field_step_t& step = fp.steps[fp.steps.size() - 1];
         // vals[1] is the index_mode, vals[0] the u32 index; each VALUE read shifts in from the
         // right. The u8 index_mode is the low byte of its u32 load (`load_le` is LE and reads
         // the absent bytes as zero), so one load width serves both.
@@ -447,10 +450,9 @@ template <class N>
                 // A wire index_mode byte outside {SCALAR,ELEMENT,WILDCARD} is malformed.
                 // Without this the switch would fall through and silently DROP the decoded
                 // index (step keeps its non-indexed defaults) — reject it, matching the
-                // kMaxFieldDepth guard below and the sibling INVALID_PATH sites (#437).
+                // kMaxFieldDepth guard above and the sibling INVALID_PATH sites (#437).
                 return std::unexpected(status_t::INVALID_PATH);
         }
-        if (fp.steps.size() > kMaxFieldDepth) return std::unexpected(status_t::INVALID_PATH);
         cur = std::move(next);  // the lookahead item is the next level's NAME (or end)
     }
     return fp;

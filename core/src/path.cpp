@@ -6,6 +6,7 @@
 #include "libtracer/path.hpp"
 
 #include <charconv>
+#include <new>
 
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/packed_path.hpp"
@@ -21,15 +22,13 @@ namespace {
 // THE shared segment predicate (ADR-0073 §1), also enforced at the wire creation
 // boundary (#688) so the two tiers cannot drift.
 
-/** @brief Parse one field step: "name", "name[3]", or "name[]". */
+/** @brief Parse one field step: "name", "name[3]", or "name[]". The name views @p step. */
 [[nodiscard]] result_t<field_step_t> parse_step(std::string_view step) {
     field_step_t fs;
     const std::size_t br = step.find('[');
-    if (br == std::string_view::npos) {
-        fs.name = std::string(step);
-    } else {
+    fs.name = step.substr(0, br);
+    if (br != std::string_view::npos) {
         if (step.back() != ']') return std::unexpected(status_t::INVALID_PATH);
-        fs.name = std::string(step.substr(0, br));
         fs.indexed = true;
         const std::string_view idx = step.substr(br + 1, step.size() - br - 2);
         if (idx.empty()) {
@@ -44,18 +43,23 @@ namespace {
             fs.index = static_cast<std::uint16_t>(value);
         }
     }
-    // A field name is a NAME like an address segment, held to the same shared predicate
-    // (reference/03 §reserved characters). That is what makes a second ':' malformed (#2113):
-    // the tail was split at the first one, so `/x:schema:subscribers[]` used to name a field
-    // called `schema:subscribers` and answer SCHEMA_NOT_FOUND.
     if (!valid_segment(fs.name)) return std::unexpected(status_t::INVALID_PATH);
     return fs;
 }
 
+/** @brief The field path of a path that has none: what @ref path_t::field answers then. */
+const field_path_t kNoField{};
+
+/** @brief Every block a path draws is aligned for the field path it may lead with. */
+constexpr std::size_t kBlockAlign = alignof(field_path_t);
+
 }  // namespace
 
 result_t<path_t> path_t::parse(std::string_view text) {
-    // Split off the field tail at the first ':'.
+    return parse(text, tr::mem::table_source());
+}
+
+result_t<path_t> path_t::parse(std::string_view text, tr::mem::block_source_t& src) {
     std::string_view addr = text;
     std::string_view field_text;
     if (const std::size_t colon = text.find(':'); colon != std::string_view::npos) {
@@ -65,56 +69,16 @@ result_t<path_t> path_t::parse(std::string_view text) {
 
     // The address must be rooted at '/'.
     if (addr.empty() || addr.front() != '/') return std::unexpected(status_t::INVALID_PATH);
-    // Strip trailing slashes (but keep the root "/").
+    // Strip trailing slashes; the root "/" is zero segments (the graph root).
     while (addr.size() > 1 && addr.back() == '/') addr.remove_suffix(1);
+    if (addr.size() == 1) addr = {};
+    // One packed record per `/seg` is `[u8 len][seg]`, the same byte count as its text, so the
+    // key is exactly `addr.size()` bytes, known before a byte is written.
+    if (addr.size() > kMaxPathBytes) return std::unexpected(status_t::INVALID_PATH);
 
-    path_t p;
-    // Root "/" is zero segments (the graph root); otherwise split on '/'.
-    if (addr != "/") {
-        // Pre-size the payload EXACTLY, before a single byte is appended. The emitter grows
-        // `payload_` by geometric doubling, so a two-segment path used to walk a 1→2→4→8→16
-        // realloc chain — four throwaway blocks and four frees to build fifteen bytes. That
-        // is not a registration cost: EVERY path-keyed read, write and subscribe parses a
-        // path first, so the whole codebase paid it per operation, and on an MCU allocator a
-        // malloc/free round-trip is hundreds of nanoseconds rather than the tens glibc's
-        // tcache serves it in.
-        //
-        // The size is exact, not an estimate. `addr` is rooted and has no trailing or
-        // doubled slashes by this point, so each segment is preceded by exactly one '/':
-        // the separator count IS the segment count, the segment bytes total
-        // `addr.size() - nsegs`, and each PACKED record adds exactly ONE length byte
-        // (RFC-0018) — giving `nsegs + (addr.size() - nsegs)` = `addr.size()`. The whole
-        // canonical key is now the address string's own length, one byte per '/' included.
-        std::size_t nsegs = 0;
-        for (const char c : addr) {
-            if (c == '/') ++nsegs;
-        }
-        // Reserve only within the bound the loop below enforces anyway, so a garbage address
-        // cannot make this allocate more than a well-formed one of the same length would.
-        if (const std::size_t want = addr.size(); want <= kMaxPathBytes) p.payload_.reserve(want);
-
-        std::size_t pos = 1;  // skip the leading '/'
-        for (;;) {
-            const std::size_t slash = addr.find('/', pos);
-            const std::size_t end = (slash == std::string_view::npos) ? addr.size() : slash;
-            const std::string_view seg = addr.substr(pos, end - pos);
-            // empty ("//"), reserved character, or over-long — one predicate, shared
-            // with the wire creation boundary (ADR-0073 §1).
-            if (!valid_segment(seg)) return std::unexpected(status_t::INVALID_PATH);
-            if (++p.segments_ > kMaxSegments) return std::unexpected(status_t::INVALID_PATH);
-            // `valid_segment` already bounded the segment at `kMaxSegmentBytes` (64) and
-            // refused an empty one, so the packed emitter cannot refuse here — but its
-            // answer is checked rather than discarded, because THAT bound is a build-time
-            // constant and the record's `u8` length field is the wire's (RFC-0018 §5).
-            if (!wire::emit_path_segment(p.payload_, seg))
-                return std::unexpected(status_t::INVALID_PATH);
-            if (p.payload_.size() > kMaxPathBytes) return std::unexpected(status_t::INVALID_PATH);
-            if (slash == std::string_view::npos) break;
-            pos = slash + 1;
-        }
-    }
-
-    // Parse the field tail: dot-separated steps, each optionally "[N]" or "[]".
+    // The steps first, their names viewing `text`; they are re-pointed into the block below.
+    field_path_t field;
+    std::size_t name_bytes = 0;
     if (!field_text.empty()) {
         std::size_t pos = 0;
         for (;;) {
@@ -124,15 +88,123 @@ result_t<path_t> path_t::parse(std::string_view text) {
             if (step.empty()) return std::unexpected(status_t::INVALID_PATH);
             auto fs = parse_step(step);
             if (!fs) return std::unexpected(fs.error());
-            p.field_.steps.push_back(std::move(*fs));
-            if (p.field_.steps.size() > kMaxFieldDepth)
-                return std::unexpected(status_t::INVALID_PATH);
+            if (!field.steps.push_back(*fs)) return std::unexpected(status_t::INVALID_PATH);
+            name_bytes += fs->name.size();
             if (dot == std::string_view::npos) break;
             pos = dot + 1;
         }
     }
 
+    path_t p;
+    p.src_ = &src;
+    p.has_field_ = !field.empty();
+    const std::size_t len = p.payload_off() + addr.size() + name_bytes;
+    if (len != 0) {
+        p.block_ = static_cast<std::byte*>(src.try_alloc(len, kBlockAlign));
+        if (p.block_ == nullptr) return std::unexpected(status_t::BACKPRESSURE);
+        p.block_len_ = static_cast<std::uint32_t>(len);
+    }
+    std::byte* at = p.block_ + p.payload_off();
+    std::size_t segments = 0;
+    for (std::size_t pos = 1; pos < addr.size();) {
+        const std::size_t slash = addr.find('/', pos);
+        const std::size_t end = (slash == std::string_view::npos) ? addr.size() : slash;
+        const std::string_view seg = addr.substr(pos, end - pos);
+        if (!valid_segment(seg) || ++segments > kMaxSegments)
+            return std::unexpected(status_t::INVALID_PATH);
+        at += wire::store_path_segment(std::span<std::byte>(at, 1 + seg.size()), seg);
+        pos = end + 1;
+    }
+    p.segments_ = static_cast<std::uint8_t>(segments);
+    p.key_len_ = static_cast<std::uint16_t>(addr.size());
+    if (p.has_field_) {
+        for (field_step_t& st : field.steps) {
+            std::memcpy(at, st.name.data(), st.name.size());
+            st.name = {reinterpret_cast<const char*>(at), st.name.size()};
+            at += st.name.size();
+        }
+        new (p.block_) field_path_t(field);
+    }
     return p;
+}
+
+const field_path_t& path_t::field() const noexcept {
+    return has_field_ ? *std::launder(reinterpret_cast<const field_path_t*>(block_)) : kNoField;
+}
+
+tr::mem::block_source_t& path_t::source() const noexcept {
+    return src_ != nullptr ? *src_ : tr::mem::table_source();
+}
+
+path_t::path_t(const path_t& o) { copy_from(o); }
+
+path_t& path_t::operator=(const path_t& o) {
+    if (this != &o) {
+        release();
+        copy_from(o);
+    }
+    return *this;
+}
+
+void path_t::copy_from(const path_t& o) {
+    tr::mem::block_source_t& src = o.source();
+    src_ = o.src_;
+    key_len_ = o.key_len_;
+    segments_ = o.segments_;
+    has_field_ = o.has_field_;
+    if (o.block_len_ != 0) {
+        block_ = static_cast<std::byte*>(src.try_alloc(o.block_len_, kBlockAlign));
+        if (block_ == nullptr) tr::mem::exhausted_at_init(src, "path_t");
+        block_len_ = o.block_len_;
+        std::memcpy(block_ + payload_off(), o.block_ + payload_off(), block_len_ - payload_off());
+    }
+    if (has_field_) {
+        // The steps' names view the block they were parsed into; re-point them at this one.
+        field_path_t f = o.field();
+        for (field_step_t& st : f.steps)
+            st.name = {reinterpret_cast<const char*>(block_) +
+                           (reinterpret_cast<const std::byte*>(st.name.data()) - o.block_),
+                       st.name.size()};
+        new (block_) field_path_t(f);
+    }
+    // A chain the source refuses leaves the copy unbound: the canonical bytes it holds are a
+    // complete answer, and the next operation re-learns (RFC-0029 §6.3).
+    if (o.chain_len_ != 0) (void)bind(o.binding().chain);
+}
+
+void path_t::release() noexcept {
+    clear_binding();
+    if (block_ != nullptr) source().release(block_, block_len_, kBlockAlign);
+    block_ = nullptr;
+    block_len_ = 0;
+}
+
+void path_t::take(path_t& o) noexcept {
+    src_ = o.src_;
+    block_ = std::exchange(o.block_, nullptr);
+    chain_ = std::exchange(o.chain_, nullptr);
+    block_len_ = std::exchange(o.block_len_, 0);
+    chain_len_ = std::exchange(o.chain_len_, 0);
+    key_len_ = std::exchange(o.key_len_, 0);
+    segments_ = std::exchange(o.segments_, 0);
+    has_field_ = std::exchange(o.has_field_, false);
+}
+
+bool path_t::bind(std::span<const std::byte> chain) noexcept {
+    if (chain.empty() || chain.size() > 0xFFFFu) return false;
+    auto* const blk = static_cast<std::byte*>(source().try_alloc(chain.size(), 1));
+    if (blk == nullptr) return false;
+    std::memcpy(blk, chain.data(), chain.size());
+    clear_binding();
+    chain_ = blk;
+    chain_len_ = static_cast<std::uint16_t>(chain.size());
+    return true;
+}
+
+void path_t::clear_binding() noexcept {
+    if (chain_ != nullptr) source().release(chain_, chain_len_, 1);
+    chain_ = nullptr;
+    chain_len_ = 0;
 }
 
 namespace {
@@ -176,29 +248,6 @@ std::size_t path_key_hash_t::operator()(const path_key_t& k) const noexcept {
 
 std::size_t path_key_hash_t::operator()(std::span<const std::byte> k) const noexcept {
     return fnv1a_key(k);
-}
-
-// ---- the learned-chain slot (RFC-0029 §6.2): one table-source block (ADR-0083) ----
-
-void path_t::copy_chain(const path_t& o) noexcept {
-    if (!bind({o.chain_, o.chain_len_})) mem::exhausted_at_init(mem::table_source(), "path_t");
-}
-
-bool path_t::bind(std::span<const std::byte> chain) noexcept {
-    if (chain.empty() || chain.size() > 0xFFFFu) return false;
-    auto* const block = static_cast<std::byte*>(mem::table_source().try_alloc(chain.size(), 1));
-    if (block == nullptr) return false;
-    std::memcpy(block, chain.data(), chain.size());
-    clear_binding();
-    chain_ = block;
-    chain_len_ = static_cast<std::uint16_t>(chain.size());
-    return true;
-}
-
-void path_t::clear_binding() noexcept {
-    if (chain_ != nullptr) mem::table_source().release(chain_, chain_len_, 1);
-    chain_ = nullptr;
-    chain_len_ = 0;
 }
 
 }  // namespace tr::graph
