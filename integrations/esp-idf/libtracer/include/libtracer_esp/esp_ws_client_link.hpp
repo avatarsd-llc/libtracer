@@ -564,6 +564,11 @@ class esp_ws_client_link_t final : public transport_t {
      *         `stats().c.tx_drops` (#1160). */
     [[nodiscard]] std::size_t tx_bytes() const noexcept { return tx_bytes_; }
 
+    /** @brief Bytes of the frames now waiting behind a write in flight (#2277). Never above
+     *         @ref tx_bytes: a frame that would take the waiting total past it is dropped and
+     *         charged to `stats().c.tx_drops`. The frame being written is not counted. */
+    [[nodiscard]] std::size_t tx_held_bytes() const noexcept { return held_.held(); }
+
     /** @brief The injected owning-RX source (`memory.rx`), or null for borrowed delivery. */
     [[nodiscard]] mem::mem_backend_t* rx_backend() const noexcept { return rx_backend_; }
 
@@ -746,6 +751,43 @@ class esp_ws_client_link_t final : public transport_t {
     const std::size_t tx_bytes_;
     /** @brief The recv thread's stack, kept for a spawn deferred to @ref start_receiving. */
     const std::size_t recv_stack_;
+    /**
+     * @brief The `tx_bytes` budget for frames that WAIT (#2277): a store over @ref tx_src_
+     *        that refuses a draw which would take the waiting total past `tx_bytes`.
+     *
+     * A frame built to wait in a lane is drawn here, and the block's return gives its bytes
+     * back, so the frames a stalled peer can pin never total more than `tx_bytes`. A frame
+     * written at once from the sender's own call is drawn from @ref tx_src_ directly: it is
+     * the write in flight, not a waiting one. Declared before @ref egress_, which returns
+     * every waiting frame here when it closes the peer.
+     */
+    class held_budget_t final : public mem::block_source_t {
+       public:
+        held_budget_t(mem::block_source_t& inner, std::size_t budget) noexcept
+            : block_source_t("ws-client-held"), inner_(&inner), budget_(budget) {}
+        [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+            std::size_t had = held_.load(std::memory_order_relaxed);
+            do {
+                if (bytes > budget_ - had) return nullptr;  // had <= budget_ always
+            } while (!held_.compare_exchange_weak(had, had + bytes, std::memory_order_relaxed));
+            void* const p = inner_->try_alloc(bytes, align);
+            if (p == nullptr) held_.fetch_sub(bytes, std::memory_order_relaxed);
+            return p;
+        }
+        void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+            inner_->release(p, bytes, align);
+            held_.fetch_sub(bytes, std::memory_order_relaxed);
+        }
+        [[nodiscard]] std::size_t held() const noexcept {
+            return held_.load(std::memory_order_relaxed);
+        }
+
+       private:
+        mem::block_source_t* const inner_;
+        const std::size_t budget_;
+        std::atomic<std::size_t> held_{0};
+    };
+    held_budget_t held_;
     /** @brief The shared egress module (ADR-0087 §2, #1619): the writer role, and the rings
      *         frames wait in while a write is in flight, drawn from @ref tx_src_. Every write
      *         step reports its frame moved (a failed write tears the connection down here,

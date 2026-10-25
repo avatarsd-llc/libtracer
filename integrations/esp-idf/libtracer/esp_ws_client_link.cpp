@@ -331,6 +331,7 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t 
       rx_bytes_(config.rx_bytes),
       tx_bytes_(config.tx_bytes),
       recv_stack_(config.recv_stack),
+      held_(*tx_src_, tx_bytes_),
       egress_(*tx_src_) {
     // The dial slot is drawn at setup, so a store that cannot hold it is a sizing bug, never
     // a runtime condition (ADR-0083): the constructor stops here, before the recv thread
@@ -813,9 +814,13 @@ void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> i
     // takes a waiting frame writes it as it stands, and the block goes back when its last
     // reference does, so no buffer outlives the frame. A refused draw drops the frame,
     // counted, and the writer still drains what others left waiting.
+    // Only a frame that WAITS is charged to the `tx_bytes` budget (#2277): the one the direct
+    // arm builds is the write in flight. A waiting frame the budget refuses is shed, counted.
+    bool direct = false;
     tr::net::egress_once_t once([&] {
         return tr::net::egress_frame_t::make(
-            *tx_src_, ws::detail::client_frame_bytes(total),
+            direct ? *tx_src_ : static_cast<mem::block_source_t&>(held_),
+            ws::detail::client_frame_bytes(total),
             [&](std::span<std::byte> out) { return frame_into(out.data(), iov, total); });
     });
     // Every step reports its frame moved: write_locked counts a failed or short write itself
@@ -828,6 +833,7 @@ void esp_ws_client_link_t::send_on(std::span<const std::span<const std::byte>> i
     const tr::net::egress_result_t r = egress_.send(
         peer_, lane, once,
         [&] {
+            direct = true;
             const tr::net::egress_frame_t* const f = once();
             return f != nullptr ? wrote(f->head()) : tr::net::egress_step_t{0, false, true};
         },

@@ -63,6 +63,7 @@
  * its own callers.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -77,6 +78,7 @@
 #include "gated_source.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_poly_ptr.hpp"
+#include "libtracer/ws.hpp"
 #include "libtracer_esp/esp_ws_client_link.hpp"
 
 namespace {
@@ -605,6 +607,63 @@ void test_a_second_sender_does_not_wait_on_a_parked_write() {
     check(drained_fake(), "and the link drained");
 }
 /**
+ * @brief #2277: the frames waiting behind a stalled write are charged to `tx_bytes`.
+ *
+ * Sender A is parked inside `esp_transport_write`. Every later send builds a frame that has
+ * to wait, and each waiting frame is a private masked copy, so a peer that never drains
+ * could pin one per lane slot. The budget caps their total at `tx_bytes`: a frame that would
+ * pass it is dropped and counted in `tx_drops`, never held. Released, the writer sends A's
+ * frame and then exactly the frames that were admitted, in order, and the budget is empty.
+ */
+void test_waiting_frames_are_bounded_by_tx_bytes() {
+    std::printf("#2277 frames waiting behind a stalled write never exceed tx_bytes:\n");
+    fake_ws::reset();
+    fake_ws::hold_writes(true);
+    auto link = dialing_link();
+    check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
+    esp_ws_client_link_t* const under_test = link.get();
+
+    const std::vector<std::byte> first = payload();
+    std::thread a([&] { under_test->send(first); });
+    check(wait_until([] { return fake_ws::writers_inside() >= 1; }, 2s),
+          "sender A is parked INSIDE the transport");
+
+    // One waiting frame's block: the egress header, then the masked frame.
+    const std::size_t block =
+        sizeof(tr::net::egress_frame_t) + tr::net::ws::detail::client_frame_bytes(payload().size());
+    const std::size_t fit = kBufBytes / block;
+    check(fit >= 1 && fit < tr::net::kEgressControlDepth,
+          "the case is sized so the budget, not the lane depth, binds");
+    constexpr std::size_t kSends = 12;
+    const std::size_t drops_before = under_test->stats().c.tx_drops;
+    std::size_t peak = 0;
+    std::vector<std::byte> last;
+    for (std::size_t i = 0; i < kSends; ++i) {
+        std::vector<std::byte> f = payload();
+        f[0] = static_cast<std::byte>(0x40 + i);
+        under_test->send(f);
+        if (i < fit) last = f;
+        peak = std::max(peak, under_test->tx_held_bytes());
+        check(under_test->tx_held_bytes() <= under_test->tx_bytes(),
+              "the waiting frames never total more than tx_bytes");
+    }
+    std::printf("       %zu B held at peak of a %zu B budget, %zu frame(s) admitted\n", peak,
+                under_test->tx_bytes(), fit);
+    check(peak == fit * block, "the budget filled with whole frames");
+    check(under_test->stats().c.tx_drops - drops_before == kSends - fit,
+          "every frame past the budget is a counted drop");
+    check(fake_ws::writes_started() == 1, "no waiting sender reached the transport");
+
+    fake_ws::hold_writes(false);
+    a.join();
+    check(fake_ws::writes_started() == static_cast<int>(1 + fit),
+          "the writer sent its own frame, then every admitted one");
+    check(fake_ws::last_write_payload() == last, "the admitted frames left in order");
+    check(under_test->tx_held_bytes() == 0, "and the budget is empty once they are written");
+    link.reset();
+    check(drained_fake(), "and the link drained");
+}
+/**
  * @brief #1880: the dial slot and the read scratch come from `memory.state`, and each is
  *        returned by EXACTLY the party that last holds it.
  *
@@ -1004,6 +1063,7 @@ int main() {
     test_send_during_a_redial_reads_no_handle();
     test_the_blocking_bounds_are_derived_from_the_watchdog();
     test_a_second_sender_does_not_wait_on_a_parked_write();
+    test_waiting_frames_are_bounded_by_tx_bytes();
     test_the_dial_slot_returns_to_its_store_on_both_arms();
     test_an_unconnected_link_holds_no_connection_memory();
     test_a_refused_scratch_is_a_failed_dial();
