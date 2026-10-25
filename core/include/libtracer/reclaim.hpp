@@ -55,17 +55,25 @@ struct retired_callback_t {
 /**
  * @brief **`reclaim_strict`** — the grace point is the moment `unsubscribe()` returns.
  *
- * The opt-in ZERO-COST mode (ADR-0080 §Decision 2), for an MCU deployment that provably
- * never unsubscribes from inside a dispatch. Nothing is tracked on the dispatch path, no
- * state is held anywhere, and `unsubscribe()` runs the release hook inline before it
- * returns — so the caller may free its context on that return with no further ceremony.
+ * The opt-in ZERO-COST mode (ADR-0080 §Decision 2) on the subscription-pair reclamation axis
+ * (`reclaim_policy_t`). Nothing is tracked on the dispatch path, no state is held anywhere,
+ * and `unsubscribe()` runs the release hook inline before it returns — so the caller may free
+ * its context on that return with no further ceremony.
  *
- * **Re-entrant and cross-thread unsubscribe are FORBIDDEN and NOT DETECTED**: unsubscribing
- * while any delivery is live — inside one, or on another thread — would retire a pair a
- * running fan-out's snapshot still names. This policy keeps no dispatch state, so no build can
- * see it; that is the trade it exists to make (ADR-0080 Amendment 1 §1). Select it only where
- * the deployment can show that no dispatch is live when it unsubscribes, for example a
- * thread-affine context that must be released on its own thread — otherwise take the default.
+ * **Target: NARROW bare metal only. Precondition, a hard rule: no preemption and no second
+ * core** — for example a superloop on a single-core Cortex-M. Any build that preempts,
+ * including a single-core RTOS, keeps @ref reclaim_qsbr_t, because preemption alone opens the
+ * window in which an unsubscribe retires a pair a suspended fan-out's snapshot still names, which
+ * is a use-after-free. On a unicore build QSBR costs about 22 instructions per publish and no
+ * fence, so the opt-out saves little anywhere else.
+ *
+ * **Re-entrant unsubscribe is FORBIDDEN and NOT DETECTED**: unsubscribing from inside a
+ * delivery would retire a pair the running fan-out's snapshot still names. This policy keeps
+ * no dispatch state, so no build can see it; that is the trade it exists to make (ADR-0080
+ * Amendment 1 §1).
+ *
+ * It is not an alternative to @ref hazard_slot_t, which sits on a different axis (the LKV
+ * slot, `lkv_slot_t`) and targets WIDE many-core hosts. Neither policy supersedes the other.
  *
  * Selecting it is one line in `libtracer/config_override.hpp`:
  * `using reclaim_policy_t = reclaim_strict_t;`
@@ -90,7 +98,9 @@ struct reclaim_strict_t {
  * The default on WIDE, MID and NARROW alike (ADR-0080 Amendment 1 §1). A grace point stated
  * over one thread cannot be safe: an app thread that unsubscribes at depth 0 would release a
  * pair another thread's fan-out snapshotted a moment before, and preemption opens that window
- * on one CPU too. @ref reclaim_strict_t is the only opt-out.
+ * on one CPU too, so a single-core RTOS build needs it as much as a WIDE host does.
+ * @ref reclaim_strict_t is the only opt-out, for bare metal with no preemption and no second
+ * core.
  *
  * @section reclaim_qsbr_guarantee What a caller gets
  *
@@ -117,8 +127,10 @@ struct reclaim_strict_t {
  *
  * So a release hook must be **short, thread-safe with respect to its own context,
  * non-blocking and `noexcept`**: it may run on a receiving thread, at that thread's priority
- * and on its stack. Posting the context to an app-owned queue is the ideal shape. A context
- * that must be released on its own thread takes @ref reclaim_strict_t instead.
+ * and on its stack. Posting the context to an app-owned queue is the ideal shape, and it is
+ * also how a context that must be released on its own thread gets there: the hook posts it
+ * and that thread frees it. @ref reclaim_strict_t is not the answer to thread affinity; its
+ * precondition is no preemption and no second core.
  *
  * @section reclaim_qsbr_cost What it costs
  *

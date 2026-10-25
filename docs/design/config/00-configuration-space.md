@@ -237,6 +237,7 @@ is a knob the fragment does not state at all (#1244).
 | `kSlabClassCap` (`config.hpp:default_config_t::kSlabClassCap`) | count | 2 — fully free slabs a class keeps | inherited — unused on a chip |
 | `acl_policy_t` (`config.hpp:default_config_t::acl_policy_t`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`config.hpp:default_config_t::lkv_slot_t`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(LIBTRACER_SPIN_WAIT_SAFE)`) |
+| `reclaim_policy_t` (`config.hpp:default_config_t::reclaim_policy_t`) | policy type | `reclaim_qsbr_t` on every target, a single-core RTOS included; `reclaim_strict_t` is the opt-out for NARROW bare metal with no preemption and no second core, and is independent of `lkv_slot_t` | inherited — every chip build runs FreeRTOS, which preempts, so it keeps QSBR |
 | `kSingleCore` (`config.hpp:default_config_t::kSingleCore`) | target fact | `false` — fails safe; true makes the QSBR bracket's fences compiler barriers (ADR-0080 Amendment 1 §2, #2126) | derived from `CONFIG_FREERTOS_UNICORE` on a chip, `false` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_SINGLE_CORE true)`) |
 | `kSpinWaitSafe` (`config.hpp:inline constexpr bool kSpinWaitSafe`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_SPIN_WAIT_SAFE true)`) |
 | `kBusLinks` (`config.hpp:default_config_t::kBusLinks`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_BUS_LINKS`, default `n`; CAN is offered only with it |
@@ -350,7 +351,7 @@ an integrator should be asked.
 
 `lkv_slot_t` is the one knob whose value is a **name the integrator supplies**, so it is the one
 knob with a contract attached. The declaration instructs that the named type must satisfy the
-policy contract in `lkv_slot.hpp` (`config.hpp:default_config_t::lkv_slot_t`, and the instruction itself at `config.hpp:contend across many cores. Override fragment:`) —
+policy contract in `lkv_slot.hpp` (`config.hpp:default_config_t::lkv_slot_t`, and the instruction itself at `config.hpp:named type must satisfy the contract in`) —
 a header that is absent from `core/Doxyfile`'s `INPUT` list, so the generated API site does not
 serve the page that instruction points at. The contract, stated here, is three operations over
 `value_ptr_t = std::shared_ptr<const view::rope_t>` and one declaration:
@@ -375,8 +376,12 @@ which is where they belong rather than repeated here.
 
 The default is `single_writer_slot_t`, whose reclamation is the refcount, so there is no scheme
 to implement and no registry to size. Its one wait is `guard_t`, which on a chip is an
-interrupt-masked critical section and on a host one of 64 address-striped mutexes. A host can
-bind `hazard_slot_t` instead, the lock-free slot, at a heap node per published value. The refcount
+interrupt-masked critical section and on a host one of 64 address-striped mutexes. A WIDE
+many-core host with many readers of one hot vertex can bind `hazard_slot_t` instead, the
+lock-free slot, at a heap node per published value; a single core gains almost nothing from it
+and publishes slower. That choice is independent of `reclaim_policy_t`, whose opt-out
+`reclaim_strict_t` is for NARROW bare metal: the two are parallel opt-ins on different axes,
+and neither supersedes the other. The refcount
 slot that used to be the default, `std::atomic<std::shared_ptr<T>>`, was removed because
 libstdc++ spin-locks both its load and its store, and on a priority-preemptive core that spin
 can hang the target (#1618;

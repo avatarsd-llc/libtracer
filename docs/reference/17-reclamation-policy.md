@@ -47,9 +47,20 @@ using config_t = my_node_config_t;
 | policy | grace point | target | dispatch cost | unsubscribe while a dispatch is live |
 | --- | --- | --- | --- | --- |
 | **`reclaim_qsbr`** (default) | every dispatching thread has passed a quiescent state | WIDE, MID and NARROW | one relaxed load, one release store and one fence **per outermost bracket** (a compiler barrier under `kSingleCore`) | supported, on any thread |
-| `reclaim_strict` | `unsubscribe()` returns | a deployment that can show no dispatch is live when it unsubscribes | **zero** | forbidden, and not detected |
+| `reclaim_strict` | `unsubscribe()` returns | NARROW bare metal with **no preemption and no second core** (for example a superloop on a single-core Cortex-M) | **zero** | forbidden, and not detected |
 
 The tag set is closed at these two. A build that still names `reclaim_local_t` is refused at compile time, with the migration note.
+
+### Two parallel opt-ins, on two axes
+
+`reclaim_strict_t` and `hazard_slot_t` are both opt-ins, but they are not alternatives and neither supersedes the other. Each sits on its own axis, with its own target and precondition:
+
+| opt-in | axis | target | precondition | otherwise |
+| --- | --- | --- | --- | --- |
+| `reclaim_strict_t` | `reclaim_policy_t`: when a retired subscription's `{fn, ctx}` pair is freed | NARROW | bare metal with no preemption and no second core | `reclaim_qsbr_t`, the default on every target |
+| `hazard_slot_t` | `lkv_slot_t`: how a vertex stores and reads its last-known value ([ADR-0069](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md)) | WIDE | a many-core host with many readers of one hot vertex | `single_writer_slot_t`; a single core gains almost nothing from the hazard slot and publishes slower |
+
+QSBR stays the default everywhere, a single-core RTOS included, because preemption alone reproduces the use-after-free that the grace period exists to prevent. On a unicore build it costs about 22 instructions per publish and no fence.
 
 ### The rule that shapes all of them
 
@@ -92,7 +103,9 @@ When the same build also binds `hazard_slot_t`, each thread's quiescent point ad
 
 ### `reclaim_strict` — the opt-out
 
-For a deployment that can show no dispatch is live — on any thread — when it unsubscribes, or whose context is thread-affine and must be released on its own thread. Nothing is tracked, nothing is stored, `unsubscribe()` always releases inline. Unsubscribing while a dispatch is live is **forbidden and not detected**: the policy keeps no dispatch state, so no build can see the violation. That is the trade it is for.
+**Precondition, a hard rule: no preemption and no second core.** That means NARROW bare metal, for example a superloop on a single-core Cortex-M. A build with a second core can unsubscribe while another core is mid-fan-out, and a build that preempts, even on one core, can unsubscribe while a suspended task is mid-fan-out; either way the pair is freed under a live snapshot. Such a build keeps `reclaim_qsbr`. A context that must be released on its own thread is not a reason to take `reclaim_strict` either: its hook posts the context to that thread.
+
+Nothing is tracked, nothing is stored, `unsubscribe()` always releases inline. Unsubscribing from inside a delivery is **forbidden and not detected**: the policy keeps no dispatch state, so no build can see the violation. That is the trade it is for.
 
 ## What it costs — measured
 

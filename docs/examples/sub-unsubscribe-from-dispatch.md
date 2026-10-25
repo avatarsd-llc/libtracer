@@ -37,7 +37,7 @@ Amendment 1).
   same seam pattern as the ACL policy and the LKV slot. The example prints
   `reclaim_policy_t::kName` so a run says which one it exercised.
 - **`reclaim_strict_t` forbids this shape, and does not detect it.** It is the zero-cost
-  opt-out for a deployment that can show no dispatch is live when it unsubscribes. It keeps
+  opt-out for NARROW bare metal with no preemption and no second core. It keeps
   no dispatch state, so no build can see a violation. The example branches on
   `kDefersToDispatchExit` with `if constexpr` and skips its body there — the constant is the
   portable way to ask "may I do this on this target?", and asking it is the point. An example

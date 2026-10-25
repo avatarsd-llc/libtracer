@@ -122,7 +122,13 @@ Two bindings ship:
 | binding | mechanism | regime (reference §3) |
 | --- | --- | --- |
 | `single_writer_slot_t` (default) | a `shared_ptr` swapped and copied inside `guard_t` | **(a)** on a single core (an interrupt-masked section); one of 64 address-striped mutexes on a host |
-| `hazard_slot_t` (host opt-in) | lock-free `atomic<node*>` + a hazard-pointer domain | **(b)** — one contended RMW for the promotion |
+| `hazard_slot_t` (WIDE opt-in) | lock-free `atomic<node*>` + a hazard-pointer domain | **(b)** — one contended RMW for the promotion |
+
+`hazard_slot_t` targets a WIDE many-core host with many readers of one hot vertex; a single core
+gains almost nothing from it and publishes slower. It is independent of the reclamation policy
+(`reclaim_policy_t`, [reference/17](../../reference/17-reclamation-policy.md)), where QSBR is the
+default on every target and `reclaim_strict_t` is the opt-out for NARROW bare metal with no
+preemption and no second core. The two opt-ins are parallel; neither supersedes the other.
 
 The refcount slot `sp_atomic_slot_t` (`std::atomic<std::shared_ptr<const rope_t>>`, regime
 **(d)**, since libstdc++ spins on its pointer-lock bit) was the default until #1618 removed it.
