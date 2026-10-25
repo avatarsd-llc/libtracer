@@ -204,7 +204,7 @@ void test_ordering() {
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
-                                                       tr::mem::bytes_t& out) {
+                                                       tr::mem::bytes_t& out, std::uint64_t&) {
     return tr::testing::subject_into(out, caller);
 }
 

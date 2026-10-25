@@ -6,8 +6,10 @@ Access control is a **pure policy over typed entries**. A vertex stores a list o
 `tr::graph::ace_t` — subject, granted-rights mask, flags, expiry. The graph does
 the walking: it merges a vertex's own entries with the `INHERIT`-flagged entries
 of its ancestors into an `effective_acl_t`, then hands that list plus the
-check-time clock to the policy the build selected. The policy touches no graph
-state, takes no locks and reads no clock of its own, which is what makes ACE
+application's check-time `now` to the policy the build selected. Neither the
+graph nor the policy reads a clock: the subject-lookup hook supplies `now`
+([RFC-0037](../spec/rfcs/0037-ace-expiry-takes-the-applications-now.md)). The
+policy touches no graph state and takes no locks, which is what makes ACE
 edge cases — expiry, inheritance, ordering — unit-testable with no live graph.
 ```
 
@@ -110,9 +112,14 @@ peer legitimately sends more than the receiver understands; an ACL is not.
 - **`NO_MATCH` is not `DENY`.** A policy that collapses the two takes the
   open-by-default decision away from the caller and changes behaviour on every
   vertex with no applicable entry.
-- **Expiry is absolute, in nanoseconds since the UNIX epoch.** The clock is
-  passed *in* by the caller; a policy that read a clock itself could not be
-  tested deterministically and would disagree with the rest of one check.
+- **Expiry is absolute, in nanoseconds on the application's clock.** The
+  subject-lookup hook writes the application's `now` beside the subject token,
+  and the epoch is whatever the application writes `expires_ns` against
+  ([RFC-0037](../spec/rfcs/0037-ace-expiry-takes-the-applications-now.md)). A
+  hook that supplies no `now` fails every lease closed: a leased `ALLOW` grants
+  nothing and a leased `DENY` still refuses. Standing grants never consult it.
+  A policy that read a clock itself could not be tested deterministically, and
+  libtracer reads no clock at all.
 - **Inheritance is a flag, not a mode.** Only `kAceInherit`-flagged entries of an
   ancestor reach a descendant; an entry without it is local no matter where it
   sits in the tree.
@@ -148,6 +155,10 @@ peer legitimately sends more than the receiver understands; an ACL is not.
 ```
 
 ```{doxygenvariable} tr::graph::kEveryoneSubject
+:project: libtracer
+```
+
+```{doxygenvariable} tr::graph::kAceNowUnknown
 :project: libtracer
 ```
 

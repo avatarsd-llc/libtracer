@@ -59,7 +59,7 @@ std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::str
 
 /** @brief The simplest resolver there is: the caller context IS the subject token. */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
-                                                       tr::mem::bytes_t& out) {
+                                                       tr::mem::bytes_t& out, std::uint64_t&) {
     return put_subject(out, caller);
 }
 

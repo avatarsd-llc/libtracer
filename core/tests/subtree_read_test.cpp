@@ -339,8 +339,8 @@ void test_acl_prune() {
     // Enforcement on for the attributed caller "peer"; the empty (local) context is settled
     // as trusted before the resolver runs (#905), which is what the setup writes above use.
     g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
-               {[](void*, std::string_view,
-                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+               {[](void*, std::string_view, tr::mem::bytes_t& out,
+                   std::uint64_t&) -> std::expected<void, tr::wire::err_t> {
                     return tr::testing::subject_into(out, "u");
                 },
                 nullptr});
@@ -429,8 +429,8 @@ void test_acl_prune_zero_children() {
     (void)g.write(path_t("/q/b"), make_value(value_tlv({0x02})));
 
     g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
-               {[](void*, std::string_view,
-                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+               {[](void*, std::string_view, tr::mem::bytes_t& out,
+                   std::uint64_t&) -> std::expected<void, tr::wire::err_t> {
                     return tr::testing::subject_into(out, "u");
                 },
                 nullptr});

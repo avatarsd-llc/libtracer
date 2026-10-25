@@ -98,7 +98,7 @@ std::vector<std::string> g_writers;
 
 /** @brief The identity resolver: the caller context IS the subject token. */
 std::expected<void, tr::wire::err_t> identity_lookup(void*, std::string_view caller,
-                                                     tr::mem::bytes_t& out) {
+                                                     tr::mem::bytes_t& out, std::uint64_t&) {
     if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))
         return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
     return {};

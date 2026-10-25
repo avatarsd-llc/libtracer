@@ -23,7 +23,7 @@ Typed ACE parse/build (`ace_t` ↔ wire ACE TLV) lands in the same module; the d
 
 ### 2. The graph owns the ancestor walk and caches the merge
 
-The graph collects a vertex's **effective ACEs** (own + inherited per `INHERIT`, using the `key_view` ancestor navigation) and hands the policy the ranges. On top, the merge is **cached per vertex** with a **generation counter bumped by any `:acl` field-write**: the data-plane check becomes a generation compare plus a pure policy call — the per-operation ancestor mutex-walk leaves the data plane entirely. Correctness note that makes the cache safe: **only the merge is cached, never the verdict** — `expires_ns` is evaluated by the policy against `now` at check time, so expiry needs no invalidation; `:acl` writes are control-plane-rare, so generation bumps are cheap.
+The graph collects a vertex's **effective ACEs** (own + inherited per `INHERIT`, using the `key_view` ancestor navigation) and hands the policy the ranges. On top, the merge is **cached per vertex** with a **generation counter bumped by any `:acl` field-write**: the data-plane check becomes a generation compare plus a pure policy call — the per-operation ancestor mutex-walk leaves the data plane entirely. Correctness note that makes the cache safe: **only the merge is cached, never the verdict** — `expires_ns` is evaluated by the policy against `now` at check time, so expiry needs no invalidation (that `now` is the application's, supplied through the subject-lookup hook, and the graph reads no clock; [RFC-0037](../spec/rfcs/0037-ace-expiry-takes-the-applications-now.md)); `:acl` writes are control-plane-rare, so generation bumps are cheap.
 
 ## Considered options
 

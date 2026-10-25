@@ -264,7 +264,7 @@ void mint_never_carries_successor() {
 
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view c,
-                                                       tr::mem::bytes_t& out) {
+                                                       tr::mem::bytes_t& out, std::uint64_t&) {
     const auto* p = reinterpret_cast<const std::byte*>(c.data());
     return tr::testing::subject_into(out, std::vector<std::byte>(p, p + c.size()));
 }

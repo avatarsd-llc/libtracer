@@ -1225,8 +1225,8 @@ void test_denied_creator_draws_nothing() {
     // Enforcement on for a NAMED caller; /dev grants READ (inherited) but not WRITE, the right
     // a creation needs (RFC-0036).
     g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
-               {[](void*, std::string_view,
-                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+               {[](void*, std::string_view, tr::mem::bytes_t& out,
+                   std::uint64_t&) -> std::expected<void, tr::wire::err_t> {
                     return tr::testing::subject_into(out, "u");
                 },
                 nullptr});

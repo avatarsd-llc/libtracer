@@ -109,13 +109,19 @@ inline constexpr std::string_view kEveryoneSubject = "EVERYONE@";
 
 namespace detail_acl {
 
-/** @brief True iff @p ace applies to @p subject right @p now for @p bit under @p required_flags. */
+/** @brief True iff @p ace applies to @p subject at @p now for @p bit under @p required_flags.
+ *  @p now is the application's, or @ref kAceNowUnknown when it supplied none. */
 [[nodiscard]] inline bool ace_applies(const ace_t& ace, std::span<const std::byte> subject,
                                       std::uint32_t bit, std::uint64_t now,
                                       std::uint8_t required_flags) noexcept {
     if ((ace.flags & required_flags) != required_flags) return false;
     if ((ace.access_mask & bit) == 0) return false;
-    if (ace.expires_ns != 0 && ace.expires_ns <= now) return false;
+    // A lapsed lease applies no more. With no `now` (`kAceNowUnknown`, which every lease
+    // reads as lapsed) a DENY applies anyway, so a missing clock never grants what a live
+    // one refuses (RFC-0037).
+    if (ace.expires_ns != 0 && ace.expires_ns <= now &&
+        (now != kAceNowUnknown || ace.type != ace_type_t::DENY))
+        return false;
     if (is_reserved_subject(ace.subject)) return true;  // the wildcard ACE matches everyone
     return std::ranges::equal(ace.subject, subject);
 }
@@ -196,7 +202,8 @@ struct allow_only_policy_t {
      * @param subject        The resolved subject token bytes (ADR-0018).
      * @param bit            The requested right (one `acl_right_t` bit).
      * @param aces           One vertex's stored ACEs, in stored order.
-     * @param now            Check-time wall clock, ns since the UNIX epoch.
+     * @param now            The application's check-time `now` (RFC-0037), or
+     *                       @ref kAceNowUnknown when it supplied none.
      * @param required_flags ACEs lacking these flag bits are skipped — `0` for the
      *                       target's own list, `kAceInherit` for an ancestor's.
      * @return `ALLOW` or `NO_MATCH` (this profile never returns `DENY`).
@@ -311,7 +318,8 @@ class effective_acl_t {
      *                (or this instance's @ref merged, via the member overload).
      * @param subject The resolved subject token bytes (ADR-0018).
      * @param bit     The requested right (one `acl_right_t` bit).
-     * @param now     Check-time wall clock, ns since the UNIX epoch.
+     * @param now     The application's check-time `now` (RFC-0037), or
+     *                @ref kAceNowUnknown when it supplied none.
      * @param required_flags ACEs lacking these bits are skipped, exactly as
      *                `Policy::allows` skips them: `0` evaluates the whole list (the
      *                bearer's own check), `kAceInherit` evaluates the inheritable

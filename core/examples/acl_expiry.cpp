@@ -7,9 +7,11 @@
  * @file
  * @brief ONE CONCEPT — `expires_ns` is evaluated against the CALLER's `now`, at check time.
  *
- * An ACE may carry an absolute deadline: `expires_ns`, nanoseconds since the UNIX epoch, with
- * `0` meaning "never". It is not a timer and nothing sweeps it — the policy compares it to the
- * `now` its caller passed in, on every single check. That is why the graph caches the merged
+ * An ACE may carry an absolute deadline: `expires_ns`, nanoseconds on the application's clock,
+ * with `0` meaning "never". It is not a timer and nothing sweeps it — the policy compares it to
+ * the `now` its caller passed in, on every single check. At the `graph_t` door that `now` is
+ * the application's: the subject-lookup hook writes it beside the subject token, and the
+ * library reads no clock of its own (RFC-0037). That is why the graph caches the merged
  * effective-ACE list but never a verdict: a merge stays valid as the clock moves, so expiry
  * needs no invalidation mechanism at all (ADR-0050).
  *
@@ -20,7 +22,8 @@
  *
  * This runs against the PURE surface — `effective_acl_t` takes `now` as a parameter, so the
  * example can step the clock without sleeping — and then confirms the same rule at the real
- * `graph_t` door, which reads its own clock.
+ * `graph_t` door, where the hook hands in the application's `now`. A hook that hands in none
+ * fails every lease closed.
  *
  * Runs under ctest as `example_acl_expiry`; returns non-zero on any failed check.
  */
@@ -67,9 +70,18 @@ std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::str
     return {};
 }
 
-/** @brief The caller context IS the subject token. */
-std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
-                                                       tr::mem::bytes_t& out) {
+/** @brief The application's clock: here a number the example sets, never a clock read. */
+struct app_clock_t {
+    bool running = true;   /**< @brief False models an application with no clock. */
+    std::uint64_t now = 0; /**< @brief The application's `now`, in its own ns. */
+};
+
+/** @brief The caller context IS the subject token, and the app's `now` rides beside it. */
+std::expected<void, tr::wire::err_t> caller_is_subject(void* ctx, std::string_view caller,
+                                                       tr::mem::bytes_t& out,
+                                                       std::uint64_t& now_ns) {
+    const auto& clock = *static_cast<const app_clock_t*>(ctx);
+    if (clock.running) now_ns = clock.now;  // left alone, `now_ns` says "no now supplied"
     return put_subject(out, caller);
 }
 
@@ -130,22 +142,27 @@ int main() {
     check(ok, forever.allows(other, bit(acl_right_t::READ), kDeadline + 1),
           "expires_ns == 0 means never expires, not expired at the epoch");
 
-    // The same predicate at the real door, where `now` comes from the graph's own clock.
+    // The same predicate at the real door, where `now` is whatever the application's hook says.
+    app_clock_t clock{.now = kDeadline - 1};
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, &clock});
     const vertex_handle_t v = g.register_vertex(path_t("/room"), role_t::STORED_VALUE);
     (void)g.write(v, some_value());
     const ace_t both[] = {
-        {.subject = tr::graph::subject_of("live"),
+        {.subject = tr::graph::subject_of("visitor"),
          .access_mask = bit(acl_right_t::READ),
-         .expires_ns = ~0ULL >> 1},
-        {.subject = tr::graph::subject_of("stale"),
-         .access_mask = bit(acl_right_t::READ),
-         .expires_ns = 1},
+         .expires_ns = kDeadline},
+        {.subject = tr::graph::subject_of("resident"), .access_mask = bit(acl_right_t::READ)},
     };
     (void)g.write(path_t("/room:acl"), *tr::view::over_bytes(tr::graph::encode_acl(both)));
-    check(ok, g.read(v, "live").has_value(), "a grant expiring in the year 2262 still reads");
-    check(ok, denied(g.read(v, "stale")), "a grant that expired 1 ns after the epoch does not");
+    check(ok, g.read(v, "visitor").has_value(), "the app's clock says before the deadline: reads");
+    clock.now = kDeadline;
+    check(ok, denied(g.read(v, "visitor")), "the app's clock reaches the deadline: refused");
+    // An application with no clock supplies no `now`. A lease then cannot be proved live, so it
+    // grants nothing; a standing grant is untouched, because it never asks.
+    clock = {.running = false};
+    check(ok, denied(g.read(v, "visitor")), "no now supplied: the lease fails closed");
+    check(ok, g.read(v, "resident").has_value(), "no now supplied: the standing grant still reads");
 
     std::printf("one ACE list, four verdicts, zero invalidations — deadline %llu ns\n",
                 static_cast<unsigned long long>(kDeadline));

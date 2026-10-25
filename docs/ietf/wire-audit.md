@@ -193,7 +193,7 @@ rows here.
 | right WRITE_ACL | `0x40` | assigned | `:acl` write (the admin right) | — | **retired** by RFC-0036 (two rights) | |
 | right WRITE_OWNER | `0x80` | assigned, "no core surface yet" | none: no owner identity exists | — | **retired** by RFC-0036 (two rights) | F8 |
 | reserved rights | `0x100`+ | reserved | none | — | **keep** | |
-| ACE `expires_ns` | key, u64 | optional | evaluated against the core's own clock (`graph.cpp`) | — | **keep** on the wire; the clock moves to an app seam (#1792 (findings: dropping await, existing timers)). | |
+| ACE `expires_ns` | key, u64 | optional | evaluated against the application's `now`, which the subject-lookup hook supplies; no `now` fails a lease closed (RFC-0037, #2308) | — | **keep** on the wire; the clock moved to the app seam (RFC-0037). | |
 
 ## 8. `SETTINGS` surfaces (05 §`0x0B`)
 

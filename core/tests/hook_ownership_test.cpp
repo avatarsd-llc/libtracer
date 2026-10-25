@@ -106,7 +106,7 @@ void subscribe_peer(fwd_router_t& router) {
 
 /** @brief An application subject seam that names the caller as the subject. */
 std::expected<void, tr::wire::err_t> caller_is_subject(void* /*ctx*/, std::string_view caller,
-                                                       tr::mem::bytes_t& out) {
+                                                       tr::mem::bytes_t& out, std::uint64_t&) {
     if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))
         return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
     return {};

@@ -89,6 +89,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed (breaking)
 
+- **`subject_lookup_fn_t` takes the application's `now` (RFC-0037, #2308).** The seam gains a
+  last parameter, `std::uint64_t& now_ns`. It arrives holding `tr::graph::kAceNowUnknown`, and
+  the hook overwrites it with the application's clock in ns, on the epoch it writes `expires_ns`
+  against. ACE expiry is judged against that value, and libtracer reads no clock:
+  `graph.cpp`'s `system_clock::now()` is gone. A hook that leaves `now_ns` alone supplies no
+  `now`, and every lease then fails closed: a leased ALLOW grants nothing and a leased DENY
+  still refuses. Standing grants (`expires_ns == 0`) behave as before. **Migrate** each hook by
+  adding the parameter. A deployment that issues leases writes its `now` into it; one that issues
+  none can ignore it.
 - **`can_link_t::write_raw` is called concurrently (#2262).** `can_transport_t` used to
   hold its TX lock across a whole group, so every `write_raw` on a link was serialized and a
   second sender waited out the first group's driver back-pressure. The lock now covers only

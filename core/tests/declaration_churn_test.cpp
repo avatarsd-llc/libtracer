@@ -106,7 +106,7 @@ class counting_source_t final : public tr::mem::block_source_t {
 
 /** @brief The test resolver: the caller context IS the subject (acl_test's shape). */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
-                                                       tr::mem::bytes_t& out) {
+                                                       tr::mem::bytes_t& out, std::uint64_t&) {
     return tr::testing::subject_into(out, caller);
 }
 
