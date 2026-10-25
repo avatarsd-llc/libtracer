@@ -673,7 +673,8 @@ class can_transport_t final : public transport_t, public bus_link_t {
      * The handle's index IS the bus node id and the name is a pure function of it, so this
      * is `format_peer_name` and nothing else — no table lookup, no lock, no liveness check
      * (an announce-census peer has no session whose liveness could be asked about, which is
-     * exactly why the generation is the constant `kAnnouncedPeerGeneration`).
+     * exactly why the generation is the constant `kAnnouncedPeerGeneration`). A handle at any
+     * other generation, or past `can::kNodeMax`, is not one this bus mints and names nothing.
      */
     [[nodiscard]] std::string_view peer_name(peer_handle_t peer,
                                              std::span<char> scratch) const override;

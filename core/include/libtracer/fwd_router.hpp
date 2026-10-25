@@ -865,9 +865,10 @@ class fwd_router_t {
      * Calling it for a peer that already left, or never subscribed, evicts nothing and is
      * safe. The calling discipline is @ref link_down's: callers hold no transport-internal
      * locks.
-     * @retval true  @p link_name is a live bus mount and @p peer names one of its peers.
+     * @retval true  @p link_name is a live bus mount and @p peer is a handle that bus mints
+     *               (its `peer_name` names it), whether or not that peer is still heard.
      * @retval false no live child is named @p link_name, it has no bus facet, or @p peer is
-     *               invalid or names no peer of it. Nothing was evicted.
+     *               not a handle that bus mints. Nothing was evicted.
      */
     bool link_down(std::string_view link_name, peer_handle_t peer);
 

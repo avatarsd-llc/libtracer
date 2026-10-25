@@ -294,8 +294,9 @@ transport_t* transport_can::peer_link_of(peer_handle_t peer) {
 std::string_view transport_can::peer_name(peer_handle_t peer, std::span<char> scratch) const {
     // A pure re-formatting of the node id the handle's index IS — no `peers_` lookup and no
     // TTL check, deliberately: this answers "what is this handle's NAME", not "is that peer
-    // still audible", which is `peer_link`'s question.
-    if (!peer.valid() || peer.index > can::kNodeMax) return {};
+    // still audible", which is `peer_link`'s question. A generation this bus never mints
+    // (the invalid handle's zero included) names no peer of it (#2237).
+    if (peer.generation != kAnnouncedPeerGeneration || peer.index > can::kNodeMax) return {};
     const peer_name_buf_t name = format_peer_name(static_cast<std::uint16_t>(peer.index));
     const std::string_view view = name.view();
     if (view.empty() || view.size() > scratch.size()) return {};

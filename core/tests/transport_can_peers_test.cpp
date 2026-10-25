@@ -25,6 +25,7 @@
  *     bounded by the 13-bit id space) and re-announcing is idempotent.
  */
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -515,6 +516,31 @@ void test_resolved_endpoint_is_identity_scoped() {
 }
 
 // ---------------------------------------------------------------------------
+// #2237 — the by-handle door on a real CAN mount accepts only a handle this bus mints.
+// ---------------------------------------------------------------------------
+
+void test_peer_door_takes_only_minted_handles() {
+    std::printf("#2237 by-handle door on a CAN mount (minted handles only):\n");
+    fake_can_bus_t bus;
+    graph_t graph;
+    fwd_router_t router(graph);
+    tr::net::transport_can tcan(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs"});
+    (void)router.attach_link("can0", tcan);
+
+    constexpr std::uint32_t kGen = tr::net::transport_can::kAnnouncedPeerGeneration;
+    std::array<char, tr::net::kPeerNameChars> scratch{};
+    check(tcan.peer_name(tr::net::peer_handle_t{9, kGen + 1}, scratch).empty(),
+          "peer_name refuses a generation this bus never mints");
+    check(!router.link_down("can0", tr::net::peer_handle_t{9, kGen + 1}),
+          "so the door refuses that handle and evicts nothing");
+    check(!router.link_down("can0", tr::net::peer_handle_t{can::kNodeMax + 1u, kGen}),
+          "and a node id past the bus's id space");
+    check(router.link_down("can0", tr::net::peer_handle_t{9, kGen}),
+          "a minted handle is accepted, heard or not");
+}
+
+// ---------------------------------------------------------------------------
 // Per-distinct-node growth: many announcers all enumerate; re-announce is idempotent.
 // ---------------------------------------------------------------------------
 
@@ -573,6 +599,7 @@ int main() {
     test_enumeration_and_forwarding();
     test_peer_expiry();
     test_resolved_endpoint_is_identity_scoped();
+    test_peer_door_takes_only_minted_handles();
     test_peer_table_growth();
     return tr::testing::summary("transport_can_peers");
 }

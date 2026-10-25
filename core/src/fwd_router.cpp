@@ -1234,6 +1234,9 @@ void fwd_router_t::link_down(std::string_view link_name) {
 }
 
 bool fwd_router_t::link_down(std::string_view link_name, peer_handle_t peer) {
+    // Opened before the mount is looked up, as `bound_send` does: a `remove_child` racing this
+    // door cannot have its ctx, link or bus collected under the lookup and the eviction.
+    const frame_scope_t scope;
     // The published walk, as a frame path reads it: a removed mount has no peers to evict.
     const child_rx_ctx_t* const ctx = ctx_by_name(link_name);
     bus_link_t* const bus =
@@ -1242,7 +1245,6 @@ bool fwd_router_t::link_down(std::string_view link_name, peer_handle_t peer) {
     const std::string_view name =
         bus != nullptr ? bus->peer_name(peer, scratch) : std::string_view{};
     if (name.empty()) return false;
-    const frame_scope_t scope;
     bus_peer_down(*ctx, peer, name);
     return true;
 }
