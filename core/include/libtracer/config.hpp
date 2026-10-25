@@ -1088,7 +1088,7 @@ struct default_config_t {
      *
      * The cache is inline in the object (`tr::graph::path_object_t`), so this sets every path
      * object's size, and a learned chain larger than it is not cached: the canonical form is
-     * used instead, with the same answer. Rounded up to whole 8-byte words. `0` keeps no chain
+     * used instead, with the same answer. Rounded up to whole 4-byte words. `0` keeps no chain
      * at all, leaving only the local pair (element 0), which a path object always carries.
      *
      * **Default 40 bytes:** room for three PAIR elements of 11 bytes each (RFC-0029 §4.2), one

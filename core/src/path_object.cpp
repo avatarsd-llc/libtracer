@@ -21,42 +21,63 @@ namespace tr::graph {
 
 namespace {
 
-// How many times a chain read retries a racing learn before it reads no chain. Learns come
-// from matched replies, so a reader that loses this many times in a row is losing to a storm,
+// How many times a read retries a racing write before it reads nothing. Writes come from doors
+// and matched replies, so a reader that loses this many times in a row is losing to a storm,
 // and the canonical form is the answer anyway.
-constexpr int kChainReadTries = 4;
+constexpr int kReadTries = 4;
 
 }  // namespace
 
+bool path_object_t::begin_write(std::uint32_t& s) const noexcept {
+    s = b_->seq.load(std::memory_order_relaxed);
+    if ((s & 1U) != 0 || !b_->seq.compare_exchange_strong(s, s + 1, std::memory_order_relaxed))
+        return false;
+    std::atomic_thread_fence(std::memory_order_release);
+    return true;
+}
+
+void path_object_t::end_write(std::uint32_t s) const noexcept {
+    b_->seq.store(s + 2, std::memory_order_release);
+}
+
 std::optional<vertex_slot_t> path_object_t::element0() const noexcept {
     if (b_ == nullptr) return std::nullopt;
-    const std::uint64_t e = b_->element0.load(std::memory_order_acquire);
-    if (e == kNoElement0) return std::nullopt;
-    return vertex_slot_t{.index = static_cast<std::uint32_t>(e),
-                         .generation = static_cast<std::uint32_t>(e >> 32)};
+    // The reader half of the seqlock: an even, unchanged counter around the loads proves both
+    // words came from one write. A reader that keeps losing reads no pair, which sends the
+    // door to the canonical bytes.
+    for (int t = 0; t < kReadTries; ++t) {
+        const std::uint32_t s = b_->seq.load(std::memory_order_acquire);
+        if ((s & 1U) != 0) continue;
+        const std::uint32_t index = b_->e0_index.load(std::memory_order_relaxed);
+        const std::uint32_t gen = b_->e0_gen.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (b_->seq.load(std::memory_order_relaxed) != s) continue;
+        if (gen == kGenerationSaturated) return std::nullopt;
+        return vertex_slot_t{.index = index, .generation = gen};
+    }
+    return std::nullopt;
 }
 
 void path_object_t::set_element0(std::optional<vertex_slot_t> e) const noexcept {
-    // A saturated generation is never honoured (deref_vertex_slot), and it is also the high half
-    // of kNoElement0, so the two cannot be confused: such an element is simply not kept.
-    const std::uint64_t w = e && e->generation != kGenerationSaturated
-                                ? (std::uint64_t{e->generation} << 32) | e->index
-                                : kNoElement0;
-    b_->element0.store(w, std::memory_order_release);
+    // A saturated generation is never honoured (deref_vertex_slot), so it doubles as "none".
+    // A write that loses the counter to another is dropped: the next door resolves again.
+    std::uint32_t s = 0;
+    if (!begin_write(s)) return;
+    b_->e0_index.store(e ? e->index : 0, std::memory_order_relaxed);
+    b_->e0_gen.store(e ? e->generation : kGenerationSaturated, std::memory_order_relaxed);
+    end_write(s);
 }
 
 std::size_t path_object_t::chain(std::span<std::byte> out) const noexcept {
     if (b_ == nullptr) return 0;
-    // The reader half of a seqlock: an even, unchanged counter around the copy proves no learn
-    // overlapped it. The words are atomics so the race a retry discards is not a data race.
-    for (int t = 0; t < kChainReadTries; ++t) {
+    for (int t = 0; t < kReadTries; ++t) {
         const std::uint32_t s = b_->seq.load(std::memory_order_acquire);
         if ((s & 1U) != 0) continue;
         const std::uint32_t len = b_->chain_len.load(std::memory_order_relaxed);
         if (len == 0 || len > out.size()) return 0;
-        for (std::size_t w = 0; w * 8 < len; ++w) {
-            const std::uint64_t word = b_->chain[w].load(std::memory_order_relaxed);
-            std::memcpy(out.data() + w * 8, &word, std::min<std::size_t>(8, len - w * 8));
+        for (std::size_t w = 0; w * 4 < len; ++w) {
+            const std::uint32_t word = b_->chain[w].load(std::memory_order_relaxed);
+            std::memcpy(out.data() + w * 4, &word, std::min<std::size_t>(4, len - w * 4));
         }
         std::atomic_thread_fence(std::memory_order_acquire);
         if (b_->seq.load(std::memory_order_relaxed) == s) return len;
@@ -72,29 +93,31 @@ bool path_object_t::learn(std::span<const std::byte> chain) noexcept {
         clear_chain();
         return false;
     }
-    // The writer half: take the counter odd, or give up when another learn holds it.
-    std::uint32_t s = b_->seq.load(std::memory_order_relaxed);
-    if ((s & 1U) != 0 || !b_->seq.compare_exchange_strong(s, s + 1, std::memory_order_relaxed))
-        return false;
-    std::atomic_thread_fence(std::memory_order_release);
-    for (std::size_t w = 0; w * 8 < chain.size(); ++w) {
-        std::uint64_t word = 0;
-        std::memcpy(&word, chain.data() + w * 8, std::min<std::size_t>(8, chain.size() - w * 8));
+    std::uint32_t s = 0;
+    if (!begin_write(s)) return false;
+    for (std::size_t w = 0; w * 4 < chain.size(); ++w) {
+        std::uint32_t word = 0;
+        std::memcpy(&word, chain.data() + w * 4, std::min<std::size_t>(4, chain.size() - w * 4));
         b_->chain[w].store(word, std::memory_order_relaxed);
     }
     b_->chain_len.store(static_cast<std::uint32_t>(chain.size()), std::memory_order_relaxed);
-    b_->seq.store(s + 2, std::memory_order_release);
+    end_write(s);
     return true;
 }
 
 void path_object_t::clear_chain() noexcept {
     // Length 0 is "no chain", and a single store needs no counter: a reader that loaded the old
     // length before it either finishes its copy and is confirmed by the counter, or reads 0.
+    // A clear that races a learn in progress can be overwritten by that learn's length store,
+    // which brings the learned chain back. That is harmless: the cache is soft, and a refused
+    // chain is cleared again by the next NOT_FOUND (§5.2).
     if (b_ != nullptr) b_->chain_len.store(0, std::memory_order_relaxed);
 }
 
 void path_object_t::release() noexcept {
     if (b_ == nullptr) return;
+    // TODO(#1946): the block is freed on the application's release alone. Once pending handles
+    // exist, a pending handle that refers to this object must hold the free off (§5.1 item 4).
     mem::block_source_t* const src = b_->src;
     const std::size_t bytes = b_->block_bytes;
     b_->~body_t();
@@ -117,7 +140,7 @@ result_t<path_object_t> graph_t::make_path(std::string_view text) {
     b->block_bytes = bytes;
     b->key = tail;
     b->key_len = static_cast<std::uint32_t>(key.size());
-    b->element0.store(path_object_t::kNoElement0, std::memory_order_relaxed);
+    b->e0_gen.store(kGenerationSaturated, std::memory_order_relaxed);
     return path_object_t{b};
 }
 
@@ -132,7 +155,7 @@ result_t<path_object_t> graph_t::make_path(std::span<const std::byte> key) {
     b->block_bytes = sizeof(path_object_t::body_t);
     b->key = key.data();
     b->key_len = static_cast<std::uint32_t>(key.size());
-    b->element0.store(path_object_t::kNoElement0, std::memory_order_relaxed);
+    b->e0_gen.store(kGenerationSaturated, std::memory_order_relaxed);
     return path_object_t{b};
 }
 
