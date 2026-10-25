@@ -28,6 +28,7 @@ import contextlib
 import io
 import json
 import pathlib
+import random
 import re
 import sys
 import tempfile
@@ -1130,6 +1131,72 @@ def _row(mode: str, size: int, fan: int, ep: int) -> str:
     """@brief One 12-column RESULT line for @p mode at the given key."""
     return "\t".join(["RESULT", "libtracer", mode, str(size), str(fan), str(ep),
                       "1000000", "1000000", "0", "200", "300", "210"])
+
+
+class WholeBinaryModeReplay(unittest.TestCase):
+    """@brief #2205: a speed mode that holds for a whole executable FILE cannot fail the gate.
+
+    The #2175 A/A ran two byte-identical `bench_chain_delivery` files, and one of them read
+    chain-terminus 14-22% slow in all 12 rounds. Such a mode moves an arm's best and second-
+    best samples together, so the fast-mode veto (#2168) cannot catch it: run from its build
+    file, the slow file fails the row like a regression. This replays that shape through
+    `paired_samples` and the row's own verdict. Each file a run executes draws one placement
+    when it is first run, slow (x1.20) with probability 1/4; a placement is the file's, not
+    the bytes'. Run from the build files, a slow candidate file fails; run from a fresh copy
+    per run (#2215), byte-identical arms pass ten sessions of ten."""
+
+    KEY = "chain-terminus/64/1/1"
+    SLOW, P_SLOW = 1.20, 0.25
+
+    def session(self, seed: int, copies: bool, slow_build: str | None = None) -> list[str]:
+        """@brief One gate session of the chain step over byte-identical arms: the failing
+        legs of @ref KEY. @p slow_build names the arm whose build file is on the slow
+        placement (else it draws like any other file)."""
+        placement: dict[pathlib.Path, float] = {}
+
+        def fake(argv, timeout, score_pressure=True, cpus=None):
+            exe = pathlib.Path(argv[0])
+            if exe not in placement:
+                arm = exe.parts[-2] if exe.parent.name in ("c", "b") else None
+                rng = random.Random(f"{seed}:{exe.relative_to(root)}")
+                placement[exe] = (self.SLOW if arm == slow_build and arm
+                                  else self.SLOW if rng.random() < self.P_SLOW else 1.0)
+            x = placement[exe]
+            line = "\t".join(["RESULT", "libtracer", "chain-terminus", "64", "1", "1",
+                              "1000000", f"{2_800_000 / x:.0f}", "0", f"{350 * x:.1f}", "400",
+                              f"{360 * x:.1f}"])
+            return _measurement(argv, line + "\n", True)
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            arms = {}
+            for tag in ("c", "b"):
+                (root / tag).mkdir()
+                arms[tag] = {"chain": root / tag / "bench_chain_delivery"}
+                arms[tag]["chain"].write_bytes(b"one build")
+            patches = [unittest.mock.patch.object(pg, "timed_run", fake)]
+            if not copies:
+                patches.append(unittest.mock.patch.object(pg, "fresh_copy", lambda src, n: src))
+            with contextlib.ExitStack() as st, contextlib.redirect_stdout(io.StringIO()):
+                for p in patches:
+                    st.enter_context(p)
+                s = pg.paired_samples(arms["c"], arms["b"], pg.PAIRS_DEFAULT)
+        null = pg.load_null()
+        failed = []
+        for leg in ("p50_ns", "mean_ns", "deliv_s"):
+            c = [float(v[leg]) for v in s["cand"][self.KEY]]
+            b = [float(v[leg]) for v in s["base"][self.KEY]]
+            v, _f, _src = pg.leg_verdict(self.KEY, leg, c, b, null, pg.tick_guarded(self.KEY))
+            if v["fail"]:
+                failed.append(leg)
+        return failed
+
+    def test_a_slow_build_file_fails_when_every_run_is_that_file(self):
+        """The hole: the slow file's best and second-best are both slow, so no veto holds."""
+        self.assertIn("p50_ns", self.session(0, copies=False, slow_build="c"))
+
+    def test_byte_identical_arms_pass_ten_of_ten_from_fresh_copies(self):
+        for seed in range(10):
+            self.assertEqual(self.session(seed, copies=True, slow_build="c"), [], f"session {seed}")
 
 
 class MissingGatedKeysFail(unittest.TestCase):
