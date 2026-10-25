@@ -38,6 +38,7 @@
 #include <initializer_list>
 #include <new>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -434,17 +435,28 @@ void test_egress_refusal_is_answered() {
  * @brief The rope tier is a second code path (the frame is a lazy `tlv_view_t`, not an arena),
  *        and its refusal arms answer through the rope cursor — the request split across links
  *        so the echoed routes are gathered from more than one span.
+ *
+ * A small reply gathers into the inline table and never asks the source (#2264), so the read
+ * is of a composed root whose reply is wider than `kMaxInlineIov` links: that table spills.
  */
 void test_rope_tier_refusal_is_answered() {
     std::printf("the rope-tier terminus answers its refusal arms too:\n");
     graph_t g;
-    (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)g.register_vertex(*path_t::parse("/sensor"), role_t::STORED_VALUE);
+    for (const char* c : {"a", "b", "c", "d", "e", "f"}) {
+        const auto cv =
+            g.register_vertex(*path_t::parse(std::string("/sensor/") + c), role_t::STORED_VALUE);
+        const std::array<std::byte, 4> body{};
+        std::vector<std::byte> val;
+        tr::wire::emit_tlv(val, tr::wire::type_t::VALUE, tr::wire::opt_t{}, body);
+        (void)g.write(cv, tr::view::rope_t(*tr::view::over_bytes(val)));
+    }
     arming_source_t rx;
     fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client(/*ropes=*/true);
     (void)router.attach_link("client", client);
 
-    const std::vector<std::byte> dst = b_path({"sensor", "temp"});
+    const std::vector<std::byte> dst = b_path({"sensor"});
     const std::vector<std::byte> src = b_path({"client", "way", "home"});
     const std::vector<std::byte> read = b_fwd(fwd_op_t::READ, dst, src);
 
