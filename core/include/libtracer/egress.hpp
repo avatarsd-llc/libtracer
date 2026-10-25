@@ -42,11 +42,11 @@
  * returns; it never waits on another sender's write. The holder drains the ring before it
  * lets the role go, and re-checks it after (the store-buffering pattern: a pusher draws its
  * lane, then claims; the writer lets the role go, then reads the round, all seq_cst), so
- * nothing is stranded. A sender to an idle peer takes no mutex at all: the claim is a
- * try-lock and "nothing waits" is one atomic read (#2145); the queue mutex is taken only to
- * put a frame in a lane or take one out. A write that the socket cuts short keeps
- * its frame on the wire with its offset: the rest goes on the peer's next turn, so a part
- * write never desyncs the stream.
+ * nothing is stranded. A sender to an idle peer takes no lock at all: the claim is a
+ * try-lock and "nothing waits" is one atomic read (#2145); the peer's own lane lock (#2310)
+ * is taken only to put a frame in a lane or take one out, so no two peers share a lock. A write
+ * that the socket cuts short keeps its frame on the wire with its offset: the rest goes on the
+ * peer's next turn, so a part write never desyncs the stream.
  *
  * **The stall strike.** A strike is an offer the peer could not take: its STREAM lane was
  * full, so the offer cost a frame (the ring's arm shed one), and the turn it took moved no
@@ -68,7 +68,7 @@
  *
  * **Which thread frees** (ADR-0072, ADR-0080). A frame reference may be dropped by whichever
  * thread finishes or sheds it, so its block comes from a source that is safe to free on any
- * thread, and it is never released under the queue mutex (a lane's own block is: it holds
+ * thread, and it is never released under the lane lock (a lane's own block is: it holds
  * nothing but references).
  *
  * Receiver pays: the frames and the rings come from the link's own source, and a ring's
@@ -81,9 +81,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <mutex>
 #include <new>
 #include <span>
+#include <thread>
 #include <utility>
 
 #include "libtracer/function_ref.hpp"
@@ -301,12 +301,13 @@ class egress_t;
 
 /**
  * @brief One peer's egress state: the frame on the wire, the lanes waiting behind it, the
- *        writer role.
+ *        writer role and the peer's own lane lock.
  *
  * At most 24 B on a 64-bit host (pinned below; 16 B on a 32-bit MCU), and nothing else at
- * rest: a lane — one ring per vertex the peer is fed from (ADR-0087 §2) — is drawn from the
- * link's source when that vertex's first frame has to wait, and returned when its last
- * waiting frame leaves. A peer that keeps up never holds one.
+ * rest: a lane — one ring per (peer, vertex), plus the control lane (ADR-0087 §2) — is drawn
+ * from the link's source when that vertex's first frame has to wait, and returned when its
+ * last waiting frame leaves. A peer that keeps up never holds one. The lanes are guarded by
+ * a bit of the peer's own role byte (#2310), so no two peers' sends share a lock.
  */
 class egress_peer_t {
    public:
@@ -330,6 +331,7 @@ class egress_peer_t {
 
     static constexpr std::uint8_t kWriter = 1; /**< @brief A sender holds the writer role. */
     static constexpr std::uint8_t kClosed = 2; /**< @brief Closed: nobody may claim the role. */
+    static constexpr std::uint8_t kLanes = 4;  /**< @brief A lane step holds this peer's lanes. */
 
     /**
      * @brief One vertex's ring toward this peer: FIFO inside, one block from the link's
@@ -348,15 +350,15 @@ class egress_peer_t {
         }
     };
 
-    /** @brief The lane served last; `tail_->next` is served next. Its lanes are the queue
-     *         mutex's; the pointer is atomic so a sender and the writer can see that nothing
-     *         waits without taking that mutex (#2145). Null: nothing waits. */
+    /** @brief The lane served last; `tail_->next` is served next. Its lanes are the lane
+     *         lock's (`kLanes`); the pointer is atomic so a sender and the writer can see that
+     *         nothing waits without taking that lock (#2145). Null: nothing waits. */
     std::atomic<lane_t*> tail_{nullptr};
     egress_frame_t* wire_ = nullptr; /**< @brief The frame being written (writer only). */
     std::uint32_t off_ = 0;          /**< @brief Bytes of `wire_` on the wire (writer only). */
     std::uint16_t strikes_ = 0;      /**< @brief Consecutive strikes: full-lane offers that
                                                  moved nothing (writer only, saturating). */
-    std::atomic<std::uint8_t> role_{kClosed}; /**< @brief `kWriter` | `kClosed`. */
+    std::atomic<std::uint8_t> role_{kClosed}; /**< @brief `kWriter` | `kClosed` | `kLanes`. */
     std::atomic<bool> held_{false};           /**< @brief @ref wants_write. */
 };
 
@@ -364,13 +366,14 @@ static_assert(sizeof(void*) != 8 || sizeof(egress_peer_t) <= 24,
               "the egress slot is at most 24 B per peer (#2144)");
 
 /**
- * @brief The link-level half of the egress module: the source, the queue mutex, the strike
- *        cap.
+ * @brief The link-level half of the egress module: the source and the strike cap.
  *
- * One per link. The queue mutex is held only for a lane step — an index step, and the lane
- * block drawn or returned with it — never across a write, a frame build or a frame release,
- * and never by a send that finds the peer idle (#2145): it guards the lanes, not the writer
- * election and not the write.
+ * One per link, and it holds no lock: each peer's lanes are guarded by that peer's own lane
+ * lock (#2310), a bit of its role byte. The lock is held only for a lane step — an index step,
+ * and the lane block drawn or returned with it — never across a write, a frame build or a
+ * frame release, and never by a send that finds the peer idle (#2145): it guards the lanes,
+ * not the writer election and not the write. A sender that finds it held spins, then yields;
+ * nothing sleeps.
  *
  * @note Thread-safe: any number of senders, plus the link's own receive or wait context.
  */
@@ -458,13 +461,13 @@ class egress_t {
             ++r.shed;
         } else {
             f->retain();
-            const std::lock_guard lock(q_m_);
-            if ((p.role_.load(std::memory_order_relaxed) & egress_peer_t::kClosed) != 0)
+            const lanes_guard_t lock(p);
+            if ((lock.role & egress_peer_t::kClosed) != 0)
                 ++r.shed;
             else
                 out = admit(p, lane, f, r, lost);
         }
-        egress_frame_t::release(out);  // outside the queue mutex: it may free a block
+        egress_frame_t::release(out);  // outside the lane lock: it may free a block
         // The store-buffering pair: the push above, then the claim. A holder that let the
         // role go after our push re-reads the round and finds it; a holder that has not let
         // go yet drains it. Either way it leaves. The claimed turn
@@ -521,10 +524,11 @@ class egress_t {
         }
         egress_frame_t::release(std::exchange(p.wire_, nullptr));
         p.off_ = 0;
-        // The queue mutex once, empty: a pusher that read the peer open under it has finished
-        // its push by now, and one that takes it later reads the peer closed. pop's lock-free
-        // "nothing waits" read alone could miss a push that raced the close (#2145).
-        { const std::lock_guard lock(q_m_); }
+        // The lane lock once, empty: a pusher that read the peer open under it has finished
+        // its push by now, and one that takes it later reads the peer closed (the lock and
+        // `kClosed` share one byte). pop's lock-free "nothing waits" read alone could miss a
+        // push that raced the close (#2145).
+        { const lanes_guard_t lock(p); }
         while (egress_frame_t* const f = pop(p)) egress_frame_t::release(f);
         p.strikes_ = 0;
         p.held_.store(false, std::memory_order_release);
@@ -542,23 +546,58 @@ class egress_t {
         p.wire_ = first;
         p.off_ = 0;
         p.held_.store(first != nullptr, std::memory_order_relaxed);
-        p.role_.store(0, std::memory_order_release);
+        // Clears `kClosed` only: a late sender may still hold the lane lock to read the peer
+        // closed, and its unlock must not land on a lock somebody took after this store.
+        p.role_.fetch_and(egress_peer_t::kLanes, std::memory_order_release);
     }
 
    private:
     using lane_t = egress_peer_t::lane_t;
 
-    /** @brief Take the writer role on a peer that is open and not being written. The
-     *         pusher's half of the store-buffering pair (see drain_owned): seq_cst. */
+    /** @brief Take the writer role on a peer that is open and not being written, whoever
+     *         holds its lane lock. The pusher's half of the store-buffering pair (see
+     *         drain_owned): seq_cst. */
     [[nodiscard]] static bool claim(egress_peer_t& p) noexcept {
-        std::uint8_t expected = 0;
-        return p.role_.compare_exchange_strong(expected, egress_peer_t::kWriter,
-                                               std::memory_order_seq_cst);
+        std::uint8_t r = p.role_.load(std::memory_order_relaxed);
+        while ((r & (egress_peer_t::kWriter | egress_peer_t::kClosed)) == 0)
+            if (p.role_.compare_exchange_weak(r, r | egress_peer_t::kWriter,
+                                              std::memory_order_seq_cst))
+                return true;
+        return false;
     }
 
     /**
+     * @brief @p p's lane lock for one lane step (#2310): the `kLanes` bit of its role byte.
+     *
+     * Spins, and yields every 64th try so a preempted holder can finish its step; no sleep,
+     * no clock. `role` is the role byte the lock was taken over, so a pusher reads `kClosed`
+     * in the same read-modify-write that orders it against @ref close.
+     */
+    struct lanes_guard_t {
+        explicit lanes_guard_t(egress_peer_t& peer) noexcept : p(peer) {
+            role = p.role_.load(std::memory_order_relaxed);
+            for (unsigned i = 1;; ++i) {
+                if ((role & egress_peer_t::kLanes) == 0 &&
+                    p.role_.compare_exchange_weak(role, role | egress_peer_t::kLanes,
+                                                  std::memory_order_seq_cst))
+                    return;
+                if ((i & 63U) == 0U) std::this_thread::yield();  // let a preempted holder run
+                role = p.role_.load(std::memory_order_relaxed);
+            }
+        }
+        ~lanes_guard_t() {
+            p.role_.fetch_and(static_cast<std::uint8_t>(~egress_peer_t::kLanes),
+                              std::memory_order_release);
+        }
+        lanes_guard_t(const lanes_guard_t&) = delete;
+        lanes_guard_t& operator=(const lanes_guard_t&) = delete;
+        egress_peer_t& p;  /**< @brief The peer whose lanes are held. */
+        std::uint8_t role; /**< @brief The role byte the lock was taken over. */
+    };
+
+    /**
      * @brief Put @p f in its lane of @p p under the lane's shape, drawing the lane if it is
-     *        the vertex's first waiting frame (queue mutex held).
+     *        the vertex's first waiting frame (the peer's lane lock held).
      * @param lost Set to the lane's depth when the lane was full, so the offer cost one of its
      *             frames; left alone otherwise. A refused draw is the source's verdict, not
      *             the peer's, and sets nothing. Its frame is shed, counted: keeping it for the
@@ -601,7 +640,7 @@ class egress_t {
         return out;
     }
 
-    /** @brief Draw @p lane's ring and join it to the END of @p p's round (queue mutex held). */
+    /** @brief Draw @p lane's ring and join it to the END of @p p's round (lane lock held). */
     lane_t* draw(egress_peer_t& p, const graph::delivery_lane_t& lane) noexcept {
         const bool control = lane.key == nullptr;
         const std::uint16_t depth =
@@ -622,14 +661,14 @@ class egress_t {
      *        left empty goes back to the source. Null when nothing waits.
      *
      * Only the writer-role holder pops (or @ref close, once the writer has left and every
-     * racing push has finished under the mutex), so only a pop ever empties the round: a
-     * null read without the mutex is never stale that way, and when nothing waits the pop
-     * takes no mutex (#2145). A lane a pusher draws meanwhile is found by the writer's
+     * racing push has finished under the lane lock), so only a pop ever empties the round: a
+     * null read without the lock is never stale that way, and when nothing waits the pop
+     * takes no lock (#2145). A lane a pusher draws meanwhile is found by the writer's
      * re-check after it lets the role go.
      */
     egress_frame_t* pop(egress_peer_t& p) noexcept {
         if (p.tail_.load(std::memory_order_seq_cst) == nullptr) return nullptr;
-        const std::lock_guard lock(q_m_);
+        const lanes_guard_t lock(p);
         lane_t* const tail = p.tail_.load(std::memory_order_relaxed);
         lane_t* const l = tail->next;
         egress_frame_t* const f = l->ring()[l->head];
@@ -656,7 +695,7 @@ class egress_t {
      *
      * @p drained skips the first drain pass: the caller took the role over empty lanes and
      * wrote its own record. A frame pushed since is found by the re-check after the role is
-     * let go, so the pass would only take the queue mutex to find nothing.
+     * let go, so the pass would only take the lane lock to find nothing.
      */
     template <class Write>
     void drain_owned(egress_peer_t& p, Write&& write, function_ref_t<void()> condemn,
@@ -710,8 +749,6 @@ class egress_t {
         }
     }
 
-    std::mutex q_m_;           /**< @brief Guards every peer's lanes; held only for a lane
-                                           step. */
     mem::block_source_t* src_; /**< @brief Where the lanes come from. */
     std::uint8_t strike_cap_;  /**< @brief Strikes before condemnation. */
 };

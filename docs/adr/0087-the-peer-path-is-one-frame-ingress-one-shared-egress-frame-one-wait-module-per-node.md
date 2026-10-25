@@ -53,11 +53,13 @@ Native-window hold ([ADR-0081](0081-pre-sink-ingress-native-window-hold-or-named
 
 **A send builds its frame once, in one refcounted block, and every peer it reaches holds a reference.** [PR #2130](https://github.com/avatarsd-llc/libtracer/pull/2130) (one shared refcounted WS TX frame per send) is the C6 instance.
 
-**SAMPLE and STREAM are one mechanism** (Q5): one ring; depth 1 = SAMPLE (overwrite), depth N = STREAM. Each peer's egress queue is a ring of references to shared frames, and its depth is the vertex's own depth. Nothing else picks its shape.
+**SAMPLE and STREAM are one mechanism** (Q5): one ring; depth 1 = SAMPLE (overwrite), depth N = STREAM. A peer's egress queue is a set of lanes, one ring of references to shared frames per vertex with frames waiting, and each ring's depth is that vertex's own depth. Nothing else picks its shape.
 
 - **Depth 1 is a SAMPLE.** The copy policy overwrites the one slot in place, so the latest frame wins. It is the degenerate ring, not a separate slot type.
 - **Depth N is a STREAM.** A full ring follows the receiving vertex's own declared pressure arm ([RFC-0025](../spec/rfcs/0025-stream-class-values.md) §4.4).
-- **One ring per (peer, vertex)** (maintainer ruling on #2144): each peer keeps a ring for every local vertex it is subscribed to, sized at subscribe time from that vertex's retention depth, so one vertex's flood never sheds another's frames. The rings leave round-robin across vertices and FIFO inside each, and `transport_t::send` carries the vertex identity to the link.
+- **One lane per (peer, vertex), drawn per burst** (maintainer ruling on #2144; wording corrected by #2310): a lane is a ring drawn from the link's own source when a vertex's first frame to that peer has to wait, at the depth the send carries (the vertex's retention depth), and returned when its last waiting frame leaves. A peer that keeps up holds no lane. One vertex's flood never sheds another's frames. Lanes leave round-robin across vertices and FIFO inside each, and `transport_t::send` carries the vertex identity to the link.
+- **The control lane.** A frame from no vertex rides the peer's control lane (`kEgressControlDepth`, best-effort), drawn and returned the same way.
+- **The lane lock is the peer's own** (#2310). A peer's lanes are guarded by a bit in its own role byte, held only for a lane step (an index step and the lane block drawn or returned with it), so no two peers' sends contend on a lock and the per-peer slot stays at 24 B.
 - **A BATCH is a value the application composes**, so it takes one ring entry, like any other write. IMMEDIATE behaves as STREAM here.
 
 **The egress path never reads the `delivery_class` bits.** This agrees with RFC-0025 §4.1 as the 2026-08-24 selector erratum left it. The class is honoured by the role of the vertex on each side of the edge and by the receiving vertex's pressure arm, never by a bit read in the fan-out loop. Removing the `delivery_class` wire bits themselves would be a separate RFC-0025 amendment, outside this ADR.

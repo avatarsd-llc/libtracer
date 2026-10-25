@@ -2230,8 +2230,8 @@ if(LIBTRACER_NET_PLANE)
 endif()
 
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
-    # #2145 — a dialer send takes at most one mutex: none to an idle peer, the queue mutex
-    # once when the record waits. Counted by interposing pthread_mutex_lock; skips (77) under
+    # #2145 / #2310 — a dialer send takes no mutex: none to an idle peer, and none when the
+    # record waits (the lane lock is a bit of the peer's own role byte). Counted by interposing pthread_mutex_lock; skips (77) under
     # a sanitizer or wherever the interposer is not reached.
     add_executable(egress_lock_count_test egress_lock_count_test.cpp)
     target_link_libraries(egress_lock_count_test PRIVATE libtracer ${CMAKE_DL_LIBS})
