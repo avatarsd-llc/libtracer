@@ -506,6 +506,57 @@ decides how long to wait, on its own clock:
    On every link, a missing reply means "no answer arrived", not "the peer is gone"
    ([04 §Waiting for a reply that a drop consumed](04-communication-flows.md#waiting-for-a-reply-that-a-drop-consumed)).
 
+## Confirming a stream: none, a per-op reply, or a batched watermark
+
+A stream needs a different answer from a one-shot operation. **The library adds no acknowledgement
+for a stream or a batch, and none is forced on any flow.** Confirmation is always the application's
+choice. A subscriber delivery never replies: its `src` is empty, so nothing answers it, whatever
+happened (RFC-0004 Amendment 2). When a stream's sender needs to know what arrived, the receiving
+application tells it, at application level, with one small write that covers a whole batch.
+
+### Pick one of three
+
+| | No confirmation | A per-op `REPLY` | A batched watermark |
+| --- | --- | --- | --- |
+| **Use it for** | latest-value fields and streams where freshness beats completeness | one-shot operations ([above](#acknowledged-one-shot-operations-and-safe-retry)) | a stream whose sender must release or re-send what did not arrive |
+| **Round trips** | none | one per operation, and the sender waits for it | none waited on; one small write per batch, travelling the other way |
+| **Sender RAM** | nothing | one pending request per outstanding operation | the frames it chooses to keep until they are confirmed: its own buffer, which it sizes |
+| **Receiver RAM** | nothing | one reply frame per operation, drawn from egress, and droppable under pressure (`reply_iov_dropped`, [22 §2](22-backpressure-and-sizing.md#2-the-two-pressure-arms-stated-once)) | one sequence number in its handler |
+| **How a loss shows** | a counted drop, or a gap marker on a STREAM ring ([22 §2](22-backpressure-and-sizing.md#2-the-two-pressure-arms-stated-once)) | no reply before the application's deadline | the watermark stops advancing |
+
+**A stream never uses ping-pong per frame.** Waiting for a reply to each frame before sending the
+next caps throughput at one frame per round trip, keeps a pending request alive for every frame in
+flight, and puts a reply frame on the return path for every frame sent. On a lossy link it also
+stalls the stream on every lost reply. A per-op `REPLY` is for operations, not for frames.
+
+### The batched watermark
+
+1. **The sender numbers its frames.** It puts its own sequence number in each frame's payload. The
+   library adds no sequence number to a delivery; this one is the application's.
+2. **The receiver tracks how far it has got.** Its handler keeps the highest sequence number up to
+   which every frame has arrived. When the number jumps, frames were lost on the way.
+3. **The receiver writes back "received up to N".** Every K frames, or on its own clock, it writes
+   one value carrying `N` to a vertex the sender owns for the purpose (for example
+   `/app/cam/confirmed`), through the mount that reaches the sender. The write has an empty `src`,
+   so nobody waits for it and nothing answers it.
+4. **The sender acts on it when it arrives.** It releases the frames it kept up to `N`, and it may
+   re-send from `N + 1`. Both are application decisions; the library keeps no window and starts no
+   timer.
+
+A lost watermark costs nothing: the next one carries a larger `N` and replaces it, because it is a
+whole-value write, and repeating it stores the same state ([§A retry is safe because of the
+operation's shape](#a-retry-is-safe-because-of-the-operations-shape)). The receiver chooses K, and
+with it the trade: a smaller K frees the sender's buffer sooner and costs more writes on the return
+path; a larger K costs the sender more buffer.
+
+*Forthcoming:* [#2252](https://github.com/avatarsd-llc/libtracer/issues/2252) (approved, v0.23.0)
+covers the latest-value case without any confirmation. When a latest-value (conflate) frame to a
+peer is dropped rather than parked, the egress slot for that peer and vertex marks it dirty in one
+bit, aiming for 0 B, and once the link can be written again the vertex's **current** value is
+re-encoded and sent. The drop is still counted, nothing new goes on the wire, and the subscriber
+still sends no reply. A latest-value field therefore reaches every subscriber once there is room,
+and the watermark is left for STREAM flows, where every frame matters.
+
 ## Pitfalls
 
 - **Treating a remote vertex as a replica.** There is no copy anywhere. A value a consumer

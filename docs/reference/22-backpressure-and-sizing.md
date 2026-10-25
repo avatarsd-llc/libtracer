@@ -136,7 +136,11 @@ Three properties of this pair that a deployment must design around:
    the per-edge credit window is parked as the v2 escalation (RFC-0025 §4.6.1 clause 7). A
    **remote** producer against a reliable ring does not stall — it sees the receiver's drop tally
    after the fact. Plan the remote case as §3 archetype 3 does, or accept that the feedback is
-   asynchronous.
+   asynchronous. When a remote producer must know what arrived, the receiving application
+   writes back one "received up to N" value per batch:
+   [18 §Confirming a stream](18-composition-over-the-network.md#confirming-a-stream-none-a-per-op-reply-or-a-batched-watermark).
+   The library adds no acknowledgement for a stream, and a stream never waits for a reply per
+   frame.
 3. **Depth and bytes compose.** The declared depth intent retires *before* the byte bound charges,
    so a ring at its declared depth funds the new admission out of the entry it was going to drop
    anyway — and a source sized for exactly N entries does not spuriously shed on the N+1th
