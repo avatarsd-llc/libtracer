@@ -334,7 +334,7 @@ thresholds, one hard invariant:
 
 | mechanism | when | comparison | threshold | effect |
 | --- | --- | --- | --- | --- |
-| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 (a row at the flat threshold is decided by the disjoint-ranges + majority-of-pairs rule) | fails the PR |
+| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 (a row at the flat threshold is decided by the separated-arms + majority-of-pairs rule) | fails the PR |
 | **push ratchet** | every `main` push | HEAD vs its parent, **three independently-drawn runners** | same as above | **advisory** — each replica reports (see the tier note below) |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
 | **soft trend alert** | per `main` commit | vs previous point, **cross-runner** | series drifts past **125%** | a comment, *not* a verdict |
@@ -625,8 +625,12 @@ Details that make these trustworthy:
 - **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
   or past the flat threshold, because builds of one source move them by several percent
   (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they are decided
-  by the flat threshold **and** the range rule (medians breach, the arms' [min..max] ranges
-  are disjoint, a strict majority of pairs breach), and the report says `cap`. A row the null does not carry is decided the same
+  by the flat threshold **and** the separation rule (the median pair ratio breaches, the
+  candidate's best run is worse than the baseline's median run, a strict majority of pairs
+  breach), and the report says `cap`. Until #2205 this asked for disjoint [min..max] ranges;
+  with a fresh copy per run (#2215) one copy on a slow placement overlapped them, and a
+  replayed x1.20 regression passed a flat row in 9 of 10 sessions at a 1/4 slow-copy rate.
+  The separation rule supersedes the #1874 capped-leg rule (ruled 2026-10-25). A row the null does not carry is decided the same
   way. In the 2026-10-09 null (27 fit rounds in three windows, banked from main@738c0a29)
   the null tightens 27 of the 89 legs outside the cliff family and 18 of the 294 cliff legs;
   every other leg is at the cap. Rows at the cap on every leg: `acl-inherit-d4-mt4`,
