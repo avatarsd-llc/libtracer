@@ -61,6 +61,7 @@
 
 #include "fwd_frame_builder.hpp"
 #include "libtracer/fwd_router.hpp"
+#include "libtracer/iov_table.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -388,54 +389,32 @@ void test_reply_iov_on_the_seam() {
         link.inject(b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"client"}), {}, {}));
     };
 
-    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, false);
-    read_once();
-    check(rx.served() == 1, "the reply iov table came from the router's INJECTED rx source");
-    check(link.take() == 1, "the reply reached the requester");
-
-    // Armed: refuse exactly that table. The RESULT reply is dropped and counted, and the
-    // requester is answered with a stack-built BACKPRESSURE instead (#1612); nothing aborts.
+    // A small reply fits the caller's inline table (#2264): no draw at all, so even a
+    // refusing source cannot drop it. The watch is armed to prove that nothing asked.
     rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, true);
-    const std::size_t before = router.drop_stats().reply_iov_dropped;
     read_once();
-    check(rx.refused() >= 1, "the injector fired (an unreached try_alloc would be vacuous)");
-    check(link.take() == 1,
-          "an exhausted reply table answers an addressed BACKPRESSURE (#1612), never aborts");
-    check(router.drop_stats().reply_iov_dropped == before + 1,
-          "the drop is counted on reply_iov_dropped, the documented convention");
-
-    // Disarm: the next request is answered again — the refusal left no residue.
-    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, false);
-    read_once();
-    check(link.take() == 1, "replies resume once the source recovers");
+    check(rx.served() == 0 && rx.refused() == 0,
+          "a 2-link reply gathers into the inline table and draws nothing (#2264)");
+    check(link.take() == 1, "the reply reached the requester");
 
     // The ROPE terminus is the SECOND site, and it is not the same code path: the frame is
     // adopted as a lazy `tlv_view_t` rather than arena-decoded, and the reply is resolved
-    // straight off the rope. Same table, same source, same refusal — driven here through the
-    // rope ingress so a migration applied to only one of the two would redden.
-    const std::vector<std::byte> req =
-        b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"client"}), {}, {});
-    const auto read_once_roped = [&link, &req] {
+    // straight off the rope. The same inline table serves it.
+    const auto read_once_roped = [&link](const std::vector<std::byte>& req) {
         tr::view::rope_t frame;
         tr::view::segment_ptr_t seg = tr::view::heap_alloc(req.size());
         std::memcpy(seg->bytes.data(), req.data(), req.size());
         frame.append(tr::view::view_t::over(std::move(seg)));
         link.inject_rope(std::move(frame));
     };
+    const std::vector<std::byte> req =
+        b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"client"}), {}, {});
 
-    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, false);
-    read_once_roped();
-    check(rx.served() == 1, "the ROPE terminus's reply table comes from the same rx source");
+    read_once_roped(req);
+    check(rx.served() == 0 && rx.refused() == 0,
+          "the ROPE terminus's small reply draws nothing either");
     check(link.take() == 1, "the rope-tier reply reached the requester");
-
-    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, true);
-    const std::size_t before_rope = router.drop_stats().reply_iov_dropped;
-    read_once_roped();
-    check(rx.refused() >= 1, "the injector fired on the rope tier too");
-    check(link.take() == 1,
-          "an exhausted table answers the rope-tier request with BACKPRESSURE, never aborts");
-    check(router.drop_stats().reply_iov_dropped == before_rope + 1,
-          "and counts it on the same reply_iov_dropped");
+    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, false);
 
     // The COMPOSED-ROOT reply, which is why this table has no fixed bound. A branch read
     // folds every registered descendant's landed LKV into one reply rope, so the peer that
@@ -459,7 +438,8 @@ void test_reply_iov_on_the_seam() {
     // MEASURED. The exact width is incidental — what is load-bearing is that it is far past
     // any small fixed array, and that the seam is asked for exactly this one block.
     constexpr std::size_t kComposedLinks = 20;
-    static_assert(kComposedLinks > 4, "the composed reply must exceed any fixed-array proposal");
+    static_assert(kComposedLinks > tr::net::kMaxInlineIov,
+                  "the composed reply must spill past the inline table into the source");
     rx.watch(reply_iov_bytes(kComposedLinks), kIovAlign, false);
     read_branch();
     check(rx.served() == 1, "a 20-link composed-root reply draws ONE table of exactly that width");
@@ -474,6 +454,24 @@ void test_reply_iov_on_the_seam() {
           "an exhausted table replaces the composed reply with one BACKPRESSURE frame");
     check(router.drop_stats().reply_iov_dropped == before_composed + 1,
           "counted on reply_iov_dropped at composed-root size too");
+
+    // The rope tier spills through the same table, from the same source, and drops the same way.
+    const std::vector<std::byte> branch_req =
+        b_fwd(fwd_op_t::READ, b_path({"plant"}), b_path({"client"}), {}, {});
+    rx.watch(reply_iov_bytes(kComposedLinks), kIovAlign, false);
+    read_once_roped(branch_req);
+    check(rx.served() == 1, "the rope tier spills the composed reply into the same rx source");
+    check(link.take() == 1, "the rope-tier composed reply goes out whole");
+
+    rx.watch(reply_iov_bytes(kComposedLinks), kIovAlign, true);
+    const std::size_t before_rope = router.drop_stats().reply_iov_dropped;
+    read_once_roped(branch_req);
+    check(rx.refused() >= 1, "the injector fired on the rope tier too");
+    check(link.take() == 1,
+          "an exhausted table answers the rope-tier request with BACKPRESSURE, never aborts");
+    check(router.drop_stats().reply_iov_dropped == before_rope + 1,
+          "and counts it on the same reply_iov_dropped");
+    rx.watch(reply_iov_bytes(kComposedLinks), kIovAlign, false);
 }
 
 // --- (d) the composed-read NODE TABLE, on the injected source (#873 phase 1, #1778) ---
