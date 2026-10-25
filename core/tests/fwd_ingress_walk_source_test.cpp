@@ -1,8 +1,7 @@
 /**
  * @file
- * @brief #1648 review — the router's two in-place ingress reads (the `on_inbound` observer and
- *        the bus-NAME-hop rejection) spill a deep walk into the RECEIVING LINK's source, never
- *        the process heap.
+ * @brief #1648 review — the router's in-place ingress read on a bus-NAME-hop rejection spills a
+ *        deep walk into the RECEIVING LINK's source, never the process heap.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -17,11 +16,11 @@
  *
  * Each link is registered with its own source that refuses on command, while the router's
  * default `rx` stays the heap. A refused spill is `TLV_NESTING_TOO_DEEP`, so with the link's
- * source refusing, a deep frame is NOT observed and NOT answered. Pointed at the heap instead,
- * the spill would succeed and the frame would be observed or answered: that is the
- * discriminating outcome. Every case also asserts the link's source was ASKED (so the case is
- * not vacuous), runs a shallow control that needs no spill, and ends with the source serving
- * and the same deep frame going through.
+ * source refusing, a deep frame is NOT answered. Pointed at the heap instead, the spill would
+ * succeed and the frame would be answered: that is the discriminating outcome. (The second
+ * read, the `on_inbound` observer's, was deleted with the observer, #2277.) Every case also asserts
+ * the link's source was ASKED (so the case is not vacuous), runs a shallow control that needs no
+ * spill, and ends with the source serving and the same deep frame going through.
  */
 
 #include <algorithm>
@@ -155,38 +154,6 @@ std::vector<std::byte> b_nest(int depth) {
 /** @brief Deeper than the walk's eight inline slots (the `tlv_children_test` depth). */
 constexpr int kDeep = 12;
 
-/** @brief The observer arm: a deep FWD spills into the link's source, not the heap. */
-void test_observer_walk_draws_from_the_link() {
-    std::printf("the on_inbound observer's walk spills into the receiving link's source:\n");
-    graph_t g;
-    fwd_router_t router(g);  // the router's default rx stays the heap
-    arming_source_t link_rx;
-    rec_link_t in;
-    (void)router.attach_link("in", in, &link_rx);
-    int observed = 0;
-    router.on_inbound(
-        [](void* ctx, std::string_view, const tr::wire::tlv_node_t&) { ++*static_cast<int*>(ctx); },
-        &observed);
-
-    const std::vector<std::byte> dst = b_path({"nowhere"});
-    const std::vector<std::byte> src = b_path({"origin"});
-    const std::vector<std::byte> shallow = b_fwd(fwd_op_t::WRITE, dst, src, {}, b_nest(1));
-    const std::vector<std::byte> deep = b_fwd(fwd_op_t::WRITE, dst, src, {}, b_nest(kDeep));
-
-    link_rx.arm();
-    in.inject(shallow);
-    check(observed == 1, "control: a shallow FWD is observed with the link's source refusing");
-
-    const int asked_before = link_rx.asked();
-    in.inject(deep);
-    check(link_rx.asked() > asked_before, "instrument: the walk ASKED the link's source");
-    check(observed == 1, "a refused spill is TLV_NESTING_TOO_DEEP: the deep FWD is not observed");
-
-    link_rx.disarm();
-    in.inject(deep);
-    check(observed == 2, "the same deep FWD is observed once the link's source serves");
-}
-
 /** @brief The rejection arm, span and rope: a deep refused hop spills into the link's source. */
 void test_reject_walk_draws_from_the_link(bool ropes) {
     std::printf("the bus-name rejection's walk spills into the receiving link's source (%s):\n",
@@ -226,15 +193,11 @@ void test_reject_walk_draws_from_the_link(bool ropes) {
 }  // namespace
 
 int main() {
-    test_observer_walk_draws_from_the_link();
     // The rejection presupposes the ADR-0044 bus module; a bus-closed build mounts the bus as a
-    // point-to-point link and never reaches it, so those cases are bound to the module here
-    // rather than labelling the whole target out of the bus-closed leg.
-    if constexpr (tr::net::kBusLinks) {
-        test_reject_walk_draws_from_the_link(/*ropes=*/false);
-        test_reject_walk_draws_from_the_link(/*ropes=*/true);
-    } else {
-        std::printf("bus module closed: the bus-name rejection cases are skipped\n");
-    }
+    // point-to-point link and never reaches it, so the suite states a skip there.
+    if constexpr (!tr::net::kBusLinks)
+        return tr::testing::skipped("fwd_ingress_walk_source", "bus module closed");
+    test_reject_walk_draws_from_the_link(/*ropes=*/false);
+    test_reject_walk_draws_from_the_link(/*ropes=*/true);
     return tr::testing::summary("fwd_ingress_walk_source");
 }

@@ -62,6 +62,7 @@
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
+#include "send_tap.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 #include "transport_vertex_test_access.hpp"
@@ -331,26 +332,26 @@ void test_fwd_still_routes() {
     fwd_router_t router_b(node_b);
     (void)node_b.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
 
+    // Observe what A sends toward B. A FWD{WRITE dst=/up/temp} from A: A strips "up" and
+    // forwards "/temp" over channel.a(); B receives it on "down". (We assert the frame
+    // went out on the wired link — the byte path is fwd_router's, untouched by the vertex
+    // shell.)
+    std::promise<bool> got;
+    auto fut = got.get_future();
+    const auto sent = [&got](std::span<const std::byte>) {
+        try {
+            got.set_value(true);
+        } catch (...) {
+        }
+    };
+
     tr::net::loopback_channel_t channel;
+    tr::testing::send_tap_t a_up(channel.a(), sent);
     (void)net_a.register_module("ws-client", "ws", conn_role_t::DIAL);
-    net_a.provide_link("ws-client", "up", channel.a());
+    net_a.provide_link("ws-client", "up", a_up);
     (void)node_a.write(path_t("/net/ws-client/conn"), conn_spec("up", 0));
     (void)router_b.attach_link("down",
                                channel.b());  // B's side: plain router child (unchanged path)
-
-    // Observe inbound FWDs on B. A FWD{WRITE dst=/up/temp} from A: A strips "up" and
-    // forwards "/temp" over channel.a(); B receives it on "down". (We assert the frame
-    // arrived — the byte path is fwd_router's, untouched by the vertex shell.)
-    std::promise<bool> got;
-    auto fut = got.get_future();
-    router_b.on_raw(
-        [](void* ctx, std::string_view link, std::span<const std::byte>) {
-            if (link == "down") try {
-                    static_cast<std::promise<bool>*>(ctx)->set_value(true);
-                } catch (...) {
-                }
-        },
-        &got);
 
     // Build FWD{ op=WRITE, dst=/up/temp, src=/reply, VALUE } and hand it to A's router
     // as if it arrived locally (inbound_name "self" names no child => forward by dst).
@@ -376,7 +377,7 @@ void test_fwd_still_routes() {
 
     router_a.on_frame("self", frame);  // "self" names no child => forward via the mount
     check(fut.wait_for(2s) == std::future_status::ready,
-          "the FWD forwarded out /net/ws-client/up and arrived on B (byte path unchanged)");
+          "the FWD forwarded out /net/ws-client/up toward B (byte path unchanged)");
     channel.shutdown();
 }
 

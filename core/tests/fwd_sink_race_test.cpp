@@ -7,7 +7,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * `fwd_router_t` held its five observer/terminus sinks as ten plain non-atomic members.
- * Each setter stored the two halves separately with no lock — `raw_cb_ = fn; raw_ctx_ =
+ * Each setter stored the two halves separately with no lock — `reply_cb_ = fn; reply_ctx_ =
  * ctx;` — while the frame path did check-then-call on a transport receive thread. Besides
  * being a data race by the C++ memory model, that has a directly observable failure: a
  * reader that loads the pointer AFTER the `fn` store and the context BEFORE the `ctx`
@@ -21,11 +21,10 @@
  * publish shows up as a tag mismatch — a functional assertion on every build, not only a
  * TSan vehicle (the race itself is also reported directly under `-fsanitize=thread`).
  *
- * The raw-frame observer (every inbound frame, before any parse) is driven: all three sinks
- * share one `sink_slot_t` publish discipline, so one is enough. (The stale-label observer,
- * a second frame path, went with the label tables, #1951.) The scenario carries a positive
- * control, so a "fix" that quietly stopped dispatching would fail rather than pass by
- * silence.
+ * The reply-terminus sink is driven, with REPLY frames whose route ends at this node: it is
+ * the one router sink left (the two frame observers were deleted, #2277; the stale-label
+ * observer went with the label tables, #1951). The scenario carries a non-vacuity check, so a
+ * "fix" that quietly stopped dispatching would fail rather than pass by silence.
  *
  * @par Why no SHARE of dispatches is asserted, only that some landed (#1380)
  * There used to be a `kFloor = kIters / 50` here and a "fired on a large share of frames"
@@ -40,9 +39,8 @@
  * x86-64's TSO the release fence inside `set` is free and the share is tens of percent; on
  * aarch64 it is a real `dmb ish` and the same code legitimately swallows fifty times more.
  * Asserting a majority made this test flaky at ~12 %; asserting 2 % moved the flake to the
- * other leg. So the verdict is the torn-pair invariant alone, plus the DETERMINISTIC positive
- * control (every frame still forwarded) and a
- * non-vacuity check that a sink was reached at all. The share itself is PRINTED, which is
+ * other leg. So the verdict is the torn-pair invariant alone, plus a non-vacuity check that a
+ * sink was reached at all. The share itself is PRINTED, which is
  * the number a human reads when a host looks degenerate.
  *
  * @par The `armed` latch
@@ -70,10 +68,9 @@
 
 namespace {
 
-using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
+using tr::graph::reply_kind_t;
 using tr::net::fwd_router_t;
-using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
@@ -102,8 +99,8 @@ void score(void* ctx, char expected) {
     p->hits.fetch_add(1, std::memory_order_relaxed);
 }
 
-void raw_a(void* ctx, std::string_view, std::span<const std::byte>) { score(ctx, 'A'); }
-void raw_b(void* ctx, std::string_view, std::span<const std::byte>) { score(ctx, 'B'); }
+void reply_a(void* ctx, const tr::view::rope_t&) { score(ctx, 'A'); }
+void reply_b(void* ctx, const tr::view::rope_t&) { score(ctx, 'B'); }
 
 // --- wire builders (canonical bytes via the production emit helpers) ----------
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
@@ -114,37 +111,27 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     return out;
 }
 
-using tr::testing::b_fwd;
-
-/** @brief A span link that only counts — the frame path must keep working under the storm. */
-class counting_link_t : public transport_t {
-   public:
-    void send(std::span<const std::byte>) override { ++sent_; }
-    [[nodiscard]] std::size_t sent() const { return sent_; }
-
-   private:
-    std::size_t sent_ = 0;
-};
+using tr::testing::b_fwd_reply;
 
 /** @brief Frames each storm pumps through the router. */
 constexpr int kIters = 200000;
 
 /**
- * @brief The raw-frame observer: flipped from one thread while frames flow on another.
+ * @brief The reply-terminus sink: flipped from one thread while replies flow on another.
  */
-void raw_sink_flip_race() {
-    std::printf("raw-frame observer, flipped under a frame storm:\n");
+void reply_sink_flip_race() {
+    std::printf("reply-terminus sink, flipped under a reply storm:\n");
     graph_t g;
     fwd_router_t router(g);
-    counting_link_t cli;
-    counting_link_t up;
-    (void)router.attach_link("cli", cli);
-    (void)router.attach_link("up", up);
 
     probe_t a{'A'};
     probe_t b{'B'};
+    // `reply-ep` names no child, so the route is spent here and the reply goes to the sink.
+    const std::byte pv{0x2A};
+    std::vector<std::byte> value;
+    tr::wire::emit_tlv(value, type_t::VALUE, opt_t{}, std::span<const std::byte>(&pv, 1));
     const std::vector<std::byte> frame =
-        b_fwd(fwd_op_t::READ, b_path({"up", "sensor"}), b_path({"reply-ep"}));
+        b_fwd_reply(reply_kind_t::RESULT, b_path({"reply-ep"}), b_path({"sensor"}), value);
 
     std::atomic<bool> go{false};
     std::atomic<bool> armed{false};
@@ -158,11 +145,11 @@ void raw_sink_flip_race() {
         }
         // Arm with A installed and say so, so the storm never runs against an empty slot
         // for a reason that has nothing to do with the seam under test.
-        router.on_raw(&raw_a, &a);
+        router.on_reply(&reply_a, &a);
         armed.store(true, std::memory_order_release);
         while (!stop.load(std::memory_order_relaxed)) {
-            router.on_raw(&raw_a, &a);
-            router.on_raw(&raw_b, &b);
+            router.on_reply(&reply_a, &a);
+            router.on_reply(&reply_b, &b);
         }
     });
     std::thread pump([&] {
@@ -179,12 +166,9 @@ void raw_sink_flip_race() {
 
     const long hits = a.hits.load() + b.hits.load();
     std::printf("    (%ld of %d frames reached a sink)\n", hits, kIters);
-    // Positive control: the storm must not have cost the router its day job, and the
-    // observer must actually have observed — a sink that never fired proves nothing. The
-    // SHARE is printed above, never asserted; see the file header for why.
-    check(up.sent() == static_cast<std::size_t>(kIters), "every frame still forwarded");
-    check(hits > 0,
-          "the raw observer was reached during the storm (the torn check is not vacuous)");
+    // The sink must actually have been reached — a sink that never fired proves nothing.
+    // The SHARE is printed above, never asserted; see the file header for why.
+    check(hits > 0, "the reply sink was reached during the storm (the torn check is not vacuous)");
     check(g_torn.load() == 0, "no sink was handed the other sink's context");
 }
 
@@ -192,6 +176,6 @@ void raw_sink_flip_race() {
 
 int main() {
     std::printf("router sink publish coherence (#914):\n");
-    raw_sink_flip_race();
+    reply_sink_flip_race();
     return tr::testing::summary("fwd_sink_race");
 }

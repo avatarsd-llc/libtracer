@@ -97,6 +97,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `fwd/fwd-label-*`, `acl/label-vs-string-*`) go with it.
 - `deferred_await_t::ok_src`: with no terminus label mint it always equalled `src`, so a
   deferred AWAIT stores its reply `src` once.
+- **The router's test-only frame observers (#2277):** `fwd_router_t::on_raw` and
+  `fwd_router_t::on_inbound`, with their `raw_fn_t` and `inbound_fn_t` types. No production
+  adapter used either, and every received frame paid two sink reads for them. `on_reply` stays.
+  *Migration:* observe frames at the link instead. A test that wants what a hop put on the wire
+  wraps the sending link (the test suite's `send_tap_t` in `core/tests/send_tap.hpp`), or
+  decodes the frame where it injects it, before calling `fwd_router_t::on_frame`.
 
 ### Added
 

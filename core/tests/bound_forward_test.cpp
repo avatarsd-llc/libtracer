@@ -54,6 +54,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "pair_body.hpp"
+#include "send_tap.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
@@ -179,7 +180,7 @@ path_t conn_endpoint(std::string_view module) {
 }
 
 /**
- * @brief Every FWD a node saw inbound on one named link — COUNTED, not latched.
+ * @brief Every FWD sent on one link toward a node — COUNTED, not latched.
  *
  * Counted because half the claims here are that a frame did NOT arrive: a drop at a mid-chain
  * hop is invisible at the terminus, so the assertion is "B's inbound count did not move while
@@ -188,13 +189,11 @@ path_t conn_endpoint(std::string_view module) {
 struct hop_probe_t {
     std::mutex m;
     std::condition_variable cv;
-    std::string link;
     std::size_t seen = 0;
     std::vector<std::byte> dst;
     std::vector<std::byte> src;
 
-    void observe(std::string_view on, std::span<const std::byte> frame) {
-        if (on != link) return;
+    void observe(std::span<const std::byte> frame) {
         const auto dec = tr::wire::decode(frame);
         if (!dec || dec->type != type_t::FWD || dec->children.size() < 3) return;
         {
@@ -337,9 +336,22 @@ int main() {
     tr::net::loopback_channel_t ch_cli;  // client <-> A
     tr::net::loopback_channel_t ch_ab;   // A <-> B
 
+    // What B receives is what A sends on its link to B, so that is where it is observed.
+    hop_probe_t at_b;
+    const auto to_b = [&at_b](std::span<const std::byte> f) { at_b.observe(f); };
+    tr::testing::send_tap_t a_to_b(ch_ab.a(), to_b);
+
+    // The BACKWARD half of every drop claim below. A refusal that turned into a misroute onto
+    // the INBOUND link — the first child, the one the frame came from — would echo the frame
+    // back toward the origin and B would still see nothing, so B's count alone cannot tell a
+    // drop from a bounce. This counts what A puts back on the client's link.
+    hop_probe_t at_cli;
+    const auto to_cli = [&at_cli](std::span<const std::byte> f) { at_cli.observe(f); };
+    tr::testing::send_tap_t a_to_cli(ch_cli.b(), to_cli);
+
     net_cli.provide_link("uplink", "a", ch_cli.a());
-    net_a.provide_link("downlink", "cli", ch_cli.b());
-    net_a.provide_link("uplink", "b", ch_ab.a());
+    net_a.provide_link("downlink", "cli", a_to_cli);
+    net_a.provide_link("uplink", "b", a_to_b);
     net_b.provide_link("downlink", "a", ch_ab.b());
 
     // A module is declared per staged link, and each declaration takes a `kind` of its own:
@@ -360,24 +372,6 @@ int main() {
               mk(g_a, "uplink", "b").has_value() && mk(g_b, "downlink", "a").has_value(),
           "all four connections created through the /net/<module>/conn creator endpoint "
           "(production wiring)");
-
-    hop_probe_t at_b;
-    at_b.link = "net/downlink/a";
-    r_b.on_raw([](void* ctx, std::string_view on,
-                  std::span<const std::byte> f) { static_cast<hop_probe_t*>(ctx)->observe(on, f); },
-               &at_b);
-
-    // The BACKWARD half of every drop claim below. A refusal that turned into a misroute onto
-    // the INBOUND link — the first child, the one the frame came from — would echo the frame
-    // back toward the origin and B would still see nothing, so B's count alone cannot tell a
-    // drop from a bounce. This counts what A puts back on the client's link.
-    hop_probe_t at_cli;
-    at_cli.link = "net/uplink/a";
-    r_cli.on_raw(
-        [](void* ctx, std::string_view on, std::span<const std::byte> f) {
-            static_cast<hop_probe_t*>(ctx)->observe(on, f);
-        },
-        &at_cli);
 
     mailbox_t inbox;
     r_cli.on_reply(

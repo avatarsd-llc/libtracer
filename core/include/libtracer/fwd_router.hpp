@@ -766,13 +766,6 @@ class fwd_router_t {
 
     /** @brief Reply-terminus sink (@ref on_reply): @p ctx, then the FWD{REPLY} frame. */
     using reply_fn_t = void (*)(void* ctx, const view::rope_t& reply);
-    /** @brief Inbound-FWD observer (@ref on_inbound): @p ctx, inbound child, the FWD read in
-     *         place (a validated, non-owning @ref wire::tlv_node_t). */
-    using inbound_fn_t = void (*)(void* ctx, std::string_view inbound, const wire::tlv_node_t& fwd);
-    /** @brief Raw-frame observer (@ref on_raw): @p ctx, inbound child, the whole frame. */
-    using raw_fn_t = void (*)(void* ctx, std::string_view inbound,
-                              std::span<const std::byte> frame);
-
     /**
      * @brief Set the sink for a REPLY that terminates at this node's reply endpoint.
      *
@@ -794,34 +787,6 @@ class fwd_router_t {
      * @param ctx Opaque pointer handed back as @p fn's first argument.
      */
     void on_reply(reply_fn_t fn, void* ctx = nullptr) noexcept;
-
-    /**
-     * @brief Set a read-only observer of every inbound FWD (observability/tests).
-     *
-     * Invoked with the inbound child name and the FWD, before routing. Carries no routing
-     * semantics; used to assert the per-hop `dst`-shrink / `src`-grow invariant and as the
-     * seam where a per-hop `:acl` forward-right check (RFC-0004 §F) will later hang.
-     *
-     * The FWD is handed over as a @ref wire::tlv_node_t (#1648): the whole frame validated
-     * once, CRC trailers included, then read in place — observing allocates nothing for a
-     * frame nested no deeper than the walk's inline slots. The node borrows the inbound bytes,
-     * so it is valid only for the duration of the call; an observer that keeps anything
-     * copies it (`fwd.bytes()`).
-     *
-     * @param fn  Callback invoked on a transport receive thread.
-     * @param ctx Opaque pointer handed back as @p fn's first argument.
-     */
-    void on_inbound(inbound_fn_t fn, void* ctx = nullptr) noexcept;
-
-    /**
-     * @brief Set a read-only observer of every inbound frame's RAW bytes (any type).
-     *
-     * Fires before dispatch with the inbound link name and the complete frame span — used by
-     * tests to measure what a frame actually carried on the wire.
-     * @param fn  Callback invoked on a transport receive thread.
-     * @param ctx Opaque pointer handed back as @p fn's first argument.
-     */
-    void on_raw(raw_fn_t fn, void* ctx = nullptr) noexcept;
 
     /**
      * @brief The link-departure hook (RFC-0009 §D extended to peer departure): evict
@@ -1630,13 +1595,10 @@ class fwd_router_t {
      * terminus contiguously and was dropped as a non-control frame when the identical bytes
      * arrived as a multi-link rope.
      *
-     * The four genuinely tier-specific actions are passed in, so the shared body holds no
+     * The three genuinely tier-specific actions are passed in, so the shared body holds no
      * `if constexpr` of its own:
      *
      * @tparam Cursor   A grammar byte-source cursor (span or rope).
-     * @param  observe  The read-only inbound observer (tests/ACL seam), which wants a decoded
-     *                  tree and so exists only on the contiguous tier; a no-op on the rope
-     *                  tier, where nothing contiguous is in hand to give it.
      * @param  reject   Reply to a bus NAME + residual hop (ADR-0073 §3 / RFC-0020), called
      *                  with the refusal status and the frame's `fwd_pre_t`, whose offsets
      *                  locate the routes the refusal swaps. Needs contiguous bytes, which the
@@ -1653,10 +1615,10 @@ class fwd_router_t {
      * @retval true  The frame was FWD-classified and is fully handled; the caller returns.
      * @retval false Not a FWD frame at all — the caller continues to its control arm.
      */
-    template <class Cursor, class Observe, class Reject, class Terminus, class Reply>
+    template <class Cursor, class Reject, class Terminus, class Reply>
     bool route_fwd_ingress(std::string_view inbound_name, const Cursor& cur,
-                           const child_rx_ctx_t* inbound_ctx, bool from_peer, Observe&& observe,
-                           Reject&& reject, Terminus&& terminus, Reply&& reply);
+                           const child_rx_ctx_t* inbound_ctx, bool from_peer, Reject&& reject,
+                           Terminus&& terminus, Reply&& reply);
     /**
      * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
      *
@@ -2007,33 +1969,27 @@ class fwd_router_t {
      */
     mutable std::mutex ctl_m_;
     /**
-     * @brief Serializes the three sink SETTERS — never taken by a reader (#914).
+     * @brief Serializes the reply-sink SETTER — never taken by a reader (#914).
      *
      * A `sink_slot_t` publishes its pair for racing readers but does not serialize two
-     * concurrent publishes; one mutex here does that for all three, which is what keeps a
-     * slot three words wide. Deliberately NOT `ctl_m_`: that one is held across socket
-     * construction for milliseconds, and installing an observer has no business waiting
-     * on a connect. The frame path takes neither.
+     * concurrent publishes; this mutex does, which is what keeps the slot three words wide.
+     * Deliberately NOT `ctl_m_`: that one is held across socket construction for milliseconds, and
+     * installing an observer has no business waiting on a connect. The frame path takes neither.
      */
     mutable std::mutex sink_m_;
     /**
-     * @brief The three observer/terminus sinks, each a `sink_slot_t` (#914).
+     * @brief The reply-terminus sink, a `sink_slot_t` (#914).
      *
-     * They were ten plain members — `fn` and `ctx` stored separately by a setter that
+     * The sinks were ten plain members — `fn` and `ctx` stored separately by a setter that
      * takes no lock, read with check-then-call on every transport receive thread. That
      * is a data race by the C++ memory model, and the documented runtime clear
      * ("passing nullptr clears a sink") was its worst case: a torn read hands a new
      * `fn` the previous `ctx`. Every frame-path read is now one `get()` snapshot and
-     * the dispatch runs off that snapshot, so no read of a sink can straddle a `set`.
-     *
-     * Ordered so that the two the FWD span path reads on EVERY frame — `inbound_` and
-     * `raw_` — are adjacent: three words per slot puts their hot words within one cache
-     * line, which a 64-byte (per-slot-mutex) first cut did not, and `bench_forward_demux`
-     * charged ~2% for at 64 registered links.
+     * the dispatch runs off that snapshot, so no read of a sink can straddle a `set`. The
+     * two test-only frame observers that shared this block were deleted (#2277); no frame
+     * reads a sink before it is routed.
      */
-    sink_slot_t<reply_fn_t> reply_;     /**< @brief Reply-terminus sink. */
-    sink_slot_t<inbound_fn_t> inbound_; /**< @brief Inbound-FWD observer. */
-    sink_slot_t<raw_fn_t> raw_;         /**< @brief Raw-frame observer. */
+    sink_slot_t<reply_fn_t> reply_; /**< @brief Reply-terminus sink. */
 
     /**
      * @name The counted cold-path drops behind @ref drop_stats (#1503 step 3)

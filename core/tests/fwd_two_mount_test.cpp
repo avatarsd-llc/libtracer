@@ -54,6 +54,7 @@
 #include "libtracer/loopback.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "send_tap.hpp"
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
@@ -122,24 +123,21 @@ path_t conn_endpoint(std::string_view module) {
 }
 
 /**
- * @brief The `dst`/`src` of the first FWD a node saw on ONE named inbound link.
+ * @brief The `dst`/`src` of the first FWD the previous hop sent on ONE link.
  *
- * Filled from an @ref tr::net::fwd_router_t::on_raw observer, which fires on a transport
- * receive thread before dispatch — so the snapshot is the frame the PREVIOUS hop actually put
- * on the wire, not a re-encoding of it.
+ * Filled from a `send_tap_t` on that hop's link, which sees each frame as it is sent — so the
+ * snapshot is the frame the PREVIOUS hop actually put on the wire, not a re-encoding of it.
  */
 struct hop_probe_t {
     std::mutex m;
     std::condition_variable cv;
-    std::string link;           /**< @brief The inbound link NAME to latch on. */
     bool seen = false;          /**< @brief Whether a FWD has been captured. */
     std::vector<std::byte> dst; /**< @brief Re-encoded `dst` PATH bytes. */
     std::vector<std::byte> src; /**< @brief Re-encoded `src` PATH bytes. */
     std::size_t dst_segs = 0;   /**< @brief `dst` segment count (the strip-K witness). */
 
-    /** @brief Latch the first FWD arriving on @ref link. */
-    void observe(std::string_view on, std::span<const std::byte> frame) {
-        if (on != link) return;
+    /** @brief Latch the first FWD sent. */
+    void observe(std::span<const std::byte> frame) {
         const auto dec = tr::wire::decode(frame);
         if (!dec || dec->type != type_t::FWD || dec->children.size() < 3) return;
         {
@@ -211,9 +209,17 @@ int main() {
 
     net_cli.provide_link("uplink", "a", ch_cli.a());
     net_a.provide_link("downlink", "cli", ch_cli.b());
-    net_a.provide_link("uplink", "b", ch_ab.a());
+    // ----- the per-hop probes: what B and C receive is what A and B send toward them.
+    hop_probe_t at_b;
+    const auto to_b = [&at_b](std::span<const std::byte> f) { at_b.observe(f); };
+    tr::testing::send_tap_t a_to_b(ch_ab.a(), to_b);
+    hop_probe_t at_c;
+    const auto to_c = [&at_c](std::span<const std::byte> f) { at_c.observe(f); };
+    tr::testing::send_tap_t b_to_c(ch_bc.a(), to_c);
+
+    net_a.provide_link("uplink", "b", a_to_b);
     net_b.provide_link("downlink", "a", ch_ab.b());
-    net_b.provide_link("uplink", "c", ch_bc.a());
+    net_b.provide_link("uplink", "c", b_to_c);
     net_c.provide_link("downlink", "b", ch_bc.b());
 
     // One module declaration per staged link, each with a `kind` of its own: a declaration is
@@ -236,19 +242,7 @@ int main() {
           "all six connections created through the /net/<module>/conn creator endpoint "
           "(production wiring)");
 
-    // ----- the per-hop probes and the client's reply sink.
-    hop_probe_t at_b;
-    at_b.link = "net/downlink/a";  // B's mount for the link from A
-    r_b.on_raw([](void* ctx, std::string_view on,
-                  std::span<const std::byte> f) { static_cast<hop_probe_t*>(ctx)->observe(on, f); },
-               &at_b);
-
-    hop_probe_t at_c;
-    at_c.link = "net/downlink/b";  // C's mount for the link from B
-    r_c.on_raw([](void* ctx, std::string_view on,
-                  std::span<const std::byte> f) { static_cast<hop_probe_t*>(ctx)->observe(on, f); },
-               &at_c);
-
+    // ----- the client's reply sink.
     mailbox_t inbox;
     r_cli.on_reply(
         [](void* ctx, const tr::view::rope_t& reply) {

@@ -51,6 +51,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_ws.hpp"
+#include "send_tap.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
@@ -97,7 +98,7 @@ std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>
 
 /**
  * @brief What B saw inbound for the last request — captured byte-exact for the dst-shrink / src-
- *        grow assertion (guarded; B observes on its recv thread).
+ *        grow assertion (guarded; observed on the sending thread of A's link to B).
  */
 struct observed_t {
     std::mutex m;
@@ -163,11 +164,6 @@ int main() {
 
     observed_t b_seen;
     fwd_router_t router_b(graph_b);
-    router_b.on_inbound(
-        [](void* ctx, std::string_view in, const tr::wire::tlv_node_t& fwd) {
-            if (in == "b-in") static_cast<observed_t*>(ctx)->set(fwd);
-        },
-        &b_seen);
     transport_ws_server srv_b(0);
     if (!srv_b.ok()) {
         std::fprintf(stderr, "node B: ws server failed to bind\n");
@@ -192,8 +188,13 @@ int main() {
     }
     (void)router_a.attach_link("cli",
                                srv_a);  // A's name for the inbound client link (prepended to src)
+    // What B receives is what A sends on its link to B, so that link is where it is observed.
+    tr::testing::send_tap_t a_up(a_to_b, [&b_seen](std::span<const std::byte> f) {
+        // Every frame A sends toward B is a forwarded FWD.
+        if (const auto fwd = tr::wire::tlv_node_t::over(f)) b_seen.set(*fwd);
+    });
     (void)router_a.attach_link("up",
-                               a_to_b);  // A's name for the link to B (the dst segment routed)
+                               a_up);  // A's name for the link to B (the dst segment routed)
 
     // ----- the client: originator. ws client to A; collects the REPLY. ----------
     graph_t graph_c;
@@ -244,7 +245,7 @@ int main() {
                   tr::detail::load_le<std::uint32_t>(r.children[4].payload) == kStored,
               "REPLY payload == the exact stored VALUE u32=0xDEADBEEF (byte-exact end to end)");
     }
-    // The dst-shrink / src-grow proof, observed at B.
+    // The dst-shrink / src-grow proof, observed on the link into B.
     check(b_seen.snap_dst() == b_path({"sensor"}),
           "B saw dst shrunk to /sensor (the 'up' segment stripped at A)");
     check(b_seen.snap_src() == b_path({"cli", "reply-ep"}),

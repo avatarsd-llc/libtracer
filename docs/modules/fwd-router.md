@@ -143,15 +143,9 @@ class fwd_router_t {
     graph::result_t<void> subscribe_toward(const graph::path_t& producer,
                                            const graph::path_t& target);
 
-    // Per-frame sinks: function pointer + opaque context, never std::function (ADR-0047).
+    // The reply sink: function pointer + opaque context, never std::function (ADR-0047).
     using reply_fn_t            = void (*)(void* ctx, const view::rope_t& reply);
-    using inbound_fn_t          = void (*)(void* ctx, std::string_view inbound,
-                                           const wire::tlv_node_t& fwd);  // read in place
-    using raw_fn_t              = void (*)(void* ctx, std::string_view inbound,
-                                           std::span<const std::byte> frame);
     void on_reply(reply_fn_t, void* ctx = nullptr) noexcept;
-    void on_inbound(inbound_fn_t, void* ctx = nullptr) noexcept;
-    void on_raw(raw_fn_t, void* ctx = nullptr) noexcept;
 
     void on_frame(std::string_view inbound_name, std::span<const std::byte> frame);
 
@@ -190,7 +184,7 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 ```
 
 Signature source: `core/include/libtracer/fwd_router.hpp:fwd_router_t::fwd_router_t(graph::graph_t& graph` (constructor; its planes are the `router_planes_t` aggregate at `core/include/libtracer/fwd_router.hpp:router_planes_t`), `core/include/libtracer/fwd_router.hpp:fwd_router_t::add_child`
-(`add_child`), `core/include/libtracer/fwd_router.hpp:fwd_router_t::subscribe_toward` (`subscribe_toward`), `core/include/libtracer/fwd_router.hpp:fwd_router_t::reply_fn_t` (the sink function-pointer types);
+(`add_child`), `core/include/libtracer/fwd_router.hpp:fwd_router_t::subscribe_toward` (`subscribe_toward`), `core/include/libtracer/fwd_router.hpp:fwd_router_t::reply_fn_t` (the reply sink's function-pointer type);
 `core/include/libtracer/child_registry.hpp:child_registry_t::add` (`add`), `core/include/libtracer/child_registry.hpp:resolve_peer(const child_t& child, std::string_view peer)` (`resolve_peer`), `core/include/libtracer/child_registry.hpp:child_registry_t::erase`
 (`erase`), `core/include/libtracer/child_registry.hpp:child_registry_t::entry_by_name` (`entry_by_name`), `core/include/libtracer/child_registry.hpp:child_registry_t::by_name` (`by_name`), `core/include/libtracer/child_registry.hpp:child_registry_t::size`/`core/include/libtracer/child_registry.hpp:child_registry_t::live_size` (`size`/`live_size`).
 
@@ -198,8 +192,7 @@ Signature source: `core/include/libtracer/fwd_router.hpp:fwd_router_t::fwd_route
 
 ```{mermaid}
 flowchart TB
-    IN["inbound frame on child NAME"] --> RAW["on_raw observer"]
-    RAW --> PEEK["offset peek: first dst segment"]
+    IN["inbound frame on child NAME"] --> PEEK["offset peek: first dst segment"]
     PEEK --> DEMUX{"child_registry_t<br/>longest_prefix"}
     DEMUX -->|"resolves to a link"| FWD["strip dst segment<br/>prepend inbound NAME to src"]
     FWD --> SG["stack-built heads<br/>+ untouched frame views"]
@@ -495,22 +488,19 @@ tested against hand-built frames with no live transport.
   re-slices from its own cursor.
 - **`sink_slot_t`** (`tr::sink_slot_t` — layer-neutral since #1049, when L4 took its
   three configuration seams into one; it has no `tr::net` spelling)
-  holds each of the router's three observability/terminus sinks —
-  reply, inbound-FWD, raw-frame. A sink is a
+  holds the router's reply-terminus sink (the inbound-FWD and raw-frame
+  observers that shared it were deleted, #2277). A sink is a
   `{function pointer, context}` pair set from a control thread and read on every
   transport receive thread, so the two halves have to be published as a unit: a
   torn read hands a newly installed function the previous sink's context, and
-  every sink casts that context. The slot is three words — a generation counter
+  the sink casts that context. The slot is three words — a generation counter
   and the pair — published through the counter and read with plain atomic loads,
   so the frame path takes no lock and never spins: a reader that lands inside a
   publish reports *no sink* for that frame rather than waiting. An unset slot
   therefore costs one load, which is what the plain member it replaced cost, and
-  the router serializes the three setters against each other with one mutex no
-  reader ever takes. It is the observer-shaped sibling of the transport plane's
-  `receiver_slot_t`, which owns the same discipline plus the delivery-tier select
-  ([transport](transport.md)) — and the size matters: a first cut that carried a
-  `std::mutex` per slot put the two sinks the FWD path reads on separate cache
-  lines and `bench_forward_demux` charged ~2% for it at 64 registered links.
+  the router serializes setters with one mutex no reader ever takes. It is the
+  observer-shaped sibling of the transport plane's `receiver_slot_t`, which owns
+  the same discipline plus the delivery-tier select ([transport](transport.md)).
 - **The grammar** (`tr::wire::grammar`) is the shared TLV header/trailer core
   underneath all of that; it is documented with the codec on
   [frame-codec](frame-codec.md).

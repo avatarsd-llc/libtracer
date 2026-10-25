@@ -30,10 +30,8 @@
  *   - step 3 + proof: AFTER C's departure, a producer write on B is delivered to A's
  *     `/sink/val` (delivery-is-a-write), byte-exact.
  *
- * Diagnostics (no semantics): an inbound-FWD observer on C records deliveries that were
- * misrouted to the ORCHESTRATOR instead of toward A, and B's subscriber-slot count is
- * sampled after the departure — so a failure localizes itself (target ignored vs edge
- * evicted with C's session).
+ * Diagnostic (no semantics): B's subscriber-slot count is sampled after the departure, so a
+ * failure localizes itself (target ignored vs edge evicted with C's session).
  *
  * Event/deadline driven (mailbox + cv), bounded, RAII stop->join->close teardown.
  */
@@ -232,26 +230,6 @@ std::uint32_t rope_value_u32(const tr::graph::value_t& value) {
     return tr::detail::load_le<std::uint32_t>(dec->payload);
 }
 
-/** @brief Count of FWD{WRITE} frames C received inbound — the misroute diagnostic. */
-struct misroute_counter_t {
-    std::mutex m;
-    std::size_t writes = 0;
-    void note(const tr::wire::tlv_node_t& fwd) {
-        const auto kids = fwd.children();
-        if (kids.empty()) return;
-        const tr::wire::tlv_node_t op = *kids.begin();
-        if (op.type() != type_t::VALUE || op.payload().empty() ||
-            std::to_integer<int>(op.payload()[0]) != static_cast<int>(fwd_op_t::WRITE))
-            return;
-        const std::lock_guard lock(m);
-        ++writes;
-    }
-    std::size_t snap() {
-        const std::lock_guard lock(m);
-        return writes;
-    }
-};
-
 constexpr auto kBudget = 5000ms;
 constexpr auto kQuietBudget = 300ms;
 
@@ -360,11 +338,10 @@ int main() {
     {
         graph_t graph_c;
         fwd_router_t router_c(graph_c);
-        // C's two router sinks, declared BEFORE `net_c` and therefore destroyed AFTER
-        // it (#1489). Both are fed from C's recv thread, which lives inside `net_c`;
+        // C's reply sink, declared BEFORE `net_c` and therefore destroyed AFTER
+        // it (#1489). It is fed from C's recv thread, which lives inside `net_c`;
         // `~transport_vertex_t` joining that worker is the only barrier there is.
         mailbox_t c_replies;
-        misroute_counter_t c_misroutes;
         transport_vertex_t net_c(graph_c, router_c);
         (void)net_c.register_module(std::string(tr::net::kWsClientSuggestedModule), "ws",
                                     conn_role_t::DIAL);
@@ -375,11 +352,6 @@ int main() {
                 static_cast<mailbox_t*>(ctx)->push(std::vector<std::byte>(b.begin(), b.end()));
             },
             &c_replies);
-        router_c.on_inbound(
-            [](void* ctx, std::string_view, const tr::wire::tlv_node_t& fwd) {
-                static_cast<misroute_counter_t*>(ctx)->note(fwd);
-            },
-            &c_misroutes);
         {
             const auto w = graph_c.write(path_t("/net/ws-client/conn"),
                                          conn_spec_view("b", b_port, "ws", "127.0.0.1"));
@@ -448,8 +420,6 @@ int main() {
         (void)graph_b.write(temp_v, owned(b_value_u32(0x0BEF0BEF)));
         const bool a_got_pre = a_rx.wait(2000ms).has_value();
         check(a_got_pre, "pre-departure delivery reaches A (the composed target routes)");
-        std::printf("    (diagnostic: FWD{WRITE} frames delivered to the ORCHESTRATOR: %zu)\n",
-                    c_misroutes.snap());
 
         // ----- recipe step 3: C departs — REAL teardown -----------------------------
         std::printf("\nStep 3 — C departs (remove_connection + node destruction):\n");
