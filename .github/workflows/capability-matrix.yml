@@ -48,3 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Capability matrix matches real test evidence
         run: python3 tools/gen_capability_matrix.py --check
+
+concurrency:
+  group: capability-matrix-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

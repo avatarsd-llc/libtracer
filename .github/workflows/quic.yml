@@ -163,3 +163,7 @@ jobs:
           export LD_LIBRARY_PATH="$HOME/msquic-install/lib:${LD_LIBRARY_PATH:-}"
           setarch "$(uname -m)" -R ctest --test-dir core/build-quic-insecure-tls \
             -R '^(quic|webtransport)$' --output-on-failure
+
+concurrency:
+  group: quic-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

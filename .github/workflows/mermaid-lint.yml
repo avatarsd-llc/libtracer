@@ -51,3 +51,7 @@ jobs:
         run: npm ci
       - name: Parse every docs mermaid block
         run: node tools/mermaid-lint/check-mermaid.mjs
+
+concurrency:
+  group: mermaid-lint-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

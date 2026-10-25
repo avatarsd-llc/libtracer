@@ -103,3 +103,7 @@ jobs:
       - name: Tear the testbed down
         if: always()
         run: docker compose -f tests/testbed/compose.yml down -v
+
+concurrency:
+  group: mesh-testbed-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

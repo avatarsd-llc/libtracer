@@ -83,3 +83,7 @@ jobs:
       - name: Symbol-size ratchet
         if: steps.scope.outputs.run == 'true'
         run: python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json
+
+concurrency:
+  group: symbol-ratchet-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

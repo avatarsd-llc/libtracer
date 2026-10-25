@@ -145,3 +145,7 @@ jobs:
         if: always()
         working-directory: tests/packaging/pio_esp32_can
         run: ls -la .pio/build/esp32c6/firmware.elf .pio/build/esp32c6/firmware.bin || true
+
+concurrency:
+  group: pio-esp32-can-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

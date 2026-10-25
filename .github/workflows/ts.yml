@@ -97,3 +97,7 @@ jobs:
       # deny(missing_docs). The rendered ./docs-api output is gitignored.
       - name: Docs coverage gate (TypeDoc)
         run: npm run docs
+
+concurrency:
+  group: ts-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

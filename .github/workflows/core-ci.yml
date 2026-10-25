@@ -1570,3 +1570,7 @@ jobs:
             exit 1
           fi
           echo "ok"
+
+concurrency:
+  group: core-ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

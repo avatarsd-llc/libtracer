@@ -93,3 +93,7 @@ jobs:
             grep -q "^#### ${pkg}" "${RUNNER_TEMP}/release-body.md" \
               || { echo "::error::${pkg} contributes nothing to the release body"; exit 1; }
           done
+
+concurrency:
+  group: version-consistency-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

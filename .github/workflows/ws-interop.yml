@@ -172,3 +172,7 @@ jobs:
         env:
           LIBTRACER_WS_FUZZ_HARNESS: ${{ github.workspace }}/core/build/tests/ws_fuzz_harness
         run: python3 tests/conformance/ws_diff_fuzz.py -n 2000
+
+concurrency:
+  group: ws-interop-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}

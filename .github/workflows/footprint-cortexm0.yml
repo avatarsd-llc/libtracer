@@ -142,3 +142,7 @@ jobs:
           name: footprint-cortexm0
           path: footprint-cortexm0.json
           if-no-files-found: ignore
+
+concurrency:
+  group: footprint-cortexm0-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
