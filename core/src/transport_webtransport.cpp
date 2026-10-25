@@ -1097,7 +1097,12 @@ std::uint16_t webtransport_transport_t::local_port() const noexcept {
 }
 
 bool webtransport_transport_t::link_up() const noexcept {
-    return impl_ && impl_->up.load(std::memory_order_relaxed);
+    return impl_ && impl_->up.load(std::memory_order_relaxed) &&
+           impl_->session.load(std::memory_order_relaxed);
+}
+
+bool webtransport_transport_t::dial_ended() const noexcept {
+    return ok() && !impl_->listen && !impl_->link_established.load(std::memory_order_relaxed);
 }
 
 bool webtransport_transport_t::session_up() const noexcept {

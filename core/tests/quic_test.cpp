@@ -95,6 +95,16 @@ std::array<tr::net::tls_profile_t, 2> g_profiles{};
 
 quic_dial_tls_t dev_tls() { return quic_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}; }
 
+/** @brief Poll until @p t's dial has ended (its handshake refused, #2306), or the budget
+ *         expires. */
+template <class Link>
+bool await_ended(const Link& t, std::chrono::milliseconds budget = 5000ms) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (!t.dial_ended() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(1ms);
+    return t.dial_ended();
+}
+
 /** @brief A dial returns before its handshake (#2306): poll until the link is up. */
 bool await_up(const tr::net::transport_t& t, std::chrono::milliseconds budget = 5000ms) {
     const auto deadline = std::chrono::steady_clock::now() + budget;
@@ -811,15 +821,13 @@ void test_spec_dial_trust_keys() {
     check(listening, "B: five self-signed dev-cert listeners are up on OS-granted ports");
 
     // A dial no longer waits for its handshake (#2306): creation succeeds once the handshake
-    // is STARTED, and the handshake's verdict is whether the link ever comes up. A refused
-    // leg is given a second; leg 3, the same dial to an equal listener, comes up in
-    // milliseconds, so a refused leg that stays down for a second was refused.
+    // is STARTED, and the handshake's verdict is whether the link comes up or its dial ends.
     const auto link_a = [&net_a](std::string_view nm) {
         return tr::testing::link_of(net_a, std::string("net/quic-client/").append(nm));
     };
     const auto stays_down = [&](std::string_view nm) {
-        const tr::net::transport_t* const l = link_a(nm);
-        return l != nullptr && !await_up(*l, 1000ms);
+        const auto* const l = dynamic_cast<const quic_transport_t*>(link_a(nm));
+        return l != nullptr && await_ended(*l) && !l->link_up();
     };
 
     // 1. No trust key at all. The default is to verify, the dev cert validates
@@ -1010,16 +1018,15 @@ void test_dial_does_not_wait() {
                        ::getsockname(hole, reinterpret_cast<sockaddr*>(&at), &len) == 0;
     check(bound, "a silent UDP peer is bound on loopback");
 
+    // The proof the constructor did not wait is the events, not a stopwatch: it returned
+    // with the dial started, not up, and not yet ended — the old constructor could only
+    // return once the handshake had failed.
     std::atomic<int> downs{0};
-    const auto t0 = std::chrono::steady_clock::now();
+    const auto count = [](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); };
     quic_transport_t dialer("127.0.0.1", ntohs(at.sin_port), dev_tls());
-    const auto took = std::chrono::steady_clock::now() - t0;
-    dialer.set_down_notifier([](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); },
-                             &downs);
-    check(dialer.ok() && !dialer.link_up(), "the dial is started and not up");
-    // Half of msquic's 10 s handshake idle timeout: the constructor's own TLS credential load
-    // stays far below it even on a loaded sanitizer runner, and a wait would sit above it.
-    check(took < 5s, "the constructor returned without waiting for the handshake");
+    const bool missed = dialer.set_down_notifier(count, &downs);
+    check(dialer.ok() && !dialer.link_up() && !dialer.dial_ended() && !missed && downs.load() == 0,
+          "the constructor returned with the dial started, not up and not ended");
 
     const std::array<std::byte, 3> small{std::byte{1}, std::byte{2}, std::byte{3}};
     dialer.send(std::span<const std::byte>(small));
@@ -1029,9 +1036,20 @@ void test_dial_does_not_wait() {
     const auto deadline = std::chrono::steady_clock::now() + 20s;
     while (downs.load() == 0 && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(10ms);
-    check(downs.load() == 1 && !dialer.link_up(),
+    check(downs.load() == 1 && !dialer.link_up() && dialer.dial_ended(),
           "the handshake that never completed ends in one link-down fire");
     if (hole >= 0) ::close(hole);
+
+    // A refusal that lands BEFORE any notifier is installed is kept, not lost: the install
+    // reports it, so the installer runs its notifier itself (what the router does).
+    quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+    std::atomic<int> late{0};
+    quic_transport_t refused("127.0.0.1", listener.local_port(),
+                             quic_dial_tls_t{.ca_file = g_other_cert});
+    check(refused.ok() && await_ended(refused) && !refused.link_up(),
+          "a wrong-CA dial is started, then ends on its refused handshake");
+    check(refused.set_down_notifier(count, &late) && late.load() == 0,
+          "the fire that found no notifier is reported to the late install");
 }
 
 }  // namespace

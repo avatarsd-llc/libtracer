@@ -185,6 +185,11 @@ class quic_transport_t final : public transport_t {
      *         down (peer/transport/idle). Relaxed atomic. */
     [[nodiscard]] bool link_up() const noexcept override;
 
+    /** @brief DIAL: true once this dial's one connection has ended — its handshake failed
+     *         or it came up and went down — so an owner tells a failed dial from a pending
+     *         one (#2306). Set just before the link-down fire. LISTEN: always false. */
+    [[nodiscard]] bool dial_ended() const noexcept;
+
     /** @brief Frames dropped because the RX backend was exhausted (backpressure,
      *         ADR-0039 §4 / ADR-0042 §2) — drained off the stream, never an OOM. */
     [[nodiscard]] std::uint64_t dropped_rx() const noexcept;

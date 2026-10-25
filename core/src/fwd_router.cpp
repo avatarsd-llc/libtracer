@@ -894,7 +894,7 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     // ADR-0063 §3: serialize control-plane writers. The registry's scan-then-append and the
     // receiver chain's append are both non-atomic, and two creates arriving on two
     // different transports' receive threads are genuinely concurrent. Readers take nothing.
-    const std::lock_guard ctl(ctl_m_);
+    std::unique_lock ctl(ctl_m_);
     // ALWAYS-ON, and only for a bound that is REAL (#523). The width bound this replaced was
     // a debug `assert` of "1..3 segments" — which, compiled out under NDEBUG, meant every
     // release build had no bound at all while the descent could only reach three. The width
@@ -1073,17 +1073,19 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
     publish_ctx(ctx);
     // Departure seam (RFC-0009 §D extended): the same stable ctx carries the child's
     // NAME to link_down when the transport reports its one connection dead.
-    link.set_down_notifier(
-        [](void* c) {
-            auto* const cc = static_cast<child_rx_ctx_t*>(c);
-            cc->self->link_gone(cc->name, {.conn = cc->entry->conn_slot});
-            // The eviction released this child's index slot, so the cached token is spent
-            // (#1417). Dropped here rather than inside `link_down`, which is also a public
-            // by-NAME door with no ctx in hand; a reconnect over the same registration mints
-            // a fresh token on its first subscribe.
-            cc->link_token.store(0, std::memory_order_relaxed);
-        },
-        &ctx);
+    constexpr transport_t::down_fn_t gone = [](void* c) {
+        auto* const cc = static_cast<child_rx_ctx_t*>(c);
+        cc->self->link_gone(cc->name, {.conn = cc->entry->conn_slot});
+        // The eviction released this child's index slot, so the cached token is spent
+        // (#1417). Dropped here rather than inside `link_down`, which is also a public
+        // by-NAME door with no ctx in hand; a reconnect over the same registration mints
+        // a fresh token on its first subscribe.
+        cc->link_token.store(0, std::memory_order_relaxed);
+    };
+    // A link that went down before this install (a QUIC dial whose handshake failed at
+    // once, #2306) is evicted below, once the control lock is let go: the eviction takes
+    // graph locks, the notifier's own discipline.
+    const bool gone_already = link.set_down_notifier(gone, &ctx);
     if (link.delivers_ropes()) {
         link.set_rope_receiver(
             [](void* c, view::rope_t frame) {
@@ -1101,6 +1103,8 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
             },
             &ctx);
     }
+    ctl.unlock();
+    if (gone_already) gone(&ctx);
     return true;
 }
 

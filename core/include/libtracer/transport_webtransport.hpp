@@ -247,10 +247,15 @@ class webtransport_transport_t final : public transport_t {
     /** @brief LISTEN mode: the actual bound UDP port (resolves an ephemeral 0). */
     [[nodiscard]] std::uint16_t local_port() const noexcept;
 
-    /** @brief Liveness (the @ref transport_t::link_up contract): true from the
-     *         QUIC CONNECTED event until the connection (and with it the
-     *         session) shuts down. Relaxed atomic. */
+    /** @brief Liveness (the @ref transport_t::link_up contract): true while the
+     *         WebTransport session is up (@ref session_up) on a connected QUIC link, so a
+     *         send seen up has its frame channel (#2306). Relaxed atomics. */
     [[nodiscard]] bool link_up() const noexcept override;
+
+    /** @brief DIAL: true once this dial's one connection has ended — its handshake failed
+     *         or it came up and went down — so an owner tells a failed dial from a pending
+     *         one (#2306). Set just before the link-down fire. LISTEN: always false. */
+    [[nodiscard]] bool dial_ended() const noexcept;
 
     /** @brief True once the WebTransport session is established — the extended
      *         CONNECT was accepted (LISTEN: request validated + 200 sent;

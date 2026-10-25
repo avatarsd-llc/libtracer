@@ -26,6 +26,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   refused at creation with `TRANSPORT_DOWN`: the endpoint is created and never comes up. The
   internal 10 s handshake wait is gone; msquic's own handshake idle timeout ends a dial that
   never answers.
+- **A link-down fire is no longer lost when it comes before the notifier (#2306).**
+  `transport_t::set_down_notifier` now returns `bool`: true when the link went down before
+  this install, so the installer runs its notifier once itself after letting its own locks go.
+  `fwd_router_t::add_child` and the self-heal engine do. New `dial_ended()` on
+  `quic_transport_t` and `webtransport_transport_t` tells a failed dial from a pending one.
+  `webtransport_transport_t::link_up()` is now true only while the session is up, so a link
+  seen up has its frame channel.
 - **A PAIR chain is learned with no flag (RFC-0029 §6.2/§7.1, #2245) — BREAKING (wire).** A
   successful terminus reply seeds its `src` with `PATH{<target PAIR>}`, and every relaying hop
   prepends its PAIR (else its NAME run), so the origin receives its whole chain in `src`. Every

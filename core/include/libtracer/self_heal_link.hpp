@@ -291,8 +291,10 @@ class self_heal_link_t final : public transport_t {
     [[nodiscard]] bool attempt_locked(std::unique_lock<std::mutex>& l);
 
     /** @brief Install the engine's trampolines on a fresh socket and start it receiving
-     *         (frames land in this engine's `rx_`, i.e. whatever the router installed). */
-    void wire_socket(sock_t& sock);
+     *         (frames land in this engine's `rx_`, i.e. whatever the router installed).
+     *  @return True iff the socket went down before its notifier was in (a QUIC dial whose
+     *          handshake failed at once, #2306): the attempt failed. */
+    [[nodiscard]] bool wire_socket(sock_t& sock);
 
     /** @brief The inner socket's down event, on the socket's own thread — flags the loss,
      *         parks the corpse, wakes the worker. Never destroys, never publishes. */

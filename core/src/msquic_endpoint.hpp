@@ -673,11 +673,15 @@ class msquic_endpoint_t {
             conn = nullptr;
             return false;
         }
+        // The dial's one down fire is armed BEFORE the start: a handshake that fails at once
+        // lands its shutdown callback while ConnectionStart is still returning.
+        link_established.store(true, std::memory_order_relaxed);
         tsan_release(this);  // publish the constructed endpoint to the callbacks
         if (QUIC_FAILED(api->ConnectionStart(conn, config, QUIC_ADDRESS_FAMILY_UNSPEC, host.c_str(),
-                                             peer_port)))
+                                             peer_port))) {
+            link_established.store(false, std::memory_order_relaxed);  // nothing started
             return false;
-        link_established.store(true, std::memory_order_relaxed);  // the dial's one down fire
+        }
         return true;
     }
 
