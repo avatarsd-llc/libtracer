@@ -168,16 +168,15 @@ constexpr int kReconnectBackoffMs = 1500;
 #endif
 
 /**
- * @brief Poll slice for the destructor's sender drain (ms). A sleep, not a spin: a
- *        higher-priority destroying task that only yielded would starve on a unicore chip
- *        exactly the senders it is waiting for.
+ * @brief The tally's top bit: a destructor is waiting for the count under it to reach zero
+ *        (#2338).
  *
- * DELIBERATELY FIXED (#1160). One tick is the smallest amount of "let the senders run"
- * the scheduler can express, so this is a floor imposed by the RTOS rather than a number
- * chosen here — raising it only makes teardown coarser and lowering it cannot work. There
- * is no trade for an embedder to make, so there is no knob.
+ * The drain blocks on the tally itself (`std::atomic::wait`), so it needs no clock and no
+ * slice, and a sender pays for the wake only when it is the one that matters: the last one
+ * out while this bit is set. Every other exit is the one `fetch_sub` it always was. The
+ * count under the bit is the number of senders, which never comes near 2^31.
  */
-constexpr int kDrainSliceMs = 1;
+constexpr std::uint32_t kDrainWaiting = std::uint32_t{1} << 31;
 
 /**
  * @brief TCP keepalive policy for the dialed connection: idle seconds before the first
@@ -221,8 +220,20 @@ class sender_exit_t {
    public:
     /** @brief Adopt an ALREADY-raised @p tally; lower it on scope exit. */
     explicit sender_exit_t(std::atomic<std::uint32_t>& tally) noexcept : tally_(tally) {}
-    /** @brief Lower the tally, releasing everything this sender did to the drain. */
-    ~sender_exit_t() { tally_.fetch_sub(1, std::memory_order_release); }
+    /**
+     * @brief Lower the tally, releasing everything this sender did to the drain, and wake
+     *        the drain if this was its last sender.
+     *
+     * The notify is this sender's last act, and the woken destructor may already be
+     * freeing the object. libstdc++ (the host's and the IDF toolchains') keys the wake on
+     * the tally's ADDRESS, in a waiter table of its own, and loads and stores nothing at
+     * it: the same address-only wake a mutex unlock ends with, which is what lets any
+     * `std::mutex` be destroyed by the thread that just locked it after another's unlock.
+     */
+    ~sender_exit_t() {
+        if (tally_.fetch_sub(1, std::memory_order_release) == (kDrainWaiting | 1))
+            tally_.notify_all();
+    }
 
     sender_exit_t(const sender_exit_t&) = delete;
     sender_exit_t& operator=(const sender_exit_t&) = delete;
@@ -455,8 +466,15 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
     // A caller that entered `send()` but whose raise lands after the last load below is
     // NOT waited out, and neither is one that has yet to call at all; both are the same
     // embedder-owned lifetime residual, not something this loop can widen its way into.
-    while (senders_.load(std::memory_order_acquire) != 0)
-        std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
+    //
+    // The wait is on the tally (#2338): the bit says a drain is waiting, the last sender out
+    // under it wakes the drain, and `wait` returns at once if the count moved after the read
+    // it was handed, so no wake is lost between the read and the block.
+    std::uint32_t n = senders_.fetch_or(kDrainWaiting, std::memory_order_acquire);
+    while ((n & ~kDrainWaiting) != 0) {
+        senders_.wait(n, std::memory_order_acquire);
+        n = senders_.load(std::memory_order_acquire);
+    }
     // Every sender has left, so no writer holds the role: the close only returns what is
     // left in the rings to `tx_src_` before that store can go.
     egress_.close(peer_);

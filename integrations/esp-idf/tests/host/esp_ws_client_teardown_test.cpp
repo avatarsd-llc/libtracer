@@ -265,6 +265,57 @@ void test_teardown_does_not_destroy_handles_under_a_sender() {
 }
 
 /**
+ * @brief The drain waits on the tally, and the LAST of several senders is what wakes it
+ *        (#2338).
+ *
+ * One sender is parked inside the transport and three more queue behind it on the send
+ * serializer, so the tally is at four when the destructor sets its waiting bit. Every
+ * sender but the last leaves without a wake; the destructor must still be blocked after
+ * each of them, and return only once the fourth is out. The suite's sanitizer builds are
+ * the "no sender touches freed state" half: a sender reading the link after the
+ * destructor returned is a use-after-free under ASan and a race under TSan.
+ */
+void test_the_drain_wakes_on_the_last_sender_out() {
+    std::printf("the drain wakes on the last sender out:\n");
+    fake_ws::reset();
+    fake_ws::hold_writes(true);
+
+    auto link = dialing_link();
+    check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
+    const std::vector<std::byte> frame = payload();
+    esp_ws_client_link_t* const under_test = link.get();  // see the headline case
+
+    constexpr int kSenders = 4;
+    std::atomic<int> seq{0};
+    std::atomic<int> left_at[kSenders] = {};
+    std::vector<std::thread> senders;
+    senders.emplace_back([&] {
+        under_test->send(frame);
+        left_at[0].store(++seq, std::memory_order_release);
+    });
+    check(wait_until([] { return fake_ws::writers_inside() >= 1; }, 2s),
+          "the first sender is parked inside the transport");
+    for (int i = 1; i < kSenders; ++i)
+        senders.emplace_back([&, i] {
+            under_test->send(frame);
+            left_at[i].store(++seq, std::memory_order_release);
+        });
+    // Placed by time, pinned by what the fake did not see (as in the headline case).
+    std::this_thread::sleep_for(50ms);
+    check(fake_ws::writes_started() == 1, "the other three are queued, not in the transport");
+
+    link.reset();
+    const int d_pos = ++seq;
+    for (std::thread& t : senders) t.join();
+
+    for (const std::atomic<int>& at : left_at) {
+        const int pos = at.load(std::memory_order_acquire);
+        check(pos != 0 && pos < d_pos, "every sender left before the destructor returned");
+    }
+    check(fake_ws::handle_misuse() == 0, "with no operation on a destroyed handle");
+}
+
+/**
  * @brief Defect 2: the reconnect backoff is a bound, not a sentence.
  *
  * With every dial failing, the recv thread spends its life in the backoff. Pre-fix that
@@ -1055,6 +1106,7 @@ void test_a_ping_mid_fragment_is_answered_whole() {
 int main() {
     std::printf("esp_ws_client_link bounded-blocking host suite (#952, #1058):\n");
     test_teardown_does_not_destroy_handles_under_a_sender();
+    test_the_drain_wakes_on_the_last_sender_out();
     test_teardown_does_not_wait_out_the_reconnect_backoff();
     test_a_teardown_that_lands_mid_dial_costs_no_dial_bound();
     test_an_orphaned_dial_that_succeeds_closes_and_releases_once();
