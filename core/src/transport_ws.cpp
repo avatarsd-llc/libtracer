@@ -7,6 +7,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -14,7 +15,6 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -671,10 +671,13 @@ ws_client_transport_t::ws_client_transport_t(std::string_view host, std::uint16_
     // no more trusted with our pre-auth memory than a peer that dialled us.
     max_handshake_ = ws_server_transport_t::handshake_cap(max_handshake);
     // Seed the per-frame masking-key stream with something that varies between
-    // connections (steady_clock + this address). Not crypto-strong — RFC 6455
-    // masking exists for proxy/cache safety, not to defend against a peer.
-    std::uint64_t seed =
-        static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    // connections: one OS entropy read per dial, mixed with this address (#2305). Not
+    // crypto-strong — RFC 6455 masking exists for proxy/cache safety, not to defend against
+    // a peer. A failed read (ENOSYS, or EAGAIN early in boot) leaves the address-only mix;
+    // there is no clock fallback, because the library reads no clock.
+    std::uint64_t seed = 0;
+    if (::getrandom(&seed, sizeof(seed), GRND_NONBLOCK) != static_cast<ssize_t>(sizeof(seed)))
+        seed = 0;
     seed ^= reinterpret_cast<std::uintptr_t>(this);
     mask_state_.store(seed, std::memory_order_relaxed);
 
