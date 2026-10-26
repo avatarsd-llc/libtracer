@@ -586,8 +586,11 @@ struct default_config_t {
      * one `value_t*` swapped and retained inside @ref guard_t. It has no registry, no
      * deferred reclamation and a publish that cannot fail, and its one wait is the guard (#1618).
      *
-     * `hazard_slot_t` is the lock-free alternative for a host whose reads of one shared vertex
-     * contend across many cores. Override fragment: `using lkv_slot_t = hazard_slot_t;`. The
+     * `hazard_slot_t` is the lock-free opt-in. Target: a WIDE many-core host. Precondition: many
+     * readers contend on one hot vertex. A single core gains almost nothing from it and
+     * publishes slower, so a NARROW or MID build keeps `single_writer_slot_t`. This axis is
+     * independent of `reclaim_policy_t`: binding one says nothing about the other.
+     * Override fragment: `using lkv_slot_t = hazard_slot_t;`. The
      * named type must satisfy the contract in `%lkv_slot.hpp` — in particular `load()` returns an
      * OWNING handle, and the policy declares `may_spin`, which is refused where
      * @ref kSpinWaitSafe is `false`.
@@ -619,10 +622,12 @@ struct default_config_t {
      * OUTERMOST bracket (not per edge; the fence is a compiler barrier under `kSingleCore`).
      *
      * The one opt-out: `using reclaim_policy_t = reclaim_strict_t;`, which tracks nothing and
-     * releases inline before `unsubscribe()` returns. Take it only where the deployment can
-     * show that no dispatch is live when it unsubscribes — on any thread — because
-     * `reclaim_strict_t` cannot detect it. `reclaim_local_t` is withdrawn: a fragment that
-     * still names it is refused with the migration note.
+     * releases inline before `unsubscribe()` returns. Target: NARROW bare metal. Precondition, a
+     * hard rule: no preemption and no second core, because `reclaim_strict_t` cannot detect a
+     * violation and preemption alone reproduces the use-after-free. A single-core RTOS keeps
+     * the default. This axis is independent of `lkv_slot_t`: `hazard_slot_t` is a WIDE
+     * opt-in on that axis, not an alternative to this one. `reclaim_local_t` is withdrawn: a
+     * fragment that still names it is refused with the migration note.
      */
     using reclaim_policy_t = reclaim_qsbr_t;
 

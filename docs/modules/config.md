@@ -101,14 +101,29 @@ on a chip, the address-striped `mutex_guard_t` on a host), with no registry and 
 publish that cannot fail. (`kSingleWriter`, the one-publisher-per-vertex promise
 an RTOS build used to state, was removed in
 [#1718](https://github.com/avatarsd-llc/libtracer/issues/1718): no code read it.)
-`hazard_slot_t` is the lock-free host opt-in: an `atomic<node_t*>` reclaimed
+`hazard_slot_t` is the lock-free opt-in for a WIDE many-core host with many
+readers of one hot vertex: an `atomic<node_t*>` reclaimed
 with hazard pointers, which costs a fixed registry sized by `kHazardReaderSlots`,
 a heap node per published value, and a publish that can fail under memory
-exhaustion. Every
+exhaustion. A single core gains almost nothing from it and publishes slower, so
+NARROW and MID builds keep `single_writer_slot_t`. Every
 policy returns an *owning* handle from `load()` and declares `may_spin`, and a
 build whose `kSpinWaitSafe` is `false` refuses a policy that can spin. The
 refcount slot `sp_atomic_slot_t` was removed because libstdc++ spin-locks it
 (#1618).
+
+**Reclamation policy** — `reclaim_policy_t` picks when a retired subscription's
+`{fn, ctx}` pair is freed ([reference/17](../reference/17-reclamation-policy.md)).
+`reclaim_qsbr_t` is the default on every target, a single-core RTOS included:
+preemption alone reproduces the use-after-free it prevents, and on a unicore build
+it costs about 22 instructions per publish and no fence. `reclaim_strict_t` is the
+opt-out, and its precondition is a hard rule: NARROW bare metal with no preemption
+and no second core, such as a superloop on a single-core Cortex-M. It cannot detect
+a violation.
+
+This axis and the LKV slot axis are independent. `hazard_slot_t` (WIDE) and
+`reclaim_strict_t` (NARROW bare metal) are parallel opt-ins, and neither one
+supersedes the other.
 
 ## Pitfalls
 

@@ -57,8 +57,14 @@
  *     bind: its one wait is `config_t::guard_t`, an interrupt-masked critical section
  *     there and an address-striped one-word lock on a host, whose contender sleeps rather than
  *     spins on a descheduled holder (#1618).
- *   - @ref tr::graph::hazard_slot_t — the lock-free opt-in for a host whose reads of one shared
- *     vertex contend across many cores.
+ *   - @ref tr::graph::hazard_slot_t — the lock-free opt-in. Target: a WIDE many-core host.
+ *     Precondition: many readers of one hot vertex. A single core gains almost nothing and
+ *     publishes slower.
+ *
+ * This axis (`lkv_slot_t`) is independent of the subscription-pair reclamation policy
+ * (`reclaim_policy_t`, `%reclaim.hpp`): QSBR is the default there on every target, and
+ * `reclaim_strict_t` is a NARROW bare-metal opt-out on that axis. Neither policy supersedes
+ * the other.
  *
  * The refcount slot both replace, `std::atomic<std::shared_ptr<const rope_t>>`
  * (`sp_atomic_slot_t`), was deleted because it was the only policy that could spin: libstdc++
@@ -1001,8 +1007,9 @@ inline final_sweep_t::~final_sweep_t() {
  * readers (7.4 M/s) — see the table in this file's header, and ADR-0069 §6 for why the
  * model bench's 20.8× did not survive contact with the whole read path.
  *
- * A host opt-in. The gain over the refcount slot it replaced is a concurrency gain, so a
- * single-core node buys nothing from it and still pays `(kHazardReaderSlots + 1) * 128` bytes
+ * A WIDE opt-in, for many readers of one hot vertex on a many-core host. The gain over the
+ * refcount slot it replaced is a concurrency gain, so a single-core node buys almost nothing
+ * from it, publishes slower, and still pays `(kHazardReaderSlots + 1) * 128` bytes
  * of registry, a deferred-reclamation lifetime rule (see `retire_and_flush`), and a publish
  * that can fail. Such a node binds @ref single_writer_slot_t.
  *

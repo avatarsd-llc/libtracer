@@ -276,7 +276,16 @@ jobs:
           - acl_full: OFF
             lkv_slot: single_writer_slot_t
             root: heap
-    name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})${{ matrix.root && format(' root={0}', matrix.root) || '' }}
+          # THE OTHER RECLAMATION POLICY (#894, ADR-0080). `reclaim_qsbr_t` is the default on
+          # every target (Amendment 1, #2127) and every other leg compiles it;
+          # `reclaim_strict_t` is the one opt-out (NARROW bare metal, no preemption and no
+          # second core), and a seam whose other member nothing builds has already rotted. This
+          # leg binds it with core/tests/presets/reclaim-strict and runs the whole suite —
+          # `reclaim_test` follows the binding by `if constexpr`. It was its own job until #2300.
+          - acl_full: OFF
+            lkv_slot: single_writer_slot_t
+            reclaim: strict
+    name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})${{ matrix.root && format(' root={0}', matrix.root) || '' }}${{ matrix.reclaim && format(' reclaim={0}', matrix.reclaim) || '' }}
     steps:
       # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
       # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
@@ -314,13 +323,14 @@ jobs:
       - name: Configure + build (C++23) + ctest
         env:
           LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
-          LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
+          LT_EXPECT_RECLAIM_POLICY: ${{ matrix.reclaim == 'strict' && 'reclaim_strict_t' || 'reclaim_qsbr_t' }}
           LT_EXPECT_ACL_POLICY: ${{ matrix.acl_full == 'ON' && 'full_acl_policy_t' || 'allow_only_policy_t' }}
         run: |
           preset=""
           if [ "${{ matrix.acl_full }}" = "ON" ]; then preset="-I$PWD/core/tests/presets/acl-full"; fi
           if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
           if [ "${{ matrix.root }}" = "heap" ]; then preset="-I$PWD/core/tests/presets/heap-root"; fi
+          if [ "${{ matrix.reclaim }}" = "strict" ]; then preset="-I$PWD/core/tests/presets/reclaim-strict"; fi
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="$preset"
           cmake --build core/build --parallel "$BUILD_JOBS"
           ctest --test-dir core/build --output-on-failure
@@ -400,106 +410,6 @@ jobs:
             -DLIBTRACER_TRANSPORT_WS=OFF -DLIBTRACER_TRANSPORT_CAN=OFF
           cmake --build core/build-minimal --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-minimal --output-on-failure
-      - name: Compiler cache statistics (this job)
-        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
-        # are shared by every runner. Absent on the hosted route (no `/ccache`).
-        if: always() && env.CCACHE_DIR != ''
-        run: ccache --show-log-stats -v || true
-      - name: Restore workspace ownership for the host runner
-        # Hands the container's root-owned tree back to the host runner user. WHY, and
-        # why it is duplicated inline rather than factored into a composite action: the
-        # WORKSPACE OWNERSHIP section of this file's header. Gated by
-        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
-        # END with this exact step.
-        if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
-
-  # THE OTHER RECLAMATION POLICY (#894, ADR-0080). `reclaim_qsbr_t` is the default on every
-  # target (Amendment 1, #2127) and every other leg here compiles it; `reclaim_strict_t` is the
-  # one opt-out, and a seam whose other member nothing ever builds is a seam that has already
-  # rotted. This leg binds it and runs the whole suite — `reclaim_test` follows the binding by
-  # `if constexpr`, dropping the four cases the policy forbids, so one executable serves both.
-  #
-  # It is bound with an ORDINARY override fragment rather than a `-D` knob, per ADR-0068: a new
-  # configuration member does not get a CMake variable, it is set in `config_override.hpp` as
-  # plain C++. Three lines that inherit the defaults, so it cannot drift from them.
-  build-test-reclaim-strict:
-    needs: changes
-    if: needs.changes.outputs.relevant == 'true'
-    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container:
-      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
-      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
-      # runners.slice (11 cores for all runners + containers together), so no per-container
-      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
-      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
-      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
-      options: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
-    # Measured healthy max 4.88 min. 20 = ~4x; same group, same container apt step.
-    timeout-minutes: 20
-    steps:
-      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
-      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
-      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
-      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
-      # sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS) + compiler cache
-        run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
-          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
-          echo "BUILD_JOBS=$jobs"
-          if [ -d /ccache ]; then
-            {
-              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
-              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
-              echo "CCACHE_DIR=/ccache"
-              echo "CCACHE_MAXSIZE=20G"
-              echo "CCACHE_COMPILERCHECK=content"
-              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
-              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
-            } >> "$GITHUB_ENV"
-            echo "ccache: ON (/ccache)"
-          fi
-      - uses: actions/checkout@v4
-        with:
-          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
-          # re-roots `.git/config` after the cleanup step has already run.
-          persist-credentials: false
-      - name: Bind reclaim_strict_t, build + ctest
-        env:
-          LT_EXPECT_LKV_SLOT: single_writer_slot_t
-          LT_EXPECT_RECLAIM_POLICY: reclaim_strict_t
-          LT_EXPECT_ACL_POLICY: allow_only_policy_t
-        run: |
-          mkdir -p "$PWD/reclaim-strict/libtracer"
-          cat > "$PWD/reclaim-strict/libtracer/config_override.hpp" <<'FRAGMENT'
-          /**
-           * @file
-           * @brief GENERATED CI fixture — the ADR-0080 zero-cost reclamation policy bound.
-           */
-          #pragma once
-
-          namespace tr::graph {
-
-          /** @brief The defaults, with re-entrant unsubscribe forbidden (an MCU target). */
-          struct reclaim_strict_config_t : default_config_t {
-              using reclaim_policy_t = reclaim_strict_t;
-              // The two link modules are opt-in since v0.17.0 (#1670); this leg's subject is
-              // elsewhere, so it keeps the full test build's modules on.
-              static constexpr bool kBusLinks = true;
-              static constexpr bool kSelfHealLinks = true;
-              // The fault-injection tests run here too, so the hooks are compiled in (#1719).
-              static constexpr bool kFaultInjection = true;
-          };
-
-          using config_t = reclaim_strict_config_t;
-
-          }  // namespace tr::graph
-          FRAGMENT
-          cmake -S core -B core/build-strict -DBUILD_TESTING=ON \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
-          cmake --build core/build-strict --parallel "$BUILD_JOBS"
-          ctest --test-dir core/build-strict --output-on-failure
       - name: Compiler cache statistics (this job)
         # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
         # are shared by every runner. Absent on the hosted route (no `/ccache`).
@@ -1547,7 +1457,7 @@ jobs:
   build-test-required:
     name: build-test
     if: always()
-    needs: [changes, build-test, build-test-minimal-set, build-test-reclaim-strict, build-test-bus-closed, build-test-self-heal-closed, build-test-arm64, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
+    needs: [changes, build-test, build-test-minimal-set, build-test-bus-closed, build-test-self-heal-closed, build-test-arm64, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
