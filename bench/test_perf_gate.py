@@ -1111,7 +1111,7 @@ class GateTimesFamilyByFamily(unittest.TestCase):
                               pinned=True, clk_tck=100, score_pressure=not multi)
 
     def test_a_foreign_intruder_is_contended_on_either_set(self):
-        # 12% of the window was someone else's CPU time; our own cgroup psi reads 0.
+        # 12% of the window was someone else's CPU time; the bench slice's psi reads 0.
         for multi in (False, True):
             with self.subTest(multi=multi):
                 rc, out = self.verdict_for(self.run_cond(8.8, 0.0, multi))

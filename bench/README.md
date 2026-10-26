@@ -1816,9 +1816,9 @@ vector growth nor its page faults land inside a sample.
 Each family is also tagged SINGLE- or MULTI-threaded (`bench_libtracer --families`).
 When both arms support it, `perf_gate.py` times the two sets as separate invocations and
 compares both A/B: every `--family-set single` run first, judged on foreign CPU time and
-own-cgroup pressure, then every `--family-set multi` run, judged on foreign CPU time only. A
+bench-slice pressure, then every `--family-set multi` run, judged on foreign CPU time only. A
 MULTI family (`inproc-mt*`, `acl-inherit-d4-mt4`, `*alloc-mt*`) queues the bench's own
-threads on the pinned CPUs, and the own-cgroup pressure that raised turned gates INCONCLUSIVE
+threads on the pinned CPUs, and the bench-slice pressure that raised turned gates INCONCLUSIVE
 with 0% foreign load. A real intruder still shows as foreign CPU time on either set. The
 gated MULTI points are `inproc-mt4/64/1/4`, `acl-inherit-d4-mt4/64/1/4` and
 `poolalloc-mt4/64/1/1`.

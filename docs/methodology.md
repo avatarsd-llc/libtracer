@@ -365,10 +365,12 @@ Details that make these trustworthy:
   of the wall time — not `avg10`, a 10 s moving average a short execution would inherit
   from the run before it). An execution shorter than 0.5 s is too short to measure a
   share on and is judged on foreign time alone, and a multi-threaded execution, which
-  raises pressure itself, has its pressure recorded but not scored. On the pinned host the pressure that decides is the bench job's
-  **own cgroup's** `cpu.pressure`: its CPUs are cgroup-isolated, so host-wide
-  `/proc/pressure/cpu` says nothing about them and is recorded for information only. On
-  unpinned hosted runners, host-wide pressure decides. An execution is
+  raises pressure itself, has its pressure recorded but not scored. The pressure that decides, pinned or not, is the
+  **bench slice's** `cpu.pressure` (`/sys/fs/cgroup/bench.slice/cpu.pressure`): the bench
+  CPUs are that slice's alone, so host-wide `/proc/pressure/cpu` says nothing about them
+  and is recorded for information only (maintainer ruling, 2026-10-26, after host-wide
+  pressure dropped every pair of a quiet live A/A). A host with no bench slice, such as a
+  hosted runner, has no pressure to score and is judged on foreign time alone. An execution is
   **contended** when foreign time exceeds **2 %** of its window or pressure exceeds **5**;
   a contended execution is re-run, up to three attempts, and the first clean one is kept.
   The per-PR gate judges **each family's own window**: a pair whose execution
