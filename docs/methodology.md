@@ -369,8 +369,10 @@ Details that make these trustworthy:
   **bench slice's** `cpu.pressure` (`/sys/fs/cgroup/bench.slice/cpu.pressure`): the bench
   CPUs are that slice's alone, so host-wide `/proc/pressure/cpu` says nothing about them
   and is recorded for information only (maintainer ruling, 2026-10-26, after host-wide
-  pressure dropped every pair of a quiet live A/A). A host with no bench slice, such as a
-  hosted runner, has no pressure to score and is judged on foreign time alone. An execution is
+  pressure dropped every pair of a quiet live A/A). Where a bench slice is expected (a
+  pinned run, or `BENCH_SLICE` set) but its `cpu.pressure` cannot be read, the execution is
+  contended: the guard fails closed. Only a run where none is expected (unpinned, with
+  `BENCH_SLICE` unset, such as a hosted runner) is judged on foreign time alone. An execution is
   **contended** when foreign time exceeds **2 %** of its window or pressure exceeds **5**;
   a contended execution is re-run, up to three attempts, and the first clean one is kept.
   The per-PR gate judges **each family's own window**: a pair whose execution

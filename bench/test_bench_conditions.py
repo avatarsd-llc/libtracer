@@ -67,11 +67,11 @@ CG = "/runners.slice/actions.runner.studio-bench.service"
 
 
 def sample(stat: str, pressure: int | None, wall_ns: int, cpu: int = 7,
-           bench_slice: int | None = None, avg10: float = 0.0) -> bc.Sample:
+           bench_slice: int | None = 0, avg10: float = 0.0) -> bc.Sample:
     """@brief One snapshot built from synthetic /proc text through the real reader.
 
-    @p pressure is the host-wide PSI `some total=` (µs); @p bench_slice, when given, is the
-    bench slice's own counter, at the path the real reader reads. The job's own cgroup is
+    @p pressure is the host-wide PSI `some total=` (µs); @p bench_slice is the bench
+    slice's own counter, at the path the real reader reads, and None leaves that file out. The job's own cgroup is
     always present and NEVER read for pressure: the slice is the one scored source
     (2026-10-26 ruling). @p avg10 decorates every file and must never decide.
     """
@@ -153,9 +153,12 @@ class Classify(unittest.TestCase):
 
     def test_host_pressure_never_decides_even_unpinned(self):
         """2026-10-26 ruling: host-wide pressure is logged, never gated. With no bench
-        slice (a hosted runner) nothing is scored, and a clean CPU reads CLEAN."""
-        c = bc.classify(T0, after(1000, 0, pressure=us(41.4)), own_cpu_s=10.0, nivcsw=0,
-                        cpus=[7], pinned=False)
+        slice expected (a hosted runner) nothing is scored, and a clean CPU reads CLEAN."""
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=None)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), us(41.4), 10_000_000_000,
+                    bench_slice=None)
+        c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=False,
+                        slice_expected=False)
         self.assertEqual(c.verdict, bc.CLEAN, c.line())
         self.assertIsNone(c.pressure)
         self.assertAlmostEqual(c.host_pressure, 41.4)
@@ -192,10 +195,10 @@ class Classify(unittest.TestCase):
         self.assertEqual(c.verdict, bc.CONTENDED)
         self.assertIn(f"{bc.BENCH_SLICE} psi 12.5 > 5", c.reason)
 
-    def test_cgroup_pressure_path(self):
-        self.assertEqual(bc.cgroup_pressure_path(f"0::{CG}\n"),
-                         f"{bc.CGROUP_FS}{CG}/cpu.pressure")
-        self.assertIsNone(bc.cgroup_pressure_path("12:cpu,cpuacct:/foo\n"))  # v1-only
+    def test_job_cgroup_dir(self):
+        self.assertEqual(bc.job_cgroup_dir(f"0::{CG}\n"), f"{bc.CGROUP_FS}{CG}")
+        self.assertEqual(bc.job_cgroup_dir("0::/\n"), bc.CGROUP_FS)
+        self.assertIsNone(bc.job_cgroup_dir("12:cpu,cpuacct:/foo\n"))  # v1-only
 
     def test_stale_avg10_from_a_previous_run_is_not_contention(self):
         """#1839: a short execution right after a multi-threaded one reads avg10 ~50
@@ -244,12 +247,37 @@ class Classify(unittest.TestCase):
         self.assertAlmostEqual(c.pressure, 80.0)
         self.assertIn("not scored: multi-threaded", c.line())
 
-    def test_no_psi_is_not_contention(self):
-        t0 = sample(proc_stat(7, 1000, 500, 8000), None, 0)
-        c = bc.classify(t0, after(1000, 0, pressure=None), own_cpu_s=10.0, nivcsw=0,
-                        cpus=[7])
-        self.assertTrue(c.clean)
+    def test_no_psi_where_no_slice_is_expected_is_not_contention(self):
+        """Unpinned with BENCH_SLICE unset (a hosted runner): no pressure anywhere is
+        judged on foreign time alone."""
+        t0 = sample(proc_stat(7, 1000, 500, 8000), None, 0, bench_slice=None)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), None, 10_000_000_000, bench_slice=None)
+        c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=False,
+                        slice_expected=False)
+        self.assertTrue(c.clean, c.line())
         self.assertIn("psi n/a", c.line())
+
+    def test_pinned_without_slice_pressure_fails_closed(self):
+        """#2205 review: a pinned run whose bench slice has no cpu.pressure is CONTENDED,
+        not silently judged on foreign time; the quiet host pressure cannot rescue it."""
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=None)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, bench_slice=None)
+        c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
+        self.assertEqual(c.verdict, bc.CONTENDED, c.line())
+        self.assertIn("bench slice has no cpu.pressure", c.reason)
+
+    def test_named_slice_without_pressure_fails_closed_unpinned(self):
+        """BENCH_SLICE set but unreadable also fails closed on an unpinned run, and on a
+        window too short to score pressure on."""
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=None)
+        t1 = sample(proc_stat(7, 1010, 500, 8000), 0, 100_000_000, bench_slice=None)
+        c = bc.classify(t0, t1, own_cpu_s=0.1, nivcsw=0, cpus=[7], pinned=False,
+                        slice_expected=True)
+        self.assertEqual(c.verdict, bc.CONTENDED, c.line())
+        self.assertIn("bench slice has no cpu.pressure", c.reason)
+
+    def test_slice_named_follows_the_environment(self):
+        self.assertEqual(bc.SLICE_NAMED, "BENCH_SLICE" in os.environ)
 
 
 def scripted(verdicts: list[str]):
