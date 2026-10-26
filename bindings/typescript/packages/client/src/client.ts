@@ -151,19 +151,15 @@ interface Pending {
   token: string;
 }
 
-/** @brief A request that timed out: what its late REPLY can still be recognised by. */
-interface Expired {
-  /** @brief Its `dst` segments, for a reply that carries no token. */
-  dst: string[] | null;
-  /** @brief Its reply token. */
-  token: string;
-}
-
 /**
- * @brief How many timed-out requests the client remembers, so their late replies are
- * dropped rather than handed to a live caller. The oldest is forgotten first.
+ * @brief How many timed-out requests' `dst` the client remembers, so a late reply that
+ * carries no token is dropped rather than handed to a live caller. The oldest is forgotten
+ * first. A reply that carries a token needs no memory (see `LibtracerClient.correlate`).
  */
 const EXPIRED_CAP = 32;
+
+/** @brief A reply token this client issues: `q<n>` for a one-shot, `sub<n>` for a subscribe. */
+const TOKEN = /^(q|sub)([1-9][0-9]*)$/;
 
 /** @brief The request deadline used when `requestTimeoutMs` is not given. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -220,8 +216,8 @@ export class LibtracerClient {
   /** @brief The number the next one-shot request's reply token (`q<n>`) carries. */
   private nextRequest = 1;
   private readonly pending: Pending[] = [];
-  /** @brief The most recent timed-out requests, oldest first, at most {@link EXPIRED_CAP}. */
-  private readonly expired: Expired[] = [];
+  /** @brief The `dst` of the most recent timed-out requests, oldest first, at most {@link EXPIRED_CAP}. */
+  private readonly expired: string[][] = [];
   private errorHandler: ((err: Error) => void) | null = null;
   private closed: Error | null = null;
 
@@ -343,31 +339,32 @@ export class LibtracerClient {
    *
    * @section expired A late reply
    *
-   * A request that times out leaves `pending` and is remembered in `expired` (#2330).
-   * Its late reply, matched by token or, failing that, by `src` against no live request,
-   * consumes that record and is dropped (`-1`). A live request is always tried first, so
-   * a dead one can never take a reply from a live request to the same path.
+   * A request that times out leaves `pending` (#2330). A reply whose token this client
+   * issued (`q<n>` with `n` below the next number, or any `sub<n>`) and that no live
+   * request holds is late, and is dropped (`-1`) with no memory needed. Only a peer that
+   * does not route its reply to `src` sends no token; for that reply alone `expired`
+   * remembers the last {@link EXPIRED_CAP} dead requests' `dst`, and a `src` that matches
+   * one of them and no live request is dropped too. A live request is always tried first,
+   * so a dead one can never take a reply from a live request to the same path.
    */
   private correlate(parsed: ParsedFwd): number {
     const fifo = this.pending.length > 0 ? 0 : -1;
-    const late = (match: (e: Expired) => boolean): boolean => {
-      const at = this.expired.findIndex(match);
-      if (at < 0) return false;
-      this.expired.splice(at, 1);
-      return true;
-    };
     const byToken = segmentsOf(parsed.dst);
-    if (byToken !== null && byToken.length > 0 && endsWith(this.replyEndpoint, byToken.slice(0, -1))) {
-      const token = byToken[byToken.length - 1];
+    const token = byToken !== null && byToken.length > 0 ? byToken[byToken.length - 1] : '';
+    const issued = TOKEN.exec(token);
+    if (issued !== null && endsWith(this.replyEndpoint, byToken!.slice(0, -1))) {
       const at = this.pending.findIndex((p) => p.token === token);
       if (at >= 0) return at;
-      if (late((e) => e.token === token)) return -1;
+      if (issued[1] === 'sub' || Number(issued[2]) < this.nextRequest) return -1;
     }
     const src = segmentsOf(parsed.src);
     if (src === null || src.length === 0) return fifo;
     const at = this.pending.findIndex((p) => p.dst !== null && endsWith(p.dst, src));
     if (at >= 0) return at;
-    return late((e) => e.dst !== null && endsWith(e.dst, src)) ? -1 : fifo;
+    const dead = this.expired.findIndex((d) => endsWith(d, src));
+    if (dead < 0) return fifo;
+    this.expired.splice(dead, 1);
+    return -1;
   }
 
   /**
@@ -432,7 +429,7 @@ export class LibtracerClient {
           settle(entry);
           const at = this.pending.indexOf(entry);
           if (at >= 0) this.pending.splice(at, 1);
-          this.expired.push({ dst: entry.dst, token: entry.token });
+          if (entry.dst !== null) this.expired.push(entry.dst);
           if (this.expired.length > EXPIRED_CAP) this.expired.shift();
           entry.reject(onDeadline());
         }, deadlineMs);

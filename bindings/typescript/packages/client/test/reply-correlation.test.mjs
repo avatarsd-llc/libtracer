@@ -296,3 +296,18 @@ test('pending returns to empty after timeouts, and the late-reply memory is boun
   assert.equal(c.pending.length, 0);
   assert.ok(c.expired.length <= 32, `expired holds ${c.expired.length} records`);
 });
+
+test('a late token reply is dropped even after more than 32 timeouts (#2330)', async () => {
+  const t = new FakeTransport();
+  const c = new LibtracerClient(t, { requestTimeoutMs: 10 });
+  const reads = [];
+  for (let i = 0; i < 33; i++) reads.push(assert.rejects(c.read('/lossy/path'), /timed out/));
+  await withLiveLoop(() => Promise.all(reads));
+
+  // q1 is long past the tokenless memory, and its reply's src is a PAIR that names no
+  // segments: only the token says it is late.
+  const live = c.read('/other/path'); // q34
+  t.inject(replyByToken(['client', 'q1'], 'too-late'));
+  t.inject(replyByToken(['client', 'q34'], 'mine'));
+  assert.equal(textOf(await live), 'mine');
+});
