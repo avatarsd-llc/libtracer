@@ -22,6 +22,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   destructor finishes last. A wedged server task now costs the item and its slots until it
   runs, and a refused queue leaks them, logged. Destroyed from the server task itself, the
   detach still runs inline.
+  Because those frees can now land after the destructor returns, `memory.state` must outlive
+  the adopting server, as the header's lifetime rule already states; an app that freed it
+  right after the link must now keep it until the server stops.
 - **BREAKING: the auth deadline is the application's
   ([#2257](https://github.com/avatarsd-llc/libtracer/issues/2257)).** `httpd_ws_link_t` no
   longer reads a clock or runs a timer for it. The per-link `esp_timer` sweep, the reap the
