@@ -44,6 +44,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `fwd/fwd-reverse-mint`, `fwd/fwd-bound-forward`, `fwd/fwd-bound-forwarded`,
   `path-ref/reverse-len-not-multiple-of-8`, `acl/bound-vs-canonical-allow` and `-deny`.
 
+- **The Arduino packaging stub (`integrations/arduino/`, #2311).** Its `library.properties` was
+  never submitted to the Arduino Library Manager and is no longer version-stamped or CI-checked.
+  Arduino users take the PlatformIO package or the ESP-IDF managed component.
 - **The RFC-0027 path-label plane is deleted (RFC-0029 slice S3, #2244).** RFC-0029 §1 and
   §5.3 retired it; a node's only address-compression element is now the PAIR. Gone from the
   public headers: `path_label.hpp` (`path_label_t`, `kPathLabel*`, `emit_path_label`,

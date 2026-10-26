@@ -49,7 +49,6 @@ it, so the number cannot drift inside the tree:
   | Manifest | Ecosystem |
   | --- | --- |
   | [`library.json`](../library.json) | PlatformIO |
-  | [`integrations/arduino/library.properties`](../integrations/arduino/library.properties) | Arduino (**not distributed** — stamped for tree consistency only, see below) |
   | [`integrations/esp-idf/libtracer/idf_component.yml`](../integrations/esp-idf/libtracer/idf_component.yml) | ESP Component Registry |
   | `bindings/typescript/packages/*/package.json` (×4) | npm (`@avatarsd-llc/*`) |
   | [`bindings/typescript/package-lock.json`](../bindings/typescript/package-lock.json) | npm (mirrors the four above) |
@@ -72,17 +71,6 @@ To reconcile the tree to a version: run `python3 tools/sync-version.py X.Y.Z`
 (stamps `VERSION`, every manifest **and** the npm lockfile), refresh the Rust
 lockfile (`cd bindings/rust && cargo update -p libtracer`), and commit them
 together.
-
-**Arduino is not a release channel.** The Arduino Library Manager path is **not
-planned** (maintainer decision, `9751fd32`) — see
-[`integrations/arduino/README.md`](../integrations/arduino/README.md). libtracer
-has never been submitted to [`arduino/library-registry`](https://github.com/arduino/library-registry)
-and no release step does so. As laid out, it could not be: the registry requires
-`library.properties` **in the repository root**, and ours lives under
-`integrations/arduino/`. `tools/sync-version.py` still stamps it so the number
-cannot drift inside the tree (and `version-consistency.yml` enforces that), but
-nothing consumes it. Point Arduino users at the **PlatformIO** package or the
-**ESP-IDF** managed component.
 
 **Consumers of the raw tagged tree** (a git pin rather than a registry) see the
 committed manifests, not the tag-time stamped ones — so reconciling them before
@@ -198,8 +186,7 @@ entries, the release is a minor bump, never a patch. Re-publishing one registry 
    are **not** the `bindings/typescript/packages/` directory names, and the ESP
    Component Registry index can lag the upload by several minutes — poll it before
    concluding the job skipped. `find_package(libtracer X.Y REQUIRED)` is already
-   proven by the `install-consume` CI job. There is no Arduino step (see "Source
-   of truth" above).
+   proven by the `install-consume` CI job.
 
 ## Notes
 

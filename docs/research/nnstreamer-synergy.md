@@ -340,8 +340,8 @@ The dotted edge is the finding, not decoration: seam 3 does not sit on the seam-
    and therefore dereferenceable) while conceding that loses the "device memory" signal above
    L0. This is the one genuinely hard-to-reverse choice in the programme and is **ADR-worthy**
    if seam 3 proceeds.
-5. **Where does the plugin live?** `integrations/` today holds `arduino`, `esphome`, `esp-idf`
-   and `platformio` — all *device-side*. A host-side dlopen'd `.so` is a different genre. New
+5. **Where does the plugin live?** `integrations/` today holds `esphome`, `esp-idf` and
+   `platformio` — all *device-side*. A host-side dlopen'd `.so` is a different genre. New
    tier, or stretch `integrations/`?
 
 ## Recommendation and the first concrete step

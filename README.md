@@ -40,7 +40,7 @@ libtracer is a **spec first**, then implementations. The C++ core is the golden 
 | **TypeScript** ([`bindings/typescript/`](bindings/typescript/)) | native browser/**edge** — codec + client (read/write/await/subscribe) + WebSocket/WebTransport | byte‑verified; client/transports experimental |
 | **ESP‑IDF** ([`integrations/esp-idf/`](integrations/esp-idf/)) | packages the full C++ node as a managed component (CI‑built esp32c6/c3 + linux) | working |
 | **PlatformIO** ([`integrations/platformio/`](integrations/platformio/)) | packages + compiles the portable core (codec/graph/tcp/udp/ws/can; on `espressif32` **no ws** — the POSIX pair is excluded per #947/#984, see the [integration README](integrations/platformio/README.md)) | working; esp32 CAN via a best‑effort build hook (board‑unverified) |
-| **ESPHome · Arduino** ([`integrations/`](integrations/)) | platform packaging | ESPHome is a placeholder stub · Arduino **not planned** |
+| **ESPHome** ([`integrations/esphome/`](integrations/esphome/)) | platform packaging | placeholder stub |
 | **ROS 2** (`rmw_tracer`, [`bindings/ros2/`](bindings/ros2/)) | drop‑in RMW over the C++ graph | **early stub** |
 
 ## Quick start
@@ -90,7 +90,7 @@ libtracer/
 │   └── examples/        Runnable, CI-built example programs (CC0)
 ├── backends/            Vendor L0 memory backends — cuda/ (GPU); each its own CMake project
 ├── bindings/            Native cores — rust/ (crates.io), typescript/ (npm @avatarsd-llc/*)
-├── integrations/        Platform packaging — esp-idf/ (working) · platformio/ · esphome/ · arduino/
+├── integrations/        Platform packaging — esp-idf/ (working) · platformio/ · esphome/
 ├── bench/               libtracer↔Zenoh benchmark harness (feeds the live perf page)
 ├── docs/                Spec (normative) · reference (descriptive) · ADRs (rationale)
 ├── tests/conformance/   Cross-implementation vectors + run-all.py driver
