@@ -25,6 +25,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Because those frees can now land after the destructor returns, `memory.state` must outlive
   the adopting server, as the header's lifetime rule already states; an app that freed it
   right after the link must now keep it until the server stops.
+- **`esp_ws_client_link_t`'s teardown waits on its senders without a clock
+  ([#2338](https://github.com/avatarsd-llc/libtracer/issues/2338)).** The destructor used to
+  poll the in-flight sender count every millisecond with `sleep_for`. It now blocks on the
+  count itself, and the last sender to leave wakes it. A sender that leaves while no
+  teardown waits pays nothing more than before. Which senders teardown waits for is
+  unchanged. No API change.
 - **BREAKING: the auth deadline is the application's
   ([#2257](https://github.com/avatarsd-llc/libtracer/issues/2257)).** `httpd_ws_link_t` no
   longer reads a clock or runs a timer for it. The per-link `esp_timer` sweep, the reap the
