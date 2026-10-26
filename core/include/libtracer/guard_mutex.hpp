@@ -59,6 +59,13 @@ namespace tr {
  * is why @ref may_spin is `false`: the wait is bounded by the holder's window, never by the
  * spinner's priority.
  *
+ * The nap is the one sanctioned sleep in core (#2307). It arms no timer of libtracer's, reads
+ * no clock and decides nothing by elapsed time: it only gives the CPU back, and the contender
+ * then looks again. Blocking in `std::atomic::wait` instead was measured and refused.
+ * It makes the unlock an `exchange` that looks for a sleeper (+4.7 ns per unlock on the host),
+ * and that cost `lkvgraph_hot1-fan0` 10–21 % and `inproc-target-stored` 9–10 % of their
+ * throughput, against an A/A spread under 3 %. That is the #1628 cost again.
+ *
  * ## Striped, by address
  *
  * A lock per LKV slot would put bytes in every vertex, and `sizeof(vertex_t)` is ratcheted, so
@@ -96,7 +103,8 @@ struct alignas(std::max(LineBytes, alignof(std::atomic<bool>))) basic_mutex_guar
      *
      * Only a holder descheduled inside its few-instruction window makes anyone sleep, so this
      * bounds the extra latency of that rare case, not the common one. Bounded from below by
-     * what one `nanosleep` costs anyway.
+     * what one `nanosleep` costs anyway. The one sanctioned sleep in core; see the class
+     * for why it is not a futex wait (#2307).
      */
     static constexpr std::chrono::microseconds kNap{20};
 
