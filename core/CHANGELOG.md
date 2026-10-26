@@ -225,6 +225,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   dropped at the ingress, uncounted, the way the reply side already treats a removed child. A
   name the registry never held keeps the by-name fallback. New
   `child_registry_t::tombstoned(name)` tells the two apart.
+- **A borrowed segment's control block comes from the default value source, not the heap**
+  (#2283). `view::borrow`, `borrow_const` and `borrow_device` drew the `segment_t` with
+  `new (std::nothrow)` and the borrowed backends returned it with `delete`, so every segment
+  release reached the heap through `mem::destroy_dispatch`. The block is now drawn from and
+  returned to `mem::value_source()`; a refused draw still yields a null handle. The two
+  borrowed backends are one class, `borrowed_backend_t`, whose address space is a member. On
+  ESP32-C6 the no-heap gate falls from 1765 references in 580 functions to 914 in 353.
 - **`udp_transport_t::dropped_tx` counts a datagram the socket refuses (#2279).** A `sendto` or
   `sendmsg` that failed or sent short (a full socket buffer, `EMSGSIZE`, a shut socket) used
   to lose the frame without counting it, on all three send paths (`send(span)`, `send(iov)`,
