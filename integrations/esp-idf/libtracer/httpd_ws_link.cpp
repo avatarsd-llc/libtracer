@@ -23,14 +23,12 @@
 #include <atomic>
 #include <cassert>
 #include <cerrno>
-#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <new>
-#include <thread>
 #include <utility>
 
 #include "esp_freertos_hooks.h"
@@ -69,30 +67,6 @@ static_assert(offsetof(httpd_ws_link_t::stats_t, peers_frozen) == 60);
 namespace {
 
 constexpr const char* kTag = "httpd_ws";
-
-/**
- * @brief The adopted-mode teardown drain: turns of @ref kDrainSliceMs each.
- *
- * The ONE bound the destructor spends waiting on the adopted server's task — first for
- * the session detach, then for the in-flight TX slots (#815 established this pair of
- * numbers; naming them keeps the two drains on one bound rather than inventing a
- * second). Nothing depends on it for CORRECTNESS: both expiries are memory-safe by
- * construction (leak the sessions / leak the pool) and are logged, so the bound only
- * trades how long a teardown blocks against how often that leak is taken. An adopted
- * server we do not own exposes no timeout of its own to derive it from — the send/recv
- * wait it was configured with belongs to the caller's `httpd_config_t`, not to us.
- *
- * DELIBERATELY FIXED (#1160). It is reached only on a teardown of an ADOPTED server, it
- * costs no RAM, and both outcomes are already safe and logged — so the only thing a knob
- * would let an embedder choose is how long their own destructor blocks before taking a
- * leak they are told about. That is not a resource trade, and it is not on any hot path;
- * a node that finds this bound wrong has a wedged server task, which is the thing to fix.
- */
-constexpr int kDrainTurns = 200;
-
-/** @brief One drain turn, milliseconds — see @ref kDrainTurns. Fixed for the same reason,
- *         and it is only the resolution at which that one bound is sampled. */
-constexpr int kDrainSliceMs = 5;
 
 /** @brief The calling task's identity, as the opaque token `server_task_` latches. */
 [[nodiscard]] void* current_task() noexcept {
@@ -1423,28 +1397,30 @@ class httpd_ws_link_t::peer_resolution_t final : public transport_t {
  * @brief The teardown session-detach work item — everything @ref detach_work needs, and
  *        NOTHING that belongs to the link.
  *
- * Deliberately self-contained (a server handle and a snapshot of fds): the item may be
- * sitting in the adopted server's control queue when the destructor gives up on it, so
- * touching the link from the work function would reintroduce exactly the
- * use-after-free this fixes. Ownership is settled by @ref released — the destructor and
- * the work function each exchange it once, and the SECOND one to do so deletes the
- * item; a work item the server never runs is a single small leak, never a double free.
+ * Deliberately self-contained (a server handle, a snapshot of fds and the slots they
+ * carry): the destructor queues the item and returns without waiting for it (#2339), so
+ * the link is usually gone by the time it runs, and touching the link from the work
+ * function would reintroduce exactly the use-after-free this fixes. The snapshotted slots
+ * go with it: the server holds each one as a session ctx until the item detaches it, so
+ * the item is what frees them, after the detach. Ownership of the item itself is settled
+ * by @ref released: the destructor and the work function each exchange it once, and the
+ * SECOND one to do so deletes it. A work item the server never runs leaks the item and
+ * its slots, never a double free.
  *
  * The fds are paired with the ctx pointer each one was carrying at snapshot time,
  * because a socket NUMBER does not identify a session over time: `httpd_sess_get`
  * resolves purely by fd, so an item that drains late — after the peer hung up and the
  * shared server accepted an unrelated client onto the recycled descriptor — would
  * otherwise run a stranger's `free_ctx` mid-life and force its session closed. The
- * ctx pointers are COMPARED, never dereferenced, and the abandon path leaks every slot
- * precisely so those addresses stay unique for as long as this item can run.
+ * ctx pointers are COMPARED, never dereferenced, and the item owns those slots until it
+ * has run, so those addresses stay unique for as long as it can run.
  */
 struct httpd_ws_link_t::detach_req_t {
     mem::block_source_t* src = nullptr; /**< @brief Where this item came from (`memory.state`). */
     httpd_handle_t handle = nullptr;    /**< @brief The adopted server (still running). */
     fixed_array_t<int> fds;             /**< @brief Snapshot of the open peers' sockets. */
-    fixed_array_t<void*> ctxs;          /**< @brief The ctx each fd carried (identity only). */
+    fixed_array_t<session_t*> ctxs;     /**< @brief The slot each fd carried; owned here. */
     std::size_t n = 0;                  /**< @brief Entries in @ref fds / @ref ctxs. */
-    std::atomic<bool> done{false};      /**< @brief Set once every fd has been detached. */
     std::atomic<bool> released{false};  /**< @brief Ownership handshake (see the brief). */
     /** @brief The handler gate, handed over by the destructor: freed here when the server
      *         lists no WebSocket client, kept otherwise (#2202). Null = not handed over. */
@@ -1933,9 +1909,9 @@ void httpd_ws_link_t::detach_work(void* req_arg) {
         const int fd = req->fds[i];
         if (fd < 0) continue;
         // IDENTITY gate, and the reason the snapshot carries ctx pointers at all. This
-        // item can drain arbitrarily late — a full control queue delays it, and a
-        // destructor that gave up on its bound leaves it queued for a server task that
-        // may only recover minutes later. By then the peer may have hung up and the
+        // item can drain arbitrarily late — a full control queue delays it, and the
+        // destructor does not wait for it, so a wedged server task may only run it
+        // minutes later. By then the peer may have hung up and the
         // SHARED server (the firmware's :80 SPA httpd serves other routes too) may have
         // accepted an unrelated client onto the recycled descriptor. httpd_sess_get
         // resolves by fd alone, so detaching blind would run that stranger's free_ctx
@@ -1968,7 +1944,9 @@ void httpd_ws_link_t::detach_work(void* req_arg) {
     for (std::size_t i = 0; i < n; ++i)
         ws += httpd_ws_get_fd_info(req->handle, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET;
     if (ws == 0) mem::drop_in(*req->src, req->gate);  // null: nothing handed over
-    req->done.store(true, std::memory_order_release);
+    // The slots last: every session that held one has been detached above, or had already
+    // closed (its free_ctx ran then, inert behind the shut gate), so nothing reaches them.
+    for (std::size_t i = 0; i < req->n; ++i) mem::drop_in(*req->src, req->ctxs[i]);
     if (req->released.exchange(true, std::memory_order_acq_rel)) mem::drop_in(*req->src, req);
 }
 
@@ -2002,7 +1980,6 @@ void httpd_ws_link_t::detach_sessions() {
             if (s->open) ++open_n;
     }
     // Queued even with no slot armed, since the item also carries the gate (detach_work).
-    // With none armed there is nothing to wait for: the destructor queues it and goes on.
 
     // Failable throughout, from `memory.state`: a teardown that cannot draw must still be
     // memory-safe, so a refusal here takes the neutralise-and-leak path rather than skipping
@@ -2016,59 +1993,60 @@ void httpd_ws_link_t::detach_sessions() {
     }
     raw->src = state_src_;
     {
+        // Each armed slot moves into the item: the server holds it as a session ctx until
+        // the item detaches it, so the item frees it (#2339), and this destructor no longer
+        // does. Neutralised on the way, so its resolution handle and reassembly buffer go
+        // back now rather than whenever the item runs.
         const std::lock_guard lock(peers_m_);
         std::size_t i = 0;
-        for (session_t* const s : slots_)
-            if (s->open && i < open_n) {
-                raw->fds[i] = s->fd;
-                raw->ctxs[i] = s;  // the ctx this fd was armed with — identity only
-                ++i;
+        for (std::size_t j = 0; j < slots_.size();) {
+            session_t* const s = slots_[j];
+            if (!s->open || i == open_n) {
+                ++j;
+                continue;
             }
+            raw->fds[i] = s->fd;
+            raw->ctxs[i++] = s;  // the ctx this fd was armed with
+            neutralise(s);
+            slots_.erase_at(j);
+        }
         raw->n = i;
     }
     raw->handle = handle_.load(std::memory_order_relaxed);
     raw->gate = gate_.load(std::memory_order_relaxed);
 
-    bool detached = open_n == 0;
     // Relaxed both ways: a match can only be observed by the task that stored it, and a
-    // stale MISS on any other task is the safe direction (queue the work and wait, which
-    // is what a task that is not the server must do anyway).
+    // stale MISS on any other task is the safe direction (queue the work, which is what a
+    // task that is not the server must do anyway).
     if (server_task_.load(std::memory_order_relaxed) == current_task()) {
         // We ARE the server task (the dtor was reached from a work item or a handler on
-        // it). Queued work could only run after we return, so waiting for it would
-        // deadlock by construction — the #814 lesson. Being that task is exactly the
-        // permission detach_work needs, so run it right here instead. Items queued before
-        // this frame have NOT run yet and one may carry the gate, so it is not handed over.
+        // it). Queued work could only run after we return, and being that task is exactly
+        // the permission detach_work needs, so run it right here instead (#814). Items
+        // queued before this frame have NOT run yet and one may carry the gate, so it is
+        // not handed over.
         raw->gate = nullptr;
         detach_work(raw);
-        detached = true;
     } else if (httpd_queue_work(handle_.load(std::memory_order_relaxed),
                                 &httpd_ws_link_t::detach_work, raw) != ESP_OK) {
-        ESP_LOGE(kTag, "session detach could not be queued (ctrl queue full)");
-        // Never queued: ours to drop, and the gate it carried is kept. With no slot armed
-        // nothing is left to abandon, so `detached` keeps its `open_n == 0`.
+        // Never queued: ours to drop, and the gate and the slots it carried are kept. The
+        // server still holds each slot as a session ctx; neutralised above, behind the shut
+        // gate, its free_ctx is inert on the leaked shell.
+        ESP_LOGE(kTag, "session detach could not be queued (ctrl queue full): %u slot(s) leaked",
+                 (unsigned)raw->n);
         raw->released.store(true, std::memory_order_relaxed);
-    } else {
-        for (int turn = 0; turn < kDrainTurns && !detached; ++turn) {
-            detached = raw->done.load(std::memory_order_acquire);
-            if (!detached) std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
-        }
     }
-    if (!detached) ESP_LOGE(kTag, "session detach did not run on the httpd task");
+    // Queued: no wait. Whichever of this and the work item exchanges second frees the item.
     if (raw->released.exchange(true, std::memory_order_acq_rel)) mem::drop_in(*state_src_, raw);
-    if (!detached) abandon_sessions();
 }
 
 void httpd_ws_link_t::abandon_sessions() {
     std::size_t leaked = 0;
     {
         const std::lock_guard lock(peers_m_);
-        // EVERY slot, not just the still-open ones. A closed slot's address is also in
-        // the detach snapshot the server may still be holding, and that snapshot's
-        // fd-reuse guard compares ctx POINTERS: freeing a shell here would let an
-        // unrelated allocation land on its address and be mistaken for ours. Leaking the
-        // whole set keeps those addresses unique for as long as the item can run, and
-        // this path is already the loudly-logged, teardown-only loss.
+        // EVERY slot, not just the still-open ones: this path is reached only when the
+        // detach item could not be drawn, so the server keeps the armed slots as session
+        // ctxs, and leaking the whole set is the simplest form of the loudly-logged,
+        // teardown-only loss.
         for (session_t* const s : slots_) {
             neutralise(s);
             ++leaked;
