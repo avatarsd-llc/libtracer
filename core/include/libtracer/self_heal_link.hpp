@@ -40,8 +40,9 @@ namespace tr::net {
 inline constexpr std::uint32_t kDefaultBackoffMs = 1000;
 
 /** @brief The value handed to the kind's factory in `conn_settings_t` when the SPEC's
- *         `connect_timeout` is 0/absent (RFC-0014 §4). No built-in consumer uses it: no op
- *         and no dial attempt waits on it (Amendment 5). */
+ *         `connect_timeout` is 0/absent (RFC-0014 §4). The key is kept and still parsed;
+ *         nothing on the send path waits on it (Amendment 5). #2304 makes it the `:settings`
+ *         value compared against the app's `now`. */
 inline constexpr std::uint32_t kDefaultConnectTimeoutMs = 5000;
 
 /**

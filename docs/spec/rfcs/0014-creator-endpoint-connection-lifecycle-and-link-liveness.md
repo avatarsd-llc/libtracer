@@ -410,8 +410,9 @@ connection vertex.
    was, after the stall.
 
 `connect_timeout` stays a config key. It is parsed and handed to the kind's factory in its parsed
-settings, and no built-in consumer uses it: no op and no dial attempt waits on it. Whether the key
-stays is a separate ruling. A [reference/23](../../reference/23-noise-link-binding.md) Noise link keeps its own §7 rule
+settings, and nothing on the send path waits on it: no op and no dial attempt waits on it.
+[#2304](https://github.com/avatarsd-llc/libtracer/issues/2304) makes it the `:settings` value compared against the
+application's `now`. A [reference/23](../../reference/23-noise-link-binding.md) Noise link keeps its own §7 rule
 that an attempt an operation started on an unheld link stops at its attempt deadline.
 
 ### 5. Gating
