@@ -80,6 +80,8 @@ struct state_t {
     bool connect_succeed = false;       /**< @brief What that release makes them report. */
     int connect_timeout_ms = 0;         /**< @brief The last dial's requested bound. */
     bool hold_write = false;            /**< @brief Park writers instead of completing them. */
+    bool pin_write = false;             /**< @brief Park writers past their own timeout,
+                                         *          until fake_ws::pin_writes(false). */
     std::condition_variable write_cv;   /**< @brief Wakes parked writers. */
     int writers = 0;                    /**< @brief Writers parked right now. */
     int writes = 0;                     /**< @brief Writes entered since the reset. */
@@ -157,6 +159,7 @@ void reset() {
     st().dialers = 0;
     st().connect_timeout_ms = 0;
     st().hold_write = false;
+    st().pin_write = false;
     st().writers = 0;
     st().writes = 0;
     st().write_timeout_ms = 0;
@@ -292,6 +295,14 @@ void hold_writes(bool on) {
         st().hold_write = on;
     }
     if (!on) st().write_cv.notify_all();  // the peer started accepting again
+}
+
+void pin_writes(bool on) {
+    {
+        const std::lock_guard<std::mutex> lk(st().m);
+        st().pin_write = on;
+    }
+    if (!on) st().write_cv.notify_all();
 }
 
 int writers_inside() {
@@ -516,6 +527,16 @@ int esp_transport_write(esp_transport_handle_t t, const char* buffer, int len, i
                     // handle is still a call the link decided to make
     st().write_timeout_ms = timeout_ms;
     if (!handle_usable(t)) return -1;
+    if (st().pin_write) {
+        // Parked until the TEST lets go, whatever the caller's timeout: the state a test
+        // checks against is then held, not raced against the link's own write bound. The
+        // release stands for that bound expiring, so the write fails as it would have.
+        ++st().writers;
+        st().write_cv.wait(lk, [] { return !st().pin_write; });
+        --st().writers;
+        (void)handle_usable(t);  // a handle destroyed under the parked writer is misuse
+        return -1;
+    }
     if (st().hold_write) {
         // A peer whose TCP window has closed. The caller is holding the link's send
         // serializer for the whole of this, which is the state the pre-#952 destructor

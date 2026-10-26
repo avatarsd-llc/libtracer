@@ -263,8 +263,8 @@ void test_teardown_does_not_destroy_handles_under_a_sender() {
  * destructor's for no fault of the link.
  *
  * - While the parked write is still inside the transport, the destructor has not returned.
- *   The flag is read BEFORE the fake's count: a destructor that returned legitimately did so
- *   after that write left, so the later read sees it gone.
+ *   The fake pins that write until the test releases it (`fake_ws::pin_writes`), so it is
+ *   still parked whatever the link's own write bound is and however slow the runner.
  * - When the destructor returns, no write is inside the transport, and the queued three
  *   left without one.
  * - None of the four touches freed state. The fake counts handle misuse; a queued sender
@@ -274,7 +274,7 @@ void test_teardown_does_not_destroy_handles_under_a_sender() {
 void test_the_drain_wakes_on_the_last_sender_out() {
     std::printf("the drain wakes on the last sender out:\n");
     fake_ws::reset();
-    fake_ws::hold_writes(true);
+    fake_ws::pin_writes(true);  // parked until released below, past the link's bound
 
     auto link = dialing_link();
     check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
@@ -298,13 +298,14 @@ void test_the_drain_wakes_on_the_last_sender_out() {
         inside_at_return.store(fake_ws::writers_inside(), std::memory_order_relaxed);
         returned.store(true, std::memory_order_release);
     });
-    // A quarter of the parked write's ~416 ms bound: the write is still inside.
+    // The write is pinned, so it is inside the transport for certain; the wait only gives
+    // a destructor that wrongly returns the time to do it.
     std::this_thread::sleep_for(100ms);
-    const bool early = returned.load(std::memory_order_acquire);
-    const int inside = fake_ws::writers_inside();
-    check(inside == 1, "the parked write is still inside the transport");
-    check(!(early && inside == 1), "and the destructor has not returned under it");
+    check(fake_ws::writers_inside() == 1, "the parked write is still inside the transport");
+    check(!returned.load(std::memory_order_acquire),
+          "and the destructor has not returned under it");
 
+    fake_ws::pin_writes(false);  // the write gives up, as its bound would have
     destroyer.join();
     for (std::thread& t : senders) t.join();
     check(inside_at_return.load(std::memory_order_relaxed) == 0,
