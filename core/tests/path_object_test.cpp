@@ -26,6 +26,15 @@
 #include "test_support.hpp"
 #include "test_values.hpp"
 
+namespace tr::graph {
+/** @brief The test-only door: writes a path object's element 0 directly. */
+struct path_object_test_door_t {
+    static void set(const path_object_t& p, std::optional<vertex_slot_t> e) noexcept {
+        p.set_element0(e);
+    }
+};
+}  // namespace tr::graph
+
 namespace {
 
 using tr::graph::graph_t;
@@ -211,6 +220,34 @@ void test_chain_race() {
     check(torn.load() == 0, "every chain read was one of the learned chains, or none");
 }
 
+/** @brief A reader racing element-0 writes sees one written pair or none, never a torn one. */
+void test_element0_race() {
+    std::printf("an element-0 write racing readers never tears:\n");
+    graph_t g;
+    auto p = *g.make_path("/race0");
+    // The two halves differ in both words, so a pair mixing them is visible.
+    const tr::graph::vertex_slot_t a{.index = 1, .generation = 2};
+    const tr::graph::vertex_slot_t b{.index = 0x10000, .generation = 0x20000};
+    std::atomic<bool> stop{false};
+    std::atomic<int> torn{0};
+    std::vector<std::thread> readers;
+    for (int r = 0; r < 2; ++r) {
+        readers.emplace_back([&] {
+            while (!stop.load(std::memory_order_relaxed)) {
+                const auto e = p.element0();
+                if (e && *e != a && *e != b) torn.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (int i = 0; i < 20000; ++i) {
+        tr::graph::path_object_test_door_t::set(p, (i & 1) != 0 ? a : b);
+        if (i % 7 == 0) (void)p.learn(std::vector<std::byte>(9, std::byte{0x33}));
+    }
+    stop.store(true);
+    for (auto& t : readers) t.join();
+    check(torn.load() == 0, "every element-0 read was one of the written pairs, or none");
+}
+
 /** @brief Serves until armed, then `allow` more blocks; counts live blocks. */
 class gate_source_t final : public tr::mem::block_source_t {
    public:
@@ -268,6 +305,7 @@ int main() {
     test_rom_and_refusals();
     test_chain_cache();
     test_chain_race();
+    test_element0_race();
     test_drawn_from_the_seam();
     return tr::testing::summary("path_object");
 }
