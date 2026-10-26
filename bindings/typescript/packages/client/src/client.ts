@@ -12,7 +12,7 @@
  *
  * Now that RFC-0004 fills spec §3 (the remote-operation envelope ADR-0034
  * deferred), the client speaks the path-addressed higher operations over `FWD`:
- *   - read(path)            — FWD{ op=READ,  dst=path, src=<reply-ep> }
+ *   - read(path)            — FWD{ op=READ,  dst=path, src=<reply-ep>/q<n> }
  *   - write(path, valueTLV) — FWD{ op=WRITE, dst=path, src=…, payload }
  *   - await(path, ns?)      — FWD{ op=AWAIT, dst=path, src=…, await_timeout? }
  *   - readField(path, sel)  — FWD{ op=READ,  dst=path, FIELD=sel, src=… }
@@ -151,6 +151,11 @@ interface Pending {
    * the FIFO fallback.
    */
   dst: string[] | null;
+  /**
+   * @brief The request's own reply token: the one segment after the reply endpoint in its
+   * `src`, which the REPLY's `dst` carries home (see {@link LibtracerClient.correlate}).
+   */
+  token: string;
 }
 
 /** @brief The request deadline used when `requestTimeoutMs` is not given. */
@@ -202,6 +207,8 @@ export class LibtracerClient {
   private readonly subscriptions = new Map<string, ValueHandler>();
   /** @brief The number the next subscription's target segment carries. */
   private nextSubscription = 1;
+  /** @brief The number the next one-shot request's reply token (`q<n>`) carries. */
+  private nextRequest = 1;
   private readonly pending: Pending[] = [];
   private errorHandler: ((err: Error) => void) | null = null;
   private closed: Error | null = null;
@@ -304,39 +311,38 @@ export class LibtracerClient {
    * milliseconds while a local one answers in about one, so a later request
    * routinely OVERTAKES an earlier one on the same link. Under `shift()` the first
    * overtake transposes two answers and the queue never realigns — every later
-   * caller gets the previous request's reply. Nothing errors: the caller receives a
-   * well-formed `RESULT` for somebody else's path (#1530).
+   * caller gets the previous request's reply (#1530).
    *
-   * @section key What the wire does carry
+   * @section token The originator matches by its own reply token
    *
-   * RFC-0004 §B: a REPLY "does not accumulate `src`; the `src` child of a REPLY is
-   * still required and is set to the **responder's own endpoint** (the vertex that
-   * produced the result)". `dst` SHRINKS per hop, so what the terminus resolved —
-   * and echoes — is the TAIL of the request's `dst` after every mount prefix was
-   * stripped: a request to `/net/ws-client/peer0/hw/variant` answers `src=hw/variant`,
-   * and so does a local request to `/hw/variant`. The key is therefore a SUFFIX
-   * match, not an equality, and it is genuinely ambiguous between those two.
+   * Every request's `src` is the reply endpoint plus one segment of its own: `q<n>`
+   * for a one-shot, `sub<n>` for a subscribe. A REPLY is routed by that `src`, so its
+   * `dst` carries the token home; `dst` shrinks per hop, so what arrives is a TAIL of
+   * `<reply-ep>/<token>` — its last segment is the token and whatever precedes it must
+   * end the reply endpoint, the same reading {@link deliver} applies. The token is an
+   * ordinary `src` segment, not a field in `FWD`, and the receiver holds no state for
+   * it ([18 §Acknowledged one-shot operations and safe retry](
+   * ../../../../../docs/reference/18-composition-over-the-network.md#acknowledged-one-shot-operations-and-safe-retry)).
    *
-   * So: the oldest outstanding request whose `dst` ends with the reply's `src`, which
-   * is FIFO among the ones the wire cannot tell apart — exactly the tiebreak #1530
-   * prescribes, and it resolves that issue's measured four-request trace correctly.
+   * @section fallback When the token is absent
    *
-   * @section fallback When the key is unusable
-   *
-   * An empty `src` (RFC-0004 Amendment 2's "no reply requested"), a `PATH_REF` src on
-   * a reply to a bound operation, a label escape, or a `src` matching nothing
-   * outstanding all fall back to the oldest entry — today's behaviour exactly, so
-   * this change can only ever improve a correlation, never break one that worked.
+   * A peer that answers to its own endpoint instead of routing to `src` leaves no token
+   * in `dst`. Then the reply's `src` is matched as before: the oldest outstanding
+   * request whose `dst` ends with it, FIFO among the ones the wire cannot tell apart.
+   * Since #2245 a reply's `src` is the target's PAIR (RFC-0029 §6.2), an escape that
+   * names no segments, so such a reply falls through to the oldest entry — as does an
+   * empty `src`, or one matching nothing outstanding.
    */
   private correlate(parsed: ParsedFwd): number {
     const fifo = this.pending.length > 0 ? 0 : -1;
-    let src: string[];
-    try {
-      src = pathSegments(parsed.src);
-    } catch {
-      return fifo; // a PATH_REF / escaped src is not an address this client can match
+    const byToken = segmentsOf(parsed.dst);
+    if (byToken !== null && byToken.length > 0 && endsWith(this.replyEndpoint, byToken.slice(0, -1))) {
+      const token = byToken[byToken.length - 1];
+      const at = this.pending.findIndex((p) => p.token === token);
+      if (at >= 0) return at;
     }
-    if (src.length === 0) return fifo;
+    const src = segmentsOf(parsed.src);
+    if (src === null || src.length === 0) return fifo;
     for (let i = 0; i < this.pending.length; i++) {
       const dst = this.pending[i].dst;
       if (dst !== null && endsWith(dst, src)) return i;
@@ -362,13 +368,8 @@ export class LibtracerClient {
    */
   private deliver(value: Tlv, dst: Tlv | null): void {
     for (const handler of this.valueHandlers) handler(value.payload, value);
-    let segs: string[] = [];
-    try {
-      if (dst !== null) segs = pathSegments(dst);
-    } catch {
-      return; // a PATH_REF / escaped dst names no subscription this client minted
-    }
-    if (segs.length === 0 || !endsWith(this.replyEndpoint, segs.slice(0, -1))) return;
+    const segs = segmentsOf(dst);
+    if (segs === null || segs.length === 0 || !endsWith(this.replyEndpoint, segs.slice(0, -1))) return;
     this.subscriptions.get(segs[segs.length - 1])?.(value.payload, value);
   }
 
@@ -379,26 +380,31 @@ export class LibtracerClient {
   /**
    * @brief Send a one-shot FWD and resolve its FWD{REPLY}.
    *
-   * @param frame the encoded request frame
-   * @param dst   the request's destination segments — the key its reply's `src`
+   * @param build builds the request frame around the `src` it is given: the reply
+   *              endpoint plus this request's own reply token
+   * @param dst   the request's destination segments — the fallback key a reply's `src`
    *              echoes (see {@link correlate})
    * @param deadlineMs this request's own deadline in ms, overriding
    *              `requestTimeoutMs` (used by {@link await_})
    * @param onDeadline the rejection raised when the deadline elapses
+   * @param token the reply token, when the caller already owns one (a subscription's
+   *              `sub<n>`); otherwise a fresh `q<n>`
    */
   private request(
-    frame: Uint8Array,
+    build: (src: string[]) => Uint8Array,
     dst: string[],
     deadlineMs: number = this.requestTimeoutMs,
     onDeadline: () => Error = () =>
       new Error(`request timed out after ${deadlineMs}ms (no FWD reply)`),
+    token: string = `q${this.nextRequest++}`,
   ): Promise<ParsedFwd> {
+    const frame = build([...this.replyEndpoint, token]);
     return new Promise<ParsedFwd>((resolve, reject) => {
       if (this.closed) {
         reject(this.closed);
         return;
       }
-      const entry: Pending = { resolve, reject, settled: false, timer: null, dst };
+      const entry: Pending = { resolve, reject, settled: false, timer: null, dst, token };
       if (deadlineMs > 0 && Number.isFinite(deadlineMs)) {
         entry.timer = setTimeout(() => {
           // Leave the settled entry in the FIFO (see Pending) — its slot is
@@ -433,7 +439,7 @@ export class LibtracerClient {
   /* --------------------------------------------------------- one-shot --- */
 
   /**
-   * @brief Read a remote vertex's value: `FWD{ op=READ, dst=path, src=<reply-ep> }`.
+   * @brief Read a remote vertex's value: `FWD{ op=READ, dst=path, src=<reply-ep>/q<n> }`.
    *
    * @param path the destination path (a `/`-string like `"/sensor/temp"`, or segments)
    * @returns the RESULT's value TLV (decoded)
@@ -442,7 +448,7 @@ export class LibtracerClient {
   async read(path: string | string[]): Promise<Tlv> {
     const dst = splitPath(path);
     const reply = await this.request(
-      encodeFwd({ op: FWD_OP.READ, dst, src: this.replyEndpoint }),
+      (src) => encodeFwd({ op: FWD_OP.READ, dst, src }),
       dst,
     );
     const value = this.result(reply);
@@ -464,7 +470,7 @@ export class LibtracerClient {
   async readField(path: string | string[], selector: string | FieldLevel[]): Promise<Tlv> {
     const dst = splitPath(path);
     const reply = await this.request(
-      encodeFwd({ op: FWD_OP.READ, dst, field: selector, src: this.replyEndpoint }),
+      (src) => encodeFwd({ op: FWD_OP.READ, dst, field: selector, src }),
       dst,
     );
     const value = this.result(reply);
@@ -483,7 +489,7 @@ export class LibtracerClient {
   async write(path: string | string[], valueTLV: Uint8Array): Promise<void> {
     const dst = splitPath(path);
     const reply = await this.request(
-      encodeFwd({ op: FWD_OP.WRITE, dst, src: this.replyEndpoint, payload: valueTLV }),
+      (src) => encodeFwd({ op: FWD_OP.WRITE, dst, src, payload: valueTLV }),
       dst,
     );
     this.result(reply); // throws on ERROR; RESULT carries no payload
@@ -524,11 +530,12 @@ export class LibtracerClient {
   ): Promise<void> {
     const dst = splitPath(path);
     const reply = await this.request(
-      encodeFwd({
+      (src) =>
+        encodeFwd({
         op: FWD_OP.WRITE,
         dst,
         field: selector,
-        src: this.replyEndpoint,
+        src,
         payload: valueTLV,
       }),
       dst,
@@ -548,8 +555,8 @@ export class LibtracerClient {
    * of `requestTimeoutMs` (10 s by default; the default is used even when the
    * option disables other requests' deadlines) and `timeoutNs`.
    *
-   * Replies name no request op, so do not keep an `await_` and a `read` to the
-   * same vertex outstanding at once: their RESULTs cannot be told apart.
+   * Each request carries its own reply token, so an `await_` and a `read` to the same
+   * vertex may be outstanding at once.
    *
    * @param path        the destination path (string or segments)
    * @param timeoutNs   the await timeout in ns, sent as `await_timeout` and used as
@@ -560,10 +567,11 @@ export class LibtracerClient {
   async await_(path: string | string[], timeoutNs?: bigint): Promise<Tlv> {
     const dst = splitPath(path);
     const reply = await this.request(
-      encodeFwd({
+      (src) =>
+        encodeFwd({
         op: FWD_OP.AWAIT,
         dst,
-        src: this.replyEndpoint,
+        src,
         awaitTimeoutNs: timeoutNs,
       }),
       dst,
@@ -617,14 +625,18 @@ export class LibtracerClient {
     this.subscriptions.set(key, handler);
     try {
       const reply = await this.request(
-        encodeFwd({
-          op: FWD_OP.WRITE,
-          dst,
-          field: ':subscribers[]',
-          src: target,
-          payload: subscriber,
-        }),
+        (src) =>
+          encodeFwd({
+            op: FWD_OP.WRITE,
+            dst,
+            field: ':subscribers[]',
+            src,
+            payload: subscriber,
+          }),
         dst,
+        this.requestTimeoutMs,
+        undefined,
+        key,
       );
       this.result(reply); // throws on ERROR
     } catch (err) {
@@ -679,6 +691,19 @@ function endsWith(path: string[], tail: string[]): boolean {
   const at = path.length - tail.length;
   for (let i = 0; i < tail.length; i++) if (path[at + i] !== tail[i]) return false;
   return true;
+}
+
+/**
+ * @brief A route's segments, or `null` when it names none this client can read: no route, a
+ * retired `PATH_REF`, or a `PATH` carrying an escape record such as a PAIR (RFC-0029 §4).
+ */
+function segmentsOf(route: Tlv | null): string[] | null {
+  if (route === null) return null;
+  try {
+    return pathSegments(route);
+  } catch {
+    return null;
+  }
 }
 
 /** @brief Normalize a `/`-path string (or segment array) into validated segments. */

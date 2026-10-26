@@ -11,6 +11,20 @@ versioning/publish strategy.
 
 - `isPathRefType` (core package) is true for `0x14` only (#2245): a `0x15 PATH_REF_REVERSE`
   body is a `PATH` body of PAIR and NAME records (RFC-0029 §7.1) and decodes at any length.
+- **A reply is matched to its request by the request's own reply token** (#2245). Every
+  one-shot request now sends `src = <replyEndpoint>/q<n>` (a subscribe keeps
+  `<replyEndpoint>/sub<n>`), and a REPLY goes to the request whose token ends its `dst`.
+  Two outstanding requests to the same path are now told apart. A reply with no token falls
+  back to the `src`-suffix match and then FIFO, as before. A node's reply `src` is now the
+  target's PAIR (RFC-0029 §6.2), which names no segments, so without the token every reply
+  from such a node would be matched FIFO. The receiver holds no state for the token.
+- `parseFwdTlv` reads a trailing `0x15` on any `WRITE`, with no flag (RFC-0029 §7.1).
+
+### Removed
+
+- `FWD_OP_FLAG_MINT_REQUEST` and the `ParsedFwd.mintRequest` / `ParsedFwd.dstBound` fields
+  (RFC-0024 bound-path mint, retired by #2245). `parseFwdTlv` refuses a `0x14 PATH_REF` as
+  `dst` or `src`. The client never set bit 7.
 
 ### Fixed
 

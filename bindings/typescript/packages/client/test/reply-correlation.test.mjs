@@ -27,6 +27,7 @@ import {
   LibtracerClient,
   encodeValue,
   encodeFwd,
+  encodePath,
   FWD_OP,
   FWD_KIND,
 } from '../dist/index.js';
@@ -199,4 +200,67 @@ test('a reply with nothing outstanding is dropped, not thrown', async () => {
   });
   t.inject(replyFrom(['hw', 'variant'], 'unsolicited'));
   assert.equal(errs, 0);
+});
+
+/**
+ * @brief A FWD{REPLY, RESULT} as a #2245 node emits it: routed home by the request's own
+ * `src`, so `dst` carries the reply token, and `src` is the target's learned PAIR — an
+ * escape record (`00 16 08` + u32 index + u32 generation) that names no segments.
+ */
+function replyByToken(dstSegments, text) {
+  const pair = new Uint8Array([0x00, 0x16, 0x08, 7, 0, 0, 0, 1, 0, 0, 0]);
+  const src = {
+    type: TYPE.PATH,
+    opt: { pl: false, ts: false, cr: false, ll: false, cw: false, tf: false },
+    payload: pair,
+    children: [],
+    trailer: null,
+  };
+  const leaf = (b) => decode(b);
+  return encode({
+    type: TYPE.FWD,
+    opt: { pl: true, ts: false, cr: false, ll: false, cw: false, tf: false },
+    payload: new Uint8Array(0),
+    children: [
+      leaf(encodeValue(new Uint8Array([FWD_OP.REPLY]))),
+      leaf(encodePath(dstSegments)),
+      src,
+      leaf(encodeValue(new Uint8Array([FWD_KIND.RESULT]))),
+      leaf(encodeValue(new TextEncoder().encode(text))),
+    ],
+    trailer: null,
+  });
+}
+
+test('each request seeds its own reply token after the reply endpoint (#2245)', () => {
+  const t = new FakeTransport();
+  const c = new LibtracerClient(t);
+  void c.read('/a');
+  void c.read('/a');
+  const srcOf = (frame) => decode(frame).children[2].payload;
+  assert.deepEqual(srcOf(t.sent[0]), decode(encodePath(['client', 'q1'])).payload);
+  assert.deepEqual(srcOf(t.sent[1]), decode(encodePath(['client', 'q2'])).payload);
+});
+
+test('two reads of the SAME path answered in reverse resolve by their reply tokens (#2245)', async () => {
+  const t = new FakeTransport();
+  const c = new LibtracerClient(t);
+  const first = c.read('/hw/variant');
+  const second = c.read('/hw/variant');
+  // The src suffix cannot tell these apart, and since #2245 src is a PAIR anyway.
+  t.inject(replyByToken(['client', 'q2'], 'second'));
+  t.inject(replyByToken(['q1'], 'first')); // a hop consumed the endpoint segment
+  assert.equal(textOf(await first), 'first');
+  assert.equal(textOf(await second), 'second');
+});
+
+test('a PAIR src with no token in dst falls back to the oldest request', async () => {
+  const t = new FakeTransport();
+  const c = new LibtracerClient(t);
+  const first = c.read('/x');
+  const second = c.read('/y');
+  t.inject(replyByToken(['client'], 'oldest'));
+  t.inject(replyByToken(['client', 'q9'], 'next')); // an unknown token is no match either
+  assert.equal(textOf(await first), 'oldest');
+  assert.equal(textOf(await second), 'next');
 });

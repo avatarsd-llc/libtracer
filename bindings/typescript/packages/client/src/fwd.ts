@@ -292,11 +292,14 @@ export function encodeFwd(req: FwdRequest): Uint8Array {
 export interface ParsedFwd {
   /** @brief The operation (a {@link FWD_OP} value). */
   readonly op: number;
-  /** @brief The `dst` route child — a `PATH`, or a `PATH_REF` when {@link dstBound}. */
+  /** @brief The `dst` route child — a `PATH` (a `0x14 PATH_REF` is refused, RFC-0029 S1). */
   readonly dst: Tlv;
   /** @brief The optional FIELD selector child (or `null`). */
   readonly field: Tlv | null;
-  /** @brief The `src` route child — a `PATH`, or a `PATH_REF` on a reply to a bound op. */
+  /**
+   * @brief The `src` route child — a `PATH`. On a REPLY it is the learned chain: the target's
+   * PAIR plus one element per relaying hop (RFC-0029 §6.2), PAIRs being escape records.
+   */
   readonly src: Tlv;
   /** @brief The reply {@link FWD_KIND} (REPLY frames only, else `null`). */
   readonly kind: number | null;
@@ -304,38 +307,25 @@ export interface ParsedFwd {
   readonly payload: Tlv | null;
   /** @brief The AWAIT `await_timeout` ns (else `null`). */
   readonly awaitTimeoutNs: bigint | null;
-  /** @brief `op` bit 7 was set — the origin asked for a bound-path mint (RFC-0024 §7.5). */
-  readonly mintRequest: boolean;
-  /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
-  readonly dstBound: boolean;
   /**
-   * @brief The trailing reverse-direction list a mint-flagged FORWARDED request carries — a
-   * `PATH_REF_REVERSE` (`0x15`), RFC-0024 §7.1 amendments 1 and 2 (else `null`).
+   * @brief The reverse-direction list a FORWARDED subscribe carries — a `PATH_REF_REVERSE`
+   * (`0x15`) whose body is a `PATH` body of PAIR and NAME records, one per hop, grown by
+   * every forwarder with no flag (RFC-0029 §7.1); else `null`.
    *
    * Identified by its TYPE, never by its position: a WRITE's payload is whatever stands in
-   * the payload slot as long as it is not this code, INCLUDING a raw `PATH_REF`. The origin
-   * never emits the child, so this is `null` on every frame a client builds.
+   * the payload slot as long as it is not this code. The origin never emits the child, so
+   * this is `null` on every frame a client builds.
    */
   readonly reverse: Tlv | null;
 }
 
 /**
- * @brief The opcode field of the `op` byte — bits 5-0 (RFC-0024 §7.5).
+ * @brief The opcode field of the `op` byte — bits 5-0.
  *
- * Bits 7-6 are FLAGS. A forwarder MUST mask before switching (RFC-0024 §9.3): an
- * unrecognised flag then degrades to the plain opcode instead of an unknown-opcode reject,
- * which is what makes a flag additive at all.
+ * Bits 7-6 are reserved: no client sets them, a forwarder routes on the masked opcode, and
+ * the terminus refuses a set bit (#2245).
  */
 export const FWD_OPCODE_MASK = 0x3f;
-
-/**
- * @brief `op` bit 7 — the bound-path MINT REQUEST (RFC-0024 §7.5).
- *
- * Set by an origin asking each host on the route to answer with its own vertex ref. It costs
- * ZERO request bytes: there is no free TLV `opt` bit, and a dedicated presence child would
- * spend a 4-byte header to express one. The request is a hint, never an obligation.
- */
-export const FWD_OP_FLAG_MINT_REQUEST = 0x80;
 
 const u8 = (t: Tlv): number => (t.payload.length > 0 ? t.payload[0] : 0);
 
@@ -345,23 +335,15 @@ export function parseFwdTlv(fwd: Tlv): ParsedFwd {
   const ch = fwd.children;
   let i = 0;
   if (ch[i]?.type !== TYPE.VALUE) throw new RangeError('FWD: missing op VALUE child');
-  // The opcode is `op & 0x3F`; bits 7-6 are flags (RFC-0024 §7.5, normative in §9.3).
-  // Switching on the raw byte would make a mint-flagged READ an unknown opcode here.
-  const opByte = u8(ch[i++]);
-  const op = opByte & FWD_OPCODE_MASK;
-  const mintRequest = (opByte & FWD_OP_FLAG_MINT_REQUEST) !== 0;
-  // Two address forms (RFC-0024 §4): a canonical PATH, or a bound PATH_REF whose body shape
-  // the grammar has already checked. What an element MEANS is node-scoped, so a binding core
-  // carries one and never interprets it.
-  const dstBound = ch[i]?.type === TYPE.PATH_REF;
-  if (!dstBound && ch[i]?.type !== TYPE.PATH) throw new RangeError('FWD: missing dst PATH child');
+  // The opcode is `op & 0x3F`, read the way a forwarder reads it (bits 7-6 reserved).
+  const op = u8(ch[i++]) & FWD_OPCODE_MASK;
+  // One address form: a PATH, whose PAIR records a binding carries and never interprets.
+  // A retired 0x14 PATH_REF is not a PATH, so it is refused here like any other type.
+  if (ch[i]?.type !== TYPE.PATH) throw new RangeError('FWD: missing dst PATH child');
   const dst = ch[i++];
   let field: Tlv | null = null;
   if (ch[i]?.type === TYPE.FIELD) field = ch[i++];
-  // `src` takes either form too: a reply to a bound operation echoes the request's `dst`.
-  if (ch[i]?.type !== TYPE.PATH && ch[i]?.type !== TYPE.PATH_REF) {
-    throw new RangeError('FWD: missing src PATH child');
-  }
+  if (ch[i]?.type !== TYPE.PATH) throw new RangeError('FWD: missing src PATH child');
   const src = ch[i++];
 
   let kind: number | null = null;
@@ -371,8 +353,7 @@ export function parseFwdTlv(fwd: Tlv): ParsedFwd {
     if (ch[i]?.type === TYPE.VALUE) kind = u8(ch[i++]);
     if (i < ch.length) payload = ch[i++];
   } else if (op === FWD_OP.WRITE) {
-    // The reverse list is told from the payload by its TYPE (RFC-0024 §7.1 amendment 2), so a
-    // raw PATH_REF payload is a payload and only 0x15 is the list.
+    // The reverse list is told from the payload by its TYPE: only 0x15 is the list.
     if (i < ch.length && ch[i].type !== TYPE.PATH_REF_REVERSE) payload = ch[i++];
   } else if (op === FWD_OP.AWAIT) {
     if (ch[i]?.type === TYPE.VALUE && ch[i].payload.length >= 8) {
@@ -380,11 +361,9 @@ export function parseFwdTlv(fwd: Tlv): ParsedFwd {
       i++;
     }
   }
-  // Licensed only on a mint-flagged request (§7.1 amendment 1): on an unflagged frame a
-  // trailing 0x15 binds no route and stays unparsed.
-  const reverse =
-    mintRequest && ch[i]?.type === TYPE.PATH_REF_REVERSE ? ch[i] : null;
-  return { op, dst, field, src, kind, payload, awaitTimeoutNs, mintRequest, dstBound, reverse };
+  // Every forwarded subscribe carries it, with no flag (RFC-0029 §7.1).
+  const reverse = ch[i]?.type === TYPE.PATH_REF_REVERSE ? ch[i] : null;
+  return { op, dst, field, src, kind, payload, awaitTimeoutNs, reverse };
 }
 
 /**

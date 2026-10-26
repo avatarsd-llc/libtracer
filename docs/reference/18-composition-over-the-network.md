@@ -448,17 +448,18 @@ The originator matches the reply to its request from the reply's own route:
 
 - The reference core's `fwd_router_t::originate` gives each request a reply route of its own, a
   fresh one-segment token, unless the caller names one.
-- The TypeScript client matches by **`src` suffix**: a reply goes to the oldest outstanding
-  request whose `dst` ends with the reply's `src`
+- The TypeScript client does the same: each one-shot request sends `src = <replyEndpoint>/q<n>`
+  (a subscribe keeps `<replyEndpoint>/sub<n>`), so the reply's `dst` carries that token and the
+  client takes the request the token names. Only a reply with no token in its `dst` falls back to
+  the older **`src` suffix** match and then to arrival order
   ([#1530](https://github.com/avatarsd-llc/libtracer/issues/1530);
   [04 §Multi-hop FWD forwarding](04-communication-flows.md#multi-hop-fwd-forwarding)).
 
-**The suffix caveat.** Two outstanding writes to the **same path** have the same suffix, so the
-suffix cannot tell their replies apart, and matching falls back to arrival order. Replies on one
-link carry no ordering promise, so the fallback can hand each caller the other's answer. If it
-matters which attempt was answered, give each attempt a **fresh reply route**: a reply endpoint of
-its own, so the reply's `dst` names the attempt. That is sender-side only. No other node reads the
-route as anything but a path, and nothing changes on the wire.
+**Same-path requests.** Because each attempt carries its own reply token, two outstanding writes
+to the **same path** are told apart by the reply's `dst`, not by arrival order. A client that
+builds its own reply route gets the same property by giving each attempt a **fresh reply route**:
+a reply endpoint of its own, so the reply's `dst` names the attempt. That is sender-side only. No
+other node reads the route as anything but a path, and nothing changes on the wire.
 
 *Forthcoming:* [RFC-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0030-host-api-walks-the-graph-reply-is-a-remote-write.md)
 §8–§9 (accepted; implementation
