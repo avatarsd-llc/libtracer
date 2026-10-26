@@ -663,7 +663,7 @@ class can_transport_t final : public transport_t, public bus_link_t {
      * subscriber's delivery renders and compares no name. Answers what @ref peer_link answers
      * for `peer_name(peer)`, liveness included.
      * @retval nullptr @p peer is invalid, carries a generation other than
-     *         @ref kAnnouncedPeerGeneration, lies past `can::kNodeMax`, or its node expired.
+     *         @ref kAnnouncedPeerGeneration, lies past `%can::kNodeMax`, or its node expired.
      */
     [[nodiscard]] transport_t* peer_link_of(peer_handle_t peer) override;
 
@@ -674,7 +674,7 @@ class can_transport_t final : public transport_t, public bus_link_t {
      * is `format_peer_name` and nothing else — no table lookup, no lock, no liveness check
      * (an announce-census peer has no session whose liveness could be asked about, which is
      * exactly why the generation is the constant `kAnnouncedPeerGeneration`). A handle at any
-     * other generation, or past `can::kNodeMax`, is not one this bus mints and names nothing.
+     * other generation, or past `%can::kNodeMax`, is not one this bus mints and names nothing.
      */
     [[nodiscard]] std::string_view peer_name(peer_handle_t peer,
                                              std::span<char> scratch) const override;
