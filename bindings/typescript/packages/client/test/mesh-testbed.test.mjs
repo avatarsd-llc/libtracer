@@ -148,6 +148,9 @@ async function dial(client, from, linkName, toNode, budgetMs = 30000) {
   throw new Error(`dial ${from} -> ${toNode} (as "${linkName}") failed: ${lastErr}`);
 }
 
+/** @brief The far-side path {@link bringUp} sends its kick to; no assertion reads it. */
+const KICK_PROBE = 'link-kick-probe';
+
 /** @brief `link_state_t::UP`, the 1-byte liveness VALUE a connection vertex holds (RFC-0014 §4). */
 const LINK_UP = 0x03;
 
@@ -159,13 +162,19 @@ const LINK_UP = 0x03;
  * link (dropped, but it starts the attempt) and then reads the connection vertex's liveness;
  * the first frame a test routes then finds the link `up`. The op-woken socket stays up until
  * loss (§4.1's keep-up MAY, which the reference engine takes).
+ *
+ * The kick names {@link KICK_PROBE}, a path no assertion reads. A dropped kick is never
+ * answered, and the client keeps its timed-out entry so that a late reply cannot reach a live
+ * caller. The client matches a reply to the oldest entry whose `dst` ends with the reply's
+ * `src`. A kick to `/node/name` would therefore leave an entry that takes the reply of the
+ * next `/node/name` read, local or remote, and that read would time out.
  */
 async function bringUp(client, linkName, deadline) {
   const conn = ['net', WS_CLIENT_MODULE, linkName];
   while (Date.now() < deadline) {
     const state = await client.read(conn);
     if (state.payload?.[state.payload.length - 1] === LINK_UP) return;
-    await client.await_([...conn, 'node', 'name'], 200_000_000n).catch(() => {});
+    await client.await_([...conn, KICK_PROBE], 200_000_000n).catch(() => {});
   }
   throw new Error(`link "${linkName}" did not come up`);
 }

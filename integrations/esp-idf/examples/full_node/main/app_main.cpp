@@ -390,9 +390,8 @@ int run_host_probe(device_node_t& dev) {
     // Dial the device: a config-created udp client connection at /net/udp-client/dev.
     // Since the RFC-0014 §4 S5 flip (#1548) the built-in DIAL kinds are engine-managed on a
     // build that carries the engine — opt-in since v0.17.0 (#1670), and this example opts in
-    // (sdkconfig.defaults) — so this write creates the connection DORMANT and the first op
-    // below auto-wakes it. On a lean build it dials eagerly instead; the round trip is
-    // unchanged from the application's side either way, which is the point.
+    // (sdkconfig.defaults) — so this write creates the connection DORMANT. On a lean build it
+    // dials eagerly instead.
     const auto wa = graph.write(path_t("/net/udp-client/conn"),
                                 conn_spec("dev", kNodePort, "udp", "127.0.0.1"));
     check(wa.has_value(),
@@ -401,11 +400,16 @@ int run_host_probe(device_node_t& dev) {
 
     // 1) FWD{READ /dev/sensor/temp} — crosses the wire, resolves at the device
     //    terminus, and the REPLY source-routes back to our reply sink.
-    router.on_frame(
-        "self", b_fwd(tr::graph::fwd_op_t::READ,
-                      b_path({"net", "udp-client", "dev", "sensor", "temp"}), b_path({"probe"})));
+    //
+    //    A send on a link that is not `up` is a counted drop that kicks the dial and never
+    //    waits (RFC-0014 Amendment 5), so the first READ into the DORMANT link only starts
+    //    it. The READ is re-sent every 250 ms until a reply lands; the box keeps the first.
     bool read_ok = false;
     for (int i = 0; i < 60 && !read_ok; ++i) {
+        if (i % 5 == 0)
+            router.on_frame("self", b_fwd(tr::graph::fwd_op_t::READ,
+                                          b_path({"net", "udp-client", "dev", "sensor", "temp"}),
+                                          b_path({"probe"})));
         read_ok = reply_box.ready.load(std::memory_order_acquire);
         if (!read_ok) std::this_thread::sleep_for(50ms);
     }
