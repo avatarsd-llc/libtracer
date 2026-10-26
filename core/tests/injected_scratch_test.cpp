@@ -114,11 +114,13 @@ int main() {
     graph_t g(root);
     fwd_router_t router(g, {.link_src = &heap, .rx = &heap, .flat = &backend, .egress = &backend});
     transport_vertex_t net(g, router, "/net", &backend, &heap);
+    // A path the app parses draws from the source it names (#2286): here, the graph's own.
+    const auto at = [&g](std::string_view text) { return *path_t::parse(text, g.table_source()); };
 
     // (a) The path_key_t spill: a 34-byte name record, then a copy of the key.
     std::printf("(a) a long name spills to the graph's source:\n");
     std::size_t before = root.draws;
-    (void)g.register_vertex(path_t("/n/a-name-well-past-sixteen-bytes"), role_t::STORED_VALUE);
+    (void)g.register_vertex(at("/n/a-name-well-past-sixteen-bytes"), role_t::STORED_VALUE);
     check(root.draws > before, "the spill drew the graph's source");
     // The copy constructor draws from the source that served the original (#1991).
     const std::string_view text = "a-record-well-past-sixteen-bytes";
@@ -140,7 +142,7 @@ int main() {
         tr::mem::bytes_t spec(heap);
         check(tr::net::conn_spec_t("b0").bytes(spec), "the SPEC encodes");
         const auto spec_view = tr::view::over_bytes(tr::mem::as_span(spec), backend);
-        check(spec_view && g.write(path_t("/net/bus/conn"), *spec_view).has_value(),
+        check(spec_view && g.write(at("/net/bus/conn"), *spec_view).has_value(),
               "the bus connection is created");
         check(net.set_link_state("net/bus/b0", tr::net::link_state_t::UP).has_value(),
               "its liveness is published");
@@ -148,7 +150,7 @@ int main() {
         check(default_root_peak() == 0,
               "creating it and publishing its liveness took nothing from the default root");
         before = root.draws;
-        const auto listing = g.read(path_t("/net/bus/b0:children[]"));
+        const auto listing = g.read(at("/net/bus/b0:children[]"));
         check(
             listing.has_value() && (*listing)->link_count() == 1 && (*listing)->total_length() > 0,
             "the listing reads back as one non-empty link");

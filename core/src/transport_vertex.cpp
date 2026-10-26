@@ -422,8 +422,9 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
     // `SCHEMA_NOT_FOUND` like any other unregistered catalog type. The ONE wire creation door
     // for a connection is the per-module creator endpoint `<net_root>/<module>/conn`
     // (`register_module` mints it; RFC-0014 §1/§2).
-    if (!graph_.find(path_t::parse(net_root_.view())->key())) {
-        (void)graph_.register_vertex(*path_t::parse(net_root_.view()), graph::role_t::STORED_VALUE);
+    if (auto root = path_t::parse(net_root_.view(), graph_.table_source());
+        root && !graph_.find(root->key())) {
+        (void)graph_.register_vertex(*root, graph::role_t::STORED_VALUE);
     }
     // The `quic` kind is NOT a builtin: it lives in the separate libtracer_quic
     // module (ADR-0043), which extends this catalog through register_transport_type

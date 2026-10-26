@@ -23,6 +23,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -403,15 +404,26 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
  * under a `:subscribers` head and answers INVALID_PATH anywhere else, as a malformed index_mode
  * does.
  */
+/** @brief Where @ref selector_to_field copies the step names: every step at its bound. */
+using field_names_t = std::array<char, kMaxFieldDepth * kMaxSegmentBytes>;
+
 template <class N>
-[[nodiscard]] result_t<field_path_t> selector_to_field(const N& field) {
+[[nodiscard]] result_t<field_path_t> selector_to_field(const N& field, field_names_t& names) {
     field_path_t fp;
+    char* at = names.data();
     auto ch = field.children();
     std::optional<N> cur = ch.next();
     while (cur) {  // one level per NAME + its 0/1/2 trailing VALUEs
         if (cur->type() != type_t::NAME) return std::unexpected(status_t::INVALID_PATH);
-        field_step_t& step = fp.steps.emplace_back();
-        step.name.assign(detail::as_string_view(cur->body()));
+        // A step's name is copied into @p names, which the caller holds for the resolve: a
+        // rope-tier NAME node flattens into a cache of its own that dies with the node. A level
+        // past kMaxFieldDepth, or a name past a segment's bound, is refused.
+        const std::string_view name = detail::as_string_view(cur->body());
+        if (name.size() > kMaxSegmentBytes ||
+            !fp.steps.push_back(field_step_t{.name = {at, name.size()}}))
+            return std::unexpected(status_t::INVALID_PATH);
+        at = std::ranges::copy(name, at).out;
+        field_step_t& step = fp.steps[fp.steps.size() - 1];
         // vals[1] is the index_mode, vals[0] the u32 index; each VALUE read shifts in from the
         // right. The u8 index_mode is the low byte of its u32 load (`load_le` is LE and reads
         // the absent bytes as zero), so one load width serves both.
@@ -447,10 +459,9 @@ template <class N>
                 // A wire index_mode byte outside {SCALAR,ELEMENT,WILDCARD} is malformed.
                 // Without this the switch would fall through and silently DROP the decoded
                 // index (step keeps its non-indexed defaults) — reject it, matching the
-                // kMaxFieldDepth guard below and the sibling INVALID_PATH sites (#437).
+                // kMaxFieldDepth guard above and the sibling INVALID_PATH sites (#437).
                 return std::unexpected(status_t::INVALID_PATH);
         }
-        if (fp.steps.size() > kMaxFieldDepth) return std::unexpected(status_t::INVALID_PATH);
         cur = std::move(next);  // the lookahead item is the next level's NAME (or end)
     }
     return fp;
@@ -1068,8 +1079,9 @@ template <class N>
 
     // Decode the optional :field selector (its `[*]` deferral included). A request without
     // one decodes to the empty path, which is the vertex value itself.
-    const result_t<field_path_t> field =
-        req.selector ? selector_to_field(*req.selector) : result_t<field_path_t>{field_path_t{}};
+    field_names_t names;  // the selector's step names, held for the resolve
+    const result_t<field_path_t> field = req.selector ? selector_to_field(*req.selector, names)
+                                                      : result_t<field_path_t>{field_path_t{}};
 
     // #766, guard 2 of 2 — the ONE check of everything the walk read before it touches the
     // graph. The selector's names and indices are the last span reads the walk makes (the

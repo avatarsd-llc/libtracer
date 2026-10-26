@@ -16,6 +16,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -76,28 +77,75 @@ inline constexpr std::size_t kMaxFieldDepth = 8;
  * The parsed form of one `.`-separated component of a `:field.sub[N]` tail
  * (docs/reference/03 §addressing). Exactly one of @ref indexed (with @ref index),
  * @ref append, or @ref wildcard is meaningful when a `[...]` selector is present.
+ *
+ * A step owns nothing (ADR-0083 Q15: no owning standard type crosses core's API): @ref name
+ * views bytes that whoever built the step keeps alive — a @ref path_t's own block, the
+ * request frame a resolver is reading, or a string literal.
  */
 struct field_step_t {
-    std::string name;     /**< @brief The step's NAME (the text before any `[...]`). */
-    bool indexed = false; /**< @brief True if a `[...]` selector was present. */
-    bool append = false;  /**< @brief True for `[]` — append to a sequence. */
+    std::string_view name; /**< @brief The step's NAME (the text before any `[...]`). */
+    bool indexed = false;  /**< @brief True if a `[...]` selector was present. */
+    bool append = false;   /**< @brief True for `[]` — append to a sequence. */
     /** @brief True for `[*]` — FIELD index_mode=WILDCARD (RFC-0004 §C). */
     bool wildcard = false;
     /** @brief The `[N]` index; valid when `indexed && !append && !wildcard`. */
     std::uint16_t index = 0;
-    /** @brief Value equality over every field. */
+    /** @brief Value equality over every field (the name by content). */
     bool operator==(const field_step_t&) const = default;
+};
+
+/**
+ * @brief The steps of a field path, held IN PLACE: at most @ref kMaxFieldDepth of them, the
+ *        bound every parser already enforces, so a field path never allocates.
+ *
+ * The read surface is the one a sequence has (`size`, `[i]`, range-for); the one write is
+ * @ref push_back, which refuses a step past the bound instead of growing.
+ */
+class field_steps_t {
+   public:
+    /** @brief The number of steps. */
+    [[nodiscard]] std::size_t size() const noexcept { return n_; }
+    /** @brief True when there are no steps. */
+    [[nodiscard]] bool empty() const noexcept { return n_ == 0; }
+    /** @brief Step @p i; @p i MUST be below @ref size. */
+    [[nodiscard]] const field_step_t& operator[](std::size_t i) const noexcept { return s_[i]; }
+    /** @brief Step @p i, mutable; @p i MUST be below @ref size. */
+    [[nodiscard]] field_step_t& operator[](std::size_t i) noexcept { return s_[i]; }
+    /** @brief First step. */
+    [[nodiscard]] const field_step_t* begin() const noexcept { return s_.data(); }
+    /** @brief One past the last step. */
+    [[nodiscard]] const field_step_t* end() const noexcept { return s_.data() + n_; }
+    /** @brief First step, mutable. */
+    [[nodiscard]] field_step_t* begin() noexcept { return s_.data(); }
+    /** @brief One past the last step, mutable. */
+    [[nodiscard]] field_step_t* end() noexcept { return s_.data() + n_; }
+    /**
+     * @brief Append @p step.
+     * @return false, appending nothing, when @ref kMaxFieldDepth steps are already held.
+     */
+    [[nodiscard]] bool push_back(const field_step_t& step) noexcept {
+        if (n_ == kMaxFieldDepth) return false;
+        s_[n_++] = step;
+        return true;
+    }
+    /** @brief Equality over the held steps (unused slots never compare). */
+    bool operator==(const field_steps_t& o) const noexcept { return std::ranges::equal(*this, o); }
+
+   private:
+    std::array<field_step_t, kMaxFieldDepth> s_{};
+    std::uint8_t n_ = 0;
 };
 
 /**
  * @brief The parsed `:field.sub[N]` tail of a path — a sequence of @ref field_step_t.
  *
  * Empty when the path addresses the vertex value itself (no `:` tail). Drives the
- * field-write / field-read control surface (docs/reference/04).
+ * field-write / field-read control surface (docs/reference/04). A value type with no
+ * allocation: its steps are in place and their names are views.
  */
 struct field_path_t {
     /** @brief The `.`-separated steps; empty ⇒ the vertex value itself. */
-    std::vector<field_step_t> steps;
+    field_steps_t steps;
     /** @brief True when there is no field tail (addresses the vertex value). */
     [[nodiscard]] bool empty() const noexcept { return steps.empty(); }
     /** @brief Value equality over the step sequence. */
@@ -120,20 +168,16 @@ struct field_path_t {
  *
  * The canonical bytes stay in the @ref path_t alongside it and are never discarded: they are
  * the fallback a refused chain drops back to, which is what makes "drop and re-learn" a
- * complete recovery (§6.3).
+ * complete recovery (§6.3). A VIEW of the path's own storage, valid while that path is
+ * unchanged.
  */
 struct path_binding_t {
     /** @brief True once a chain has been adopted; false is "never bound", not "invalid". */
     bool bound = false;
-    /**
-     * @brief The chain's `PATH` body, origin-first. Empty exactly when @ref bound is false.
-     *
-     * A view into the owning @ref path_t's block (drawn from the injected table source,
-     * ADR-0083): valid until that path is rebound, cleared, assigned or destroyed.
-     */
+    /** @brief The chain's `PATH` body, origin-first. Empty exactly when @ref bound is false. */
     std::span<const std::byte> chain;
-    /** @brief Value equality: both fields, the chain compared by content. */
-    [[nodiscard]] bool operator==(const path_binding_t& o) const noexcept {
+    /** @brief Value equality: both flags, and the chains by content. */
+    bool operator==(const path_binding_t& o) const noexcept {
         return bound == o.bound && std::ranges::equal(chain, o.chain);
     }
 };
@@ -145,46 +189,27 @@ struct path_binding_t {
  * Dispatch keys on the parsed bytes (@ref key), never the string form — parse once,
  * hold the value, and every read/write compares bytes (docs/reference/02 §dispatch).
  *
- * A path also carries the optional bound form (@ref binding, RFC-0024 §7.4). It stays a
+ * A path also carries the optional learned chain (@ref binding, RFC-0029 §6.2). It stays a
  * **value type**: the binding is an opaque slot the graph and transport tiers fill and
  * validate, never a handle into either of them, so copying a path copies its binding and
  * neither copy can outlive anything.
+ *
+ * @section storage Storage (#2286)
+ *
+ * No standard container: the canonical bytes, the field steps and their names live in ONE
+ * block sized exactly at parse, and a learned chain in a second, both drawn from a
+ * `tr::mem::block_source_t` — the one given to @ref parse, else the process table source (the
+ * same default `path_key_t` spills to, ADR-0083). The root path with no field tail owns no
+ * block at all. A copy draws its blocks from the source of the path it copies and, like
+ * `path_key_t`'s, stops with a sizing message if that source cannot serve the path block; a
+ * chain block it cannot serve leaves the copy unbound instead (the canonical bytes are a
+ * complete answer, RFC-0029 §6.3). A move takes the blocks. Nothing here grows after the parse
+ * except the chain slot, and that is one exact block per adopted chain.
  */
 class path_t {
    public:
     /** @brief An empty path (no segments, no field tail). */
-    path_t() = default;
-    /** @brief Copies the path and its chain; a chain block the table source refuses aborts. */
-    path_t(const path_t& o) : payload_(o.payload_), field_(o.field_), segments_(o.segments_) {
-        if (o.chain_len_ != 0) copy_chain(o);
-    }
-    /** @brief Takes the path and its chain block; @p o is left unbound. */
-    path_t(path_t&& o) noexcept
-        : payload_(std::move(o.payload_)),
-          field_(std::move(o.field_)),
-          segments_(o.segments_),
-          chain_(std::exchange(o.chain_, nullptr)),
-          chain_len_(std::exchange(o.chain_len_, 0)) {}
-    /** @brief Copy-assign (see the copy constructor). */
-    path_t& operator=(const path_t& o) {
-        if (this != &o) *this = path_t(o);
-        return *this;
-    }
-    /** @brief Move-assign (see the move constructor). */
-    path_t& operator=(path_t&& o) noexcept {
-        if (this == &o) return *this;
-        clear_binding();
-        payload_ = std::move(o.payload_);
-        field_ = std::move(o.field_);
-        segments_ = o.segments_;
-        chain_ = std::exchange(o.chain_, nullptr);
-        chain_len_ = std::exchange(o.chain_len_, 0);
-        return *this;
-    }
-    /** @brief Returns the chain block to the table source. */
-    ~path_t() {
-        if (chain_ != nullptr) clear_binding();
-    }
+    path_t() noexcept = default;
 
     /**
      * @brief Construct from a compile-site / known-good path LITERAL, parsing ONCE.
@@ -215,18 +240,47 @@ class path_t {
      */
     [[nodiscard]] static result_t<path_t> parse(std::string_view text);
 
+    /**
+     * @brief @ref parse, drawing the path's block from @p src.
+     * @return As @ref parse; `BACKPRESSURE` when @p src refuses the block.
+     */
+    [[nodiscard]] static result_t<path_t> parse(std::string_view text,
+                                                tr::mem::block_source_t& src);
+
+    /** @brief Copy @p o into blocks from @p o's source (see @ref storage). */
+    path_t(const path_t& o);
+    /** @brief Copy-assign (see the copy constructor). */
+    path_t& operator=(const path_t& o);
+    /** @brief Take @p o's blocks; @p o is left the empty path. */
+    path_t(path_t&& o) noexcept { take(o); }
+    /** @brief Move-assign (see the move constructor). */
+    path_t& operator=(path_t&& o) noexcept {
+        if (this != &o) {
+            release();
+            take(o);
+        }
+        return *this;
+    }
+    /** @brief Return both blocks to their source. */
+    ~path_t() { release(); }
+
     /** @brief The vertex-map key: the canonical PATH-TLV payload bytes (packed records). */
     [[nodiscard]] std::span<const std::byte> key() const noexcept {
-        return {payload_.data(), payload_.size()};
+        return {block_ + payload_off(), key_len_};
     }
-    /** @brief The parsed `:field` tail (empty when the path addresses the vertex value). */
-    [[nodiscard]] const field_path_t& field() const noexcept { return field_; }
+    /**
+     * @brief The parsed `:field` tail (empty when the path addresses the vertex value).
+     *
+     * Its step names view this path's block, and so does a copy of it: hold the path for as
+     * long as the field path is used (`auto f = path_t::parse(t)->field();` dangles).
+     */
+    [[nodiscard]] const field_path_t& field() const noexcept;
     /** @brief The number of segments in the path. */
     [[nodiscard]] std::size_t segment_count() const noexcept { return segments_; }
 
     /** @brief This path's learned chain, if one has been adopted (RFC-0029 §6.2). */
     [[nodiscard]] path_binding_t binding() const noexcept {
-        return {chain_len_ != 0, {chain_, chain_len_}};
+        return {.bound = chain_len_ != 0, .chain = {chain_, chain_len_}};
     }
 
     /**
@@ -235,10 +289,7 @@ class path_t {
      * Refuses (leaving the path unbound) an empty chain and one whose body a 16-bit length
      * cannot spell: the canonical path this object still holds is the answer, and refusing
      * beats truncating, which would produce a *valid-looking* chain for a different route.
-     *
-     * The chain is copied into one block drawn from `tr::mem::table_source()` (ADR-0083),
-     * so binding takes nothing from the global heap; a block the source refuses also refuses
-     * the bind.
+     * Also refuses, leaving any earlier chain in place, when the source has no block for it.
      *
      * @return true iff the chain was recorded.
      */
@@ -254,33 +305,35 @@ class path_t {
     void clear_binding() noexcept;
 
    private:
-    /** @brief Bind a copy of @p o's chain; a block the table source refuses aborts. */
-    void copy_chain(const path_t& o) noexcept;
+    [[nodiscard]] std::size_t payload_off() const noexcept {
+        return has_field_ ? sizeof(field_path_t) : 0;
+    }
+    [[nodiscard]] tr::mem::block_source_t& source() const noexcept;
+    void copy_from(const path_t& o);
+    void release() noexcept;
+    void take(path_t& o) noexcept;
 
-    std::vector<std::byte> payload_;  // canonical PATH-TLV payload (packed segment records)
-    field_path_t field_;
-    std::size_t segments_ = 0;
-    // The learned-chain slot (RFC-0029 §6.2): one table-source block, null for every path that
-    // has never adopted a chain — so an unbound path costs a pointer and no allocation, and
-    // nothing on the canonical hot path reads it. `chain_len_ != 0` is "bound".
-    std::byte* chain_ = nullptr;
-    std::uint16_t chain_len_ = 0;
+    tr::mem::block_source_t* src_ = nullptr;  // who serves both blocks; null ⇒ table source
+    std::byte* block_ = nullptr;  // [field_path_t if has_field_][key bytes][field names]
+    std::byte* chain_ = nullptr;  // the learned chain's PATH body (RFC-0029 §6.2)
+    std::uint32_t block_len_ = 0;
+    std::uint16_t chain_len_ = 0;  // a chain body is at most 0xFFFF bytes (`bind`)
+    std::uint16_t key_len_ = 0;    // at most kMaxPathBytes
+    std::uint8_t segments_ = 0;    // at most kMaxSegments
+    bool has_field_ = false;
 };
 
 /**
- * @brief A `path_t` is NINE pointer-widths: two owning containers, a count and a chain slot.
+ * @brief A `path_t` is three pointers and ten bytes of lengths: 40 B on a 64-bit host, 24 B on
+ *        rv32.
  *
- * Pinned, not observed. A path is a parse-once VALUE the API takes by `const&`, and its opaque
- * slot (RFC-0024's binding) added a container to it — RFC-0027's path-label slot was the second,
- * and went with that plane (RFC-0029 S3, #2244: 15 → 11); the chain left `std::vector` for a
- * table-source block (RFC-0029 S2: 11 → 9). That is the
- * exact growth an unwatched type absorbs one RFC at a time until somebody embeds it in a hot
- * struct and pays for it per vertex. Expressed in `sizeof(void*)` so it holds identically on
- * rv32 and on a 64-bit host, which is the whole point of pinning a shape rather than a number:
- * a change here is a deliberate edit, and it is the moment to ask whether the new member wants
- * to be a slot at all.
+ * Pinned, not observed. A path is a parse-once VALUE the API takes by `const&`, and an origin
+ * holds them per subscription and per vertex, so its size is multiplied RAM. #2286 moved its three
+ * remaining owning standard containers into source-drawn blocks: 9 pointer-widths → 3 plus the
+ * lengths (72 → 40 B on a 64-bit host, 36 → 24 B on rv32). A change here is a deliberate edit, and
+ * it is the moment to ask whether the new member wants to be a slot at all.
  */
-static_assert(sizeof(path_t) == 9 * sizeof(void*),
+static_assert(sizeof(path_t) == (sizeof(void*) == 8 ? 40 : 24),
               "a path_t's shape is a ratchet — grow it deliberately or not at all");
 
 inline path_t::path_t(std::string_view text) {

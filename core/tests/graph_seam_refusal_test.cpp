@@ -18,6 +18,7 @@
  * the message names the call, the source and the bytes it was asked for.
  */
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -817,9 +818,62 @@ void test_init_exhaustion_message() {
 }
 #endif
 
+/**
+ * @brief #2286 — a path's blocks come from the source it was parsed with, and every refusal
+ *        answers by value: `parse` with BACKPRESSURE, `bind` keeping the chain it had, and a
+ *        copy that gets its path block but not its chain block left unbound.
+ */
+void test_path_storage() {
+    std::printf("path_t storage: drawn from the given source, refusals answered by value\n");
+    gate_source_t src;
+    const std::byte chain[] = {std::byte{2}, std::byte{'p'}, std::byte{'q'}};
+    const std::byte chain2[] = {std::byte{1}, std::byte{'r'}};
+    {
+        // The root with no field tail owns no block, so a dry source still parses it.
+        src.arm(0);
+        const auto root = path_t::parse("/", src);
+        check(root && root->key().empty() && src.live_ == 0, "the root path draws no block");
+        const auto dry = path_t::parse("/a/b:x.y[2]", src);
+        check(!dry && dry.error() == status_t::BACKPRESSURE && src.live_ == 0,
+              "parse on a dry source answers BACKPRESSURE and holds nothing");
+        src.disarm();
+
+        auto p = path_t::parse("/a/b:x.y[2]", src);
+        check(p && src.live_ == 1, "a path with a field tail is ONE block");
+        check(p->key().size() == 4 && p->segment_count() == 2, "the key is the packed address");
+        check(p->field().steps.size() == 2 && p->field().steps[0].name == "x" &&
+                  p->field().steps[1].name == "y" && p->field().steps[1].index == 2,
+              "the field steps survive the text they were parsed from");
+        check(p->bind(chain) && src.live_ == 2, "a chain is a second block from the same source");
+
+        src.arm(0);
+        check(!p->bind(chain2) && std::ranges::equal(p->binding().chain, chain),
+              "a refused bind keeps the chain the path had");
+
+        // The path block is served, the chain block is not: the copy stays canonical.
+        src.arm(1);
+        {
+            const path_t c(*p);
+            check(!c.binding().bound && std::ranges::equal(c.key(), p->key()) &&
+                      c.field() == p->field() && src.live_ == 3,
+                  "a copy whose chain block is refused is left unbound, not aborted");
+            check(c.field().steps[0].name.data() != p->field().steps[0].name.data(),
+                  "the copy's step names view its own block");
+        }
+        src.disarm();
+        check(src.live_ == 2, "the copy gave its block back");
+
+        path_t m(std::move(*p));
+        check(src.live_ == 2 && m.binding().bound && p->key().empty() && p->field().empty(),
+              "a move takes both blocks and leaves the empty path");
+    }
+    check(src.live_ == 0, "destroying the paths returns every block");
+}
+
 }  // namespace
 
 int main() {
+    test_path_storage();
     test_register();
     test_register_policy_reset();
     test_register_unconditional();

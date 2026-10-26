@@ -619,7 +619,7 @@ void register_client(graph_t& g) {
  *  @return true iff the field write was admitted. */
 bool append_vector(graph_t& g, const path_t& producer, std::string_view vector_case) {
     tr::graph::field_path_t field;
-    field.steps.push_back(
+    (void)field.steps.push_back(
         tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
     const std::optional<vertex_handle_t> v = g.find(producer.key());
     if (!v) return false;
@@ -632,7 +632,7 @@ bool append_vector(graph_t& g, const path_t& producer, std::string_view vector_c
 bool replace_vector(graph_t& g, const path_t& producer, std::uint16_t idx,
                     std::string_view vector_case) {
     tr::graph::field_path_t field;
-    field.steps.push_back(
+    (void)field.steps.push_back(
         tr::graph::field_step_t{.name = "subscribers", .indexed = true, .index = idx});
     const std::optional<vertex_handle_t> v = g.find(producer.key());
     if (!v) return false;
@@ -884,7 +884,7 @@ void test_value_target_is_refused() {
     const auto value_target = make_value(vector_bytes("subscriber/target-as-value-refused"));
 
     tr::graph::field_path_t append;
-    append.steps.push_back(
+    (void)append.steps.push_back(
         tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
     check(fails_with(g.write(*v, append, value_target), status_t::TYPE_MISMATCH),
           "`:subscribers[]` refuses a VALUE target TYPE_MISMATCH");
@@ -896,7 +896,7 @@ void test_value_target_is_refused() {
           "ablation: the PATH form of the same target is admitted into slot 0");
 
     tr::graph::field_path_t replace;
-    replace.steps.push_back(
+    (void)replace.steps.push_back(
         tr::graph::field_step_t{.name = "subscribers", .indexed = true, .index = 0});
     check(fails_with(g.write(*v, replace, value_target), status_t::TYPE_MISMATCH),
           "`:subscribers[0]` refuses a VALUE target TYPE_MISMATCH");
@@ -924,7 +924,7 @@ void test_no_target_is_not_an_unsubscribe() {
           "slot 0 holds a policy-less edge to /client");
 
     tr::graph::field_path_t slot0;
-    slot0.steps.push_back(tr::graph::field_step_t{.name = "subscribers", .indexed = true});
+    (void)slot0.steps.push_back(tr::graph::field_step_t{.name = "subscribers", .indexed = true});
     check(fails_with(g.write(src, slot0, make_value(vector_bytes("subscriber/no-target-refused"))),
                      status_t::TYPE_MISMATCH),
           "`:subscribers[0]` refuses the targetless record with TYPE_MISMATCH");
@@ -987,7 +987,7 @@ void test_qos_settings_pair_scan_cannot_be_hijacked() {
     register_client(g);
 
     tr::graph::field_path_t field;
-    field.steps.push_back(
+    (void)field.steps.push_back(
         tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
     const std::optional<vertex_handle_t> v = g.find(path_t("/hj/src").key());
     const bool admitted =
@@ -1035,7 +1035,7 @@ int join_latches_for(graph_t& g, const std::vector<std::byte>& sub) {
     (void)g.write(src, byte_value(0x5A));  // the LKV a durability request would latch
     register_client(g);
     tr::graph::field_path_t field;
-    field.steps.push_back(
+    (void)field.steps.push_back(
         tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
     const std::optional<vertex_handle_t> v = g.find(path_t("/rk/src").key());
     if (!v || !g.write(*v, field, make_value(sub)).has_value()) return -1;
@@ -1121,7 +1121,7 @@ void test_stream_depth_is_carried_and_ignored() {
     (void)g.write(producer, byte_value(0x5A));
     register_client(g);
     tr::graph::field_path_t field;
-    field.steps.push_back(
+    (void)field.steps.push_back(
         tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
     check(g.write(producer, field, make_value(sub)).has_value(),
           "a SUBSCRIBER carrying `stream_depth` is ADMITTED — retired as a request, not refused");

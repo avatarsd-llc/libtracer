@@ -80,7 +80,16 @@ extern "C" void app_main(void) {
                 sizeof(st_root_t), sizeof(tr::mem::mcu_root_t));
 
     tr::graph::graph_t g(g_root);  // every block this graph draws comes from g_root
-    const auto count = g.register_vertex(path_t("/counter"), role_t::STORED_VALUE);
+    // A path's block comes from the source it is parsed with, else the process table source,
+    // which is the default arena here (#2286). Parsing from the graph's table source keeps
+    // the path in the app's root too.
+    const auto counter = path_t::parse("/counter", g.table_source());
+    if (!counter) {
+        check(false, "parse /counter from the graph's table source");
+        finish();
+        return;
+    }
+    const auto count = g.register_vertex(*counter, role_t::STORED_VALUE);
     for (std::uint32_t i = 1; i <= 100; ++i) {
         const auto value = tr::view::over_bytes(std::as_bytes(std::span(&i, 1)), g.value_backend());
         if (!value || !g.write(count, *value)) check(false, "write /counter");

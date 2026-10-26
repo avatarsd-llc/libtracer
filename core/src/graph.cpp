@@ -3516,7 +3516,8 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
     const std::optional<view::view_t> value = view::over_bytes(mem::as_span(sub), *value_backend_);
     if (!value) return std::unexpected(status_t::BACKPRESSURE);
     field_path_t field;
-    field.steps.push_back(field_step_t{.name = "subscribers", .indexed = true, .append = true});
+    (void)field.steps.push_back(  // the first of kMaxFieldDepth slots: cannot be full
+        field_step_t{.name = "subscribers", .indexed = true, .append = true});
     return field_write(v, field, *value, write_ctx_t{});
 }
 

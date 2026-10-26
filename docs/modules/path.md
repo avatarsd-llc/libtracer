@@ -21,12 +21,13 @@ canonical key — e.g. `/sensor/temp` → `06 'sensor' 04 'temp'`
 ## Interface
 
 ```cpp
-struct field_step_t { std::string name; bool indexed, append, wildcard; std::uint16_t index; };
-struct field_path_t { std::vector<field_step_t> steps; };
+struct field_step_t { std::string_view name; bool indexed, append, wildcard; std::uint16_t index; };
+struct field_path_t { field_steps_t steps; };        // ≤ kMaxFieldDepth steps in place, no growth
 
 class path_t {
     explicit path_t(std::string_view);               // known-good LITERAL: parses once, aborts if malformed
     static result_t<path_t> parse(std::string_view);  // RUNTIME string; result_t = expected<T, status_t>
+    static result_t<path_t> parse(std::string_view, mem::block_source_t&);  // block from that source
     std::span<const std::byte> key() const;          // canonical PATH payload bytes
     const field_path_t& field() const;               // the :field.sub[N] tail
     std::size_t segment_count() const;
@@ -37,11 +38,15 @@ struct path_key_hash_t { /* FNV-1a over the key bytes */ };
 
 The two entry points differ in what failure means. `path_t::parse` is for a string whose
 validity is itself a runtime condition, and returns `status_t::INVALID_PATH`
-(`core/src/path.cpp:path_t::parse`). The `explicit` constructor is for a compile-site
+(`core/src/path.cpp:result_t<path_t> path_t::parse(std::string_view text, tr::mem`). The `explicit` constructor is for a compile-site
 literal, where a malformed path is a source bug: it hard-aborts rather than yielding a
 `result_t` the caller would only `*`-deref unchecked (`path.hpp:explicit path_t(std::string_view`, defined
 `path.hpp:p`). Neither uses
 exceptions, so both hold under `-fno-exceptions`.
+
+A path owns no standard container (#2286): its key, its field steps and their names are one
+block sized exactly at parse, drawn from the source given to `parse` (else the table source),
+and a step's `name` views that block. The root path with no field tail draws nothing.
 
 ## String → bytes, once
 

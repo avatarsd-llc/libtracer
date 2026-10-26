@@ -39,7 +39,7 @@
     },
     "tr::graph::path_t::parse": {
       "ccn": [
-        24
+        23
       ],
       "file": "core/src/path.cpp"
     },

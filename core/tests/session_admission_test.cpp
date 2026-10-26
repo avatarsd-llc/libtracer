@@ -185,10 +185,10 @@ std::vector<std::byte> b_clear() {
 /** @brief The `:subscribers[N]` field, or the `:subscribers[]` append for no @p slot. */
 field_path_t subscribers(std::optional<std::uint16_t> slot) {
     field_path_t f;
-    f.steps.push_back(field_step_t{.name = "subscribers",
-                                   .indexed = true,
-                                   .append = !slot.has_value(),
-                                   .index = slot.value_or(0)});
+    (void)f.steps.push_back(field_step_t{.name = "subscribers",
+                                         .indexed = true,
+                                         .append = !slot.has_value(),
+                                         .index = slot.value_or(0)});
     return f;
 }
 
