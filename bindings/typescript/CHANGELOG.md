@@ -7,6 +7,16 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A timed-out request no longer takes the next reply to the same path** (#2330). Its
+  waiter used to stay in the client's pending queue for good, so a request that was never
+  answered took the reply meant for the next request to that path, and the queue grew under
+  loss. A request that times out now leaves the queue at once. The client remembers the 32
+  most recent ones, so a late reply carrying a dead request's token, or a `src` naming only
+  a dead request, is dropped. A reply with neither now goes to the oldest live request; it
+  used to be absorbed by the dead one.
+
 ### Changed
 
 - `isPathRefType` (core package) is true for `0x14` only (#2245): a `0x15 PATH_REF_REVERSE`

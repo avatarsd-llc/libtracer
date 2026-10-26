@@ -134,13 +134,6 @@ export class FwdError extends Error {
 interface Pending {
   resolve(reply: ParsedFwd): void;
   reject(err: Error): void;
-  /**
-   * @brief True once the promise has settled (timed out / transport closed).
-   *
-   * A settled entry stays in the queue so its own late REPLY still consumes its
-   * slot rather than being handed to a live caller.
-   */
-  settled: boolean;
   /** @brief The per-request deadline timer (cleared on settle), when one is armed. */
   timer: ReturnType<typeof setTimeout> | null;
   /**
@@ -157,6 +150,20 @@ interface Pending {
    */
   token: string;
 }
+
+/** @brief A request that timed out: what its late REPLY can still be recognised by. */
+interface Expired {
+  /** @brief Its `dst` segments, for a reply that carries no token. */
+  dst: string[] | null;
+  /** @brief Its reply token. */
+  token: string;
+}
+
+/**
+ * @brief How many timed-out requests the client remembers, so their late replies are
+ * dropped rather than handed to a live caller. The oldest is forgotten first.
+ */
+const EXPIRED_CAP = 32;
 
 /** @brief The request deadline used when `requestTimeoutMs` is not given. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -176,9 +183,12 @@ export function awaitDeadlineMs(requestTimeoutMs: number, timeoutNs?: bigint): n
   return Math.min(request, own);
 }
 
-/** @brief Settle a pending entry: clear its deadline and mark it consumed. */
+/**
+ * @brief Settle a pending entry: clear its deadline. Every entry leaves `pending` as it
+ * settles (answered, timed out, or the transport closed), so the queue holds live
+ * requests only (#2330).
+ */
 function settle(p: Pending): void {
-  p.settled = true;
   if (p.timer !== null) {
     clearTimeout(p.timer);
     p.timer = null;
@@ -210,6 +220,8 @@ export class LibtracerClient {
   /** @brief The number the next one-shot request's reply token (`q<n>`) carries. */
   private nextRequest = 1;
   private readonly pending: Pending[] = [];
+  /** @brief The most recent timed-out requests, oldest first, at most {@link EXPIRED_CAP}. */
+  private readonly expired: Expired[] = [];
   private errorHandler: ((err: Error) => void) | null = null;
   private closed: Error | null = null;
 
@@ -230,11 +242,11 @@ export class LibtracerClient {
   private handleClose(cause?: Error): void {
     this.closed = new Error('transport closed' + (cause ? `: ${cause.message}` : ''));
     for (const p of this.pending) {
-      if (p.settled) continue;
       settle(p);
       p.reject(this.closed);
     }
     this.pending.length = 0;
+    this.expired.length = 0;
   }
 
   /* ---------------------------------------------------------- inbound --- */
@@ -276,14 +288,10 @@ export class LibtracerClient {
       }
       if (parsed.op === FWD_OP.REPLY) {
         const at = this.correlate(parsed);
-        if (at < 0) return; // a reply with nothing outstanding to answer
+        if (at < 0) return; // a late reply, or one with nothing outstanding to answer
         const [waiter] = this.pending.splice(at, 1);
-        // A settled waiter (timed out) still consumes its slot; its late reply is
-        // dropped rather than handed to a live caller.
-        if (!waiter.settled) {
-          settle(waiter);
-          waiter.resolve(parsed);
-        }
+        settle(waiter);
+        waiter.resolve(parsed);
         return;
       }
       // A delivery IS a FWD{WRITE} (RFC-0004 §D): deliver its VALUE payload.
@@ -332,22 +340,34 @@ export class LibtracerClient {
    * Since #2245 a reply's `src` is the target's PAIR (RFC-0029 §6.2), an escape that
    * names no segments, so such a reply falls through to the oldest entry — as does an
    * empty `src`, or one matching nothing outstanding.
+   *
+   * @section expired A late reply
+   *
+   * A request that times out leaves `pending` and is remembered in `expired` (#2330).
+   * Its late reply, matched by token or, failing that, by `src` against no live request,
+   * consumes that record and is dropped (`-1`). A live request is always tried first, so
+   * a dead one can never take a reply from a live request to the same path.
    */
   private correlate(parsed: ParsedFwd): number {
     const fifo = this.pending.length > 0 ? 0 : -1;
+    const late = (match: (e: Expired) => boolean): boolean => {
+      const at = this.expired.findIndex(match);
+      if (at < 0) return false;
+      this.expired.splice(at, 1);
+      return true;
+    };
     const byToken = segmentsOf(parsed.dst);
     if (byToken !== null && byToken.length > 0 && endsWith(this.replyEndpoint, byToken.slice(0, -1))) {
       const token = byToken[byToken.length - 1];
       const at = this.pending.findIndex((p) => p.token === token);
       if (at >= 0) return at;
+      if (late((e) => e.token === token)) return -1;
     }
     const src = segmentsOf(parsed.src);
     if (src === null || src.length === 0) return fifo;
-    for (let i = 0; i < this.pending.length; i++) {
-      const dst = this.pending[i].dst;
-      if (dst !== null && endsWith(dst, src)) return i;
-    }
-    return fifo;
+    const at = this.pending.findIndex((p) => p.dst !== null && endsWith(p.dst, src));
+    if (at >= 0) return at;
+    return late((e) => e.dst !== null && endsWith(e.dst, src)) ? -1 : fifo;
   }
 
   /**
@@ -404,12 +424,16 @@ export class LibtracerClient {
         reject(this.closed);
         return;
       }
-      const entry: Pending = { resolve, reject, settled: false, timer: null, dst, token };
+      const entry: Pending = { resolve, reject, timer: null, dst, token };
       if (deadlineMs > 0 && Number.isFinite(deadlineMs)) {
         entry.timer = setTimeout(() => {
-          // Leave the settled entry in the FIFO (see Pending) — its slot is
-          // consumed by the late reply, if one ever arrives.
+          // Evict the waiter so it cannot take a live request's reply, and remember it
+          // so its own late reply is dropped (#2330).
           settle(entry);
+          const at = this.pending.indexOf(entry);
+          if (at >= 0) this.pending.splice(at, 1);
+          this.expired.push({ dst: entry.dst, token: entry.token });
+          if (this.expired.length > EXPIRED_CAP) this.expired.shift();
           entry.reject(onDeadline());
         }, deadlineMs);
         // Don't hold a Node event loop open for a pending deadline (no-op in browsers).

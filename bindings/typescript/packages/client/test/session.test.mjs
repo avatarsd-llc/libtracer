@@ -123,18 +123,43 @@ test('a request with no reply rejects after requestTimeoutMs', async () => {
   await withLiveLoop(() => assert.rejects(client.read('/sensor/never'), /timed out after 25ms/));
 });
 
-test('a late reply after a timeout consumes its FIFO slot; the next request still correlates', async () => {
+test('a late reply after a timeout is dropped; the next request still correlates (#2330)', async () => {
   const t = new FakeTransport();
   const client = new LibtracerClient(t, { requestTimeoutMs: 25 });
 
   await withLiveLoop(() => assert.rejects(client.read('/slow'), /timed out/));
 
   // The second request is issued, THEN the first request's late reply arrives,
-  // THEN the second's. The late reply must be dropped against the timed-out
-  // slot, not resolve the second request.
+  // THEN the second's. The late reply carries the dead request's token (q1), so it
+  // is dropped rather than resolving the second request (q2).
+  const reply = (token, byte) =>
+    encodeFwd({
+      op: FWD_OP.REPLY,
+      dst: ['client', token],
+      src: ['sensor'],
+      kind: FWD_KIND.RESULT,
+      payload: encodeValue(new Uint8Array([byte])),
+    });
   const p2 = client.read('/fast');
-  t.inject(resultReply(encodeValue(new Uint8Array([0xaa])))); // late reply for /slow
-  t.inject(resultReply(encodeValue(new Uint8Array([0xbb])))); // reply for /fast
+  t.inject(reply('q1', 0xaa)); // late reply for /slow
+  t.inject(reply('q2', 0xbb)); // reply for /fast
+  const tlv = await p2;
+  assert.deepEqual([...tlv.payload], [0xbb]);
+});
+
+/**
+ * A reply with no token and a `src` that names no request cannot be told apart from
+ * the live request's answer. The timed-out waiter left `pending`, so the reply goes to
+ * the live request: a request dropped in transit never answers at all, and a dead waiter
+ * that kept its slot would take every later reply (#2330).
+ */
+test('a keyless reply after a timeout answers the live request (#2330)', async () => {
+  const t = new FakeTransport();
+  const client = new LibtracerClient(t, { requestTimeoutMs: 25 });
+
+  await withLiveLoop(() => assert.rejects(client.read('/dropped'), /timed out/));
+  const p2 = client.read('/live');
+  t.inject(resultReply(encodeValue(new Uint8Array([0xbb]))));
   const tlv = await p2;
   assert.deepEqual([...tlv.payload], [0xbb]);
 });
