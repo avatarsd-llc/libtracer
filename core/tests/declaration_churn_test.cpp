@@ -104,13 +104,6 @@ class counting_source_t final : public tr::mem::block_source_t {
     std::size_t in_use_ = 0; /**< @brief Outstanding bytes. */
 };
 
-/** @brief `s` as bytes. */
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief The test resolver: the caller context IS the subject (acl_test's shape). */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
                                                        tr::mem::bytes_t& out) {
@@ -122,7 +115,7 @@ std::vector<std::byte> allow(std::string_view subject, acl_right_t right) {
     const std::vector<tr::graph::ace_t> aces{
         tr::graph::ace_t{.type = tr::graph::ace_type_t::ALLOW,
                          .flags = 0,
-                         .subject = as_bytes(subject),
+                         .subject = tr::graph::subject_of(subject),
                          .access_mask = static_cast<std::uint32_t>(right),
                          .expires_ns = 0}};
     return tr::graph::encode_acl(aces);

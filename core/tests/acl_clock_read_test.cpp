@@ -87,7 +87,7 @@ std::vector<std::byte> allow_all(std::string_view subject, std::uint64_t expires
     const auto mask = static_cast<std::uint32_t>(tr::graph::acl_right_t::READ) |
                       static_cast<std::uint32_t>(tr::graph::acl_right_t::WRITE);
     const std::vector<tr::graph::ace_t> aces{tr::graph::ace_t{
-        .subject = as_bytes(subject), .access_mask = mask, .expires_ns = expires_ns}};
+        .subject = tr::graph::subject_of(subject), .access_mask = mask, .expires_ns = expires_ns}};
     return tr::graph::encode_acl(aces);
 }
 

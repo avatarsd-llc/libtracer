@@ -275,7 +275,7 @@ bytes_t admin_only_acl() {
     const tr::graph::ace_t ace{
         .type = tr::graph::ace_type_t::ALLOW,
         .flags = tr::graph::kAceInherit,
-        .subject = bytes_t(p, p + 5),
+        .subject = std::span<const std::byte>(p, 5),
         .access_mask = tr::graph::kAceRights,
         .expires_ns = 0,
     };

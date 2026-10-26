@@ -295,27 +295,28 @@ void test_snapshot_under_concurrent_add() {
 
 /** @brief The presence bit @ref vertex_t::with_acl reports, lifted out of the callback. */
 bool acl_present(vertex_t& v) {
-    return v.with_acl([](bool present, const std::vector<ace_t>&) { return present; });
+    return v.with_acl([](bool present, std::span<const ace_t>) { return present; });
 }
 
 /** @brief How many ACEs @ref vertex_t::with_acl reports (0 for an absent ACL too). */
 std::size_t acl_ace_count(vertex_t& v) {
-    return v.with_acl([](bool, const std::vector<ace_t>& aces) { return aces.size(); });
+    return v.with_acl([](bool, std::span<const ace_t> aces) { return aces.size(); });
 }
 
 void test_acl_verbs() {
     std::printf("ACL verbs — set_acl / with_acl / with_aces:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x06}), {}};
     check(!acl_present(v), "no :acl set => with_acl reports absent");
-    check(v.with_aces([](const std::vector<ace_t>& aces) { return aces.empty(); }),
+    check(v.with_aces([](std::span<const ace_t> aces) { return aces.empty(); }),
           "no :acl set => empty ACE list");
 
     ace_t ace;
     ace.access_mask = 0x3;
-    check(v.set_acl({ace}, tr::mem::table_source()), "the ACE list fits the table source");
+    check(v.set_acl(std::span<const ace_t>(&ace, 1), tr::mem::table_source()),
+          "the ACE list fits the table source");
     check(acl_present(v) && acl_ace_count(v) == 1,
           "with_acl serves the presence bit and the stored ACE list together");
-    check(v.with_aces([](const std::vector<ace_t>& aces) {
+    check(v.with_aces([](std::span<const ace_t> aces) {
         return aces.size() == 1 && aces[0].access_mask == 0x3;
     }),
           "with_aces evaluates over the parsed ACE list under the lock");

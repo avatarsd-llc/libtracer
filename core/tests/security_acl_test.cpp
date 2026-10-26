@@ -10,6 +10,7 @@
  */
 #include "libtracer/security_acl.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -66,7 +67,7 @@ ace_t ace(std::string_view subject, std::uint32_t mask, ace_type_t type = ace_ty
           std::uint8_t flags = 0, std::uint64_t expires_ns = 0) {
     return ace_t{.type = type,
                  .flags = flags,
-                 .subject = as_bytes(subject),
+                 .subject = tr::graph::subject_of(subject),
                  .access_mask = mask,
                  .expires_ns = expires_ns};
 }
@@ -111,6 +112,14 @@ std::vector<std::byte> one_ace(std::span<const std::byte> entry) {
  * @note `wire::tlv_node_t::over` borrows its input, so @p wire must outlive the call — passing a
  *       temporary is fine (it lives to the end of the full expression).
  */
+/** @brief @p acl parsed under `Policy` into a core array whose subjects view @p acl's bytes. */
+template <class Policy>
+tr::graph::result_t<tr::mem::block_array_t<ace_t>> parse(const tr::wire::tlv_node_t& acl) {
+    tr::mem::block_array_t<ace_t> out(tr::mem::heap_source());
+    if (const auto r = parse_acl<Policy>(acl, out); !r) return std::unexpected(r.error());
+    return out;
+}
+
 template <class Policy>
 void rejects(std::span<const std::byte> wire, std::string_view what) {
     const auto acl = tr::wire::tlv_node_t::over(wire);
@@ -118,18 +127,20 @@ void rejects(std::span<const std::byte> wire, std::string_view what) {
         check(false, what);  // the blob must be structurally decodable to test the parse gate
         return;
     }
-    const auto parsed = parse_acl<Policy>(*acl);
+    const auto parsed = parse<Policy>(*acl);
     check(!parsed.has_value() && parsed.error() == status_t::TYPE_MISMATCH, what);
 }
 
-/** @brief The ACEs @p wire parses to under `Policy`, or an empty list if it was rejected. */
+/** @brief The ACEs @p wire parses to under `Policy`, COPIED into an owning table (so @p wire
+ *         may be a temporary), or an empty table if it was rejected. */
 template <class Policy>
-std::vector<ace_t> parsed_aces(std::span<const std::byte> wire) {
+tr::graph::ace_table_t parsed_aces(std::span<const std::byte> wire) {
+    tr::graph::ace_table_t table(tr::mem::heap_source());
     const auto acl = tr::wire::tlv_node_t::over(wire);
-    if (!acl.has_value()) return {};
-    const auto out = parse_acl<Policy>(*acl);
-    if (!out.has_value()) return {};
-    return *out;
+    if (!acl.has_value()) return table;
+    const auto out = parse<Policy>(*acl);
+    if (out.has_value()) (void)table.append(*out);
+    return table;
 }
 
 /** @brief One `(NAME key, value)` pair of an ACE body, held before it is emitted. */
@@ -160,7 +171,7 @@ std::vector<std::byte> one_ace_of(const std::vector<pair_t>& pairs) {
 template <class Policy>
 bool accepts(std::span<const std::byte> wire) {
     const auto acl = tr::wire::tlv_node_t::over(wire);
-    return acl.has_value() && parse_acl<Policy>(*acl).has_value();
+    return acl.has_value() && parse<Policy>(*acl).has_value();
 }
 
 }  // namespace
@@ -269,13 +280,14 @@ int main() {
         const auto acl = tr::wire::tlv_node_t::over(wire);
         check(acl.has_value() && acl->type() == tr::wire::type_t::ACL,
               "encode_acl yields ACL{...}");
-        const auto out = parse_acl<allow_only_policy_t>(*acl);
+        const auto out = parse<allow_only_policy_t>(*acl);
         check(out.has_value() && out->size() == 2, "parse_acl round-trips 2 ACEs");
-        check(out && (*out)[0].subject == in[0].subject &&
+        check(out && std::ranges::equal((*out)[0].subject, in[0].subject) &&
                   (*out)[0].access_mask == in[0].access_mask && (*out)[0].flags == kAceInherit &&
                   (*out)[0].expires_ns == 42,
               "ACE 0 fields survive the round-trip");
-        check(out && (*out)[1].subject == in[1].subject && (*out)[1].expires_ns == 0,
+        check(out && std::ranges::equal((*out)[1].subject, in[1].subject) &&
+                  (*out)[1].expires_ns == 0,
               "ACE 1 fields survive (expires omitted => 0)");
     }
 
@@ -286,10 +298,10 @@ int main() {
         const std::vector<std::byte> wire = encode_acl(in);
         const auto acl = tr::wire::tlv_node_t::over(wire);
         check(acl.has_value(), "a DENY ACL encodes/decodes structurally");
-        const auto strict = parse_acl<allow_only_policy_t>(*acl);
+        const auto strict = parse<allow_only_policy_t>(*acl);
         check(!strict && strict.error() == status_t::TYPE_MISMATCH,
               "allow_only parse rejects a DENY ACE with TYPE_MISMATCH");
-        const auto full = parse_acl<full_acl_policy_t>(*acl);
+        const auto full = parse<full_acl_policy_t>(*acl);
         check(full.has_value() && full->size() == 1 && (*full)[0].type == ace_type_t::DENY,
               "full parse stores the DENY ACE");
     }
@@ -303,7 +315,7 @@ int main() {
         // so the buffer must outlive parse_acl below.
         const std::vector<std::byte> wire = encode_acl(in);
         const auto acl = tr::wire::tlv_node_t::over(wire);
-        check(acl.has_value() && !parse_acl<full_acl_policy_t>(*acl).has_value(),
+        check(acl.has_value() && !parse<full_acl_policy_t>(*acl).has_value(),
               "a flag bit beyond INHERIT is TYPE_MISMATCH even under full");
     }
 
@@ -565,7 +577,7 @@ int main() {
             add_pair(e, "flags", type_t::VALUE, le(kAceInherit, 1));
             add_pair(e, "subject", type_t::VALUE, as_bytes("peer-a"));
             add_pair(e, "access_mask", type_t::VALUE, le(0x0003, 2));
-            const std::vector<ace_t> got = parsed_aces<allow_only_policy_t>(one_ace(e));
+            const tr::graph::ace_table_t got = parsed_aces<allow_only_policy_t>(one_ace(e));
             check(got.size() == 1 && got[0].access_mask == 0x0003 && got[0].flags == kAceInherit,
                   "a u16 `access_mask` (the pre-RFC-0026 narrow spelling) still parses");
         }
@@ -579,8 +591,8 @@ int main() {
             add_pair(e, "type", type_t::VALUE, le(0, 1));
             add_pair(e, "subject", type_t::NAME, as_bytes("subject"));
             add_pair(e, "access_mask", type_t::VALUE, mask4);
-            const std::vector<ace_t> got = parsed_aces<allow_only_policy_t>(one_ace(e));
-            check(got.size() == 1 && got[0].subject == as_bytes("subject"),
+            const tr::graph::ace_table_t got = parsed_aces<allow_only_policy_t>(one_ace(e));
+            check(got.size() == 1 && std::ranges::equal(got[0].subject, as_bytes("subject")),
                   "a NAME-typed subject binds the token written, not the next key");
         }
 
@@ -592,8 +604,8 @@ int main() {
             add_pair(e, "subject", type_t::NAME, as_bytes("EVERYONE@"));
             add_pair(e, "access_mask", type_t::VALUE, mask4);
             add_pair(e, "expires_ns", type_t::VALUE, le(42, 8));
-            const std::vector<ace_t> got = parsed_aces<allow_only_policy_t>(one_ace(e));
-            check(got.size() == 1 && got[0].subject == as_bytes("EVERYONE@") &&
+            const tr::graph::ace_table_t got = parsed_aces<allow_only_policy_t>(one_ace(e));
+            check(got.size() == 1 && std::ranges::equal(got[0].subject, as_bytes("EVERYONE@")) &&
                       got[0].expires_ns == 42,
                   "a NAME-typed EVERYONE@ subject with an expiry parses");
         }
@@ -630,10 +642,11 @@ int main() {
             {0, 1, true}, {1, 1, false}, {2, 0, true}, {3, 4, true}, {4, 8, false}};
 
         {
-            const std::vector<ace_t> got =
+            const tr::graph::ace_table_t got =
                 parsed_aces<allow_only_policy_t>(one_ace_of(canonical_pairs()));
             check(got.size() == 1 && got[0].type == ace_type_t::ALLOW &&
-                      got[0].flags == kAceInherit && got[0].subject == as_bytes("alice") &&
+                      got[0].flags == kAceInherit &&
+                      std::ranges::equal(got[0].subject, as_bytes("alice")) &&
                       got[0].access_mask == 3 && got[0].expires_ns == 42,
                   "11: the canonical body parses to the fields written");
         }

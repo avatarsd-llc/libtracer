@@ -53,13 +53,6 @@ using tr::wire::type_t;
 using tr::testing::check;
 using tr::testing::make_value;
 
-/** @brief `caller` bytes as a subject token — the ADR-0018 test resolver. */
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief The test resolver: the caller context IS the subject (acl_test's shape). */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
                                                        tr::mem::bytes_t& out) {
@@ -73,7 +66,7 @@ std::vector<std::byte> allow(std::initializer_list<std::pair<std::string_view, a
     for (const auto& [subject, right] : g)
         aces.push_back(tr::graph::ace_t{.type = tr::graph::ace_type_t::ALLOW,
                                         .flags = 0,
-                                        .subject = as_bytes(subject),
+                                        .subject = tr::graph::subject_of(subject),
                                         .access_mask = static_cast<std::uint32_t>(right),
                                         .expires_ns = 0});
     return tr::graph::encode_acl(aces);

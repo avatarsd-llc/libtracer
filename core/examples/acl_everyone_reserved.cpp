@@ -108,7 +108,7 @@ int main() {
     (void)g.write(bare, some_value());     // only way either read below can fail
 
     // The wildcard ACE: READ for everybody, and nothing else for anybody.
-    const ace_t wildcard[] = {{.subject = as_bytes(kEveryoneSubject),
+    const ace_t wildcard[] = {{.subject = tr::graph::subject_of(kEveryoneSubject),
                                .access_mask = static_cast<std::uint32_t>(acl_right_t::READ)}};
     (void)g.write(path_t("/guarded:acl"), *tr::view::over_bytes(tr::graph::encode_acl(wildcard)));
 

@@ -24,7 +24,7 @@
  * pulled a 3400-line vertex hub to name four types it owns the meaning of — the straddle
  * #868 set out to end. It is ended by giving the records their own home rather than by
  * folding them in beside the evaluator, because the two halves sit on OPPOSITE sides of
- * the vertex: `vertex_ext_t` stores a `std::vector<ace_t>`, so the records are compiled by
+ * the vertex: `acl_state_t` stores an `ace_table_t`, so the records are compiled by
  * every net-plane TU, while nothing in the vertex core calls the policies or the codec.
  * Declaring the records here would drag this header along with them — measured at 15 -> 100
  * dependent TUs — and an ACL evaluation edit would rebuild the tree. See `acl_ace.hpp`.
@@ -44,6 +44,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -260,15 +261,22 @@ struct full_acl_policy_t {
  * The merged list is what the graph caches per vertex (the ADR-0050 cached
  * effective-ACE merge): only the MERGE is cached, never a verdict — `expires_ns`
  * is evaluated against the caller's `now` at check time, so expiry needs no
- * invalidation.
+ * invalidation. It is an @ref ace_table_t (#2287): it copies the subjects it merges, so
+ * it stays good after the lists it was built from are gone, and an append the source
+ * refuses leaves it as it was.
  */
 class effective_acl_t {
    public:
+    /** @brief An empty merge whose table draws from @p src. */
+    explicit effective_acl_t(mem::block_source_t& src = mem::default_root()) noexcept
+        : merged_(src) {}
+
     /** @brief Append the target vertex's own ACEs (all of them, stored order).
      *  @note Call BEFORE any @ref append_ancestor — own ACEs evaluate first
-     *        (the effective-ACL ordering of ADR-0020). */
-    void append_own(std::span<const ace_t> aces) {
-        merged_.insert(merged_.end(), aces.begin(), aces.end());
+     *        (the effective-ACL ordering of ADR-0020).
+     *  @retval false The source refused the table; the merge is unchanged. */
+    [[nodiscard]] bool append_own(std::span<const ace_t> aces) noexcept {
+        return merged_.append(aces);
     }
 
     /**
@@ -277,17 +285,17 @@ class effective_acl_t {
      *
      * Call once per strict ancestor, NEAREST-FIRST, so the full policy's
      * first-match-per-bit ordering follows the effective-ACL definition.
+     * @retval false The source refused the table; the merge is unchanged.
      */
-    void append_ancestor(std::span<const ace_t> aces) {
-        for (const ace_t& ace : aces)
-            if ((ace.flags & kAceInherit) != 0) merged_.push_back(ace);
+    [[nodiscard]] bool append_ancestor(std::span<const ace_t> aces) noexcept {
+        return merged_.append(aces, kAceInherit);
     }
 
     /** @brief The merged effective-ACE list, in evaluation order. */
-    [[nodiscard]] const std::vector<ace_t>& merged() const noexcept { return merged_; }
+    [[nodiscard]] std::span<const ace_t> merged() const noexcept { return merged_; }
 
-    /** @brief Move the merged list out (what the graph stores in its per-vertex cache). */
-    [[nodiscard]] std::vector<ace_t> release() noexcept { return std::move(merged_); }
+    /** @brief Move the merged table out (what the graph stores in its per-vertex cache). */
+    [[nodiscard]] ace_table_t release() noexcept { return std::move(merged_); }
 
     /**
      * @brief The final ACL verdict over a pre-merged effective-ACE list.
@@ -340,24 +348,17 @@ class effective_acl_t {
     }
 
    private:
-    std::vector<ace_t> merged_; /**< @brief Effective ACEs, evaluation order. */
+    ace_table_t merged_; /**< @brief Effective ACEs, evaluation order. */
 };
 
 namespace detail_acl {
 
-/** @brief Append @p ace to a `std::vector` table. */
-inline void push_ace(std::vector<ace_t>& out, ace_t&& ace) { out.push_back(std::move(ace)); }
-/** @brief Append @p ace to a core table the caller reserved, so the append cannot be refused. */
-inline void push_ace(mem::block_array_t<ace_t>& out, ace_t&& ace) noexcept {
-    (void)out.push_back(std::move(ace));
-}
-
-/** @brief The one body of both @ref parse_acl spellings: @p out is cleared, then filled. */
-template <class Policy, class Out>
-[[nodiscard]] result_t<void> parse_acl_into(const wire::tlv_node_t& acl, Out& out) {
+/** @brief The body of @ref parse_acl — @p out, reserved one slot per entry, is filled. */
+template <class Policy>
+[[nodiscard]] result_t<void> parse_acl_into(const wire::tlv_node_t& acl,
+                                            mem::block_array_t<ace_t>& out) noexcept {
     using wire::tlv_node_t;
     using wire::type_t;
-    out.clear();
     for (const tlv_node_t entry : acl.children()) {
         if (entry.type() != type_t::ACL || !entry.opt().pl)
             return std::unexpected(status_t::TYPE_MISMATCH);
@@ -406,14 +407,13 @@ template <class Policy, class Out>
             type > std::uint64_t{Policy::kAcceptsDeny} ||
             ((flags & ~std::uint64_t{kAceInherit}) | (mask & ~std::uint64_t{kAceRights})) != 0)
             return std::unexpected(status_t::TYPE_MISMATCH);
-        ace_t ace;
-        ace.type = static_cast<ace_type_t>(type);
-        ace.flags = static_cast<std::uint8_t>(flags);
-        ace.subject.assign(raw[detail_acl::kAceSubject].begin(),
-                           raw[detail_acl::kAceSubject].end());
-        ace.access_mask = static_cast<std::uint32_t>(mask);
-        ace.expires_ns = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceExpires]);
-        push_ace(out, std::move(ace));  // the core-array caller reserved one slot per entry
+        // The caller reserved one slot per entry, so this append cannot be refused.
+        (void)out.push_back(
+            ace_t{.type = static_cast<ace_type_t>(type),
+                  .flags = static_cast<std::uint8_t>(flags),
+                  .subject = raw[detail_acl::kAceSubject],
+                  .access_mask = static_cast<std::uint32_t>(mask),
+                  .expires_ns = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceExpires])});
     }
     return {};
 }
@@ -453,28 +453,20 @@ template <class Policy, class Out>
  * (`%detail_acl::kAceKeys`) and a seen-bitmask, so the required-field rule is a single
  * compare against `%detail_acl::kAceRequired` (#1799).
  *
+ * The ACEs are views (#2287): each @ref ace_t::subject points into @p acl's bytes, so they
+ * are good for as long as those bytes are. Copy them into an @ref ace_table_t to keep them
+ * longer, which is what `vertex_t::set_acl` does.
+ *
  * @tparam Policy The accepting policy (defaults to the target's selection).
  * @param acl A validated ACL node (`ACL{ ACL{NAME/VALUE…}* }`), walked in place (#1829).
- * @return The typed ACE list, in wire order, or `TYPE_MISMATCH`.
- */
-template <class Policy = acl_policy_t>
-[[nodiscard]] result_t<std::vector<ace_t>> parse_acl(const wire::tlv_node_t& acl) {
-    std::vector<ace_t> out;
-    if (const result_t<void> r = detail_acl::parse_acl_into<Policy>(acl, out); !r)
-        return std::unexpected(r.error());
-    return out;
-}
-
-/**
- * @brief @ref parse_acl into a core array (#1781): @p out is replaced by the typed ACEs in
- *        wire order. The same strict shape rules; the table is drawn from @p out's source.
- * @retval status_t::TYPE_MISMATCH The ACL is not a shape @ref parse_acl accepts.
- * @retval status_t::BACKPRESSURE @p out's source refused the table.
+ * @param out Replaced by the typed ACEs, in wire order; the array is drawn from its source.
+ * @retval status_t::TYPE_MISMATCH The ACL is not a shape this function accepts.
+ * @retval status_t::BACKPRESSURE @p out's source refused the array.
  * On any refusal @p out holds no ACE of this ACL.
  */
 template <class Policy = acl_policy_t>
 [[nodiscard]] result_t<void> parse_acl(const wire::tlv_node_t& acl,
-                                       mem::block_array_t<ace_t>& out) {
+                                       mem::block_array_t<ace_t>& out) noexcept {
     // One slot per entry, reserved up front: the parse below then cannot be refused midway.
     std::size_t entries = 0;
     for ([[maybe_unused]] const wire::tlv_node_t entry : acl.children()) ++entries;

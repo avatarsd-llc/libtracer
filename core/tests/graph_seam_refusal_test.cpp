@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <expected>
 #include <new>
 #include <span>
 #include <string>
@@ -31,6 +32,7 @@
 #include <vector>
 
 #include "graph_sinks.hpp"
+#include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
@@ -665,6 +667,125 @@ void test_field_reads() {
     }
 }
 
+/** @brief One ALLOW ACE for @p subject (whose bytes must outlive it). */
+tr::graph::ace_t ace_for(std::string_view subject, std::uint32_t mask, std::uint8_t flags = 0) {
+    return tr::graph::ace_t{.type = tr::graph::ace_type_t::ALLOW,
+                            .flags = flags,
+                            .subject = tr::graph::subject_of(subject),
+                            .access_mask = mask};
+}
+
+/** @brief A right as its mask bit. */
+constexpr std::uint32_t mask_of(tr::graph::acl_right_t r) { return static_cast<std::uint32_t>(r); }
+
+/** @brief Whether the bytes @p r read are exactly @p want. */
+template <class R>
+bool reads_as(const R& r, std::span<const std::byte> want) {
+    if (!r) return false;
+    const auto got = (*r)->only().bytes();
+    return got.size() == want.size() && std::equal(want.begin(), want.end(), got.begin());
+}
+
+/**
+ * @brief A refused @ref tr::graph::ace_table_t::append answers false and leaves the table as it
+ *        was (#2287): its size, every ACE, and the subject bytes each one views.
+ */
+void test_ace_table_append() {
+    std::printf("ace_table_t::append — a refused append changes nothing:\n");
+    gate_source_t src;
+    {
+        tr::graph::ace_table_t t(src);
+        const std::uint32_t read = mask_of(tr::graph::acl_right_t::READ);
+        const tr::graph::ace_t first[] = {ace_for("peer-a", read), ace_for("peer-bb", read)};
+        check(t.append(first), "the first append fits");
+        const tr::graph::ace_t* const before = t.data();
+        const tr::graph::ace_t more[] = {ace_for("peer-ccc", read, tr::graph::kAceInherit)};
+        src.arm(0);
+        const bool held = !t.append(more);
+        src.disarm();
+        const auto subject_is = [](const tr::graph::ace_t& a, std::string_view s) {
+            const auto want = tr::graph::subject_of(s);
+            return a.subject.size() == want.size() &&
+                   std::equal(want.begin(), want.end(), a.subject.begin());
+        };
+        check(held && src.refused_ > 0, "the append is refused and answers false");
+        check(t.size() == 2 && t.data() == before && subject_is(t[0], "peer-a") &&
+                  subject_is(t[1], "peer-bb") && t[0].access_mask == read && t[1].flags == 0,
+              "the table keeps its block, its ACEs and their subject bytes");
+        check(t.append(more) && t.size() == 3 && subject_is(t[2], "peer-ccc") &&
+                  subject_is(t[0], "peer-a"),
+              "the same append succeeds once the source has room");
+    }
+    check(src.live_ == 0, "the table gives back its block");
+}
+
+/**
+ * @brief A refused `:acl` write (#2287): the parse table or the stored copy is refused, the
+ *        write answers BACKPRESSURE, and `:acl` reads back the previous ACL.
+ */
+void test_acl_write() {
+    std::printf(":acl write — the parsed and the stored ACE tables:\n");
+    using tr::graph::acl_right_t;
+    static const std::vector<tr::graph::ace_t> old_acl{
+        ace_for("peer-old", mask_of(acl_right_t::READ))};
+    static const std::vector<std::byte> old_wire = tr::graph::encode_acl(old_acl);
+    const auto setup = [](graph_t& g) {
+        const vertex_handle_t v = g.register_vertex(*path_t::parse("/s"), role_t::STORED_VALUE);
+        (void)g.write(*path_t::parse("/s:acl"), make_value(old_wire));
+        return v;
+    };
+    const auto op = [](graph_t& g, vertex_handle_t&) {
+        const std::vector<tr::graph::ace_t> next{
+            ace_for("peer-new-one", mask_of(acl_right_t::READ)),
+            ace_for("peer-new-two", mask_of(acl_right_t::WRITE), tr::graph::kAceInherit)};
+        return verdict(g.write(*path_t::parse("/s:acl"), make_value(tr::graph::encode_acl(next))));
+    };
+    const auto untouched = [](graph_t& g, vertex_handle_t&) {
+        return reads_as(g.read(*path_t::parse("/s:acl")), old_wire);
+    };
+    report(drive<vertex_handle_t>(setup, op, untouched), ":acl write");
+}
+
+/**
+ * @brief A refused merge rebuild (#2287): the bearer's cached merge (its own ACEs, then an
+ *        ancestor's inheritable ones) cannot be drawn, so the gate denies and publishes
+ *        nothing; once the source has room the next check rebuilds and allows. A merge stamped
+ *        current over the own ACEs alone would deny `peer-i` for good, which the retry catches.
+ */
+void test_acl_merge() {
+    std::printf("acl_allows — the cached effective-ACE merge:\n");
+    using tr::graph::acl_right_t;
+    struct ctx_t {
+        vertex_handle_t leaf;
+    };
+    const auto setup = [](graph_t& g) {
+        g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
+                   {+[](void*, std::string_view caller,
+                        tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+                        return tr::testing::subject_into(out, caller);
+                    },
+                    nullptr});
+        (void)g.register_vertex(*path_t::parse("/m"), role_t::STORED_VALUE);
+        const vertex_handle_t leaf =
+            g.register_vertex(*path_t::parse("/m/leaf"), role_t::STORED_VALUE);
+        (void)g.write(leaf, make_value({0x01}));
+        const std::vector<tr::graph::ace_t> up{
+            ace_for("peer-i", mask_of(acl_right_t::READ), tr::graph::kAceInherit)};
+        const std::vector<tr::graph::ace_t> own{ace_for("peer-x", mask_of(acl_right_t::WRITE))};
+        (void)g.write(*path_t::parse("/m:acl"), make_value(tr::graph::encode_acl(up)));
+        (void)g.write(*path_t::parse("/m/leaf:acl"), make_value(tr::graph::encode_acl(own)));
+        return ctx_t{leaf};
+    };
+    // Allowed completes; a denial is the refusal answered by value; anything else fails.
+    const auto op = [](graph_t& g, ctx_t& c) {
+        const auto r = g.read(c.leaf, "peer-i");
+        if (r) return 1;
+        return r.error() == status_t::PERMISSION_DENIED ? 0 : -1;
+    };
+    const auto nothing = [](graph_t&, ctx_t&) { return true; };
+    report(drive<ctx_t>(setup, op, nothing), "acl merge");
+}
+
 /**
  * @brief A wide fan-out's snapshot (#1885): the writing call's stack frame first, the table
  *        source past it, and a counted truncation when that is dry. No thread keeps a buffer.
@@ -891,6 +1012,9 @@ int main() {
     test_subscribe_target();
     test_subscribe_wire();
     test_field_reads();
+    test_ace_table_append();
+    test_acl_write();
+    test_acl_merge();
 #if defined(__unix__)
     test_init_exhaustion_message();
 #endif

@@ -60,12 +60,6 @@ using tr::wire::type_t;
 using tr::testing::check;
 using tr::testing::make_value;
 
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief A delivery-counting subscriber — the control that proves nothing was published. */
 void count_cb(void* ctx, const tr::graph::value_t& /*value*/) { ++*static_cast<int*>(ctx); }
 
@@ -229,7 +223,7 @@ void test_value_is_read_gated() {
     const std::vector<ace_t> grant{
         ace_t{.type = tr::graph::ace_type_t::ALLOW,
               .flags = 0,
-              .subject = as_bytes("alice"),
+              .subject = tr::graph::subject_of("alice"),
               .access_mask = static_cast<std::uint32_t>(acl_right_t::READ),
               .expires_ns = 0}};
     check(g.write(path_t("/dev:acl"), make_value(tr::graph::encode_acl(grant))).has_value(),
@@ -261,7 +255,7 @@ void test_unknown_spellings_are_caller_independent() {
     const std::vector<ace_t> grant{
         ace_t{.type = tr::graph::ace_type_t::ALLOW,
               .flags = 0,
-              .subject = as_bytes("alice"),
+              .subject = tr::graph::subject_of("alice"),
               .access_mask = static_cast<std::uint32_t>(acl_right_t::READ),
               .expires_ns = 0}};
     check(g.write(path_t("/dev:acl"), make_value(tr::graph::encode_acl(grant))).has_value(),

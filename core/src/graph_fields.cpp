@@ -670,11 +670,12 @@ struct graph_t::field_surface_t {
         const auto acl = wire::tlv_node_t::over(value);
         if (!acl || acl->type() != type_t::ACL || !acl->opt().pl)
             return std::unexpected(status_t::TYPE_MISMATCH);
-        result_t<std::vector<ace_t>> aces = parse_acl(*acl);
-        if (!aces) return std::unexpected(aces.error());
+        // The parsed ACEs view the value's bytes; set_acl copies them into the vertex's table.
+        mem::block_array_t<ace_t> aces(g.table_source());
+        if (const result_t<void> parsed = parse_acl(*acl, aces); !parsed)
+            return std::unexpected(parsed.error());
         // Storing replaces; empty => no restrictions. A refused extension block stores nothing.
-        if (!v->set_acl(std::move(*aces), g.table_source()))
-            return std::unexpected(status_t::BACKPRESSURE);
+        if (!v->set_acl(aces, g.table_source())) return std::unexpected(status_t::BACKPRESSURE);
         {
             // Subtree-precise cache invalidation (ADR-0050 via the ADR-0057 child
             // links): every descendant's effective merge embeds this vertex's
@@ -1302,7 +1303,7 @@ result_t<view::view_t> graph_t::read_acl(vertex_t* v) const {
     mem::bump_source_t frame(scratch, *tables_);
     mem::bytes_t acl(frame);
     bool ok = true;
-    v->with_acl([&acl, &ok](bool set, const std::vector<ace_t>& aces) {
+    v->with_acl([&acl, &ok](bool set, std::span<const ace_t> aces) {
         if (set) ok = encode_acl(aces, acl);
         return set;
     });

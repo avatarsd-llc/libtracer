@@ -61,12 +61,6 @@ using tr::testing::b_fwd;
 using tr::testing::check;
 using tr::testing::make_value;
 
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
                                                        tr::mem::bytes_t& out) {
@@ -303,7 +297,7 @@ void test_unserved_net_names_are_caller_independent() {
     const std::vector<ace_t> grant{
         ace_t{.type = tr::graph::ace_type_t::ALLOW,
               .flags = 0,
-              .subject = as_bytes("alice"),
+              .subject = tr::graph::subject_of("alice"),
               .access_mask = static_cast<std::uint32_t>(acl_right_t::READ),
               .expires_ns = 0}};
     check(g.write(path_t("/dev:acl"), make_value(tr::graph::encode_acl(grant))).has_value(),

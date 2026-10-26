@@ -166,6 +166,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     window, is refused before any draw and counted on `dropped_groups`; no open group is
     evicted. `can_reassembly_t`'s constructor takes the two caps, and `open_group` takes the
     run's `max_count`.
+- **The ACL types hold no `std::vector`; a vertex's ACEs draw from the graph's source
+  ([#2287](https://github.com/avatarsd-llc/libtracer/issues/2287)).** `ace_t::subject` is a
+  `subject_view_t` (a `std::span<const std::byte>` that cannot be built from a temporary
+  container), so `ace_t` owns nothing and copies for free. A vertex stores its `:acl` and its
+  cached effective merge in the new `ace_table_t`, one block holding the ACEs and copies of
+  their subjects. The `std::vector<ace_t>` forms are gone:
+  - `parse_acl(node)` returning `result_t<std::vector<ace_t>>` is removed; the
+    `parse_acl(node, mem::block_array_t<ace_t>&)` form stays, and its ACEs view `node`'s bytes.
+  - `effective_acl_t` takes a source (default `mem::default_root()`); `append_own` and
+    `append_ancestor` return `[[nodiscard]] bool` (false: the source refused the table);
+    `merged()` returns `std::span<const ace_t>` and `release()` an `ace_table_t`.
+  - `vertex_t::set_acl` takes `std::span<const ace_t>` and copies it; `with_acl` and
+    `with_aces` hand their callback `std::span<const ace_t>`; `with_effective_aces` takes a
+    source, its rebuild is `bool(ace_table_t& merged)` (seeded with the vertex's own ACEs)
+    and it returns `std::optional` of the evaluation, empty when the merge was refused. The
+    graph's gate answers DENY then.
+  - **Migration:** write `{.subject = tr::graph::subject_of("alice")}`, or point the view at
+    bytes that outlive the ACE, where you wrote `{.subject = std::vector<std::byte>(...)}`. A
+    temporary container is a compile error rather than a dangling view. Replace
+    `auto aces = parse_acl(node)` with
+    `mem::block_array_t<ace_t> aces(src); auto r = parse_acl(node, aces);`, and copy the ACEs
+    into an `ace_table_t` (`table.append(aces)`) to keep them past `node`'s bytes. Check the
+    `bool` from `append_own` / `append_ancestor`. Change `const std::vector<ace_t>&` callback
+    parameters to `std::span<const ace_t>`. Compare subjects with `std::ranges::equal`.
 
 ### Breaking
 

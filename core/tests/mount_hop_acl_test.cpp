@@ -111,7 +111,7 @@ tr::graph::ace_t allow(std::string_view subject, std::uint32_t mask) {
     return tr::graph::ace_t{
         .type = tr::graph::ace_type_t::ALLOW,
         .flags = tr::graph::kAceInherit,
-        .subject = bytes_t(p, p + subject.size()),
+        .subject = std::span<const std::byte>(p, subject.size()),
         .access_mask = mask,
         .expires_ns = 0,
     };

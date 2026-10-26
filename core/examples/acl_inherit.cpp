@@ -52,13 +52,6 @@ void check(bool& ok, bool cond, const char* what) {
     ok = ok && cond;
 }
 
-/** @brief @p s as opaque subject-token bytes. */
-std::vector<std::byte> as_bytes(std::string_view s) {
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
-
 /** @brief Append @p subject to the gate's buffer @p out; a refused append fails closed. */
 std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::string_view subject) {
     if (!out.append(reinterpret_cast<const std::byte*>(subject.data()), subject.size()))
@@ -101,8 +94,10 @@ int main() {
 
     // One :acl on the composite, carrying both kinds of ACE.
     const ace_t composite[] = {
-        {.flags = kAceInherit, .subject = as_bytes("fleet"), .access_mask = bit(acl_right_t::READ)},
-        {.subject = as_bytes("local"), .access_mask = bit(acl_right_t::WRITE)},
+        {.flags = kAceInherit,
+         .subject = tr::graph::subject_of("fleet"),
+         .access_mask = bit(acl_right_t::READ)},
+        {.subject = tr::graph::subject_of("local"), .access_mask = bit(acl_right_t::WRITE)},
     };
     (void)g.write(path_t("/dev:acl"), *tr::view::over_bytes(tr::graph::encode_acl(composite)));
 
@@ -119,7 +114,8 @@ int main() {
           "…and does not travel: /dev/temp is closed by the inherited ACE, which does not name it");
 
     // Own ACEs come first, and combine with what is inherited rather than replacing it.
-    const ace_t own[] = {{.subject = as_bytes("app"), .access_mask = bit(acl_right_t::WRITE)}};
+    const ace_t own[] = {
+        {.subject = tr::graph::subject_of("app"), .access_mask = bit(acl_right_t::WRITE)}};
     (void)g.write(path_t("/dev/temp:acl"), *tr::view::over_bytes(tr::graph::encode_acl(own)));
     check(ok, g.write(temp, some_value(), "app").has_value(), "the child's own ACE grants WRITE");
     check(ok, g.read(temp, "fleet").has_value(),
@@ -132,7 +128,7 @@ int main() {
     (void)g.write(site, some_value());
     (void)g.write(leaf, some_value());
     const ace_t unflagged[] = {
-        {.subject = as_bytes("someone"), .access_mask = bit(acl_right_t::READ)}};
+        {.subject = tr::graph::subject_of("someone"), .access_mask = bit(acl_right_t::READ)}};
     (void)g.write(path_t("/site:acl"), *tr::view::over_bytes(tr::graph::encode_acl(unflagged)));
     check(ok, denied(g.write(site, some_value(), "stranger")),
           "the ACE closes /site to a stranger");
