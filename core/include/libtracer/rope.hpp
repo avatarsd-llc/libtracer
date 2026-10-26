@@ -483,12 +483,22 @@ class rope_t {
      *        @p from. A view is a segment pointer and two sizes and nothing points at one,
      *        so its bytes at a new address are the same view: no move constructor and no
      *        destructor runs, which keeps relocation off the segment release path.
+     *
+     * Up to `kInline` links, the common case (a move, and the first spill), each link is one
+     * fixed-size copy the compiler emits as loads and stores. A `memcpy` of a runtime length
+     * would be a library call, which every move of a rope on the relay path would pay.
      */
     static void relocate(view_t* to, view_t* from, std::size_t n) noexcept {
         static_assert(mem::bitwise_relocatable<view_t> && mem::bitwise_relocatable<segment_ptr_t>,
                       "rope_t relocates its links by memcpy");
-        if (n != 0)
+        if (n > kInline) {
             std::memcpy(static_cast<void*>(to), static_cast<const void*>(from), n * sizeof(view_t));
+            return;
+        }
+        for (std::size_t i = 0; i < kInline; ++i)
+            if (i < n)
+                std::memcpy(static_cast<void*>(to + i), static_cast<const void*>(from + i),
+                            sizeof(view_t));
     }
 
     /** @brief Adopt @p o's links (@p o is left empty and inline); this rope holds none. */
