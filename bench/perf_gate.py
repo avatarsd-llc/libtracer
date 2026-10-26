@@ -697,7 +697,7 @@ def lkv_ratio_report_paired(bench: pathlib.Path, base_bench: pathlib.Path,
 #     lowest of its mask (`bench::pin_to_one_cpu`, #1906), and is judged over the whole set. The methodology's own rule is one CPU per single-threaded measurement; the
 #     old whole-sweep invocation needed several CPUs only because MULTI rows rode along.
 #   - A MULTI family runs on every bench CPU (`BENCH_CPU`), judged on foreign time only: its
-#     own threads raise its own cgroup's pressure (#1803). It sizes T from its affinity mask
+#     own threads raise the bench slice's pressure (#1803). It sizes T from its affinity mask
 #     (`bench::usable_cpus`), so T never exceeds the CPUs it was given. MULTI steps run after
 #     every SINGLE step, so no pressure-scored launch inherits their residue.
 #   - The sibling binaries (`BENCH_BY_KEY`, other than `main`) are one SINGLE step each.
@@ -2156,7 +2156,7 @@ def print_conditions() -> None:
     """@brief The measurement-conditions block every verdict is printed under (#1676)."""
     print(f"Measurement conditions ({'CLEAN' if LEDGER.clean else 'CONTENDED'}; "
           f"contended = foreign > {bc.FOREIGN_MAX_PCT:g}% on the bench CPU or "
-          f"CPU pressure > {bc.PRESSURE_MAX:g} (own cgroup if pinned, host if not), re-run up to {bc.DEFAULT_ATTEMPTS}x):")
+          f"CPU pressure > {bc.PRESSURE_MAX:g} (the bench slice's; host pressure is logged only), re-run up to {bc.DEFAULT_ATTEMPTS}x):")
     print(f"  {LEDGER.line()}")
     for x in LEDGER.report(notable_only=True):
         print(x)

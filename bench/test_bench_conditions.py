@@ -67,18 +67,20 @@ CG = "/runners.slice/actions.runner.studio-bench.service"
 
 
 def sample(stat: str, pressure: int | None, wall_ns: int, cpu: int = 7,
-           cgroup: int | None = None, avg10: float = 0.0) -> bc.Sample:
+           bench_slice: int | None = None, avg10: float = 0.0) -> bc.Sample:
     """@brief One snapshot built from synthetic /proc text through the real reader.
 
-    @p pressure is the host-wide PSI `some total=` (µs); @p cgroup, when given, is this
-    job's own cgroup counter, reached the way the real reader reaches it — through
-    /proc/self/cgroup. @p avg10 decorates both files and must never decide.
+    @p pressure is the host-wide PSI `some total=` (µs); @p bench_slice, when given, is the
+    bench slice's own counter, at the path the real reader reads. The job's own cgroup is
+    always present and NEVER read for pressure: the slice is the one scored source
+    (2026-10-26 ruling). @p avg10 decorates every file and must never decide.
     """
     files = {bc.PROC_STAT: stat,
-             bc.PROC_PSI: None if pressure is None else psi(pressure, avg10)}
-    if cgroup is not None:
-        files[bc.PROC_SELF_CGROUP] = f"0::{CG}\n"
-        files[f"{bc.CGROUP_FS}{CG}/cpu.pressure"] = psi(cgroup, avg10)
+             bc.PROC_PSI: None if pressure is None else psi(pressure, avg10),
+             bc.PROC_SELF_CGROUP: f"0::{CG}\n",
+             f"{bc.CGROUP_FS}{CG}/cpu.pressure": psi(99_000_000, avg10)}
+    if bench_slice is not None:
+        files[bc.SLICE_PSI] = psi(bench_slice, avg10)
     return bc.snapshot((cpu,), read=files.get, now=lambda: wall_ns)
 
 
@@ -149,32 +151,46 @@ class Classify(unittest.TestCase):
         c = bc.classify(T0, t1, own_cpu_s=0.08, nivcsw=0, cpus=[7])
         self.assertTrue(c.clean, c.line())
 
-    def test_unpinned_host_pressure_in_window_contends(self):
-        """Hosted runners have nothing to isolate: host-wide pressure decides there."""
+    def test_host_pressure_never_decides_even_unpinned(self):
+        """2026-10-26 ruling: host-wide pressure is logged, never gated. With no bench
+        slice (a hosted runner) nothing is scored, and a clean CPU reads CLEAN."""
         c = bc.classify(T0, after(1000, 0, pressure=us(41.4)), own_cpu_s=10.0, nivcsw=0,
                         cpus=[7], pinned=False)
-        self.assertEqual(c.verdict, bc.CONTENDED)
-        self.assertIn("host psi 41.4 > 5", c.reason)
+        self.assertEqual(c.verdict, bc.CLEAN, c.line())
+        self.assertIsNone(c.pressure)
+        self.assertAlmostEqual(c.host_pressure, 41.4)
+        self.assertIn("host 41.4, info", c.line())
 
-    def test_pinned_host_pressure_high_cgroup_quiet_cpu_clean_is_clean(self):
+    def test_unpinned_bench_slice_pressure_contends(self):
+        """The slice's pressure decides whether or not the run is pinned: the live A/A is
+        unpinned and still runs on the slice's CPUs."""
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=0)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), us(60.0), 10_000_000_000,
+                    bench_slice=us(7.5))
+        c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=False)
+        self.assertEqual(c.verdict, bc.CONTENDED)
+        self.assertIn(f"{bc.BENCH_SLICE} psi 7.5 > 5", c.reason)
+        self.assertNotIn("host psi", c.reason)
+
+    def test_host_pressure_high_slice_quiet_cpu_clean_is_clean(self):
         """The pinned host's bench CPUs are cgroup-isolated: host-wide pressure of 40-68
         says nothing about them. Own cgroup ~0 and a clean CPU must read CLEAN, with the
         host figure recorded for information."""
-        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=0)
-        t1 = sample(proc_stat(7, 2000, 500, 8000), us(55.2), 10_000_000_000, cgroup=us(0.1))
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=0)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), us(55.2), 10_000_000_000, bench_slice=us(0.1))
         c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
         self.assertEqual(c.verdict, bc.CLEAN, c.line())
-        self.assertEqual(c.pressure_source, "cgroup")
+        self.assertEqual(c.pressure_source, bc.BENCH_SLICE)
         self.assertAlmostEqual(c.pressure, 0.1)
         self.assertAlmostEqual(c.host_pressure, 55.2)
         self.assertIn("host 55.2, info", c.line())
 
     def test_pinned_own_cgroup_pressure_contends(self):
-        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=0)
-        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, cgroup=us(12.5))
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=0)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, bench_slice=us(12.5))
         c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
         self.assertEqual(c.verdict, bc.CONTENDED)
-        self.assertIn("cgroup psi 12.5 > 5", c.reason)
+        self.assertIn(f"{bc.BENCH_SLICE} psi 12.5 > 5", c.reason)
 
     def test_cgroup_pressure_path(self):
         self.assertEqual(bc.cgroup_pressure_path(f"0::{CG}\n"),
@@ -185,8 +201,8 @@ class Classify(unittest.TestCase):
         """#1839: a short execution right after a multi-threaded one reads avg10 ~50
         left over from the previous run. Only the stall gained in its own window counts:
         none was gained, so a quiet window is CLEAN however high avg10 reads."""
-        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=9_000_000, avg10=50.8)
-        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, cgroup=9_000_000,
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=9_000_000, avg10=50.8)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, bench_slice=9_000_000,
                     avg10=50.8)
         c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
         self.assertTrue(c.clean, c.line())
@@ -194,9 +210,9 @@ class Classify(unittest.TestCase):
 
     def test_the_pressure_bar_is_five_percent_of_the_window(self):
         def run(pct):
-            t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=1_000_000)
+            t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=1_000_000)
             t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000,
-                        cgroup=1_000_000 + us(pct))
+                        bench_slice=1_000_000 + us(pct))
             return bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
         self.assertTrue(run(4.9).clean)
         self.assertFalse(run(5.1).clean)
@@ -204,14 +220,14 @@ class Classify(unittest.TestCase):
     def test_too_short_to_measure_is_judged_on_foreign_time_alone(self):
         """A 10 ms execution: the stall share of so short a window is noise, so even a
         large one is recorded and not scored. A foreign intruder still contends."""
-        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=0)
-        t1 = sample(proc_stat(7, 1001, 500, 8000), 0, 10_000_000, cgroup=5_000)  # 50%
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=0)
+        t1 = sample(proc_stat(7, 1001, 500, 8000), 0, 10_000_000, bench_slice=5_000)  # 50%
         quiet = bc.classify(t0, t1, own_cpu_s=0.01, nivcsw=0, cpus=[7], pinned=True)
         self.assertTrue(quiet.clean, quiet.line())
         self.assertAlmostEqual(quiet.pressure, 50.0)
         self.assertIn("not scored: window too short", quiet.line())
         t2 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000 + 10_000_000,
-                    cgroup=5_000)
+                    bench_slice=5_000)
         busy = bc.classify(T0, t2, own_cpu_s=7.0, nivcsw=0, cpus=[7], pinned=True)
         self.assertFalse(busy.clean)
         self.assertIn("foreign", busy.reason)
@@ -220,8 +236,8 @@ class Classify(unittest.TestCase):
     def test_multi_threaded_own_pressure_is_recorded_not_scored(self):
         """#1803: a multi-threaded run queues behind its own threads; its in-window
         pressure is recorded and never decides."""
-        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=0)
-        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, cgroup=us(80.0))
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, bench_slice=0)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, bench_slice=us(80.0))
         c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True,
                         score_pressure=False)
         self.assertTrue(c.clean, c.line())
