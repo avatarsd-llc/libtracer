@@ -2319,11 +2319,11 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // The stack array's overflow (a rope's regions across many links, or the cold relayed
     // subscribe): the sub-span count is only known at run time — gather into a NOTHROW block
     // array drawn from the failable seam (#596). A `std::pmr::vector` here was a peer-reachable
-    // abort(): the element count is chosen by the sender (link count x region count), the growth is
-    // `operator new`, and on -fno-exceptions the throw is a reboot. This is the FORWARD path —
-    // it sits behind no ACL, exactly like the RX decode (#588). Both TERMINUS REPLY tables took
-    // the same migration in #1570 — see `gather_reply_iov` and its two call sites — so no
-    // egress iov in this file is on the throwing `reserve` any more.
+    // abort(): the element count is chosen by the sender (link count x region count), the
+    // growth is `operator new`, and on -fno-exceptions the throw is a reboot. This is the
+    // FORWARD path: it sits behind no ACL, exactly like the RX decode (#588). Both TERMINUS REPLY
+    // tables took the same migration in #1570 (see `gather_reply_iov` and its call sites), so
+    // no egress iov in this file is on the throwing `reserve` any more.
     //
     // Exhaustion drops the frame. That is the correct answer for a forward hop: FWD is not
     // delivery-guaranteed, the sender retries, and emitting a partial iov would put a
@@ -2377,6 +2377,7 @@ using reply_iov_t = iov_table_t<std::span<const std::byte>>;
  */
 [[nodiscard]] std::span<const std::span<const std::byte>> gather_reply_iov(
     const view::rope_t& reply, reply_iov_t& iov) {
+    assert(reply.link_count() > 0 && "an empty table stands for a refused draw");
     std::span<const std::byte>* const out = iov.acquire(reply.link_count());
     if (out == nullptr) return {};
     std::size_t n = 0;
