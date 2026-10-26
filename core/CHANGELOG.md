@@ -312,6 +312,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `src` is answered `BACKPRESSURE` from the request's bytes and counted the same way, where it
   was a silent `malformed_rx` drop.
 
+### Changed
+
+- **A TCP or WS server's broadcast holds no lock across its writes (#2263).**
+  `slot_server_t::broadcast` walked the slot table under `peers_m_`, one write per peer, so at
+  N peers accept, teardown, name resolution, directed replies and every other broadcast waited
+  out N syscalls. The walk now follows a lock-free chain of slots
+  (`slot_server_t::session_base_t::next`, 8 B per slot); `peers_m_` guards only names and the
+  table's growth, and the poll thread rebuilds its poll set without it. A session leaving
+  mid-walk is refused by its closed egress; one admitted mid-walk may take the record. No
+  signature changes.
+
 ## [0.21.0] — 2026-10-22
 
 ### Fixed
