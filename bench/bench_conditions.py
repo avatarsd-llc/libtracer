@@ -36,8 +36,10 @@ What is sampled, around each invocation:
     (40-80 on the shared studio host while bench.slice read ~0) says nothing about the
     bench CPUs and flagged every pair of a quiet live A/A as contended (#2205): it is
     RECORDED, for information only, and never decides (maintainer ruling, 2026-10-26).
-    Where there is no bench slice (a hosted runner) there is no pressure to score, and a
-    run is judged on foreign time alone.
+    Where a bench slice is expected (a pinned run, or `BENCH_SLICE` set) and its
+    cpu.pressure cannot be read, the run is CONTENDED: the guard fails closed rather than
+    turning itself off. Only where none is expected (unpinned, `BENCH_SLICE` unset: a
+    hosted runner) is a run judged on foreign time alone.
     The window is the run's own, not `avg10`: avg10 is a 10 s moving average, so a
     0.0 s execution read the pressure the PREVIOUS (multi-threaded) execution left
     behind and every re-run of it read the same stale value (#1839). A run shorter than
@@ -115,6 +117,11 @@ PROC_SELF_CGROUP = "/proc/self/cgroup"
 CGROUP_FS = "/sys/fs/cgroup"
 # The slice that owns the bench CPUs. Its cpu.pressure is the one pressure the rule scores.
 BENCH_SLICE = os.environ.get("BENCH_SLICE", "bench.slice")
+# Where a bench slice is EXPECTED: a pinned run (BENCH_CPU names CPUs) or an explicit
+# BENCH_SLICE. There a missing pressure file is a broken guard, not a quiet host, and the
+# run fails closed (#2205 review). Only an unpinned run with BENCH_SLICE unset (a hosted
+# runner) is judged on foreign time alone.
+SLICE_NAMED = "BENCH_SLICE" in os.environ
 SLICE_PSI = f"{CGROUP_FS}/{BENCH_SLICE}/cpu.pressure"
 
 
@@ -172,8 +179,9 @@ def parse_psi_total(text: str | None) -> int | None:
     return None
 
 
-def cgroup_pressure_path(self_cgroup: str | None) -> str | None:
-    """@brief `<cgroupfs>/<path>/cpu.pressure` for the cgroup-v2 line of /proc/self/cgroup.
+def job_cgroup_dir(self_cgroup: str | None) -> str | None:
+    """@brief `<cgroupfs>/<path>`, this job's cgroup directory, from the cgroup-v2 line of
+    /proc/self/cgroup.
 
     The bench is a child of this process and inherits its cgroup, so the wrapper's own
     cgroup IS the bench job's. None on a cgroup-v1-only host (no `0::` line).
@@ -181,7 +189,7 @@ def cgroup_pressure_path(self_cgroup: str | None) -> str | None:
     for line in (self_cgroup or "").splitlines():
         if line.startswith("0::"):
             rel = line[3:].strip().lstrip("/")
-            return f"{CGROUP_FS}/{rel}/cpu.pressure" if rel else f"{CGROUP_FS}/cpu.pressure"
+            return f"{CGROUP_FS}/{rel}" if rel else CGROUP_FS
     return None
 
 
@@ -279,8 +287,7 @@ def job_cpus(read: Callable[[str], str | None] = _read) -> tuple[int, ...]:
     file decides (the cpuset controller may be enabled on the slice and not below it);
     falls back to that affinity where none has it.
     """
-    cg = cgroup_pressure_path(read(PROC_SELF_CGROUP))
-    d = cg.rsplit("/", 1)[0] if cg else ""
+    d = job_cgroup_dir(read(PROC_SELF_CGROUP)) or ""
     while d.startswith(CGROUP_FS + "/"):  # the root constrains nothing
         text = read(d + "/cpuset.cpus.effective")
         if text and text.strip():
@@ -301,8 +308,13 @@ def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
              cpus: Iterable[int], pinned: bool = True,
              foreign_max_pct: float = FOREIGN_MAX_PCT,
              pressure_max: float = PRESSURE_MAX, clk_tck: int = CLK_TCK,
-             score_pressure: bool = True) -> Conditions:
+             score_pressure: bool = True, slice_expected: bool | None = None) -> Conditions:
     """@brief The decision rule: CLEAN, or CONTENDED with the reason spoken.
+
+    @p slice_expected (default: @p pinned, or `BENCH_SLICE` set) says a bench slice must
+    exist here. When it does and the slice's `cpu.pressure` could not be read, the run is
+    CONTENDED ("bench slice has no cpu.pressure"): the guard fails closed instead of
+    turning itself off.
 
     @p score_pressure False judges the run on foreign time alone (#1803). That is for a
     MULTI-threaded bench invocation, whose own threads queue behind each other on the
@@ -315,7 +327,7 @@ def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
 
     Pinned or not, a run gates on foreign time and the bench slice's pressure only;
     host-wide pressure is recorded beside them and never decides (2026-10-26 ruling). A
-    host with no bench slice has no pressure to score.
+    host where no bench slice is expected has no pressure to score.
 
     Pure — two snapshots and the bench's own usage in, a verdict out — so the rule is
     tested on synthetic /proc text rather than on a machine that happens to be busy.
@@ -331,6 +343,10 @@ def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
     source = BENCH_SLICE
     wall_s = max(0, after.wall_ns - before.wall_ns) / 1e9
     psi = _window_pct(before.slice_us, after.slice_us, wall_s)
+    if slice_expected is None:
+        slice_expected = pinned or SLICE_NAMED
+    if slice_expected and (before.slice_us is None or after.slice_us is None):
+        reasons.append(f"bench slice has no cpu.pressure ({SLICE_PSI})")
     if (score_pressure and wall_s >= PSI_MIN_WINDOW_S and psi is not None
             and psi > pressure_max):
         reasons.append(f"{source} psi {psi:.1f} > {pressure_max:g}")
@@ -588,8 +604,7 @@ def runners_on(procs: dict[int, tuple[str, set[int]]], bench: Iterable[int]) -> 
 def _job_procs() -> dict[int, tuple[str, set[int]]]:
     """@brief This job's processes (its cgroup and the cgroups below it): pid -> (argv[0],
     the union of its threads' affinities). A process that exits mid-read is skipped."""
-    cg = cgroup_pressure_path(_read(PROC_SELF_CGROUP))
-    root = cg.rsplit("/", 1)[0] if cg else ""
+    root = job_cgroup_dir(_read(PROC_SELF_CGROUP)) or ""
     pids: set[int] = set()
     for d, _, files in os.walk(root) if root else ():
         if "cgroup.procs" in files:
