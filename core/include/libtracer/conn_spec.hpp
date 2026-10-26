@@ -124,7 +124,8 @@ class conn_spec_t {
     conn_spec_t& backoff_ms(std::uint32_t value) { return u32("backoff", value); }
 
     /** @brief `connect_timeout` — VALUE u32, in ms; parsed and handed to the kind's factory, and
-     *         no built-in consumer uses it (RFC-0014 Amendment 5). */
+     *         no send waits on it (RFC-0014 Amendment 5); #2304 makes it the attempt bound
+     *         compared against the app's `now`. */
     conn_spec_t& connect_timeout_ms(std::uint32_t value) { return u32("connect_timeout", value); }
 
     /**
