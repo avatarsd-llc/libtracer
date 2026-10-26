@@ -31,6 +31,15 @@ namespace tr::graph {
 inline constexpr std::size_t kPathChainCapacity = (config_t::kPathChainBytes + 3) / 4 * 4;
 
 /**
+ * @brief The test suite's door into @ref path_object_t's private element-0 write, so a race
+ *        can drive it directly.
+ *
+ * Declared here and never defined by the library: only the test suite defines it. It is not
+ * part of the API; code outside the test suite must not define it.
+ */
+struct path_object_test_door_t;
+
+/**
  * @brief A graph-owned path object (RFC-0030 §5): what the host API addresses a vertex through.
  *
  * Made by @ref graph_t::make_path from a canonical path string (parsed and validated once) or
@@ -120,13 +129,17 @@ class path_object_t {
 
    private:
     friend class graph_t;
+    friend struct path_object_test_door_t;  // test-only: writes element 0 to race it.
 
     static constexpr std::size_t kChainWords = kPathChainCapacity / 4;
 
-    // Every shared field is a 32-bit atomic, lock-free on every target (a 64-bit atomic is a
-    // libcall critical section on a 32-bit MCU, which an ISR door could deadlock on). Element 0
-    // and the chain are written under `seq`, so a reader takes both words of the pair from one
-    // write.
+    // Every shared field is a 32-bit word, so every load and store is one aligned access on
+    // every target (a 64-bit atomic is a libcall critical section on a 32-bit MCU, which an ISR
+    // door could deadlock on). The one RMW, the writer's take of `seq`, is a CAS where the
+    // target has one and the build's `guard_t` section where it does not (rv32imc, Cortex-M0).
+    // Element 0 and the chain are written under the ONE `seq`, so a reader takes both words of
+    // the pair from one write. The counter is shared, so a burst of chain learns also sends
+    // element-0 reads to the canonical bytes; the answer is the same, only slower.
     struct body_t {
         mem::block_source_t* src;              // who serves this block
         std::size_t block_bytes;               // its size, for the sized release
@@ -138,8 +151,6 @@ class path_object_t {
         std::atomic<std::uint32_t> chain_len;  // 0: no chain
         std::array<std::atomic<std::uint32_t>, kChainWords> chain;  // inline chain cache
     };
-    static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
-                  "a path object's door reads only lock-free atomics");
 
     // The writer half of the seqlock: take `seq` odd, or answer false when another writer holds
     // it (the cache is soft, so the losing write is dropped). `end_write` publishes.

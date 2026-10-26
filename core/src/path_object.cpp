@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "libtracer/graph.hpp"
+#include "libtracer/guard.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/path.hpp"
 
@@ -29,9 +30,20 @@ constexpr int kReadTries = 4;
 }  // namespace
 
 bool path_object_t::begin_write(std::uint32_t& s) const noexcept {
-    s = b_->seq.load(std::memory_order_relaxed);
-    if ((s & 1U) != 0 || !b_->seq.compare_exchange_strong(s, s + 1, std::memory_order_relaxed))
-        return false;
+    if constexpr (std::atomic<std::uint32_t>::is_always_lock_free) {
+        s = b_->seq.load(std::memory_order_relaxed);
+        if ((s & 1U) != 0 || !b_->seq.compare_exchange_strong(s, s + 1, std::memory_order_relaxed))
+            return false;
+    } else {
+        // No atomic RMW on this target (rv32imc, Cortex-M0): the take is a load and a store
+        // inside the build's one critical section, as `rmw_counter_t`'s guarded bump is.
+        // Readers take no section: every store they observe is one aligned word.
+        static_assert(::tr::guard<guard_t>, "config_t::guard_t must be a complete tr::guard here");
+        const ::tr::guard_scope_t<guard_t> section(b_);
+        s = b_->seq.load(std::memory_order_relaxed);
+        if ((s & 1U) != 0) return false;
+        b_->seq.store(s + 1, std::memory_order_relaxed);
+    }
     std::atomic_thread_fence(std::memory_order_release);
     return true;
 }
