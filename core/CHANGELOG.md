@@ -83,6 +83,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`fwd_router_t::link_down(link_name, peer)`**: evicts one bus peer's subscriber edges by its
+  handle (#2237). Since #2103, `link_down(name)` reaches only a registered child's edges, and a
+  bus peer's left only through the bus's own peer-down seam. An announce-census CAN bus never
+  fires that seam. With this overload the application can name the mount and the peer's handle
+  (`{node id, transport_can::kAnnouncedPeerGeneration}` on CAN), and the router runs the same
+  departure the seam runs. It returns false, and evicts nothing, for an unknown mount, a flat
+  link or an invalid handle.
+- **`transport_can::peer_link_of`** resolves a peer handle by its node id, so a remote delivery
+  to a CAN peer no longer formats the peer's name and parses it back (#2237).
 - **`tr::net::session_slot_index(name)`** (`pair.hpp`) — the slot index a `p<slot>[~<gen>]`
   session name spells, nullopt for any other name: the inverse of the one spelling both slot
   servers write, which the router uses to find a slot's tenancy (#2234).

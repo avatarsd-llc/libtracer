@@ -25,6 +25,7 @@
  *     bounded by the 13-bit id space) and re-announcing is idempotent.
  */
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -465,11 +466,24 @@ void test_resolved_endpoint_is_identity_scoped() {
     tr::net::transport_t* const cached = observer.peer_link("n9");
     check(cached != nullptr, "n9 resolves to a directed endpoint");
 
+    // #2237: the delivery path resolves by HANDLE, and answers what the name answers.
+    const tr::net::peer_handle_t h9{9, tr::net::transport_can::kAnnouncedPeerGeneration};
+    check(observer.peer_link_of(h9) == cached, "peer_link_of(n9's handle) is that endpoint");
+    check(observer.peer_link_of(tr::net::peer_handle_t{}) == nullptr,
+          "an invalid handle resolves to nothing");
+    check(observer.peer_link_of(tr::net::peer_handle_t{can::kNodeMax + 1u, 1}) == nullptr,
+          "a handle past the node-id space resolves to nothing");
+    check(observer.peer_link_of(tr::net::peer_handle_t{9, 2}) == nullptr,
+          "a handle at any other generation names no CAN peer");
+    check(observer.peer_link_of(tr::net::peer_handle_t{3, 1}) == nullptr,
+          "a node never heard resolves to nothing");
+
     // --- n9 falls silent: it stops RESOLVING, but the entry is never freed. ---
     peer9.reset();
     check(wait_until([&] { return names().count("n9") == 0; }, kBudget),
           "after peer_ttl of silence n9 leaves the enumeration");
     check(observer.peer_link("n9") == nullptr, "and a FRESH resolution of n9 now fails");
+    check(observer.peer_link_of(h9) == nullptr, "and so does its handle (#2237)");
 
     // --- a different peer arrives while n9 is gone. It cannot inherit the name.
     std::atomic<int> n7_deliveries{0};
@@ -489,6 +503,8 @@ void test_resolved_endpoint_is_identity_scoped() {
                                                   "n9-returned"});
     peer9->set_receiver(n9_rx);
     check(wait_until([&] { return names().count("n9") == 1; }, kBudget), "n9 returns to the bus");
+    check(observer.peer_link_of(h9) == cached,
+          "the returned n9's handle resolves to the same endpoint (#2237)");
 
     const std::vector<std::byte> directed(18, std::byte{0x5A});
     cached->send(directed);
@@ -497,6 +513,31 @@ void test_resolved_endpoint_is_identity_scoped() {
     // Sized to what this sink can actually have seen: n7 has been up throughout the
     // directed send and would have counted it had the endpoint addressed the newcomer.
     check(n7_deliveries.load() == 0, "and the newcomer n7 received nothing addressed to n9");
+}
+
+// ---------------------------------------------------------------------------
+// #2237 — the by-handle door on a real CAN mount accepts only a handle this bus mints.
+// ---------------------------------------------------------------------------
+
+void test_peer_door_takes_only_minted_handles() {
+    std::printf("#2237 by-handle door on a CAN mount (minted handles only):\n");
+    fake_can_bus_t bus;
+    graph_t graph;
+    fwd_router_t router(graph);
+    tr::net::transport_can tcan(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs"});
+    (void)router.attach_link("can0", tcan);
+
+    constexpr std::uint32_t kGen = tr::net::transport_can::kAnnouncedPeerGeneration;
+    std::array<char, tr::net::kPeerNameChars> scratch{};
+    check(tcan.peer_name(tr::net::peer_handle_t{9, kGen + 1}, scratch).empty(),
+          "peer_name refuses a generation this bus never mints");
+    check(!router.link_down("can0", tr::net::peer_handle_t{9, kGen + 1}),
+          "so the door refuses that handle and evicts nothing");
+    check(!router.link_down("can0", tr::net::peer_handle_t{can::kNodeMax + 1u, kGen}),
+          "and a node id past the bus's id space");
+    check(router.link_down("can0", tr::net::peer_handle_t{9, kGen}),
+          "a minted handle is accepted, heard or not");
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +599,7 @@ int main() {
     test_enumeration_and_forwarding();
     test_peer_expiry();
     test_resolved_endpoint_is_identity_scoped();
+    test_peer_door_takes_only_minted_handles();
     test_peer_table_growth();
     return tr::testing::summary("transport_can_peers");
 }

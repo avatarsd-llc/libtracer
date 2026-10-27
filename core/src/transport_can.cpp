@@ -275,10 +275,18 @@ void transport_can::enumerate_peers(const peer_visitor_t& visit) const {
  */
 transport_t* transport_can::peer_link(std::string_view peer) {
     const std::optional<std::uint16_t> node = parse_peer_name(peer);
-    if (!node) return nullptr;
+    return node ? peer_link_of(peer_handle_t{*node, kAnnouncedPeerGeneration}) : nullptr;
+}
+
+transport_t* transport_can::peer_link_of(peer_handle_t peer) {
+    // The handle's index IS the node id the table is keyed by (`peer_name` is the pure
+    // re-formatting of it), so the lookup is the table's own: no name is rendered or parsed on
+    // a delivery (#2237). Every handle this bus mints carries `kAnnouncedPeerGeneration`, so
+    // any other generation, the invalid handle's zero included, names no peer of this bus.
+    if (peer.generation != kAnnouncedPeerGeneration || peer.index > can::kNodeMax) return nullptr;
     const auto now = std::chrono::steady_clock::now();
     const std::lock_guard lock(peers_m_);
-    peer_entry_t* const* const e = peers_.find(*node);
+    peer_entry_t* const* const e = peers_.find(static_cast<std::uint16_t>(peer.index));
     if (e == nullptr || now - (*e)->last_heard > cfg_.peer_ttl) return nullptr;
     return &(*e)->endpoint;
 }
@@ -286,8 +294,9 @@ transport_t* transport_can::peer_link(std::string_view peer) {
 std::string_view transport_can::peer_name(peer_handle_t peer, std::span<char> scratch) const {
     // A pure re-formatting of the node id the handle's index IS — no `peers_` lookup and no
     // TTL check, deliberately: this answers "what is this handle's NAME", not "is that peer
-    // still audible", which is `peer_link`'s question.
-    if (!peer.valid() || peer.index > can::kNodeMax) return {};
+    // still audible", which is `peer_link`'s question. A generation this bus never mints
+    // (the invalid handle's zero included) names no peer of it (#2237).
+    if (peer.generation != kAnnouncedPeerGeneration || peer.index > can::kNodeMax) return {};
     const peer_name_buf_t name = format_peer_name(static_cast<std::uint16_t>(peer.index));
     const std::string_view view = name.view();
     if (view.empty() || view.size() > scratch.size()) return {};
