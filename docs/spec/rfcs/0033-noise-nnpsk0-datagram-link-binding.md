@@ -18,7 +18,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Instrument** | **Amendment.** It adds an optional normative link binding: a datagram layout, a handshake, and MUSTs that a peer can observe on the wire. It also adds nouns to the `:stats.link.<child>` block of [reference/05](../../reference/05-protocol-tlvs.md), a normative annex. GOVERNANCE.md reserves both for an amendment. It changes no existing wire byte: a link that does not use the binding is unaffected. |
 | **Tracking issue** | [#2063](https://github.com/avatarsd-llc/libtracer/issues/2063). It is a narrow slice pulled forward from [#1993](https://github.com/avatarsd-llc/libtracer/issues/1993) (an opaque credential member in `:identity` and the "Tracer over Noise" binding, v1.0.0). |
 | **Target spec version** | v1 itself. `docs/spec/v1.md` still reads "(DRAFT)". |
-| **Amends** | [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §4 as amended (Amendment 1), **for a Noise link only**: an operation on a dormant link fails at once instead of waiting one `connect_timeout` (§5.1), and an attempt an operation started stops at its attempt deadline (§5.7). [ADR-0086](../../adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8's pattern list (§10.4; the dated note lands in this RFC's pull request). [reference/05](../../reference/05-protocol-tlvs.md) §The seam census record and §Invalidation (§10.2, written in slice S1). |
+| **Amends** | [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §4 as amended (Amendment 1), **for a Noise link only**: an operation on a dormant link fails at once instead of waiting one `connect_timeout` (§5.1), and an attempt an operation started stops at its attempt deadline (§5.7). RFC-0014 Amendment 5 (#2303) later generalised the fail-at-once rule to every `DIAL` link. [ADR-0086](../../adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8's pattern list (§10.4; the dated note lands in this RFC's pull request). [reference/05](../../reference/05-protocol-tlvs.md) §The seam census record and §Invalidation (§10.2, written in slice S1). |
 | **Builds on** | [ADR-0045](../../adr/0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) Decision 4 (link confidentiality is the link's job, by a Noise channel) and Decision 5 (trust is per hop); [ADR-0086](../../adr/0086-identity-is-app-level-key-plus-opaque-credential-anchored-names-are-a-policy.md) Decision 8 ("Tracer over Noise" is an optional normative link binding); [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) (link liveness); [RFC-0010](0010-owner-app-fields-and-schema.md) Amendment 2 (the `:stats.link.<child>` census); [RFC-0029](0029-one-path-primitive.md) §8.2 (a session boundary advances the generation). |
 | **Leaves to #1993** | The `:identity` credential member, the static-key patterns (IK, XX, KK) over the ed25519 node key, and the credential in the handshake payload. §7 says how they attach to this binding. |
 | **Relates to** | [#1649](https://github.com/avatarsd-llc/libtracer/issues/1649) (an ESP-IDF UDP link with Noise), which should be built against this binding (§10.3). |
@@ -189,8 +189,10 @@ follow this section. A link that does not follow it is not a conforming Tracer N
   Nothing waits for a dial. A caller that wants to send as soon as
   the session exists awaits the connection vertex's value reaching `up`, an ordinary `await` whose
   deadline the requester owns (RFC-0004 Amendment 3), and then sends. This is how the recovery
-  case makes its first write. `connect_timeout` is kept as the attempt deadline of §5.7, checked
-  against the application's `now` ([#2304](https://github.com/avatarsd-llc/libtracer/issues/2304)).
+  case makes its first write. The §5.7 attempt deadline is the link's own attempt span, checked
+  against the application's `now`; `connect_timeout` stays a config key, parsed and handed to the
+  factory; binding it to the application's `now` is
+  [#2304](https://github.com/avatarsd-llc/libtracer/issues/2304)'s.
   Nothing is queued in either case.
 - The binding is **per hop**. A frame forwarded beyond the far node leaves this session there.
   Nothing here gives end-to-end protection, as ADR-0045 Decision 5 says.
