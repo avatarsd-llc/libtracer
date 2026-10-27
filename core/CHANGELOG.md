@@ -47,6 +47,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - A set op-byte bit 7 or 6 is an undefined opcode at a terminus (`TYPE_MISMATCH`); a
   forwarder still masks it.
 - `fwd_dst_kind_t::PATH_REF` is renamed `RETIRED`: a `0x14` `dst` is refused by type code.
+- **A send on a self-heal `DIAL` link that is not `UP` never waits (RFC-0014 Amendment 5,
+  #2303) — BEHAVIOUR.** `self_heal_link_t::send` on a `DORMANT`, `DIALING` or `RECONNECTING`
+  link drops the frame at once and counts it in `drop_stats().dropped_tx`; on `DORMANT` it also
+  kicks one dial on the engine's worker. It used to block the calling thread for up to
+  `connect_timeout` and then deliver. The first frame sent into a dormant link is therefore no
+  longer delivered: a caller that needs it delivered awaits `up` on `/net/<module>/<name>`, then
+  sends. `connect_timeout` is still handed to the kind's factory; no op waits on it.
 
 ### Removed
 

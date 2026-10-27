@@ -525,14 +525,16 @@ void test_config_constructed_udp() {
                                            : static_cast<std::uint8_t>(link_state_t::UP)),
           "A: the DIAL link's creation-time liveness matches this build's dial model");
 
-    // End-to-end: FWD{READ dst=/b/temp} from A AUTO-WAKES the dormant link (the §4 op door:
-    // one bounded dial attempt, then the frame goes), crosses A's socket to
-    // B's terminus, and the REPLY source-routes back to A's reply sink — B's listener
-    // learned A's ephemeral source address from the request datagram.
+    // End-to-end: FWD{READ dst=/b/temp} from A crosses A's socket to B's terminus, and the
+    // REPLY source-routes back to A's reply sink — B's listener learned A's ephemeral source
+    // address from the request datagram. On an engine-managed dial the first READ only kicks
+    // the dormant link and is dropped (RFC-0014 Amendment 5), so it is sent again once UP.
     router_a.on_frame("self", fwd_read({"net", "udp-client", "b", "temp"}, {"reply-ep"}));
     check(await_link_state_byte(node_a, "/net/udp-client/b",
                                 static_cast<std::uint8_t>(link_state_t::UP)),
           "A: the link is UP — the op woke it if this build's dial model is the engine's");
+    if (kBuiltinDialIsEngineManaged)
+        router_a.on_frame("self", fwd_read({"net", "udp-client", "b", "temp"}, {"reply-ep"}));
     const bool replied = fut.wait_for(3s) == std::future_status::ready;
     check(replied, "the READ reached B and the REPLY returned over the learned peer");
     if (replied) {
@@ -2042,8 +2044,14 @@ void test_app_chosen_root_and_module() {
     check(s.has_value() && s->kind == "udp" && s->port == b_port,
           "A: settings_of resolves by the app-chosen qualified key");
 
-    // End-to-end: a READ routed through /io/w/b reaches B and the reply returns.
+    // End-to-end: a READ routed through /io/w/b reaches B and the reply returns. On an
+    // engine-managed dial the first READ only kicks the dormant link and is dropped (RFC-0014
+    // Amendment 5), so it is sent again once the link is UP.
     router_a.on_frame("self", fwd_read({"io", "w", "b", "temp"}, {"reply-ep"}));
+    check(await_link_state_byte(node_a, "/io/w/b", static_cast<std::uint8_t>(link_state_t::UP)),
+          "A: the /io/w/b link is UP");
+    if (kBuiltinDialIsEngineManaged)
+        router_a.on_frame("self", fwd_read({"io", "w", "b", "temp"}, {"reply-ep"}));
     const bool replied = fut.wait_for(3s) == std::future_status::ready;
     check(replied, "the READ crossed the /io/w link and the REPLY returned");
     if (replied) {

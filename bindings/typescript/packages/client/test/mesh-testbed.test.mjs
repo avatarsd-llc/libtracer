@@ -119,11 +119,11 @@ const WS_CLIENT_MODULE = 'ws-client';
  * connection lands at `/net/ws-client/<linkName>`, the same path the assertions below read.
  *
  * Retries the WHOLE write. Since the RFC-0014 §4 S5 flip (#1548) a built-in DIAL is
- * engine-managed, so this write creates the connection DORMANT and the first frame routed
- * through it auto-wakes the dial — the retry loop now covers a refused WRITE (an unready
- * ctrl peer), not a refused connect. It is kept because before the flip a refused dial
- * returned before `register_vertex_key`, leaving NO vertex, and re-issuing the same SPEC
- * was the only recovery; a build that closes the engine out still behaves that way.
+ * engine-managed, so this write creates the connection DORMANT — the retry loop covers a
+ * refused WRITE (an unready ctrl peer), not a refused connect. It is kept because before the
+ * flip a refused dial returned before `register_vertex_key`, leaving NO vertex, and
+ * re-issuing the same SPEC was the only recovery; a build that closes the engine out still
+ * behaves that way. Then {@link bringUp} waits for the link to reach `up`.
  * `linkName` is the FAR node's name, per the naming rule.
  */
 async function dial(client, from, linkName, toNode, budgetMs = 30000) {
@@ -139,13 +139,44 @@ async function dial(client, from, linkName, toNode, budgetMs = 30000) {
   while (Date.now() < deadline) {
     try {
       await client.write(['net', WS_CLIENT_MODULE, 'conn'], spec);
-      return;
+      return await bringUp(client, linkName, deadline);
     } catch (err) {
       lastErr = err;
       await sleep(500);
     }
   }
   throw new Error(`dial ${from} -> ${toNode} (as "${linkName}") failed: ${lastErr}`);
+}
+
+/** @brief The far-side path {@link bringUp} sends its kick to; no assertion reads it. */
+const KICK_PROBE = 'link-kick-probe';
+
+/** @brief `link_state_t::UP`, the 1-byte liveness VALUE a connection vertex holds (RFC-0014 §4). */
+const LINK_UP = 0x03;
+
+/**
+ * @brief Bring the DORMANT link `linkName` up and wait for it, before anything routes over it.
+ *
+ * RFC-0014 Amendment 5: an op on a link that is not `up` is a counted drop that kicks the
+ * dial, and never waits for it. So each round sends one short-deadline request through the
+ * link (dropped, but it starts the attempt) and then reads the connection vertex's liveness;
+ * the first frame a test routes then finds the link `up`. The op-woken socket stays up until
+ * loss (§4.1's keep-up MAY, which the reference engine takes).
+ *
+ * The kick names {@link KICK_PROBE}, a path no assertion reads. A dropped kick is never
+ * answered, and the client keeps its timed-out entry so that a late reply cannot reach a live
+ * caller. The client matches a reply to the oldest entry whose `dst` ends with the reply's
+ * `src`. A kick to `/node/name` would therefore leave an entry that takes the reply of the
+ * next `/node/name` read, local or remote, and that read would time out.
+ */
+async function bringUp(client, linkName, deadline) {
+  const conn = ['net', WS_CLIENT_MODULE, linkName];
+  while (Date.now() < deadline) {
+    const state = await client.read(conn);
+    if (state.payload?.[state.payload.length - 1] === LINK_UP) return;
+    await client.await_([...conn, KICK_PROBE], 200_000_000n).catch(() => {});
+  }
+  throw new Error(`link "${linkName}" did not come up`);
 }
 
 /** @brief The NAME strings of a synthesized/enumerated `:children[]` POINT listing. */

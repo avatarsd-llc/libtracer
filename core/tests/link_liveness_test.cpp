@@ -1,8 +1,8 @@
 /**
  * @file
  * @brief RFC-0014 §4 S5 (#492) — the link-liveness ENGINE drives `link_state_t` through
- *        its DIAL state machine: dormant creation, auto-wake dial on demand
- *        (`connect_timeout`-bounded), self-heal with `backoff` while a standing binding
+ *        its DIAL state machine: dormant creation, a dial kicked by an op that is itself
+ *        a counted drop (Amendment 5), self-heal with `backoff` while a standing binding
  *        holds, fail-fast on `RECONNECTING`, and close-to-dormant on the last release.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -230,45 +230,58 @@ void test_engine_creation_is_dormant() {
 }
 
 void test_op_autowakes_and_dials() {
-    std::printf("S5: any op auto-wakes a dormant link — DIALING while in flight, UP on success:\n");
+    std::printf("S5: an op on a dormant link is a counted drop that kicks the dial (Am. 5):\n");
     dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
     declare_fake_engine_module(net, script);
     const script_guard_t guard{script};  // bounded teardown even on a failing test
-    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
+    // An 8 s connect_timeout, so a send that waited out the gated attempt would take all of
+    // it; the never-wait path performs no wait at all — half of it is margin, not a window.
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1, 8000));
     tr::net::transport_t* const link = tr::testing::link_of(net, "net/fake-client/a");
     check(link != nullptr, "link_of answers the engine link");
     check(!link->link_up(), "link_up() is false while dormant (#1059)");
 
-    // The op blocks in the engine while the factory is gated — DIALING is held open.
+    // RFC-0014 Amendment 5: the op never waits. It is dropped and counted on the calling
+    // thread, and the dial it kicked runs on the worker — gated in the factory, so DIALING is
+    // held open for the second send below.
     const std::byte frame[1] = {std::byte{0x00}};
-    auto op = std::async(std::launch::async, [&] { link->send(frame); });
-    check(script.await_attempts(1), "the send triggered a dial (the factory ran)");
+    const auto t0 = std::chrono::steady_clock::now();
+    link->send(frame);
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    check(elapsed < 4s, "a send on a DORMANT link returns at once — no connect_timeout wait");
+    check(dropped_tx(net, "net/fake-client/a") == 1, "...and its frame is a counted drop");
+    check(script.await_attempts(1), "the send kicked a dial (the factory ran)");
     check(await_state(node, "/net/fake-client/a", link_state_t::DIALING),
           "the vertex publishes DIALING (0x01) while the attempt is in flight");
+    const auto t1 = std::chrono::steady_clock::now();
+    link->send(frame);
+    check(std::chrono::steady_clock::now() - t1 < 4s && dropped_tx(net, "net/fake-client/a") == 2,
+          "a send on a DIALING link is a counted drop at once, too");
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 1, "...and starts no second attempt");
+    }
     script.script(true);
-    op.get();
     check(await_state(node, "/net/fake-client/a", link_state_t::UP),
           "the vertex publishes UP (0x03) on the successful dial");
     check(link->link_up(), "link_up() is true once UP");
     check(link->close_frozen_peers(100, 50) == 0 && link->close_frozen_peers(200, 150) == 0 &&
               link->link_up(),
           "the engine forwards the liveness check (#2198) and an idle socket is kept");
-    check(script.built.size() == 1 && script.built[0]->sent.load() == 1,
-          "the woken op was SERVED on the new socket (not dropped)");
-    check(dropped_tx(net, "net/fake-client/a") == 0, "nothing was dropped on the wake path");
+    check(script.built.size() == 1 && script.built[0]->sent.load() == 0,
+          "neither dropped frame reached the new socket");
 
     // While UP, ops go straight through — no second dial.
     link->send(frame);
-    check(script.built[0]->sent.load() == 2, "an op on an UP link sends directly");
+    check(script.built[0]->sent.load() == 1, "an op on an UP link sends directly");
     {
         const std::lock_guard l(script.m);
         check(script.attempts == 1, "no re-dial happened for an op on an UP link");
     }
-    check(script.last.connect_timeout_ms == tr::net::kDefaultConnectTimeoutMs,
-          "an absent connect_timeout resolves to the engine default (RFC-0014 §4)");
+    check(script.last.connect_timeout_ms == 8000, "the factory sees the SPEC's connect_timeout");
 }
 
 void test_lone_oneshot_failure_redormants() {
@@ -284,14 +297,17 @@ void test_lone_oneshot_failure_redormants() {
 
     script.script(false);  // pre-queued: the attempt concludes without blocking
     const std::byte frame[1] = {std::byte{0x00}};
-    link->send(frame);  // returns once the one attempt concluded: link-down, dropped
+    link->send(frame);  // returns at once: link-down, dropped; the kicked attempt fails
     check(dropped_tx(net, "net/fake-client/a") == 1, "the op was dropped (link-down) and counted");
+    check(script.await_attempts(1), "...and kicked one dial");
     check(await_state(node, "/net/fake-client/a", link_state_t::DORMANT),
           "the vertex re-publishes DORMANT — refcount 0 means no self-heal (RFC-0014 §4)");
     {
         const std::lock_guard l(script.m);
         check(script.attempts == 1, "exactly ONE attempt ran — no background retry began");
     }
+    check(script.last.connect_timeout_ms == tr::net::kDefaultConnectTimeoutMs,
+          "an absent connect_timeout resolves to the engine default (RFC-0014 §4)");
 }
 
 void test_loss_at_refcount_zero_redormants() {
@@ -309,10 +325,11 @@ void test_loss_at_refcount_zero_redormants() {
     // time. Keeping it up past the op is §4.1's MAY, which this engine exercises.
     script.script(true);  // pre-queued: the attempt concludes without blocking
     const std::byte frame[1] = {std::byte{0x00}};
-    link->send(frame);
+    link->send(frame);  // dropped (Amendment 5); it kicks the dial
     check(await_state(node, "/net/fake-client/a", link_state_t::UP),
           "the op-woken link is UP with no standing binding (§4.1's MAY: up until loss)");
-    check(script.built.size() == 1 && script.built[0]->sent.load() == 1, "the op was SERVED");
+    link->send(frame);
+    check(script.built.size() == 1 && script.built[0]->sent.load() == 1, "an op once UP is SERVED");
 
     // The remote hangs up with nothing holding the link: dormant, and the retry loop must
     // never start (§4.1 MUST 1/MUST 2 — the arm the S7 vectors pin).
@@ -341,8 +358,9 @@ void test_loss_at_refcount_zero_redormants() {
         const std::lock_guard l(script.m);
         check(script.attempts == 2, "the fresh dial is the op's own — the second attempt overall");
     }
+    link->send(frame);
     check(script.built.size() == 2 && script.built[1]->sent.load() == 1,
-          "the post-loss op was served on a freshly constructed socket");
+          "an op once UP again is served on a freshly constructed socket");
 }
 
 void test_standing_binding_selfheals() {

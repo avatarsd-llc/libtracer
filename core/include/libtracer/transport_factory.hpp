@@ -125,9 +125,9 @@ struct conn_settings_t {
                                                       consumed by the S5 liveness engine
                                                       (`self_heal_link.hpp`), 0 = the engine's
                                                       default (`kDefaultBackoffMs`). */
-    std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):
-                                                      how long one dial waits for `UP` before it
-                                                      counts as failed; consumed by the S5 engine.
+    std::uint32_t connect_timeout_ms = 0; /**< @brief `connect_timeout` (RFC-0014 §4), parsed
+                                                      and handed to the factory; no built-in
+                                                      consumer uses it (Amendment 5).
                                                       0 = `kDefaultConnectTimeoutMs`. */
 };
 
@@ -149,7 +149,7 @@ struct transport_kind_traits_t {
      *        (@ref tr::net::self_heal_link_t).
      *
      * When set, a DIAL creation constructs NO socket: the vertex is minted `DORMANT` and
-     * the engine dials on demand (any op auto-wakes it, bounded by `connect_timeout`),
+     * the engine dials on demand (an op kicks the dial and is dropped, RFC-0014 Amendment 5),
      * self-heals with `backoff` while a standing binding holds it, and closes the socket
      * back to dormant on the last release. The kind's factory is then run once per dial
      * attempt — it must be re-runnable (every built-in socket factory is, and each states

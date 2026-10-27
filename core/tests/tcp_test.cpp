@@ -740,9 +740,15 @@ void test_config_constructed_tcp() {
           "A: the parsed :settings carry kind/addr/port");
 
     // End-to-end: FWD{READ dst=/b/temp} from A crosses A's config-created stream to
-    // B's terminus, and the REPLY source-routes back over the same connection.
-    router_a.on_frame("self", fwd_read({"net", "tcp-client", "b", "temp"}, {"reply-ep"}));
-    const bool replied = fut.wait_for(3s) == std::future_status::ready;
+    // B's terminus, and the REPLY source-routes back over the same connection. An
+    // engine-managed dial is dormant at creation, and a READ into it only kicks the dial
+    // and is dropped (RFC-0014 Amendment 5), so the READ is re-sent until one is answered;
+    // the sink keeps the first reply and ignores the rest.
+    bool replied = false;
+    for (int i = 0; i < 15 && !replied; ++i) {
+        router_a.on_frame("self", fwd_read({"net", "tcp-client", "b", "temp"}, {"reply-ep"}));
+        replied = fut.wait_for(200ms) == std::future_status::ready;
+    }
     check(replied, "the READ reached B and the REPLY returned over the accepted peer");
     if (replied) {
         const std::vector<std::byte> reply_bytes = fut.get();  // owns; decode borrows

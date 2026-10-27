@@ -196,8 +196,8 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which does tear down the
   routes under it, because `remove_connection` un-routes and retires the identity vertex.
   Routing that makes `/net/<module>/<name>` addressable is [ADR-0061 — Per-module mount routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md).
-- **All four of those keys are consumed today.** (A `keepalive` pair is still accepted
-  but ignored — it had no consumer, so #1666 removed the field that stored it.) `backoff` / `connect_timeout` feed the §4 liveness engine
+- **Three of those four keys are consumed today.** (A `keepalive` pair is still accepted
+  but ignored — it had no consumer, so #1666 removed the field that stored it.) `backoff` feeds the §4 liveness engine, and `connect_timeout` is kept and handed to the factory, with nothing on the send path waiting on it (#2304 makes it the `:settings` value compared against the app's `now`)
   ([#492](https://github.com/avatarsd-llc/libtracer/issues/492) S5, `self_heal_link_t`)
   on a kind registered `self_heal_dial` — since
   [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) every built-in
@@ -347,12 +347,11 @@ machine managed automatically (RFC-0014).
 - **A `LISTEN` link ignores refcount.** Its listen socket stays bound and accepting
   until the vertex is retired — reachability is its purpose. Bindings routed through its
   accepted peers do not gate it.
-- **Any op auto-wakes a dormant `DIAL` link.** The op triggers a dial, waits for one
-  connect attempt bounded by `connect_timeout`, then serves or returns `link-down`. A
-  `write` may therefore stall on a dial; `await` on the connection vertex — which
-  resolves specifically when liveness reaches `up` and returns `link-down` on terminal
-  failure — is the explicit "bring it up and wait" verb for callers that will not
-  tolerate a data op blocking.
+- **An op never waits for a dial (RFC-0014 Amendment 5).** An op on a `dormant` or
+  `dialing` `DIAL` link fails at once with `link-down` and its frame is a counted drop; on a
+  `dormant` link it also starts one dial attempt. A caller that wants "bring it up and
+  wait" awaits `up` on the connection vertex — which resolves specifically when liveness
+  reaches `up` and returns `link-down` on terminal failure — and sends after it.
 - **Self-healing is the retry loop toward that target, and runs only while refcount >
   0.** Loss while in use re-dials with `backoff`. A one-shot op's transient hold is
   released **before** self-heal is evaluated, so a lone one-shot whose dial fails drops
