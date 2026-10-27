@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-"""Unit tests for the #1538 workspace-ownership gate.
+"""Unit tests for the #1538 / #2343 runner workspace gate.
 
 `tools/check_ci_workspace_cleanup.py` is a gate whose whole value is that it goes
 RED on the shapes that actually occurred. Two of thirteen self-hosted container
@@ -16,9 +16,11 @@ a synthetic workflow directory built to exhibit one failure:
 * `if: success()` instead of `always()`, i.e. a cleanup that skips exactly the
   failed/cancelled runs that leave the most wreckage;
 * a drifted command (the pre-#1538 spelling, which never covered `$RUNNER_TEMP`);
-* the negative controls: a compliant self-hosted container job passes, and jobs
-  that do not qualify (hosted-with-container, self-hosted-without-container) are
-  not policed at all.
+* (#2343) the space check missing, not first, or drifted, which is how a full
+  runner tmpfs came to read as a test failure;
+* the negative controls: a compliant self-hosted job passes, a self-hosted job
+  without a container is policed for both steps but not for checkout's
+  credentials, and a hosted job is not policed at all.
 
 Run with ``python3 -m unittest discover -s tools/tests``.
 """
@@ -37,6 +39,10 @@ SELF_HOSTED = (
     "${{ (github.repository == 'avatarsd-llc/libtracer') && "
     "fromJSON('[\"self-hosted\",\"ci-local\"]') || 'ubuntu-24.04' }}"
 )
+
+SPACE = f"""      - name: {gate.SPACE_NAME}
+        run: {gate.SPACE_RUN}
+"""
 
 CLEANUP = f"""      - name: {gate.STEP_NAME}
         if: {gate.STEP_IF}
@@ -59,7 +65,7 @@ jobs:
 """
     if container is not None:
         body += f"    container: {container}\n"
-    return body + "    steps:\n" + steps
+    return body + "    steps:\n" + SPACE + steps
 
 
 class GateArms(unittest.TestCase):
@@ -127,23 +133,52 @@ class GateArms(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertIn("persist-credentials", findings[0])
 
+    def test_missing_space_check_is_red(self):
+        """#2343: a job that cannot tell a full runner disk from a failing test."""
+        text = workflow(SELF_HOSTED, "ubuntu:24.04", "      - run: make\n" + CLEANUP).replace(SPACE, "")
+        findings = self._findings(text)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("does not START with", findings[0])
+
+    def test_space_check_not_first_is_red(self):
+        """After checkout is too late: checkout is the first step a full disk breaks."""
+        text = workflow(SELF_HOSTED, "ubuntu:24.04", CHECKOUT + SPACE + CLEANUP).replace(SPACE, "", 1)
+        findings = self._findings(text)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("does not START with", findings[0])
+
+    def test_drifted_space_check_is_red(self):
+        """A lowered threshold is the same step wearing the same name."""
+        text = workflow(SELF_HOSTED, "ubuntu:24.04", CLEANUP).replace(str(gate.SPACE_MIN_KIB), "1048576")
+        findings = self._findings(text)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("space check command drifted", findings[0])
+
     def test_hosted_container_job_is_not_policed(self):
         """A hosted VM's disk is discarded with the VM; nothing survives to break."""
         text = workflow("ubuntu-24.04", "ubuntu:24.04", "      - run: make\n")
         self.assertEqual(self._findings(text), [])
 
-    def test_self_hosted_without_container_is_not_policed(self):
-        """Steps that are not in a container already run AS the runner user."""
+    def test_self_hosted_without_container_is_policed_for_both_steps(self):
+        """#2343: a host job's build trees fill the shared tmpfs just the same."""
         text = workflow("[self-hosted, bench-local]", None, "      - run: make\n")
+        findings = self._findings(text)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("does not END with", findings[0])
+
+    def test_self_hosted_without_container_may_persist_credentials(self):
+        """Outside a container the post step runs as the runner user, so `.git/config` stays its own."""
+        text = workflow("[self-hosted, bench-local]", None, "      - uses: actions/checkout@v4\n" + CLEANUP)
         self.assertEqual(self._findings(text), [])
 
 
 class RealWorkflows(unittest.TestCase):
     """The gate's subject really does exist — a sweep that inspects nothing is vacuous."""
 
-    def test_the_tree_has_self_hosted_container_jobs(self):
-        jobs = list(gate.qualifying_jobs())
-        self.assertGreater(len(jobs), 0, "no self-hosted container job found — has the routing changed?")
+    def test_the_tree_has_self_hosted_jobs_with_and_without_containers(self):
+        jobs = [job for _, _, job in gate.qualifying_jobs()]
+        self.assertTrue(any(job["container"] for job in jobs), "no self-hosted container job found")
+        self.assertTrue(any(not job["container"] for job in jobs), "no self-hosted host job found")
 
     def test_the_hand_rolled_reader_agrees_with_pyyaml(self):
         """The reader is hand-rolled because CI has no PyYAML; here, where PyYAML exists, it is the oracle.

@@ -1,48 +1,53 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-"""Gate every self-hosted `container:` job on the workspace-ownership cleanup step (#1538).
+"""Gate every self-hosted job on the workspace check and cleanup steps (#1538, #2343).
 
-WHY THIS EXISTS. A `container:` job runs as **root**, and on the self-hosted
-`ci-local` runners the container's `/__w` is a bind mount of the host runner's
-`_work` tree. Every file such a job creates — the checkout, the CMake build
-trees, `$RUNNER_TEMP` — stays root-owned after the job ends. The runner user
-(`github-runner`) then cannot clean them, so the NEXT job on that machine fails
-inside `actions/checkout`'s clean step. That failure reads as code breakage and
-is not: on 2026-08-23 it took `perf-local / bench-local` red with 129 root-owned
-paths under `core/build-minimal`, left there by core-ci's
-`build-test-minimal-set`.
+WHY THIS EXISTS. The self-hosted runners share one `_work` tree on a tmpfs, so
+what a job leaves there is both a hazard and a cost. Two incidents, one per step:
 
-The remedy is one `if: always()` step per job that hands the tree back. The
-DEFECT is that the remedy is per-job: it was added to eleven of the thirteen
-qualifying jobs and missed on two, and the two it missed are what broke the
-bench runner. A cleanup step that a new job can silently omit is not a fix, it
-is a convention. This gate turns it into a rule — a job that runs a container on
-a self-hosted runner and does not end with the canonical step fails here, named.
+- #1538: a `container:` job runs as **root**, and the container's `/__w` is a
+  bind mount of the host runner's `_work` tree. Every file it creates stays
+  root-owned, the runner user cannot clean it, and the NEXT job on that machine
+  fails inside `actions/checkout`'s clean step. On 2026-08-23 that took
+  `perf-local / bench-local` red with 129 root-owned paths left by core-ci's
+  `build-test-minimal-set`, one of two jobs the per-job remedy had missed.
+- #2343: build trees from finished jobs piled up on the runner tmpfs until a job
+  could not start, and the failure read as a test failure.
+
+So every self-hosted job is bracketed by two canonical steps. FIRST,
+`Check the runner workspace has room`, which fails below 4 GB free with a message
+that names the runner, not the code. LAST, under `if: always()`, the cleanup:
+it deletes the job's checkout, build trees, workspace siblings and temp files, and
+hands the runner's own `$RUNNER_TEMP/_*` dirs back to the runner user. It runs as
+root in a container and with `sudo -n` on the host where granted, so root-owned
+files go too. A remedy that a new job can silently omit is a convention, not a
+fix; this gate makes it a rule, naming each job that lacks either step.
 
 WHY NOT A COMPOSITE ACTION (which would remove the copy-paste this gate polices):
 a local `uses: ./.github/actions/...` is only resolvable after `actions/checkout`
-has run, and the step must survive a job that died in its apt step BEFORE
-checkout — the exact wedge surface core-ci's header documents. The duplicated
-inline step is deliberate; this gate is what keeps the duplicates identical.
+has run. The check runs before checkout, and the cleanup must survive a job that
+died before checkout. The duplicated inline steps are deliberate; this gate is
+what keeps the duplicates identical.
 
 WHAT COUNTS AS QUALIFYING. A job whose `runs-on:` mentions `self-hosted` (either
-literally or inside the trusted-run routing expression) AND which declares a
-`container:`. Hosted-only jobs need nothing — the whole VM is discarded — and
-non-container self-hosted jobs already run as `github-runner`.
+literally or inside the trusted-run routing expression). Hosted-only jobs need
+nothing; the whole VM is discarded.
 
-WHAT IS ENFORCED. Two things.
+WHAT IS ENFORCED. Three things.
 
-1. The job's LAST step must be exactly the canonical step: the canonical name,
+1. The job's FIRST step is exactly the canonical space check, so a full disk is
+   named before checkout can fail on it.
+2. The job's LAST step is exactly the canonical cleanup: the canonical name,
    `if: always()`, and the canonical `run:` command, character for character.
-   Last, because a step after it can re-dirty the tree it just handed back.
-   Identical, because a variant that chowns a smaller set is the same defect
-   wearing the same name.
-2. Its `actions/checkout` must set `persist-credentials: false`. Checkout's POST
-   step runs after every real step, including the cleanup, and rewrites
-   `.git/config` as root when it has a credential to unset — see CHECKOUT_WITH.
-   The first green run of the fixed workflows still left one root-owned file per
-   runner because of it, and that file is the one the next checkout must write.
+   Last, because a step after it can re-dirty the tree. Identical, because a
+   variant that cleans a smaller set is the same defect wearing the same name.
+3. In a `container:` job, `actions/checkout` sets `persist-credentials: false`.
+   Checkout's POST step runs after every real step, including the cleanup, and
+   rewrites `.git/config` as root when it has a credential to unset; see
+   CHECKOUT_WITH. (With the cleanup deleting `.git` this is belt and braces: the
+   post step skips when `.git/config` is gone. It still matters for a job whose
+   cleanup could not finish.)
 
 STDLIB ONLY. `version-consistency.yml` runs `unittest discover -s tools/tests` with
 no pattern and no pip install, so an `import yaml` here fails a suite that has
@@ -63,24 +68,70 @@ from pathlib import Path
 
 WORKFLOW_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
-STEP_NAME = "Restore workspace ownership for the host runner"
-"""The canonical step name. Also what the failure message tells an author to add."""
+SPACE_NAME = "Check the runner workspace has room"
+"""The canonical first step's name."""
 
-STEP_RUN = 'chown -R "$(stat -c \'%u:%g\' ..)" . "$RUNNER_TEMP"'
-"""The canonical command.
+SPACE_MIN_KIB = 4 * 1024 * 1024
+"""The threshold, 4 GB in the KiB that `df -Pk` reports."""
 
-`..` is the workspace's parent (`/__w/<repo>`), created by the runner process on
-the host, so its owner IS the runner user — no uid is hard-coded and the job
-behaves identically on the hosted fallback route. `.` is the workspace itself and
-`$RUNNER_TEMP` is `/__w/_temp`, which `install-consume` builds into as root and
-which the runner likewise cannot clear between jobs.
+SPACE_RUN = (
+    "a=$(df -Pk \"$GITHUB_WORKSPACE\" | awk 'NR==2 {print $4}'); "
+    f'[ "${{a:-0}}" -ge {SPACE_MIN_KIB} ] || '
+    '{ echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); '
+    'clean the runner, this is not a test failure"; exit 1; }'
+)
+"""The canonical space check.
+
+It runs BEFORE checkout, so it can only use the shell. `df -P` keeps the output
+on one line per filesystem whatever the device name's length. An unreadable `df`
+reads as 0 and fails, which is the right answer for a workspace that cannot be
+inspected. It cannot catch a disk too full for the runner to download the job's
+actions: that dies in "Set up job" before any step, and is what the cleanup
+below prevents.
+"""
+
+STEP_NAME = "Clean this job's workspace off the host runner"
+"""The canonical last step's name. Also what the failure message tells an author to add."""
+
+STEP_RUN = (
+    "s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); "
+    'w="${GITHUB_WORKSPACE:?}"; t="${RUNNER_TEMP:?}"; '
+    '$s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + && '
+    '$s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + && '
+    "$s find \"$t\" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + && "
+    "$s chown -R \"$(stat -c '%u:%g' \"$w/..\")\" \"$t\" || "
+    'echo "::warning::this job left files in the runner workspace; '
+    "the next job's free-space check names a full disk\""
+)
+"""The canonical cleanup command.
+
+`s` is `sudo -n` on a host runner that grants it and empty otherwise: inside a
+container the step is already root, and on the hosted fallback there is nothing
+root-owned to remove. The `:?` guards make an unset variable abort the step
+instead of widening `find` to `/`.
+
+- The workspace's siblings go (perf's `../main-baseline` worktree, perf-local's
+  `../ghp-prune`), but not the workspace dir itself: post steps run in it, and
+  `actions/checkout`'s post step skips once `.git/config` is gone.
+- The workspace's contents go: the checkout and every build tree.
+- `$RUNNER_TEMP` keeps the runner's own `_*` dirs (it reads its file-command
+  files after this step) and loses the job's files, e.g. `install-consume`'s
+  build. What is left is handed to the owner of `..`, the workspace's parent,
+  which the runner process created on the host, so its owner IS the runner user
+  and no uid is hard-coded.
+
+A failure warns rather than fails: the job's verdict is about the code, and the
+next job's space check is the alarm for a runner that is filling up.
 """
 
 STEP_IF = "always()"
 """Success is not the interesting case. A job that failed or was cancelled mid-build
-leaves the most root-owned wreckage, and that is the run whose next checkout breaks."""
+leaves the most wreckage, and that is the run whose next job breaks."""
 
-CANONICAL_YAML = f"""      - name: {STEP_NAME}
+CANONICAL_YAML = f"""      - name: {SPACE_NAME}
+        run: {SPACE_RUN}
+      ...
+      - name: {STEP_NAME}
         if: {STEP_IF}
         run: {STEP_RUN}"""
 
@@ -241,11 +292,9 @@ def _is_self_hosted(runs_on: object) -> bool:
 
 
 def qualifying_jobs(workflow_dir: Path = WORKFLOW_DIR):
-    """@brief Yield `(path, job_name, job)` for every self-hosted containerized job."""
+    """@brief Yield `(path, job_name, job)` for every job that can run self-hosted."""
     for path in sorted(workflow_dir.glob("*.yml")):
         for name, job in parse_workflow(path.read_text(encoding="utf-8")).items():
-            if not job["container"]:
-                continue
             if not _is_self_hosted(job["runs-on"]):
                 continue
             yield path, name, job
@@ -264,7 +313,7 @@ def check(workflow_dir: Path = WORKFLOW_DIR) -> list[tuple[str, str]]:
 
         steps = job.get("steps") or []
         if not steps:
-            note(f"{rel}: job `{name}` runs a container on a self-hosted runner but has no steps")
+            note(f"{rel}: job `{name}` runs on a self-hosted runner but has no steps")
             continue
 
         # The checkout POST step runs AFTER the cleanup and re-roots `.git/config`
@@ -272,7 +321,7 @@ def check(workflow_dir: Path = WORKFLOW_DIR) -> list[tuple[str, str]]:
         # CHECKOUT_WITH — this is not tidiness, it is the difference between "no
         # root-owned files" and "one, and it is the one that breaks the next job".
         setting, expected = CHECKOUT_WITH
-        for step in steps:
+        for step in steps if job["container"] else []:
             uses = step.get("uses") or ""
             if not uses.startswith("actions/checkout"):
                 continue
@@ -285,11 +334,25 @@ def check(workflow_dir: Path = WORKFLOW_DIR) -> list[tuple[str, str]]:
                     f"after the cleanup has run"
                 )
 
+        first = steps[0]
+        if not isinstance(first, dict) or first.get("name") != SPACE_NAME:
+            shown = first.get("name") or first.get("uses") or "<unnamed>" if isinstance(first, dict) else str(first)
+            note(
+                f"{rel}: job `{name}` does not START with the runner workspace space check "
+                f"(first step is {shown!r})"
+            )
+        elif (first.get("run") or "").strip() != SPACE_RUN:
+            note(
+                f"{rel}: job `{name}` space check command drifted\n"
+                f"       expected: {SPACE_RUN}\n"
+                f"       found:    {(first.get('run') or '<not a plain scalar>').strip()}"
+            )
+
         last = steps[-1]
         if not isinstance(last, dict) or last.get("name") != STEP_NAME:
             shown = last.get("name") or last.get("uses") or "<unnamed>" if isinstance(last, dict) else str(last)
             note(
-                f"{rel}: job `{name}` does not END with the workspace-ownership cleanup step "
+                f"{rel}: job `{name}` does not END with the workspace cleanup step "
                 f"(last step is {shown!r})"
             )
             continue
@@ -321,21 +384,21 @@ def main() -> int:
 
     if findings:
         print(
-            f"{len(offenders)} self-hosted container job(s) do not restore workspace ownership (#1538):\n",
+            f"{len(offenders)} self-hosted job(s) lack the workspace check or cleanup (#1538, #2343):\n",
             file=sys.stderr,
         )
         for _, finding in findings:
             print(f"  - {finding}", file=sys.stderr)
         print(
-            "\nEvery job that runs `container:` on a self-hosted runner must END with:\n\n"
+            "\nEvery job that can run on a self-hosted runner must START and END with:\n\n"
             f"{CANONICAL_YAML}\n\n"
-            "Without it the container's root-owned files survive the job and the next\n"
-            "actions/checkout on that runner fails its clean step.",
+            "Without them a finished job's files (root-owned, from a container) fill the\n"
+            "runner tmpfs and break the next checkout, and the breakage reads as a test failure.",
             file=sys.stderr,
         )
         return 1
 
-    print(f"ok: all {len(jobs)} self-hosted container jobs restore workspace ownership")
+    print(f"ok: all {len(jobs)} self-hosted jobs check and clean the runner workspace")
     return 0
 
 

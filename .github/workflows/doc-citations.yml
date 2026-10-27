@@ -133,6 +133,10 @@ jobs:
     # NOT count against timeout-minutes). See core-ci.yml's header for the policy.
     timeout-minutes: 15
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -178,11 +182,12 @@ jobs:
         run: python3 tools/check_type_names.py
       - name: Every CI image reference matches the Dockerfile hash
         run: python3 tools/check_ci_image_tag.py
-      - name: Restore workspace ownership for the host runner
-        # Hands the container's root-owned tree back to the host runner user. WHY, and
-        # why it is duplicated inline rather than factored into a composite action: the
-        # WORKSPACE OWNERSHIP section of core-ci.yml's header. Gated by
-        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
-        # END with this exact step.
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE:?}"; t="${RUNNER_TEMP:?}"; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + && $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + && $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + && $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
