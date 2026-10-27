@@ -264,3 +264,50 @@ test('a PAIR src with no token in dst falls back to the oldest request', async (
   assert.equal(textOf(await first), 'oldest');
   assert.equal(textOf(await second), 'next');
 });
+
+test('a dropped request does not steal the next same-path reply (#2330)', async () => {
+  const t = new FakeTransport();
+  const c = new LibtracerClient(t, { requestTimeoutMs: 25 });
+
+  // An AWAIT that is dropped on the way and never answered (a DORMANT link, say).
+  await withLiveLoop(() => assert.rejects(c.await_('/node/name'), /TIMEOUT/));
+  assert.equal(c.pending.length, 0, 'the timed-out waiter left pending');
+
+  // A READ of the same path, answered by a peer that puts no token in dst: the dead
+  // waiter must not take it.
+  const read = c.read('/node/name');
+  t.inject(replyFrom(['node', 'name'], 'answer'));
+  assert.equal(textOf(await read), 'answer');
+
+  // And by token: the late reply of the dead request is dropped, the live one resolves.
+  const again = c.read('/node/name');
+  t.inject(replyByToken(['client', 'q1'], 'too-late'));
+  t.inject(replyByToken(['client', 'q3'], 'mine'));
+  assert.equal(textOf(await again), 'mine');
+  assert.equal(c.pending.length, 0);
+});
+
+test('pending returns to empty after timeouts, and the late-reply memory is bounded (#2330)', async () => {
+  const t = new FakeTransport();
+  const c = new LibtracerClient(t, { requestTimeoutMs: 10 });
+  const reads = [];
+  for (let i = 0; i < 40; i++) reads.push(assert.rejects(c.read('/lossy/path'), /timed out/));
+  await withLiveLoop(() => Promise.all(reads));
+  assert.equal(c.pending.length, 0);
+  assert.ok(c.expired.length <= 32, `expired holds ${c.expired.length} records`);
+});
+
+test('a late token reply is dropped even after more than 32 timeouts (#2330)', async () => {
+  const t = new FakeTransport();
+  const c = new LibtracerClient(t, { requestTimeoutMs: 10 });
+  const reads = [];
+  for (let i = 0; i < 33; i++) reads.push(assert.rejects(c.read('/lossy/path'), /timed out/));
+  await withLiveLoop(() => Promise.all(reads));
+
+  // q1 is long past the tokenless memory, and its reply's src is a PAIR that names no
+  // segments: only the token says it is late.
+  const live = c.read('/other/path'); // q34
+  t.inject(replyByToken(['client', 'q1'], 'too-late'));
+  t.inject(replyByToken(['client', 'q34'], 'mine'));
+  assert.equal(textOf(await live), 'mine');
+});
