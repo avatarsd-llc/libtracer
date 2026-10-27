@@ -93,8 +93,10 @@ follow §1–§11. A link that does not follow it is not a conforming Tracer Noi
   Nothing waits for a dial. A caller that wants to send as soon as
   the session exists awaits the connection vertex's value reaching `up`, an ordinary `await` whose
   deadline the requester owns (RFC-0004 Amendment 3), and then sends. This is how the recovery
-  case makes its first write. `connect_timeout` is kept as the attempt deadline of §7, checked
-  against the application's `now` ([#2304](https://github.com/avatarsd-llc/libtracer/issues/2304)).
+  case makes its first write. The §7 attempt deadline is the link's own attempt span, checked
+  against the application's `now`; `connect_timeout` stays a config key, parsed and handed to the
+  factory; binding it to the application's `now` is
+  [#2304](https://github.com/avatarsd-llc/libtracer/issues/2304)'s.
   Nothing is queued in either case.
 - The binding is **per hop**. A frame forwarded beyond the far node leaves this session there.
   Nothing here gives end-to-end protection, as ADR-0045 Decision 5 says.
