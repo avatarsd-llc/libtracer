@@ -221,6 +221,10 @@ jobs:
       # silent CLI change would read as a flash failure on the device.
       ESPTOOL_VERSION: '4.8.1'
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       # BEFORE checkout, because checkout is what it saves. Same self-heal
       # perf-local carries, for the same measured reason (#1538): container jobs on
       # this host leave root-owned files in the shared `_work` tree and the next
@@ -305,11 +309,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      # LAST, and `always()`: a step after this one can re-dirty the tree it just
-      # handed back. This job runs no container, so `tools/check_ci_workspace_cleanup.py`
-      # does not police it — the step is here because the host is SHARED with jobs
-      # that do, and a HIL run that leaves the workspace unusable breaks the bench
-      # instrument next.
-      - name: Restore workspace ownership for the next job on this host
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
