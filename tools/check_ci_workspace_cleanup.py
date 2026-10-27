@@ -95,12 +95,12 @@ STEP_NAME = "Clean this job's workspace off the host runner"
 
 STEP_RUN = (
     "s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); "
-    'w="${GITHUB_WORKSPACE:?}"; t="${RUNNER_TEMP:?}"; '
-    '$s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + && '
-    '$s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + && '
-    "$s find \"$t\" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + && "
-    "$s chown -R \"$(stat -c '%u:%g' \"$w/..\")\" \"$t\" || "
-    'echo "::warning::this job left files in the runner workspace; '
+    'w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; '
+    '$s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; '
+    '$s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; '
+    "$s find \"$t\" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; "
+    "$s chown -R \"$(stat -c '%u:%g' \"$w/..\")\" \"$t\" || r=1; "
+    '[ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; '
     "the next job's free-space check names a full disk\""
 )
 """The canonical cleanup command.
@@ -108,7 +108,11 @@ STEP_RUN = (
 `s` is `sudo -n` on a host runner that grants it and empty otherwise: inside a
 container the step is already root, and on the hosted fallback there is nothing
 root-owned to remove. The `:?` guards make an unset variable abort the step
-instead of widening `find` to `/`.
+instead of widening `find` to `/`, and the trailing `/` is stripped first so
+`${w##*/}` always names the workspace dir. Each part runs whatever the one
+before it did (`;`, not `&&`): a delete that fails must not skip the `_temp`
+chown, or a root-owned `_runner_file_commands` breaks the next host job's
+"Set up job" (#1538).
 
 - The workspace's siblings go (perf's `../main-baseline` worktree, perf-local's
   `../ghp-prune`), but not the workspace dir itself: post steps run in it, and

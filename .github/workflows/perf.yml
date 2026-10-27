@@ -344,7 +344,7 @@ jobs:
         # The workspace dir itself stays for the post steps. Gated, first step included,
         # by tools/check_ci_workspace_cleanup.py.
         if: always()
-        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE:?}"; t="${RUNNER_TEMP:?}"; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + && $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + && $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + && $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
   # --- the composition harness, EXECUTED (audit pass only) -----------------------
   # bench/run_compose.sh is the two-process, delivery-counted composition harness (#568).
