@@ -43,6 +43,7 @@ struct stats_block_t;
 namespace tr::net {
 
 class transport_t;
+class fwd_router_t;
 
 /**
  * @brief The optional multi-peer (bus) capability of a transport link (ADR-0044).
@@ -967,7 +968,8 @@ class transport_t {
      *
      * A fire that comes before any notifier is installed is not lost (#2306): the link
      * keeps it, and this call reports it, so the installer runs its notifier once itself —
-     * after it lets its own locks go, which this call cannot know. A QUIC dial that fails
+     * after it lets its own locks go, which this call cannot know. The router does so
+     * through @ref notify_down, which now finds its notifier installed. A QUIC dial that fails
      * its handshake before the router installs its notifier is the case.
      * @param fn  The notifier; @p ctx is passed back as its first argument.
      * @param ctx Caller-owned context; must outlive every possible notification.
@@ -1015,10 +1017,13 @@ class transport_t {
     receiver_slot_t<> rx_;
 
    private:
+    /** @brief The router replays a fire that came before its install (@ref set_down_notifier)
+     *         through @ref notify_down, the same slot a transport fires. */
+    friend class fwd_router_t;
     /** @brief The mark @ref notify_down leaves in `down_fn_` for a fire that found no
      *         notifier; never called. */
     static void missed_down(void* /*ctx*/) noexcept {}
-    /** @brief Installed link-down sink, or @ref missed_down. Atomic: a transport's callback
+    /** @brief Installed link-down sink, or `missed_down`. Atomic: a transport's callback
      *         thread may fire it (notify_down) while add_child is still installing it. */
     mutable std::atomic<down_fn_t> down_fn_{nullptr};
     std::atomic<void*> down_ctx_{nullptr}; /**< @brief Its caller-owned context. */

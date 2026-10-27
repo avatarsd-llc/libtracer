@@ -1104,7 +1104,8 @@ bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::bloc
             &ctx);
     }
     ctl.unlock();
-    if (gone_already) gone(&ctx);
+    // Replayed through the link's own fire, which now finds `gone` installed.
+    if (gone_already) link.notify_down();
     return true;
 }
 
