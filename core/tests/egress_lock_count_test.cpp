@@ -1,14 +1,15 @@
 /**
  * @file
- * @brief #2145 — a dialer send takes at most one mutex: none when the peer is idle, the
- *        queue mutex once when the record has to wait.
+ * @brief #2145 / #2310 — a dialer send takes no mutex: none when the peer is idle, and none
+ *        when the record has to wait.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * The egress module elects its writer by try-lock (ADR-0087 §2), and "nothing waits" is one
  * atomic read, so a send that finds the peer idle takes no mutex at all; one that finds a
- * write in flight takes the queue mutex once, to put its frame in a lane. Before #2145 the
+ * write in flight takes the peer's own lane lock, a bit of its role byte and no mutex
+ * (#2310), to put its frame in a lane. Before #2145 the
  * idle send took the queue mutex three times: the election, the empty pop and the re-check.
  *
  * The count comes from interposing `pthread_mutex_lock` and `pthread_mutex_trylock` in this
@@ -89,9 +90,9 @@ egress_frame_t* frame_of(std::size_t n) {
     return egress_frame_t::make(tr::mem::heap_source(), one);
 }
 
-/** @brief The egress module itself: an idle send takes none, a queued one the queue mutex. */
+/** @brief The egress module itself: neither an idle send nor a queued one takes a mutex. */
 void test_egress_counts() {
-    std::printf("an egress send takes no mutex when idle, one when it queues:\n");
+    std::printf("an egress send takes no mutex, idle or queued:\n");
     egress_t eg(tr::mem::heap_source());
     egress_peer_t p;
     eg.open(p);
@@ -117,7 +118,7 @@ void test_egress_counts() {
     });
     while (!in_write.load()) std::this_thread::yield();
     const unsigned queued = locks_in([&] { (void)send([] { return egress_step_t{64}; }); });
-    check(queued == 1, "a send behind a write in flight takes the queue mutex once");
+    check(queued == 0, "a send behind a write in flight takes no mutex (the peer's lane bit)");
     release.store(true);
     writer.join();
     eg.close(p);

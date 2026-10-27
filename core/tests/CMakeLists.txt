@@ -2227,11 +2227,18 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(egress_test)
     add_test(NAME egress COMMAND egress_test)
     set_tests_properties(egress PROPERTIES TIMEOUT 120)
+    # #2310 — a peer's lane lock never livelocks a higher-priority sender against a
+    # preempted lower-priority holder on one CPU (#1618). SKIPS (77) without SCHED_FIFO.
+    add_executable(egress_inversion_test egress_inversion_test.cpp)
+    target_link_libraries(egress_inversion_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(egress_inversion_test)
+    add_test(NAME egress_inversion COMMAND egress_inversion_test)
+    set_tests_properties(egress_inversion PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
 
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
-    # #2145 — a dialer send takes at most one mutex: none to an idle peer, the queue mutex
-    # once when the record waits. Counted by interposing pthread_mutex_lock; skips (77) under
+    # #2145 / #2310 — a dialer send takes no mutex: none to an idle peer, and none when the
+    # record waits (the lane lock is a bit of the peer's own role byte). Counted by interposing pthread_mutex_lock; skips (77) under
     # a sanitizer or wherever the interposer is not reached.
     add_executable(egress_lock_count_test egress_lock_count_test.cpp)
     target_link_libraries(egress_lock_count_test PRIVATE libtracer ${CMAKE_DL_LIBS})

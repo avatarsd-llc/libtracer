@@ -572,7 +572,7 @@ void test_stalled_peer_does_not_delay_others() {
  */
 /**
  * @brief A close that races senders strands nothing (#2145): the "nothing waits" read is
- *        lock-free, so close takes the queue mutex once before it drains, and a frame pushed
+ *        lock-free, so close takes the peer's lane lock once before it drains, and a frame pushed
  *        while the close ran is either drained by it or refused as closed.
  */
 void test_close_races_senders() {
@@ -692,6 +692,93 @@ void test_concurrent_handoff() {
     std::printf("  delivered=%zu shed=%u\n", frames, shed.load());
 }
 
+thread_local bool t_gated = false; /**< @brief This thread's draws go through the gate. */
+thread_local int t_draws = 0;      /**< @brief Draws this thread made through the gate. */
+
+/**
+ * @brief #2310: the lane lock is the peer's own. A push into peer A that is held inside its
+ *        lane step (its lane draw parked in the source) does not block a push into peer B.
+ *
+ * Before #2310 one mutex per link guarded every peer's lanes, so B's push waited for A's
+ * draw to return.
+ */
+void test_lane_lock_is_per_peer() {
+    std::printf("a push held in one peer's lane step does not block another peer's push:\n");
+    // A source that parks the gated thread's SECOND draw (its first is the frame, built
+    // before the lane lock; the second is the lane, drawn under it) until released.
+    struct gated_source_t final : tr::mem::block_source_t {
+        gated_source_t() noexcept : block_source_t("egress_test_gated") {}
+        void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+            if (t_gated && ++t_draws == 2) {
+                parked.store(true, std::memory_order_release);
+                while (!open.load(std::memory_order_acquire)) std::this_thread::yield();
+            }
+            void* const p = tr::mem::heap_source().try_alloc(bytes, align);
+            if (p != nullptr) live.fetch_add(1, std::memory_order_relaxed);
+            return p;
+        }
+        void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+            live.fetch_sub(1, std::memory_order_relaxed);
+            tr::mem::heap_source().release(p, bytes, align);
+        }
+        std::atomic<bool> parked{false};
+        std::atomic<bool> open{false};
+        std::atomic<int> live{0};
+    };
+    gated_source_t src;
+    egress_t eg(src);
+    egress_peer_t a;
+    egress_peer_t b;
+    eg.open(a);
+    eg.open(b);
+    const delivery_lane_t lane = lane_of(&vertex_a, 4);
+    const bytes_t own(8, std::byte{0x5A});
+    const std::span<const std::byte> one[1] = {own};
+    const auto none = [](const egress_frame_t&, std::size_t) {
+        return egress_step_t{0, true, false};
+    };
+    const auto push = [&](egress_peer_t& p) {
+        tr::net::egress_once_t once([&] { return egress_frame_t::make(src, one); });
+        (void)eg.send(p, lane, once, [] { return egress_step_t{0, true, false}; }, none, [] {});
+    };
+    push(a);  // each peer's socket holds its first frame on the wire, so the next send queues
+    push(b);
+
+    std::thread held([&] {
+        t_gated = true;
+        push(a);  // parks inside A's lane draw, A's lane lock held
+    });
+    while (!src.parked.load(std::memory_order_acquire)) std::this_thread::yield();
+    std::atomic<bool> b_done{false};
+    std::thread other([&] {
+        push(b);
+        b_done.store(true, std::memory_order_release);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!b_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    check(b_done.load(), "B's push returned while A's lane step was held");
+    // The positive control: a second push into A DOES wait for A's held step, so the leg
+    // above shows the lock is per peer, not that pushes take no lock at all.
+    std::atomic<bool> a2_done{false};
+    std::thread second([&] {
+        push(a);
+        a2_done.store(true, std::memory_order_release);
+    });
+    const auto settle = std::chrono::steady_clock::now() + 200ms;
+    while (!a2_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < settle)
+        std::this_thread::yield();
+    check(!a2_done.load(), "a second push into A waits while A's lane step is held");
+    src.open.store(true, std::memory_order_release);
+    held.join();
+    other.join();
+    second.join();
+    check(a2_done.load(), "and returns once A's step lets the lane lock go");
+    eg.close(a);
+    eg.close(b);
+    check(src.live.load() == 0, "nothing leaked");
+}
+
 void test_slot_size() {
     std::printf("the per-peer egress slot is at most 24 B (pinned by static_assert):\n");
     check(sizeof(void*) != 8 || sizeof(egress_peer_t) <= 24, "sizeof(egress_peer_t) <= 24");
@@ -713,6 +800,7 @@ int main() {
     test_control_lane_strikes();
     test_close_and_refusal();
     test_stalled_peer_does_not_delay_others();
+    test_lane_lock_is_per_peer();
     test_close_races_senders();
     test_concurrent_handoff();
     return tr::testing::summary("egress_test");

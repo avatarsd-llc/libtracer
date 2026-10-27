@@ -695,7 +695,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
     /** @brief This link's egress store: shared frames, rings, a frame's gather overflow
      *         (@ref write_frame), and a derived class's own link buffers (#1780). */
     mem::block_source_t* io_src_;
-    /** @brief The egress module (ADR-0087 §2): the source, the queue mutex, the strike cap. */
+    /** @brief The egress module (ADR-0087 §2): the source and the strike cap. */
     egress_t egress_;
     /** @brief The ONE peer's egress — a dialer's or a one-peer listener's. A multi-peer
      *         server keeps one per session instead and leaves this one closed. */
