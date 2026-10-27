@@ -87,14 +87,15 @@ follow §1–§11. A link that does not follow it is not a conforming Tracer Noi
 - A Noise link **MUST NOT send any Tracer frame in clear**, and MUST NOT fall back to the plain
   carrier when it has no session. A send without a session fails as a send on a down link does
   (RFC-0014 §4: "ops on a down link fail fast").
-- **An operation on a `dormant` Noise link fails at once.** RFC-0014 §4 lets an operation on a
-  dormant DIAL link wait for one connect attempt, bounded by `connect_timeout`. A Noise link has no
-  clock to bound that wait and no buffer to hold the frame in. So the operation fails at once with
-  link-down, and it **starts** an attempt (it is a demand). A caller that wants to send as soon as
+- **An operation on a `dormant` Noise link fails at once.** RFC-0014 Amendment 5 makes this the
+  rule for every `DIAL` link: an operation on a link that is not `up` fails at once with link-down,
+  its frame is a counted drop, and on a `dormant` link it **starts** an attempt (it is a demand).
+  Nothing waits for a dial. A caller that wants to send as soon as
   the session exists awaits the connection vertex's value reaching `up`, an ordinary `await` whose
   deadline the requester owns (RFC-0004 Amendment 3), and then sends. This is how the recovery
-  case makes its first write. `connect_timeout` becomes the attempt deadline of §7, checked
-  against `now`. Nothing is queued in either case.
+  case makes its first write. `connect_timeout` is kept as the attempt deadline of §7, checked
+  against the application's `now` ([#2304](https://github.com/avatarsd-llc/libtracer/issues/2304)).
+  Nothing is queued in either case.
 - The binding is **per hop**. A frame forwarded beyond the far node leaves this session there.
   Nothing here gives end-to-end protection, as ADR-0045 Decision 5 says.
 
