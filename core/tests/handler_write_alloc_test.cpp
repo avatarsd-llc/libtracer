@@ -134,7 +134,7 @@ constexpr std::size_t kBytes = 64;
  * @brief Stable per-link buffers, so building the written value copies nothing.
  *
  * The rope is a borrowed view over these — the only allocation `make()` can make is the link
- * vector itself once the count passes the rope's inline capacity, which is the spill this
+ * table itself once the count passes the rope's inline capacity, which is the spill this
  * ladder is built to cross. It is charged to BOTH arms identically, so it cancels in the
  * difference the assertion takes.
  */
@@ -145,9 +145,12 @@ struct fixture_t {
         for (std::size_t i = 0; i < links; ++i) buffers.emplace_back(kBytes, std::byte{0xAB});
     }
 
-    /** @brief A fresh borrowed-view rope of `buffers.size()` links. */
+    /** @brief A fresh borrowed-view rope of `buffers.size()` links. Its spill block comes
+     *         from the raw heap source, as the graph's does: a rope with no source spills into
+     *         `table_source()`, which on this build is a slab pool the counter cannot see per
+     *         write (#2284). */
     [[nodiscard]] rope_t make() const {
-        rope_t r;
+        rope_t r{tr::mem::heap_source()};
         (void)r.try_reserve(buffers.size());
         for (const std::vector<std::byte>& b : buffers)
             r.append(view_t::over(tr::view::borrow_const(std::span<const std::byte>(b))));
