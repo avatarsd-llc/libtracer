@@ -471,7 +471,7 @@ classDiagram
   monotonically and then refuses everything. Construct it per operation, or `reset` it
   between operations; a long-lived bounded seam wants `pool_source_t`, which recycles.
 - **A `bump_source_t` buffer is not a hard bound by default.** Its upstream defaults to
-  `heap_source()`, so overflow spills to the platform heap. Passing `null_source()` as
+  `default_root()`, so overflow spills to the build's default root (#2288). Passing `null_source()` as
   the upstream is what makes the buffer the limit and turns overflow into a rejection.
 - **`source_resource_t` is placement, not failability.** The `std::pmr` adapter draws its
   bytes from an injected `block_source_t`, but `std::pmr`'s only exhaustion signal is a

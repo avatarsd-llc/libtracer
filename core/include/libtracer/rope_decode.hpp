@@ -340,12 +340,12 @@ namespace tr::wire {
  *          view::rope_t::all_host) — a device link cannot be CPU-read to verify a
  *          CRC and is rejected with `FRAME_INVALID`.
  * @param spill The block source the walk stack spills into once its inline slots are
- *              full. Default: the process heap, i.e. today's behaviour unchanged.
+ *              full. Default: the build's default root (#2288).
  * @return `{}` when @p r is exactly one valid frame; otherwise the `err_t` the
  *         grammar rejects with — identical to `tlv_node_t::over(flatten(r))`'s error for the
  *         same bytes, PROVIDED both are given the same depth resources.
  */
 [[nodiscard]] std::expected<void, err_t> validate_rope(
-    const view::rope_t& r, mem::block_source_t& spill = mem::heap_source());
+    const view::rope_t& r, mem::block_source_t& spill = mem::default_root());
 
 }  // namespace tr::wire

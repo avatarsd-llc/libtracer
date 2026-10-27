@@ -4032,7 +4032,7 @@ class graph_t {
      *         match this member's layout argument reintroduces the UBSan `vptr` lifetime
      *         bug that placement fixed.
      */
-    mem::block_source_t* ctl_ = &mem::heap_source();
+    mem::block_source_t* ctl_ = &mem::default_root();
 
     /** @brief The VALUE sub-pool (#1777): every published value and the graph-level DEFAULT
      *         receiver-ring admissions (RFC-0025 §4.6.1 clause 3) draw from it.
@@ -4048,13 +4048,13 @@ class graph_t {
      *
      *         Declared beside `ctl_` for the reason that member documents — a cold pointer
      *         inserted mid-object shifts `roots_` and every hot member after it. */
-    mem::block_source_t* values_ = &mem::heap_source();
+    mem::block_source_t* values_ = &mem::default_root();
 
     /** @brief The TABLE sub-pool (#1777): registration, the control-plane containers and the
      *         failable scratch of a composed read or a branch write draw from it. The root's
      *         table sub-pool on a default graph, the injected root otherwise. Declared beside
      *         `ctl_` for the reason that member documents. */
-    mem::block_source_t* tables_ = &mem::heap_source();
+    mem::block_source_t* tables_ = &mem::default_root();
 
     /** @brief The @ref set_vertex_ceiling bound, charged against `vertex_slots_.size()` (#1314).
      *
