@@ -64,7 +64,7 @@ std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::str
 /** @brief The caller context IS the subject token — the resolver is not what this example is
  *         about (see acl_subject_resolver for the seam itself). */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
-                                                       tr::mem::bytes_t& out) {
+                                                       tr::mem::bytes_t& out, std::uint64_t&) {
     return put_subject(out, caller);
 }
 

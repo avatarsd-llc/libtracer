@@ -60,7 +60,8 @@ inline std::expected<void, tr::wire::err_t> subject_into(tr::mem::bytes_t& out,
 /** @brief The subject seam most tests install: the caller context IS the subject token. */
 inline std::expected<void, tr::wire::err_t> caller_is_subject_into(void* /*ctx*/,
                                                                    std::string_view caller,
-                                                                   tr::mem::bytes_t& out) {
+                                                                   tr::mem::bytes_t& out,
+                                                                   std::uint64_t&) {
     return subject_into(out, caller);
 }
 

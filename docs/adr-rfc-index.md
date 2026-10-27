@@ -138,6 +138,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [RFC-0034](spec/rfcs/0034-subscription-selector-fields.md) | The subscription selector's two fields: `active` and `options` | accepted |  |  |
 | [RFC-0035](spec/rfcs/0035-subscribers-slot-surface-suspend-and-manage.md) | `:subscribers[N]` as one surface: list, create, suspend, resume and clear any subscription | accepted |  |  |
 | [RFC-0036](spec/rfcs/0036-two-rights-fields-are-paths-under-their-vertex.md) | Two rights, and `:` fields are paths under their vertex | accepted |  | [ADR-0020](adr/0020-acl-nfsv4-style-aces-with-inheritance.md) (part) |
+| [RFC-0037](spec/rfcs/0037-ace-expiry-takes-the-applications-now.md) | ACE expiry is judged against the application's `now` | accepted |  |  |
 
 ## Numbering gaps
 

@@ -36,6 +36,11 @@ libtracer does **authorization**, and the transport does authentication.
 - **The token goes into the gate's buffer.** The seam appends the subject to the `out` buffer the
   gate hands it, a stack frame that spills to the graph's own source only past 64 bytes, so a
   gated operation allocates nothing for its subject. A refused append is a deny too.
+- **It also carries the application's `now`.** The seam's last argument is the `now` an ACE's
+  `expires_ns` is compared against. This resolver issues no leases, so it leaves it alone, and a
+  lease would then fail closed
+  ([RFC-0037](../spec/rfcs/0037-ace-expiry-takes-the-applications-now.md),
+  [expiry](acl-expiry.md)).
 - **Install it at wiring time, from one thread, before frames flow.** `graph_hooks_t::subject_lookup`
   is configuration, which the verb says on purpose.
 - **Nothing here is conditional** — the target builds and runs under every CI leg.

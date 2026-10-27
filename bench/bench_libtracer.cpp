@@ -957,8 +957,8 @@ namespace acl_bench {
 void install_resolver(graph_t& g) {
     g.set_hook(
         &tr::graph::graph_hooks_t::subject_lookup,
-        {[](void*, std::string_view caller,
-            tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+        {[](void*, std::string_view caller, tr::mem::bytes_t& out,
+            std::uint64_t&) -> std::expected<void, tr::wire::err_t> {
              // The empty (local) context is settled as trusted before the lookup runs (#905),
              // so the setup writes never arrive here.
              if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))

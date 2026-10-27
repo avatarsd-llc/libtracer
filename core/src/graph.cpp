@@ -198,18 +198,6 @@ class remote_frame_t {
 // Canonical-key NAME navigation (last segment, parent, ancestor/child, level
 // split) lives in one locus: tr::wire::key_view_t (key_view.hpp).
 
-/**
- * @brief Absolute wall-clock ns since the UNIX epoch — the ACE `expires_ns` reference clock.
- *
- * Cold and out of line (#1685): the ACL gate reads it only for a leased ACE, so a gate over
- * standing grants carries none of it, and graph.cpp's inline budget is left as it was.
- */
-[[nodiscard, gnu::noinline, gnu::cold]] std::uint64_t now_ns() {
-    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                          std::chrono::system_clock::now().time_since_epoch())
-                                          .count());
-}
-
 // ACE evaluation and the typed :acl parse live in security_acl.hpp (ADR-0050):
 // a pure per-target policy (acl_policy_t — ALLOW-only MCU profile by default,
 // the full first-match-per-bit host policy when a fragment binds it), the
@@ -1810,7 +1798,10 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     std::array<std::byte, kSubjectFrameBytes> frame_bytes;
     mem::bump_source_t frame(frame_bytes, *tables_);
     mem::bytes_t token(frame);
-    if (!lookup.fn(lookup.ctx, caller, token)) return false;  // DENIED — PERMISSION_DENIED
+    // The application's `now` for ACE expiry rides beside the token (RFC-0037): the library
+    // reads no clock. A seam that leaves the sentinel supplies none, and leases fail closed.
+    std::uint64_t now = kAceNowUnknown;
+    if (!lookup.fn(lookup.ctx, caller, token, now)) return false;  // DENIED — PERMISSION_DENIED
     const std::span<const std::byte> subject = mem::as_span(token);
     // The wildcard spelling is RESERVED in the subject-token space (#908): the wire has one
     // spelling for a subject, so a principal that could BE `EVERYONE@` is indistinguishable
@@ -1867,17 +1858,16 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
                     // Inlined by attribute: with the expiry test below, GCC 13.3 would otherwise
                     // emit the evaluation out of line — one more call on every gate.
                     [&] [[gnu::always_inline]] (std::span<const ace_t> merged) {
-                        // The ACE-expiry reference clock is read only when an ACE in the list can
-                        // expire (#1685; the unguarded arm above never reads it, #1665):
-                        // `expires_ns == 0` never compares against `now`, so a list of standing
-                        // grants (every gated forward hop that carries no lease) is evaluated
-                        // without a `system_clock::now()`, and `0` stands in for the clock it never
-                        // asks.
+                        // The application's `now` is used only when an ACE in the list can
+                        // expire (#1685): `expires_ns == 0` never compares against it, so a list
+                        // of standing grants (every gated forward hop that carries no lease) is
+                        // evaluated the same whether or not the application supplied one, and `0`
+                        // stands in for it.
                         const bool leased = std::ranges::any_of(merged, &ace_t::expires_ns);
                         // A bare descendant evaluates the INHERITABLE SUBSEQUENCE of the bearer's
                         // merge. Filtered in place (order-identical) rather than against a second,
                         // projected vector — see effective_acl_t::allows.
-                        return effective_acl_t::allows(merged, subject, bit, leased ? now_ns() : 0,
+                        return effective_acl_t::allows(merged, subject, bit, leased ? now : 0,
                                                        self ? std::uint8_t{0} : kAceInherit);
                     })
                 .value_or(false);
@@ -1920,7 +1910,9 @@ bool graph_t::may_write_slot(vertex_t* v, std::size_t slot, std::string_view cal
     mem::bump_source_t b_frame(b_bytes, *tables_);
     mem::bytes_t a(a_frame);
     mem::bytes_t b(b_frame);
-    return lookup.fn(lookup.ctx, held, a) && lookup.fn(lookup.ctx, caller, b) &&
+    // The holder test compares identities only; the `now` each lookup supplies goes unused.
+    std::uint64_t now = kAceNowUnknown;
+    return lookup.fn(lookup.ctx, held, a, now) && lookup.fn(lookup.ctx, caller, b, now) &&
            !is_reserved_subject(mem::as_span(a)) &&
            std::ranges::equal(mem::as_span(a), mem::as_span(b));
 }

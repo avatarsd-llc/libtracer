@@ -194,7 +194,16 @@ std::optional<std::vector<std::byte>> acl_readback(graph_t& g, const path_t& p) 
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
-                                                       tr::mem::bytes_t& out) {
+                                                       tr::mem::bytes_t& out, std::uint64_t&) {
+    return tr::testing::subject_into(out, caller);
+}
+
+/** @brief @ref caller_is_subject that also supplies the application's `now` from `ctx` (RFC-0037).
+ */
+std::expected<void, tr::wire::err_t> caller_is_subject_at(void* ctx, std::string_view caller,
+                                                          tr::mem::bytes_t& out,
+                                                          std::uint64_t& now_ns) {
+    now_ns = *static_cast<const std::uint64_t*>(ctx);
     return tr::testing::subject_into(out, caller);
 }
 
@@ -210,7 +219,8 @@ constexpr std::string_view kUnnameable = "ghost";
  * as FULLY TRUSTED and waved through every gate, `:acl` writes and creation included (#905).
  */
 std::expected<void, tr::wire::err_t> resolver_cannot_name_ghost(void*, std::string_view caller,
-                                                                tr::mem::bytes_t& out) {
+                                                                tr::mem::bytes_t& out,
+                                                                std::uint64_t&) {
     if (caller == kUnnameable) return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
     return tr::testing::subject_into(out, caller);
 }
@@ -877,9 +887,10 @@ void test_acl_and_schema_are_addressed_whole() {
 }
 
 void test_expiry() {
-    std::printf("ACE expiry (expires_ns, absolute ns since epoch):\n");
+    std::printf("ACE expiry (expires_ns, on the application's clock):\n");
     graph_t g;
-    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject, nullptr});
+    std::uint64_t app_now = 2;  // after peer-stale's deadline, before peer-live's
+    g.set_hook(&tr::graph::graph_hooks_t::subject_lookup, {caller_is_subject_at, &app_now});
     vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);
 
@@ -1289,8 +1300,8 @@ void test_deny_arm_stops_remote_fan_in() {
     graph_t g;
     bool revoked = false;
     g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
-               {[](void* ctx, std::string_view caller,
-                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+               {[](void* ctx, std::string_view caller, tr::mem::bytes_t& out,
+                   std::uint64_t&) -> std::expected<void, tr::wire::err_t> {
                     if (*static_cast<const bool*>(ctx) && caller == "link-a")
                         return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
                     return tr::testing::subject_into(out, caller);
@@ -1334,8 +1345,8 @@ void test_empty_caller_is_trusted_without_the_resolver() {
     std::printf("the empty (local) caller is trusted without consulting the resolver (#905):\n");
     graph_t g;
     g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
-               {[](void*, std::string_view,
-                   tr::mem::bytes_t& /*out*/) -> std::expected<void, tr::wire::err_t> {
+               {[](void*, std::string_view, tr::mem::bytes_t& /*out*/,
+                   std::uint64_t&) -> std::expected<void, tr::wire::err_t> {
                     return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
                 },
                 nullptr});
@@ -1530,7 +1541,7 @@ struct known_links_t {
 
 /** @brief Maps every KNOWN link to the one token `guest`, and refuses any other caller. */
 std::expected<void, tr::wire::err_t> known_links_are_guest(void* ctx, std::string_view caller,
-                                                           tr::mem::bytes_t& out) {
+                                                           tr::mem::bytes_t& out, std::uint64_t&) {
     const auto& known = static_cast<const known_links_t*>(ctx)->names;
     if (std::find(known.begin(), known.end(), caller) == known.end())
         return std::unexpected(tr::wire::err_t::ACCESS_DENIED);

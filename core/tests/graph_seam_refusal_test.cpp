@@ -760,8 +760,8 @@ void test_acl_merge() {
     };
     const auto setup = [](graph_t& g) {
         g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
-                   {+[](void*, std::string_view caller,
-                        tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+                   {+[](void*, std::string_view caller, tr::mem::bytes_t& out,
+                        std::uint64_t&) -> std::expected<void, tr::wire::err_t> {
                         return tr::testing::subject_into(out, caller);
                     },
                     nullptr});

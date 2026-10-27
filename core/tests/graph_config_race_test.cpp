@@ -159,12 +159,12 @@ void sink_b(void* ctx, const tr::graph::remote_delivery_t&, const tr::graph::val
 }
 
 std::expected<void, tr::wire::err_t> resolver_a(void* ctx, std::string_view caller,
-                                                tr::mem::bytes_t& out) {
+                                                tr::mem::bytes_t& out, std::uint64_t&) {
     score(ctx, 'A');
     return tr::testing::subject_into(out, std::vector<std::byte>(caller.size(), std::byte{'a'}));
 }
 std::expected<void, tr::wire::err_t> resolver_b(void* ctx, std::string_view caller,
-                                                tr::mem::bytes_t& out) {
+                                                tr::mem::bytes_t& out, std::uint64_t&) {
     score(ctx, 'B');
     return tr::testing::subject_into(out, std::vector<std::byte>(caller.size(), std::byte{'a'}));
 }
@@ -874,7 +874,7 @@ std::atomic<long> g_y_resolved{0};
 
 /** @brief Resolves a caller to its own bytes — the subject the ACEs below name. */
 std::expected<void, tr::wire::err_t> resolver_identity(void*, std::string_view caller,
-                                                       tr::mem::bytes_t& out) {
+                                                       tr::mem::bytes_t& out, std::uint64_t&) {
     if (caller == "peer-y") g_y_resolved.fetch_add(1, std::memory_order_relaxed);
     return tr::testing::subject_into(
         out,

@@ -1,13 +1,15 @@
-# `expires_ns` is evaluated against the caller's clock (L4 auth / ACL)
+# `expires_ns` is evaluated against the application's clock (L4 auth / ACL)
 
-An ACE may carry an absolute deadline: `expires_ns`, nanoseconds since the UNIX epoch, with `0`
-meaning *never*. It is not a timer and nothing sweeps it — the policy compares it to the `now`
-its caller passed in, on every single check
+An ACE may carry an absolute deadline: `expires_ns`, nanoseconds on the application's clock, with
+`0` meaning *never*. It is not a timer and nothing sweeps it — the policy compares it to the `now`
+its caller passed in, on every single check. At the graph's door that `now` is the application's:
+the subject-lookup hook writes it beside the subject token, and libtracer reads no clock
+([RFC-0037](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0037-ace-expiry-takes-the-applications-now.md))
 ([ADR-0050](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0050-acl-pure-policy-cached-effective-ace-merge.md)).
 
 The example runs against the **pure** surface first, because `effective_acl_t` takes `now` as a
 parameter — so it can step the clock without sleeping — and then confirms the identical rule at
-the real `graph_t` door, which reads its own clock.
+the real `graph_t` door, where the hook hands in the application's `now`.
 
 ## What to notice
 
@@ -26,10 +28,12 @@ the real `graph_t` door, which reads its own clock.
 - **The parser refuses an *empty* `expires_ns` for the same reason.** An empty payload would load
   as `0` — the permissive reading — so an absent value must not be allowed to mean "never
   expires" ([strict ACL parsing](acl-parse-strict.md)).
+- **No `now`, no lease.** An application with no clock leaves the hook's `now` alone. A lease
+  can then be proved neither live nor lapsed, so a leased grant gives nothing (and a leased `DENY`
+  still refuses), while a standing grant reads as before. The example checks both.
 - **Nothing here is conditional, and nothing sleeps.** No timers, no threads, no wall-clock
-  rendezvous: the deadline is a number the example passes in. The graph-level half uses grants
-  that expired one nanosecond after the epoch and one that expires in the year 2262, so it is
-  deterministic on any machine, on any CI leg.
+  rendezvous: the deadline is a number the example passes in, and the graph-level half steps a
+  `now` the example owns, so it is deterministic on any machine, on any CI leg.
 
 ## Source
 

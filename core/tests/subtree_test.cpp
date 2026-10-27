@@ -339,8 +339,8 @@ void test_write_creates_acl_gate() {
     // Enforcement is on for the ATTRIBUTED caller "peer"; the empty (local) context stays
     // trusted without consulting the resolver (#905), which is what the setup writes use.
     g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
-               {[](void*, std::string_view,
-                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+               {[](void*, std::string_view, tr::mem::bytes_t& out,
+                   std::uint64_t&) -> std::expected<void, tr::wire::err_t> {
                     return tr::testing::subject_into(out, "u");
                 },
                 nullptr});
@@ -385,8 +385,8 @@ void test_branch_write_acl_admission() {
     vertex_handle_t st = g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
     vertex_handle_t su = g.register_vertex(path_t("/s/u"), role_t::STORED_VALUE);
     g.set_hook(&tr::graph::graph_hooks_t::subject_lookup,
-               {[](void*, std::string_view,
-                   tr::mem::bytes_t& out) -> std::expected<void, tr::wire::err_t> {
+               {[](void*, std::string_view, tr::mem::bytes_t& out,
+                   std::uint64_t&) -> std::expected<void, tr::wire::err_t> {
                     return tr::testing::subject_into(out, "u");
                 },
                 nullptr});

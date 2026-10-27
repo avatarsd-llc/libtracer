@@ -253,11 +253,22 @@ struct subscription_address_t {
  *       a coherent snapshot. Whatever state the seam needs travels in @p ctx, which the caller
  *       owns and must keep alive across every possible gated operation.
  *
+ * **The application's `now` rides beside the token (RFC-0037, #2308).** The library reads no
+ * clock. An ACE's `expires_ns` is compared against the value the seam writes into @p now_ns,
+ * in ns on the application's own clock, whose epoch is the application's choice and must
+ * match how it writes `expires_ns`. @p now_ns arrives holding @ref kAceNowUnknown. A seam
+ * that leaves it there supplies no `now`, and every leased ACE then fails closed: a leased
+ * ALLOW grants nothing and a leased DENY still refuses. The gate reads @p now_ns only when
+ * the effective ACL it evaluates holds a lease, so standing grants never depend on it. Only
+ * the owner writes `:acl`, so an application that never issues a lease may leave it alone,
+ * and one whose clock read is not cheap need only write it while it has leases out.
+ *
  * Install it as @ref graph_hooks_t::subject_lookup. It replaced the returning form
  * (`subject_resolver_fn_t`, a `std::vector` token), deleted by #2239.
  */
 using subject_lookup_fn_t = std::expected<void, wire::err_t> (*)(void* ctx, std::string_view caller,
-                                                                 mem::bytes_t& out);
+                                                                 mem::bytes_t& out,
+                                                                 std::uint64_t& now_ns);
 
 /**
  * @brief One EXTERNAL mutation of a producer's `:subscribers[]` — what @ref
@@ -723,6 +734,7 @@ struct graph_hooks_t {
      * evaluates the target's *effective* ACL (own ACEs + inherited, ADR-0020); denial returns
      * `PERMISSION_DENIED`. The EMPTY caller context is the local-API convention and is
      * trusted without consulting the seam (#905), so its error arm is free to mean DENY.
+     * The seam also supplies the application's `now` for ACE expiry (RFC-0037).
      */
     graph_hook_t<subject_lookup_fn_t> subject_lookup{};
 

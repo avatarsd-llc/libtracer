@@ -124,7 +124,8 @@ struct ace_t {
                                               the special subject `"EVERYONE@"` matches any
                                               resolved subject. */
     std::uint32_t access_mask = 0; /**< @brief Granted rights (an OR of `acl_right_t` bits). */
-    std::uint64_t expires_ns = 0;  /**< @brief Absolute expiry, ns since the UNIX epoch;
+    std::uint64_t expires_ns = 0;  /**< @brief Absolute expiry in ns on the APPLICATION's clock
+                                        (the `now` its subject-lookup hook supplies, RFC-0037);
                                         0 = never expires. An expired ACE grants nothing. */
 };
 
@@ -223,5 +224,15 @@ class ace_table_t {
     mem::block_array_t<ace_t> slots_; /**< @brief The ACEs, then their subject bytes. */
     std::size_t n_ = 0;               /**< @brief How many leading slots are ACEs. */
 };
+
+/**
+ * @brief The `now` an ACL gate evaluates with when the application supplied none (RFC-0037).
+ *
+ * The subject-lookup hook starts with its `now_ns` out-parameter at this value and the
+ * application overwrites it with its own clock. Left here, no lease can be proved either
+ * live or lapsed, so a leased ALLOW grants nothing and a leased DENY still refuses: the gate
+ * fails closed both ways. A standing ACE (`expires_ns == 0`) never consults `now`.
+ */
+inline constexpr std::uint64_t kAceNowUnknown = ~std::uint64_t{0};
 
 }  // namespace tr::graph

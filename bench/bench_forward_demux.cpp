@@ -88,7 +88,7 @@ using tr::wire::type_t;
  *        subject token, so the inbound link's qualified name is what the `:acl` grants.
  */
 std::expected<void, tr::wire::err_t> caller_is_subject(void*, std::string_view caller,
-                                                       tr::mem::bytes_t& out) {
+                                                       tr::mem::bytes_t& out, std::uint64_t&) {
     if (!out.append(reinterpret_cast<const std::byte*>(caller.data()), caller.size()))
         return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
     return {};

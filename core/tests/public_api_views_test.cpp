@@ -294,7 +294,7 @@ void test_graph_arrays() {
 
 /** @brief The caller-storage resolver: the caller IS the subject; "ghost" is unnameable. */
 std::expected<void, tr::wire::err_t> lookup_caller(void*, std::string_view caller,
-                                                   mem::bytes_t& out) {
+                                                   mem::bytes_t& out, std::uint64_t&) {
     if (caller == "ghost") return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
     if (!out.append(bytes_of(caller).data(), caller.size()))
         return std::unexpected(tr::wire::err_t::ACCESS_DENIED);

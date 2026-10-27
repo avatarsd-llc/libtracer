@@ -646,7 +646,8 @@ void test_stale_index_entries_are_harmless() {
  * below red — that is the check that this test is not decorative.
  */
 /** @brief A resolver naming every caller as one principal, `fleet`: two links, one holder. */
-std::expected<void, tr::wire::err_t> one_principal(void*, std::string_view, tr::mem::bytes_t& out) {
+std::expected<void, tr::wire::err_t> one_principal(void*, std::string_view, tr::mem::bytes_t& out,
+                                                   std::uint64_t&) {
     constexpr std::string_view kFleet = "fleet";
     const auto* p = reinterpret_cast<const std::byte*>(kFleet.data());
     return tr::testing::subject_into(out, std::vector<std::byte>(p, p + kFleet.size()));

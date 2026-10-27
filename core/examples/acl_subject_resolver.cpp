@@ -77,7 +77,7 @@ std::expected<void, tr::wire::err_t> put_subject(tr::mem::bytes_t& out, std::str
  * because a principal outlives the link it happens to be dialled in on today.
  */
 std::expected<void, tr::wire::err_t> resolve_link_owner(void* ctx, std::string_view caller,
-                                                        tr::mem::bytes_t& out) {
+                                                        tr::mem::bytes_t& out, std::uint64_t&) {
     static_cast<link_directory_t*>(ctx)->invocations += 1;
     if (caller == "ws:7") return put_subject(out, "alice");
     if (caller == "ws:8") return put_subject(out, "bob");
