@@ -117,6 +117,50 @@ webtransport_dial_tls_t dev_tls() {
     return webtransport_dial_tls_t{.ca_file = {}, .insecure_no_verify = true};
 }
 
+/**
+ * @brief Block until @p t reports its session up, or the budget expires.
+ *
+ * A dial returns before its handshake (#2306), so a test that drives a dialed
+ * session awaits it here first, from the test's own clock.
+ */
+[[nodiscard]] bool wait_session(const webtransport_transport_t& t,
+                                std::chrono::milliseconds budget = 5000ms) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (!t.session_up()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(5ms);
+    }
+    return true;
+}
+
+/** @brief The SPEC-created WebTransport link named @p name, or null. */
+[[nodiscard]] webtransport_transport_t* wt_link(tr::net::transport_vertex_t& net,
+                                                std::string_view name) {
+    return dynamic_cast<webtransport_transport_t*>(tr::testing::link_of(net, name));
+}
+
+/** @brief The SPEC-created link named @p name exists and its session comes up. */
+[[nodiscard]] bool comes_up(tr::net::transport_vertex_t& net, std::string_view name) {
+    const webtransport_transport_t* const l = wt_link(net, name);
+    return l != nullptr && wait_session(*l);
+}
+
+/** @brief Poll until @p t's dial has ended (its handshake refused, #2306), or the budget
+ *         expires. */
+[[nodiscard]] bool wait_ended(const webtransport_transport_t& t,
+                              std::chrono::milliseconds budget = 5000ms) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (!t.dial_ended() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(1ms);
+    return t.dial_ended();
+}
+
+/** @brief The SPEC-created link named @p name exists, and its dial ended without a session. */
+[[nodiscard]] bool stays_down(tr::net::transport_vertex_t& net, std::string_view name) {
+    const webtransport_transport_t* const l = wt_link(net, name);
+    return l != nullptr && wait_ended(*l) && !l->session_up();
+}
+
 std::vector<std::byte> test_frame(std::size_t len, std::uint8_t seed) {
     std::vector<std::byte> f(len);
     for (std::size_t i = 0; i < len; ++i) f[i] = static_cast<std::byte>(seed + i);
@@ -289,9 +333,10 @@ void test_session_and_raw_duplex() {
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     check(listener.ok(), "listener started (ALPN h3, ephemeral port, dev cert)");
     webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
-    check(dialer.ok(), "dialer completed QUIC + H3 SETTINGS + extended CONNECT + 200");
+    check(wait_session(dialer), "the dialed session comes up");
+    check(dialer.ok(), "the dial started (it returns before its handshake, #2306)");
+    check(wait_session(dialer), "dialer reports the WebTransport session up (200 received)");
     check(dialer.link_up(), "dialer reports link up (CONNECTED)");
-    check(dialer.session_up(), "dialer reports the WebTransport session up (200 received)");
 
     // The server flips session_up when it validates the CONNECT — await it.
     const auto deadline = std::chrono::steady_clock::now() + 3s;
@@ -321,6 +366,7 @@ void test_big_frame_chunking() {
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
     webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
+    check(wait_session(dialer), "the dialed session comes up");
 
     const auto small1 = test_frame(3, 0x07);
     const auto big = test_frame(300 * 1024, 0x11);
@@ -354,6 +400,7 @@ void test_send_overload_parity() {
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
     webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
+    check(wait_session(dialer), "the dialed session comes up");
 
     // One 9-byte payload, sent twice: whole, then split 2 + 0 + 7 (the empty
     // span is skipped by the gather, never by the length).
@@ -452,6 +499,7 @@ void test_view_delivery_and_backpressure() {
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key, {.memory = {.rx = &rec}});
     check(listener.delivers_ropes(), "webtransport_transport_t::delivers_ropes() is true");
     webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
+    check(wait_session(dialer), "the dialed session comes up");
 
     listener.set_rope_receiver(rope_rx);
 
@@ -482,6 +530,7 @@ void test_view_delivery_and_backpressure() {
                                        {.memory = {.rx = &starved}});
     listener2.set_rope_receiver(rope_rx2);
     webtransport_transport_t dialer2("127.0.0.1", listener2.local_port(), "/", dev_tls());
+    check(wait_session(dialer2), "the dialed session comes up");
     const auto d1 = test_frame(8192, 0x01);
     const auto d2 = test_frame(16, 0x50);
     const auto d3 = test_frame(24, 0xA0);
@@ -529,7 +578,7 @@ void test_fwd_read_round_trip() {
     // before the routers die), the quic_test declaration-order contract.
     webtransport_transport_t tb(std::uint16_t{0}, g_cert, g_key);  // B serves WebTransport
     webtransport_transport_t ta("127.0.0.1", tb.local_port(), "/", dev_tls());
-    check(ta.ok(), "the WebTransport session to B is up");
+    check(wait_session(ta), "the WebTransport session to B is up");
 
     (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     std::vector<std::byte> tv;
@@ -655,13 +704,13 @@ void test_config_constructed_webtransport() {
     check(router_b.registry().by_name("net/webtransport-server/hj") != nullptr,
           "B: the hijack-vector listener is wired in — it serves the REAL dev profile");
 
-    // A: a webtransport CLIENT dialing B — a synchronous session from config.
+    // A: a webtransport CLIENT dialing B — a session from config, awaited (#2306).
     // The dial VERIFIES B's certificate (#918): B serves the self-signed dev cert,
     // so this names that very file as its `ca` bundle. Without a trust key the
     // session would be refused — asserted in test_spec_dial_trust_keys.
     const auto wa = node_a.write(path_t("/net/webtransport-client/conn"),
                                  wt_conn_spec("b", srv_port, "127.0.0.1", "dev"));
-    check(wa.has_value(),
+    check(wa.has_value() && comes_up(net_a, "net/webtransport-client/b"),
           "A: SPEC{kind=webtransport, addr, port, ca} constructs the dialing endpoint");
     const auto s = net_a.settings_of("net/webtransport-client/b");
     check(
@@ -712,10 +761,8 @@ void test_spec_dial_trust_keys() {
     //    nothing, the session is REFUSED. This write SUCCEEDED before the fix.
     const auto plain = node_a.write(path_t("/net/webtransport-client/conn"),
                                     wt_conn_spec("verify", ports["l1"], "127.0.0.1"));
-    check(!plain.has_value() && plain.error() == tr::graph::status_t::TRANSPORT_DOWN,
-          "A: a SPEC dial carrying no trust key is REFUSED — the peer cert does not validate");
-    check(router_a.registry().by_name("net/webtransport-client/verify") == nullptr,
-          "A: the refused dial leaves no endpoint behind");
+    check(plain.has_value() && stays_down(net_a, "net/webtransport-client/verify"),
+          "A: a SPEC dial carrying no trust key never comes up — the peer cert does not validate");
 
     // 2. `insecure = 1` — the DEV-ONLY opt-out. Honoured only on a build that binds
     //    config_t::kAllowInsecureTls; on the default build the SPEC is refused at creation
@@ -724,7 +771,8 @@ void test_spec_dial_trust_keys() {
     const auto insec = node_a.write(path_t("/net/webtransport-client/conn"),
                                     wt_conn_spec("insec", ports["l2"], "127.0.0.1", {}, {}, true));
     if constexpr (tr::net::kAllowInsecureTls) {
-        check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
+        check(insec.has_value() && comes_up(net_a, "net/webtransport-client/insec"),
+              "A: `insecure = 1` connects to that same unvalidatable peer");
         check(tr::net::webtransport_insecure_refusals() == refused_before,
               "A: a build with kAllowInsecureTls counts no refusal");
     } else {
@@ -747,20 +795,22 @@ void test_spec_dial_trust_keys() {
     // 3. `ca = <the peer's own cert>` — verification stays ON, against a private bundle.
     const auto with_ca = node_a.write(path_t("/net/webtransport-client/conn"),
                                       wt_conn_spec("ca", ports["l3"], "127.0.0.1", "dev"));
-    check(with_ca.has_value(), "A: `ca = <the peer's cert>` connects with verification ON");
+    check(with_ca.has_value() && comes_up(net_a, "net/webtransport-client/ca"),
+          "A: `ca = <the peer's cert>` connects with verification ON");
 
     // 4. `insecure = 0` is the explicit "verify" spelling, not a weaker opt-out.
     const auto zero = node_a.write(path_t("/net/webtransport-client/conn"),
                                    wt_conn_spec("zero", ports["l4"], "127.0.0.1", {}, {}, false));
-    check(!zero.has_value() && zero.error() == tr::graph::status_t::TRANSPORT_DOWN,
-          "A: `insecure = 0` passes the capability gate and still verifies — REFUSED");
+    check(zero.has_value() && stays_down(net_a, "net/webtransport-client/zero"),
+          "A: `insecure = 0` passes the capability gate and still verifies — never up");
 
     // 5. `ca = <an UNRELATED bundle>` — the bundle is genuinely consulted, not
     //    merely accepted: one that does not certify this peer still refuses.
     const auto wrong_ca =
         node_a.write(path_t("/net/webtransport-client/conn"),
                      wt_conn_spec("wrongca", ports["l5"], "127.0.0.1", "wrongca"));
-    check(!wrong_ca.has_value(), "A: `ca = <an unrelated CA>` is REFUSED — the bundle is applied");
+    check(wrong_ca.has_value() && stays_down(net_a, "net/webtransport-client/wrongca"),
+          "A: `ca = <an unrelated CA>` never comes up — the bundle is applied");
 }
 
 /**
@@ -846,7 +896,8 @@ void test_app_default_profile() {
 
     const auto d =
         node.write(path_t("/net/webtransport-client/conn"), wt_conn_spec("cli", port, "127.0.0.1"));
-    check(d.has_value(), "a DIAL with no `tls` key verifies against the default profile's CA");
+    check(d.has_value() && comes_up(net, "net/webtransport-client/cli"),
+          "a DIAL with no `tls` key verifies against the default profile's CA");
 
     // A stale config still carrying a retired key is REFUSED even where a usable
     // default profile exists: skipping `ca` would silently re-anchor the dial. Any
@@ -904,7 +955,8 @@ void test_spec_dial_connect_path() {
     const auto named = node_a.write(path_t("/net/webtransport-client/conn"),
                                     wt_conn_spec("named", served.local_port(), "127.0.0.1", "dev",
                                                  {}, std::nullopt, "/tracer"));
-    check(named.has_value(), "A: SPEC{..., path=\"/tracer\"} constructs the dialer");
+    check(named.has_value() && wait_session(served),
+          "A: SPEC{..., path=\"/tracer\"} constructs the dialer");
     check(path_of(served) == "/tracer",
           "the CONNECT that reached the server named /tracer — the SPEC key is on the wire");
 
@@ -913,14 +965,16 @@ void test_spec_dial_connect_path() {
     const auto plain =
         node_a.write(path_t("/net/webtransport-client/conn"),
                      wt_conn_spec("plain", defaulted.local_port(), "127.0.0.1", "dev"));
-    check(plain.has_value(), "A: a SPEC with no `path` key still constructs the dialer");
+    check(plain.has_value() && wait_session(defaulted),
+          "A: a SPEC with no `path` key still constructs the dialer");
     check(path_of(defaulted) == "/", "a SPEC with no `path` key dials the / default");
 
     // 3. The empty-string normalisation the factory leans on (an absent key
     //    parses to an empty string, which the constructor turns into "/").
     webtransport_transport_t empty_path(std::uint16_t{0}, g_cert, g_key);
     webtransport_transport_t dialer("127.0.0.1", empty_path.local_port(), "", dev_tls());
-    check(dialer.ok(), "a direct dial with an EMPTY path establishes its session");
+    check(wait_session(dialer) && wait_session(empty_path),
+          "a direct dial with an EMPTY path establishes its session");
     check(path_of(empty_path) == "/", "an empty path is normalised to / before the CONNECT");
 
     // 4. #1039 — a non-empty `path` that is not origin-form. RFC 9114 §4.3.1 /
@@ -956,7 +1010,8 @@ void test_spec_dial_connect_path() {
     const auto nested = node_a.write(
         path_t("/net/webtransport-client/conn"),
         wt_conn_spec("deep", deep.local_port(), "127.0.0.1", "dev", {}, std::nullopt, "/a/b"));
-    check(nested.has_value(), "A: SPEC{..., path=\"/a/b\"} still constructs the dialer");
+    check(nested.has_value() && wait_session(deep),
+          "A: SPEC{..., path=\"/a/b\"} still constructs the dialer");
     check(path_of(deep) == "/a/b", "the origin-form path reached the server verbatim");
 }
 
@@ -967,17 +1022,6 @@ void test_spec_dial_connect_path() {
  *         reassembler can produce a same-length frame of the wrong bytes. */
 [[nodiscard]] bool same(const std::vector<std::byte>& got, const std::vector<std::uint8_t>& want) {
     return got.size() == want.size() && std::memcmp(got.data(), want.data(), want.size()) == 0;
-}
-
-/** @brief Block until the LISTEN side reports its session up, or the budget expires. */
-[[nodiscard]] bool wait_session(const webtransport_transport_t& t,
-                                std::chrono::milliseconds budget) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    while (!t.session_up()) {
-        if (std::chrono::steady_clock::now() > deadline) return false;
-        std::this_thread::sleep_for(5ms);
-    }
-    return true;
 }
 
 /**
@@ -1391,7 +1435,7 @@ void test_the_handshake_budget_is_the_configured_one() {
         webtransport_transport_t dead("127.0.0.1", peer.local_port(), "/",
                                       webtransport_dial_tls_t{.ca_file = g_other_cert},
                                       {.max_handshake = 4096});
-        check(!dead.ok(), "leg 3: the wrong-CA dial did not come up");
+        check(wait_ended(dead) && !dead.link_up(), "leg 3: the wrong-CA dial did not come up");
         check(dead.effective_max_handshake() == 4096,
               "leg 3: a DIAL that never came up still reports its own budget");
     }
@@ -1500,6 +1544,7 @@ void test_push_on_session_waits_for_start_receiving() {
     listener.set_receiver(server_rx);
     {
         webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
+        check(wait_session(dialer), "the dialed session comes up");
         check(dialer.ok(), "the deferred dialer still completed CONNECT + 200 in its constructor");
         check(dialer.session_up(),
               "the H3 handshake ran to completion while delivery was held (the gate is on "
@@ -1564,6 +1609,7 @@ void test_start_receiving_is_inert_where_it_must_be() {
     {
         // An armed dialer, armed twice: the second call finds the gate already open.
         webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
+        check(wait_session(dialer), "the dialed session comes up");
         check(dialer.ok(), "dialer up");
         dialer.set_receiver(dialer_rx);
         dialer.start_receiving();
@@ -1586,7 +1632,8 @@ void test_start_receiving_is_inert_where_it_must_be() {
     webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key);
     webtransport_transport_t dead("127.0.0.1", listener2.local_port(), "/",
                                   webtransport_dial_tls_t{.ca_file = g_other_cert});
-    check(!dead.ok(), "the wrong-CA dial did not come up (no session, no frame stream)");
+    check(wait_ended(dead) && !dead.link_up(),
+          "the wrong-CA dial did not come up (no session, no frame stream)");
     dead.start_receiving();
     dead.start_receiving();
     check(!dead.session_up(), "arming a link that never came up changed nothing");

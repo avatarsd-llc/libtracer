@@ -43,6 +43,7 @@ struct stats_block_t;
 namespace tr::net {
 
 class transport_t;
+class fwd_router_t;
 
 /**
  * @brief The optional multi-peer (bus) capability of a transport link (ADR-0044).
@@ -881,12 +882,13 @@ class transport_t {
      *
      * The uniform PULL-side liveness query, the poll twin of @ref set_down_notifier's push
      * — an owner can ask any link the same question. It is deliberately NOT the concrete
-     * types' `ok()`: `ok()` is the CAME-UP predicate (did construction — the dial, the
-     * handshake, the bind — succeed), answered once, right after construction (the
-     * `make_checked` gate), and it never reverts; THIS is the runtime state, cleared by
-     * the transport's own teardown path when its one connection dies. After a teardown
-     * the two diverge: `ok()` stays true (the link DID come up), `link_up()` answers
-     * false.
+     * types' `ok()`: `ok()` is the CONSTRUCTED predicate (did construction succeed — the
+     * bind, the connect, or for a QUIC or WebTransport dial only the start of its
+     * handshake, #2306), answered once, right after construction (the `make_checked`
+     * gate), and it never reverts; THIS is the runtime state, set when the connection
+     * comes up and cleared by the transport's own teardown path when its one connection
+     * dies. The two diverge: a QUIC dial is `ok()` before it is up, and after a teardown
+     * `ok()` stays true while `link_up()` answers false.
      *
      * The default is TRUE: a connectionless (UDP) or bus (CAN) kind has no closure
      * concept — its link is as up as it ever is — and a multi-peer server outlives any
@@ -963,16 +965,24 @@ class transport_t {
      * kind (UDP) has no closure concept and never fires it. Fire with no internal
      * transport locks held — the notifier re-enters the routing plane, which takes
      * graph locks.
+     *
+     * A fire that comes before any notifier is installed is not lost (#2306): the link
+     * keeps it, and this call reports it, so the installer runs its notifier once itself —
+     * after it lets its own locks go, which this call cannot know. The router does so
+     * through @ref notify_down, which now finds its notifier installed. A QUIC dial that fails
+     * its handshake before the router installs its notifier is the case.
      * @param fn  The notifier; @p ctx is passed back as its first argument.
      * @param ctx Caller-owned context; must outlive every possible notification.
+     * @return True iff the link went down before this install: @p fn was not called for it,
+     *         and the caller calls it once, with its own locks released.
      */
-    void set_down_notifier(down_fn_t fn, void* ctx) noexcept {
+    bool set_down_notifier(down_fn_t fn, void* ctx) noexcept {
         // Publish ctx-before-fn (release on fn); notify_down's acquire load pairs
         // fn with its ctx. Atomic because a transport's callback thread — spawned
         // in the ctor, so already live — can fire notify_down on a fast remote
         // hangup before fwd_router_t::add_child finishes this install.
         down_ctx_.store(ctx, std::memory_order_relaxed);
-        down_fn_.store(fn, std::memory_order_release);
+        return down_fn_.exchange(fn, std::memory_order_acq_rel) == &missed_down;
     }
 
    protected:
@@ -988,11 +998,15 @@ class transport_t {
      */
     ~transport_t() = default;
 
-    /** @brief Fire the link-down notifier (no-op when none installed) — see
-     *         @ref set_down_notifier for the calling discipline. */
+    /** @brief Fire the link-down notifier — see @ref set_down_notifier for the calling
+     *         discipline. With none installed the fire is kept for the next install. */
     void notify_down() const {
-        const down_fn_t fn = down_fn_.load(std::memory_order_acquire);
-        if (fn != nullptr) fn(down_ctx_.load(std::memory_order_relaxed));
+        down_fn_t fn = down_fn_.load(std::memory_order_acquire);
+        while (fn == nullptr)
+            if (down_fn_.compare_exchange_weak(fn, &missed_down, std::memory_order_acq_rel,
+                                               std::memory_order_acquire))
+                return;  // kept: the next set_down_notifier reports it
+        if (fn != &missed_down) fn(down_ctx_.load(std::memory_order_relaxed));
     }
 
     /** @brief The delivery-tier slot (the ONE tier-select mechanism, ADR-0042 /
@@ -1003,9 +1017,15 @@ class transport_t {
     receiver_slot_t<> rx_;
 
    private:
-    /** @brief Installed link-down sink. Atomic: a transport's callback thread may
-     *         fire it (notify_down) while add_child is still installing it. */
-    std::atomic<down_fn_t> down_fn_{nullptr};
+    /** @brief The router replays a fire that came before its install (@ref set_down_notifier)
+     *         through @ref notify_down, the same slot a transport fires. */
+    friend class fwd_router_t;
+    /** @brief The mark @ref notify_down leaves in `down_fn_` for a fire that found no
+     *         notifier; never called. */
+    static void missed_down(void* /*ctx*/) noexcept {}
+    /** @brief Installed link-down sink, or `missed_down`. Atomic: a transport's callback
+     *         thread may fire it (notify_down) while add_child is still installing it. */
+    mutable std::atomic<down_fn_t> down_fn_{nullptr};
     std::atomic<void*> down_ctx_{nullptr}; /**< @brief Its caller-owned context. */
 
     /** @brief The injected egress store — see @ref egress_source. Not atomic: it is wired

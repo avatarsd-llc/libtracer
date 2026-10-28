@@ -12,7 +12,7 @@
  *
  * Everything msquic-MECHANICAL — the handle lifecycle and ownership
  * discipline, the teardown ordering, the TSan annotations, the one-copy TX
- * contract, the RX length-prefix reassembly, the dial rendezvous, and the
+ * contract, the RX length-prefix reassembly, the non-blocking dial, and the
  * one-peer listener-replacement skeleton — lives in the shared
  * msquic_endpoint_t base (src/msquic_endpoint.hpp; see its header comment for
  * the full contracts). This transport keeps ONLY its variance points: ONE
@@ -95,6 +95,34 @@ struct quic_transport_t::impl_t : msquic_endpoint_t {
         return QUIC_STATUS_SUCCESS;
     }
 
+    /**
+     * @brief CONNECTED, DIAL side: open and start the ONE bidirectional frame stream (the
+     *        listener adopts it via PEER_STREAM_STARTED).
+     *
+     * Under @ref conn_m and only while @p c is still the live connection, the same recheck
+     * webtransport's `open_stream` makes: the teardown harvest nulls `conn` under that lock,
+     * so a stream opened after it would never be closed. A stream msquic refuses shuts the
+     * connection down, so the link goes down instead of staying up with no frame stream.
+     */
+    void on_connected(HQUIC c) override {
+        if (listen) return;
+        bool opened = false;
+        {
+            const std::lock_guard lock(conn_m);
+            if (conn != c) return;  // tearing down
+            HQUIC stream = nullptr;
+            if (QUIC_SUCCEEDED(api->StreamOpen(c, QUIC_STREAM_OPEN_FLAG_NONE, &impl_t::stream_cb,
+                                               this, &stream))) {
+                opened = QUIC_SUCCEEDED(api->StreamStart(stream, QUIC_STREAM_START_FLAG_NONE));
+                if (opened)
+                    frame_stream = stream;
+                else
+                    api->StreamClose(stream);  // never started: no callback can be pending
+            }
+        }
+        if (!opened) shutdown_conn(0);  // a local refusal, not the peer's fault
+    }
+
     /** @brief One-peer replacement harvest: detach and close the departed
      *         peer's stream + connection (refuse while the peer is up). */
     bool replace_peer() override {
@@ -152,26 +180,11 @@ quic_transport_t::quic_transport_t(std::string_view peer_host, std::uint16_t pee
     settings.IdleTimeoutMs = 0;  // no idle teardown; link liveness is #66 lifecycle
     settings.IsSet.IdleTimeoutMs = TRUE;
 
-    // The tcp_transport_t dial shape (base): block until the handshake
-    // resolves so ok() is meaningful at construction.
+    // Non-blocking dial (base, #2306): returns once the handshake is started. The frame
+    // stream opens on CONNECTED (impl_t::on_connected); until then a send is a counted drop.
     if (!i.dial("libtracer", kAlpn, settings, tls.ca_file, tls.insecure_no_verify, peer_host,
                 peer_port))
         return;
-
-    // Open + start the ONE bidirectional frame stream (the dialer owns opening
-    // it; the listener adopts it via PEER_STREAM_STARTED).
-    HQUIC stream = nullptr;
-    if (QUIC_FAILED(
-            i.api->StreamOpen(i.conn, QUIC_STREAM_OPEN_FLAG_NONE, &impl_t::stream_cb, &i, &stream)))
-        return;
-    if (QUIC_FAILED(i.api->StreamStart(stream, QUIC_STREAM_START_FLAG_NONE))) {
-        i.api->StreamClose(stream);
-        return;
-    }
-    {
-        const std::lock_guard lock(i.conn_m);
-        i.frame_stream = stream;
-    }
     i.open_ok = true;
 }
 
@@ -228,6 +241,10 @@ std::uint16_t quic_transport_t::local_port() const noexcept {
 
 bool quic_transport_t::link_up() const noexcept {
     return impl_ && impl_->up.load(std::memory_order_relaxed);
+}
+
+bool quic_transport_t::dial_ended() const noexcept {
+    return ok() && !impl_->listen && !impl_->link_established.load(std::memory_order_relaxed);
 }
 
 std::uint64_t quic_transport_t::dropped_rx() const noexcept {

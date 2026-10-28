@@ -257,7 +257,7 @@ void self_heal_link_t::reap_locked(std::unique_lock<std::mutex>& l) {
     l.lock();
 }
 
-void self_heal_link_t::wire_socket(sock_t& sock) {
+bool self_heal_link_t::wire_socket(sock_t& sock) {
     // The engine's own sinks forward into `rx_` — whatever receiver the router installed
     // on the ENGINE at add_child dispatches from there, so the registry wiring is done
     // once and every healed socket inherits it. Down-notifier before start_receiving,
@@ -277,13 +277,14 @@ void self_heal_link_t::wire_socket(sock_t& sock) {
             },
             &sock);
     }
-    sock.link->set_down_notifier(
+    const bool went_down = sock.link->set_down_notifier(
         [](void* c) {
             auto* const s = static_cast<sock_t*>(c);
             s->self->on_socket_down(*s);
         },
         &sock);
     sock.link->start_receiving();
+    return went_down;
 }
 
 void self_heal_link_t::on_socket_down(sock_t& sock) {
@@ -315,6 +316,7 @@ bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
     const tlv_node_t* cfg_ptr = cfg ? &*cfg : nullptr;
     auto built = factory_(settings_, cfg_ptr, src_);
     sock_ref_t sock;
+    bool went_down = false;  // the socket died before its notifier was in: a failed attempt
     // A refused record is a failed attempt, as a refused socket is: the link it would have
     // named is destroyed with `built` and the engine retries on its backoff.
     if (built) sock = sock_ref_t(mem::make_in<sock_t>(src_));
@@ -326,12 +328,12 @@ bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
         // thread starts in its constructor is already draining, and the sinks route into
         // this engine's rx_, which the router wired at add_child — frames have somewhere
         // to land from the first instant (#1025).
-        wire_socket(*sock.get());
+        went_down = wire_socket(*sock.get());
     }
     l.lock();
-    if (stop_) {
-        // Torn down concurrently: the just-built socket is a corpse (destroyed by stop()
-        // outside m_), never adopted.
+    if (stop_ || went_down) {
+        // Torn down concurrently, or already dead: the just-built socket is a corpse
+        // (destroyed by stop() or the reaper outside m_), never adopted.
         park_locked(std::move(sock));
         return false;
     }

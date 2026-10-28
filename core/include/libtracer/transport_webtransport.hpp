@@ -145,16 +145,17 @@ class webtransport_transport_t final : public transport_t {
     }
 
     /**
-     * @brief DIAL mode: establish a WebTransport session to
-     *        `https://peer_host:peer_port/path` and open the frame stream
-     *        (synchronous — the constructor waits for the QUIC handshake, the
-     *        H3 SETTINGS/CONNECT exchange, and the 200).
+     * @brief DIAL mode: start a WebTransport session to
+     *        `https://peer_host:peer_port/path`. Returns at once; it never waits (#2306).
      *
-     * Confirm with ok(); on failure the object is inert. Inbound frames are
-     * held in msquic's per-stream flow-control window until the owner installs
-     * its receivers and calls @ref start_receiving (#1101, #2249), so a server
-     * that pushes the instant the session comes up cannot be decoded into an
-     * empty sink.
+     * ok() says the QUIC handshake was started; on false the object is inert. The rest
+     * runs on msquic's callbacks: CONNECTED sends the H3 face and the extended CONNECT,
+     * and the 200 opens the frame stream (@ref session_up). A send before the frame
+     * stream exists is dropped and counted in `dropped_tx`, never queued (the down-link
+     * rule); a handshake or a CONNECT that fails ends in the link-down notifier, once. Inbound
+     * frames are held in msquic's per-stream flow-control window until the owner installs its
+     * receivers and calls @ref start_receiving (#1101, #2249), so a server that pushes the instant
+     * the session comes up cannot be decoded into an empty sink.
      *
      * @param peer_host Server hostname or dotted-quad IPv4 (the CONNECT
      *                  `:authority` host part).
@@ -237,8 +238,8 @@ class webtransport_transport_t final : public transport_t {
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
-    /** @brief The came-up predicate (#1059) — DIAL: the WebTransport session is
-     *         established (200 received) and the frame stream started; LISTEN: the
+    /** @brief The came-up predicate (#1059) — DIAL: the QUIC handshake was started (the
+     *         session follows on msquic's callbacks, @ref session_up); LISTEN: the
      *         listener is up on its port. Answered at construction and never
      *         reverting; liveness is @ref link_up. */
     [[nodiscard]] bool ok() const noexcept;
@@ -246,10 +247,15 @@ class webtransport_transport_t final : public transport_t {
     /** @brief LISTEN mode: the actual bound UDP port (resolves an ephemeral 0). */
     [[nodiscard]] std::uint16_t local_port() const noexcept;
 
-    /** @brief Liveness (the @ref transport_t::link_up contract): true from the
-     *         QUIC CONNECTED event until the connection (and with it the
-     *         session) shuts down. Relaxed atomic. */
+    /** @brief Liveness (the @ref transport_t::link_up contract): true while the
+     *         WebTransport session is up (@ref session_up) on a connected QUIC link, so a
+     *         send seen up has its frame channel (#2306). Relaxed atomics. */
     [[nodiscard]] bool link_up() const noexcept override;
+
+    /** @brief DIAL: true once this dial's one connection has ended — its handshake failed
+     *         or it came up and went down — so an owner tells a failed dial from a pending
+     *         one (#2306). Set just before the link-down fire. LISTEN: always false. */
+    [[nodiscard]] bool dial_ended() const noexcept;
 
     /** @brief True once the WebTransport session is established — the extended
      *         CONNECT was accepted (LISTEN: request validated + 200 sent;

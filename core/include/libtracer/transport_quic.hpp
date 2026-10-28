@@ -94,14 +94,15 @@ class quic_transport_t final : public transport_t {
     static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
-     * @brief DIAL mode: connect to @p peer_host:@p peer_port and open the
-     *        frame stream (synchronous — the constructor waits for the QUIC
-     *        handshake, the tcp_transport_t dial shape).
+     * @brief DIAL mode: start a connection to @p peer_host:@p peer_port. Returns at once;
+     *        it never waits for the QUIC handshake (#2306).
      *
-     * Confirm with ok(); on failure no connection is live and the object is
-     * inert. On success the bidirectional frame stream is started and frames
-     * may flow immediately, so receivers must be installed before the peer
-     * sends (the set_receiver contract).
+     * ok() says the handshake was started; on false no connection exists and the object is
+     * inert. The link comes up on msquic's CONNECTED callback (@ref link_up), which also
+     * opens the bidirectional frame stream; a send before that is dropped and counted in
+     * `dropped_tx`, never queued (the down-link rule). A handshake that fails ends in the
+     * link-down notifier, once. Receivers must still be installed before the peer sends
+     * (the set_receiver contract).
      *
      * @param peer_host Peer hostname or dotted-quad IPv4 (e.g. "127.0.0.1").
      * @param peer_port Peer UDP port (host byte order).
@@ -171,9 +172,9 @@ class quic_transport_t final : public transport_t {
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
-    /** @brief The came-up predicate (#1059) — DIAL: the handshake completed and the frame
-     *         stream started; LISTEN: the listener is up on its port. Answered at
-     *         construction and never reverting; liveness is @ref link_up. */
+    /** @brief The came-up predicate (#1059) — DIAL: the handshake was started (it
+     *         completes, or fails, on msquic's callbacks); LISTEN: the listener is up on its
+     *         port. Answered at construction and never reverting; liveness is @ref link_up. */
     [[nodiscard]] bool ok() const noexcept;
 
     /** @brief LISTEN mode: the actual bound UDP port (resolves an ephemeral 0). */
@@ -183,6 +184,11 @@ class quic_transport_t final : public transport_t {
      *         connection events: true from CONNECTED until the connection shuts
      *         down (peer/transport/idle). Relaxed atomic. */
     [[nodiscard]] bool link_up() const noexcept override;
+
+    /** @brief DIAL: true once this dial's one connection has ended — its handshake failed
+     *         or it came up and went down — so an owner tells a failed dial from a pending
+     *         one (#2306). Set just before the link-down fire. LISTEN: always false. */
+    [[nodiscard]] bool dial_ended() const noexcept;
 
     /** @brief Frames dropped because the RX backend was exhausted (backpressure,
      *         ADR-0039 §4 / ADR-0042 §2) — drained off the stream, never an OOM. */

@@ -18,7 +18,11 @@
  * connection. Run under TSan (setarch -R) and ASan+UBSan.
  */
 
+#include <arpa/inet.h>
 #include <msquic.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <array>
 #include <atomic>
@@ -90,6 +94,26 @@ std::string g_other_cert;
 std::array<tr::net::tls_profile_t, 2> g_profiles{};
 
 quic_dial_tls_t dev_tls() { return quic_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}; }
+
+/** @brief Poll until @p t's dial has ended (its handshake refused, #2306), or the budget
+ *         expires. */
+template <class Link>
+bool await_ended(const Link& t, std::chrono::milliseconds budget = 5000ms) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (!t.dial_ended() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(1ms);
+    return t.dial_ended();
+}
+
+/** @brief A dial returns before its handshake (#2306): poll until the link is up. */
+bool await_up(const tr::net::transport_t& t, std::chrono::milliseconds budget = 5000ms) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (!t.link_up()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(1ms);
+    }
+    return true;
+}
 
 // A raw msquic client — the test's hand on the stream (the tcp raw_client_t
 // role): it writes arbitrary bytes with NO framing, so prefixes can be split,
@@ -245,8 +269,8 @@ void test_raw_frame_duplex() {
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     check(listener.ok(), "listener started (ephemeral port, dev cert)");
     quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls());
-    check(dialer.ok(), "dialer completed the QUIC handshake (insecure dev mode)");
-    check(dialer.link_up(), "dialer reports link up (CONNECTED)");
+    check(dialer.ok(), "dialer started the QUIC handshake (insecure dev mode)");
+    check(await_up(dialer), "dialer reports link up (CONNECTED)");
 
     listener.set_receiver(listener_rx);
     dialer.set_receiver(dialer_rx);
@@ -308,6 +332,7 @@ void test_big_frame_chunking() {
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
     quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls());
+    check(await_up(dialer), "the dial came up");
 
     // ~300 KiB spans hundreds of QUIC packets — msquic MUST deliver it in
     // multiple RECEIVE chunks, exercising body reassembly at scale; the small
@@ -401,6 +426,7 @@ void test_view_delivery_segment_identity() {
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, {.memory = {.rx = &rec}});
     check(listener.delivers_ropes(), "quic_transport_t::delivers_ropes() is true");
     quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls());
+    check(await_up(dialer), "the dial came up");
 
     listener.set_rope_receiver(rope_rx);
 
@@ -436,6 +462,7 @@ void test_backpressure_drain() {
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, {.memory = {.rx = &rec}});
     listener.set_rope_receiver(rope_rx);
     quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls());
+    check(await_up(dialer), "the dial came up");
 
     const auto f1 = test_frame(8192, 0x01);  // spans several RECEIVE chunks while draining
     const auto f2 = test_frame(16, 0x50);
@@ -458,6 +485,7 @@ void test_scatter_gather() {
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
     quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls());
+    check(await_up(dialer), "the dial came up");
 
     const std::array<std::byte, 2> s0{std::byte{0x01}, std::byte{0x02}};
     const std::array<std::byte, 3> s1{std::byte{0x03}, std::byte{0x04}, std::byte{0x05}};
@@ -539,6 +567,7 @@ void test_tx_honours_the_connection_cap() {
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, {.max_frame = kCap});
     listener.set_receiver(rx);
     quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls(), {.max_frame = kCap});
+    check(await_up(dialer), "the dial came up");
     check(dialer.ok(), "both ends are up at a 64 KiB configured cap");
 
     // A frame the link really carries, so the shed below cannot be confused with a link that
@@ -597,6 +626,7 @@ void test_two_nodes_over_quic() {
     tr::net::fwd_router_t router_b(node_b);
     quic_transport_t tb(std::uint16_t{0}, g_cert, g_key);  // B listens (dev cert)
     quic_transport_t ta("127.0.0.1", tb.local_port(), dev_tls());
+    check(await_up(ta), "the dial came up");
 
     // B holds the target vertex and a subscriber; A knows the link to B as "b".
     (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
@@ -729,6 +759,8 @@ void test_config_constructed_quic() {
     const auto wa = node_a.write(path_t("/net/quic-client/conn"),
                                  quic_conn_spec("b", srv_port, "127.0.0.1", "dev"));
     check(wa.has_value(), "A: SPEC{kind=quic, addr, port, ca} constructs the dialing socket");
+    const tr::net::transport_t* const dialed = tr::testing::link_of(net_a, "net/quic-client/b");
+    check(dialed != nullptr && await_up(*dialed), "A: the dialing socket comes up (#2306)");
     const auto s = net_a.settings_of("net/quic-client/b");
     check(s.has_value() && s->kind == "quic" && s->addr == "127.0.0.1" && s->port == srv_port,
           "A: the parsed :settings carry kind/addr/port");
@@ -788,16 +820,23 @@ void test_spec_dial_trust_keys() {
     }
     check(listening, "B: five self-signed dev-cert listeners are up on OS-granted ports");
 
+    // A dial no longer waits for its handshake (#2306): creation succeeds once the handshake
+    // is STARTED, and the handshake's verdict is whether the link comes up or its dial ends.
+    const auto link_a = [&net_a](std::string_view nm) {
+        return tr::testing::link_of(net_a, std::string("net/quic-client/").append(nm));
+    };
+    const auto stays_down = [&](std::string_view nm) {
+        const auto* const l = dynamic_cast<const quic_transport_t*>(link_a(nm));
+        return l != nullptr && await_ended(*l) && !l->link_up();
+    };
+
     // 1. No trust key at all. The default is to verify, the dev cert validates
-    //    against nothing, so the handshake is REFUSED and creation reports the
-    //    socket-did-not-come-up status. This is the write that SUCCEEDED before
-    //    the fix, when the factory hardcoded insecure_no_verify = true.
+    //    against nothing, so the handshake is REFUSED and the link never comes up.
+    //    This is the dial that came UP before the fix, when the factory hardcoded
+    //    insecure_no_verify = true.
     const auto plain = node_a.write(path_t("/net/quic-client/conn"),
                                     quic_conn_spec("verify", ports["l1"], "127.0.0.1"));
-    check(!plain.has_value() && plain.error() == tr::graph::status_t::TRANSPORT_DOWN,
-          "A: a SPEC dial carrying no trust key is REFUSED — the peer cert does not validate");
-    check(router_a.registry().by_name("net/quic-client/verify") == nullptr,
-          "A: the refused dial leaves no connection behind");
+    check(plain.has_value(), "A: a SPEC dial carrying no trust key is created (it does not wait)");
 
     // 2. `insecure = 1` — the DEV-ONLY opt-out. Honoured only on a build that binds
     //    config_t::kAllowInsecureTls; on the default build the SPEC is refused at creation
@@ -806,7 +845,8 @@ void test_spec_dial_trust_keys() {
     const auto insec = node_a.write(path_t("/net/quic-client/conn"),
                                     quic_conn_spec("insec", ports["l2"], "127.0.0.1", {}, true));
     if constexpr (tr::net::kAllowInsecureTls) {
-        check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
+        check(insec.has_value() && link_a("insec") != nullptr && await_up(*link_a("insec")),
+              "A: `insecure = 1` connects to that same unvalidatable peer");
         check(tr::net::quic_insecure_refusals() == refused_before,
               "A: a build with kAllowInsecureTls counts no refusal");
     } else {
@@ -830,14 +870,17 @@ void test_spec_dial_trust_keys() {
     //    self-signed or privately-issued peer.
     const auto with_ca = node_a.write(path_t("/net/quic-client/conn"),
                                       quic_conn_spec("ca", ports["l3"], "127.0.0.1", "dev"));
-    check(with_ca.has_value(), "A: `ca = <the peer's cert>` connects with verification ON");
+    check(with_ca.has_value() && link_a("ca") != nullptr && await_up(*link_a("ca")),
+          "A: `ca = <the peer's cert>` connects with verification ON");
+    check(stays_down("verify"),
+          "A: the dial carrying no trust key never comes up — the peer cert does not validate");
 
     // 4. `insecure = 0` is the explicit "verify" spelling, not a weaker opt-out —
     //    a stale key left at zero must not disable validation by accident.
     const auto zero = node_a.write(path_t("/net/quic-client/conn"),
                                    quic_conn_spec("zero", ports["l4"], "127.0.0.1", {}, false));
-    check(!zero.has_value() && zero.error() == tr::graph::status_t::TRANSPORT_DOWN,
-          "A: `insecure = 0` passes the capability gate and still verifies — REFUSED");
+    check(zero.has_value() && stays_down("zero"),
+          "A: `insecure = 0` passes the capability gate and still verifies — never up");
 
     // 5. `ca = <an UNRELATED bundle>` — the bundle is genuinely consulted, not
     //    merely accepted: one that does not certify this peer still refuses. This
@@ -845,7 +888,8 @@ void test_spec_dial_trust_keys() {
     const auto wrong_ca =
         node_a.write(path_t("/net/quic-client/conn"),
                      quic_conn_spec("wrongca", ports["l5"], "127.0.0.1", "wrongca"));
-    check(!wrong_ca.has_value(), "A: `ca = <an unrelated CA>` is REFUSED — the bundle is applied");
+    check(wrong_ca.has_value() && stays_down("wrongca"),
+          "A: `ca = <an unrelated CA>` never comes up — the bundle is applied");
 }
 
 /**
@@ -931,7 +975,9 @@ void test_app_default_profile() {
 
     const auto d =
         node.write(path_t("/net/quic-client/conn"), quic_conn_spec("cli", port, "127.0.0.1"));
-    check(d.has_value(), "a DIAL with no `tls` key verifies against the default profile's CA");
+    const tr::net::transport_t* const cli = tr::testing::link_of(net, "net/quic-client/cli");
+    check(d.has_value() && cli != nullptr && await_up(*cli),
+          "a DIAL with no `tls` key verifies against the default profile's CA");
 
     // A stale config still carrying a retired key is REFUSED even where a usable
     // default profile exists: skipping `ca` would silently re-anchor the dial. Any
@@ -951,6 +997,59 @@ void test_app_default_profile() {
     check(router.registry().by_name("net/quic-client/stale") == nullptr &&
               router.registry().by_name("net/quic-server/stale-u8") == nullptr,
           "no stale-key refusal leaves a connection behind");
+}
+
+/**
+ * @brief #2306: a dial returns before its handshake, sends before `up` are counted drops,
+ *        and a handshake that never completes ends in ONE link-down fire.
+ *
+ * The peer is a plain UDP socket that reads nothing and answers nothing, so no ICMP races
+ * the test either: the handshake can only end on msquic's own handshake idle timeout. The
+ * constructor returning well inside that timeout is the proof that it did not wait.
+ */
+void test_dial_does_not_wait() {
+    std::printf("QUIC dial — returns at once, comes up or down on msquic's callbacks (#2306):\n");
+    const int hole = ::socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in at{};
+    at.sin_family = AF_INET;
+    at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(at);
+    const bool bound = hole >= 0 && ::bind(hole, reinterpret_cast<sockaddr*>(&at), len) == 0 &&
+                       ::getsockname(hole, reinterpret_cast<sockaddr*>(&at), &len) == 0;
+    check(bound, "a silent UDP peer is bound on loopback");
+
+    // The proof the constructor did not wait is the events, not a stopwatch: it returned
+    // with the dial started, not up, and not yet ended — the old constructor could only
+    // return once the handshake had failed.
+    std::atomic<int> downs{0};
+    const auto count = [](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); };
+    quic_transport_t dialer("127.0.0.1", ntohs(at.sin_port), dev_tls());
+    const bool missed = dialer.set_down_notifier(count, &downs);
+    check(dialer.ok() && !dialer.link_up() && !dialer.dial_ended() && !missed && downs.load() == 0,
+          "the constructor returned with the dial started, not up and not ended");
+
+    const std::array<std::byte, 3> small{std::byte{1}, std::byte{2}, std::byte{3}};
+    dialer.send(std::span<const std::byte>(small));
+    check(dialer.dropped_tx() == 1, "a send before up is dropped and counted, never queued");
+
+    // msquic's default handshake idle timeout is 10 s; give it room, from the test's clock.
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    while (downs.load() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(10ms);
+    check(downs.load() == 1 && !dialer.link_up() && dialer.dial_ended(),
+          "the handshake that never completed ends in one link-down fire");
+    if (hole >= 0) ::close(hole);
+
+    // A refusal that lands BEFORE any notifier is installed is kept, not lost: the install
+    // reports it, so the installer runs its notifier itself (what the router does).
+    quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+    std::atomic<int> late{0};
+    quic_transport_t refused("127.0.0.1", listener.local_port(),
+                             quic_dial_tls_t{.ca_file = g_other_cert});
+    check(refused.ok() && await_ended(refused) && !refused.link_up(),
+          "a wrong-CA dial is started, then ends on its refused handshake");
+    check(refused.set_down_notifier(count, &late) && late.load() == 0,
+          "the fire that found no notifier is reported to the late install");
 }
 
 }  // namespace
@@ -984,6 +1083,7 @@ int main() {
                   tr::net::tls_profile_t{
                       .name = "wrongca", .ca_file = g_other_cert, .cert_file = {}, .key_file = {}}};
 
+    test_dial_does_not_wait();
     test_raw_frame_duplex();
     test_split_and_coalesced();
     test_big_frame_chunking();

@@ -35,9 +35,9 @@
  *     buffer is unavoidable — and the only library-held buffer.
  *   - The RX length-prefix reassembly (the shared length_prefix_framer_t) and
  *     its delivery through the outer transport's receiver_slot_t.
- *   - The dial-side handshake rendezvous (the constructor blocks until
- *     CONNECTED or shutdown, the tcp_transport_t dial shape) and the shared
- *     LISTEN bring-up (listener start + ephemeral-port resolution).
+ *   - The non-blocking dial (it returns once the handshake is started; msquic's
+ *     CONNECTED and shutdown callbacks bring the link up or down, #2306) and the
+ *     shared LISTEN bring-up (listener start + ephemeral-port resolution).
  *
  * The derived transports keep ONLY their variance points — stream
  * classification/adoption, per-peer harvest shape, and (for webtransport) the
@@ -55,8 +55,6 @@
 #include <msquic.h>
 
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -125,8 +123,6 @@ struct tsan_cb_guard_t {
 inline constexpr std::size_t kPrefixBytes = length_prefix_framer_t::kPrefixBytes;
 /** @brief App-layer connection-shutdown code: framing lost on the frame stream. */
 inline constexpr std::uint64_t kAppErrMalformed = 0x1;
-/** @brief Dial-constructor rendezvous budget per stage (milliseconds). */
-inline constexpr std::uint32_t kHandshakeWaitMs = 10'000;
 
 /**
  * @brief One in-flight send: the QUIC_BUFFER msquic reads from plus the owned
@@ -214,7 +210,7 @@ static_assert(std::is_trivially_destructible_v<send_ctx_t>);
  *        derives from (the posix_endpoint_t precedent, msquic-flavored).
  *
  * Owns the msquic object tree, the shared bring-up (open_common / dial /
- * listen_start), the handshake rendezvous, the one-peer listener-replacement
+ * listen_start), the link-state callbacks, the one-peer listener-replacement
  * skeleton, the RX reassembly + delivery, the one-copy TX path, and the
  * 5-step teardown. Members are public on purpose: this is an
  * implementation-detail base of the module's pimpl structs (exactly the
@@ -332,10 +328,12 @@ class msquic_endpoint_t {
      *         that drains during our own teardown must not fire the notifier (it
      *         would re-enter a routing plane being disposed). */
     std::atomic<bool> stopping{false};
-    /** @brief Latched true at CONNECTED, consumed by the ONE departure fire: a
-     *         link that never came up flowed no frames (nothing to evict), and
-     *         the SHUTDOWN_COMPLETE trailing a hangup — or a replacement harvest
-     *         after the callback already fired — must not re-fire. */
+    /** @brief Armed when a dial starts (a DIAL link's whole life, its failed handshake
+     *         included, ends in ONE down fire) or at CONNECTED (a LISTEN peer), and
+     *         consumed by that one departure fire: a listen peer that never came up flowed
+     *         no frames (nothing to evict), and the SHUTDOWN_COMPLETE trailing a hangup —
+     *         or a replacement harvest after the callback already fired — must not
+     *         re-fire. */
     std::atomic<bool> link_established{false};
     /** @} */
 
@@ -359,18 +357,6 @@ class msquic_endpoint_t {
     /** @} */
 
     /**
-     * @name DIAL handshake rendezvous: the ctor blocks until CONNECTED or
-     *       shutdown (derived transports may add further stages on the same
-     *       mutex/cv — the webtransport session stage).
-     * @{
-     */
-    std::mutex wait_m;               /**< @brief Guards the rendezvous flags. */
-    std::condition_variable wait_cv; /**< @brief Signaled by the stage signals. */
-    bool handshake_done = false;     /**< @brief QUIC handshake stage resolved. */
-    bool handshake_ok = false;       /**< @brief QUIC handshake stage outcome. */
-    /** @} */
-
-    /**
      * @brief RX frame reassembly across msquic RECEIVE chunks. Touched only on
      *        the frame stream's callback (msquic serializes per-connection
      *        callbacks) and reset by the listener before a replacement peer's
@@ -380,32 +366,6 @@ class msquic_endpoint_t {
 
     /** @brief Reset the RX reassembly state for a replacement peer. */
     void reset_rx() { framer_.reset(); }
-
-    /** @brief Resolve the QUIC-handshake rendezvous stage (idempotent). */
-    void signal_handshake(bool ok) {
-        {
-            const std::lock_guard lock(wait_m);
-            if (handshake_done) return;
-            handshake_done = true;
-            handshake_ok = ok;
-        }
-        wait_cv.notify_all();
-    }
-
-    /**
-     * @brief Wait for one rendezvous stage (dial ctor), bounded by
-     *        @ref kHandshakeWaitMs.
-     *
-     * @param done The stage's done flag (guarded by @ref wait_m).
-     * @param ok   The stage's outcome flag.
-     * @return True when the stage resolved successfully within the budget.
-     */
-    bool wait_stage(bool& done, bool& ok) {
-        std::unique_lock lock(wait_m);
-        wait_cv.wait_for(lock, std::chrono::milliseconds(kHandshakeWaitMs),
-                         [&done] { return done; });
-        return done && ok;
-    }
 
     /** @brief Shut the live connection down with app-layer @p code (no close —
      *         the handle stays owned by the destructor / replacement path). */
@@ -675,15 +635,18 @@ class msquic_endpoint_t {
     }
 
     /**
-     * @brief DIAL bring-up through the QUIC handshake: client credential
+     * @brief DIAL bring-up up to the start of the QUIC handshake: client credential
      *        (CA bundle or the DEV-ONLY no-verify escape), open_common,
-     *        ConnectionOpen/Start, then the handshake rendezvous.
+     *        ConnectionOpen/Start.
      *
-     * The tcp_transport_t dial shape: blocks until the handshake resolves so
-     * the caller's ok() is meaningful at construction (CONNECTED, or any
-     * shutdown / timeout = failure).
+     * Returns as soon as msquic accepts the start; it never waits for the handshake
+     * (#2306). The link is not up until msquic's CONNECTED callback, and a handshake
+     * that fails ends in the connection's shutdown callback, which fires the link-down
+     * notifier once. How long a handshake may take is msquic's own
+     * `HandshakeIdleTimeoutMs`; an app that wants a tighter deadline drives it from its
+     * own clock.
      *
-     * @return True when the handshake completed; on false the caller returns
+     * @return True when the handshake was started; on false the caller returns
      *         with open_ok still false and teardown() unwinds what opened.
      */
     bool dial(const char* reg_name, const QUIC_BUFFER& alpn, const QUIC_SETTINGS& settings,
@@ -710,11 +673,16 @@ class msquic_endpoint_t {
             conn = nullptr;
             return false;
         }
+        // The dial's one down fire is armed BEFORE the start: a handshake that fails at once
+        // lands its shutdown callback while ConnectionStart is still returning.
+        link_established.store(true, std::memory_order_relaxed);
         tsan_release(this);  // publish the constructed endpoint to the callbacks
         if (QUIC_FAILED(api->ConnectionStart(conn, config, QUIC_ADDRESS_FAMILY_UNSPEC, host.c_str(),
-                                             peer_port)))
+                                             peer_port))) {
+            link_established.store(false, std::memory_order_relaxed);  // nothing started
             return false;
-        return wait_stage(handshake_done, handshake_ok);
+        }
+        return true;
     }
 
     /**
@@ -805,8 +773,8 @@ class msquic_endpoint_t {
      * @{
      */
 
-    /** @brief CONNECTED hook, after `up` is set and before the handshake
-     *         signal (webtransport's server opens its H3 face here). */
+    /** @brief CONNECTED hook, just before `up` is set: a dialer opens its streams here
+     *         (the handshake is complete), and webtransport's server its H3 face. */
     virtual void on_connected(HQUIC c) { (void)c; }
 
     /** @brief The peer opened a stream — classify/adopt it (the per-transport
@@ -814,7 +782,7 @@ class msquic_endpoint_t {
     virtual QUIC_STATUS on_peer_stream_started(HQUIC c, QUIC_CONNECTION_EVENT* ev) = 0;
 
     /** @brief Connection-down hook (any shutdown event), after `up` clears and
-     *         before the handshake signal (webtransport clears its session). */
+     *         before the departure fire (webtransport clears its session). */
     virtual void on_conn_down() {}
 
     /**
@@ -844,18 +812,19 @@ class msquic_endpoint_t {
      * @{
      */
 
-    /** @brief The connection callback: link-state flags, the handshake
-     *         rendezvous, and dispatch to the stream-adoption virtual. */
+    /** @brief The connection callback: link-state flags, the CONNECTED and down
+     *         hooks, and dispatch to the stream-adoption virtual. */
     static QUIC_STATUS QUIC_API conn_cb(HQUIC conn_h, void* ctx, QUIC_CONNECTION_EVENT* ev) {
         auto* self = static_cast<msquic_endpoint_t*>(ctx);
         const tsan_cb_guard_t guard(self);  // msquic serializes callbacks (see file top)
         switch (ev->Type) {
             case QUIC_CONNECTION_EVENT_CONNECTED:
-                self->up.store(true, std::memory_order_relaxed);
+                // The hook first: a dialer's frame stream is in place before link_up() says
+                // so, so a sender that waited for up is not dropped for a missing stream.
+                self->on_connected(conn_h);
                 self->link_established.store(true,
                                              std::memory_order_relaxed);  // arm the fire latch
-                self->on_connected(conn_h);
-                self->signal_handshake(true);
+                self->up.store(true, std::memory_order_relaxed);
                 return QUIC_STATUS_SUCCESS;
             case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
                 return self->on_peer_stream_started(conn_h, ev);
@@ -867,7 +836,6 @@ class msquic_endpoint_t {
                 // listener replacement path owns it.
                 self->up.store(false, std::memory_order_relaxed);
                 self->on_conn_down();
-                self->signal_handshake(false);
                 // Departure seam: the one peer's connection went down under us —
                 // evict its subscriber edges. Guarded so our own teardown (and a
                 // link that never came up) does not fire, deduped so the trailing
