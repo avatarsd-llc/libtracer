@@ -62,7 +62,7 @@ struct twai_link_config_t {
     std::size_t stack_size = 0;        /**< @brief Dispatch-thread stack size in bytes, 0 =
                                             the global pthread default
                                             (`CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`). The
-                                            stack is drawn from `memory.io` (#2288), so
+                                            stack is drawn from `memory.stack` (#2288), so
                                             non-zero right-sizes this task alone — the RAM
                                             lever (libtracer #486). Size to the measured
                                             high-water mark plus margin. */
@@ -173,6 +173,15 @@ class twai_link_t final : public can_link_t {
     [[nodiscard]] bool ok() const noexcept { return node_ != nullptr; }
 
     /**
+     * @brief True once @ref start has spawned the dispatch thread (#2288).
+     *
+     * `can_link_t::start` has no error channel, so a dispatch thread whose stack the link's
+     * `memory.stack` refused shows here, false after a start, and in that source's census
+     * (`stats().refused`), never as a link that is up and silently never delivers.
+     */
+    [[nodiscard]] bool receiving() const noexcept { return thread_.joinable(); }
+
+    /**
      * @brief Frames dropped by the TX FULL policy since construction.
      *
      * Counts writes that timed out waiting for an in-flight slot plus writes
@@ -204,7 +213,8 @@ class twai_link_t final : public can_link_t {
     /** @brief The dispatch thread's entry: `run()` on the @ref twai_link_t @p self. */
     static void entry(void* self);
 
-    mem::block_source_t* src_; /**< @brief `memory.io`: the queue, the pool, the stack. */
+    mem::block_source_t* src_;       /**< @brief `memory.io`: the RX queue and the TX pool. */
+    mem::block_source_t* stack_src_; /**< @brief `memory.stack`: the dispatch thread (#2288). */
     twai_node_handle_t node_ = nullptr;
     QueueHandle_t rx_queue_ = nullptr;        /**< @brief Of can_frame_data_t, ISR -> dispatch. */
     StaticQueue_t rx_queue_buf_{};            /**< @brief The queue's control block. */
@@ -230,7 +240,7 @@ class twai_link_t final : public can_link_t {
     std::size_t stack_size_ = 0;               /**< @brief Dispatch-thread stack hint, held from
                                                     construction and spent at start() (#1186). */
     std::atomic<bool> stop_{false};
-    static_thread_t thread_; /**< @brief The dispatch thread, from @ref src_ (#2288). */
+    static_thread_t thread_; /**< @brief The dispatch thread, from @ref stack_src_ (#2288). */
 };
 
 }  // namespace tr::net

@@ -354,8 +354,8 @@ class self_heal_link_t final : public transport_t {
     // THROWS on spawn failure, which is a `std::abort()` under `-fno-exceptions`, and on
     // ESP-IDF it takes its stack (`CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, 12,288 B stock)
     // from the platform heap per link. Here the worker's stack and control block come from
-    // @ref src_ on ESP-IDF (one block, sized by `tr::net::kSelfHealWorkerStackBytes`), and a
-    // refused spawn is an error the engine absorbs.
+    // `tr::mem::stack_source()` on ESP-IDF (one block, sized by
+    // `tr::net::kSelfHealWorkerStackBytes`), and a refused spawn is an error the engine absorbs.
     static_thread_t worker_;          /**< @brief Joined by @ref stop. */
     bool worker_started_ = false;     /**< @brief Lazy; claimed and cleared by @ref stop. */
     detail::thread_id_t worker_id_{}; /**< @brief Re-entrancy guard: the worker's own
