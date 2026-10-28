@@ -36,8 +36,8 @@ permissions:
   packages: write
 
 concurrency:
-  group: ci-image-${{ github.ref }}
-  cancel-in-progress: false
+  group: ci-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-push:

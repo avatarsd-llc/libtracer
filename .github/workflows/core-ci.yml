@@ -12,7 +12,7 @@
 #   head branch lives in this same repository, i.e. it is not a fork PR)
 #
 # A repository variable switches the whole route off: with `CI_SELF_HOSTED` set to `false`
-# (Settings → Variables → Actions), every leg here and in doc-citations.yml runs on the
+# (Settings → Variables → Actions), every guarded job in every workflow runs on the
 # hosted image. Unset or any other value keeps the self-hosted route for trusted runs.
 # perf.yml's bench runner does not read it: the gate needs the bench machine.
 #
@@ -182,11 +182,17 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Decides whether this change can affect anything core-ci builds. GitHub-hosted on
-  # purpose: it executes no build and must never wait on the self-hosted pool, and a
-  # fork PR running it touches nothing but a throwaway VM.
+  # Decides whether this change can affect anything core-ci builds. It executes no build,
+  # but our own runs still take the `ci-local` route like every other job (#2348): no
+  # pull request of this repository runs on a hosted runner. A fork PR falls back to one.
   changes:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      # The ci-local runners are bare machines, so the job runs in a container on BOTH
+      # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
+      # 10g is the per-job memory budget.
+      options: --memory 10g
     timeout-minutes: 10
     env:
       # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
@@ -202,6 +208,10 @@ jobs:
     outputs:
       relevant: ${{ steps.decide.outputs.relevant }}
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       - uses: actions/checkout@v4
         with:
           # A pull_request checkout is the merge commit: HEAD^1 is the base tip it was
@@ -249,6 +259,15 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
           echo "relevant=$relevant"
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
   build-test:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
@@ -1533,9 +1552,19 @@ jobs:
     name: build-test
     if: always()
     needs: [changes, build-test, build-test-minimal-set, build-test-bus-closed, build-test-self-heal-closed, build-test-arm64, build-test-gcc15, build-test-noise, sanitizers, tsan, tsan-membarrier, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (vars.CI_SELF_HOSTED != 'false' && github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container:
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
+      # The ci-local runners are bare machines, so the job runs in a container on BOTH
+      # routes (core-ci.yml's CONTAINER header). CPU is bounded host-side by runners.slice;
+      # 10g is the per-job memory budget.
+      options: --memory 10g
     timeout-minutes: 10
     steps:
+      - name: Check the runner workspace has room
+        # FIRST, before checkout: a full runner disk fails here, named, instead of as an
+        # action download or a test (#2343). Gated by tools/check_ci_workspace_cleanup.py.
+        run: a=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}'); [ "${a:-0}" -ge 4194304 ] || { echo "::error::runner workspace has $(( ${a:-0} / 1048576 )) GB free (< 4 GB); clean the runner, this is not a test failure"; exit 1; }
       - name: Combine the core-ci job results into one verdict
         env:
           NEEDS: ${{ toJSON(needs) }}
@@ -1555,6 +1584,15 @@ jobs:
             exit 1
           fi
           echo "ok"
+      - name: Clean this job's workspace off the host runner
+        # LAST, on every outcome (#2343): deletes this job's checkout, build trees, sibling
+        # worktrees and temp files so the shared runner tmpfs does not fill, and hands the
+        # runner's own _temp/_* dirs back to the host runner user (#1538). Runs as root in a
+        # container job and with sudo where the host grants it, so root-owned files go too.
+        # The workspace dir itself stays for the post steps. Gated, first step included,
+        # by tools/check_ci_workspace_cleanup.py.
+        if: always()
+        run: s=$(sudo -n true 2>/dev/null && echo 'sudo -n' || true); w="${GITHUB_WORKSPACE%/}"; w="${w:?}"; t="${RUNNER_TEMP:?}"; r=0; $s find "$w/.." -mindepth 1 -maxdepth 1 ! -path "$w/../${w##*/}" -exec rm -rf {} + || r=1; $s find "$w" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || r=1; $s find "$t" -mindepth 1 -maxdepth 1 ! -name '_*' -exec rm -rf {} + || r=1; $s chown -R "$(stat -c '%u:%g' "$w/..")" "$t" || r=1; [ "$r" = 0 ] || echo "::warning::this job left files in the runner workspace; the next job's free-space check names a full disk"
 
 concurrency:
   group: core-ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
