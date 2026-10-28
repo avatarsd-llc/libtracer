@@ -16,6 +16,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Library threads draw from a block source, never the platform heap (#2288).** New
+  `tr::static_thread_t` (`libtracer/static_thread.hpp`) is the one thread spawn the library uses.
+  On ESP-IDF it is a static FreeRTOS task whose control block and stack are ONE block drawn from
+  the caller's source; on a POSIX host it is `pthread_create` and the source pays only a small
+  boot record. A refused draw is a failed spawn, never an abort. The source rules:
+  - `posix_endpoint_t::start` (the tcp, udp and ws receive threads) takes a source, default
+    `mem::net_source()`; it must outlive the transport. On an MCU arena build that default is the
+    static arena, which now also holds each receive stack: size the arena for it, or pass one.
+  - `self_heal_link_t`'s worker draws from the link's own `src`, which already had to outlive
+    the link.
+  - `loopback_channel_t` takes an optional source (default `mem::net_source()`) that must
+    outlive the channel. Each queued frame is one block from it, on an intrusive FIFO, and both
+    receive threads come from it. A frame whose block is refused, or sent to a stopped peer, is
+    dropped and counted in the new `loopback_endpoint_t::drop_stats()` (`dropped_tx`).
+  - A thread that may be DETACHED (`static_thread_t::detach`) must draw from a source that
+    outlives the process (`mem::default_root()`): on ESP-IDF its block is parked on an intrusive
+    list and released only after its body returns, at the next spawn, join or detach.
 - **A QUIC or WebTransport dial no longer waits for its handshake (#2306).** The DIAL
   constructors of `quic_transport_t` and `webtransport_transport_t` return as soon as the
   connection is started; `ok()` now means the dial started, not that the link is up. The link

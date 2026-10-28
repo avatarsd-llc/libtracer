@@ -22,10 +22,10 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #include "esp_log.h"
-#include "esp_thread.hpp"
 #include "esp_timer.h"
 #include "esp_transport.h"
 #include "esp_transport_tcp.h"
@@ -381,7 +381,16 @@ void esp_ws_client_link_t::start_receiving() {
     // able to size it (#900).
     if (stop_.load(std::memory_order_acquire) || armed_.exchange(true, std::memory_order_acq_rel))
         return;
-    recv_thread_ = esp::spawn_thread(recv_stack_, "ws_cli_rx", [this] { recv_loop(); });
+    // The stack comes from the process-lifetime default root, never a source that dies with
+    // this link: shut_down may detach the thread mid-dial, and a detached static task's block
+    // is reaped later (static_thread_t::detach, #2288). A refused draw leaves the link not
+    // dialing, as a failed spawn always did.
+    (void)recv_thread_.start(&esp_ws_client_link_t::recv_entry, this, recv_stack_, "ws_cli_rx",
+                             mem::default_root());
+}
+
+void esp_ws_client_link_t::recv_entry(void* self) {
+    static_cast<esp_ws_client_link_t*>(self)->recv_loop();
 }
 
 void esp_ws_client_link_t::shut_down() {

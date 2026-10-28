@@ -47,6 +47,7 @@ set(LIBTRACER_SOURCES_REQUIRED
     "${_libtracer_src}/graph_fields.cpp"
     "${_libtracer_src}/link_index.cpp"
     "${_libtracer_src}/loopback.cpp"
+    "${_libtracer_src}/static_thread.cpp"
 )
 
 # The FWD net/routing plane: op_resolve, fwd_router, transport_vertex.

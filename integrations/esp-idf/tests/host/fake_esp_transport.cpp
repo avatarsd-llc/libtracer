@@ -9,6 +9,8 @@
 
 #include "fake_esp_transport.hpp"
 
+#include <pthread.h>
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -21,7 +23,6 @@
 #include <thread>
 #include <utility>
 
-#include "esp_pthread.h"
 #include "esp_transport.h"
 #include "esp_transport_tcp.h"
 #include "libtracer/ws.hpp"
@@ -95,11 +96,7 @@ struct state_t {
     int readers = 0;                   /**< @brief Readers parked right now. */
     /** @} */
 
-    std::size_t armed_stack = 0; /**< @brief Last arming set_cfg's stack_size. */
-    std::string armed_name;      /**< @brief Its thread_name. */
-    bool restored = false;       /**< @brief A zero-stack set_cfg followed it. */
-    bool cfg_live = false;       /**< @brief A config is currently armed (get_cfg). */
-    esp_pthread_cfg_t cfg{};     /**< @brief The armed config itself. */
+    std::size_t dial_stack = 0; /**< @brief The first dialing thread's stack size. */
 };
 
 /** @brief The single fake instance. */
@@ -180,10 +177,7 @@ void reset() {
     st().headers.reset();
     st().dialed_headers.clear();
     st().socket_fd = -1;
-    st().armed_stack = 0;
-    st().armed_name.clear();
-    st().restored = false;
-    st().cfg_live = false;
+    st().dial_stack = 0;
 }
 
 void push_frames(std::vector<frame_t> frames) {
@@ -219,19 +213,9 @@ void set_socket_fd(int fd) {
     st().socket_fd = fd;
 }
 
-std::size_t armed_stack() {
+std::size_t dial_stack() {
     const std::lock_guard<std::mutex> lk(st().m);
-    return st().armed_stack;
-}
-
-std::string armed_name() {
-    const std::lock_guard<std::mutex> lk(st().m);
-    return st().armed_name;
-}
-
-bool cfg_restored() {
-    const std::lock_guard<std::mutex> lk(st().m);
-    return st().restored;
+    return st().dial_stack;
 }
 
 void fail_connects(bool on) {
@@ -404,6 +388,13 @@ int esp_transport_connect(esp_transport_handle_t t, const char* host, int port, 
     std::unique_lock<std::mutex> lk(st().m);
     if (!handle_usable(t)) return -1;
     ++st().connects;
+    if (st().dial_stack == 0) {
+        pthread_attr_t attr;
+        if (::pthread_getattr_np(::pthread_self(), &attr) == 0) {
+            (void)::pthread_attr_getstacksize(&attr, &st().dial_stack);
+            ::pthread_attr_destroy(&attr);
+        }
+    }
     // Sampled HERE, not read back later: what dial N requested is a fact only dial N can
     // report, and what #959 left undefined was whether the first dial requested the same
     // headers as every one after it. Recorded for failed and hung dials too — what a dial
@@ -577,36 +568,6 @@ int esp_transport_ws_get_read_payload_len(esp_transport_handle_t t) {
     (void)t;
     const std::lock_guard<std::mutex> lk(st().m);
     return st().last_payload_len;
-}
-
-/** @} */
-
-/** @name The `esp_pthread` stack-sizing surface (#900's observable). */
-/** @{ */
-
-esp_pthread_cfg_t esp_pthread_get_default_config(void) { return esp_pthread_cfg_t{}; }
-
-esp_err_t esp_pthread_set_cfg(const esp_pthread_cfg_t* cfg) {
-    if (cfg == nullptr) return ESP_FAIL;
-    const std::lock_guard<std::mutex> lk(st().m);
-    if (cfg->stack_size != 0) {
-        st().armed_stack = cfg->stack_size;
-        st().armed_name = cfg->thread_name != nullptr ? cfg->thread_name : "";
-        st().restored = false;
-    } else if (st().armed_stack != 0) {
-        st().restored = true;  // the arming config was put back
-    }
-    st().cfg = *cfg;
-    st().cfg_live = true;
-    return ESP_OK;
-}
-
-esp_err_t esp_pthread_get_cfg(esp_pthread_cfg_t* p) {
-    if (p == nullptr) return ESP_FAIL;
-    const std::lock_guard<std::mutex> lk(st().m);
-    if (!st().cfg_live) return ESP_FAIL;  // nothing armed: leave *p untouched, as IDF does
-    *p = st().cfg;
-    return ESP_OK;
 }
 
 /** @} */

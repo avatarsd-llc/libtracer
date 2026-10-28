@@ -143,20 +143,17 @@ void self_heal_link_t::release() {
 }
 
 void self_heal_link_t::stop() {
-    pthread_t w{};
     bool started = false;
     {
         const std::lock_guard l(m_);
         stop_ = true;
-        // Take the handle out under the lock and clear the flag, so a second `stop()` (the
-        // destructor after an explicit one) joins nothing rather than joining twice — the
-        // `std::move(worker_)` this replaces bought the same idempotence.
+        // Claim the worker under the lock and clear the flag, so a second `stop()` (the
+        // destructor after an explicit one) joins nothing rather than joining twice.
         started = worker_started_;
-        w = worker_;
         worker_started_ = false;
         cv_.notify_all();
     }
-    if (started) (void)::pthread_join(w, nullptr);
+    if (started) worker_.join();
     // Tear the sockets down with `m_` RELEASED: each destruction joins a receive thread
     // that may itself be blocked in on_socket_down waiting for `m_`.
     sock_t* dead = nullptr;
@@ -215,29 +212,19 @@ self_heal_link_t::sock_ref_t self_heal_link_t::ready_socket() {
     return {};
 }
 
-void* self_heal_link_t::worker_entry(void* self) {
+void self_heal_link_t::worker_entry(void* self) {
     static_cast<self_heal_link_t*>(self)->worker_main();
-    return nullptr;
 }
 
 void self_heal_link_t::ensure_worker_locked() {
     if (stop_ || worker_started_) return;
-    pthread_attr_t attr;
-    ::pthread_attr_init(&attr);
-    // The #1470 stack knob. `if constexpr` so the default binding (0 — every host build)
-    // emits no call at all and the spawn stays the one that shipped. A hint below the
-    // platform floor makes setstacksize answer EINVAL and leaves the attr's default in
-    // place, so the spawn still happens with the default stack — the same soft behaviour
-    // `posix_endpoint_t::start` and `socketcan_link_t::start` take.
-    if constexpr (kSelfHealWorkerStackBytes != 0)
-        (void)::pthread_attr_setstacksize(&attr, kSelfHealWorkerStackBytes);
-    // Error-code return, not a throw: a `std::thread` spawn failure is a `std::abort()`
-    // under -fno-exceptions, which is not an answer a link-liveness engine may give on an
-    // out-of-heap MCU. A failed spawn simply leaves the engine unworkered — the next
-    // transition tries again.
-    worker_started_ =
-        (::pthread_create(&worker_, &attr, &self_heal_link_t::worker_entry, this) == 0);
-    ::pthread_attr_destroy(&attr);
+    // The #1470 stack knob (0 = the platform default; every host build). On ESP-IDF the
+    // stack is drawn from the link's own source with its control block (#2288); a refused
+    // spawn, from the source or the platform, simply leaves the engine unworkered and the
+    // next transition tries again. Never a throw: a `std::thread` spawn failure is a
+    // `std::abort()` under -fno-exceptions.
+    worker_started_ = worker_.start(&self_heal_link_t::worker_entry, this,
+                                    kSelfHealWorkerStackBytes, "tr_heal", src_);
 }
 
 void self_heal_link_t::publish_unlocked(std::unique_lock<std::mutex>& l, link_state_t s) {

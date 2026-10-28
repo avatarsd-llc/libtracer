@@ -12,6 +12,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The chip links create their threads, queues and semaphores statically, from a block source
+  ([#2288](https://github.com/avatarsd-llc/libtracer/issues/2288)).** No libtracer thread or
+  queue on ESP-IDF comes from the platform heap any more: each thread is a
+  `tr::static_thread_t`, a static FreeRTOS task whose `StaticTask_t` and stack are one block
+  drawn from a source. The source rules:
+  - `twai_link_t` draws its dispatch thread's stack, its ISR→dispatch queue storage and (as
+    before) its TX pool from `twai_link_config_t::memory.io`, null meaning the net sub-pool; it
+    must outlive the link. The queue and the TX-slot semaphore are `xQueueCreateStatic` /
+    `xSemaphoreCreateCountingStatic`. A refused queue leaves `ok()` false; a refused stack leaves
+    the link not receiving. `stack_size` still sizes the thread, now without `esp_pthread_set_cfg`.
+  - `esp_ws_client_link_t`'s recv thread draws from `tr::mem::default_root()`, never the link's
+    source: a teardown mid-dial detaches it, and a detached task's block is released after the
+    link is gone. `recv_stack` sizes it as before.
+  - The tcp, udp and ws receive threads draw from the core default, `mem::net_source()`: on an
+    arena build that is the static arena (`CONFIG_LIBTRACER_ARENA_BYTES`), which must now hold
+    each receive stack too.
+  - The private `esp_thread.hpp` helper (`esp::spawn_thread`) is gone.
 - **BREAKING: the auth deadline is the application's
   ([#2257](https://github.com/avatarsd-llc/libtracer/issues/2257)).** `httpd_ws_link_t` no
   longer reads a clock or runs a timer for it. The per-link `esp_timer` sweep, the reap the

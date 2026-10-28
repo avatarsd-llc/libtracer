@@ -9,19 +9,18 @@
  * Same construction as the #816 / #835 httpd suites: the REAL chip translation unit
  * (`integrations/esp-idf/libtracer/esp_ws_client_link.cpp`) is compiled here against a
  * host fake of the one IDF facility each contract rests on — `esp_transport_ws`'s frame
- * stream and `esp_pthread`'s stack-sizing seam (fake_esp_transport.hpp). No socket is
+ * stream (fake_esp_transport.hpp). No socket is
  * opened at any layer: the ESP-IDF WebSocket plane must never use POSIX sockets (#947),
  * and a fake that opened one would prove the wrong thing.
  *
  * What is pinned here:
  *
- *   1. #900 — the `recv_stack` knob REACHES the thread. On IDF a `std::thread`'s stack
- *      comes from the global `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` unless
- *      `esp_pthread_set_cfg` armed the next `pthread_create`; the ctor used to
+ *   1. #900 — the `recv_stack` knob REACHES the thread. The ctor used to
  *      `(void)recv_stack` and spawn a plain `std::thread`, so a caller who sized the
  *      stack for its in-call delivery path got the default and a stack-overflow reboot.
- *      The observable is the arming call, plus its restore (or the size would leak onto
- *      every later thread spawned from the same caller).
+ *      The thread is now a `tr::static_thread_t` (#2288): a static task on IDF, a pthread
+ *      sized through its attr here. The observable is the stack of the thread that dials,
+ *      read back inside the fake's connect.
  *
  *   2. #901 — drop-don't-truncate ACTUALLY HOLDS. An oversized message is dropped
  *      WHOLE: its remainder is consumed and discarded, never handed up as a bogus
@@ -52,10 +51,12 @@
  * counting deliveries at the moment the good one lands catches it without a timing
  * guess.
  *
- * What this suite deliberately does NOT claim: that 12288 bytes is enough stack for a
+ * What this suite deliberately does NOT claim: that any one stack size is enough for a
  * given graph's delivery depth. That is a per-application high-water-mark measurement
  * and belongs on the HIL, not on a host fake.
  */
+
+#include <pthread.h>
 
 #include <array>
 #include <atomic>
@@ -151,6 +152,19 @@ class sink_t {
 
 /** @brief The rx buffer every receive-path case sizes its frames against. */
 constexpr std::size_t kRxBytes = 64;
+/** @brief A recv stack the host can honor and tell apart from its default: above the glibc
+ *         floor (`PTHREAD_STACK_MIN`, 16 KiB on x86-64) and far below the 8 MiB default. */
+constexpr std::size_t kHostStack = 256 * 1024;
+
+/** @brief The stack a pthread spawned with a default attr gets on this host. */
+std::size_t default_stack() {
+    pthread_attr_t attr;
+    ::pthread_attr_init(&attr);
+    std::size_t n = 0;
+    (void)::pthread_attr_getstacksize(&attr, &n);
+    ::pthread_attr_destroy(&attr);
+    return n;
+}
 
 /** @brief A distinctive well-formed message used as the "did the assembler recover?"
  *         probe after every drop. */
@@ -163,23 +177,17 @@ bool same_bytes(const std::vector<std::byte>& got, const fake_ws::frame_t& want)
     return got == want.payload;
 }
 
-/**
- * @brief #900 — a non-zero `recv_stack` arms the pthread config, and the config is
- *        restored so the size does not leak onto later spawns.
- */
+/** @brief #900 — a non-zero `recv_stack` is the stack the recv thread runs on. */
 void test_recv_stack_reaches_the_thread() {
     std::printf("#900 recv_stack is honored:\n");
     fake_ws::reset();
     {
-        // 12288 is the depth the sibling SERVER link already sizes this workload at
-        // (httpd_ws_link_t's recv stack) — the in-call graph delivery is the same one.
         tr::net::esp_ws_client_link_t link(
-            "127.0.0.1", 8080, {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288});
+            "127.0.0.1", 8080,
+            {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = kHostStack});
         link.start_receiving();
-        check(fake_ws::armed_stack() == 12288, "the requested stack size was armed");
-        check(fake_ws::armed_name() == "ws_cli_rx", "the recv thread was named");
-        check(fake_ws::cfg_restored(), "the surrounding pthread config was restored");
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
+        check(fake_ws::dial_stack() == kHostStack, "on a thread of the requested stack size");
     }
     check_drained();
 }
@@ -188,35 +196,38 @@ void test_recv_stack_reaches_the_thread() {
  * @brief #1606 — a link spawns NO recv thread until it is armed: the thread
  *        stack is the largest thing an unarmed link used to hold for nothing.
  *
- * The observable is #900's: a sized spawn arms the pthread config, so a link that has not
- * armed it has not spawned. Arming spawns it at the configured size; a second arm is a
- * no-op, and an arm after shut_down() spawns nothing.
+ * The recv thread is what dials, so a link that has not dialed by the time an armed one
+ * would have has not spawned. Arming spawns it at the configured size; an arm after
+ * shut_down() spawns nothing.
  */
 void test_unarmed_link_spawns_no_thread() {
     std::printf("#1606 an unarmed link has no recv thread:\n");
     fake_ws::reset();
     {
         tr::net::esp_ws_client_link_t link(
-            "127.0.0.1", 8080, {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288});
-        check(fake_ws::armed_stack() == 0, "construction spawned no thread");
+            "127.0.0.1", 8080,
+            {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = kHostStack});
+        check(!wait_until([] { return fake_ws::connect_count() >= 1; }, 200ms),
+              "construction spawned no thread");
         link.start_receiving();
-        check(fake_ws::armed_stack() == 12288, "arming spawned it, at the configured stack");
-        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "and it dialed");
+        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "arming dialed");
+        check(fake_ws::dial_stack() == kHostStack, "from a thread at the configured stack");
     }
     check_drained();
     fake_ws::reset();
     {
         tr::net::esp_ws_client_link_t link(
-            "127.0.0.1", 8080, {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288});
+            "127.0.0.1", 8080,
+            {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = kHostStack});
         link.shut_down();
         link.start_receiving();
-        check(fake_ws::armed_stack() == 0, "an arm after shut_down() spawns nothing");
-        check(!wait_until([] { return fake_ws::connect_count() >= 1; }, 200ms), "nor dials");
+        check(!wait_until([] { return fake_ws::connect_count() >= 1; }, 200ms),
+              "an arm after shut_down() spawns nothing and dials nothing");
     }
     check_drained();
 }
 
-/** @brief #900 — `recv_stack == 0` keeps the historical behaviour: nothing is armed. */
+/** @brief #900 — `recv_stack == 0` keeps the platform default stack. */
 void test_zero_recv_stack_arms_nothing() {
     std::printf("#900 recv_stack=0 is the platform default:\n");
     fake_ws::reset();
@@ -224,8 +235,8 @@ void test_zero_recv_stack_arms_nothing() {
         tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
                                            {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes});
         link.start_receiving();
-        check(fake_ws::armed_stack() == 0, "no pthread config was armed");
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
+        check(fake_ws::dial_stack() == default_stack(), "on the platform default stack");
     }
     check_drained();
 }

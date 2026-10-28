@@ -24,9 +24,6 @@
 /** @brief Opaque semaphore handle (FreeRTOS's incomplete-struct pointer). */
 typedef struct fake_semaphore_t* SemaphoreHandle_t;
 
-/** @brief Create a counting semaphore of @p max_count, starting at @p initial_count. */
-SemaphoreHandle_t xSemaphoreCreateCounting(UBaseType_t max_count, UBaseType_t initial_count);
-
 /** @brief Free a semaphore. Callers waiting on it must already be gone. */
 void vSemaphoreDelete(SemaphoreHandle_t semaphore);
 
@@ -64,3 +61,8 @@ typedef struct {
  * owns the semaphore model of the one link it stands behind.
  */
 SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t* storage);
+
+/** @brief Create a counting semaphore of @p max_count, starting at @p initial_count, in
+ *         caller-provided storage (modelled by fake_twai.cpp). */
+SemaphoreHandle_t xSemaphoreCreateCountingStatic(UBaseType_t max_count, UBaseType_t initial_count,
+                                                 StaticSemaphore_t* storage);

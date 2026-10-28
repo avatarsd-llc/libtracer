@@ -31,7 +31,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
-#include <thread>
 
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
@@ -39,6 +38,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "libtracer/can_tx_pool.hpp"
+#include "libtracer/static_thread.hpp"
 #include "libtracer/transport_can.hpp"
 
 namespace tr::net {
@@ -60,19 +60,24 @@ struct twai_link_config_t {
                                             — one frame's wait must not on its own outlast
                                             the window a task may go unfed (#962). */
     std::size_t stack_size = 0;        /**< @brief Dispatch-thread stack size in bytes, 0 =
-                                            the global pthread default. Non-zero right-sizes
-                                            this task via `esp_pthread_set_cfg` instead of
-                                            inflating `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`
-                                            for every pthread — the RAM lever (libtracer #486).
-                                            Size to the measured high-water mark plus margin. */
+                                            the global pthread default
+                                            (`CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`). The
+                                            stack is drawn from `memory.io` (#2288), so
+                                            non-zero right-sizes this task alone — the RAM
+                                            lever (libtracer #486). Size to the measured
+                                            high-water mark plus margin. */
     /**
      * @brief The link's memory (@ref link_memory_t), the shape the WS links take (#1880).
      *
-     * Only `io` is read: the in-flight TX pool (`tx_queue_depth + 1` slots and their
-     * flags) is drawn from it once, by the constructor, and a store that refuses it is a
-     * sizing bug that aborts there (`mem::exhausted_at_init`, ADR-0083). Null means the
-     * process net sub-pool. `rx` and `state` are unused: the ISR→dispatch handoff is a
-     * FreeRTOS queue of fixed records, created by the RTOS, not drawn from a source.
+     * Only `io` is read, and it MUST outlive the link. The in-flight TX pool
+     * (`tx_queue_depth + 1` slots and their flags) is drawn from it once, by the
+     * constructor, and a store that refuses it is a sizing bug that aborts there
+     * (`mem::exhausted_at_init`, ADR-0083). The ISR→dispatch queue's storage
+     * (`rx_queue_depth` fixed records) is drawn from it by the constructor too, and the
+     * dispatch thread's stack and task block by @ref twai_link_t::start (#2288): the RTOS
+     * creates both statically, so nothing comes from the platform heap. A refused queue
+     * leaves the link not up (@ref twai_link_t::ok); a refused stack leaves it not
+     * receiving. Null means the process net sub-pool. `rx` and `state` are unused.
      */
     link_memory_t memory{};
 };
@@ -84,8 +89,8 @@ struct twai_link_config_t {
  * serialized under a lock, inbound frames delivered through the registered
  * @ref can_link_t::rx_fn_t on an internal dispatch thread. The driver's
  * RX-done callback runs in ISR context, so it only copies the frame into a
- * FreeRTOS queue; the dispatch thread (a plain `std::thread`, i.e. a pthread
- * task on FreeRTOS) pops and invokes the callback — user code never runs in
+ * FreeRTOS queue; the dispatch thread (a static FreeRTOS task, @ref
+ * tr::static_thread_t) pops and invokes the callback — user code never runs in
  * the ISR. @ref ok is false if the controller failed to come up.
  *
  * TX path (#383): each outbound frame is copied into a link-owned
@@ -196,13 +201,20 @@ class twai_link_t final : public can_link_t {
                                void* user_ctx);
     /** @brief Dispatch thread: queue -> registered rx_fn_t. */
     void run();
+    /** @brief The dispatch thread's entry: `run()` on the @ref twai_link_t @p self. */
+    static void entry(void* self);
 
+    mem::block_source_t* src_; /**< @brief `memory.io`: the queue, the pool, the stack. */
     twai_node_handle_t node_ = nullptr;
     QueueHandle_t rx_queue_ = nullptr;        /**< @brief Of can_frame_data_t, ISR -> dispatch. */
+    StaticQueue_t rx_queue_buf_{};            /**< @brief The queue's control block. */
+    void* rx_queue_storage_ = nullptr;        /**< @brief Its records, drawn from @ref src_. */
+    std::size_t rx_queue_bytes_ = 0;          /**< @brief Their size, for the release. */
     rx_fn_t rx_;                              /**< @brief Guarded by m_. */
     std::mutex m_;                            /**< @brief Guards rx_. */
     std::mutex write_m_;                      /**< @brief Serializes writes / teardown. */
     can_tx_pool_t<tx_slot_t> tx_pool_;        /**< @brief In-flight TX storage, freed on tx-done. */
+    StaticSemaphore_t tx_free_sem_buf_{};     /**< @brief @ref tx_free_sem_'s control block. */
     SemaphoreHandle_t tx_free_sem_ = nullptr; /**< @brief Counts free pool slots; taken in
                                                    write_raw OUTSIDE write_m_ (#962), given
                                                    from the tx-done ISR. */
@@ -218,7 +230,7 @@ class twai_link_t final : public can_link_t {
     std::size_t stack_size_ = 0;               /**< @brief Dispatch-thread stack hint, held from
                                                     construction and spent at start() (#1186). */
     std::atomic<bool> stop_{false};
-    std::thread thread_;
+    static_thread_t thread_; /**< @brief The dispatch thread, from @ref src_ (#2288). */
 };
 
 }  // namespace tr::net
